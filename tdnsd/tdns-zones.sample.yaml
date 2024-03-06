@@ -1,0 +1,20 @@
+zones:
+   axfr.net:
+      name:		axfr.net.
+      type:		secondary
+      store:		slice
+      primary:		master.johani.org:53
+      notify:	  	[ 127.0.0.1:5399 ]
+   stenstam.net:
+      name:		stenstam.net
+      type:		secondary
+      store:		map
+      primary:		master.johani.org:53
+      notify:		[ 127.0.0.1:5399 ]
+   test.net:
+      name:		test.net
+      type:		primary
+      zonefile:		/etc/axfr.net/zones/test.net.zone
+      store:		map
+      primary:		master.johani.org:53
+      notify:		[ 127.0.0.1:5399 ]

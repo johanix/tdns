@@ -8,6 +8,10 @@
 *.so
 *.dylib
 
+tdnsd/tdnsd
+tdns-cli/tdns-cli
+dog/dog
+
 # Test binary, built with `go test -c`
 *.test
 

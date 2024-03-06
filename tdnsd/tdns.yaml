@@ -1,0 +1,27 @@
+cli:
+   tdnsd:
+      baseurl:          http://127.0.0.1:8989/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
+
+service:
+   name:		TDNSD
+   refresh:		true
+   maxrefresh:		1800    # seconds. Cap refresh counter to max this
+   reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
+   verbose:		true
+   debug:		false   # writes processed zone to disk
+
+dnsengine:
+   addresses:	[ 127.0.0.1:5354 ]
+
+apiserver:
+   address:     127.0.0.1:8989
+   key:         winter-is-coming-santa-stuck-in-chimney
+
+scanner:
+   interval:    60
+
+log:
+   file:		/var/log/axfr.net/tdnsd.log
+
