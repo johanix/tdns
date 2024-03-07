@@ -1,0 +1,21 @@
+test.net.               7200    IN      SOA     when.pigs.can.fly. hostmaster.johani.org. (
+                                2023122602 7200 1800 604800 7200 )
+                        7200    IN      NS      nsa.johani.org.
+                        7200    IN      NS      nsb.johani.org.
+                        7200    IN      NS      nsc.johani.org.
+                        120     IN      MX      1 mxc.johani.org.
+foo._dsync.test.net.    3600    IN      DSYNC   ANY   2 5354    foo-target.test.net.
+foo._dsync.test.net.    3600    IN      DSYNC   CDS   1 5354    foo-target.test.net.
+foo._dsync.test.net.    3600    IN      DSYNC   CSYNC 1 5354    foo-target.test.net.
+*._dsync.test.net.      3600    IN      DSYNC   ANY   2 5354    ddns-target.test.net.
+*._dsync.test.net.      3600    IN      DSYNC   CDS   1 5354    notify-target.test.net.
+*._dsync.test.net.      3600    IN      DSYNC   CSYNC 1 5354    notify-target.test.net.
+anka.test.net.          7200    IN      A       1.2.3.4
+citron.test.net.        7200    IN      A       1.2.3.40
+emil.*.test.net.        7200    IN      A       1.2.3.50
+gunga.test.net.         7200    IN      A       1.2.3.60
+gunga.test.net.         7200    IN      SRV     10 20 30 srv.test.net.
+isblock.test.net.       7200    IN      A       1.2.3.70
+kanel.test.net.         7200    IN      A       1.2.3.80
+kanel.test.net.         7200    IN      TXT     "allan tar kakan i 4711 baud"
+kanel.test.net.         7200    IN      TXT     "vi aro alla oense"
