@@ -22,6 +22,9 @@ apiserver:
 scanner:
    interval:    60
 
+db:
+   file:	/var/tmp/tdns.db
+
 log:
-   file:		/var/log/axfr.net/tdnsd.log
+   file:	/var/log/axfr.net/tdnsd.log
 

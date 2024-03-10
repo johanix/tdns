@@ -59,7 +59,7 @@ func mainloop(conf *Config) {
 	fmt.Println("mainloop: leaving signal dispatcher")
 }
 
-const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
+// const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 type Zconfig struct {
 	Zones map[string]ZoneConf
@@ -111,7 +111,7 @@ func main() {
 }
 
 func ParseConfig(conf *Config) error {
-	viper.SetConfigFile(DefaultCfgFile)
+	viper.SetConfigFile(tdns.DefaultCfgFile)
 
 	viper.AutomaticEnv() // read in environment variables that match
 
@@ -119,7 +119,7 @@ func ParseConfig(conf *Config) error {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	} else {
-		log.Fatalf("Could not load config %s: Error: %v", DefaultCfgFile, err)
+		log.Fatalf("Could not load config %s: Error: %v", tdns.DefaultCfgFile, err)
 	}
 
 	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
