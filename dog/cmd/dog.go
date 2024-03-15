@@ -58,11 +58,11 @@ var rootCmd = &cobra.Command{
 		server = server + ":" + port
 
 		for _, qname := range cleanArgs {
-			fmt.Printf("Processing arg \"%s\"\n", qname)
+			fmt.Printf("dog processing arg \"%s\"\n", qname)
 
 			qname = dns.Fqdn(qname)
 			if verbose {
-				fmt.Printf("*** Querying for %s IN %s:\n", qname, rrtype)
+				fmt.Printf("*** Querying for %s IN %s:\n", qname, dns.TypeToString[rrtype])
 			}
 
 			switch rrtype {

@@ -5,12 +5,11 @@ package tdns
 
 import (
 	"github.com/miekg/dns"
-	"log"
 	"strings"
 )
 
-// Returns [] NS RRs + [] glue RRs
-func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*RRset, *RRset) {
+// Returns [] NS RRs + [] v4glue RRs + [] v6glue RRs
+func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*RRset, *RRset, *RRset) {
 	var child string
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
@@ -20,22 +19,23 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*RRset, *RRset
 		}
 		if zd.NameExists(child) {
 			childrrs, _ := zd.GetOwner(child)
-			log.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
+			zd.Logger.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
 			if childns, ok := childrrs.RRtypes[dns.TypeNS]; ok {
-				//				log.Printf("FindDelegation for qname='%s': there are NS RRs for '%s'", qname, child)
+				// zd.Logger.Printf("FindDelegation for qname='%s': there are NS RRs for '%s'", qname, child)
 				// Ok, we found a delegation. Do we need any glue?
-				glue := zd.FindGlue(childns, dnssec_ok)
-				return &childns, glue
+				v4glue, v6glue := zd.FindGlue(childns, dnssec_ok)
+				return &childns, v4glue, v6glue
 			}
 		}
 	}
-	log.Printf("FindZone: no delegation for qname=%s found in %s", qname, zd.ZoneName)
-	return nil, nil
+	zd.Logger.Printf("FindZone: no delegation for qname=%s found in %s", qname, zd.ZoneName)
+	return nil, nil, nil
 }
 
-func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) *RRset {
+// Returns two RRsets with A glue and AAAA glue. Each RRset may be nil.
+func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 	zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
-	var glue, maybe_glue RRset
+	var v4glue, v6glue, maybe_4glue, maybe_6glue RRset
 	var nsname string
 	zone := nsrrs.RRs[0].Header().Name
 	for _, rr := range nsrrs.RRs {
@@ -50,27 +50,41 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) *RRset {
 
 			if ns_A_rrs, ok := nsnamerrs.RRtypes[dns.TypeA]; ok {
 				// Ok, we found an A RR
-				maybe_glue.RRs = append(maybe_glue.RRs, ns_A_rrs.RRs...)
-				maybe_glue.RRSIGs = append(maybe_glue.RRSIGs, ns_A_rrs.RRSIGs...)
+				maybe_4glue.RRs = append(maybe_4glue.RRs, ns_A_rrs.RRs...)
+				maybe_4glue.RRSIGs = append(maybe_4glue.RRSIGs, ns_A_rrs.RRSIGs...)
 			}
 			if ns_AAAA_rrs, ok := nsnamerrs.RRtypes[dns.TypeAAAA]; ok {
 				// Ok, we found an AAAA RR
-				maybe_glue.RRs = append(maybe_glue.RRs, ns_AAAA_rrs.RRs...)
-				maybe_glue.RRSIGs = append(maybe_glue.RRSIGs, ns_AAAA_rrs.RRSIGs...)
+				maybe_6glue.RRs = append(maybe_6glue.RRs, ns_AAAA_rrs.RRs...)
+				maybe_6glue.RRSIGs = append(maybe_6glue.RRSIGs, ns_AAAA_rrs.RRSIGs...)
 			}
 		} else {
-			log.Printf("FindGlue: in the NS RRset I found this RRSIG: %s", rr.String())
+			zd.Logger.Printf("FindGlue: in the NS RRset I found this RRSIG: %s",
+						    rr.String())
 		}
 	}
 
-	if len(maybe_glue.RRs) == 0 {
-		//		log.Printf("FindGlue: no glue for zone=%s found in %s", zone, zd.ZoneName)
-	} else {
-		//		log.Printf("FindGlue: found %d glue RRs zone=%s in %s", len(glue.RRs), zone, zd.ZoneName)
-		glue = maybe_glue
+	if len(maybe_4glue.RRs) != 0 {
+		// zd.Logger.Printf("FindGlue: found %d glue RRs zone=%s in %s",
+		// 			       len(glue.RRs), zone, zd.ZoneName)
+		v4glue = maybe_4glue
 		if !dnssec_ok {
-			glue.RRSIGs = []dns.RR{} // drop any RRSIGs
+			v4glue.RRSIGs = []dns.RR{} // drop any RRSIGs
 		}
+	} else {
+		// zd.Logger.Printf("FindGlue: no v4 glue for zone=%s found in %s",
+		// 			       zone, zd.ZoneName)
 	}
-	return &glue
+	if len(maybe_6glue.RRs) != 0 {
+		// zd.Logger.Printf("FindGlue: found %d v6 glue RRs zone=%s in %s",
+		// 			       len(maybe_v6glue.RRs), zone, zd.ZoneName)
+		v6glue = maybe_6glue
+		if !dnssec_ok {
+			v6glue.RRSIGs = []dns.RR{} // drop any RRSIGs
+		}
+	} else {
+		// zd.Logger.Printf("FindGlue: no v6 glue for zone=%s found in %s",
+		// 			       zone, zd.ZoneName)
+	}
+	return &v4glue, &v6glue
 }

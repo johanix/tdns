@@ -39,6 +39,11 @@ var reloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
+		if zoneName == "" {
+			fmt.Printf("Error: zone name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+
 		msg, err := SendCommandNG(api, tdns.CommandPost{
 						Command:	"reload",
 						Zone:		dns.Fqdn(zoneName),
@@ -126,9 +131,63 @@ var debugRRsetCmd = &cobra.Command{
 	},
 }
 
+var debugLAVCmd = &cobra.Command{
+	Use:   "lav",
+	Short: "Request tdnsd to lookup and validate a child RRset",
+	Run: func(cmd *cobra.Command, args []string) {
+		if debugQname == "" {
+			fmt.Printf("Error: qname name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+		if debugQtype == "" {
+			fmt.Printf("Error: qtype name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+		qtype := dns.StringToType[strings.ToUpper(debugQtype)]
+		if qtype == 0 {
+			fmt.Printf("Error: unknown qtype: '%s'. Terminating.\n", debugQtype)
+			os.Exit(1)
+		}
+
+		dr := SendDebug(api, tdns.DebugPost{
+			Command: "lav",
+			Qname:   dns.Fqdn(debugQname),
+			Qtype:   qtype,
+			Verbose: true,
+		})
+		fmt.Printf("debug response: %v\n", dr)
+	},
+}
+var debugShowTACmd = &cobra.Command{
+	Use:   "show-ta",
+	Short: "Request tdnsd to return known trust anchors",
+	Run: func(cmd *cobra.Command, args []string) {
+
+		dr := SendDebug(api, tdns.DebugPost{
+			Command: "show-ta",
+			Verbose: true,
+		})
+		// fmt.Printf("debug response: %v\n", dr)
+
+		if len(dr.TrustedDnskeys) > 0 {
+		   fmt.Printf("Trusted DNSKEYs:\n")
+		   for _, v := range dr.TrustedDnskeys {
+		       fmt.Printf("KEY: %s\n", v.Dnskey.String())
+		   }
+		}
+		if len(dr.TrustedSig0keys) > 0 {
+		   fmt.Printf("Trusted SIG(0) keys:\n")
+		   for _, v := range dr.TrustedSig0keys {
+		       fmt.Printf("KEY: %s\n", v.Key.String())
+		   }
+		}
+		
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd)
-	debugCmd.AddCommand(debugRRsetCmd)
+	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")

@@ -38,7 +38,7 @@ func init() {
 	cobra.OnInitialize(initConfig, initApi)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		fmt.Sprintf("config file (default is %s)", DefaultCfgFile))
+		fmt.Sprintf("config file (default is %s)", tdns.DefaultCfgFile))
 	rootCmd.PersistentFlags().StringVarP(&zoneName, "zonename", "z", "", "zone name")
 
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "debug output")
@@ -51,7 +51,7 @@ func initConfig() {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		viper.SetConfigFile(DefaultCfgFile)
+		viper.SetConfigFile(tdns.DefaultCfgFile)
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -63,7 +63,7 @@ func initConfig() {
 		}
 		cfgFileUsed = viper.ConfigFileUsed()
 	} else {
-		log.Fatalf("Could not load config %s: Error: %v", DefaultCfgFile, err)
+		log.Fatalf("Could not load config %s: Error: %v", tdns.DefaultCfgFile, err)
 	}
 
 	LocalConfig = viper.GetString("cli.localconfig")

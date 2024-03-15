@@ -57,8 +57,11 @@ type InternalConf struct {
         APIStopCh     chan struct{}
 	RefreshZoneCh chan tdns.ZoneRefresher
 	BumpZoneCh    chan BumperData
+	ValidatorCh   chan tdns.ValidatorRequest
 	ScannerQ      chan ScanRequest
 	UpdateQ       chan UpdateRequest
+	TrustedDnskeys	   tdns.TAconfig
+	TrustedSig0keys	   tdns.Sig0config
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

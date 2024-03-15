@@ -17,7 +17,7 @@ import (
 
 var DefaultTables = map[string]string{
 
-	"Keys": `CREATE TABLE IF NOT EXISTS 'Keys' (
+	"TrustedDnskeys": `CREATE TABLE IF NOT EXISTS 'TrustedDnskeys' (
 id		  INTEGER PRIMARY KEY,
 parent		  TEXT,
 child		  TEXT,
@@ -26,6 +26,35 @@ keyrr		  TEXT,
 comment		  TEXT,
 UNIQUE (parent, child, keyid)
 )`,
+
+	"UntrustedDnskeys": `CREATE TABLE IF NOT EXISTS 'UntrustedDnskeys' (
+id		  INTEGER PRIMARY KEY,
+parent		  TEXT,
+child		  TEXT,
+keyid		  INTEGER,
+keyrr		  TEXT,
+comment		  TEXT,
+UNIQUE (parent, child, keyid)
+)`,
+
+	"TrustedSig0keys": `CREATE TABLE IF NOT EXISTS 'TrustedSig0keys' (
+id		  INTEGER PRIMARY KEY,
+owner		  TEXT,
+keyid		  INTEGER,
+keyrr		  TEXT,
+comment		  TEXT,
+UNIQUE (owner, keyid)
+)`,
+
+	"UntrustedSig0keys": `CREATE TABLE IF NOT EXISTS 'UntrustedSig0keys' (
+id		  INTEGER PRIMARY KEY,
+owner		  TEXT,
+keyid		  INTEGER,
+keyrr		  TEXT,
+comment		  TEXT,
+UNIQUE (owner, keyid)
+)`,
+
 }
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
@@ -110,10 +139,12 @@ func NewKeyDB(force bool) *KeyDB {
 	}
 
 	if force {
-		sqlcmd := "DROP TABLE Keys"
-		_, err = db.Exec(sqlcmd)
-		if err != nil {
-			log.Fatalf("NewKeyDB: Error when dropping table Keys:", err)
+	   	for table, _ := range DefaultTables {
+		    sqlcmd := "DROP TABLE " + table
+		    _, err = db.Exec(sqlcmd)
+		    if err != nil {
+			log.Fatalf("NewKeyDB: Error when dropping table %s: %v", table, err)
+		    }
 		}
 	}
 	dbSetupTables(db)

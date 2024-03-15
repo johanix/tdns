@@ -81,6 +81,9 @@ func main() {
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
 	go RefreshEngine(&conf, stopch)
 
+	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
+	go ValidatorEngine(&conf, stopch)
+
 	err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
 	if err != nil {
 		log.Fatalf("Error parsing zones: %v", err)
@@ -109,6 +112,20 @@ func main() {
 
 	mainloop(&conf)
 }
+
+type TAtmp map[string]TmpAnchor
+
+type TmpAnchor struct {
+     Name	 string
+     Dnskey	 string
+}
+
+//type Sig0config map[string]Sig0Key
+//
+//type Sig0Key struct {
+//     Name	 string
+//     Key	 dns.KEY
+//}
 
 func ParseConfig(conf *Config) error {
 	viper.SetConfigFile(tdns.DefaultCfgFile)
@@ -139,7 +156,7 @@ func ParseConfig(conf *Config) error {
 
 	err = yaml.Unmarshal(cfgdata, &zconf)
 	if err != nil {
-		log.Fatalf("Error from yaml.Unmarshal: %v", err)
+		log.Fatalf("Error from yaml.Unmarshal(Zconfig): %v", err)
 	}
 
 	// This kludge is to allow the zones to be a map[string]ZoneConf,
@@ -151,6 +168,57 @@ func ParseConfig(conf *Config) error {
 		fmt.Printf(" [%s]", key)
 	}
 	fmt.Println()
+
+	// If a validator trusted key config file is found, read it in.
+	tafile := viper.GetString("validator.dnskey.trusted.file")
+	if tafile != "" {
+	   cfgdata, err := os.ReadFile(tafile)
+	   if err != nil {
+		log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
+	   }
+
+	   var tatmp TAtmp
+	   var taconf = make(tdns.TAconfig, 5)
+
+	   err = yaml.Unmarshal(cfgdata, &tatmp)
+	   if err != nil {
+		log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
+           }
+
+	   for k, v := range tatmp {
+	       k = dns.Fqdn(k)
+	       rr, err := dns.NewRR(v.Dnskey)
+	       if err != nil {
+		  log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
+	       }
+
+	       if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
+	       	  taconf[k] = tdns.TrustAnchor{
+				Name:	k,
+				Dnskey:	*dnskeyrr,
+			   }
+	       }
+	   }
+	   conf.Internal.TrustedDnskeys = taconf
+	}
+
+	// If a validator trusted key config file is found, read it in.
+	sig0file := viper.GetString("validator.sig0.trusted.file")
+	if sig0file != "" {
+	   cfgdata, err := os.ReadFile(sig0file)
+	   if err != nil {
+		log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
+	   }
+
+	   var sig0conf tdns.Sig0config
+
+	   err = yaml.Unmarshal(cfgdata, &sig0conf)
+	   if err != nil {
+		log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
+           }
+
+	   conf.Internal.TrustedSig0keys = sig0conf
+	}
 
 	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
 	ValidateZones(conf, tdns.ZonesCfgFile) // will terminate on error

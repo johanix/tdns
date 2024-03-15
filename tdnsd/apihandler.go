@@ -115,6 +115,28 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
 			}
 
+		case "lav":
+			log.Printf("tdnsd debug lookup-and-validate inquiry")
+		        zd := FindZone(dp.Qname)
+			if zd == nil {
+			   resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
+			   		 dp.Qname)
+			   resp.Error = true
+			} else {
+			   tmp, err := zd.LookupChildRRset(dp.Qname, dp.Qtype, dp.Verbose)
+			   if err != nil {
+			      resp.Error = true
+			      resp.ErrorMsg = err.Error()
+			   } else {
+			      resp.RRset = *tmp
+			   }
+			}
+
+		case "show-ta":
+			log.Printf("tdnsd debug show-ta inquiry")
+			resp.TrustedDnskeys = conf.Internal.TrustedDnskeys
+			resp.TrustedSig0keys = conf.Internal.TrustedSig0keys
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true
