@@ -61,9 +61,6 @@ type InternalConf struct {
 	ValidatorCh   chan tdns.ValidatorRequest
 	ScannerQ      chan ScanRequest
 	UpdateQ       chan UpdateRequest
-//	TrustedDnskeys	   *tdns.TAStore
-//	TrustedDnskeys	   cmap.ConcurrentMap[string, tdns.TrustAnchor]
-//	TrustedSig0keys	   tdns.Sig0Store
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {
