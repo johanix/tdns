@@ -8,6 +8,7 @@ require (
 	github.com/go-playground/validator/v10 v10.11.1
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.50
+	github.com/ryanuber/columnize v2.1.2+incompatible
 	github.com/spf13/cobra v1.6.1
 	github.com/spf13/viper v1.14.0
 )

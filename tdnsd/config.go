@@ -7,6 +7,7 @@ package main
 import (
 	"log"
 
+	// "github.com/orcaman/concurrent-map/v2"
 	"github.com/go-playground/validator/v10"
 	"github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
@@ -60,8 +61,9 @@ type InternalConf struct {
 	ValidatorCh   chan tdns.ValidatorRequest
 	ScannerQ      chan ScanRequest
 	UpdateQ       chan UpdateRequest
-	TrustedDnskeys	   tdns.TAconfig
-	TrustedSig0keys	   tdns.Sig0config
+//	TrustedDnskeys	   *tdns.TAStore
+//	TrustedDnskeys	   cmap.ConcurrentMap[string, tdns.TrustAnchor]
+//	TrustedSig0keys	   tdns.Sig0Store
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

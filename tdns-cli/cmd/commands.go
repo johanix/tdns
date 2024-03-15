@@ -13,6 +13,7 @@ import (
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
@@ -45,15 +46,15 @@ var reloadCmd = &cobra.Command{
 		}
 
 		msg, err := SendCommandNG(api, tdns.CommandPost{
-						Command:	"reload",
-						Zone:		dns.Fqdn(zoneName),
-						Force:		force,
-						})
+			Command: "reload",
+			Zone:    dns.Fqdn(zoneName),
+			Force:   force,
+		})
 		if err != nil {
-		   fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 		}
 		if msg != "" {
-		   fmt.Printf("%s\n", msg)
+			fmt.Printf("%s\n", msg)
 		}
 	},
 }
@@ -69,10 +70,10 @@ var bumpCmd = &cobra.Command{
 
 		msg, err := SendCommand("bump", dns.Fqdn(zoneName))
 		if err != nil {
-		   fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 		}
 		if msg != "" {
-		   fmt.Printf("%s\n", msg)
+			fmt.Printf("%s\n", msg)
 		}
 	},
 }
@@ -87,14 +88,14 @@ var bumpNGCmd = &cobra.Command{
 		}
 
 		msg, err := SendCommandNG(api, tdns.CommandPost{
-						Command: "bump",
-					       	Zone:    dns.Fqdn(zoneName),
-					       })
+			Command: "bump",
+			Zone:    dns.Fqdn(zoneName),
+		})
 		if err != nil {
-		   fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 		}
 		if msg != "" {
-		   fmt.Printf("%s\n", msg)
+			fmt.Printf("%s\n", msg)
 		}
 	},
 }
@@ -156,6 +157,7 @@ var debugLAVCmd = &cobra.Command{
 			Verbose: true,
 		})
 		fmt.Printf("debug response: %v\n", dr)
+
 	},
 }
 var debugShowTACmd = &cobra.Command{
@@ -167,21 +169,29 @@ var debugShowTACmd = &cobra.Command{
 			Command: "show-ta",
 			Verbose: true,
 		})
-		// fmt.Printf("debug response: %v\n", dr)
+
+		var out = []string{"Type|Signer|KeyID|Record"}
 
 		if len(dr.TrustedDnskeys) > 0 {
-		   fmt.Printf("Trusted DNSKEYs:\n")
-		   for _, v := range dr.TrustedDnskeys {
-		       fmt.Printf("KEY: %s\n", v.Dnskey.String())
-		   }
+			fmt.Printf("Trusted DNSKEYs:\n")
+			for k, v := range dr.TrustedDnskeys {
+				tmp := strings.Split(k, "::")
+				out = append(out, fmt.Sprintf("DNSKEY|%s|%s|%.70s...",
+					tmp[0], tmp[1], v.String()))
+			}
 		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+
+		out = []string{"Type|Signer|KeyID|Record"}
 		if len(dr.TrustedSig0keys) > 0 {
-		   fmt.Printf("Trusted SIG(0) keys:\n")
-		   for _, v := range dr.TrustedSig0keys {
-		       fmt.Printf("KEY: %s\n", v.Key.String())
-		   }
+			fmt.Printf("Trusted SIG(0) keys:\n")
+			for k, v := range dr.TrustedSig0keys {
+				tmp := strings.Split(k, "::")
+				out = append(out, fmt.Sprintf("KEY|%s|%s|%.70s...\n",
+					tmp[0], tmp[1], v.String()))
+			}
 		}
-		
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 	},
 }
 
@@ -206,7 +216,7 @@ func SendCommand(cmd, zone string) (string, error) {
 
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
-		
+
 		return "", fmt.Errorf("Error from Api Post: %v", err)
 	}
 	if verbose {

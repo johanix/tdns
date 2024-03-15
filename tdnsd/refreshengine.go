@@ -67,7 +67,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					Zone:	zr.Name,
 			        }
 			if zone != "" {
-				if zonedata, exist = Zones.Get(zone); exist {
+				if zonedata, exist = tdns.Zones.Get(zone); exist {
 					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'",
 						zone)
 					if _, haveParams := refreshCounters[zone]; !haveParams {
@@ -136,7 +136,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams: downstreams,
 					}
 
-					Zones.Set(zone, zonedata)
+					tdns.Zones.Set(zone, zonedata)
 //					if updated {
 //						if resetSoaSerial {
 //							zonedata.CurrentSerial = uint32(time.Now().Unix())
@@ -157,7 +157,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 				}				
 			}
 			if zr.Response != nil {
-			   zd, _ := Zones.Get(zr.Name)
+			   zd, _ := tdns.Zones.Get(zr.Name)
 			   resp.Msg = fmt.Sprintf("RefreshEngine: %s zone %s refreshing (force=%v)",
 			   	      				  tdns.ZoneTypeToString[zd.ZoneType], zr.Name,
 								  zr.Force)
@@ -174,7 +174,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 					log.Printf("RefreshEngine: will refresh zone %s due to refresh counter", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
-					zd, _ := Zones.Get(zone)
+					zd, _ := tdns.Zones.Get(zone)
 					updated, err := zd.Refresh(false)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
@@ -200,7 +200,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 				Zone: zone,
 			}
 			if zone != "" {
-				if zd, exist := Zones.Get(zone); exist {
+				if zd, exist := tdns.Zones.Get(zone); exist {
 					log.Printf("RefreshEngine: bumping SOA serial for known zone '%s'", zone)
 					resp.OldSerial = zd.CurrentSerial
 					zd.CurrentSerial++

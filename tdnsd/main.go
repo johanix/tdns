@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/johanix/tdns/tdns"
+	// "github.com/orcaman/concurrent-map/v2"
 )
 
 var appVersion string
@@ -45,12 +46,12 @@ func mainloop(conf *Config) {
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
 				if err != nil {
-				   log.Fatalf("Error parsing zones: %v", err)
+					log.Fatalf("Error parsing zones: %v", err)
 				}
 
-			case <- conf.Internal.APIStopCh:
+			case <-conf.Internal.APIStopCh:
 				log.Println("mainloop: Stop command received. Cleaning up.")
-			     	wg.Done()
+				wg.Done()
 			}
 		}
 	}()
@@ -116,16 +117,16 @@ func main() {
 type TAtmp map[string]TmpAnchor
 
 type TmpAnchor struct {
-     Name	 string
-     Dnskey	 string
+	Name   string
+	Dnskey string
 }
 
-//type Sig0config map[string]Sig0Key
-//
-//type Sig0Key struct {
-//     Name	 string
-//     Key	 dns.KEY
-//}
+type Sig0tmp map[string]TmpSig0Key
+
+type TmpSig0Key struct {
+	Name string
+	Key  string
+}
 
 func ParseConfig(conf *Config) error {
 	viper.SetConfigFile(tdns.DefaultCfgFile)
@@ -172,56 +173,74 @@ func ParseConfig(conf *Config) error {
 	// If a validator trusted key config file is found, read it in.
 	tafile := viper.GetString("validator.dnskey.trusted.file")
 	if tafile != "" {
-	   cfgdata, err := os.ReadFile(tafile)
-	   if err != nil {
-		log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
-	   }
+		cfgdata, err := os.ReadFile(tafile)
+		if err != nil {
+			log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
+		}
 
-	   var tatmp TAtmp
-	   var taconf = make(tdns.TAconfig, 5)
+		var tatmp TAtmp
+		//	   var tastore = tdns.NewTAStore()
 
-	   err = yaml.Unmarshal(cfgdata, &tatmp)
-	   if err != nil {
-		log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
-           }
+		err = yaml.Unmarshal(cfgdata, &tatmp)
+		if err != nil {
+			log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
+		}
 
-	   for k, v := range tatmp {
-	       k = dns.Fqdn(k)
-	       rr, err := dns.NewRR(v.Dnskey)
-	       if err != nil {
-		  log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
-	       }
+		for k, v := range tatmp {
+			k = dns.Fqdn(k)
+			rr, err := dns.NewRR(v.Dnskey)
+			if err != nil {
+				log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
+			}
 
-	       if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-	       	  taconf[k] = tdns.TrustAnchor{
-				Name:	k,
-				Dnskey:	*dnskeyrr,
-			   }
-	       }
-	   }
-	   conf.Internal.TrustedDnskeys = taconf
+			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
+				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
+				tdns.TAStore.Map.Set(mapkey, tdns.TrustAnchor{
+					Name:   k,
+					Dnskey: *dnskeyrr,
+				})
+			}
+		}
+		//	   conf.Internal.TrustedDnskeys = tastore
 	}
 
 	// If a validator trusted key config file is found, read it in.
 	sig0file := viper.GetString("validator.sig0.trusted.file")
 	if sig0file != "" {
-	   cfgdata, err := os.ReadFile(sig0file)
-	   if err != nil {
-		log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
-	   }
+		cfgdata, err := os.ReadFile(sig0file)
+		if err != nil {
+			log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
+		}
 
-	   var sig0conf tdns.Sig0config
+		var sig0tmp Sig0tmp
+		//	   var sig0conf tdns.Sig0Store
 
-	   err = yaml.Unmarshal(cfgdata, &sig0conf)
-	   if err != nil {
-		log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
-           }
+		err = yaml.Unmarshal(cfgdata, &sig0tmp)
+		if err != nil {
+			log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
+		}
 
-	   conf.Internal.TrustedSig0keys = sig0conf
+		for k, v := range sig0tmp {
+			k = dns.Fqdn(k)
+			rr, err := dns.NewRR(v.Key)
+			if err != nil {
+				log.Fatalf("Error from dns.NewRR(%s): %v", v.Key, err)
+			}
+
+			if keyrr, ok := rr.(*dns.KEY); ok {
+				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
+				tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
+					Name:      k,
+					Validated: true,
+					Key:       *keyrr,
+				})
+			}
+		}
+		//	   conf.Internal.TrustedSig0keys = sig0conf
 	}
 
 	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
-	ValidateZones(conf, tdns.ZonesCfgFile) // will terminate on error
+	ValidateZones(conf, tdns.ZonesCfgFile)   // will terminate on error
 	return nil
 }
 

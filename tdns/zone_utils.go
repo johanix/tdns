@@ -329,3 +329,30 @@ func IsIxfr(rrs []dns.RR) bool {
         }
         return false
 }
+
+func FindZone(qname string) *ZoneData {
+	var tzone string
+	labels := strings.Split(qname, ".")
+	for i := 0; i < len(labels)-1; i++ {
+		tzone = strings.Join(labels[i:], ".")
+		if zd, ok := Zones.Get(tzone); ok {
+			return zd
+		}
+	}
+	log.Printf("FindZone: no zone for qname=%s found", qname)
+	return nil
+}
+
+func FindZoneNG(qname string) *ZoneData {
+	i := strings.Index(qname, ".")
+	for {
+		if i == -1 {
+			break // done
+		}
+		if zd, ok := Zones.Get(qname[i:]); ok {
+			return zd
+		}
+		i = strings.Index(qname[i:], ".")
+	}
+	return nil
+}

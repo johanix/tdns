@@ -6,23 +6,15 @@ package main
 import (
 	"fmt"
 	"log"
-//	"time"
 
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
-//	"github.com/miekg/dns"
-//	"github.com/orcaman/concurrent-map/v2"
+	"github.com/miekg/dns"
 )
 
-// 1. Load trusted keys.
-//    - DNSKEYs: only the trust anchors from file are trusted at startup,
-//               all dynamic data needs to be fetched as needed.
-//    - SIG(0):  All keys that we decide to trust will be kept in a DB table and
-//               reloaded on restart.
-// 2. Wait for request
 func ValidatorEngine(conf *Config, stopch chan struct{}) {
-     	var validatorch = conf.Internal.ValidatorCh
+	var validatorch = conf.Internal.ValidatorCh
 
 	if !viper.GetBool("validator.active") {
 		log.Printf("ValidatorEngine is NOT active.")
@@ -36,24 +28,29 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 		log.Printf("ValidatorEngine: Starting")
 	}
 
-//	LoadTrustedSig0Keys(conf)
-
 	var vr tdns.ValidatorRequest
 	var rrset *tdns.RRset
+	var rrtype string
 
 	for {
 		select {
 		case vr = <-validatorch:
 			rrset = vr.RRset
-			resp := tdns.ValidatorResponse{
-			        }
+			resp := tdns.ValidatorResponse{}
+
 			if rrset != nil {
-			   resp.Validated = true	// placeholder
+				if len(rrset.RRs) > 0 {
+					rrtype = dns.TypeToString[rrset.RRs[0].Header().Rrtype]
+					log.Printf("ValidatorEngine: request to validate %s %s (%d RRs)",
+						rrset.RRs[0].Header().Name, rrtype, len(rrset.RRs))
+				}
+
+				resp.Validated = true // placeholder
 			}
 
 			if vr.Response != nil {
-			   resp.Msg = fmt.Sprintf("ValidatorEngine: reponding")
-			   vr.Response <- resp
+				resp.Msg = fmt.Sprintf("ValidatorEngine: responding")
+				vr.Response <- resp
 			}
 		}
 	}

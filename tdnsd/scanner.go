@@ -35,7 +35,7 @@ func ScannerEngine(conf *Config) error {
 		for {
 			select {
 			case <-ticker.C:
-				log.Printf("Time for periodic scan of all zones.")
+				// log.Printf("Time for periodic scan of all zones.")
 				// cds_scanner("")
 				// csync_scanner("")
 

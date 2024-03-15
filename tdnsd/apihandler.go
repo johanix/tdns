@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
+	"github.com/miekg/dns"
 
 	"github.com/johanix/tdns/tdns"
 )
@@ -103,39 +104,56 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch dp.Command {
 		case "rrset":
 			log.Printf("tdnsd debug rrset inquiry")
-			if zd, ok := Zones.Get(dp.Zone); ok {
-			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
-				if owner := &zd.Owners[idx]; owner != nil {
-					if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
-						resp.RRset = rrset
-					}
-					log.Printf("tdnsd debug rrset: owner: %v", owner)
-				}
+			if zd, ok := tdns.Zones.Get(dp.Zone); ok {
+//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
+//				if owner := &zd.Owners[idx]; owner != nil {
+				   owner, err := zd.GetOwner(dp.Qname)
+				   if err != nil {
+				   }
+				
+				   if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
+					resp.RRset = rrset
+				   }
+				   log.Printf("tdnsd debug rrset: owner: %v", owner)
 			} else {
 				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
 			}
 
 		case "lav":
 			log.Printf("tdnsd debug lookup-and-validate inquiry")
-		        zd := FindZone(dp.Qname)
+		        zd := tdns.FindZone(dp.Qname)
 			if zd == nil {
 			   resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
 			   		 dp.Qname)
 			   resp.Error = true
 			} else {
-			   tmp, err := zd.LookupChildRRset(dp.Qname, dp.Qtype, dp.Verbose)
+			   // tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
+			   rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
 			   if err != nil {
 			      resp.Error = true
 			      resp.ErrorMsg = err.Error()
 			   } else {
-			      resp.RRset = *tmp
+			      if rrset != nil {
+			      	 resp.RRset = *rrset
+				 resp.Validated = valid
+			      }
 			   }
 			}
 
 		case "show-ta":
 			log.Printf("tdnsd debug show-ta inquiry")
-			resp.TrustedDnskeys = conf.Internal.TrustedDnskeys
-			resp.TrustedSig0keys = conf.Internal.TrustedSig0keys
+			tmp1 := map[string]dns.DNSKEY{}
+			for _, key := range tdns.TAStore.Map.Keys() {
+			    val, _ := tdns.TAStore.Map.Get(key)
+			    tmp1[key] = val.Dnskey
+			}
+			resp.TrustedDnskeys = tmp1
+			tmp2 := map[string]dns.KEY{}
+			for _, key := range tdns.Sig0Store.Map.Keys() {
+			    val, _ := tdns.Sig0Store.Map.Get(key)
+			    tmp2[key] = val.Key
+			}
+			resp.TrustedSig0keys = tmp2
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)

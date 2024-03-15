@@ -110,8 +110,9 @@ type DebugResponse struct {
 	Zone       string
 	OwnerIndex map[string]int
 	RRset      RRset
-	TrustedDnskeys	TAconfig
-	TrustedSig0keys	Sig0config
+	TrustedDnskeys	map[string]dns.DNSKEY
+	TrustedSig0keys	map[string]dns.KEY
+	Validated	bool
 	Msg        string
 	Error      bool
 	ErrorMsg   string
@@ -157,16 +158,23 @@ type ValidatorResponse struct {
      Msg	       string
 }
 
-type TAconfig map[string]TrustAnchor
+// type TAStore map[string]map[uint16]TrustAnchor
+type TAStoreT struct {
+     Map    cmap.ConcurrentMap[string, TrustAnchor]
+}
 
 type TrustAnchor struct {
      Name	 string
+     Validated	 bool
      Dnskey	 dns.DNSKEY
 }
 
-type Sig0config map[string]Sig0Key
+type Sig0StoreT struct {
+     Map	cmap.ConcurrentMap[string, Sig0Key]
+}
 
 type Sig0Key struct {
      Name	 string
+     Validated	 bool
      Key	 dns.KEY
 }

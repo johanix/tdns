@@ -14,10 +14,10 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
-	"github.com/orcaman/concurrent-map/v2"
+//	"github.com/orcaman/concurrent-map/v2"
 )
 
-var Zones = cmap.New[*tdns.ZoneData]()
+// var Zones = cmap.New[*tdns.ZoneData]()
 
 func DnsEngine(conf *Config) error {
 	addresses := viper.GetStringSlice("dnsengine.addresses")
@@ -68,7 +68,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			m := new(dns.Msg)
 			m.SetReply(r)
 
-			if zd, ok := Zones.Get(qname); ok {
+			if zd, ok := tdns.Zones.Get(qname); ok {
 				log.Printf("Received Notify for known zone %s. Fetching from upstream", qname)
 				zonech <- tdns.ZoneRefresher{
 					Name:      qname, // send zone name into RefreshEngine
@@ -85,7 +85,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		case dns.OpcodeQuery:
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
-			if zd, ok := Zones.Get(qname); ok {
+			if zd, ok := tdns.Zones.Get(qname); ok {
 				// The qname is equal to the name of a zone we have
 				ApexResponder(w, r, zd, qname, qtype, dnssec_ok)
 				return
@@ -102,13 +102,13 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			
 			log.Printf("DnsHandler: Qname is '%s', which is not a known zone.", qname)
 			known_zones := []string{}
-			for _, zname := range Zones.Keys() {
+			for _, zname := range tdns.Zones.Keys() {
 				known_zones = append(known_zones, zname)
 			}
 			log.Printf("DnsHandler: Known zones are: %v", known_zones)
 
 			// Let's see if we can find the zone
-			zd := FindZone(qname)
+			zd := tdns.FindZone(qname)
 			if zd == nil {
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -256,10 +256,9 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
 			w.WriteMsg(m)
 			return nil
-		} else {
-			origqname = qname
-			qname = wildqname
-		}
+		} 
+		origqname = qname
+		qname = wildqname
 	}
 
 	owner, err := zd.GetOwner(qname)
@@ -387,12 +386,12 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	return nil
 }
 
-func FindZone(qname string) *tdns.ZoneData {
+func xxxFindZone(qname string) *tdns.ZoneData {
 	var tzone string
 	labels := strings.Split(qname, ".")
 	for i := 1; i < len(labels)-1; i++ {
 		tzone = strings.Join(labels[i:], ".")
-		if zd, ok := Zones.Get(tzone); ok {
+		if zd, ok := tdns.Zones.Get(tzone); ok {
 			return zd
 		}
 	}
@@ -400,13 +399,13 @@ func FindZone(qname string) *tdns.ZoneData {
 	return nil
 }
 
-func FindZoneNG(qname string) *tdns.ZoneData {
+func xxxFindZoneNG(qname string) *tdns.ZoneData {
 	i := strings.Index(qname, ".")
 	for {
 		if i == -1 {
 			break // done
 		}
-		if zd, ok := Zones.Get(qname[i:]); ok {
+		if zd, ok := tdns.Zones.Get(qname[i:]); ok {
 			return zd
 		}
 		i = strings.Index(qname[i:], ".")

@@ -6,25 +6,36 @@ cli:
 
 service:
    name:		TDNSD
+   verbose:		true
+   debug:		false   # writes processed zone to disk
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
    reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
-   verbose:		true
-   debug:		false   # writes processed zone to disk
 
 dnsengine:
-   addresses:	[ 127.0.0.1:5354 ]
+   addresses:		[ 127.0.0.1:5354 ]
 
 apiserver:
-   address:     127.0.0.1:8989
-   key:         winter-is-coming-santa-stuck-in-chimney
+   address:     	127.0.0.1:8989
+   key:         	winter-is-coming-santa-stuck-in-chimney
+
+validator:
+   active:		true
+   verbose:		true
+   debug:		true
+   dnskey:
+      trusted:
+         file:		/etc/axfr.net/trust-anchors.yaml
+   sig0:
+      trusted:
+         file:		/etc/axfr.net/sig0-keys.yaml
 
 scanner:
-   interval:    60
+   interval:    	60
 
 db:
-   file:	/var/tmp/tdns.db
+   file:		/var/tmp/tdns.db
 
 log:
-   file:	/var/log/axfr.net/tdnsd.log
+   file:		/var/log/axfr.net/tdnsd.log
 
