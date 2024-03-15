@@ -71,13 +71,14 @@ type Ixfr struct {
 type Owners []OwnerData
 
 type OwnerData struct {
-	Name    string
+	Name	string
 	RRtypes map[uint16]RRset
 }
 
 type RRset struct {
-	RRs    []dns.RR
-	RRSIGs []dns.RR
+	Name	string
+	RRs	[]dns.RR
+	RRSIGs	[]dns.RR
 }
 
 type CommandPost struct {
@@ -100,6 +101,7 @@ type DebugPost struct {
 	Zone    string
 	Qname   string
 	Qtype   uint16
+	Verbose	bool
 }
 
 type DebugResponse struct {
@@ -108,6 +110,9 @@ type DebugResponse struct {
 	Zone       string
 	OwnerIndex map[string]int
 	RRset      RRset
+	TrustedDnskeys	map[string]dns.DNSKEY
+	TrustedSig0keys	map[string]dns.KEY
+	Validated	bool
 	Msg        string
 	Error      bool
 	ErrorMsg   string
@@ -140,4 +145,36 @@ type RefresherResponse struct {
      Msg	       string
      Error	       bool
      ErrorMsg	       string
+}
+
+type ValidatorRequest struct {
+     Qname	      string
+     RRset	      *RRset
+     Response	      chan ValidatorResponse
+}
+
+type ValidatorResponse struct {
+     Validated	       bool
+     Msg	       string
+}
+
+// type TAStore map[string]map[uint16]TrustAnchor
+type TAStoreT struct {
+     Map    cmap.ConcurrentMap[string, TrustAnchor]
+}
+
+type TrustAnchor struct {
+     Name	 string
+     Validated	 bool
+     Dnskey	 dns.DNSKEY
+}
+
+type Sig0StoreT struct {
+     Map	cmap.ConcurrentMap[string, Sig0Key]
+}
+
+type Sig0Key struct {
+     Name	 string
+     Validated	 bool
+     Key	 dns.KEY
 }

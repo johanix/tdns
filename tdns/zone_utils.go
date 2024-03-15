@@ -14,6 +14,7 @@ import (
 
 func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	verbose := true
+	var updated bool
 
 	zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 					ZoneTypeToString[zd.ZoneType], force)
@@ -22,42 +23,42 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	case Primary:
 		zd.Logger.Printf("zd.Refresh(): Should reload zone %s from file %s", zd.ZoneName, zd.ZoneFile)
 
-		err := zd.FetchFromFile(verbose, force)
+		updated, err := zd.FetchFromFile(verbose, force)
 		if err != nil {
 			return false, err
 		}
-		return true, err
+		return updated, err
 
 	case Secondary:
 		do_transfer, upstream_serial, err := zd.DoTransfer()
 		if err != nil {
-			log.Printf("Error from DoZoneTransfer(%s): %v", zd.ZoneName, err)
+			zd.Logger.Printf("Error from DoZoneTransfer(%s): %v", zd.ZoneName, err)
 			return false, err
 		}
 
 		if force {
-			log.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased",
+			zd.Logger.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased",
 				zd.ZoneName)
-			err = zd.FetchFromUpstream(verbose)
+			updated, err = zd.FetchFromUpstream(verbose)
 			if err != nil {
 				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
 				return false, err
 			}
-			return true, nil // zone updated, no error
+			return updated, nil // zone updated, no error
 		}
 
 		if do_transfer {
-			log.Printf("Refresher: %s: upstream serial has increased: %d-->%d",
+			zd.Logger.Printf("Refresher: %s: upstream serial has increased: %d-->%d",
 				zd.ZoneName, zd.IncomingSerial, upstream_serial)
-			err = zd.FetchFromUpstream(verbose)
+			updated, err = zd.FetchFromUpstream(verbose)
 			if err != nil {
 				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
 				return false, err
 			}
-			return true, nil // zone updated, no error
+			return updated, nil // zone updated, no error
 		}
 
-		log.Printf("Refresher: %s: upstream serial is unchanged: %d", zd.ZoneName, zd.IncomingSerial)
+		zd.Logger.Printf("Refresher: %s: upstream serial is unchanged: %d", zd.ZoneName, zd.IncomingSerial)
 
 	default:
 		return false, fmt.Errorf("Error: cannot refresh zone %s of unknown type %d", zd.ZoneName, zd.ZoneType)
@@ -106,7 +107,8 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	return false, upstream_serial, nil
 }
 
-func (zd *ZoneData) FetchFromFile(verbose, force bool) error {
+// Return updated, error
+func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 
 	log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
 
@@ -124,11 +126,11 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) error {
 	loaded, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
 	if err != nil {
 		log.Printf("Error from ReadZoneFile(%s): %v", zd.ZoneName, err)
-		return err
+		return false, err
 	}
 
 	if !loaded {
-	   return nil	// new zone not loaded, but not returning any error
+	   return false, nil	// new zone not loaded, but not returning any error
 	}
 
 	if viper.GetBool("service.debug") {
@@ -151,10 +153,11 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) error {
 
 	// Zones[zd.ZoneName] = zonedata
 
-	return nil
+	return true, nil
 }
 
-func (zd *ZoneData) FetchFromUpstream(verbose bool) error {
+// Return updated, err
+func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 
 	log.Printf("Transferring zone %s via AXFR from %s\n", zd.ZoneName, zd.Upstream)
 
@@ -171,8 +174,14 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) error {
 
 	_, err := zonedata.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
 	if err != nil {
-		log.Printf("Error from ZoneTransfer(%s): %v", zd.ZoneName, err)
-		return err
+		zd.Logger.Printf("Error from ZoneTransfer(%s): %v", zd.ZoneName, err)
+		return false, err
+	}
+
+	if zonedata.CurrentSerial == zd.CurrentSerial {
+		zd.Logger.Printf("FetchFromUpstream: zone %s: SOA serial is unchanged (%d)",
+						     zd.ZoneName, zd.CurrentSerial)
+	   	return false, nil
 	}
 
 	if viper.GetBool("service.debug") {
@@ -193,9 +202,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) error {
 	zd.Data = zonedata.Data
 	zd.mu.Unlock()
 
-	// Zones[zd.ZoneName] = zonedata
-
-	return nil
+	return true, nil
 }
 
 func (zd *ZoneData) NameExists(qname string) bool {
@@ -321,4 +328,31 @@ func IsIxfr(rrs []dns.RR) bool {
                 }
         }
         return false
+}
+
+func FindZone(qname string) *ZoneData {
+	var tzone string
+	labels := strings.Split(qname, ".")
+	for i := 0; i < len(labels)-1; i++ {
+		tzone = strings.Join(labels[i:], ".")
+		if zd, ok := Zones.Get(tzone); ok {
+			return zd
+		}
+	}
+	log.Printf("FindZone: no zone for qname=%s found", qname)
+	return nil
+}
+
+func FindZoneNG(qname string) *ZoneData {
+	i := strings.Index(qname, ".")
+	for {
+		if i == -1 {
+			break // done
+		}
+		if zd, ok := Zones.Get(qname[i:]); ok {
+			return zd
+		}
+		i = strings.Index(qname[i:], ".")
+	}
+	return nil
 }

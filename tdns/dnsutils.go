@@ -57,7 +57,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	for envelope := range answerChan {
 		if envelope.Error != nil {
 			zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
-			break
+			return 0, envelope.Error			
 		}
 
 		for _, rr := range envelope.RR {
@@ -216,7 +216,13 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) erro
 
 	for envelope := range answerChan {
 		if envelope.Error != nil {
-			fmt.Printf("ZoneTransfer: zone %s error: %v", zname, envelope.Error)
+			errstr := envelope.Error.Error()
+			if strings.Contains(errstr, "bad xfr rcode: 9") {
+			   fmt.Printf("Error: %s: Not authoritative for zone %s\n",
+			   		      upstream, zname)
+			} else {
+			   fmt.Printf("Error: zone %s error: %v", zname, errstr)
+			}
 			break
 		}
 

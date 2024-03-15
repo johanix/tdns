@@ -13,6 +13,7 @@ import (
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
@@ -39,16 +40,21 @@ var reloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
+		if zoneName == "" {
+			fmt.Printf("Error: zone name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+
 		msg, err := SendCommandNG(api, tdns.CommandPost{
-						Command:	"reload",
-						Zone:		dns.Fqdn(zoneName),
-						Force:		force,
-						})
+			Command: "reload",
+			Zone:    dns.Fqdn(zoneName),
+			Force:   force,
+		})
 		if err != nil {
-		   fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 		}
 		if msg != "" {
-		   fmt.Printf("%s\n", msg)
+			fmt.Printf("%s\n", msg)
 		}
 	},
 }
@@ -64,10 +70,10 @@ var bumpCmd = &cobra.Command{
 
 		msg, err := SendCommand("bump", dns.Fqdn(zoneName))
 		if err != nil {
-		   fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 		}
 		if msg != "" {
-		   fmt.Printf("%s\n", msg)
+			fmt.Printf("%s\n", msg)
 		}
 	},
 }
@@ -82,14 +88,14 @@ var bumpNGCmd = &cobra.Command{
 		}
 
 		msg, err := SendCommandNG(api, tdns.CommandPost{
-						Command: "bump",
-					       	Zone:    dns.Fqdn(zoneName),
-					       })
+			Command: "bump",
+			Zone:    dns.Fqdn(zoneName),
+		})
 		if err != nil {
-		   fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("Error: %s\n", err.Error())
 		}
 		if msg != "" {
-		   fmt.Printf("%s\n", msg)
+			fmt.Printf("%s\n", msg)
 		}
 	},
 }
@@ -126,9 +132,72 @@ var debugRRsetCmd = &cobra.Command{
 	},
 }
 
+var debugLAVCmd = &cobra.Command{
+	Use:   "lav",
+	Short: "Request tdnsd to lookup and validate a child RRset",
+	Run: func(cmd *cobra.Command, args []string) {
+		if debugQname == "" {
+			fmt.Printf("Error: qname name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+		if debugQtype == "" {
+			fmt.Printf("Error: qtype name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+		qtype := dns.StringToType[strings.ToUpper(debugQtype)]
+		if qtype == 0 {
+			fmt.Printf("Error: unknown qtype: '%s'. Terminating.\n", debugQtype)
+			os.Exit(1)
+		}
+
+		dr := SendDebug(api, tdns.DebugPost{
+			Command: "lav",
+			Qname:   dns.Fqdn(debugQname),
+			Qtype:   qtype,
+			Verbose: true,
+		})
+		fmt.Printf("debug response: %v\n", dr)
+
+	},
+}
+var debugShowTACmd = &cobra.Command{
+	Use:   "show-ta",
+	Short: "Request tdnsd to return known trust anchors",
+	Run: func(cmd *cobra.Command, args []string) {
+
+		dr := SendDebug(api, tdns.DebugPost{
+			Command: "show-ta",
+			Verbose: true,
+		})
+
+		var out = []string{"Type|Signer|KeyID|Record"}
+
+		if len(dr.TrustedDnskeys) > 0 {
+			fmt.Printf("Trusted DNSKEYs:\n")
+			for k, v := range dr.TrustedDnskeys {
+				tmp := strings.Split(k, "::")
+				out = append(out, fmt.Sprintf("DNSKEY|%s|%s|%.70s...",
+					tmp[0], tmp[1], v.String()))
+			}
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+
+		out = []string{"Type|Signer|KeyID|Record"}
+		if len(dr.TrustedSig0keys) > 0 {
+			fmt.Printf("Trusted SIG(0) keys:\n")
+			for k, v := range dr.TrustedSig0keys {
+				tmp := strings.Split(k, "::")
+				out = append(out, fmt.Sprintf("KEY|%s|%s|%.70s...\n",
+					tmp[0], tmp[1], v.String()))
+			}
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd)
-	debugCmd.AddCommand(debugRRsetCmd)
+	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
@@ -147,7 +216,7 @@ func SendCommand(cmd, zone string) (string, error) {
 
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
-		
+
 		return "", fmt.Errorf("Error from Api Post: %v", err)
 	}
 	if verbose {

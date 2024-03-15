@@ -1,0 +1,9 @@
+johani.org:
+   name:   johani.org.
+   dnskey: johani.org. 3582 IN	DNSKEY 257 3 8 AwEAAas15MSwKYP+xJbOFE7Ndx7T69vpxdeZGPTeUnF+qL3bLoLJMN8P geBos7FDpfF2Tu73Qovo7KdcN8ThLTEpSUiFIyX4u9zb4REUGDhiXduj a/3XuhhNoJlu8B9pZe9tZggksNqyWuAS8qlpV3rLivLzmOgxu4CM90LV kctGSHy0c498nBOjAy7OUnavpLcUgaa9LsKHp8zN9DPTeHvyEDAcDGLW m11Za1vjdgH4ONLJhuP+zXaKo1Y7LmGpc2yglwManv+UUvZNMDHA+FH/ VzxdZvUH3kKfW2gwjnmI66KMRbB3chONZ7JviPRBcPJGY/ajeFuD/WmB agbCZUNWhis=
+axfr.net:
+   name:   axfr.net.
+   dnskey: axfr.net. 3600 IN DNSKEY 257 3 8 AwEAAdZ8t2qlqtexWL62nLYfY6BILo3bgUjWrlB2Q/NZGcw9Jyv5V7Ke OUNcWIU090KR3XOUKMePm5+s2NONGBijoyL7ZBke20wBfHBPF9QXY//2 XZIlO7CTXtRnW2akehP/K3lyGFfBna/dl5aj/VLlLP/0eQMYMFFDCO1r 1maTLCd4iGSOou1P5RwSSW2s4ohRjRJ8GvYVaxVsjeuQq5/XsCc/3PLI Vbx/jVi7Rsgyj53qok5TonG9siA2O4BjOSI80Cn4V6r2d0W7Vx5MjrXG 78uTOM2ZRNfCtkL5Nszd9nBydNkQ4E9BITl34ClUTD1EsfE7P1C1c1KM 1hfSRZj7nTE=
+dnslab:
+   name:   dnslab.
+   dnskey: dnslab. 900 IN DNSKEY 257 3 8 AwEAAe41F/XLf/QXK0cTmlOG8XAGN//g/3uCBGoxbkK9OtO03IulAdZ5 vBXsvvATFqRQZeP5fqujz2a7+JlWQx2Q/tGGV0QHfPO5gLXJzLGhx7F0 Q70opScSiNeswjhnC+pbry0iIR1ELcw7HeIyx52xnf+gdFE/5lcKCSb/ xWCm8Lz5
