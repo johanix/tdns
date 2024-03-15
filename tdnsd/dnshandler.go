@@ -5,7 +5,6 @@
 package main
 
 import (
-	// "fmt"
 	"log"
 	"strings"
 
@@ -14,10 +13,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
-//	"github.com/orcaman/concurrent-map/v2"
 )
-
-// var Zones = cmap.New[*tdns.ZoneData]()
 
 func DnsEngine(conf *Config) error {
 	addresses := viper.GetStringSlice("dnsengine.addresses")
@@ -386,29 +382,3 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	return nil
 }
 
-func xxxFindZone(qname string) *tdns.ZoneData {
-	var tzone string
-	labels := strings.Split(qname, ".")
-	for i := 1; i < len(labels)-1; i++ {
-		tzone = strings.Join(labels[i:], ".")
-		if zd, ok := tdns.Zones.Get(tzone); ok {
-			return zd
-		}
-	}
-	log.Printf("FindZone: no zone for qname=%s found", qname)
-	return nil
-}
-
-func xxxFindZoneNG(qname string) *tdns.ZoneData {
-	i := strings.Index(qname, ".")
-	for {
-		if i == -1 {
-			break // done
-		}
-		if zd, ok := tdns.Zones.Get(qname[i:]); ok {
-			return zd
-		}
-		i = strings.Index(qname[i:], ".")
-	}
-	return nil
-}
