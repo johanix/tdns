@@ -197,10 +197,10 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
 			//			m.Extra = append(m.Extra, glue.RRSIGs...)
 		}
-	case dns.TypeMX, dns.TypeTLSA, dns.TypeSRV, dns.TypeA, dns.TypeAAAA,
-		dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
-		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG, dns.TypeDNSKEY,
-		dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
+	case tdns.TypeDSYNC, tdns.TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
+	     dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
+	     dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
+	     dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
 		if rrset, ok := apex.RRtypes[qtype]; ok {
 			if len(rrset.RRs) > 0 {
 				m.Answer = append(m.Answer, rrset.RRs...)
