@@ -27,6 +27,7 @@ type Config struct {
 		Policy       struct {
 			Type    string   `validate:"required"`
 			RRtypes []string `validate:"required"`
+			KeyUpload string `validate:"required"`
 		}
 	}
 
@@ -66,6 +67,7 @@ type DbConf struct {
 }
 
 type InternalConf struct {
+        KeyDB	      *KeyDB
         APIStopCh     chan struct{}
 	RefreshZoneCh chan tdns.ZoneRefresher
 	BumpZoneCh    chan BumperData

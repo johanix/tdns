@@ -170,25 +170,25 @@ var debugShowTACmd = &cobra.Command{
 			Verbose: true,
 		})
 
-		var out = []string{"Type|Signer|KeyID|Record"}
+		var out = []string{"Type|Signer|KeyID|Trusted|Record"}
 
 		if len(dr.TrustedDnskeys) > 0 {
-			fmt.Printf("Trusted DNSKEYs:\n")
+			fmt.Printf("Known DNSKEYs:\n")
 			for k, v := range dr.TrustedDnskeys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("DNSKEY|%s|%s|%.70s...",
-					tmp[0], tmp[1], v.String()))
+				out = append(out, fmt.Sprintf("DNSKEY|%s|%s|%v|%.70s...",
+					tmp[0], tmp[1], v.Validated, v.Dnskey.String()))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 
-		out = []string{"Type|Signer|KeyID|Record"}
+		out = []string{"Type|Signer|KeyID|Trusted|Record"}
 		if len(dr.TrustedSig0keys) > 0 {
-			fmt.Printf("Trusted SIG(0) keys:\n")
+			fmt.Printf("Known SIG(0) keys:\n")
 			for k, v := range dr.TrustedSig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("KEY|%s|%s|%.70s...\n",
-					tmp[0], tmp[1], v.String()))
+				out = append(out, fmt.Sprintf("KEY|%s|%s|%v|%.70s...\n",
+					tmp[0], tmp[1], v.Validated, v.Key.String()))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))

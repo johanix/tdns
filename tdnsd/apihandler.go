@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
-	"github.com/miekg/dns"
+	// "github.com/miekg/dns"
 
 	"github.com/johanix/tdns/tdns"
 )
@@ -142,16 +142,26 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-ta":
 			log.Printf("tdnsd debug show-ta inquiry")
-			tmp1 := map[string]dns.DNSKEY{}
+			// tmp1 := map[string]dns.DNSKEY{}
+			tmp1 := map[string]tdns.TrustAnchor{}
 			for _, key := range tdns.TAStore.Map.Keys() {
 			    val, _ := tdns.TAStore.Map.Get(key)
-			    tmp1[key] = val.Dnskey
+			    tmp1[key] = tdns.TrustAnchor{
+						Name:		val.Name,
+						Validated:	val.Validated,
+						Dnskey:		val.Dnskey,
+					}
 			}
 			resp.TrustedDnskeys = tmp1
-			tmp2 := map[string]dns.KEY{}
+			// tmp2 := map[string]dns.KEY{}
+			tmp2 := map[string]tdns.Sig0Key{}
 			for _, key := range tdns.Sig0Store.Map.Keys() {
 			    val, _ := tdns.Sig0Store.Map.Get(key)
-			    tmp2[key] = val.Key
+			    tmp2[key] = tdns.Sig0Key{
+						Name:		val.Name,
+						Validated:	val.Validated,
+						Key:		val.Key,
+					}
 			}
 			resp.TrustedSig0keys = tmp2
 

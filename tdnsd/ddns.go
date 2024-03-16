@@ -13,10 +13,11 @@ import (
 )
 
 type UpdatePolicy struct {
-	Type    string // only "selfsub" known at the moment
-	RRtypes map[uint16]bool
-	Verbose bool
-	Debug   bool
+	Type	  string // only "selfsub" known at the moment
+	RRtypes	  map[uint16]bool
+	KeyUpload string	// only "unvalidated" is used
+	Verbose   bool
+	Debug     bool
 }
 
 func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
@@ -47,10 +48,14 @@ func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
 	w.WriteMsg(m)
 
 	if rcode != dns.RcodeSuccess {
-		log.Printf("Error verifying DDNS update. Ignoring contents.")
+		log.Printf("Error verifying DDNS update. Most likely ignoring contents.")
+		// Let's not return here, this could be an unvalidated key upload.
+//		return nil
 	}
 
-	ok, err := policy.ApproveUpdate(zone, signername, r)
+	// rcode from validation is input to ApproveUpdate only to enable
+	// the possibility of upload of unvalidated keys
+	ok, err := policy.ApproveUpdate(zone, signername, rcode, r)
 	if err != nil {
 		log.Printf("Error from ApproveUpdate: %v. Ignoring update.", err)
 		return err
@@ -60,21 +65,72 @@ func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
 		log.Printf("DnsEngine: ApproveUpdate rejected the update. Ignored.")
 		return nil
 	}
-	log.Printf("DnsEngine: Update validated and approved. Queued for zone update.")
+
+	if rcode == dns.RcodeSuccess {
+	   log.Printf("DnsEngine: Update validated and approved. Queued for zone update.")
+	} else {
+	   log.Printf("DnsEngine: Update NOT validated BUT still approved. Queued for zone update.")
+	}
 
 	// send into suitable channel for pending updates
-	updateq <- UpdateRequest{Cmd: "UPDATE", ZoneName: zone, Actions: r.Ns}
+	updateq <- UpdateRequest{
+			Cmd:		"UPDATE",
+			ZoneName: 	zone,
+			Actions: 	r.Ns,
+			Validated:	rcode == dns.RcodeSuccess,
+		   }
 	return nil
 }
 
-func (policy *UpdatePolicy) ApproveUpdate(zone, signername string, r *dns.Msg) (bool, error) {
-	log.Printf("Analysing update using policy type %s with allowed RR types %v",
-		policy.Type, policy.RRtypes)
+func (policy *UpdatePolicy) ApproveUpdate(zone, signername string, rcode uint8,
+     	     		    			r *dns.Msg) (bool, error) {
+	un := ""
+	if rcode != dns.RcodeSuccess {
+	   un = "un"
+	}
+	log.Printf("Analysing %svalidated update using policy type %s with allowed RR types %v",
+		un, policy.Type, policy.RRtypes)
 
 	for i := 0; i <= len(r.Ns)-1; i++ {
 		rr := r.Ns[i]
+		rrname := rr.Header().Name
+		rrtype := rr.Header().Rrtype
+		rrclass := rr.Header().Class
 
-		if !policy.RRtypes[rr.Header().Rrtype] {
+		// Requirement for unvalidated key upload:
+		// 1. Policy has keyupload=unvalidated"
+		// 2. Single RR in Update section, which is a KEY
+		// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
+		// 4. Name of key must be == existing delegation
+		log.Printf("AppUpdate: rrtype=%s keyupload=%s class=%s len(r.Ns)=%d",
+				       dns.TypeToString[rrtype], policy.KeyUpload, 
+				       dns.ClassToString[rrclass], len(r.Ns))
+				       
+		if rrtype == dns.TypeKEY && policy.KeyUpload == "unvalidated" && 
+		   rrclass != dns.ClassNONE && rrclass != dns.ClassANY &&
+		   len(r.Ns) == 1 {
+		   zd := tdns.FindZone(zone)
+		   if zd == nil {
+		      log.Printf("ApproveUpdate: update rejected (parent zone of %s not known)", rrname)
+		      return false, nil
+		   }
+		   if zd.IsChildDelegation(rrname) {
+		      log.Printf("ApproveUpdate: update approved (unvalidated KEY upload)")
+		      continue
+		   } else {
+			log.Printf("ApproveUpdate: update rejected (KEY ADD, but %s is not a child of %s)",
+				rrname, zone)
+		      return false, nil
+		   }
+		}
+		
+		// Past the unvalidated key upload; from here update MUST be validated
+		if rcode != dns.RcodeSuccess {
+			log.Printf("ApproveUpdate: update rejected (signature did not validate)")
+		   	return false, nil 
+		}
+
+		if !policy.RRtypes[rrtype] {
 			log.Printf("ApproveUpdate: update rejected (unapproved RR type: %s)",
 				dns.TypeToString[rr.Header().Rrtype])
 			return false, nil
@@ -95,17 +151,20 @@ func (policy *UpdatePolicy) ApproveUpdate(zone, signername string, r *dns.Msg) (
 				return false, nil
 			}
 		default:
-			log.Printf("ApproveUpdate: unknown policy type: \"%s\"", policy.Type)
+			log.Printf("ApproveUpdate: unknown policy type: \"%s\"", 
+						   policy.Type)
 			return false, nil
 		}
 
-		if rr.Header().Class == dns.ClassNONE {
+		switch rrclass {
+		case dns.ClassNONE:
 			log.Printf("ApproveUpdate: Remove RR: %s", rr.String())
-		} else if rr.Header().Class == dns.ClassANY {
+		case dns.ClassANY:
 			log.Printf("ApproveUpdate: Remove RRset: %s", rr.String())
-		} else {
+		default:
 			log.Printf("ApproveUpdate: Add RR: %s", rr.String())
 		}
 	}
 	return true, nil
 }
+

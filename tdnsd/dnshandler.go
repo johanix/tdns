@@ -56,10 +56,11 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 //        }
 
         policy := UpdatePolicy{
-                Type:    viper.GetString("ddns.policy.type"),
-                RRtypes: map[uint16]bool{},
-                Verbose: *conf.Service.Verbose,
-                Debug:   *conf.Service.Debug,
+                Type:		viper.GetString("ddns.policy.type"),
+                RRtypes: 	map[uint16]bool{},
+                KeyUpload:	viper.GetString("ddns.policy.keyupload"),
+                Verbose: 	*conf.Service.Verbose,
+                Debug:   	*conf.Service.Debug,
         }
 
         switch policy.Type {

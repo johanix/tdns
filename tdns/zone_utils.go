@@ -246,6 +246,24 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	return &owner, nil
 }
 
+func (zd *ZoneData) IsChildDelegation(qname string) bool {
+     zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
+     					  qname, zd.ZoneName)
+     owner, err := zd.GetOwner(qname)
+     if err != nil || owner == nil || qname == zd.ZoneName {
+     	return false
+     }
+     if _, exists := owner.RRtypes[dns.TypeNS]; !exists {
+     	return false
+     }
+     if len(owner.RRtypes[dns.TypeNS].RRs) == 0 {
+     	return false
+     }
+     zd.Logger.Printf("IsChildDelegation: %s is an existing child of %s",
+     					  qname, zd.ZoneName)
+     return true
+}
+
 func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 	owner, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || owner == nil {

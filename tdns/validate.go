@@ -278,13 +278,16 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error
 
 // If key not found *TrustAnchor is nil
 func (zd *ZoneData) FindSig0key(signer string, keyid uint16) (*Sig0Key, error) {
-	mapkey := signer + "::" + string(keyid)
+	mapkey := fmt.Sprintf("%s::%d", signer, keyid)
 	sk, ok := Sig0Store.Map.Get(mapkey)
 	if !ok {
 		zd.Logger.Printf("FindSig0key: Request for KEY with id %s: not found, will fetch.", mapkey)
 		rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
 		if err != nil {
 			return nil, err
+		}
+		if rrset == nil {
+		   return nil, fmt.Errorf("SIG(0) key %s not found", signer)
 		}
 		valid, err := zd.ValidateRRset(rrset, true)
 		if err != nil {
@@ -328,9 +331,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 	}
 
 	sig0key, err := zd.FindSig0key(sig.RRSIG.SignerName, sig.RRSIG.KeyTag)
-	if err != nil {
-		log.Printf("= Error: key \"%s\" is unknown.", sig.RRSIG.SignerName)
+	if err != nil || sig0key == nil {
+		log.Printf("* Error: update signed by unknown key \"%s\"",
+			      sig.RRSIG.SignerName)
 		rcode = dns.RcodeBadKey
+	   	return rcode, sig.RRSIG.SignerName, nil
 	}
 
 	keyrr := sig0key.Key
@@ -349,5 +354,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 		log.Printf("= Update SIG is NOT within its validity period")
 		rcode = dns.RcodeBadTime
 	}
-	return rcode, sig.RRSIG.SignerName, nil
+
+	if sig0key.Validated {
+	   log.Printf("* Update by known and validated key. All ok.")
+	   return rcode, sig.RRSIG.SignerName, nil
+	}
+	log.Printf("= Update signed by known but unvalidated key. ")
+	return dns.RcodeBadKey, sig.RRSIG.SignerName, nil
 }

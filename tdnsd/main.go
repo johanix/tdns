@@ -170,73 +170,16 @@ func ParseConfig(conf *Config) error {
 	}
 	fmt.Println()
 
-	// If a validator trusted key config file is found, read it in.
-	tafile := viper.GetString("validator.dnskey.trusted.file")
-	if tafile != "" {
-		cfgdata, err := os.ReadFile(tafile)
-		if err != nil {
-			log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
-		}
+	kdb := NewKeyDB(false)
+	conf.Internal.KeyDB = kdb
 
-		var tatmp TAtmp
-		//	   var tastore = tdns.NewTAStore()
-
-		err = yaml.Unmarshal(cfgdata, &tatmp)
-		if err != nil {
-			log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
-		}
-
-		for k, v := range tatmp {
-			k = dns.Fqdn(k)
-			rr, err := dns.NewRR(v.Dnskey)
-			if err != nil {
-				log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
-			}
-
-			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
-				tdns.TAStore.Map.Set(mapkey, tdns.TrustAnchor{
-					Name:   k,
-					Dnskey: *dnskeyrr,
-				})
-			}
-		}
-		//	   conf.Internal.TrustedDnskeys = tastore
+	err = kdb.LoadDnskeyTrustAnchors()
+	if err != nil {
+		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
 	}
-
-	// If a validator trusted key config file is found, read it in.
-	sig0file := viper.GetString("validator.sig0.trusted.file")
-	if sig0file != "" {
-		cfgdata, err := os.ReadFile(sig0file)
-		if err != nil {
-			log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
-		}
-
-		var sig0tmp Sig0tmp
-		//	   var sig0conf tdns.Sig0Store
-
-		err = yaml.Unmarshal(cfgdata, &sig0tmp)
-		if err != nil {
-			log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
-		}
-
-		for k, v := range sig0tmp {
-			k = dns.Fqdn(k)
-			rr, err := dns.NewRR(v.Key)
-			if err != nil {
-				log.Fatalf("Error from dns.NewRR(%s): %v", v.Key, err)
-			}
-
-			if keyrr, ok := rr.(*dns.KEY); ok {
-				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
-				tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
-					Name:      k,
-					Validated: true,
-					Key:       *keyrr,
-				})
-			}
-		}
-		//	   conf.Internal.TrustedSig0keys = sig0conf
+	err = kdb.LoadKnownSig0Keys()
+	if err != nil {
+		log.Fatalf("Error from LoadKnownSig0Keys(): %v", err)
 	}
 
 	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
@@ -286,5 +229,117 @@ func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
 
 	log.Printf("All configured zones now refreshing: %v", all_zones)
 
+	return nil
+}
+
+func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
+	// If a validator trusted key config file is found, read it in.
+	tafile := viper.GetString("validator.dnskey.trusted.file")
+	if tafile != "" {
+		cfgdata, err := os.ReadFile(tafile)
+		if err != nil {
+			log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
+		}
+
+		var tatmp TAtmp
+		//	   var tastore = tdns.NewTAStore()
+
+		err = yaml.Unmarshal(cfgdata, &tatmp)
+		if err != nil {
+			log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
+		}
+
+		for k, v := range tatmp {
+			k = dns.Fqdn(k)
+			rr, err := dns.NewRR(v.Dnskey)
+			if err != nil {
+				log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
+			}
+
+			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
+				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
+				tdns.TAStore.Map.Set(mapkey, tdns.TrustAnchor{
+					Name:      k,
+					Validated: true, // always trust config
+					Dnskey:    *dnskeyrr,
+				})
+			}
+		}
+		//	   conf.Internal.TrustedDnskeys = tastore
+	}
+	return nil
+}
+
+func (kdb *KeyDB) LoadKnownSig0Keys() error {
+
+	const (
+		loadsig0sql = "SELECT owner, keyid, trusted, keyrr FROM ChildSig0Keys"
+	)
+
+	rows, err := kdb.Query(loadsig0sql)
+	if err != nil {
+		log.Fatalf("Error from kdb.Query(%s): %v", loadsig0sql, err)
+	}
+	defer rows.Close()
+
+	var keyname, keyrrstr string
+	var keyid int
+	var trusted bool
+
+	for rows.Next() {
+		err := rows.Scan(&keyname, &keyid, &trusted, &keyrrstr)
+		if err != nil {
+			log.Fatalf("Error from rows.Scan(): %v", err)
+		}
+
+		rr, err := dns.NewRR(keyrrstr)
+		if err != nil {
+			log.Fatalf("Error from dns.NewRR(%s): %v", keyrrstr, err)
+		}
+
+		if keyrr, ok := rr.(*dns.KEY); ok {
+			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
+			tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
+				Name:      keyname,
+				Validated: trusted,
+				Key:       *keyrr,
+			})
+		}
+	}
+
+	// If a validator trusted key config file is found, read it in.
+	sig0file := viper.GetString("validator.sig0.trusted.file")
+	if sig0file != "" {
+		cfgdata, err := os.ReadFile(sig0file)
+		if err != nil {
+			log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
+		}
+
+		var sig0tmp Sig0tmp
+		//	   var sig0conf tdns.Sig0Store
+
+		err = yaml.Unmarshal(cfgdata, &sig0tmp)
+		if err != nil {
+			log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
+		}
+
+		for k, v := range sig0tmp {
+			k = dns.Fqdn(k)
+			rr, err := dns.NewRR(v.Key)
+			if err != nil {
+				log.Fatalf("Error from dns.NewRR(%s): %v", v.Key, err)
+			}
+
+			if keyrr, ok := rr.(*dns.KEY); ok {
+				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
+				tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
+					Name:      k,
+					Validated: true, // always trust config
+					Key:       *keyrr,
+				})
+			}
+		}
+		//	   conf.Internal.TrustedSig0keys = sig0conf
+	}
 	return nil
 }

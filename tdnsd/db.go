@@ -17,43 +17,27 @@ import (
 
 var DefaultTables = map[string]string{
 
-	"TrustedDnskeys": `CREATE TABLE IF NOT EXISTS 'TrustedDnskeys' (
+	"ChildDnskeys": `CREATE TABLE IF NOT EXISTS 'ChildDnskeys' (
 id		  INTEGER PRIMARY KEY,
 parent		  TEXT,
 child		  TEXT,
 keyid		  INTEGER,
+trusted		  INTEGER,
 keyrr		  TEXT,
 comment		  TEXT,
-UNIQUE (parent, child, keyid)
+UNIQUE (parent, child, keyid, trusted)
 )`,
 
-	"UntrustedDnskeys": `CREATE TABLE IF NOT EXISTS 'UntrustedDnskeys' (
-id		  INTEGER PRIMARY KEY,
-parent		  TEXT,
-child		  TEXT,
-keyid		  INTEGER,
-keyrr		  TEXT,
-comment		  TEXT,
-UNIQUE (parent, child, keyid)
-)`,
-
-	"TrustedSig0keys": `CREATE TABLE IF NOT EXISTS 'TrustedSig0keys' (
+	"ChildSig0keys": `CREATE TABLE IF NOT EXISTS 'ChildSig0keys' (
 id		  INTEGER PRIMARY KEY,
 owner		  TEXT,
 keyid		  INTEGER,
+trusted		  INTEGER,
 keyrr		  TEXT,
 comment		  TEXT,
-UNIQUE (owner, keyid)
+UNIQUE (owner, keyid, trusted)
 )`,
 
-	"UntrustedSig0keys": `CREATE TABLE IF NOT EXISTS 'UntrustedSig0keys' (
-id		  INTEGER PRIMARY KEY,
-owner		  TEXT,
-keyid		  INTEGER,
-keyrr		  TEXT,
-comment		  TEXT,
-UNIQUE (owner, keyid)
-)`,
 
 }
 

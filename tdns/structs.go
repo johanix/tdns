@@ -110,8 +110,10 @@ type DebugResponse struct {
 	Zone       string
 	OwnerIndex map[string]int
 	RRset      RRset
-	TrustedDnskeys	map[string]dns.DNSKEY
-	TrustedSig0keys	map[string]dns.KEY
+//	TrustedDnskeys	map[string]dns.DNSKEY
+//	TrustedSig0keys	map[string]dns.KEY
+	TrustedDnskeys	map[string]TrustAnchor
+	TrustedSig0keys	map[string]Sig0Key
 	Validated	bool
 	Msg        string
 	Error      bool
