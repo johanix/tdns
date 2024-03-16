@@ -16,16 +16,16 @@ var Zonename string
 
 var QueryCmd = &cobra.Command{
 	Use:   "query",
-	Short: "Send a DNS query for 'zone. NOTIFY' and present the result.",
+	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
 		Zonename = dns.Fqdn(Zonename)
-		rrs, err := NotifyQuery(Zonename, Globals.IMR)
+		rrs, err := DsyncQuery(Zonename, Globals.IMR)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 
 		if len(rrs) == 0 {
-			fmt.Printf("No '%s NOTIFY' RR found\n", Zonename)
+			fmt.Printf("No '%s DSYNC' RR found\n", Zonename)
 		} else {
 			for _, nr := range rrs {
 				fmt.Printf("%s\n", nr.String())
@@ -36,43 +36,43 @@ var QueryCmd = &cobra.Command{
 
 func init() {
 	//	rootCmd.AddCommand(queryCmd)
-	QueryCmd.PersistentFlags().StringVarP(&Zonename, "zone", "z", "", "Zone to query for the NOTIFY RRset in")
+	QueryCmd.PersistentFlags().StringVarP(&Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
 	QueryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "", "IMR to send the query to")
 }
 
-func NotifyQuery(z, imr string) ([]*dns.PrivateRR, error) {
+func DsyncQuery(z, imr string) ([]*dns.PrivateRR, error) {
 	m := new(dns.Msg)
-	m.SetQuestion(z, TypeNOTIFY)
+	m.SetQuestion(z, TypeDSYNC)
 
 	var prrs []*dns.PrivateRR
 
 	if Globals.Debug {
-		fmt.Printf("TypeNOTIFY=%d\n", TypeNOTIFY)
+		fmt.Printf("TypeDSYNC=%d\n", TypeDSYNC)
 		fmt.Printf("DEBUG: Sending to server %s query:\n%s\n", imr, m.String())
 	}
 
 	res, err := dns.Exchange(m, imr)
 
 	if err != nil && !Globals.Debug {
-		log.Fatalf("Error from dns.Exchange(%s, NOTIFY): %v", z, err)
+		log.Fatalf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
 	}
 
 	if Globals.Debug {
-		log.Printf("Response from dns.Exchange(%s, NOTIFY): %v", z, res.String())
+		log.Printf("Response from dns.Exchange(%s, DSYNC): %v", z, res.String())
 	}
 
 	if res == nil {
-		return prrs, fmt.Errorf("Error: nil response to NOTIFY query")
+		return prrs, fmt.Errorf("Error: nil response to DSYNC query")
 	}
 
 	if res.Rcode != dns.RcodeSuccess {
-		log.Fatalf("Error: Query for %s NOTIFY received rcode: %s",
+		log.Fatalf("Error: Query for %s DSYNC received rcode: %s",
 			z, dns.RcodeToString[res.Rcode])
 	}
 
 	if len(res.Answer) > 0 {
 		if Globals.Debug {
-			fmt.Printf("Looking up %s NOTIFY RRset:\n", z)
+			fmt.Printf("Looking up %s DSYNC RRset:\n", z)
 		}
 		for _, rr := range res.Answer {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
@@ -80,15 +80,15 @@ func NotifyQuery(z, imr string) ([]*dns.PrivateRR, error) {
 					fmt.Printf("%s\n", rr.String())
 				}
 
-				if _, ok := prr.Data.(*NOTIFY); ok {
+				if _, ok := prr.Data.(*DSYNC); ok {
 					prrs = append(prrs, prr)
 				} else {
-					log.Fatalf("Error: answer is not a NOTIFY RR: %s", rr.String())
+					log.Fatalf("Error: answer is not a DSYNC RR: %s", rr.String())
 				}
 			} else if _, ok = rr.(*dns.RRSIG); ok {
 				// ignore RRSIGs for the moment
 			} else {
-				log.Fatalf("Error: answer is not a NOTIFY RR: %s", rr.String())
+				log.Fatalf("Error: answer is not a DSYNC RR: %s", rr.String())
 			}
 		}
 	}
@@ -261,7 +261,7 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 	var addrs []string
 	var ddnstarget DDNSTarget
 
-	prrs, err := NotifyQuery(parentzone, parentprimary)
+	prrs, err := DsyncQuery(parentzone, parentprimary)
 	if err != nil {
 		return ddnstarget, err
 	}
@@ -269,14 +269,14 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 	const update_scheme = 2
 
 	if Globals.Debug {
-		fmt.Printf("Found %d NOTIFY RRs\n", len(prrs))
+		fmt.Printf("Found %d DSYNC RRs\n", len(prrs))
 	}
 
 	found := false
 	var dsync_rr *dns.PrivateRR
 
 	for _, prr := range prrs {
-		if prr.Data.(*NOTIFY).Scheme == update_scheme {
+		if prr.Data.(*DSYNC).Scheme == update_scheme {
 			found = true
 			dsync_rr = prr
 			break
@@ -286,7 +286,7 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 		return ddnstarget, fmt.Errorf("No DDNS update destination found for for zone %s\n", parentzone)
 	}
 
-	dsync, _ := dsync_rr.Data.(*NOTIFY)
+	dsync, _ := dsync_rr.Data.(*DSYNC)
 
 	if Globals.Verbose {
 		fmt.Printf("Looked up published DDNS update target for zone %s:\n\n%s\n\n",
@@ -312,20 +312,20 @@ func LookupDSYNCTarget(parentzone, parentprimary string, dtype uint16, scheme ui
 	var addrs []string
 	var dsynctarget DSYNCTarget
 
-	prrs, err := NotifyQuery(parentzone, parentprimary)
+	prrs, err := DsyncQuery(parentzone, parentprimary)
 	if err != nil {
 		return dsynctarget, err
 	}
 
 	if Globals.Debug {
-		fmt.Printf("Found %d NOTIFY RRs\n", len(prrs))
+		fmt.Printf("Found %d DSYNC RRs\n", len(prrs))
 	}
 
 	found := false
-	var dsync *NOTIFY
+	var dsync *DSYNC
 
 	for _, rr := range prrs {
-		dsyncrr := rr.Data.(*NOTIFY)
+		dsyncrr := rr.Data.(*DSYNC)
 		if dsyncrr.Scheme == scheme && dsyncrr.Type == dtype {
 			found = true
 			dsync = dsyncrr
@@ -338,7 +338,7 @@ func LookupDSYNCTarget(parentzone, parentprimary string, dtype uint16, scheme ui
 	}
 
 	if Globals.Verbose {
-		fmt.Printf("Looked up published DSYNC update target for zone %s:\n\n%s\tIN\tNOTIFY\t%s\n\n",
+		fmt.Printf("Looked up published DSYNC update target for zone %s:\n\n%s\tIN\tDSYNC\t%s\n\n",
 			parentzone, parentzone, dsync.String())
 	}
 

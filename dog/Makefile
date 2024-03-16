@@ -23,5 +23,8 @@ test:
 clean:
 	@rm -f $(PROG)
 
+install:
+	install -s -b -c ${PROG} /usr/local/bin/
+
 .PHONY: build clean
 

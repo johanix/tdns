@@ -47,6 +47,43 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 	zonech := conf.Internal.RefreshZoneCh
 
+        updateq := conf.Internal.UpdateQ
+
+//        keydir := viper.GetString("ddns.keydirectory")
+//        keymap, err := tdns.ReadPubKeys(keydir)
+//        if err != nil {
+//                log.Fatalf("Error from ReadPublicKeys(%s): %v", keydir, err)
+//        }
+
+        policy := UpdatePolicy{
+                Type:    viper.GetString("ddns.policy.type"),
+                RRtypes: map[uint16]bool{},
+                Verbose: *conf.Service.Verbose,
+                Debug:   *conf.Service.Debug,
+        }
+
+        switch policy.Type {
+        case "selfsub", "self":
+                // all ok, we know these
+        default:
+                log.Fatalf("Error: unknown update policy type: \"%s\". Terminating.", policy.Type)
+        }
+
+        var rrtypes []string
+        for _, rrstr := range viper.GetStringSlice("ddns.policy.rrtypes") {
+                if rrt, ok := dns.StringToType[rrstr]; ok {
+                        policy.RRtypes[rrt] = true
+                        rrtypes = append(rrtypes, rrstr)
+                } else {
+                        log.Printf("Unknown RR type: \"%s\". Ignoring.", rrstr)
+                }
+        }
+
+        if len(policy.RRtypes) == 0 {
+                log.Fatalf("Error: zero valid RRtypes listed in policy.")
+        }
+        log.Printf("DnsEngine: using update policy \"%s\" with RRtypes: %v", policy.Type, rrtypes)
+
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
 		var dnssec_ok bool
@@ -124,6 +161,49 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			//	qname, zd.ZoneName)
 			QueryResponder(w, r, zd, qname, qtype, dnssec_ok)
 			return
+
+               case dns.OpcodeUpdate:
+                        zone := qname // This is a DDNS update, then the Query Section becoes the Zone Section
+                        log.Printf("DnsEngine: Received UPDATE for zone '%s' containing %d RRs in the update section", qname, len(r.Ns))
+
+                        m := new(dns.Msg)
+                        m.SetReply(r)
+
+			// Let's see if we can find the zone
+			zd := tdns.FindZone(qname)
+			if zd == nil {
+				m.SetRcode(r, dns.RcodeRefused)
+				w.WriteMsg(m)
+				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
+			}
+
+                        rcode, signername, err := zd.ValidateUpdate(r)
+                        if err != nil {
+                                log.Printf("Error from ValidateUpdate(): %v", err)
+                        }
+
+                        // send response
+                        m = m.SetRcode(m, int(rcode))
+                        w.WriteMsg(m)
+
+                        if rcode != dns.RcodeSuccess {
+                                log.Printf("Error verifying DDNS update. Ignoring contents.")
+                        }
+
+                        ok, err := policy.ApproveUpdate(zone, signername, r)
+                        if err != nil {
+                                log.Printf("Error from ApproveUpdate: %v. Ignoring update.", err)
+                                return
+                        }
+
+                        if !ok {
+                                log.Printf("DnsEngine: ApproveUpdate rejected the update. Ignored.")
+                                return
+                        }
+                        log.Printf("DnsEngine: Update validated and approved. Queued for zone update.")
+                        // send into suitable channel for pending updates
+                        updateq <- UpdateRequest{Cmd: "UPDATE", ZoneName: zone, Actions: r.Ns}
+                        return
 
 		default:
 			log.Printf("Error: unable to handle msgs of type %s", dns.OpcodeToString[r.Opcode])

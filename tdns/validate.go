@@ -51,7 +51,6 @@ func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 		}
 		rrsig := rr.(*dns.RRSIG)
 		zd.Logger.Printf("RRset is signed by \"%s\".", rrsig.SignerName)
-		//	 ta, ok := keymap[rrsig.SignerName]
 		ta, err := zd.FindDnskey(rrsig.SignerName, rrsig.KeyTag)
 		if err != nil {
 			msg := fmt.Sprintf("Error from FindDnskey(%s, %d): %v",
@@ -275,4 +274,80 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error
 	}
 	ta, ok = TAStore.Map.Get(mapkey)
 	return &ta, nil
+}
+
+// If key not found *TrustAnchor is nil
+func (zd *ZoneData) FindSig0key(signer string, keyid uint16) (*Sig0Key, error) {
+	mapkey := signer + "::" + string(keyid)
+	sk, ok := Sig0Store.Map.Get(mapkey)
+	if !ok {
+		zd.Logger.Printf("FindSig0key: Request for KEY with id %s: not found, will fetch.", mapkey)
+		rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
+		if err != nil {
+			return nil, err
+		}
+		valid, err := zd.ValidateRRset(rrset, true)
+		if err != nil {
+			return nil, err
+		}
+		zd.Logger.Printf("FindSig0key: Found %s KEY RRset (validated)", signer)
+		for _, rr := range rrset.RRs {
+			if keyrr, ok := rr.(*dns.KEY); ok {
+			   Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()),
+					Sig0Key{
+						Name:      signer,
+						Validated: valid,
+						Key:       *keyrr,
+					})
+			}
+		}
+	}
+	sk, ok = Sig0Store.Map.Get(mapkey)
+	return &sk, nil
+}
+
+func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
+	var rcode uint8 = dns.RcodeSuccess
+
+	if len(r.Extra) == 0 {
+	   	// there is no signature on the update
+		return dns.RcodeFormatError, "", nil 
+	}
+
+	if _, ok := r.Extra[0].(*dns.SIG); !ok {
+	        // there is no SIG(0) signature on the update
+		return dns.RcodeFormatError, "", nil 
+	}
+
+	sig := r.Extra[0].(*dns.SIG)
+	log.Printf("* Update is signed by \"%s\".", sig.RRSIG.SignerName)
+	msgbuf, err := r.Pack()
+	if err != nil {
+		log.Printf("= Error from msg.Pack(): %v", err)
+		rcode = dns.RcodeFormatError
+	}
+
+	sig0key, err := zd.FindSig0key(sig.RRSIG.SignerName, sig.RRSIG.KeyTag)
+	if err != nil {
+		log.Printf("= Error: key \"%s\" is unknown.", sig.RRSIG.SignerName)
+		rcode = dns.RcodeBadKey
+	}
+
+	keyrr := sig0key.Key
+
+	err = sig.Verify(&keyrr, msgbuf)
+	if err != nil {
+		log.Printf("= Error from sig.Varify(): %v", err)
+		rcode = dns.RcodeBadSig
+	} else {
+		log.Printf("* Update SIG verified correctly")
+	}
+
+	if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now()) {
+		log.Printf("* Update SIG is within its validity period")
+	} else {
+		log.Printf("= Update SIG is NOT within its validity period")
+		rcode = dns.RcodeBadTime
+	}
+	return rcode, sig.RRSIG.SignerName, nil
 }

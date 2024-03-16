@@ -19,6 +19,17 @@ type Config struct {
 	Apiserver ApiserverConf
 	Zones     map[string]ZoneConf
 	Db	  DbConf
+	Ddns      struct {
+		KeyDirectory string `validate:"dir,required"`
+		Update_NS    *bool  `validate:"required"`
+		Update_A     *bool  `validate:"required"`
+		Update_AAAA  *bool  `validate:"required"`
+		Policy       struct {
+			Type    string   `validate:"required"`
+			RRtypes []string `validate:"required"`
+		}
+	}
+
 	Log struct {
 		File string `validate:"required"`
 	}
