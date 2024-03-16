@@ -166,7 +166,7 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 	case dns.RSASHA256, dns.RSASHA512:
 		cs = k.(*rsa.PrivateKey)
 	case dns.ED25519:
-		cs = k.(*ed25519.PrivateKey)
+		cs = k.(ed25519.PrivateKey)
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 		cs = k.(*ecdsa.PrivateKey)
 	default:

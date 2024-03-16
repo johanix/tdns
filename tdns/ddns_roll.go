@@ -53,20 +53,20 @@ func init() {
 
 func SendSig0KeyUpdate(gennewkey bool) error {
 	if Globals.Zonename == "" {
-		log.Fatalf("Error: child zone name not specified.")
+	        return fmt.Errorf("Error: child zone name not specified.")
 	}
 	Globals.Zonename = dns.Fqdn(Globals.Zonename)
 
 	if Globals.ParentZone == "" {
-		log.Fatalf("Error: parent zone name not specified.")
+		return fmt.Errorf("Error: parent zone name not specified.")
 	}
 	Globals.ParentZone = dns.Fqdn(Globals.ParentZone)
 
 	if childpri == "" {
-		log.Fatalf("Error: child primary nameserver not specified.")
+		return fmt.Errorf("Error: child primary nameserver not specified.")
 	}
 	if parpri == "" {
-		log.Fatalf("Error: parent primary nameserver not specified.")
+		return fmt.Errorf("Error: parent primary nameserver not specified.")
 	}
 
 	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
@@ -82,7 +82,7 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 		newkey, newcs, newpriv, err := GenerateSigningKey(Globals.Zonename,
 			keyrr.Algorithm)
 		if err != nil {
-			log.Fatalf("Error from GenerateSigningKey: %v", err)
+			return fmt.Errorf("Error from GenerateSigningKey: %v", err)
 		}
 		_ = newcs // XXX: should store the cs and new private key somewhere.
 		_ = newpriv
