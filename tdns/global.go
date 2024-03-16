@@ -12,6 +12,7 @@ type GlobalStuff struct {
 	Verbose 	bool
 	Debug   	bool
 	Zonename	string
+	Sig0Keyfile	string
 }
 
 var Globals = GlobalStuff{

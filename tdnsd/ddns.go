@@ -19,8 +19,8 @@ type UpdatePolicy struct {
 	Debug   bool
 }
 
-func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string, ntype uint16,
-	updateq chan UpdateRequest) error {
+func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
+     		       policy UpdatePolicy, updateq chan UpdateRequest) error {
 
 	m := new(dns.Msg)
 	m.SetReply(r)

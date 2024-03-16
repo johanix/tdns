@@ -153,7 +153,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
                case dns.OpcodeUpdate:
                         log.Printf("DnsEngine: Received UPDATE for zone '%s' containing %d RRs in the update section", qname, len(r.Ns))
 
-			err = UpdateResponder(w, r, qname, qtype, updateq)
+			err := UpdateResponder(w, r, qname, policy, updateq)
 			if err != nil {
 			       log.Printf("Error from UpdateResponder(): %v", err)
 			}
