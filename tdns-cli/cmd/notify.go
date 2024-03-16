@@ -64,12 +64,12 @@ func init() {
 	notifyCmd.AddCommand(notifySendCdsCmd, notifySendCsyncCmd, notifySendDnskeyCmd, 
 					       notifySendSoaCmd)
 
-	notifyCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
+//	notifyCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
 	notifyCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
 	notifyCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
-var pzone, childpri, parpri string
+var childpri, parpri string
 
 func SendNotify(zonename string, ntype string) {
 	var lookupzone, lookupserver string
@@ -88,15 +88,15 @@ func SendNotify(zonename string, ntype string) {
 		lookupserver = childpri
 	default:
 		// lookupzone = lib.ParentZone(zonename, lib.Globals.IMR)
-		if pzone == "" {
+		if tdns.Globals.ParentZone == "" {
 			log.Fatalf("Error: parent zone name not specified.")
 		}
-		pzone = dns.Fqdn(pzone)
+		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
 
 		if parpri == "" {
 			log.Fatalf("Error: parent primary nameserver not specified.")
 		}
-		lookupzone = pzone
+		lookupzone = tdns.Globals.ParentZone
 		lookupserver = parpri
 	}
 

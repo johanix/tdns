@@ -12,6 +12,7 @@ type GlobalStuff struct {
 	Verbose 	bool
 	Debug   	bool
 	Zonename	string
+	ParentZone	string
 	Sig0Keyfile	string
 }
 

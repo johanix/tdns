@@ -57,10 +57,10 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 	}
 	Globals.Zonename = dns.Fqdn(Globals.Zonename)
 
-	if pzone == "" {
+	if Globals.ParentZone == "" {
 		log.Fatalf("Error: parent zone name not specified.")
 	}
-	pzone = dns.Fqdn(pzone)
+	Globals.ParentZone = dns.Fqdn(Globals.ParentZone)
 
 	if childpri == "" {
 		log.Fatalf("Error: child primary nameserver not specified.")
@@ -96,14 +96,14 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 	}
 
 	const update_scheme = 2
-	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"],
+	dsynctarget, err := LookupDSYNCTarget(Globals.ParentZone, parpri, dns.StringToType["ANY"],
 		     	    			     update_scheme)
 	if err != nil {
 		return fmt.Errorf("Error from LookupDDNSTarget(%s, %s): %v",
-		       pzone, parpri, err)
+		       Globals.ParentZone, parpri, err)
 	}
 
-	msg, err := CreateUpdate(pzone, Globals.Zonename, adds, removes)
+	msg, err := CreateUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)
 	if err != nil {
 		return fmt.Errorf("Error from CreateUpdate(%v): %v", dsynctarget, err)
 	}
@@ -119,7 +119,7 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
 	}
 
-	err = SendUpdate(msg, pzone, dsynctarget)
+	err = SendUpdate(msg, Globals.ParentZone, dsynctarget)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
 	}
