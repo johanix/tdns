@@ -4,12 +4,10 @@
 package tdns
 
 import (
-// "github.com/go-redis/redis"
    "github.com/orcaman/concurrent-map/v2"
 )
 
 type GlobalStuff struct {
-	//	Rdb  	*redis.Client
 	IMR     string
 	Verbose bool
 	Debug   bool

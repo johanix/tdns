@@ -14,8 +14,8 @@ import (
 
 var Zonename string
 
-var QueryCmd = &cobra.Command{
-	Use:   "query",
+var DsyncQueryCmd = &cobra.Command{
+	Use:   "dsync-query",
 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
 		Zonename = dns.Fqdn(Zonename)
@@ -35,9 +35,8 @@ var QueryCmd = &cobra.Command{
 }
 
 func init() {
-	//	rootCmd.AddCommand(queryCmd)
-	QueryCmd.PersistentFlags().StringVarP(&Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
-	QueryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "", "IMR to send the query to")
+	DsyncQueryCmd.PersistentFlags().StringVarP(&Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
+	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "", "IMR to send the query to")
 }
 
 func DsyncQuery(z, imr string) ([]*dns.PrivateRR, error) {

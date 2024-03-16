@@ -97,22 +97,10 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		case dns.OpcodeNotify:
 			ntype := r.Question[0].Qtype
 			log.Printf("Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
-			// send NOERROR response
-			m := new(dns.Msg)
-			m.SetReply(r)
-
-			if zd, ok := tdns.Zones.Get(qname); ok {
-				log.Printf("Received Notify for known zone %s. Fetching from upstream", qname)
-				zonech <- tdns.ZoneRefresher{
-					Name:      qname, // send zone name into RefreshEngine
-					ZoneStore: zd.ZoneStore,
-				}
-			} else {
-				log.Printf("Received Notify for unknown zone %s. Ignoring.", qname)
-				m.SetRcode(r, dns.RcodeRefused)
+			err := NotifyResponder(w, r, qname, ntype, zonech)
+			if err != nil {
+			   log.Printf("Error from NotifyResponder: %v", err)
 			}
-			w.WriteMsg(m)
-			// fmt.Printf("Notify message: %v\n", m.String())
 			return
 
 		case dns.OpcodeQuery:
@@ -163,46 +151,12 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			return
 
                case dns.OpcodeUpdate:
-                        zone := qname // This is a DDNS update, then the Query Section becoes the Zone Section
                         log.Printf("DnsEngine: Received UPDATE for zone '%s' containing %d RRs in the update section", qname, len(r.Ns))
 
-                        m := new(dns.Msg)
-                        m.SetReply(r)
-
-			// Let's see if we can find the zone
-			zd := tdns.FindZone(qname)
-			if zd == nil {
-				m.SetRcode(r, dns.RcodeRefused)
-				w.WriteMsg(m)
-				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
+			err = UpdateResponder(w, r, qname, qtype, updateq)
+			if err != nil {
+			       log.Printf("Error from UpdateResponder(): %v", err)
 			}
-
-                        rcode, signername, err := zd.ValidateUpdate(r)
-                        if err != nil {
-                                log.Printf("Error from ValidateUpdate(): %v", err)
-                        }
-
-                        // send response
-                        m = m.SetRcode(m, int(rcode))
-                        w.WriteMsg(m)
-
-                        if rcode != dns.RcodeSuccess {
-                                log.Printf("Error verifying DDNS update. Ignoring contents.")
-                        }
-
-                        ok, err := policy.ApproveUpdate(zone, signername, r)
-                        if err != nil {
-                                log.Printf("Error from ApproveUpdate: %v. Ignoring update.", err)
-                                return
-                        }
-
-                        if !ok {
-                                log.Printf("DnsEngine: ApproveUpdate rejected the update. Ignored.")
-                                return
-                        }
-                        log.Printf("DnsEngine: Update validated and approved. Queued for zone update.")
-                        // send into suitable channel for pending updates
-                        updateq <- UpdateRequest{Cmd: "UPDATE", ZoneName: zone, Actions: r.Ns}
                         return
 
 		default:
