@@ -15,8 +15,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-var zonename string
-var imr = "8.8.8.8:53"
+var imr string
 
 var notifyCmd = &cobra.Command{
 	Use:   "notify",
@@ -32,7 +31,7 @@ var notifySendCdsCmd = &cobra.Command{
 	Use:   "cds",
 	Short: "Send a Notify(CDS) to parent of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zonename), "CDS")
+		SendNotify(dns.Fqdn(zoneName), "CDS")
 	},
 }
 
@@ -40,7 +39,7 @@ var notifySendCsyncCmd = &cobra.Command{
 	Use:   "csync",
 	Short: "Send a Notify(CSYNC) to parent of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zonename), "CSYNC")
+		SendNotify(dns.Fqdn(zoneName), "CSYNC")
 	},
 }
 
@@ -48,7 +47,7 @@ var notifySendDnskeyCmd = &cobra.Command{
 	Use:   "dnskey",
 	Short: "Send a Notify(DNSKEY) to other signers of zone (multi-signer setup)",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zonename), "DNSKEY")
+		SendNotify(dns.Fqdn(zoneName), "DNSKEY")
 	},
 }
 
@@ -56,7 +55,7 @@ var notifySendSoaCmd = &cobra.Command{
 	Use:   "soa",
 	Short: "Send a normal Notify(SOA) to someone",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zonename), "SOA")
+		SendNotify(dns.Fqdn(zoneName), "SOA")
 	},
 }
 
@@ -65,7 +64,6 @@ func init() {
 	notifyCmd.AddCommand(notifySendCdsCmd, notifySendCsyncCmd, notifySendDnskeyCmd, 
 					       notifySendSoaCmd)
 
-	notifyCmd.PersistentFlags().StringVarP(&zonename, "zone", "z", "", "Zone to send a parent notify for")
 	notifyCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
 	notifyCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
 	notifyCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
