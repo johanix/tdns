@@ -9,7 +9,12 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 )
+
+// 1. Find the child NS RRset
+// 2. Find the address of each NS
+// 3. Query child NS for <qname, qtype>
 
 func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16,
 	verbose bool) (*RRset, bool, error) {
@@ -20,15 +25,73 @@ func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16,
 	}
 
 	if rrset == nil {
-		zd.Logger.Printf("LookupAndValidateRRset: No RRset returned from LookupRRset(%s, %s)",
-							  qname, dns.TypeToString[qtype])
+		zd.Logger.Printf("LookupAndValidateRRset: No RRset returned from LookupRRset(%s, %s)", qname, dns.TypeToString[qtype])
 		return nil, false, nil
 	}
 
-	// XXX: Add validation
-	valid := true
+	valid, err := zd.ValidateRRset(rrset, verbose)
+	if err != nil {
+		zd.Logger.Printf("LookupAndValidateRRset: Error from ValidateRRset: %v", err)
+		return nil, false, err
+	}
 
 	return rrset, valid, nil
+}
+
+func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
+	if len(rrset.RRSIGs) == 0 {
+		return false, nil // is it an error if there is no RRSIG?
+	}
+
+	for _, rr := range rrset.RRSIGs {
+		zd.Logger.Printf("ValidateRRset: trying to validate: %s", rr.String())
+		if _, ok := rr.(*dns.RRSIG); !ok {
+			zd.Logger.Printf("ValidateRRset: Error: not an RRSIG: %s", rr.String())
+			continue
+		}
+		rrsig := rr.(*dns.RRSIG)
+		zd.Logger.Printf("RRset is signed by \"%s\".", rrsig.SignerName)
+		//	 ta, ok := keymap[rrsig.SignerName]
+		ta, err := zd.FindDnskey(rrsig.SignerName, rrsig.KeyTag)
+		if err != nil {
+			msg := fmt.Sprintf("Error from FindDnskey(%s, %d): %v",
+				rrsig.SignerName, rrsig.KeyTag, err)
+			zd.Logger.Printf("%s", msg)
+			return false, fmt.Errorf(msg)
+		}
+		if ta == nil {
+			// don't yet know how to lookup and validate new keys
+			msg := fmt.Sprintf("Error: key \"%s\" is unknown.", rrsig.SignerName)
+			zd.Logger.Printf("%s", msg)
+			return false, fmt.Errorf(msg)
+		}
+
+		keyrr := ta.Dnskey
+
+		var valid bool
+		err = rrsig.Verify(&keyrr, rrset.RRs)
+		if err != nil {
+			zd.Logger.Printf("= Error from sig.Verify(): %v", err)
+		} else {
+			zd.Logger.Printf("* RRSIG verified correctly")
+			valid = true
+		}
+
+		time_ok := WithinValidityPeriod(rrsig.Inception,
+			rrsig.Expiration, time.Now())
+		if verbose {
+			if time_ok {
+				zd.Logger.Printf("* RRSIG is within its validity period")
+				time_ok = true
+			} else {
+				zd.Logger.Printf("= RRSIG is NOT within its validity period")
+			}
+		}
+		return valid && time_ok, nil
+
+	}
+
+	return false, nil
 }
 
 func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRset, error) {
@@ -184,3 +247,32 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 		qname, dns.TypeToString[rrtype])
 }
 
+// If key not found *TrustAnchor is nil
+func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error) {
+	mapkey := signer + "::" + string(keyid)
+	ta, ok := TAStore.Map.Get(mapkey)
+	if !ok {
+		zd.Logger.Printf("FindDnskey: Request for DNSKEY with id %s: not found, will fetch.", mapkey)
+		rrset, err := zd.LookupRRset(signer, dns.TypeDNSKEY, true)
+		if err != nil {
+			return nil, err
+		}
+		valid, err := zd.ValidateRRset(rrset, true)
+		if err != nil {
+			return nil, err
+		}
+		zd.Logger.Printf("FindDnskey: Found %s DNSKEY RRset (validated)", signer)
+		for _, rr := range rrset.RRs {
+			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
+				TAStore.Map.Set(signer+"::"+string(dnskeyrr.KeyTag()),
+					TrustAnchor{
+						Name:      signer,
+						Validated: valid,
+						Dnskey:    *dnskeyrr,
+					})
+			}
+		}
+	}
+	ta, ok = TAStore.Map.Get(mapkey)
+	return &ta, nil
+}
