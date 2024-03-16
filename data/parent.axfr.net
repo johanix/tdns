@@ -1,0 +1,23 @@
+parent.axfr.net.        7200    IN      SOA     when.pigs.can.fly. hostmaster.johani.org. (
+                                2023122603 7200 1800 604800 7200 )
+                        120     IN      MX      1 mxc.johani.org.
+parent.axfr.net.	300	IN	NS	ns.parent.axfr.net.
+parent.axfr.net.	300	IN	NS	nsb.axfr.net.
+parent.axfr.net.	300	IN	NS	nsc.axfr.net.
+ns.parent.axfr.net.	300	IN	A	52.65.113.135
+
+foo._dsync.parent.axfr.net.    3600    IN      DSYNC   ANY   2 5354    foo-target.parent.axfr.net.
+foo._dsync.parent.axfr.net.    3600    IN      DSYNC   CDS   1 5354    foo-target.parent.axfr.net.
+foo._dsync.parent.axfr.net.    3600    IN      DSYNC   CSYNC 1 5354    foo-target.parent.axfr.net.
+*._dsync.parent.axfr.net.      3600    IN      DSYNC   ANY   2 5354    ddns-target.parent.axfr.net.
+*._dsync.parent.axfr.net.      3600    IN      DSYNC   CDS   1 5354    notify-target.parent.axfr.net.
+*._dsync.parent.axfr.net.      3600    IN      DSYNC   CSYNC 1 5354    notify-target.parent.axfr.net.
+anka.parent.axfr.net.          7200    IN      A       1.2.3.4
+citron.parent.axfr.net.        7200    IN      A       1.2.3.40
+emil.*.parent.axfr.net.        7200    IN      A       1.2.3.50
+gunga.parent.axfr.net.         7200    IN      A       1.2.3.60
+gunga.parent.axfr.net.         7200    IN      SRV     10 20 30 srv.parent.axfr.net.
+isblock.parent.axfr.net.       7200    IN      A       1.2.3.70
+kanel.parent.axfr.net.         7200    IN      A       1.2.3.80
+kanel.parent.axfr.net.         7200    IN      TXT     "allan tar kakan i 4711 baud"
+kanel.parent.axfr.net.         7200    IN      TXT     "vi aro alla oense"
