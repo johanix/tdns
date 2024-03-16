@@ -31,7 +31,7 @@ var notifySendCdsCmd = &cobra.Command{
 	Use:   "cds",
 	Short: "Send a Notify(CDS) to parent of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zoneName), "CDS")
+		SendNotify(dns.Fqdn(tdns.Globals.Zonename), "CDS")
 	},
 }
 
@@ -39,7 +39,7 @@ var notifySendCsyncCmd = &cobra.Command{
 	Use:   "csync",
 	Short: "Send a Notify(CSYNC) to parent of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zoneName), "CSYNC")
+		SendNotify(dns.Fqdn(tdns.Globals.Zonename), "CSYNC")
 	},
 }
 
@@ -47,7 +47,7 @@ var notifySendDnskeyCmd = &cobra.Command{
 	Use:   "dnskey",
 	Short: "Send a Notify(DNSKEY) to other signers of zone (multi-signer setup)",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zoneName), "DNSKEY")
+		SendNotify(dns.Fqdn(tdns.Globals.Zonename), "DNSKEY")
 	},
 }
 
@@ -55,7 +55,7 @@ var notifySendSoaCmd = &cobra.Command{
 	Use:   "soa",
 	Short: "Send a normal Notify(SOA) to someone",
 	Run: func(cmd *cobra.Command, args []string) {
-		SendNotify(dns.Fqdn(zoneName), "SOA")
+		SendNotify(dns.Fqdn(tdns.Globals.Zonename), "SOA")
 	},
 }
 

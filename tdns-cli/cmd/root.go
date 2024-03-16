@@ -14,7 +14,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-var cfgFile, cfgFileUsed, zoneName string
+var cfgFile, cfgFileUsed string
 var debug, verbose bool
 
 // var GlobalReportCh, ResultCh chan tdns.CheckReport
@@ -39,7 +39,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s)", tdns.DefaultCfgFile))
-	rootCmd.PersistentFlags().StringVarP(&zoneName, "zonename", "z", "", "zone name")
+	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")

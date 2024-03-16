@@ -8,9 +8,10 @@ import (
 )
 
 type GlobalStuff struct {
-	IMR     string
-	Verbose bool
-	Debug   bool
+	IMR     	string
+	Verbose 	bool
+	Debug   	bool
+	Zonename	string
 }
 
 var Globals = GlobalStuff{

@@ -40,14 +40,14 @@ var reloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
-		if zoneName == "" {
+		if tdns.Globals.Zonename == "" {
 			fmt.Printf("Error: zone name not specified. Terminating.\n")
 			os.Exit(1)
 		}
 
 		msg, err := SendCommandNG(api, tdns.CommandPost{
 			Command: "reload",
-			Zone:    dns.Fqdn(zoneName),
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Force:   force,
 		})
 		if err != nil {
@@ -63,12 +63,12 @@ var bumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if zoneName == "" {
+		if tdns.Globals.Zonename == "" {
 			fmt.Printf("Error: zone name not specified. Terminating.\n")
 			os.Exit(1)
 		}
 
-		msg, err := SendCommand("bump", dns.Fqdn(zoneName))
+		msg, err := SendCommand("bump", dns.Fqdn(tdns.Globals.Zonename))
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
 		}
@@ -82,14 +82,14 @@ var bumpNGCmd = &cobra.Command{
 	Use:   "bumpng",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if zoneName == "" {
+		if tdns.Globals.Zonename == "" {
 			fmt.Printf("Error: zone name not specified. Terminating.\n")
 			os.Exit(1)
 		}
 
 		msg, err := SendCommandNG(api, tdns.CommandPost{
 			Command: "bump",
-			Zone:    dns.Fqdn(zoneName),
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		})
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
@@ -104,7 +104,7 @@ var debugRRsetCmd = &cobra.Command{
 	Use:   "rrset",
 	Short: "Request the contents of a particular RRset from tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
-		if zoneName == "" {
+		if tdns.Globals.Zonename == "" {
 			fmt.Printf("Error: zone name not specified. Terminating.\n")
 			os.Exit(1)
 		}
@@ -124,7 +124,7 @@ var debugRRsetCmd = &cobra.Command{
 
 		dr := SendDebug(api, tdns.DebugPost{
 			Command: "rrset",
-			Zone:    dns.Fqdn(zoneName),
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Qname:   dns.Fqdn(debugQname),
 			Qtype:   qtype,
 		})

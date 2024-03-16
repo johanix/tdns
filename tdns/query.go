@@ -12,20 +12,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var Zonename string
+// var Zonename string
 
 var DsyncQueryCmd = &cobra.Command{
 	Use:   "dsync-query",
 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
-		Zonename = dns.Fqdn(Zonename)
-		rrs, err := DsyncQuery(Zonename, Globals.IMR)
+		Globals.Zonename = dns.Fqdn(Globals.Zonename)
+		rrs, err := DsyncQuery(Globals.Zonename, Globals.IMR)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 
 		if len(rrs) == 0 {
-			fmt.Printf("No '%s DSYNC' RR found\n", Zonename)
+			fmt.Printf("No '%s DSYNC' RR found\n", Globals.Zonename)
 		} else {
 			for _, nr := range rrs {
 				fmt.Printf("%s\n", nr.String())
@@ -35,7 +35,7 @@ var DsyncQueryCmd = &cobra.Command{
 }
 
 func init() {
-	DsyncQueryCmd.PersistentFlags().StringVarP(&Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
+//	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
 	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "", "IMR to send the query to")
 }
 
