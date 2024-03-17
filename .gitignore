@@ -27,3 +27,6 @@ dog/dog
 
 # Go workspace file
 go.work
+
+# IDE
+.idea/
