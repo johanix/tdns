@@ -26,7 +26,7 @@ var DsyncDiscoveryCmd = &cobra.Command{
 		}
 
 		if len(rrs) == 0 {
-			fmt.Printf("No '%s DSYNC' RR found\n", Globals.Zonename)
+			fmt.Printf("No DSYNC record associated with '%s'\n", Globals.Zonename)
 		} else {
 			for _, nr := range rrs {
 				fmt.Printf("%s\n", nr.String())
