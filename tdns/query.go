@@ -38,7 +38,7 @@ var DsyncDiscoveryCmd = &cobra.Command{
 
 func init() {
 	//	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
-	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "", "IMR to send the query to")
+	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "resolver:53", "IMR to send the query to")
 }
 
 func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
