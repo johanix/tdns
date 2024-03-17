@@ -383,7 +383,7 @@ func (zd *ZoneData) WriteTmpFile(lg *log.Logger) (string, error) {
 	return f.Name(), nil
 }
 
-func (zd *ZoneData) WriteFile(filename string, lg *log.Logger) (string, error) {
+func (zd *ZoneData) WriteFile(filename string) (string, error) {
 	fname := fmt.Sprintf("%s/%s", viper.GetString("external.filedir"), filename)
 	f, err := os.Create(fname)
 	if err != nil {

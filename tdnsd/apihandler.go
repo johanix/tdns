@@ -47,6 +47,7 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "reload":
+			log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
 			resp.Msg, err = ReloadZone(conf, cp.Zone, cp.Force)
 			if err != nil {
 				resp.Error = true

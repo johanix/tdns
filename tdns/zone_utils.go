@@ -123,23 +123,26 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		Verbose:   zd.Verbose,
 	}
 
-	loaded, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
+	updated, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
 	if err != nil {
 		log.Printf("Error from ReadZoneFile(%s): %v", zd.ZoneName, err)
 		return false, err
 	}
 
-	if !loaded {
+	if !updated {
 	   return false, nil	// new zone not loaded, but not returning any error
 	}
 
+	// Detect whether the delegation data has changed.
+	
+
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
-		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName), log.Default())
+		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir,
+							      zd.ZoneName))
 	}
 
 	zd.mu.Lock()
-//	zd.RRs = zonedata.RRs
 	zd.Owners = zonedata.Owners
 	zd.OwnerIndex = zonedata.OwnerIndex
 	zd.IncomingSerial = zonedata.IncomingSerial
@@ -186,7 +189,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
-		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName), log.Default())
+		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName))
 	}
 
 	zd.mu.Lock()
