@@ -9,5 +9,5 @@ import (
 
 func init() {
 	rootCmd.AddCommand(tdns.DsyncQueryCmd)
+	rootCmd.AddCommand(tdns.DsyncDiscoveryCmd)
 }
-

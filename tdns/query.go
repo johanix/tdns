@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -14,18 +16,18 @@ import (
 
 // var Zonename string
 
-var DsyncQueryCmd = &cobra.Command{
+var DsyncDiscoveryCmd = &cobra.Command{
 	Use:   "dsync-query",
 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
 		Globals.Zonename = dns.Fqdn(Globals.Zonename)
-		rrs, err := DsyncQuery(Globals.Zonename, Globals.IMR)
+		rrs, err := DsyncDiscovery(Globals.Zonename, Globals.IMR)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 
 		if len(rrs) == 0 {
-			fmt.Printf("No '%s DSYNC' RR found\n", Globals.Zonename)
+			fmt.Printf("No DSYNC record associated with '%s'\n", Globals.Zonename)
 		} else {
 			for _, nr := range rrs {
 				fmt.Printf("%s\n", nr.String())
@@ -35,44 +37,83 @@ var DsyncQueryCmd = &cobra.Command{
 }
 
 func init() {
-//	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
-	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "", "IMR to send the query to")
+	//	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
+	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "resolver:53", "IMR to send the query to")
 }
 
-func DsyncQuery(z, imr string) ([]*dns.PrivateRR, error) {
+func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
+	fmt.Printf("Discovering DSYNC for %s ...\n", child)
+
+	// Step 1: One level up
+	labels := dns.SplitDomainName(child)
+	prefix := labels[0]
+	parent_guess := dns.Fqdn(strings.Join(labels[1:], "."))
+	name := prefix + "._dsync." + parent_guess
+	fmt.Printf("Trying %s ...\n", name)
+	prrs, parent, err := DsyncQuery(name, imr)
+	if err != nil {
+		log.Printf("Error: during DsyncQuery: %v\n", err)
+		return prrs, err
+	}
+	if len(prrs) > 0 {
+		return prrs, err
+	}
+
+	// Step 2: Under the inferred parent
+	if parent != parent_guess {
+		prefix, ok := strings.CutSuffix(child, "."+parent)
+		if !ok {
+			return prrs, fmt.Errorf("Misidentified parent for %s: %v", child, parent)
+		}
+		name = prefix + "._dsync." + parent
+		fmt.Printf("Trying %s ...\n", name)
+		prrs, _, err = DsyncQuery(name, imr)
+		if err != nil {
+			log.Printf("Error: during DsyncQuery: %v\n", err)
+			return prrs, err
+		}
+		if len(prrs) > 0 {
+			return prrs, err
+		}
+	}
+
+	// Step 3: At the parent apex
+	name = "_dsync." + parent
+	fmt.Printf("Trying %s ...\n", name)
+	prrs, _, err = DsyncQuery(name, imr)
+	if err != nil {
+		log.Printf("Error: during DsyncQuery: %v\n", err)
+		return prrs, err
+	}
+
+	return prrs, err
+}
+
+func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(z, TypeDSYNC)
 
 	var prrs []*dns.PrivateRR
+	var parent string
 
 	if Globals.Debug {
 		fmt.Printf("TypeDSYNC=%d\n", TypeDSYNC)
 		fmt.Printf("DEBUG: Sending to server %s query:\n%s\n", imr, m.String())
 	}
 
-	res, err := dns.Exchange(m, imr)
+	c := new(dns.Client)
+	c.Timeout = 5 * time.Second
+	res, _, err := c.Exchange(m, imr)
 
-	if err != nil && !Globals.Debug {
-		log.Fatalf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
-	}
-
-	if Globals.Debug {
-		log.Printf("Response from dns.Exchange(%s, DSYNC): %v", z, res.String())
+	if err != nil {
+		return prrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
 	}
 
 	if res == nil {
-		return prrs, fmt.Errorf("Error: nil response to DSYNC query")
+		return prrs, "", fmt.Errorf("Error: nil response to DSYNC query")
 	}
 
-	if res.Rcode != dns.RcodeSuccess {
-		log.Fatalf("Error: Query for %s DSYNC received rcode: %s",
-			z, dns.RcodeToString[res.Rcode])
-	}
-
-	if len(res.Answer) > 0 {
-		if Globals.Debug {
-			fmt.Printf("Looking up %s DSYNC RRset:\n", z)
-		}
+	if res.Rcode == dns.RcodeSuccess {
 		for _, rr := range res.Answer {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
 				if Globals.Debug {
@@ -82,16 +123,34 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, error) {
 				if _, ok := prr.Data.(*DSYNC); ok {
 					prrs = append(prrs, prr)
 				} else {
-					log.Fatalf("Error: answer is not a DSYNC RR: %s", rr.String())
+					log.Printf("Error: answer is not a DSYNC RR: %s", rr.String())
 				}
 			} else if _, ok = rr.(*dns.RRSIG); ok {
 				// ignore RRSIGs for the moment
 			} else {
-				log.Fatalf("Error: answer is not a DSYNC RR: %s", rr.String())
+				log.Printf("Error: answer is not a DSYNC RR: %s", rr.String())
 			}
 		}
+		if len(prrs) > 0 {
+			return prrs, "", nil
+		}
 	}
-	return prrs, nil
+
+	for _, rr := range res.Ns {
+		if _, ok := rr.(*dns.SOA); ok {
+			parent = rr.Header().Name
+			return nil, parent, nil
+		} else {
+			fmt.Printf("ignoring authority record: %s", rr.String())
+		}
+	}
+
+	if res.Rcode != dns.RcodeSuccess {
+		return prrs, "", fmt.Errorf("Error: Query for %s DSYNC received rcode: %s",
+			z, dns.RcodeToString[res.Rcode])
+	}
+
+	return prrs, "", nil
 }
 
 func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
@@ -260,7 +319,7 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 	var addrs []string
 	var ddnstarget DDNSTarget
 
-	prrs, err := DsyncQuery(parentzone, parentprimary)
+	prrs, _, err := DsyncQuery(parentzone, parentprimary)
 	if err != nil {
 		return ddnstarget, err
 	}
@@ -311,7 +370,7 @@ func LookupDSYNCTarget(parentzone, parentprimary string, dtype uint16, scheme ui
 	var addrs []string
 	var dsynctarget DSYNCTarget
 
-	prrs, err := DsyncQuery(parentzone, parentprimary)
+	prrs, err := DsyncDiscovery(parentzone, parentprimary)
 	if err != nil {
 		return dsynctarget, err
 	}
