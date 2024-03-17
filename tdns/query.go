@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -97,7 +98,9 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 		fmt.Printf("DEBUG: Sending to server %s query:\n%s\n", imr, m.String())
 	}
 
-	res, err := dns.Exchange(m, imr)
+	c := new(dns.Client)
+	c.Timeout = 5 * time.Second
+	res, _, err := c.Exchange(m, imr)
 
 	if err != nil {
 		return prrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
