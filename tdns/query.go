@@ -46,8 +46,8 @@ func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
 	// Step 1: One level up
 	labels := dns.SplitDomainName(child)
 	prefix := labels[0]
-	parent := strings.Join(labels[1:], ".") + "."
-	name := prefix + "._dsync." + parent
+	parent_guess := dns.Fqdn(strings.Join(labels[1:], "."))
+	name := prefix + "._dsync." + parent_guess
 	fmt.Printf("Trying %s ...\n", name)
 	prrs, parent, err := DsyncQuery(name, imr)
 	if err != nil {
@@ -58,19 +58,20 @@ func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
 	}
 
 	// Step 2: Under the inferred parent
-	fmt.Printf("Parent: %s\n", parent)
-	prefix, ok := strings.CutSuffix(child, "."+parent)
-	if !ok {
-		return prrs, fmt.Errorf("Misidentified parent for %s: %v", child, parent)
-	}
-	name = prefix + "._dsync." + parent
-	fmt.Printf("Trying %s ...\n", name)
-	prrs, _, err = DsyncQuery(name, imr)
-	if err != nil {
-		log.Printf("Error: during DsyncQuery: %v\n", err)
-	}
-	if len(prrs) > 0 {
-		return prrs, err
+	if parent != parent_guess {
+		prefix, ok := strings.CutSuffix(child, "."+parent)
+		if !ok {
+			return prrs, fmt.Errorf("Misidentified parent for %s: %v", child, parent)
+		}
+		name = prefix + "._dsync." + parent
+		fmt.Printf("Trying %s ...\n", name)
+		prrs, _, err = DsyncQuery(name, imr)
+		if err != nil {
+			log.Printf("Error: during DsyncQuery: %v\n", err)
+		}
+		if len(prrs) > 0 {
+			return prrs, err
+		}
 	}
 
 	// Step 3: At the parent apex
@@ -131,7 +132,6 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 		}
 	}
 
-	fmt.Printf("Extracting parent ...\n")
 	for _, rr := range res.Ns {
 		if _, ok := rr.(*dns.SOA); ok {
 			parent = rr.Header().Name
