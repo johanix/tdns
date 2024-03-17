@@ -8,7 +8,6 @@ import (
 )
 
 func init() {
+	rootCmd.AddCommand(tdns.DsyncQueryCmd)
 	rootCmd.AddCommand(tdns.DsyncDiscoveryCmd)
-	rootCmd.AddCommand(tdns.ToRFC3597Cmd)
-	rootCmd.AddCommand(tdns.DdnsCmd)
 }

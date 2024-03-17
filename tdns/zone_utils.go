@@ -123,23 +123,41 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		Verbose:   zd.Verbose,
 	}
 
-	loaded, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
+	updated, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
 	if err != nil {
 		log.Printf("Error from ReadZoneFile(%s): %v", zd.ZoneName, err)
 		return false, err
 	}
 
-	if !loaded {
+	if !updated {
 	   return false, nil	// new zone not loaded, but not returning any error
+	}
+
+	// Detect whether the delegation data has changed.
+	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
+	if err != nil {
+		zd.Logger.Printf("Error from DelegationDataChenged(%s): %v", zd.ZoneName, err)
+		return false, err
+	}
+	if delchanged {
+	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed:", zd.ZoneName)
+	   for _, rr := range adds {
+	       zd.Logger.Printf("ADD: %s", rr.String())
+	   }
+	   for _, rr := range removes {
+	       zd.Logger.Printf("DEL: %s", rr.String())
+	   }
+	} else {
+	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
 	}
 
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
-		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName), log.Default())
+		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir,
+							      zd.ZoneName))
 	}
 
 	zd.mu.Lock()
-//	zd.RRs = zonedata.RRs
 	zd.Owners = zonedata.Owners
 	zd.OwnerIndex = zonedata.OwnerIndex
 	zd.IncomingSerial = zonedata.IncomingSerial
@@ -150,8 +168,6 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	zd.ZoneType = zonedata.ZoneType
 	zd.Data = zonedata.Data
 	zd.mu.Unlock()
-
-	// Zones[zd.ZoneName] = zonedata
 
 	return true, nil
 }
@@ -186,7 +202,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
-		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName), log.Default())
+		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName))
 	}
 
 	zd.mu.Lock()

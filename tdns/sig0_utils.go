@@ -15,45 +15,12 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-var DdnsRollCmd = &cobra.Command{
-	Use:   "roll",
-	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
-	Run: func(cmd *cobra.Command, args []string) {
-		err := SendSig0KeyUpdate(true)
-		if err != nil {
-			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
-		}
-	},
-}
-
-var DdnsUploadCmd = &cobra.Command{
-	Use:   "upload",
-	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",
-	Run: func(cmd *cobra.Command, args []string) {
-		err := SendSig0KeyUpdate(false)
-		if err != nil {
-			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
-		}
-	},
-}
-
-func init() {
-	DdnsCmd.AddCommand(DdnsRollCmd, DdnsUploadCmd)
-
-	// rootCmd.PersistentFlags().StringVarP(&lib.Zonename, "zone", "z", "", "Child zone to sync via DDNS")
-	// rootCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
-	// rootCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-	// rootCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
-	// rootCmd.PersistentFlags().StringVarP(&lib.Global.IMR, "imr", "i", "", "IMR to send the query to")
-}
-
 func SendSig0KeyUpdate(gennewkey bool) error {
 	if Globals.Zonename == "" {
-	        return fmt.Errorf("Error: child zone name not specified.")
+		return fmt.Errorf("Error: child zone name not specified.")
 	}
 	Globals.Zonename = dns.Fqdn(Globals.Zonename)
 
@@ -97,10 +64,10 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 
 	const update_scheme = 2
 	dsynctarget, err := LookupDSYNCTarget(Globals.ParentZone, parpri, dns.StringToType["ANY"],
-		     	    			     update_scheme)
+		update_scheme)
 	if err != nil {
 		return fmt.Errorf("Error from LookupDDNSTarget(%s, %s): %v",
-		       Globals.ParentZone, parpri, err)
+			Globals.ParentZone, parpri, err)
 	}
 
 	msg, err := CreateUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)
@@ -113,7 +80,7 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 		msg, err = SignMsgNG(msg, Globals.Zonename, cs, keyrr)
 		if err != nil {
 			return fmt.Errorf("Error from SignMsgNG(%v): %v",
-			       dsynctarget, err)
+				dsynctarget, err)
 		}
 	} else {
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
@@ -217,3 +184,26 @@ func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypt
 
 	return keyrr, cs, privkey, nil
 }
+
+func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
+	var keyrr *dns.KEY
+	var cs crypto.Signer
+	var rr dns.RR
+
+	if keyfile != "" {
+		var ktype string
+		var err error
+		_, cs, rr, ktype, err = ReadKey(keyfile)
+		if err != nil {
+			log.Fatalf("Error reading key '%s': %v", keyfile, err)
+		}
+
+		if ktype != "KEY" {
+			log.Fatalf("Key must be a KEY RR")
+		}
+
+		keyrr = rr.(*dns.KEY)
+	}
+	return keyrr, cs
+}
+
