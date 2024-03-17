@@ -134,7 +134,22 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	}
 
 	// Detect whether the delegation data has changed.
-	
+	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
+	if err != nil {
+		zd.Logger.Printf("Error from DelegationDataChenged(%s): %v", zd.ZoneName, err)
+		return false, err
+	}
+	if delchanged {
+	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed:", zd.ZoneName)
+	   for _, rr := range adds {
+	       zd.Logger.Printf("ADD: %s", rr.String())
+	   }
+	   for _, rr := range removes {
+	       zd.Logger.Printf("DEL: %s", rr.String())
+	   }
+	} else {
+	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+	}
 
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
@@ -153,8 +168,6 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	zd.ZoneType = zonedata.ZoneType
 	zd.Data = zonedata.Data
 	zd.mu.Unlock()
-
-	// Zones[zd.ZoneName] = zonedata
 
 	return true, nil
 }

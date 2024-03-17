@@ -197,11 +197,16 @@ var debugShowTACmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd)
+
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
 	reloadCmd.Flags().BoolVarP(&force, "force", "F", false, "force reloading, ignoring SOA serial")
+
+//	ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
+//	ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
+//	ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
 func SendCommand(cmd, zone string) (string, error) {

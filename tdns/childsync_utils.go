@@ -4,7 +4,6 @@
 package tdns
 
 import (
-	"crypto"
 	"fmt"
 	"log"
 	"net"
@@ -12,61 +11,19 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-// var zonename string
 var imr = "8.8.8.8:53"
 var pzone, childpri, parpri string
 
-var DdnsCmd = &cobra.Command{
-	Use:   "ddns",
-	Short: "Send a DDNS update. Only usable via sub-commands.",
-}
-
-var DdnsSyncCmd = &cobra.Command{
-	Use:   "sync",
-	Short: "Send a DDNS update to sync parent delegation info with child data",
-	Run: func(cmd *cobra.Command, args []string) {
-		unsynched, adds, removes, err := ChildDelegationDataUnsynched()
-		if err != nil {
-		   log.Fatalf("Error from ChildSyncDelegationData(): %v", err)
-		}
-		if !unsynched {
-		   fmt.Printf("No change to delegation data. No need to update.\n")
-		   os.Exit(0)
-		}
-		err = ChildSendDdnsSync(adds, removes)
-		if err != nil {
-		   log.Fatalf("Error from ChildSendDdnsSync(): %v", err)
-		}
-	},
-}
-
 // Returns unsynched bool, adds, removes []dns.RR, error
-func ChildDelegationDataUnsynched() (bool, []dns.RR, []dns.RR, error) {
-	if Globals.Zonename == "" {
-		log.Fatalf("Error: child zone name not specified.")
-	}
-	Globals.Zonename = dns.Fqdn(Globals.Zonename)
-
-	if pzone == "" {
-		log.Fatalf("Error: parent zone name not specified.")
-	}
-	pzone = dns.Fqdn(pzone)
-
-	if childpri == "" {
-		log.Fatalf("Error: child primary nameserver not specified.")
-	}
-	if parpri == "" {
-		log.Fatalf("Error: parent primary nameserver not specified.")
-	}
+func ChildDelegationDataUnsynched(zone, pzone, childpri, ppri string) (bool, []dns.RR, []dns.RR, error) {
 
 	var differ bool
 	var adds, removes []dns.RR
 
-	if viper.GetBool("ddns.update-ns") {
+	if viper.GetBool("delegation.childsync.update-ns") {
 		differ, adds, removes = ComputeRRDiff(childpri, parpri,
 			Globals.Zonename, dns.TypeNS)
 	} else {
@@ -83,7 +40,7 @@ func ChildDelegationDataUnsynched() (bool, []dns.RR, []dns.RR, error) {
 	}
 
 	for _, ns := range child_ns_inb {
-		if viper.GetBool("ddns.update-a") {
+		if viper.GetBool("delegation.childsync.update-a") {
 			fmt.Printf("Comparing A glue for child NS %s:\n", ns)
 			gluediff, a_glue_adds, a_glue_removes := ComputeRRDiff(childpri,
 				parpri, ns, dns.TypeA)
@@ -100,7 +57,7 @@ func ChildDelegationDataUnsynched() (bool, []dns.RR, []dns.RR, error) {
 			fmt.Printf("*** Note: configured NOT to update A glue.\n")
 		}
 
-		if viper.GetBool("ddns.update-aaaa") {
+		if viper.GetBool("delegation.childsync.update-aaaa") {
 			fmt.Printf("Comparing AAAA glue for child NS %s:\n", ns)
 			gluediff, aaaa_glue_adds, aaaa_glue_removes := ComputeRRDiff(childpri,
 				parpri, ns, dns.TypeAAAA)
@@ -125,65 +82,89 @@ func ChildDelegationDataUnsynched() (bool, []dns.RR, []dns.RR, error) {
 	return true, adds, removes, nil
 }
 
-// XXX: This is similar to ChildDelegationDataUnsuched, but instead of querying the
+// XXX: This is similar to ChildDelegationDataUnsynched, but instead of querying the
 //      child and parent primaries we compare the delegation data in the *ZoneData
 //      structs.
 
 // Returns unsynched bool, adds, removes []dns.RR, error
 func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
-     	 []dns.RR, []dns.RR, error) {
+	[]dns.RR, []dns.RR, error) {
 	Globals.Zonename = zd.ZoneName
 
-//	if pzone == "" {
-//		log.Fatalf("Error: parent zone name not specified.")
-//	}
-//	pzone = dns.Fqdn(pzone)
-
-//	if childpri == "" {
-//		log.Fatalf("Error: child primary nameserver not specified.")
-//	}
-//	if parpri == "" {
-//		log.Fatalf("Error: parent primary nameserver not specified.")
-//	}
-
-	var differ bool
+	var differ, fakeolddata bool
 	var adds, removes []dns.RR
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-	   return false, []dns.RR{}, []dns.RR{}, fmt.Errorf("Error from zd.GetOwner(): %v", err)
+		return false, []dns.RR{}, []dns.RR{},
+			fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
+
+	if oldapex == nil {
+		if !viper.GetBool("delegations.childsync.update-on-start") {
+		   	zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
+			zd.ZoneName)
+			return false, []dns.RR{}, []dns.RR{}, nil
+		}
+		zd.Logger.Printf("Zone %s delegation update-on-start: faking empty old apex data", zd.ZoneName)
+		fakeolddata = true
+		oldapex = &OwnerData{
+			Name: zd.ZoneName,
+			RRtypes: map[uint16]RRset{
+				dns.TypeNS:   RRset{},
+				dns.TypeA:    RRset{},
+				dns.TypeAAAA: RRset{},
+			},
+		}
+	}
+
 	newapex, err := newzd.GetOwner(zd.ZoneName)
 	if err != nil {
-	   return false, []dns.RR{}, []dns.RR{}, fmt.Errorf("Error from newzd.GetOwner(): %v", err)
+		return false, []dns.RR{}, []dns.RR{},
+			fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	if viper.GetBool("ddns.update-ns") {
-//		differ, adds, removes = ComputeRRDiff(childpri, parpri,
-//			Globals.Zonename, dns.TypeNS)
+	if viper.GetBool("delegations.childsync.update-ns") {
 		differ, adds, removes = RRsetDiffer(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs,
-		oldapex.RRtypes[dns.TypeNS].RRs, dns.TypeNS, zd.Logger)
+			oldapex.RRtypes[dns.TypeNS].RRs,
+			dns.TypeNS, zd.Logger)
 	} else {
-		fmt.Printf("*** Note: configured NOT to update NS RRset.\n")
+		zd.Logger.Printf("*** Note: configured NOT to update NS RRset.\n")
 	}
 
-
-	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs, oldapex.RRtypes[dns.TypeNS].RRs, Globals.Zonename)
+	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs,
+		oldapex.RRtypes[dns.TypeNS].RRs, zd.ZoneName)
 	for _, ns := range new_ns_inb {
-		fmt.Printf("New in-bailiwick NS: %s\n", ns)
+		zd.Logger.Printf("New in-bailiwick NS: %s\n", ns)
 	}
 	for _, ns := range old_ns_inb {
-		fmt.Printf("Old in-bailiwick NS: %s\n", ns)
+		zd.Logger.Printf("Old in-bailiwick NS: %s\n", ns)
 	}
 
+	var oldowner *OwnerData
 	for _, ns := range new_ns_inb {
-		if viper.GetBool("ddns.update-a") {
-			fmt.Printf("Comparing A glue for new NS %s:\n", ns)
-//			gluediff, a_glue_adds, a_glue_removes := ComputeRRDiff(childpri,
-//				parpri, ns, dns.TypeA)
-			// 
-			gluediff, a_glue_adds, a_glue_removes := RRsetDiffer(zd.ZoneName,
-				parpri, ns, dns.TypeA)
+		if fakeolddata {
+			oldowner = oldapex
+		} else {
+			oldowner, err = zd.GetOwner(ns)
+		}
+		if err != nil {
+			return false, []dns.RR{}, []dns.RR{},
+				fmt.Errorf("Error from zd.GetOwner(%s): %v", ns, err)
+		}
+		newowner, err := newzd.GetOwner(ns)
+		if err != nil {
+			return false, []dns.RR{}, []dns.RR{},
+				fmt.Errorf("Error from newzd.GetOwner(%s): %v", ns, err)
+		}
+
+		if viper.GetBool("delegations.childsync.update-a") {
+			zd.Logger.Printf("Comparing A glue for new NS %s:\n", ns)
+
+			gluediff, a_glue_adds, a_glue_removes := RRsetDiffer(ns,
+				newowner.RRtypes[dns.TypeA].RRs,
+				oldowner.RRtypes[dns.TypeA].RRs,
+				dns.TypeA, zd.Logger)
 			if gluediff {
 				differ = true
 				for _, rr := range a_glue_removes {
@@ -194,13 +175,15 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 				}
 			}
 		} else {
-			fmt.Printf("*** Note: configured NOT to update A glue.\n")
+			zd.Logger.Printf("*** Note: configured NOT to update A glue.\n")
 		}
 
-		if viper.GetBool("ddns.update-aaaa") {
-			fmt.Printf("Comparing AAAA glue for new NS %s:\n", ns)
-			gluediff, aaaa_glue_adds, aaaa_glue_removes := ComputeRRDiff(childpri,
-				parpri, ns, dns.TypeAAAA)
+		if viper.GetBool("delegations.childsync.update-aaaa") {
+			zd.Logger.Printf("Comparing AAAA glue for new NS %s:\n", ns)
+			gluediff, aaaa_glue_adds, aaaa_glue_removes := RRsetDiffer(ns,
+				newowner.RRtypes[dns.TypeAAAA].RRs,
+				oldowner.RRtypes[dns.TypeAAAA].RRs,
+				dns.TypeAAAA, zd.Logger)
 			if gluediff {
 				differ = true
 				for _, rr := range aaaa_glue_removes {
@@ -251,36 +234,6 @@ func ChildSendDdnsSync(adds, removes []dns.RR) error {
 		log.Fatalf("Error from SendUpdate(%v): %v", dsynctarget, err)
 	}
 	return nil
-}
-
-func init() {
-	DdnsCmd.AddCommand(DdnsSyncCmd)
-
-	DdnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
-	DdnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-	DdnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
-}
-
-func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
-	var keyrr *dns.KEY
-	var cs crypto.Signer
-	var rr dns.RR
-
-	if keyfile != "" {
-		var ktype string
-		var err error
-		_, cs, rr, ktype, err = ReadKey(keyfile)
-		if err != nil {
-			log.Fatalf("Error reading key '%s': %v", keyfile, err)
-		}
-
-		if ktype != "KEY" {
-			log.Fatalf("Key must be a KEY RR")
-		}
-
-		keyrr = rr.(*dns.KEY)
-	}
-	return keyrr, cs
 }
 
 func SendUpdate(msg dns.Msg, zonename string, target DSYNCTarget) error {
@@ -392,64 +345,22 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 	return differ, adds, removes
 }
 
-func xxxComputeRRDiffNG(oldrrset, newrrset []dns.RR, owner string,
-     rrtype uint16) (bool, []dns.RR, []dns.RR) {
-	fmt.Printf("*** ComputeRRDiffNG(%s, %s)\n", owner, dns.TypeToString[rrtype])
-	rrname := dns.TypeToString[rrtype]
-//	rrs_parent, err := AuthQuery(owner, parpri, rrtype)
-//	if err != nil {
-//		log.Fatalf("Error: looking up child %s %s RRset in parent primary %s: %v",
-//			Globals.Zonename, rrname, parpri, err)
-//	}
-
-//	rrs_child, err := AuthQuery(owner, childpri, rrtype)
-//	if err != nil {
-//		log.Fatalf("Error: looking up child %s %s RRset in child primary %s: %v",
-//			Globals.Zonename, rrname, childpri, err)
-//	}
-
-	fmt.Printf("%d %s RRs in old rrset, %d %s RRs in new rrset\n",
-		len(oldrrset), rrname, len(newrrset), rrname)
-	if Globals.Debug {
-		for _, rrp := range oldrrset {
-			fmt.Printf("Parent: %s\n", rrp.String())
-		}
-
-		for _, rrc := range newrrset {
-			fmt.Printf("Child:  %s\n", rrc.String())
-		}
-	}
-
-	differ, adds, removes := RRsetDiffer(owner, newrrset, oldrrset,
-		      	      	 		    rrtype, log.Default())
-	if differ {
-		fmt.Printf("Old and new %s RRsets differ. To get parent in sync:\n", rrname)
-		for _, rr := range removes {
-			fmt.Printf("Remove: %s\n", rr.String())
-		}
-		for _, rr := range adds {
-			fmt.Printf("Add:   %s\n", rr.String())
-		}
-	}
-	return differ, adds, removes
-}
 
 func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
-	rrname := dns.TypeToString[dns.TypeNS]
 	ns_parent, err := AuthQuery(owner, parpri, dns.TypeNS)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s %s RRset in parent primary %s: %v",
-			Globals.Zonename, rrname, parpri, err)
+		log.Fatalf("Error: looking up child %s NS RRset in parent primary %s: %v",
+			Globals.Zonename, parpri, err)
 	}
 
 	ns_child, err := AuthQuery(Globals.Zonename, childpri, dns.TypeNS)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s %s RRset in child primary %s: %v",
-			Globals.Zonename, rrname, childpri, err)
+		log.Fatalf("Error: looking up child %s NS RRset in child primary %s: %v",
+			Globals.Zonename, childpri, err)
 	}
 
-	fmt.Printf("%d %s RRs from parent, %d %s RRs from child\n",
-		len(ns_parent), rrname, len(ns_child), rrname)
+	fmt.Printf("%d NS RRs from parent, %d NS RRs from child\n",
+		len(ns_parent), len(ns_child))
 	if Globals.Debug {
 		for _, rrp := range ns_parent {
 			fmt.Printf("Parent: %s\n", rrp.String())
@@ -460,24 +371,25 @@ func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 		}
 	}
 
-	var parent_ns_inb, child_ns_inb []string
+//	var parent_ns_inb, child_ns_inb []string
 
-	for _, rr := range ns_parent {
-		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, owner) {
-				parent_ns_inb = append(parent_ns_inb, ns.Ns)
-			}
-		}
-	}
-	for _, rr := range ns_child {
-		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, owner) {
-				child_ns_inb = append(child_ns_inb, ns.Ns)
-			}
-		}
-	}
+//	for _, rr := range ns_parent {
+//		if ns, ok := rr.(*dns.NS); ok {
+//			if strings.HasSuffix(ns.Ns, owner) {
+//				parent_ns_inb = append(parent_ns_inb, ns.Ns)
+//			}
+//		}
+//	}
+//	for _, rr := range ns_child {
+//		if ns, ok := rr.(*dns.NS); ok {
+//			if strings.HasSuffix(ns.Ns, owner) {
+//				child_ns_inb = append(child_ns_inb, ns.Ns)
+//			}
+//		}
+//	}
 
-	return child_ns_inb, parent_ns_inb
+//	return child_ns_inb, parent_ns_inb
+	return ComputeBailiwickNS_NG(ns_child, ns_parent, owner)
 }
 
 func ComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]string, []string) {

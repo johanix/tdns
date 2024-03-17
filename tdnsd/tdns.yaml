@@ -33,10 +33,18 @@ validator:
 resolver:
    address:		[ 13.239.122.123:53 ]
 
+delegations:
+   childsync:
+      update-ns:        true
+      update-a:         true
+      update-aaaa:      true   
+   parentsync:
+      policy:
+         type:          selfsub
+         rrtypes:       [ A, AAAA, NS, KEY ]   
+         keyupload:     unvalidated
+
 ddns:
-   update-ns:           true
-   update-a:            false
-   update-aaaa:         false
    policy:
       type:             selfsub
       rrtypes:          [ A, AAAA, NS, KEY ]
