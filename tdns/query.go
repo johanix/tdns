@@ -53,6 +53,7 @@ func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
 	prrs, parent, err := DsyncQuery(name, imr)
 	if err != nil {
 		log.Printf("Error: during DsyncQuery: %v\n", err)
+		return prrs, err
 	}
 	if len(prrs) > 0 {
 		return prrs, err
@@ -69,6 +70,7 @@ func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
 		prrs, _, err = DsyncQuery(name, imr)
 		if err != nil {
 			log.Printf("Error: during DsyncQuery: %v\n", err)
+			return prrs, err
 		}
 		if len(prrs) > 0 {
 			return prrs, err
@@ -81,6 +83,7 @@ func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
 	prrs, _, err = DsyncQuery(name, imr)
 	if err != nil {
 		log.Printf("Error: during DsyncQuery: %v\n", err)
+		return prrs, err
 	}
 
 	return prrs, err
