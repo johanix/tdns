@@ -107,8 +107,6 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 		return prrs, "", fmt.Errorf("Error: nil response to DSYNC query")
 	}
 
-	// TODO check AD bit
-
 	if res.Rcode == dns.RcodeSuccess {
 		for _, rr := range res.Answer {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
