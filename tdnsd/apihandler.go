@@ -17,6 +17,60 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
+func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var kp tdns.KeystorePost
+		err := decoder.Decode(&kp)
+		if err != nil {
+			log.Println("APIkeystore: error decoding command post:", err)
+		}
+
+		log.Printf("API: received /keystore request (cmd: %s) from %s.\n",
+			kp.Command, r.RemoteAddr)
+
+		resp := tdns.KeystoreResponse{}
+
+		defer func() {
+		      w.Header().Set("Content-Type", "application/json")
+		      json.NewEncoder(w).Encode(resp)
+		}()
+
+		switch kp.Command {
+		case "list-dnskey":
+			log.Printf("tdnsd keystore list-sig0 inquiry")
+			tmp1 := map[string]tdns.TrustAnchor{}
+			for _, key := range tdns.TAStore.Map.Keys() {
+			    val, _ := tdns.TAStore.Map.Get(key)
+			    tmp1[key] = tdns.TrustAnchor{
+						Name:		val.Name,
+						Validated:	val.Validated,
+						Dnskey:		val.Dnskey,
+					}
+			}
+			resp.ChildDnskeys = tmp1
+
+		case "list-child-sig0":
+			log.Printf("tdnsd keystore list-child-sig0 inquiry")
+			tmp2 := map[string]tdns.Sig0Key{}
+			for _, key := range tdns.Sig0Store.Map.Keys() {
+			    val, _ := tdns.Sig0Store.Map.Get(key)
+			    tmp2[key] = tdns.Sig0Key{
+						Name:		val.Name,
+						Validated:	val.Validated,
+						Trusted:	val.Trusted,
+						Key:		val.Key,
+					}
+			}
+			resp.ChildSig0keys = tmp2
+
+		default:
+			log.Printf("Unknown command: %s", kp.Command)
+		}
+	}
+}
+
 func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -141,31 +195,6 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			   }
 			}
 
-		case "show-ta":
-			log.Printf("tdnsd debug show-ta inquiry")
-			// tmp1 := map[string]dns.DNSKEY{}
-			tmp1 := map[string]tdns.TrustAnchor{}
-			for _, key := range tdns.TAStore.Map.Keys() {
-			    val, _ := tdns.TAStore.Map.Get(key)
-			    tmp1[key] = tdns.TrustAnchor{
-						Name:		val.Name,
-						Validated:	val.Validated,
-						Dnskey:		val.Dnskey,
-					}
-			}
-			resp.TrustedDnskeys = tmp1
-			// tmp2 := map[string]dns.KEY{}
-			tmp2 := map[string]tdns.Sig0Key{}
-			for _, key := range tdns.Sig0Store.Map.Keys() {
-			    val, _ := tdns.Sig0Store.Map.Get(key)
-			    tmp2[key] = tdns.Sig0Key{
-						Name:		val.Name,
-						Validated:	val.Validated,
-						Key:		val.Key,
-					}
-			}
-			resp.TrustedSig0keys = tmp2
-
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true
@@ -179,6 +208,7 @@ func SetupRouter(conf *Config) *mux.Router {
 	sr := r.PathPrefix("/api/v1").Headers("X-API-Key",
 		viper.GetString("apiserver.key")).Subrouter()
 	sr.HandleFunc("/ping", tdns.APIping("tdnsd")).Methods("POST")
+	sr.HandleFunc("/keystore", APIkeystore(conf)).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
