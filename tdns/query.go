@@ -21,11 +21,12 @@ var DsyncDiscoveryCmd = &cobra.Command{
 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
 		Globals.Zonename = dns.Fqdn(Globals.Zonename)
-		rrs, err := DsyncDiscovery(Globals.Zonename, Globals.IMR)
+		rrs, parent, err := DsyncDiscovery(Globals.Zonename, Globals.IMR)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 
+		fmt.Printf("Parent: %s\n", parent)
 		if len(rrs) == 0 {
 			fmt.Printf("No DSYNC record associated with '%s'\n", Globals.Zonename)
 		} else {
@@ -41,7 +42,7 @@ func init() {
 	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "resolver:53", "IMR to send the query to")
 }
 
-func DsyncDiscovery(child, imr string) ([]*DSYNC, error) {
+func DsyncDiscovery(child, imr string) ([]*DSYNC, string, error) {
 	fmt.Printf("Discovering DSYNC for %s ...\n", child)
 
 	// Step 1: One level up
@@ -53,27 +54,27 @@ func DsyncDiscovery(child, imr string) ([]*DSYNC, error) {
 	prrs, parent, err := DsyncQuery(name, imr)
 	if err != nil {
 		log.Printf("Error: during DsyncQuery: %v\n", err)
-		return prrs, err
+		return prrs, "", err
 	}
 	if len(prrs) > 0 {
-		return prrs, err
+		return prrs, parent_guess, err
 	}
 
 	// Step 2: Under the inferred parent
 	if parent != parent_guess {
 		prefix, ok := strings.CutSuffix(child, "."+parent)
 		if !ok {
-			return prrs, fmt.Errorf("Misidentified parent for %s: %v", child, parent)
+			return prrs, "", fmt.Errorf("Misidentified parent for %s: %v", child, parent)
 		}
 		name = prefix + "._dsync." + parent
 		fmt.Printf("Trying %s ...\n", name)
 		prrs, _, err = DsyncQuery(name, imr)
 		if err != nil {
 			log.Printf("Error: during DsyncQuery: %v\n", err)
-			return prrs, err
+			return prrs, "", err
 		}
 		if len(prrs) > 0 {
-			return prrs, err
+			return prrs, parent, err
 		}
 	}
 
@@ -83,10 +84,10 @@ func DsyncDiscovery(child, imr string) ([]*DSYNC, error) {
 	prrs, _, err = DsyncQuery(name, imr)
 	if err != nil {
 		log.Printf("Error: during DsyncQuery: %v\n", err)
-		return prrs, err
+		return prrs, "", err
 	}
 
-	return prrs, err
+	return prrs, parent, err
 }
 
 func DsyncQuery(qname, imr string) ([]*DSYNC, string, error) {
@@ -368,7 +369,7 @@ func LookupDSYNCTarget(parentzone, parentprimary string, dtype uint16, scheme ui
 	var addrs []string
 	var dsynctarget DSYNCTarget
 
-	dsyncrrs, err := DsyncDiscovery(parentzone, parentprimary)
+	dsyncrrs, _, err := DsyncDiscovery(parentzone, parentprimary)
 	if err != nil {
 		return dsynctarget, err
 	}
