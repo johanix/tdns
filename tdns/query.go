@@ -41,7 +41,7 @@ func init() {
 	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "resolver:53", "IMR to send the query to")
 }
 
-func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
+func DsyncDiscovery(child, imr string) ([]*DSYNC, error) {
 	fmt.Printf("Discovering DSYNC for %s ...\n", child)
 
 	// Step 1: One level up
@@ -89,11 +89,11 @@ func DsyncDiscovery(child, imr string) ([]*dns.PrivateRR, error) {
 	return prrs, err
 }
 
-func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
+func DsyncQuery(z, imr string) ([]*DSYNC, string, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(z, TypeDSYNC)
 
-	var prrs []*dns.PrivateRR
+	var dsyncrrs []*DSYNC
 	var parent string
 
 	if Globals.Debug {
@@ -106,11 +106,11 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 	res, _, err := c.Exchange(m, imr)
 
 	if err != nil {
-		return prrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
+		return dsyncrrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
 	}
 
 	if res == nil {
-		return prrs, "", fmt.Errorf("Error: nil response to DSYNC query")
+		return dsyncrrs, "", fmt.Errorf("Error: nil response to DSYNC query")
 	}
 
 	if res.Rcode == dns.RcodeSuccess {
@@ -120,8 +120,8 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 					fmt.Printf("%s\n", rr.String())
 				}
 
-				if _, ok := prr.Data.(*DSYNC); ok {
-					prrs = append(prrs, prr)
+				if dsyncrr, ok := prr.Data.(*DSYNC); ok {
+					dsyncrrs = append(dsyncrrs, dsyncrr)
 				} else {
 					log.Printf("Error: answer is not a DSYNC RR: %s", rr.String())
 				}
@@ -131,8 +131,8 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 				log.Printf("Error: answer is not a DSYNC RR: %s", rr.String())
 			}
 		}
-		if len(prrs) > 0 {
-			return prrs, "", nil
+		if len(dsyncrrs) > 0 {
+			return dsyncrrs, "", nil
 		}
 	}
 
@@ -146,11 +146,11 @@ func DsyncQuery(z, imr string) ([]*dns.PrivateRR, string, error) {
 	}
 
 	if res.Rcode != dns.RcodeSuccess {
-		return prrs, "", fmt.Errorf("Error: Query for %s DSYNC received rcode: %s",
+		return dsyncrrs, "", fmt.Errorf("Error: Query for %s DSYNC received rcode: %s",
 			z, dns.RcodeToString[res.Rcode])
 	}
 
-	return prrs, "", nil
+	return dsyncrrs, "", nil
 }
 
 func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
@@ -319,7 +319,7 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 	var addrs []string
 	var ddnstarget DDNSTarget
 
-	prrs, _, err := DsyncQuery(parentzone, parentprimary)
+	dsyncrrs, _, err := DsyncQuery(parentzone, parentprimary)
 	if err != nil {
 		return ddnstarget, err
 	}
@@ -327,16 +327,16 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 	const update_scheme = 2
 
 	if Globals.Debug {
-		fmt.Printf("Found %d DSYNC RRs\n", len(prrs))
+		fmt.Printf("Found %d DSYNC RRs\n", len(dsyncrrs))
 	}
 
 	found := false
-	var dsync_rr *dns.PrivateRR
+	var dsync *DSYNC
 
-	for _, prr := range prrs {
-		if prr.Data.(*DSYNC).Scheme == update_scheme {
+	for _, dsyncrr := range dsyncrrs {
+		if dsyncrr.Scheme == update_scheme {
 			found = true
-			dsync_rr = prr
+			dsync = dsyncrr
 			break
 		}
 	}
@@ -344,11 +344,9 @@ func LookupDDNSTarget(parentzone, parentprimary string) (DDNSTarget, error) {
 		return ddnstarget, fmt.Errorf("No DDNS update destination found for for zone %s\n", parentzone)
 	}
 
-	dsync, _ := dsync_rr.Data.(*DSYNC)
-
 	if Globals.Verbose {
 		fmt.Printf("Looked up published DDNS update target for zone %s:\n\n%s\n\n",
-			parentzone, dsync_rr.String())
+			parentzone, dsync.String())
 	}
 
 	addrs, err = net.LookupHost(dsync.Target)
@@ -370,20 +368,19 @@ func LookupDSYNCTarget(parentzone, parentprimary string, dtype uint16, scheme ui
 	var addrs []string
 	var dsynctarget DSYNCTarget
 
-	prrs, err := DsyncDiscovery(parentzone, parentprimary)
+	dsyncrrs, err := DsyncDiscovery(parentzone, parentprimary)
 	if err != nil {
 		return dsynctarget, err
 	}
 
 	if Globals.Debug {
-		fmt.Printf("Found %d DSYNC RRs\n", len(prrs))
+		fmt.Printf("Found %d DSYNC RRs\n", len(dsyncrrs))
 	}
 
 	found := false
 	var dsync *DSYNC
 
-	for _, rr := range prrs {
-		dsyncrr := rr.Data.(*DSYNC)
+	for _, dsyncrr := range dsyncrrs {
 		if dsyncrr.Scheme == scheme && dsyncrr.Type == dtype {
 			found = true
 			dsync = dsyncrr
