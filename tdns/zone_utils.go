@@ -200,6 +200,25 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	   	return false, nil
 	}
 
+	// Detect whether the delegation data has changed.
+	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
+	if err != nil {
+		zd.Logger.Printf("Error from DelegationDataChenged(%s): %v", zd.ZoneName, err)
+		return false, err
+	}
+	if delchanged {
+	   zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed:", zd.ZoneName)
+	   for _, rr := range adds {
+	       zd.Logger.Printf("ADD: %s", rr.String())
+	   }
+	   for _, rr := range removes {
+	       zd.Logger.Printf("DEL: %s", rr.String())
+	   }
+	} else {
+	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+	}
+
+
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
 		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName))
