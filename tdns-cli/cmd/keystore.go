@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/ryanuber/columnize"
@@ -49,7 +50,6 @@ var keystoreChildSig0ListCmd = &cobra.Command{
 
 		kr, err := SendKeystore(api, tdns.KeystorePost{
 			Command: "list-child-sig0",
-			Verbose: true,
 		})
 
 		if err != nil {
@@ -60,7 +60,7 @@ var keystoreChildSig0ListCmd = &cobra.Command{
 		var out = []string{"Type|Signer|KeyID|Trusted|Validated|Record"}
 		if len(kr.ChildSig0keys) > 0 {
 			fmt.Printf("Known SIG(0) keys:\n")
-			for k, v := range kr.TrustedSig0keys {
+			for k, v := range kr.ChildSig0keys {
 				tmp := strings.Split(k, "::")
 				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%.70s...\n",
 					tmp[0], tmp[1], v.Trusted, v.Validated, v.Key.String()))
@@ -99,27 +99,27 @@ func init() {
 
 func SendKeystore(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
+	var kr tdns.KeystoreResponse
+        
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
 	status, buf, err := api.Post("/keystore", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return "", fmt.Errorf("Error from api post: %v", err)
+		return kr, fmt.Errorf("Error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 
-	var kr tdns.KeystoreResponse
-
 	err = json.Unmarshal(buf, &kr)
 	if err != nil {
-		return "", fmt.Errorf("Error from unmarshal: %v\n", err)
+		return kr, fmt.Errorf("Error from unmarshal: %v\n", err)
 	}
 
 	if kr.Error {
-		return "", fmt.Errorf("Error from tdnsd: %s\n", kr.ErrorMsg)
+		return kr, fmt.Errorf("Error from tdnsd: %s\n", kr.ErrorMsg)
 	}
 
 	return kr, nil
