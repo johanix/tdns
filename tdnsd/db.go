@@ -25,7 +25,16 @@ keyid		  INTEGER,
 trusted		  INTEGER,
 keyrr		  TEXT,
 comment		  TEXT,
-UNIQUE (parent, child, keyid, trusted)
+UNIQUE (parent, child, keyid)
+)`,
+
+	"ChildDelegationData": `CREATE TABLE IF NOT EXISTS 'ChildDelegationData' (
+id		  INTEGER PRIMARY KEY,
+parent		  TEXT,
+child		  TEXT,
+owner		  TEXT,
+rrtype		  TEXT,
+rr		  TEXT
 )`,
 
 	"ChildSig0keys": `CREATE TABLE IF NOT EXISTS 'ChildSig0keys' (
@@ -35,7 +44,20 @@ keyid		  INTEGER,
 trusted		  INTEGER,
 keyrr		  TEXT,
 comment		  TEXT,
-UNIQUE (owner, keyid, trusted)
+UNIQUE (owner, keyid)
+)`,
+
+// The Sig0Keystore should contain both the private and public SIG(0) keys for
+// each zone that we're managing parent sync for.
+	"Sig0KeyStore": `CREATE TABLE IF NOT EXISTS 'Sig0KeyStore' (
+id		  INTEGER PRIMARY KEY,
+zonename	  TEXT,
+keyid		  INTEGER,
+trusted		  INTEGER,
+privatekey	  TEXT,
+keyrr		  TEXT,
+comment		  TEXT,
+UNIQUE (zonename, keyid)
 )`,
 
 
