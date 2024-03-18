@@ -89,9 +89,9 @@ func DsyncDiscovery(child, imr string) ([]*DSYNC, error) {
 	return prrs, err
 }
 
-func DsyncQuery(z, imr string) ([]*DSYNC, string, error) {
+func DsyncQuery(qname, imr string) ([]*DSYNC, string, error) {
 	m := new(dns.Msg)
-	m.SetQuestion(z, TypeDSYNC)
+	m.SetQuestion(qname, TypeDSYNC)
 
 	var dsyncrrs []*DSYNC
 	var parent string
@@ -106,7 +106,7 @@ func DsyncQuery(z, imr string) ([]*DSYNC, string, error) {
 	res, _, err := c.Exchange(m, imr)
 
 	if err != nil {
-		return dsyncrrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", z, err)
+		return dsyncrrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", qname, err)
 	}
 
 	if res == nil {
@@ -147,7 +147,7 @@ func DsyncQuery(z, imr string) ([]*DSYNC, string, error) {
 
 	if res.Rcode != dns.RcodeSuccess {
 		return dsyncrrs, "", fmt.Errorf("Error: Query for %s DSYNC received rcode: %s",
-			z, dns.RcodeToString[res.Rcode])
+			qname, dns.RcodeToString[res.Rcode])
 	}
 
 	return dsyncrrs, "", nil
