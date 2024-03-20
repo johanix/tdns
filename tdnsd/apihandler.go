@@ -18,6 +18,9 @@ import (
 )
 
 func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+
+     kdb := conf.Internal.KeyDB
+
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -27,8 +30,8 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIkeystore: error decoding command post:", err)
 		}
 
-		log.Printf("API: received /keystore request (cmd: %s) from %s.\n",
-			kp.Command, r.RemoteAddr)
+		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
+			kp.Command, kp.SubCommand, r.RemoteAddr)
 
 		resp := tdns.KeystoreResponse{}
 
@@ -51,19 +54,11 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.ChildDnskeys = tmp1
 
-		case "list-child-sig0":
-			log.Printf("tdnsd keystore list-child-sig0 inquiry")
-			tmp2 := map[string]tdns.Sig0Key{}
-			for _, key := range tdns.Sig0Store.Map.Keys() {
-			    val, _ := tdns.Sig0Store.Map.Get(key)
-			    tmp2[key] = tdns.Sig0Key{
-						Name:		val.Name,
-						Validated:	val.Validated,
-						Trusted:	val.Trusted,
-						Key:		val.Key,
-					}
+		case "child-sig0-mgmt":
+			resp, err = kdb.ChildSig0Mgmt(kp)
+			if err != nil {
+			   log.Printf("Error from ChildSig0Mgmt(): %v", err)
 			}
-			resp.ChildSig0keys = tmp2
 
 		default:
 			log.Printf("Unknown command: %s", kp.Command)

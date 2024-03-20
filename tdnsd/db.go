@@ -39,12 +39,13 @@ rr		  TEXT
 
 	"ChildSig0keys": `CREATE TABLE IF NOT EXISTS 'ChildSig0keys' (
 id		  INTEGER PRIMARY KEY,
-owner		  TEXT,
+child		  TEXT,
 keyid		  INTEGER,
+validated	  INTEGER,
 trusted		  INTEGER,
 keyrr		  TEXT,
 comment		  TEXT,
-UNIQUE (owner, keyid)
+UNIQUE (child, keyid)
 )`,
 
 // The Sig0Keystore should contain both the private and public SIG(0) keys for

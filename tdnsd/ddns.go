@@ -7,8 +7,10 @@ package main
 import (
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 	"github.com/johanix/tdns/tdns"
 )
 
@@ -20,12 +22,86 @@ type UpdatePolicy struct {
 	Debug     bool
 }
 
-func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
-     		       policy UpdatePolicy, updateq chan UpdateRequest) error {
+type DnsHandlerRequest struct {
+     ResponseWriter   dns.ResponseWriter
+     Msg	      *dns.Msg
+     Qname	      string
+}
+
+func DnsUpdateResponderEngine(conf *Config) error {
+        dnsupdateq := conf.Internal.DnsUpdateQ
+        updateq := conf.Internal.UpdateQ
+
+//        keydir := viper.GetString("ddns.keydirectory")
+//        keymap, err := tdns.ReadPubKeys(keydir)
+//        if err != nil {
+//                log.Fatalf("Error from ReadPublicKeys(%s): %v", keydir, err)
+//        }
+
+	  polviper := viper.Sub("parentsync.receivers.ddns")
+
+        policy := UpdatePolicy{
+                Type:		polviper.GetString("policy.type"),
+                RRtypes: 	map[uint16]bool{},
+                KeyUpload:	polviper.GetString("policy.keyupload"),
+                Verbose: 	*conf.Service.Verbose,
+                Debug:   	*conf.Service.Debug,
+        }
+
+        switch policy.Type {
+        case "selfsub", "self":
+                // all ok, we know these
+        default:
+                log.Fatalf("Error: unknown update policy type: \"%s\". Terminating.", policy.Type)
+        }
+
+        var rrtypes []string
+        for _, rrstr := range polviper.GetStringSlice("policy.rrtypes") {
+                if rrt, ok := dns.StringToType[rrstr]; ok {
+                        policy.RRtypes[rrt] = true
+                        rrtypes = append(rrtypes, rrstr)
+                } else {
+                        log.Printf("Unknown RR type: \"%s\". Ignoring.", rrstr)
+                }
+        }
+
+        if len(policy.RRtypes) == 0 {
+                log.Fatalf("Error: zero valid RRtypes listed in policy.")
+        }
+        log.Printf("DnsUpdateResponderEngine: using update policy \"%s\" with RRtypes: %v", policy.Type, rrtypes)
+
+	log.Printf("DnsUpdateResponderEngine: starting")
+
+	var dhr DnsHandlerRequest
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for {
+			select {
+			case dhr = <-dnsupdateq:
+				UpdateResponder(&dhr, policy, updateq)
+			}
+		}
+	}()
+	wg.Wait()
+
+	log.Println("DnsUpdateResponderEngine: terminating")
+	return nil
+}
+
+// func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
+//     		       policy UpdatePolicy, updateq chan UpdateRequest) error {
+func UpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq chan UpdateRequest) error {
+     	w := dhr.ResponseWriter
+	r := dhr.Msg
+	qname := dhr.Qname
 
 	m := new(dns.Msg)
 	m.SetReply(r)
 
+        log.Printf("UpdateResponder: Received UPDATE for zone '%s' with %d RRs in the update section",
+				     qname, len(r.Ns))
 	// This is a DDNS update, then the Query Section becomes the Zone Section
         zone := qname
 	

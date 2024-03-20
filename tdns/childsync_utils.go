@@ -101,12 +101,12 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 	}
 
 	if oldapex == nil {
-		if !viper.GetBool("delegations.childsync.update-on-start") {
+		if !viper.GetBool("delegations.childsync.sync-on-boot") {
 		   	zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
 			zd.ZoneName)
 			return false, []dns.RR{}, []dns.RR{}, nil
 		}
-		zd.Logger.Printf("Zone %s delegation update-on-start: faking empty old apex data", zd.ZoneName)
+		zd.Logger.Printf("Zone %s delegation sync-on-boot: faking empty old apex data", zd.ZoneName)
 		fakeolddata = true
 		oldapex = &OwnerData{
 			Name: zd.ZoneName,

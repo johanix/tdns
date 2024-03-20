@@ -82,8 +82,11 @@ type RRset struct {
 }
 
 type KeystorePost struct {
-	Command string
+	Command string	 // "sig0"
+	SubCommand	string // "list-child-keys" | "trust-child-key" | "untrust-child-key"
 	Zone    string
+	Keyname	string
+	Keyid	int
 }
 
 type KeystoreResponse struct {
@@ -194,7 +197,9 @@ type Sig0StoreT struct {
 
 type Sig0Key struct {
      Name	 string
+     Keyid	 uint16
      Validated	 bool	// has this key been DNSSEC validated
      Trusted	 bool	// is this key trusted
      Key	 dns.KEY
+     Keystr	 string
 }
