@@ -431,7 +431,7 @@ func (zd *ZoneData) SyncWithParent(adds, removes []dns.RR) error {
      if err != nil {
      	return err
      }
-     zd.Loggger.Printf("*** SyncWithParent: will try %s scheme using: %s", scheme, dsyncrr)
+     zd.Logger.Printf("*** SyncWithParent: will try %s scheme using: %s", scheme, dsyncrr)
 
      return nil
 }
