@@ -23,7 +23,7 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, ppri string) (bool, []d
 	var differ bool
 	var adds, removes []dns.RR
 
-	if viper.GetBool("delegation.childsync.update-ns") {
+	if viper.GetBool("childsync.update-ns") {
 		differ, adds, removes = ComputeRRDiff(childpri, parpri,
 			Globals.Zonename, dns.TypeNS)
 	} else {
@@ -40,7 +40,7 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, ppri string) (bool, []d
 	}
 
 	for _, ns := range child_ns_inb {
-		if viper.GetBool("delegation.childsync.update-a") {
+		if viper.GetBool("childsync.update-a") {
 			fmt.Printf("Comparing A glue for child NS %s:\n", ns)
 			gluediff, a_glue_adds, a_glue_removes := ComputeRRDiff(childpri,
 				parpri, ns, dns.TypeA)
@@ -57,7 +57,7 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, ppri string) (bool, []d
 			fmt.Printf("*** Note: configured NOT to update A glue.\n")
 		}
 
-		if viper.GetBool("delegation.childsync.update-aaaa") {
+		if viper.GetBool("childsync.update-aaaa") {
 			fmt.Printf("Comparing AAAA glue for child NS %s:\n", ns)
 			gluediff, aaaa_glue_adds, aaaa_glue_removes := ComputeRRDiff(childpri,
 				parpri, ns, dns.TypeAAAA)
@@ -101,7 +101,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 	}
 
 	if oldapex == nil {
-		if !viper.GetBool("delegations.childsync.sync-on-boot") {
+		if !viper.GetBool("childsync.sync-on-boot") {
 		   	zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
 			zd.ZoneName)
 			return false, []dns.RR{}, []dns.RR{}, nil
@@ -124,7 +124,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 			fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	if viper.GetBool("delegations.childsync.update-ns") {
+	if viper.GetBool("childsync.update-ns") {
 		differ, adds, removes = RRsetDiffer(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs,
 			oldapex.RRtypes[dns.TypeNS].RRs,
 			dns.TypeNS, zd.Logger)
@@ -158,7 +158,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 				fmt.Errorf("Error from newzd.GetOwner(%s): %v", ns, err)
 		}
 
-		if viper.GetBool("delegations.childsync.update-a") {
+		if viper.GetBool("childsync.update-a") {
 			zd.Logger.Printf("Comparing A glue for new NS %s:\n", ns)
 
 			gluediff, a_glue_adds, a_glue_removes := RRsetDiffer(ns,
@@ -178,7 +178,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 			zd.Logger.Printf("*** Note: configured NOT to update A glue.\n")
 		}
 
-		if viper.GetBool("delegations.childsync.update-aaaa") {
+		if viper.GetBool("childsync.update-aaaa") {
 			zd.Logger.Printf("Comparing AAAA glue for new NS %s:\n", ns)
 			gluediff, aaaa_glue_adds, aaaa_glue_removes := RRsetDiffer(ns,
 				newowner.RRtypes[dns.TypeAAAA].RRs,
@@ -441,6 +441,8 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
      var active_drr *DSYNC
      var active_scheme string
 
+     zd.Logger.Printf("BestSyncScheme: imr=%s zone=%s", Globals.IMR, zd.ZoneName)
+
      dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR)
      if err != nil {
      	zd.Logger.Printf("SyncWithParent: Error from DsyncDiscovery(): %v", err)
@@ -462,6 +464,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 
 	 switch scheme {
 	 case "update":
+	      log.Printf("BestSyncScheme(): checking UPDATE alternative:")
 	      for _, drr := range dsync_rrs {
 	      	  if drr.Scheme == 2 {
 		     active_drr = drr
@@ -469,11 +472,16 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 		  }
 	      }
 	      if active_drr != nil {
-	      	 active_scheme = "update"
+	      	 log.Printf("BestSyncSchemes: found working UPDATE config, happy with that.")
+	      	 active_scheme = "UPDATE"
 	      	 break
 	      }
 	      
 	 case "notify":
+	      if active_scheme != "" {
+	      	 break
+	      }
+	      log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 	      for _, drr := range dsync_rrs {
 	      	  if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
 		     active_drr = drr
@@ -481,7 +489,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 		  }
 	      }
 	      if active_drr != nil {
-	      	 active_scheme = "notify"
+	      	 active_scheme = "NOTIFY"
 	      	 break
 	      }
 
@@ -491,7 +499,8 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 		return "", active_drr, fmt.Errorf(msg)
 	 }
      }
-     zd.Logger.Printf("BestSyncScheme: zone %s parent %d. DSYNC alternatives are:", zd.ZoneName, parent)
+
+     zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:", zd.ZoneName, parent)
      for _, drr := range dsync_rrs {
      	 zd.Logger.Printf("%s", drr.String())
      }

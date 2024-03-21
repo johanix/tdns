@@ -144,6 +144,12 @@ func ParseConfig(conf *Config) error {
 	}
 
 	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
+	tdns.Globals.IMR = viper.GetString("resolver.address")
+	if tdns.Globals.IMR == "" {
+		log.Fatalf("Error: IMR undefined.")
+	} else {
+		log.Printf("*** Using resolver: %s", tdns.Globals.IMR)
+	}
 
 	err := viper.Unmarshal(&conf)
 	if err != nil {
