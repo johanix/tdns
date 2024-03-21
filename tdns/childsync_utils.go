@@ -423,3 +423,79 @@ func ComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]str
 
 	return new_ns_inb, old_ns_inb
 }
+
+func (zd *ZoneData) SyncWithParent(adds, removes []dns.RR) error {
+     zd.Logger.Printf("SyncWithParent: zone=%s adds=%v removes=%v", zd.ZoneName, adds, removes)
+
+     scheme, dsyncrr, err := zd.BestSyncScheme()
+     if err != nil {
+     	return err
+     }
+     zd.Loggger.Printf("*** SyncWithParent: will try %s scheme using: %s", scheme, dsyncrr)
+
+     return nil
+}
+
+// Return scheme (string), targetdsync (dns.RR), error)
+func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
+     var active_drr *DSYNC
+     var active_scheme string
+
+     dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR)
+     if err != nil {
+     	zd.Logger.Printf("SyncWithParent: Error from DsyncDiscovery(): %v", err)
+	return "", active_drr, err
+     }
+     if len(dsync_rrs) == 0 {
+     	msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, parent)
+     	zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
+	return "", active_drr, fmt.Errorf("Error: %s", msg)
+     }
+     schemes := viper.GetStringSlice("childsync.schemes")
+     if len(schemes) == 0 {
+     	zd.Logger.Printf("SyncWithParent: Error: no syncronization schemes configured")
+	return "", active_drr, fmt.Errorf("No synchronizations schemes configured for child %s", zd.ZoneName)
+     }
+
+     for _, scheme := range schemes {
+     	 scheme = strings.ToLower(scheme)
+
+	 switch scheme {
+	 case "update":
+	      for _, drr := range dsync_rrs {
+	      	  if drr.Scheme == 2 {
+		     active_drr = drr
+		     break
+		  }
+	      }
+	      if active_drr != nil {
+	      	 active_scheme = "update"
+	      	 break
+	      }
+	      
+	 case "notify":
+	      for _, drr := range dsync_rrs {
+	      	  if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
+		     active_drr = drr
+		     break
+		  }
+	      }
+	      if active_drr != nil {
+	      	 active_scheme = "notify"
+	      	 break
+	      }
+
+	 default:
+		msg := fmt.Sprintf("Error: zone %s unknown child scheme: %s", zd.ZoneName, scheme)
+		zd.Logger.Printf(msg)
+		return "", active_drr, fmt.Errorf(msg)
+	 }
+     }
+     zd.Logger.Printf("BestSyncScheme: zone %s parent %d. DSYNC alternatives are:", zd.ZoneName, parent)
+     for _, drr := range dsync_rrs {
+     	 zd.Logger.Printf("%s", drr.String())
+     }
+     zd.Logger.Printf("BestSyncScheme: Best DSYNC alternative: %s:", active_drr.String())
+     return active_scheme, active_drr, nil
+}
+

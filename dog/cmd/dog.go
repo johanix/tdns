@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +29,10 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 
 		var cleanArgs []string
+		var do_bit = false
+//		var err error
+		var serial uint32
+
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				server = arg[1:]
@@ -36,11 +41,28 @@ var rootCmd = &cobra.Command{
 				}
 				continue
 			}
-			rrt := strings.ToUpper(arg)
-			if foo, exist := dns.StringToType[rrt]; exist {
+
+			ucarg := strings.ToUpper(arg)
+			if foo, exist := dns.StringToType[ucarg]; exist {
 				rrtype = foo
 				continue
 			}
+
+			if strings.HasPrefix(ucarg, "IXFR=") {
+			   serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+			   tmp, err := strconv.Atoi(serialstr)
+			   if err != nil {
+			      log.Fatalf("Error: %v", err)
+			   }
+			   serial = uint32(tmp)
+			   fmt.Printf("RRtype is ixfr, using base serial %d\n", serial)
+			}
+
+			if ucarg == "+DNSSEC" {
+			   do_bit = true
+			   continue
+			}
+
 			cleanArgs = append(cleanArgs, arg)
 		}
 
@@ -67,12 +89,13 @@ var rootCmd = &cobra.Command{
 
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
-				tdns.ZoneTransferPrint(qname, server, 0, rrtype)
+				tdns.ZoneTransferPrint(qname, server, serial, rrtype)
 
 			default:
 
 				m := new(dns.Msg)
 				m.SetQuestion(qname, rrtype)
+				m.SetEdns0(4096, do_bit)
 				res, err := dns.Exchange(m, server)
 				if err != nil {
 					fmt.Printf("Error from %s: %v\n", server, err)
