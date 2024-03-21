@@ -147,6 +147,10 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	   for _, rr := range removes {
 	       zd.Logger.Printf("DEL: %s", rr.String())
 	   }
+	   err = zd.SyncWithParent(adds, removes)
+	   if err != nil {
+	      log.Printf("Error from SyncWithParent(): %v", err)
+	   }
 	} else {
 	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
 	}
