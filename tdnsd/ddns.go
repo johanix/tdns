@@ -38,9 +38,9 @@ func DnsUpdateResponderEngine(conf *Config) error {
 	//                log.Fatalf("Error from ReadPublicKeys(%s): %v", keydir, err)
 	//        }
 
-	polviper := viper.Sub("parentsync.receivers.ddns")
+	polviper := viper.Sub("parentsync.receivers.update")
 	if polviper == nil {
-	   log.Fatalf("Error: missing config for parentsync.receivers.ddns")
+	   log.Fatalf("Error: missing config for parentsync.receivers.update")
 	}
 
 	policy := UpdatePolicy{
