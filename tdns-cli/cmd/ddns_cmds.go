@@ -6,7 +6,9 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"strings"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
@@ -25,29 +27,54 @@ var ddnsSyncCmd = &cobra.Command{
 		if tdns.Globals.Zonename == "" {
 			log.Fatalf("Error: child zone name not specified.")
 		}
-		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+		PrepArgs("parentzone", "parentprimary", "childzone", "childprimary")
+// 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
-		if tdns.Globals.ParentZone == "" {
-		   log.Fatalf("Error: parent zone name not specified.")
-		}
-		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
+		SetupIMR()
 
-		if childpri == "" {
-		   log.Fatalf("Error: child primary nameserver not specified.")
-		}
-		if parpri == "" {
-		   log.Fatalf("Error: parent primary nameserver not specified.")
-		}
+// 		if tdns.Globals.ParentZone == "" {
+// 		   log.Fatalf("Error: parent zone name not specified.")
+// 		}
+// 		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
+// 
+// 		if childpri == "" {
+// 		   log.Fatalf("Error: child primary nameserver not specified.")
+// 		}
+// 		if parpri == "" {
+// 		   log.Fatalf("Error: parent primary nameserver not specified.")
+// 		}
 
-		unsynched, adds, removes, err := tdns.ChildDelegationDataUnsynched(tdns.Globals.Zonename, tdns.Globals.ParentZone, childpri, parpri)
+		// 1. Is the delegation in sync or not?
+		fmt.Printf("Is delegation for %s in sync or not?\n", tdns.Globals.Zonename)
+		unsynched, adds, removes, err := tdns.ChildDelegationDataUnsynched(
+			   tdns.Globals.Zonename, tdns.Globals.ParentZone, childpri, parpri)
 		if err != nil {
 			log.Fatalf("Error from ChildSyncDelegationData(): %v", err)
 		}
 		if !unsynched {
 			fmt.Printf("No change to delegation data. No need to update.\n")
 			os.Exit(0)
+		} else {
+		        fmt.Printf("Delegation for %s is not in sync. Needs fixing.\n",
+					       tdns.Globals.Zonename)
 		}
-		err = tdns.ChildSendDdnsSync(adds, removes)
+
+		// 2. Ok, sync needed. Is DNS UPDATE a supported scheme?
+		// [figure out if yes, and all target details]
+		const update_scheme = 2
+		dsynctarget, err := tdns.LookupDSYNCTarget(tdns.Globals.ParentZone,
+			     parpri, dns.StringToType["ANY"], update_scheme)
+		if err != nil {
+		   log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v",
+		   		     	  tdns.Globals.ParentZone,parpri, err)
+		}
+
+		// 3. Create UPDATE msg
+
+		// 4. Sign UPDATE msg
+
+		// 5. Send UPDATE msg to target
+		err = tdns.ChildSendDdnsSync(tdns.Globals.ParentZone, dsynctarget, adds, removes)
 		if err != nil {
 			log.Fatalf("Error from ChildSendDdnsSync(): %v", err)
 		}
@@ -58,7 +85,8 @@ var ddnsRollCmd = &cobra.Command{
 	Use:   "roll",
 	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := tdns.SendSig0KeyUpdate(true)
+	        PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
+		err := tdns.SendSig0KeyUpdate(childpri, parpri, true)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}
@@ -69,7 +97,8 @@ var ddnsUploadCmd = &cobra.Command{
 	Use:   "upload",
 	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := tdns.SendSig0KeyUpdate(false)
+	        PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
+		err := tdns.SendSig0KeyUpdate(childpri, parpri, false)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}
@@ -87,3 +116,45 @@ func init() {
 	ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
+func PrepArgs(required ...string) {
+     for _, arg := range required {
+     	 fmt.Printf("Required: %s\n", arg)
+	 switch arg {
+	 case "parentzone":
+	      if tdns.Globals.ParentZone == "" {
+	      	 fmt.Printf("Error: name of parent zone not specified\n")
+		 os.Exit(1)
+	      }
+	      tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
+
+	 case "childzone":
+	      if tdns.Globals.Zonename == "" {
+	      	 fmt.Printf("Error: name of child zone not specified\n")
+		 os.Exit(1)
+	      }
+	      tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+
+	 case "parentprimary":
+	      if parpri == "" {
+	      	 fmt.Printf("Error: name of parent primary not specified\n")
+		 os.Exit(1)
+	      }
+	      if !strings.Contains(parpri, ":") {
+	      	 parpri = net.JoinHostPort(parpri, "53")
+	      }
+
+	 case "childprimary":
+	      if childpri == "" {
+	      	 fmt.Printf("Error: name of child primary not specified\n")
+		 os.Exit(1)
+	      }
+	      if !strings.Contains(childpri, ":") {
+	      	 childpri = net.JoinHostPort(childpri, "53")
+	      }
+
+	 default:
+		fmt.Printf("Unknown required argument: \"%s\"\n", arg)
+		os.Exit(1)
+	 }
+     }
+}

@@ -18,23 +18,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-func SendSig0KeyUpdate(gennewkey bool) error {
-	if Globals.Zonename == "" {
-		return fmt.Errorf("Error: child zone name not specified.")
-	}
-	Globals.Zonename = dns.Fqdn(Globals.Zonename)
-
-	if Globals.ParentZone == "" {
-		return fmt.Errorf("Error: parent zone name not specified.")
-	}
-	Globals.ParentZone = dns.Fqdn(Globals.ParentZone)
-
-	if childpri == "" {
-		return fmt.Errorf("Error: child primary nameserver not specified.")
-	}
-	if parpri == "" {
-		return fmt.Errorf("Error: parent primary nameserver not specified.")
-	}
+func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
+// 	if Globals.Zonename == "" {
+// 		return fmt.Errorf("Error: child zone name not specified.")
+// 	}
+// 	Globals.Zonename = dns.Fqdn(Globals.Zonename)
+// 
+// 	if Globals.ParentZone == "" {
+// 		return fmt.Errorf("Error: parent zone name not specified.")
+// 	}
+// 	Globals.ParentZone = dns.Fqdn(Globals.ParentZone)
+// 
+// 	if childpri == "" {
+// 		return fmt.Errorf("Error: child primary nameserver not specified.")
+// 	}
+// 	if parpri == "" {
+// 		return fmt.Errorf("Error: parent primary nameserver not specified.")
+// 	}
 
 	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
 	if keyrr != nil {

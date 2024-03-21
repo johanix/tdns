@@ -14,11 +14,11 @@ import (
 	"github.com/spf13/viper"
 )
 
-var imr = "8.8.8.8:53"
-var pzone, childpri, parpri string
+// var imr = "8.8.8.8:53"
+// var pzone, childpri, parpri string
 
 // Returns unsynched bool, adds, removes []dns.RR, error
-func ChildDelegationDataUnsynched(zone, pzone, childpri, ppri string) (bool, []dns.RR, []dns.RR, error) {
+func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
 
 	var differ bool
 	var adds, removes []dns.RR
@@ -205,16 +205,18 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 	return true, adds, removes, nil
 }
 
-func ChildSendDdnsSync(adds, removes []dns.RR) error {
-	const update_scheme = 2
-	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"], update_scheme)
-	if err != nil {
-		log.Fatalf("Error from LookupDDNSTarget(%s, %s): %v", pzone, parpri, err)
-	}
+// This is only called from the CLI command "tdns-cli ddns sync"
+
+func ChildSendDdnsSync(pzone string, target DSYNCTarget, adds, removes []dns.RR) error {
+//	const update_scheme = 2
+//	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"], update_scheme)
+//	if err != nil {
+//		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", pzone, parpri, err)
+//	}
 
 	msg, err := CreateUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		log.Fatalf("Error from SendUpdate(%v): %v", dsynctarget, err)
+		log.Fatalf("Error from CreateUpdate(%s): %v", pzone, err)
 	}
 
 	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
@@ -223,15 +225,15 @@ func ChildSendDdnsSync(adds, removes []dns.RR) error {
 		fmt.Printf("Signing update.\n")
 		msg, err = SignMsgNG(msg, Globals.Zonename, cs, keyrr)
 		if err != nil {
-			log.Fatalf("Error from SendUpdate(%v): %v", dsynctarget, err)
+			log.Fatalf("Error from SignMsgNG(): %v", err)
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")
 	}
 
-	err = SendUpdate(msg, pzone, dsynctarget)
+	err = SendUpdate(msg, pzone, target)
 	if err != nil {
-		log.Fatalf("Error from SendUpdate(%v): %v", dsynctarget, err)
+		log.Fatalf("Error from SendUpdate(%s): %v", target, err)
 	}
 	return nil
 }
@@ -306,17 +308,20 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (dns.Msg, error)
 
 // Only used in the CLI version
 func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.RR, []dns.RR) {
-	fmt.Printf("*** ComputeRRDiff(%s, %s)\n", owner, dns.TypeToString[rrtype])
+      if Globals.Debug {
+//	fmt.Printf("*** ComputeRRDiff(%s, %s)\n", owner, dns.TypeToString[rrtype])
+	fmt.Printf("*** ComputeRRDiff(%s, %s, %s, %s)\n", childpri, parpri, owner, dns.TypeToString[rrtype])
+	}
 	rrname := dns.TypeToString[rrtype]
 	rrs_parent, err := AuthQuery(owner, parpri, rrtype)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s %s RRset in parent primary %s: %v",
+		log.Fatalf("Error: looking up child %s %s RRset in parent primary \"%s\": %v",
 			Globals.Zonename, rrname, parpri, err)
 	}
 
 	rrs_child, err := AuthQuery(owner, childpri, rrtype)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s %s RRset in child primary %s: %v",
+		log.Fatalf("Error: looking up child %s %s RRset in child primary \"%s\": %v",
 			Globals.Zonename, rrname, childpri, err)
 	}
 
@@ -433,6 +438,8 @@ func (zd *ZoneData) SyncWithParent(adds, removes []dns.RR) error {
      }
      zd.Logger.Printf("*** SyncWithParent: will try %s scheme using: %s", scheme, dsyncrr)
 
+     
+
      return nil
 }
 
@@ -443,13 +450,14 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 
      zd.Logger.Printf("BestSyncScheme: imr=%s zone=%s", Globals.IMR, zd.ZoneName)
 
-     dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR)
+     // dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
+     dsync_res, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
      if err != nil {
      	zd.Logger.Printf("SyncWithParent: Error from DsyncDiscovery(): %v", err)
 	return "", active_drr, err
      }
-     if len(dsync_rrs) == 0 {
-     	msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, parent)
+     if len(dsync_res.Rdata) == 0 {
+     	msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
      	zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
 	return "", active_drr, fmt.Errorf("Error: %s", msg)
      }
@@ -465,7 +473,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 	 switch scheme {
 	 case "update":
 	      log.Printf("BestSyncScheme(): checking UPDATE alternative:")
-	      for _, drr := range dsync_rrs {
+	      for _, drr := range dsync_res.Rdata {
 	      	  if drr.Scheme == 2 {
 		     active_drr = drr
 		     break
@@ -482,7 +490,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 	      	 break
 	      }
 	      log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
-	      for _, drr := range dsync_rrs {
+	      for _, drr := range dsync_res.Rdata {
 	      	  if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
 		     active_drr = drr
 		     break
@@ -500,8 +508,9 @@ func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
 	 }
      }
 
-     zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:", zd.ZoneName, parent)
-     for _, drr := range dsync_rrs {
+     zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:",
+     				       zd.ZoneName, dsync_res.Parent)
+     for _, drr := range dsync_res.Rdata {
      	 zd.Logger.Printf("%s", drr.String())
      }
      zd.Logger.Printf("BestSyncScheme: Best DSYNC alternative: %s:", active_drr.String())
