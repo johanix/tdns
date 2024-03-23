@@ -11,34 +11,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-//	"github.com/spf13/cobra"
 )
-
-// var DsyncDiscoveryCmd = &cobra.Command{
-// 	Use:   "dsync-query",
-// 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
-// 	Run: func(cmd *cobra.Command, args []string) {
-// 		Globals.Zonename = dns.Fqdn(Globals.Zonename)
-// 		rrs, parent, err := DsyncDiscovery(Globals.Zonename, Globals.IMR)
-// 		if err != nil {
-// 			log.Fatalf("Error: %v", err)
-// 		}
-// 
-// 		fmt.Printf("Parent: %s\n", parent)
-// 		if len(rrs) == 0 {
-// 			fmt.Printf("No DSYNC record associated with '%s'\n", Globals.Zonename)
-// 		} else {
-// 			for _, nr := range rrs {
-// 				fmt.Printf("%s\n", nr.String())
-// 			}
-// 		}
-// 	},
-// }
-
-func init() {
-	//	DsyncQueryCmd.PersistentFlags().StringVarP(&Globals.Zonename, "zone", "z", "", "Zone to query for the DSYNC RRset in")
-//	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&Globals.IMR, "imr", "i", "resolver:53", "IMR to send the query to")
-}
 
 type DsyncResult struct {
      Qname	 string	
