@@ -45,16 +45,58 @@ var reloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		msg, err := SendCommandNG(api, tdns.CommandPost{
+		resp, err := SendCommandNG(api, tdns.CommandPost{
 			Command: "reload",
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Force:   force,
 		})
+
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
 		}
-		if msg != "" {
-			fmt.Printf("%s\n", msg)
+		if resp.Error {
+			fmt.Printf("Error from tdnsd: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+		
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
+var nsecCmd = &cobra.Command{
+	Use:   "nsec",
+	Short: "A brief description of your command",
+}
+
+var nsecComputeCmd = &cobra.Command{
+	Use:   "compute",
+	Short: "Send an NSEC Compute command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+	     	PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command: "compute-nsec",
+			Zone:    tdns.Globals.Zonename,
+			Force:   force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+		
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+		fmt.Printf("NSEC chain for zone \"%s\":\n", cr.Zone)
+		for _, name := range cr.Names {
+		    fmt.Printf("%s\n", name)
 		}
 	},
 }
@@ -82,20 +124,24 @@ var bumpNGCmd = &cobra.Command{
 	Use:   "bumpng",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if tdns.Globals.Zonename == "" {
-			fmt.Printf("Error: zone name not specified. Terminating.\n")
-			os.Exit(1)
-		}
+	     	PrepArgs("childzone")
 
-		msg, err := SendCommandNG(api, tdns.CommandPost{
+		resp, err := SendCommandNG(api, tdns.CommandPost{
 			Command: "bump",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			Zone:    tdns.Globals.Zonename,
 		})
+
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
 		}
-		if msg != "" {
-			fmt.Printf("%s\n", msg)
+		if resp.Error {
+			fmt.Printf("Error from tdnsd: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+		
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
 		}
 	},
 }
@@ -196,9 +242,10 @@ var debugShowTACmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd)
+	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd, nsecCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
+	nsecCmd.AddCommand(nsecComputeCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
@@ -242,32 +289,31 @@ func SendCommand(cmd, zone string) (string, error) {
 	return cr.Msg, nil
 }
 
-func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (string, error) {
-
+func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (tdns.CommandResponse, error) {
+	var cr tdns.CommandResponse
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return "", fmt.Errorf("Error from api post: %v", err)
+		return cr, fmt.Errorf("Error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 
-	var cr tdns.CommandResponse
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		return "", fmt.Errorf("Error from unmarshal: %v\n", err)
+		return cr, fmt.Errorf("Error from unmarshal: %v\n", err)
 	}
 
 	if cr.Error {
-		return "", fmt.Errorf("Error from tdnsd: %s\n", cr.ErrorMsg)
+		return cr, fmt.Errorf("Error from tdnsd: %s\n", cr.ErrorMsg)
 	}
 
-	return cr.Msg, nil
+	return cr, nil
 }
 
 func SendDebug(api *tdns.Api, data tdns.DebugPost) tdns.DebugResponse {

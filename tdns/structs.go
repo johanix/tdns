@@ -113,6 +113,7 @@ type CommandResponse struct {
 	Time     time.Time
 	Status   string
 	Zone     string
+	Names	 []string
 	Msg      string
 	Error    bool
 	ErrorMsg string

@@ -285,6 +285,29 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	return &owner, nil
 }
 
+func (zd *ZoneData) GetOwnerNames() ([]string, error) {
+	var names []string
+	switch zd.ZoneStore {
+	case SliceZone:
+		if len(zd.Owners) == 0 {
+			return names, nil
+		}
+		names = zd.OwnerIndex.Keys()
+
+	case MapZone:
+		if zd.Data.IsEmpty() {
+			return names, nil
+		}
+		names = zd.Data.Keys()
+		
+	default:
+		zd.Logger.Printf("GetOwnerNames: zone storage not supported: %v", zd.ZoneStore)
+		return names, fmt.Errorf("GetOwnerNames: only supported for SliceZone and MapZone, not %s",
+			ZoneStoreToString[zd.ZoneStore])
+	}
+	return names, nil
+}
+
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
      zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
      					  qname, zd.ZoneName)

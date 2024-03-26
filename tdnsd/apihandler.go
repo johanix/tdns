@@ -115,6 +115,13 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(500 * time.Millisecond)
 			conf.Internal.APIStopCh <- struct{}{}
 
+		case "compute-nsec":
+			resp, err = tdns.ComputeNsec(cp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+			
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
 			resp.Error = true
