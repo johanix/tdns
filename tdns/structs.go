@@ -81,6 +81,25 @@ type RRset struct {
 	RRSIGs	[]dns.RR
 }
 
+type KeystorePost struct {
+	Command string	 // "sig0"
+	SubCommand	string // "list-child-keys" | "trust-child-key" | "untrust-child-key"
+	Zone    string
+	Keyname	string
+	Keyid	int
+}
+
+type KeystoreResponse struct {
+	Time     time.Time
+	Status   string
+	Zone     string
+	ChildDnskeys	map[string]TrustAnchor
+	ChildSig0keys	map[string]Sig0Key
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
 type CommandPost struct {
 	Command string
 	Zone    string
@@ -168,6 +187,7 @@ type TAStoreT struct {
 type TrustAnchor struct {
      Name	 string
      Validated	 bool
+     Trusted	 bool
      Dnskey	 dns.DNSKEY
 }
 
@@ -177,6 +197,9 @@ type Sig0StoreT struct {
 
 type Sig0Key struct {
      Name	 string
-     Validated	 bool
+     Keyid	 uint16
+     Validated	 bool	// has this key been DNSSEC validated
+     Trusted	 bool	// is this key trusted
      Key	 dns.KEY
+     Keystr	 string
 }

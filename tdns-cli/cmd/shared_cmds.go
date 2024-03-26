@@ -4,10 +4,8 @@
 package cmd
 
 import (
-	"github.com/johanix/tdns/tdns"
+//	"github.com/johanix/tdns/tdns"
 )
 
 func init() {
-//	rootCmd.AddCommand(tdns.DsyncQueryCmd)
-	rootCmd.AddCommand(tdns.DsyncDiscoveryCmd)
 }

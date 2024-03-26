@@ -136,7 +136,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	// Detect whether the delegation data has changed.
 	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
 	if err != nil {
-		zd.Logger.Printf("Error from DelegationDataChenged(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 		return false, err
 	}
 	if delchanged {
@@ -146,6 +146,10 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	   }
 	   for _, rr := range removes {
 	       zd.Logger.Printf("DEL: %s", rr.String())
+	   }
+	   err = zd.SyncWithParent(adds, removes)
+	   if err != nil {
+	      log.Printf("Error from SyncWithParent(): %v", err)
 	   }
 	} else {
 	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
@@ -203,7 +207,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	// Detect whether the delegation data has changed.
 	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
 	if err != nil {
-		zd.Logger.Printf("Error from DelegationDataChenged(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 		return false, err
 	}
 	if delchanged {
@@ -215,7 +219,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	       zd.Logger.Printf("DEL: %s", rr.String())
 	   }
 	} else {
-	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+	   zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
 	}
 
 

@@ -44,46 +44,8 @@ func DnsEngine(conf *Config) error {
 }
 
 func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
-
-	zonech := conf.Internal.RefreshZoneCh
-
-        updateq := conf.Internal.UpdateQ
-
-//        keydir := viper.GetString("ddns.keydirectory")
-//        keymap, err := tdns.ReadPubKeys(keydir)
-//        if err != nil {
-//                log.Fatalf("Error from ReadPublicKeys(%s): %v", keydir, err)
-//        }
-
-        policy := UpdatePolicy{
-                Type:		viper.GetString("ddns.policy.type"),
-                RRtypes: 	map[uint16]bool{},
-                KeyUpload:	viper.GetString("ddns.policy.keyupload"),
-                Verbose: 	*conf.Service.Verbose,
-                Debug:   	*conf.Service.Debug,
-        }
-
-        switch policy.Type {
-        case "selfsub", "self":
-                // all ok, we know these
-        default:
-                log.Fatalf("Error: unknown update policy type: \"%s\". Terminating.", policy.Type)
-        }
-
-        var rrtypes []string
-        for _, rrstr := range viper.GetStringSlice("ddns.policy.rrtypes") {
-                if rrt, ok := dns.StringToType[rrstr]; ok {
-                        policy.RRtypes[rrt] = true
-                        rrtypes = append(rrtypes, rrstr)
-                } else {
-                        log.Printf("Unknown RR type: \"%s\". Ignoring.", rrstr)
-                }
-        }
-
-        if len(policy.RRtypes) == 0 {
-                log.Fatalf("Error: zero valid RRtypes listed in policy.")
-        }
-        log.Printf("DnsEngine: using update policy \"%s\" with RRtypes: %v", policy.Type, rrtypes)
+        dnsupdateq := conf.Internal.DnsUpdateQ
+        dnsnotifyq := conf.Internal.DnsNotifyQ
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
@@ -96,13 +58,16 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
-			ntype := r.Question[0].Qtype
-			log.Printf("Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
-			err := NotifyResponder(w, r, qname, ntype, zonech)
-			if err != nil {
-			   log.Printf("Error from NotifyResponder: %v", err)
-			}
+			// A DNS NOTIFY may trigger time consuming outbound queries
+			dnsnotifyq <- DnsHandlerRequest{ ResponseWriter: w, Msg: r, Qname: qname }
+			// Not waiting for a result
 			return
+
+               case dns.OpcodeUpdate:
+			// A DNS Update may trigger time consuming outbound queries
+			dnsupdateq <- DnsHandlerRequest{ ResponseWriter: w, Msg: r, Qname: qname }
+			// Not waiting for a result
+                        return
 
 		case dns.OpcodeQuery:
 			qtype := r.Question[0].Qtype
@@ -150,15 +115,6 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			//	qname, zd.ZoneName)
 			QueryResponder(w, r, zd, qname, qtype, dnssec_ok)
 			return
-
-               case dns.OpcodeUpdate:
-                        log.Printf("DnsEngine: Received UPDATE for zone '%s' containing %d RRs in the update section", qname, len(r.Ns))
-
-			err := UpdateResponder(w, r, qname, policy, updateq)
-			if err != nil {
-			       log.Printf("Error from UpdateResponder(): %v", err)
-			}
-                        return
 
 		default:
 			log.Printf("Error: unable to handle msgs of type %s", dns.OpcodeToString[r.Opcode])

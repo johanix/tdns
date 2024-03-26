@@ -74,6 +74,8 @@ type InternalConf struct {
 	ValidatorCh   chan tdns.ValidatorRequest
 	ScannerQ      chan ScanRequest
 	UpdateQ       chan UpdateRequest
+	DnsUpdateQ    chan DnsHandlerRequest
+	DnsNotifyQ    chan DnsHandlerRequest
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {
