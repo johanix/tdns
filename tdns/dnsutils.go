@@ -572,3 +572,13 @@ func (owners Owners) Less(i, j int) bool {
 func quickSort(sortable sort.Interface) {
 	sorts.Quicksort(sortable)
 }
+
+func SetupIMR() {
+	if Globals.IMR == "" {
+		Globals.IMR = viper.GetString("resolver.address")
+	}
+
+	if Globals.Verbose {
+		fmt.Printf("Using resolver \"%s\"\n", Globals.IMR)
+	}
+}

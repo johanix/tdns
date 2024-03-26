@@ -17,7 +17,14 @@ import (
 // var imr = "8.8.8.8:53"
 // var pzone, childpri, parpri string
 
+// Only used from CLI (tdns-cli ddns sync)
 // Returns unsynched bool, adds, removes []dns.RR, error
+
+// XXX: This requires lots of recursive queries and does not take advantage of the zonedata struct
+//      in tdnsd most likely having cached most of this information. Since the only reason for
+//      the tdns-cli tool is to interact with tdnsd, it really should leverage from that rather
+//      than just do everything in the CLI.
+
 func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
 
 	var differ bool
@@ -132,8 +139,10 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 		zd.Logger.Printf("*** Note: configured NOT to update NS RRset.\n")
 	}
 
-	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs,
-		oldapex.RRtypes[dns.TypeNS].RRs, zd.ZoneName)
+//	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs,
+//		oldapex.RRtypes[dns.TypeNS].RRs, zd.ZoneName)
+	new_ns_inb, _ := BailiwickNS(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs)
+	old_ns_inb, _ := BailiwickNS(zd.ZoneName, oldapex.RRtypes[dns.TypeNS].RRs)
 	for _, ns := range new_ns_inb {
 		zd.Logger.Printf("New in-bailiwick NS: %s\n", ns)
 	}
@@ -351,6 +360,8 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 }
 
 
+// XXX: Should be replaced by four calls: one per child and parent primary to get
+//      the NS RRsets and one to new ComputeBailiwickNS() that takes a []dns.RR + zone name
 func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 	ns_parent, err := AuthQuery(owner, parpri, dns.TypeNS)
 	if err != nil {
@@ -376,28 +387,25 @@ func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 		}
 	}
 
-//	var parent_ns_inb, child_ns_inb []string
-
-//	for _, rr := range ns_parent {
-//		if ns, ok := rr.(*dns.NS); ok {
-//			if strings.HasSuffix(ns.Ns, owner) {
-//				parent_ns_inb = append(parent_ns_inb, ns.Ns)
-//			}
-//		}
-//	}
-//	for _, rr := range ns_child {
-//		if ns, ok := rr.(*dns.NS); ok {
-//			if strings.HasSuffix(ns.Ns, owner) {
-//				child_ns_inb = append(child_ns_inb, ns.Ns)
-//			}
-//		}
-//	}
-
-//	return child_ns_inb, parent_ns_inb
-	return ComputeBailiwickNS_NG(ns_child, ns_parent, owner)
+	// return ComputeBailiwickNS_NG(ns_child, ns_parent, owner)
+	child_inb, _ := BailiwickNS(owner, ns_child)
+	parent_inb, _ := BailiwickNS(owner, ns_parent)
+	return child_inb, parent_inb
 }
 
-func ComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]string, []string) {
+func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
+        var ns_inbailiwick []string
+	for _, rr := range nsrrs {
+		if ns, ok := rr.(*dns.NS); ok {
+			if strings.HasSuffix(ns.Ns, zonename) {
+				ns_inbailiwick = append(ns_inbailiwick, ns.Ns)
+			}
+		}
+	}
+	return ns_inbailiwick, nil
+}
+
+func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]string, []string) {
 	fmt.Printf("%d old NS RRs, %d new NS RRs\n", len(oldnsrrset), len(newnsrrset))
 	if Globals.Debug {
 		for _, rrp := range oldnsrrset {

@@ -125,6 +125,51 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var dp tdns.DelegationPost
+		err := decoder.Decode(&dp)
+		if err != nil {
+			log.Println("APIdelegation: error decoding delegation post:", err)
+		}
+
+		log.Printf("API: received /delegation request (cmd: %s) from %s.\n",
+			dp.Command, r.RemoteAddr)
+
+		resp := tdns.DelegationResponse{}
+
+		switch dp.Command {
+		// Find out whether delegation is in sync or not and report on details
+		case "status":
+			log.Printf("APIdelegation: zone %s delegation status inquiry\n")
+			resp, err = AnalyseZoneDelegation(conf, dp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		// Find out whether delegation is in sync or not and if not then fix it
+		case "sync":
+			log.Printf("APIdelegation: zone %s: will check and sync changes to delegation data\n",
+						   dp.Zone)
+			resp.Msg, err = SyncZoneDelegation(conf, dp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		default:
+			resp.ErrorMsg = fmt.Sprintf("Unknown delegation command: %s", dp.Command)
+			resp.Error = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
 func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -205,6 +250,7 @@ func SetupRouter(conf *Config) *mux.Router {
 	sr.HandleFunc("/ping", tdns.APIping("tdnsd")).Methods("POST")
 	sr.HandleFunc("/keystore", APIkeystore(conf)).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/delegation", APIdelegation(conf)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 

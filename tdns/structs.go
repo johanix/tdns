@@ -59,6 +59,9 @@ type ZoneData struct {
 	Upstream       string   // primary from where zone is xfrred
 	Downstreams    []string // secondaries that we notify
 	Zonefile       string
+	Parent	       string	// name of parentzone (if filled in)
+	ParentNS       []string	// names of parent nameservers
+	ParentServers  []string	// addresses of parent nameservers
 }
 
 type Ixfr struct {
@@ -110,6 +113,29 @@ type CommandResponse struct {
 	Time     time.Time
 	Status   string
 	Zone     string
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
+type DelegationPost struct {
+	Command string	   // status | sync | ...
+	Scheme	uint8	   // 1=notify | 2=update
+	Zone    string
+	Force	bool
+}
+
+type DelegationResponse struct {
+	Time     time.Time
+	Status   string
+	Zone     string
+	InSync	 bool
+	NsAdds	 []dns.RR
+	NsRemoves	[]dns.RR
+	AAdds		[]dns.RR
+	ARemoves	[]dns.RR
+	AAAAAdds	[]dns.RR
+	AAAARemoves	[]dns.RR
 	Msg      string
 	Error    bool
 	ErrorMsg string

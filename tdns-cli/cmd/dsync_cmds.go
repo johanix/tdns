@@ -10,7 +10,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+	// "github.com/spf13/viper"
 )
 
 var DsyncDiscoveryCmd = &cobra.Command{
@@ -18,7 +18,7 @@ var DsyncDiscoveryCmd = &cobra.Command{
 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
-		SetupIMR()
+		tdns.SetupIMR()
 
 		dsync_res, err := tdns.DsyncDiscovery(tdns.Globals.Zonename,
 			tdns.Globals.IMR, tdns.Globals.Verbose)
@@ -43,12 +43,12 @@ func init() {
 		"IMR to send the query to")
 }
 
-func SetupIMR() {
-	if tdns.Globals.IMR == "" {
-		tdns.Globals.IMR = viper.GetString("resolver.address")
-	}
-
-	if tdns.Globals.Verbose {
-		fmt.Printf("Using resolver \"%s\"\n", tdns.Globals.IMR)
-	}
-}
+// func SetupIMR() {
+// 	if tdns.Globals.IMR == "" {
+// 		tdns.Globals.IMR = viper.GetString("resolver.address")
+// 	}
+// 
+// 	if tdns.Globals.Verbose {
+// 		fmt.Printf("Using resolver \"%s\"\n", tdns.Globals.IMR)
+// 	}
+// }

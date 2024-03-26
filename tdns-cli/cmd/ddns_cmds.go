@@ -4,6 +4,8 @@
 package cmd
 
 import (
+        "bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -20,8 +22,63 @@ var ddnsCmd = &cobra.Command{
 	Short: "Send a DDNS update. Only usable via sub-commands.",
 }
 
-var ddnsSyncCmd = &cobra.Command{
+var delCmd = &cobra.Command{
+	Use:   "del",
+	Short: "Delegation prefix command. Only usable via sub-commands.",
+}
+
+var delStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Make an API cal to request tdnsd to analyse whether delegation is in sync or not",
+	Run: func(cmd *cobra.Command, args []string) {
+	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+							Command:	"/status",
+							Zone:		tdns.Globals.Zonename,
+					       })
+	     if err != nil {
+	     	fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	     }
+	     
+	     if dr.Error {
+	     	fmt.Printf("Error: %s\n", dr.ErrorMsg)
+		os.Exit(1)
+	     }
+
+	     fmt.Printf("%s\n", dr.Msg)
+	},
+}
+
+var schemestr string
+var scheme uint8
+
+var delSyncCmd = &cobra.Command{
 	Use:   "sync",
+	Short: "Make an API cal to request tdnsd to send a DDNS update to sync parent delegation info with child data",
+	Run: func(cmd *cobra.Command, args []string) {
+	         
+
+	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+							Command:	"/status",
+							Scheme:		scheme,
+							Zone:		tdns.Globals.Zonename,
+					       })
+	     if err != nil {
+	     	fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	     }
+	     
+	     if dr.Error {
+	     	fmt.Printf("Error: %s\n", dr.ErrorMsg)
+		os.Exit(1)
+	     }
+
+	     fmt.Printf("%s\n", dr.Msg)
+	},
+}
+
+var ddnsOldSyncCmd = &cobra.Command{
+	Use:   "oldsync",
 	Short: "Send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
 		if tdns.Globals.Zonename == "" {
@@ -30,7 +87,7 @@ var ddnsSyncCmd = &cobra.Command{
 		PrepArgs("parentzone", "parentprimary", "childzone", "childprimary")
 // 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
-		SetupIMR()
+		tdns.SetupIMR()
 
 // 		if tdns.Globals.ParentZone == "" {
 // 		   log.Fatalf("Error: parent zone name not specified.")
@@ -106,9 +163,11 @@ var ddnsUploadCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(ddnsCmd)
+	rootCmd.AddCommand(ddnsCmd, delCmd)
+	delCmd.AddCommand(delStatusCmd, delSyncCmd)
+	delSyncCmd.Flags().StringVarP(&schemestr, "scheme", "S", "", "Scheme to use for synchronization of delegation")
 
-	ddnsCmd.AddCommand(ddnsSyncCmd)
+	ddnsCmd.AddCommand(ddnsOldSyncCmd)
 	ddnsCmd.AddCommand(ddnsRollCmd, ddnsUploadCmd)
 
 	ddnsCmd.PersistentFlags().StringVarP(&tdns.Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
@@ -157,4 +216,31 @@ func PrepArgs(required ...string) {
 		os.Exit(1)
 	 }
      }
+}
+
+func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.DelegationResponse, error) {
+        var dr tdns.DelegationResponse
+	
+        bytebuf := new(bytes.Buffer)
+        json.NewEncoder(bytebuf).Encode(data)
+
+        status, buf, err := api.Post("/delegation", bytebuf.Bytes())
+        if err != nil {
+                log.Println("Error from Api Post:", err)
+                return dr, fmt.Errorf("Error from api post: %v", err)
+        }
+        if verbose {
+                fmt.Printf("Status: %d\n", status)
+        }
+
+        err = json.Unmarshal(buf, &dr)
+        if err != nil {
+                return dr, fmt.Errorf("Error from unmarshal: %v\n", err)
+        }
+
+        if dr.Error {
+                return dr, fmt.Errorf("Error from tdnsd: %s\n", dr.ErrorMsg)
+        }
+
+        return dr, nil
 }
