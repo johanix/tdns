@@ -105,6 +105,7 @@ type KeystoreResponse struct {
 
 type CommandPost struct {
 	Command string
+	SubCommand	string
 	Zone    string
 	Force	bool
 }

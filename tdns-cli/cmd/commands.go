@@ -71,14 +71,42 @@ var nsecCmd = &cobra.Command{
 	Short: "A brief description of your command",
 }
 
-var nsecComputeCmd = &cobra.Command{
-	Use:   "compute",
-	Short: "Send an NSEC Compute command to tdnsd",
+var nsecGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Send an NSEC generate command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 	     	PrepArgs("childzone")
 
 		cr, err := SendCommandNG(api, tdns.CommandPost{
-			Command: "compute-nsec",
+			Command: "nsec",
+			SubCommand: "generate",
+			Zone:    tdns.Globals.Zonename,
+			Force:   force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+		
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var nsecShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Send an NSEC show command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+	     	PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command: "nsec",
+			SubCommand: "show",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
 		})
@@ -245,7 +273,7 @@ func init() {
 	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd, nsecCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
-	nsecCmd.AddCommand(nsecComputeCmd)
+	nsecCmd.AddCommand(nsecGenerateCmd, nsecShowCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
