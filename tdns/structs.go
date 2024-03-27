@@ -105,6 +105,7 @@ type KeystoreResponse struct {
 
 type CommandPost struct {
 	Command string
+	SubCommand	string
 	Zone    string
 	Force	bool
 }
@@ -113,6 +114,7 @@ type CommandResponse struct {
 	Time     time.Time
 	Status   string
 	Zone     string
+	Names	 []string
 	Msg      string
 	Error    bool
 	ErrorMsg string

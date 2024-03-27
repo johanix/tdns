@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var verbose, debug, short bool
+var short bool
 var rrtype uint16
 
 var port = "53"
@@ -36,7 +36,7 @@ var rootCmd = &cobra.Command{
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				server = arg[1:]
-				if verbose {
+				if tdns.Globals.Verbose {
 					fmt.Printf("*** Will send remaining queries to server %s\n", server)
 				}
 				continue
@@ -83,7 +83,7 @@ var rootCmd = &cobra.Command{
 			fmt.Printf("dog processing arg \"%s\"\n", qname)
 
 			qname = dns.Fqdn(qname)
-			if verbose {
+			if tdns.Globals.Verbose {
 				fmt.Printf("*** Querying for %s IN %s:\n", qname, dns.TypeToString[rrtype])
 			}
 
@@ -123,8 +123,8 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose mode")
-	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Debugging output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	//	rootCmd.PersistentFlags().StringVarP(&rrtype, "rrtype", "r", "", "DNS RR type to query for")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")

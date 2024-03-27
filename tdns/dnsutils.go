@@ -95,7 +95,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	wg.Add(1)
 
 	go func() {
-		tr.Out(w, r, outbound_xfr)
+		err := tr.Out(w, r, outbound_xfr)
+		if err != nil {
+		   zd.Logger.Printf("Error from transfer.Out(): %v", err)
+		}
 		wg.Done()
 	}()
 
@@ -107,22 +110,24 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	count := 0
 	env := dns.Envelope{}
 
+	// SOA
 	env.RR = append(env.RR, soa)
+	// XXX: If we change the SOA serial we must also recompute the RRSIG.
+	env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+	zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+
+	// Rest of apex
+	for rrt, _ := range apex.RRtypes {
+		if rrt != dns.TypeSOA {
+			env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
+			zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
+			env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
+		}
+	}
+	count = len(env.RR)
 
 	switch zd.ZoneStore {
 	case SliceZone:
-		// SOA
-		env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-
-		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
-			if rrt != dns.TypeSOA {
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			}
-		}
-		count = len(env.RR)
-
 		// Rest of zone
 		for _, owner := range zd.Owners {
 			if owner.Name == zd.ZoneName {
@@ -130,6 +135,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrl := range owner.RRtypes {
 				env.RR = append(env.RR, rrl.RRs...)
+				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				count += len(rrl.RRs)
 				env.RR = append(env.RR, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
@@ -144,18 +150,6 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		}
 
 	case MapZone:
-		// SOA
-		env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-
-		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
-			if rrt != dns.TypeSOA {
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			}
-		}
-		count = len(env.RR)
-
 		// Rest of zone
 		for _, owner := range zd.Data.Keys() {
 		        omap, _ := zd.Data.Get(owner)
@@ -164,6 +158,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrl := range omap.RRtypes {
 				env.RR = append(env.RR, rrl.RRs...)
+				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				count += len(rrl.RRs)
 				env.RR = append(env.RR, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
@@ -183,9 +178,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	}
 
 	env.RR = append(env.RR, soa) // trailing SOA
+	zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
 
 	total_sent += len(env.RR)
-	zd.Logger.Printf("ZoneTransferOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
+	zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
 		zd.ZoneName, len(env.RR), total_sent)
 	outbound_xfr <- &env
 
@@ -223,7 +219,12 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) erro
 			} else {
 			   fmt.Printf("Error: zone %s error: %v", zname, errstr)
 			}
-			break
+			if !Globals.Debug {
+			   fmt.Printf("Xfr error: breaking off\n")
+			   break
+			} else {
+			  fmt.Printf("DEBUG: envelope: %v\n", envelope)
+			}
 		}
 
 		for _, rr := range envelope.RR {
