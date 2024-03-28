@@ -155,20 +155,69 @@ func SyncZoneDelegation(conf *Config, dp tdns.DelegationPost) (string, error) {
 	   	  resp.Zone, resp.Parent), nil
 	}
 
+	var zd *tdns.ZoneData
+	var exist bool
+
 	if zd, exist = tdns.Zones.Get(dp.Zone); !exist {
 		msg := fmt.Sprintf("Zone \"%s\" is unknown.", dp.Zone)
 		log.Printf(msg)
-		return resp, fmt.Errorf(msg)
+		return msg, fmt.Errorf(msg)
 	}
 
 	// 1. Check what DSYNC schemes are supported by parent and preference in request
+	const update_scheme = 2
+	dsynctarget, err := tdns.LookupDSYNCTarget(zd.Parent, zd.ParentServers[0],
+		     	    				      dns.StringToType["ANY"], update_scheme)
+	if err != nil {
+	   log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", zd.Parent,zd.ParentServers[0], err)
+	}
+
+	err = SyncZoneDelegationViaUpdate(conf, zd, resp, dsynctarget)
+
+	return "", err
+}
+
+func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationResponse,
+     				      dt tdns.DSYNCTarget) error {
+     kdb := conf.Internal.KeyDB
+
 	// If UPDATE:
 	// 2. Create DNS UPDATE msg
+	var adds, removes []dns.RR
+	for _, rr := range syncstate.NsAdds {
+	    adds = append(adds, dns.RR(&rr))
+	}
+	for _, rr := range syncstate.AAdds {
+	    adds = append(adds, dns.RR(&rr))
+	}
+	for _, rr := range syncstate.AAAAAdds {
+	    adds = append(adds, dns.RR(&rr))
+	}
+
+	for _, rr := range syncstate.NsRemoves {
+	    removes = append(removes, dns.RR(&rr))
+	}
+	for _, rr := range syncstate.ARemoves {
+	    removes = append(removes, dns.RR(&rr))
+	}
+	for _, rr := range syncstate.AAAARemoves {
+	    removes = append(removes, dns.RR(&rr))
+	}
+
+	m, err := tdns.CreateUpdate(zd.Parent, zd.ZoneName, adds, removes)
+	if err != nil {
+	   return err
+	}
+
 	// 3. Fetch the SIG(0) key from the keystore
+	_, cs, keyrr, err := kdb.GetSig0Key(zd.ZoneName)
+
 	// 4. Sign the msg
+	smsg, err := tdns.SignMsgNG(m, zd.ZoneName, cs, keyrr)
+	
 	// 5. Send the msg
 	// 6. Check the response
 	// 7. Return result to CLI
 
-	return "foobar", nil
+	return nil
 }
