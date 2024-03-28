@@ -75,7 +75,7 @@ func main() {
 	tdns.SetupLogging(logfile)
 	fmt.Printf("Logging to file: %s\n", logfile)
 
-	fmt.Printf("TDNSD version %s (%s) starting.\n", appVersion)
+	fmt.Printf("TDNSD version %s starting.\n", appVersion)
 
 	var stopch = make(chan struct{}, 10)
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
@@ -132,6 +132,7 @@ type TmpSig0Key struct {
 }
 
 func ParseConfig(conf *Config) error {
+     	log.Printf("Enter ParseConfig")
 	viper.SetConfigFile(tdns.DefaultCfgFile)
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -186,9 +187,9 @@ func ParseConfig(conf *Config) error {
 	if err != nil {
 		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
 	}
-	err = kdb.LoadKnownSig0Keys()
+	err = kdb.LoadChildSig0Keys()
 	if err != nil {
-		log.Fatalf("Error from LoadKnownSig0Keys(): %v", err)
+		log.Fatalf("Error from LoadChildSig0Keys(): %v", err)
 	}
 
 	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
@@ -240,4 +241,5 @@ func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
 
 	return nil
 }
+
 

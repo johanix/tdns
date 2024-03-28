@@ -15,9 +15,10 @@ import (
 //	"strings"
 //	"time"
 
-//	"github.com/miekg/dns"
+	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"github.com/johanix/tdns/tdns"
+//	"gopkg.in/yaml.v3"
 )
 
 var filename string
@@ -33,16 +34,24 @@ to quickly create a Cobra application.`,
 			log.Fatalf("Error: filename with key not specified")
 		}
 
-		k, cs, rr, ktype, err := tdns.ReadKey(filename)
+		k, cs, rr, ktype, privkey, alg, err := tdns.ReadKey(filename)
 		if err != nil {
-			log.Fatalf("Error reading key '%s': %v",
-				filename, err)
+			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
 
+//		var bpk BindPrivateKey
+//		err = yaml.Unmarshal([]byte(privkey), &bpk)
+//		if err != nil {
+//		   log.Fatal(err)
+//		}
+		fmt.Printf("PrivKey: %s\n", privkey)
+		
 		fmt.Printf("PubKey: %s\n", rr.String())
 		fmt.Printf("PrivKey (%s): %v\n", ktype, k)
 		fmt.Printf("crypto.Signer: %v\n", cs)
 		fmt.Printf("cs.Public(): %v\n", cs.Public())
+		fmt.Printf("alg: %s\n", dns.AlgorithmToString[alg])
+		
 	},
 }
 

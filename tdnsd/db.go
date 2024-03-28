@@ -37,15 +37,17 @@ rrtype		  TEXT,
 rr		  TEXT
 )`,
 
-	"ChildSig0keys": `CREATE TABLE IF NOT EXISTS 'ChildSig0keys' (
+// The Sig0TrustStore contains public SIG(0) keys that we use to validate
+// signed DNS Updates received (from child zones)
+	"Sig0TrustStore": `CREATE TABLE IF NOT EXISTS 'Sig0TrustStore' (
 id		  INTEGER PRIMARY KEY,
-child		  TEXT,
+zonename	  TEXT,
 keyid		  INTEGER,
 validated	  INTEGER,
 trusted		  INTEGER,
 keyrr		  TEXT,
 comment		  TEXT,
-UNIQUE (child, keyid)
+UNIQUE (zonename, keyid)
 )`,
 
 // The Sig0Keystore should contain both the private and public SIG(0) keys for
@@ -54,7 +56,7 @@ UNIQUE (child, keyid)
 id		  INTEGER PRIMARY KEY,
 zonename	  TEXT,
 keyid		  INTEGER,
-trusted		  INTEGER,
+algorithm	  TEXT,
 privatekey	  TEXT,
 keyrr		  TEXT,
 comment		  TEXT,
@@ -137,12 +139,11 @@ func NewKeyDB(force bool) *KeyDB {
 	dbfile := viper.GetString("db.file")
 	fmt.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
 	if err := os.Chmod(dbfile, 0664); err != nil {
-		log.Printf("NewKeyDB: Error trying to ensure that db %s is writable: %v",
-			err)
+		log.Printf("NewKeyDB: Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}
 	db, err := sql.Open("sqlite3", dbfile)
 	if err != nil {
-		log.Fatalf("NewKeyDB: Error from sql.Open:", err)
+		log.Fatalf("NewKeyDB: Error from sql.Open: %v", err)
 	}
 
 	if force {

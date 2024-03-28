@@ -16,39 +16,40 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/cobra"
+//	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
-var filename string
-
-var readkeyCmd = &cobra.Command{
-	Use:   "readkey",
-	Short: "read a DNS key, either a KEY or DNSKEY. arg is either the .key or the .private file",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if filename == "" {
-			log.Fatalf("Error: filename with key not specified")
-		}
-
-		k, cs, rr, ktype, err := ReadKey(filename)
-		if err != nil {
-			log.Fatalf("Error reading key '%s': %v",
-				filename, err)
-		}
-
-		fmt.Printf("PubKey: %s\n", rr.String())
-		fmt.Printf("PrivKey (%s): %v\n", ktype, k)
-		fmt.Printf("crypto.Signer: %v\n", cs)
-		fmt.Printf("cs.Public(): %v\n", cs.Public())
-	},
-}
-
-func init() {
-	//	rootCmd.AddCommand(readkeyCmd, signMsgCmd)
-	readkeyCmd.Flags().StringVarP(&filename, "keyfile", "f", "", "Name of private key file")
-}
+// var filename string
+// 
+// var readkeyCmd = &cobra.Command{
+// 	Use:   "readkey",
+// 	Short: "read a DNS key, either a KEY or DNSKEY. arg is either the .key or the .private file",
+// 	Long: `A longer description that spans multiple lines and likely contains examples
+// and usage of using your command. For example:
+// to quickly create a Cobra application.`,
+// 	Run: func(cmd *cobra.Command, args []string) {
+// 		if filename == "" {
+// 			log.Fatalf("Error: filename with key not specified")
+// 		}
+// 
+// 		k, cs, rr, ktype, err := ReadKey(filename)
+// 		if err != nil {
+// 			log.Fatalf("Error reading key '%s': %v",
+// 				filename, err)
+// 		}
+// 
+// 		fmt.Printf("PubKey: %s\n", rr.String())
+// 		fmt.Printf("PrivKey (%s): %v\n", ktype, k)
+// 		fmt.Printf("crypto.Signer: %v\n", cs)
+// 		fmt.Printf("cs.Public(): %v\n", cs.Public())
+// 	},
+// }
+// 
+// func init() {
+// 	//	rootCmd.AddCommand(readkeyCmd, signMsgCmd)
+// 	readkeyCmd.Flags().StringVarP(&filename, "keyfile", "f", "", "Name of private key file")
+// }
 
 func sigLifetime(t time.Time) (uint32, uint32) {
 	sigJitter := time.Duration(60 * time.Second)
@@ -91,7 +92,13 @@ func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (dns.Ms
 	return m, nil
 }
 
-func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, error) {
+type BindPrivateKey struct {
+     Private_Key_Format	    string	`yaml:"Private-key-format"`
+     Algorithm	    string  		`yaml:"Algorithm"`
+     PrivateKey	    string		`yaml:"PrivateKey"`
+}
+
+func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, string, uint8, error) {
 
 	if filename == "" {
 		log.Fatalf("Error: filename of key not specified")
@@ -113,31 +120,27 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 
 	file, err := os.Open(pubfile)
 	if err != nil {
-		log.Fatalf("Error opening public key file '%s': %v",
-			pubfile, err)
+		log.Fatalf("Error opening public key file '%s': %v", pubfile, err)
 	}
 	pubkeybytes, err := os.ReadFile(pubfile)
 	if err != nil {
-		log.Fatalf("Error reading public key file '%s': %v",
-			pubfile, err)
+		log.Fatalf("Error reading public key file '%s': %v", pubfile, err)
 	}
 	pubkey := string(pubkeybytes)
 
 	file, err = os.Open(privfile)
 	if err != nil {
-		log.Fatalf("Error opening private key file '%s': %v",
-			privfile, err)
+		log.Fatalf("Error opening private key file '%s': %v", privfile, err)
 	}
 
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
-		log.Fatalf("Error reading public key '%s': %v",
-			pubkey, err)
+		log.Fatalf("Error reading public key '%s': %v",	pubkey, err)
 	}
 
 	var k crypto.PrivateKey
 	var cs crypto.Signer
-	var ktype string
+	var ktype, bpkstr string
 	var alg uint8
 
 	// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rr.Algorithm])
@@ -151,15 +154,25 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 		}
 		ktype = "DNSKEY"
 		alg = rrk.Algorithm
+		bpkstr = rrk.PrivateKeyString(k)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+
 	case *dns.KEY:
 		rrk := rr.(*dns.KEY)
 		k, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
 		ktype = "KEY"
 		alg = rrk.Algorithm
+		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+		
 	default:
 		log.Fatalf("Error: rr is of type %v", "foo")
+	}
+
+	var bpk BindPrivateKey
+	err = yaml.Unmarshal([]byte(bpkstr), &bpk)
+	if err != nil {
+	       log.Printf("Error from yaml.Unmarshal(): %v", err)
 	}
 
 	switch alg {
@@ -170,10 +183,11 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 		cs = k.(*ecdsa.PrivateKey)
 	default:
-		log.Fatalf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
+		log.Printf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
+		err = fmt.Errorf("no support for algorithm %s yet", dns.AlgorithmToString[alg])
 	}
 
-	return k, cs, rr, ktype, nil
+	return k, cs, rr, ktype, bpk.PrivateKey, alg, err
 }
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {

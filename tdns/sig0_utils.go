@@ -193,7 +193,7 @@ func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
 	if keyfile != "" {
 		var ktype string
 		var err error
-		_, cs, rr, ktype, err = ReadKey(keyfile)
+		_, cs, rr, ktype, _, _, err = ReadKey(keyfile)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", keyfile, err)
 		}

@@ -106,5 +106,5 @@ func initApi() {
 	apikey := viper.GetString("cli.tdnsd.apikey")
 	authmethod := viper.GetString("cli.tdnsd.authmethod")
 
-	api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", verbose, debug)
+	api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
 }

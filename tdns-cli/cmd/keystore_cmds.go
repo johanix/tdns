@@ -14,61 +14,79 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	// "gopkg.in/yaml.v3"
 )
 
-var childSig0Name string
-var childSig0Keyid int
+// var filename string
+var keyid int
 
 var keystoreCmd = &cobra.Command{
 	Use:   "keystore",
 	Short: "A brief description of your command",
+	Long: `The TDNSD keystore is where SIG(0) key pairs for zones are kept.
+The CLI contains functions for listing SIG(0) key pairs, adding and
+deleting keys.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore called")
+		fmt.Println("keystore called. This is likely a mistake, sub command needed")
 	},
 }
 
-var keystoreAddSig0Cmd = &cobra.Command{
-	Use:   "addsig0",
-	Short: "Add a new SIG(0) key to the keystore (both private and public)",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore called")
-	},
-}
-
-var keystoreChildSig0Cmd = &cobra.Command{
-	Use:   "childsig0",
+var keystoreSig0Cmd = &cobra.Command{
+	Use:   "sig0",
 	Short: "Prefix command, only usable via sub-commands",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("childsig0 called")
+		fmt.Println("keystore sig0 called (but NYI)")
 	},
 }
 
-var keystoreChildSig0ListCmd = &cobra.Command{
+type BindPrivateKey struct {
+	Private_Key_Format string `yaml:"Private-key-format"`
+	Algorithm          string `yaml:"Algorithm"`
+	PrivateKey         string `yaml:"PrivateKey"`
+}
+
+var keystoreSig0AddCmd = &cobra.Command{
+	Use:   "add",
+	Short: "Add a new SIG(0) key pair to the keystore",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("filename", "childzone")
+		err := KeystoreImportKey(filename)
+		if err != nil {
+			fmt.Printf("Error from KeystoreImportKey(): %v\n", err)
+		}
+	},
+}
+
+var keystoreSig0ImportCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Add a new SIG(0) key pair to the keystore",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("filename", "childzone")
+		err := KeystoreImportKey(filename)
+		if err != nil {
+			fmt.Printf("Error from KeystoreImportKey(): %v\n", err)
+		}
+	},
+}
+
+var keystoreSig0ListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all child SIG(0) public key in the keystore",
+	Short: "List all SIG(0) key pairs in the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := Sig0TrustMgmt("list")
+		err := Sig0KeyMgmt("list")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
 	},
 }
 
-var keystoreChildSig0TrustCmd = &cobra.Command{
-	Use:   "trust",
-	Short: "Declare a child SIG(0) public key in the keystore as trusted",
+var keystoreSig0DeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete SIG(0) key pair from TDNSD keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := Sig0TrustMgmt("trust")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
-	},
-}
-var keystoreChildSig0UntrustCmd = &cobra.Command{
-	Use:   "untrust",
-	Short: "Declare a child SIG(0) public key in the keystore as untrusted",
-	Run: func(cmd *cobra.Command, args []string) {
-		err := Sig0TrustMgmt("untrust")
+		PrepArgs("keyid", "childzone")
+
+		err := Sig0KeyMgmt("delete")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
@@ -77,74 +95,96 @@ var keystoreChildSig0UntrustCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(keystoreCmd)
-	keystoreCmd.AddCommand(keystoreChildSig0Cmd, keystoreAddSig0Cmd)
+	keystoreCmd.AddCommand(keystoreSig0Cmd)
 
-	keystoreChildSig0Cmd.AddCommand(keystoreChildSig0ListCmd)
-	keystoreChildSig0Cmd.AddCommand(keystoreChildSig0TrustCmd)
-	keystoreChildSig0Cmd.AddCommand(keystoreChildSig0UntrustCmd)
+	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd)
+	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd)
 
-	keystoreChildSig0Cmd.PersistentFlags().IntVarP(&childSig0Keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
-	keystoreChildSig0Cmd.PersistentFlags().StringVarP(&childSig0Name, "child", "c", "", "Name of child SIG(0) key to change trust for")
+	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv data")
+	keystoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 }
 
-func Sig0TrustMgmt(trustval string) error {
-	kr, err := SendKeystore(api, tdns.KeystorePost{
-		Command:    "child-sig0-mgmt",
-		SubCommand: "list",
-	})
+func KeystoreImportKey(filename string) error {
+	_, _, rr, _, privkey, alg, err := tdns.ReadKey(filename)
+	if err != nil {
+		log.Fatalf("Error reading key '%s': %v", filename, err)
+	}
 
+	if krr, ok := rr.(*dns.KEY); ok {
+		if rr.Header().Name != tdns.Globals.Zonename {
+			log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
+				rr.Header().Name, tdns.Globals.Zonename)
+		}
+
+		data := tdns.KeystorePost{
+			Command:    "sig0-mgmt",
+			SubCommand: "add",
+			Zone:       tdns.Globals.Zonename,
+			Keyname:    rr.Header().Name,
+			Keyid:      krr.KeyTag(),
+			Algorithm:  alg,
+			PrivateKey: privkey,
+			KeyRR:      rr.String(),
+		}
+		kr, err := SendKeystore(api, data)
+		if err != nil {
+			fmt.Printf("Error from SendKeystore: %v", err)
+			os.Exit(1)
+		}
+		if kr.Error {
+			fmt.Printf("%s\n", kr.ErrorMsg)
+			os.Exit(1)
+		}
+		if len(kr.Msg) != 0 {
+			fmt.Printf("%s\n", kr.Msg)
+		}
+	}
+	return nil
+}
+
+func Sig0KeyMgmt(cmd string) error {
+	data := tdns.KeystorePost{
+		Command:    "sig0-mgmt",
+		SubCommand: cmd,
+	}
+
+	if cmd == "delete" {
+		data.Keyid = uint16(keyid)
+		data.Zone = tdns.Globals.Zonename
+		data.Keyname = tdns.Globals.Zonename
+	}
+
+	tr, err := SendKeystore(api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
-	if trustval == "list" {
-		var out = []string{"Signer|KeyID|Validated|Trusted|Record"}
-		if len(kr.ChildSig0keys) > 0 {
-			fmt.Printf("Known SIG(0) keys:\n")
-			for k, v := range kr.ChildSig0keys {
+
+	if tr.Error {
+		fmt.Printf("Error from TDNSD: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+
+	switch cmd {
+	case "list":
+		var out = []string{"Signer|KeyID|Algorithm|PrivKey|KEY Record"}
+		if len(tr.Sig0keys) > 0 {
+			fmt.Printf("Known SIG(0) key pairs:\n")
+			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%.70s...\n",
-					tmp[0], tmp[1], v.Validated, v.Trusted, v.Keystr))
+				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%.50s...\n",
+					tmp[0], tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 
-		return nil
+	case "delete":
+		fmt.Printf("%s\n", tr.Msg)
+
+	default:
+		fmt.Printf("Unknown keystore command: \"%s\"\n", cmd)
 	}
 
-	if childSig0Name == "" {
-		fmt.Printf("Error: name of SIG(0) key not specified (with --child)\n")
-		os.Exit(1)
-	}
-	childSig0Name = dns.Fqdn(childSig0Name)
-	if childSig0Keyid == 0 {
-		fmt.Printf("Error: keyid of SIG(0) key not specified (with --keyid)\n")
-		os.Exit(1)
-	}
-
-	mapkey := fmt.Sprintf("%s::%d", childSig0Name, childSig0Keyid)
-	if _, ok := kr.ChildSig0keys[mapkey]; !ok {
-		fmt.Printf("Error: no key with name %s and keyid %d is known.\n",
-			childSig0Name, childSig0Keyid)
-		os.Exit(1)
-	}
-
-	kr, err = SendKeystore(api, tdns.KeystorePost{
-		Command:    "child-sig0-mgmt",
-		SubCommand: trustval,
-		Keyname:    childSig0Name,
-		Keyid:      childSig0Keyid,
-	})
-
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if kr.Error {
-		fmt.Printf("Error: %s\n", kr.ErrorMsg)
-	} else {
-		fmt.Printf("%s\n", kr.Msg)
-	}
 	return nil
 }
 
@@ -170,7 +210,7 @@ func SendKeystore(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreResponse,
 	}
 
 	if kr.Error {
-		return kr, fmt.Errorf("Error from tdnsd: %s\n", kr.ErrorMsg)
+		return kr, fmt.Errorf("%s", kr.ErrorMsg)
 	}
 
 	return kr, nil

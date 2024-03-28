@@ -29,10 +29,11 @@ var delCmd = &cobra.Command{
 
 var delStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Make an API cal to request tdnsd to analyse whether delegation is in sync or not",
+	Short: "Make an API call to request TDNSD to analyse whether delegation is in sync or not",
 	Run: func(cmd *cobra.Command, args []string) {
+	     PrepArgs("zonename")
 	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
-							Command:	"/status",
+							Command:	"status",
 							Zone:		tdns.Globals.Zonename,
 					       })
 	     if err != nil {
@@ -46,6 +47,32 @@ var delStatusCmd = &cobra.Command{
 	     }
 
 	     fmt.Printf("%s\n", dr.Msg)
+	     if dr.InSync {
+	     	fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
+				       dr.Parent, dr.Zone)
+		os.Exit(0)
+	     }
+	     fmt.Printf("Delegation information in parent \"%s\" is NOT in sync with child \"%s\". Changes needed:\n",
+				       dr.Parent, dr.Zone)
+	     for _, rr := range dr.NsAdds {
+	     	 fmt.Printf("ADD NS: %s\n", rr.String())
+	     }
+	     for _, rr := range dr.NsRemoves {
+	     	 fmt.Printf("DEL NS: %s\n", rr.String())
+	     }
+	     for _, rr := range dr.AAdds {
+	     	 fmt.Printf("ADD IPv4 GLUE: %s\n", rr.String())
+	     }
+	     for _, rr := range dr.NsRemoves {
+	     	 fmt.Printf("DEL IPv4 GLUE: %s\n", rr.String())
+	     }
+	     for _, rr := range dr.AAAAAdds {
+	     	 fmt.Printf("ADD IPv6 GLUE: %s\n", rr.String())
+	     }
+	     for _, rr := range dr.AAAARemoves {
+	     	 fmt.Printf("DEL IPv6 GLUE: %s\n", rr.String())
+	     }
+
 	},
 }
 
@@ -54,12 +81,12 @@ var scheme uint8
 
 var delSyncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Make an API cal to request tdnsd to send a DDNS update to sync parent delegation info with child data",
+	Short: "Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
 	         
 
 	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
-							Command:	"/status",
+							Command:	"sync",
 							Scheme:		scheme,
 							Zone:		tdns.Globals.Zonename,
 					       })
@@ -193,6 +220,19 @@ func PrepArgs(required ...string) {
 	      }
 	      tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
+	 case "zonename":
+	      if tdns.Globals.Zonename == "" {
+	      	 fmt.Printf("Error: zone name not specified\n")
+		 os.Exit(1)
+	      }
+	      tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+
+	 case "keyid":
+	      if keyid == 0 {
+	      	 fmt.Printf("Error: key id not specified\n")
+		 os.Exit(1)
+	      }
+
 	 case "parentprimary":
 	      if parpri == "" {
 	      	 fmt.Printf("Error: name of parent primary not specified\n")
@@ -209,6 +249,17 @@ func PrepArgs(required ...string) {
 	      }
 	      if !strings.Contains(childpri, ":") {
 	      	 childpri = net.JoinHostPort(childpri, "53")
+	      }
+
+	 case "filename":
+	      if filename == "" {
+	      	 fmt.Printf("Error: filename not specified\n")
+		 os.Exit(1)
+	      }
+	      _, err := os.ReadFile(filename)
+	      if err != nil {
+	      	 fmt.Printf("Error reading file: %v\n", err)
+		 os.Exit(1)
 	      }
 
 	 default:
@@ -239,7 +290,7 @@ func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.Delegation
         }
 
         if dr.Error {
-                return dr, fmt.Errorf("Error from tdnsd: %s\n", dr.ErrorMsg)
+                return dr, fmt.Errorf(dr.ErrorMsg)
         }
 
         return dr, nil

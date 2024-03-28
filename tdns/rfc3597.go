@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -57,6 +58,7 @@ func (zd *ZoneData) FetchParentData() error {
 
      if zd.Parent == "" {
      	SetupIMR()
+	zd.Logger.Printf("Identifying name of parent zone for %s", zd.ZoneName)
      	zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
 	if err != nil {
 	   return err
@@ -64,6 +66,7 @@ func (zd *ZoneData) FetchParentData() error {
      }
 
      if len(zd.ParentNS) == 0 {
+	zd.Logger.Printf("Fetching NS RRset for %s", zd.Parent)
      	m := new(dns.Msg)
 	m.SetQuestion(zd.Parent, dns.TypeNS)
 
@@ -83,6 +86,7 @@ func (zd *ZoneData) FetchParentData() error {
      }
 
      if len(zd.ParentServers) == 0 {
+	zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", zd.Parent)
      	for _, ns := range zd.ParentNS {
 	    for _, rrtype := range []uint16{ dns.TypeA, dns.TypeAAAA } {
      	    	m := new(dns.Msg)
@@ -98,9 +102,9 @@ func (zd *ZoneData) FetchParentData() error {
 		      	  if rr.Header().Name == ns {
 		      	     switch rr.(type) {
 			     case *dns.A:
-		      	     	zd.ParentServers = append(zd.ParentServers, rr.(*dns.A).A.String())
+		      	     	zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
 			     case *dns.AAAA:
-		      	     	zd.ParentServers = append(zd.ParentServers, rr.(*dns.AAAA).AAAA.String())
+		      	     	zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
 			     default:
 				return fmt.Errorf("Unexpected RRtype: %s (should be %s)",
 				       dns.TypeToString[rr.Header().Rrtype],
@@ -113,5 +117,7 @@ func (zd *ZoneData) FetchParentData() error {
 	   }
 	}
      }
+
+     zd.Logger.Printf("FetchParentData for parent %s: all done", zd.Parent)
      return nil
 }

@@ -111,7 +111,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			_, err := tx.Exec(sqlcmd, owner, rrtypestr, rrcopy.String())
 			if err != nil {
 				log.Printf("Error from tx.Exec(%s, %s, %s): %v",
-					sqlcmd, owner, rrcopy.String())
+					sqlcmd, owner, rrcopy.String(), err)
 				return err
 			}
 
@@ -125,7 +125,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			_, err := tx.Exec(sqlcmd, owner, rrtypestr)
 			if err != nil {
 				log.Printf("Error from tx.Exec(%s, %s, %s): %v",
-					sqlcmd, owner, rrtypestr)
+					sqlcmd, owner, rrtypestr, err)
 				return err
 			}
 

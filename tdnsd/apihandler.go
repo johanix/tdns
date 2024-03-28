@@ -19,7 +19,7 @@ import (
 
 func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
-     kdb := conf.Internal.KeyDB
+        kdb := conf.Internal.KeyDB
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -41,8 +41,57 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		switch kp.Command {
+// 		case "list-dnskey":
+// 			log.Printf("tdnsd keystore list-sig0 inquiry")
+// 			tmp1 := map[string]tdns.TrustAnchor{}
+// 			for _, key := range tdns.TAStore.Map.Keys() {
+// 			    val, _ := tdns.TAStore.Map.Get(key)
+// 			    tmp1[key] = tdns.TrustAnchor{
+// 						Name:		val.Name,
+// 						Validated:	val.Validated,
+// 						Dnskey:		val.Dnskey,
+// 					}
+// 			}
+// 			resp.ChildDnskeys = tmp1
+
+		case "sig0-mgmt":
+			resp, err = kdb.Sig0Mgmt(kp)
+			if err != nil {
+			   log.Printf("Error from Sig0Mgmt(): %v", err)
+			}
+
+		default:
+			log.Printf("Unknown command: %s", kp.Command)
+		}
+	}
+}
+
+func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+
+     kdb := conf.Internal.KeyDB
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var tp tdns.TruststorePost
+		err := decoder.Decode(&tp)
+		if err != nil {
+			log.Println("APItruststore: error decoding command post:", err)
+		}
+
+		log.Printf("API: received /truststore request (cmd: %s subcommand: %s) from %s.\n",
+			tp.Command, tp.SubCommand, r.RemoteAddr)
+
+		resp := tdns.TruststoreResponse{}
+
+		defer func() {
+		      w.Header().Set("Content-Type", "application/json")
+		      json.NewEncoder(w).Encode(resp)
+		}()
+
+		switch tp.Command {
 		case "list-dnskey":
-			log.Printf("tdnsd keystore list-sig0 inquiry")
+			log.Printf("tdnsd truststore list-dnskey inquiry")
 			tmp1 := map[string]tdns.TrustAnchor{}
 			for _, key := range tdns.TAStore.Map.Keys() {
 			    val, _ := tdns.TAStore.Map.Get(key)
@@ -55,13 +104,13 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ChildDnskeys = tmp1
 
 		case "child-sig0-mgmt":
-			resp, err = kdb.ChildSig0Mgmt(kp)
+			resp, err = kdb.ChildSig0Mgmt(tp)
 			if err != nil {
 			   log.Printf("Error from ChildSig0Mgmt(): %v", err)
 			}
 
 		default:
-			log.Printf("Unknown command: %s", kp.Command)
+			log.Printf("Unknown command: %s", tp.Command)
 		}
 	}
 }
@@ -150,7 +199,7 @@ func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch dp.Command {
 		// Find out whether delegation is in sync or not and report on details
 		case "status":
-			log.Printf("APIdelegation: zone %s delegation status inquiry\n")
+			log.Printf("APIdelegation: zone %s delegation status inquiry", dp.Zone)
 			resp, err = AnalyseZoneDelegation(conf, dp)
 			if err != nil {
 				resp.Error = true
@@ -256,6 +305,7 @@ func SetupRouter(conf *Config) *mux.Router {
 		viper.GetString("apiserver.key")).Subrouter()
 	sr.HandleFunc("/ping", tdns.APIping("tdnsd")).Methods("POST")
 	sr.HandleFunc("/keystore", APIkeystore(conf)).Methods("POST")
+	sr.HandleFunc("/truststore", APItruststore(conf)).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/delegation", APIdelegation(conf)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")

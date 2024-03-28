@@ -78,7 +78,7 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher) err
 		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s",
 					     dns.TypeToString[ntype], qname)
 	default:
-		log.Printf("NotifyResponder: Unknown type of notification: NOTIFY(%S)",
+		log.Printf("NotifyResponder: Unknown type of notification: NOTIFY(%s)",
 					     dns.TypeToString[ntype])
 	}
 
