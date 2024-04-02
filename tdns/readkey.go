@@ -16,40 +16,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-//	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
-
-// var filename string
-// 
-// var readkeyCmd = &cobra.Command{
-// 	Use:   "readkey",
-// 	Short: "read a DNS key, either a KEY or DNSKEY. arg is either the .key or the .private file",
-// 	Long: `A longer description that spans multiple lines and likely contains examples
-// and usage of using your command. For example:
-// to quickly create a Cobra application.`,
-// 	Run: func(cmd *cobra.Command, args []string) {
-// 		if filename == "" {
-// 			log.Fatalf("Error: filename with key not specified")
-// 		}
-// 
-// 		k, cs, rr, ktype, err := ReadKey(filename)
-// 		if err != nil {
-// 			log.Fatalf("Error reading key '%s': %v",
-// 				filename, err)
-// 		}
-// 
-// 		fmt.Printf("PubKey: %s\n", rr.String())
-// 		fmt.Printf("PrivKey (%s): %v\n", ktype, k)
-// 		fmt.Printf("crypto.Signer: %v\n", cs)
-// 		fmt.Printf("cs.Public(): %v\n", cs.Public())
-// 	},
-// }
-// 
-// func init() {
-// 	//	rootCmd.AddCommand(readkeyCmd, signMsgCmd)
-// 	readkeyCmd.Flags().StringVarP(&filename, "keyfile", "f", "", "Name of private key file")
-// }
 
 func sigLifetime(t time.Time) (uint32, uint32) {
 	sigJitter := time.Duration(60 * time.Second)
@@ -189,6 +157,73 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 
 	return k, cs, rr, ktype, bpk.PrivateKey, alg, err
 }
+
+func PrepareKey(privkey, pubkey, algorithm string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, uint8, error) {
+	rr, err := dns.NewRR(pubkey)
+	if err != nil {
+		log.Fatalf("Error reading public key '%s': %v",	pubkey, err)
+	}
+
+	src := fmt.Sprintf(`Private-key-format: v1.3
+Algorithm: %d (%s)
+PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
+
+	var k crypto.PrivateKey
+	var cs crypto.Signer
+	var ktype string
+	var alg uint8
+
+	switch rr.(type) {
+	case *dns.DNSKEY:
+		rrk := rr.(*dns.DNSKEY)
+		k, err = rrk.NewPrivateKey(src)
+		if err != nil {
+			log.Fatalf("Error reading private key file '%s': %v", "foo", err)
+		}
+		ktype = "DNSKEY"
+		alg = rrk.Algorithm
+//		bpkstr = rrk.PrivateKeyString(k)
+		log.Printf("DNSKEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+
+	case *dns.KEY:
+		rrk := rr.(*dns.KEY)
+		k, err = rrk.NewPrivateKey(src)
+		if err != nil {
+		   log.Printf("PrepareKey: error parsing KEY private key: %v", err)
+		}
+		ktype = "KEY"
+		alg = rrk.Algorithm
+//		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
+		log.Printf("KEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+		
+	default:
+//		log.Fatalf("Error: rr is of type %v", "foo")
+		return k, cs, rr, ktype, alg, fmt.Errorf("rr is of type %v", "foo")
+	}
+
+//	var bpk BindPrivateKey
+//	err = yaml.Unmarshal([]byte(bpkstr), &bpk)
+//	if err != nil {
+//	       log.Printf("Error from yaml.Unmarshal(): %v", err)
+//	}
+
+//	log.Printf("PrepareKey: k: %v", k)
+
+	switch alg {
+	case dns.RSASHA256, dns.RSASHA512:
+		cs = k.(*rsa.PrivateKey)
+	case dns.ED25519:
+		cs = k.(ed25519.PrivateKey)
+	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
+		cs = k.(*ecdsa.PrivateKey)
+	default:
+		log.Printf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
+		err = fmt.Errorf("no support for algorithm %s yet", dns.AlgorithmToString[alg])
+	}
+
+	return k, cs, rr, ktype, alg, err
+}
+
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 

@@ -55,6 +55,7 @@ UNIQUE (zonename, keyid)
 	"Sig0KeyStore": `CREATE TABLE IF NOT EXISTS 'Sig0KeyStore' (
 id		  INTEGER PRIMARY KEY,
 zonename	  TEXT,
+state		  TEXT,
 keyid		  INTEGER,
 algorithm	  TEXT,
 privatekey	  TEXT,
@@ -96,27 +97,27 @@ func (db *KeyDB) Close() error {
 	return db.DB.Close()
 }
 
-func tableExists(db *sql.DB, name string) bool {
-
-	var match string
-	var err error
-
-	sqlcmd := fmt.Sprintf("SELECT name FROM sqlite_master WHERE type='table' AND name='%s'", name)
-	row := db.QueryRow(sqlcmd)
-
-	switch err = row.Scan(&match); err {
-	case sql.ErrNoRows:
-		fmt.Printf("Error: tableExists: table %s not found.\n", name)
-		return false
-	case nil:
-		// all ok
-		fmt.Printf("tableExists: found table '%s'\n", match)
-		return true
-	default:
-		panic(err)
-	}
-	return false
-}
+// func tableExists(db *sql.DB, name string) bool {
+// 
+// 	var match string
+// 	var err error
+// 
+// 	sqlcmd := fmt.Sprintf("SELECT name FROM sqlite_master WHERE type='table' AND name='%s'", name)
+// 	row := db.QueryRow(sqlcmd)
+// 
+// 	switch err = row.Scan(&match); err {
+// 	case sql.ErrNoRows:
+// 		fmt.Printf("Error: tableExists: table %s not found.\n", name)
+// 		return false
+// 	case nil:
+// 		// all ok
+// 		fmt.Printf("tableExists: found table '%s'\n", match)
+// 		return true
+// 	default:
+// 		panic(err)
+// 	}
+// 	return false
+// }
 
 func dbSetupTables(db *sql.DB) bool {
 	fmt.Printf("Setting up missing tables\n")

@@ -19,6 +19,7 @@ import (
 
 // var filename string
 var keyid int
+var NewState string
 
 var keystoreCmd = &cobra.Command{
 	Use:   "keystore",
@@ -93,15 +94,30 @@ var keystoreSig0DeleteCmd = &cobra.Command{
 	},
 }
 
+var keystoreSig0SetStateCmd = &cobra.Command{
+	Use:   "setstate",
+	Short: "Set the state of and existing SIG(0) key pair in the TDNSD keystore",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("keyid", "zonename", "state")
+
+		err := Sig0KeyMgmt("setstate")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(keystoreCmd)
 	keystoreCmd.AddCommand(keystoreSig0Cmd)
 
 	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd)
-	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd)
+	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv data")
 	keystoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
+	keystoreSig0SetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
+	keystoreSig0SetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
 }
 
 func KeystoreImportKey(filename string) error {
@@ -125,6 +141,7 @@ func KeystoreImportKey(filename string) error {
 			Algorithm:  alg,
 			PrivateKey: privkey,
 			KeyRR:      rr.String(),
+			State:	    "created",
 		}
 		kr, err := SendKeystore(api, data)
 		if err != nil {
@@ -148,10 +165,14 @@ func Sig0KeyMgmt(cmd string) error {
 		SubCommand: cmd,
 	}
 
-	if cmd == "delete" {
+	if cmd == "delete" || cmd == "setstate" {
 		data.Keyid = uint16(keyid)
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
+	}
+
+	if cmd == "setstate" {
+	       data.State = NewState
 	}
 
 	tr, err := SendKeystore(api, data)
@@ -167,18 +188,18 @@ func Sig0KeyMgmt(cmd string) error {
 
 	switch cmd {
 	case "list":
-		var out = []string{"Signer|KeyID|Algorithm|PrivKey|KEY Record"}
+		var out = []string{"Signer|State|KeyID|Algorithm|PrivKey|KEY Record"}
 		if len(tr.Sig0keys) > 0 {
 			fmt.Printf("Known SIG(0) key pairs:\n")
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%.50s...\n",
-					tmp[0], tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
+				out = append(out, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
+					tmp[0], v.State, tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 
-	case "delete":
+	case "delete", "setstate":
 		fmt.Printf("%s\n", tr.Msg)
 
 	default:

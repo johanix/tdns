@@ -23,9 +23,9 @@ type DsyncResult struct {
 // func DsyncDiscovery(child, imr string, verbose bool) ([]*DSYNC, string, error) {
 func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
      var dr DsyncResult
-     if verbose {
-	fmt.Printf("Discovering DSYNC for %s ...\n", child)
-	}
+//     if verbose {
+	log.Printf("Discovering DSYNC for %s ...\n", child)
+//	}
 
 	// Step 1: One level up
 	labels := dns.SplitDomainName(child)
@@ -33,9 +33,9 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 	parent_guess := dns.Fqdn(strings.Join(labels[1:], "."))
 	name := prefix + "._dsync." + parent_guess
 
-	if verbose {
-	   	   fmt.Printf("Trying %s ...\n", name)
-	}
+//	if verbose {
+	   	   log.Printf("Trying %s ...\n", name)
+//	}
 	prrs, parent, err := DsyncQuery(name, imr, verbose)
 	if err != nil {
 		log.Printf("Error: during DsyncQuery: %v\n", err)
@@ -55,9 +55,9 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 			return dr, fmt.Errorf("Misidentified parent for %s: %v", child, parent)
 		}
 		name = prefix + "._dsync." + parent
-		if verbose {
-		   fmt.Printf("Trying %s ...\n", name)
-		}
+//		if verbose {
+		   log.Printf("Trying %s ...\n", name)
+//		}
 		prrs, _, err = DsyncQuery(name, imr, verbose)
 		if err != nil {
 			log.Printf("Error: during DsyncQuery: %v\n", err)
@@ -72,9 +72,9 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 	// Step 3: At the parent apex
 	name = "_dsync." + parent
 
-	if verbose {
-	   fmt.Printf("Trying %s ...\n", name)
-	}
+//	if verbose {
+	   log.Printf("Trying %s ...\n", name)
+//	}
 	
 	prrs, _, err = DsyncQuery(name, imr, verbose)
 	if err != nil {
@@ -93,10 +93,10 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
 	var dsyncrrs []*DSYNC
 	var parent string
 
-	if Globals.Debug {
-		fmt.Printf("TypeDSYNC=%d\n", TypeDSYNC)
-		fmt.Printf("DEBUG: Sending to server %s query:\n%s\n", imr, m.String())
-	}
+//	if Globals.Debug {
+		log.Printf("DsyncQuery: TypeDSYNC=%d\n", TypeDSYNC)
+		log.Printf("DEBUG: Sending to server %s query:\n%s\n", imr, m.String())
+//	}
 
 	c := new(dns.Client)
 	c.Timeout = 5 * time.Second
@@ -114,7 +114,7 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
 		for _, rr := range res.Answer {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
 				if Globals.Debug {
-					fmt.Printf("%s\n", rr.String())
+					log.Printf("%s\n", rr.String())
 				}
 
 				if dsyncrr, ok := prr.Data.(*DSYNC); ok {
@@ -139,7 +139,7 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
 			return nil, parent, nil
 		} else {
 		        if verbose {
-			   fmt.Printf("ignoring authority record: %s", rr.String())
+			   log.Printf("ignoring authority record: %s", rr.String())
 			}
 		}
 	}
@@ -148,6 +148,8 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
 		return dsyncrrs, "", fmt.Errorf("Error: Query for %s DSYNC received rcode: %s",
 			qname, dns.RcodeToString[res.Rcode])
 	}
+
+	log.Printf("DsyncQuery: Found: %v\n", dsyncrrs)
 
 	return dsyncrrs, "", nil
 }
@@ -395,7 +397,7 @@ func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme uint8) (DSYNC
 	}
 	if !found {
 		return dsynctarget, fmt.Errorf("No DSYNC type %s scheme %d destination found for for zone %s",
-			dns.TypeToString, scheme, childzone)
+			dns.TypeToString[dtype], scheme, childzone)
 	}
 
 	if Globals.Verbose {

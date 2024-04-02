@@ -153,6 +153,9 @@ func SyncZoneDelegation(conf *Config, dp tdns.DelegationPost) (string, error) {
 	if resp.InSync {
 	   return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
 	   	  resp.Zone, resp.Parent), nil
+	} else {
+	   log.Printf("Zone \"%s\" delegation data in parent \"%s\" is NOT in sync. Sync action needed.",
+	   	  resp.Zone, resp.Parent)
 	}
 
 	var zd *tdns.ZoneData
@@ -166,7 +169,7 @@ func SyncZoneDelegation(conf *Config, dp tdns.DelegationPost) (string, error) {
 
 	// 1. Check what DSYNC schemes are supported by parent and preference in request
 	const update_scheme = 2
-	dsynctarget, err := tdns.LookupDSYNCTarget(zd.Parent, zd.ParentServers[0],
+	dsynctarget, err := tdns.LookupDSYNCTarget(zd.ZoneName, zd.ParentServers[0],
 		     	    				      dns.StringToType["ANY"], update_scheme)
 	if err != nil {
 	   log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", zd.Parent,zd.ParentServers[0], err)
@@ -210,12 +213,23 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	}
 
 	// 3. Fetch the SIG(0) key from the keystore
+	log.Printf("SyncZoneDelegationViaUpdate: Fetching the private key for %s", zd.ZoneName)
 	_, cs, keyrr, err := kdb.GetSig0Key(zd.ZoneName)
 
 	// 4. Sign the msg
+	log.Printf("SyncZoneDelegationViaUpdate: Signing the DNS UPDATE %s", zd.ZoneName)
 	smsg, err := tdns.SignMsgNG(m, zd.ZoneName, cs, keyrr)
 	
+//	log.Printf("Signed DNS UPDATE msg:\n%s\n", smsg.String())
+
 	// 5. Send the msg
+	log.Printf("SyncZoneDelegationViaUpdate: Sending the signed update to %s (addresses: %v) port %d",
+						 dt.Name, dt.Addresses, dt.Port)
+	err = tdns.SendUpdate(smsg, zd.Parent, dt)
+	if err != nil {
+	   log.Printf("Error from SendUpdate: %v", err)
+	}
+
 	// 6. Check the response
 	// 7. Return result to CLI
 

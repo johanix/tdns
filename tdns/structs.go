@@ -93,6 +93,7 @@ type KeystorePost struct {
 	Algorithm  uint8	// RSASHA256 | ED25519 | etc.
 	PrivateKey string
 	KeyRR      string
+	State	   string
 }
 
 type KeystoreResponse struct {
@@ -248,6 +249,7 @@ type Sig0StoreT struct {
 
 type Sig0Key struct {
 	Name       string
+	State	   string
 	Keyid      uint16
 	Algorithm  string
 	Validated  bool   // has this key been DNSSEC validated

@@ -83,8 +83,7 @@ var delSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
-	         
-
+	     PrepArgs("zonename")
 	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
 							Command:	"sync",
 							Scheme:		scheme,
@@ -204,7 +203,9 @@ func init() {
 
 func PrepArgs(required ...string) {
      for _, arg := range required {
-     	 fmt.Printf("Required: %s\n", arg)
+     	 if tdns.Globals.Debug {
+     	    	fmt.Printf("Required: %s\n", arg)
+	 }
 	 switch arg {
 	 case "parentzone":
 	      if tdns.Globals.ParentZone == "" {
@@ -249,6 +250,18 @@ func PrepArgs(required ...string) {
 	      }
 	      if !strings.Contains(childpri, ":") {
 	      	 childpri = net.JoinHostPort(childpri, "53")
+	      }
+
+	case "state":
+	      if NewState == "" {
+	      	 fmt.Printf("Error: new state of key mnot specified \n")
+		 os.Exit(1)
+	      }
+	      switch NewState {
+	      case "created", "active", "retired":
+	      default:
+	      	 fmt.Printf("Error: key state \"%s\" is not known\n", NewState)
+		 os.Exit(1)
 	      }
 
 	 case "filename":

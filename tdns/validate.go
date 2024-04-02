@@ -134,8 +134,9 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 		if err != nil {
 			zd.Logger.Printf("LookupRRset: Error from LookupChildRRset: %v", err)
 		}
+	} else {
+	  zd.Logger.Printf("*** %s is not a child delegation from %s", qname, zd.ZoneName)
 	}
-	zd.Logger.Printf("*** %s is not a child delegation from %s", qname, zd.ZoneName)
 
 	zd.Logger.Printf("*** owner=%s has RRtypes: ", owner.Name)
 	for k, v := range owner.RRtypes {
@@ -340,9 +341,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 
 	keyrr := sig0key.Key
 
+	log.Printf("tdns.Validate(): signer name: \"%s\"", sig.RRSIG.SignerName)
+
 	err = sig.Verify(&keyrr, msgbuf)
 	if err != nil {
-		log.Printf("= Error from sig.Varify(): %v", err)
+		log.Printf("= Error from sig.Verify(): %v", err)
 		rcode = dns.RcodeBadSig
 	} else {
 		log.Printf("* Update SIG verified correctly")

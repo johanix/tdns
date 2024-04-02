@@ -14,9 +14,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// var imr = "8.8.8.8:53"
-// var pzone, childpri, parpri string
-
 // Only used from CLI (tdns-cli ddns sync)
 // Returns unsynched bool, adds, removes []dns.RR, error
 

@@ -4,6 +4,7 @@
 package main
 
 import (
+        "crypto"
 	"database/sql"
 	"fmt"
 	"log"
@@ -20,12 +21,13 @@ import (
 func (kdb *KeyDB) Sig0Mgmt(kp tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
 	const (
-		addsig0keysql     = `
-INSERT OR REPLACE INTO Sig0KeyStore (zonename, keyid, algorithm, privatekey, keyrr) VALUES (?, ?, ?, ?, ?)`
-		deletesig0keysql  = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
-		getallsig0keyssql = `SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore`
-		getsig0keysql  = `
-SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+		addSig0KeySql     = `
+INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
+		setStateSig0KeySql     = "UPDATE Sig0KeyStore SET state=? WHERE zonename=? AND keyid=?"
+		deleteSig0KeySql  = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+		getAllSig0KeysSql = `SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore`
+		getSig0KeySql  = `
+SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 	)
 
 	var resp = tdns.KeystoreResponse{Time: time.Now()}
@@ -47,18 +49,18 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 
 	switch kp.SubCommand {
 	case "list":
-		rows, err := tx.Query(getallsig0keyssql)
+		rows, err := tx.Query(getAllSig0KeysSql)
 		if err != nil {
-			log.Fatalf("Error from kdb.Query(%s): %v", getallsig0keyssql, err)
+			log.Fatalf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
 
-		var keyname, algorithm, privatekey, keyrrstr string
+		var keyname, state, algorithm, privatekey, keyrrstr string
 		var keyid int
 
 		tmp2 := map[string]tdns.Sig0Key{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &keyid, &algorithm, &privatekey, &keyrrstr)
+			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &privatekey, &keyrrstr)
 			if err != nil {
 				log.Fatalf("Error from rows.Scan(): %v", err)
 			}
@@ -68,6 +70,7 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = tdns.Sig0Key{
 				Name:		keyname,
+				State:		state,
 				Algorithm:	algorithm,
 				PrivateKey:	fmt.Sprintf("%s*****%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
 				Keystr: 	keyrrstr,
@@ -77,8 +80,9 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 		resp.Msg = "Here are all the SIG(0) keys that we know"
 
 	case "add": // AKA "import"
-		res, err = tx.Exec(addsig0keysql, kp.Keyname, kp.Keyid, dns.AlgorithmToString[kp.Algorithm], kp.PrivateKey, kp.KeyRR)
-		log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addsig0keysql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
+		res, err = tx.Exec(addSig0KeySql, kp.Keyname, kp.State, kp.Keyid, dns.AlgorithmToString[kp.Algorithm],
+		     	   			  kp.PrivateKey, kp.KeyRR)
+		log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
 			resp.Error = true
@@ -88,9 +92,25 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 
+	case "setstate":
+		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
+		log.Printf("tx.Exec(%s, %s, %s, %d)", setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
+		if err != nil {
+			log.Printf("Error: %v", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		} else {
+			rows, _ := res.RowsAffected()
+			if rows > 0 {
+			   resp.Msg = fmt.Sprintf("Updated %d rows", rows)
+			} else {
+			   resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
+			}
+		}
+
 	case "delete":
 		// 1. Find key, if not --> error
-		row := tx.QueryRow(getsig0keysql, kp.Keyname, kp.Keyid)
+		row := tx.QueryRow(getSig0KeySql, kp.Keyname, kp.Keyid)
 
 		var keyname string
 		var keyid int
@@ -112,8 +132,8 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 		}
 
 		// 3. Return all good, now untrusted
-		res, err = tx.Exec(deletesig0keysql, kp.Keyname, kp.Keyid)
-		log.Printf("tx.Exec(%s, %s, %d)", deletesig0keysql, kp.Keyname, kp.Keyid)
+		res, err = tx.Exec(deleteSig0KeySql, kp.Keyname, kp.Keyid)
+		log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
  			log.Printf("Error: %v", err)
 			resp.Error = true
@@ -129,142 +149,40 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 	return resp, nil
 }
 
-// func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
-// 	// If a validator trusted key config file is found, read it in.
-// 	tafile := viper.GetString("validator.dnskey.trusted.file")
-// 	if tafile != "" {
-// 		cfgdata, err := os.ReadFile(tafile)
-// 		if err != nil {
-// 			log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
-// 		}
-// 
-// 		var tatmp TAtmp
-// 		//	   var tastore = tdns.NewTAStore()
-// 
-// 		err = yaml.Unmarshal(cfgdata, &tatmp)
-// 		if err != nil {
-// 			log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
-// 		}
-// 
-// 		for k, v := range tatmp {
-// 			k = dns.Fqdn(k)
-// 			rr, err := dns.NewRR(v.Dnskey)
-// 			if err != nil {
-// 				log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
-// 			}
-// 
-// 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-// 				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
-// 				tdns.TAStore.Map.Set(mapkey, tdns.TrustAnchor{
-// 					Name:      k,
-// 					Validated: true, // always trust config
-// 					Dnskey:    *dnskeyrr,
-// 				})
-// 			}
-// 		}
-// 		//	   conf.Internal.TrustedDnskeys = tastore
-// 	}
-// 	return nil
-// }
+func (kdb *KeyDB) GetSig0Key(zonename string) (crypto.PrivateKey, crypto.Signer, *dns.KEY, error) {
+     const (
+     	   fetchSig0PrivKeySql = `
+SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
+     )
 
-// 1. Load SIG(0) public keys from config, write to DB (i.e. config overrides DB)
+     var cs crypto.Signer
+     var k crypto.PrivateKey
+     var rr dns.RR
+     var keyrr *dns.KEY
 
-// func (kdb *KeyDB) LoadKnownSig0Keys() error {
-// 
-// 	const (
-// 		loadsig0sql = "SELECT child, keyid, trusted, keyrr FROM ChildSig0Keys"
-// 		addkeysql   = `
-// INSERT OR REPLACE INTO ChildSig0Keys (child, keyid, trusted, keyrr) VALUES (?, ?, ?, ?)`
-// 		//       	    getallchildsig0keyssql = `
-// 		// SELECT owner, keyid, trusted, validated, keyrr FROM ChildSig0Keys`
-// 		getonechildsig0keyssql = `
-// SELECT child, keyid, validated, trusted, keyrr FROM ChildSig0Keys WHERE owner=? AND keyid=?`
-// 		insertchildsig0key = `
-//        INSERT OR REPLACE INTO ChildSig0Keys(child, keyid, trusted, validated, keyrr)
-//        VALUES (?, ?, ?, ?, ?)`
-// 	)
-// 
-// 	log.Printf("*** Enter LoadKnownSig0Keys() ***")
-// 
-// 	rows, err := kdb.Query(loadsig0sql)
-// 	if err != nil {
-// 		log.Fatalf("Error from kdb.Query(%s): %v", loadsig0sql, err)
-// 	}
-// 	defer rows.Close()
-// 
-// 	var keyname, keyrrstr string
-// 	var keyid int
-// 	var trusted bool
-// 
-// 	for rows.Next() {
-// 		err := rows.Scan(&keyname, &keyid, &trusted, &keyrrstr)
-// 		if err != nil {
-// 			log.Fatalf("Error from rows.Scan(): %v", err)
-// 		}
-// 
-// 		rr, err := dns.NewRR(keyrrstr)
-// 		if err != nil {
-// 			log.Fatalf("Error from dns.NewRR(%s): %v", keyrrstr, err)
-// 		}
-// 
-// 		if keyrr, ok := rr.(*dns.KEY); ok {
-// 			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
-// 			tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
-// 				Name:      keyname,
-// 				Validated: trusted,
-// 				Key:       *keyrr,
-// 			})
-// 		}
-// 	}
-// 
-// 	// If a validator trusted key config file is found, read it in.
-// 	sig0file := viper.GetString("validator.sig0.trusted.file")
-// 	if sig0file != "" {
-// 		cfgdata, err := os.ReadFile(sig0file)
-// 		if err != nil {
-// 			log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
-// 		}
-// 
-// 		var sig0tmp Sig0tmp
-// 
-// 		tx, err := kdb.Begin()
-// 		if err != nil {
-// 			return err
-// 		}
-// 
-// 		err = yaml.Unmarshal(cfgdata, &sig0tmp)
-// 		if err != nil {
-// 			log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
-// 		}
-// 
-// 		for k, v := range sig0tmp {
-// 			k = dns.Fqdn(k)
-// 			rr, err := dns.NewRR(v.Key)
-// 			if err != nil {
-// 				log.Fatalf("Error from dns.NewRR(%s): %v", v.Key, err)
-// 			}
-// 
-// 			if keyrr, ok := rr.(*dns.KEY); ok {
-// 				log.Printf("* LoadChildSig0Keys: loading key %s", k)
-// 				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
-// 				tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
-// 					Name:      k,
-// 					Keyid:     keyrr.KeyTag(),
-// 					Validated: true, // always trust config
-// 					Trusted:   true, // always trust config
-// 					Key:       *keyrr,
-// 				})
-// 				_, err = tx.Exec(insertchildsig0key, k, keyrr.KeyTag(), true, true, keyrr.String())
-// 				if err != nil {
-// 					log.Printf("LoadKnownSigKeys: Error from tx.Exec(%s): %v",
-// 						insertchildsig0key, err)
-// 					continue
-// 				}
-// 			} else {
-// 				log.Printf("LoadKnownSig0Keys: Key %s is not a KEY?", rr.String())
-// 			}
-// 		}
-// 		tx.Commit()
-// 	}
-// 	return nil
-// }
+     tx, err := kdb.Begin()
+	if err != nil {
+		return k, cs, keyrr, err
+	}
+
+		rows, err := tx.Query(fetchSig0PrivKeySql, zonename)
+		if err != nil {
+			log.Fatalf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+		}
+		defer rows.Close()
+
+		var algorithm, privatekey, keyrrstr string
+		var keyid int
+
+		for rows.Next() {
+			err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
+			if err != nil {
+				log.Fatalf("Error from rows.Scan(): %v", err)
+			}
+			k, cs, rr, _, _, err = tdns.PrepareKey(privatekey, keyrrstr, algorithm)
+		}
+
+		keyrr = rr.(*dns.KEY)
+
+		return k, cs, keyrr, err     
+}
