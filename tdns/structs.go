@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/orcaman/concurrent-map/v2"
+	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type ZoneStore uint8
@@ -90,10 +90,10 @@ type KeystorePost struct {
 	Zone       string
 	Keyname    string
 	Keyid      uint16
-	Algorithm  uint8	// RSASHA256 | ED25519 | etc.
+	Algorithm  uint8 // RSASHA256 | ED25519 | etc.
 	PrivateKey string
 	KeyRR      string
-	State	   string
+	State      string
 }
 
 type KeystoreResponse struct {
@@ -154,7 +154,7 @@ type DelegationResponse struct {
 	Time        time.Time
 	Status      string
 	Zone        string
-	Parent	    string
+	Parent      string
 	InSync      bool
 	NsAdds      []dns.NS
 	NsRemoves   []dns.NS
@@ -249,7 +249,7 @@ type Sig0StoreT struct {
 
 type Sig0Key struct {
 	Name       string
-	State	   string
+	State      string
 	Keyid      uint16
 	Algorithm  string
 	Validated  bool   // has this key been DNSSEC validated
