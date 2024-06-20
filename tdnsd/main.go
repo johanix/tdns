@@ -85,11 +85,6 @@ func main() {
 	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
 	go ValidatorEngine(&conf, stopch)
 
-	err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-	if err != nil {
-		log.Fatalf("Error parsing zones: %v", err)
-	}
-
 	err = tdns.RegisterNotifyRR()
 	if err != nil {
 		log.Fatalf("Error registering new RR types: %v", err)
@@ -98,6 +93,16 @@ func main() {
 	err = tdns.RegisterDsyncRR()
 	if err != nil {
 		log.Fatalf("Error registering new RR types: %v", err)
+	}
+
+	err = tdns.RegisterDelegRR()
+	if err != nil {
+		log.Fatalf("Error registering new RR types: %v", err)
+	}
+
+	err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
+	if err != nil {
+		log.Fatalf("Error parsing zones: %v", err)
 	}
 
 	apistopper := make(chan struct{}) //
@@ -132,7 +137,7 @@ type TmpSig0Key struct {
 }
 
 func ParseConfig(conf *Config) error {
-     	log.Printf("Enter ParseConfig")
+	log.Printf("Enter ParseConfig")
 	viper.SetConfigFile(tdns.DefaultCfgFile)
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -241,5 +246,3 @@ func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
 
 	return nil
 }
-
-

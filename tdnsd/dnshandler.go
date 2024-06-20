@@ -44,8 +44,8 @@ func DnsEngine(conf *Config) error {
 }
 
 func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
-        dnsupdateq := conf.Internal.DnsUpdateQ
-        dnsnotifyq := conf.Internal.DnsNotifyQ
+	dnsupdateq := conf.Internal.DnsUpdateQ
+	dnsnotifyq := conf.Internal.DnsNotifyQ
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
@@ -59,15 +59,15 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		switch r.Opcode {
 		case dns.OpcodeNotify:
 			// A DNS NOTIFY may trigger time consuming outbound queries
-			dnsnotifyq <- DnsHandlerRequest{ ResponseWriter: w, Msg: r, Qname: qname }
+			dnsnotifyq <- DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
-               case dns.OpcodeUpdate:
+		case dns.OpcodeUpdate:
 			// A DNS Update may trigger time consuming outbound queries
-			dnsupdateq <- DnsHandlerRequest{ ResponseWriter: w, Msg: r, Qname: qname }
+			dnsupdateq <- DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
-                        return
+			return
 
 		case dns.OpcodeQuery:
 			qtype := r.Question[0].Qtype
@@ -79,14 +79,14 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
-			   // We are not auth for this zone, so no xfrs possible
-			   m := new(dns.Msg)
-			   m.SetReply(r)
-			   m.MsgHdr.Rcode = dns.RcodeNotAuth
-			   w.WriteMsg(m)
-			   return
+				// We are not auth for this zone, so no xfrs possible
+				m := new(dns.Msg)
+				m.SetReply(r)
+				m.MsgHdr.Rcode = dns.RcodeNotAuth
+				w.WriteMsg(m)
+				return
 			}
-			
+
 			log.Printf("DnsHandler: Qname is '%s', which is not a known zone.", qname)
 			known_zones := []string{}
 			for _, zname := range tdns.Zones.Keys() {
@@ -155,9 +155,9 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 			//			m.Extra = append(m.Extra, glue.RRSIGs...)
 		}
 	case tdns.TypeDSYNC, tdns.TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
-	     dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
-	     dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
-	     dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
+		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
+		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
+		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
 		if rrset, ok := apex.RRtypes[qtype]; ok {
 			if len(rrset.RRs) > 0 {
 				m.Answer = append(m.Answer, rrset.RRs...)
@@ -186,7 +186,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		// Anything special?
 		switch qtype {
 		case dns.TypeNS:
-		     m.Ns = []dns.RR{}	// authority not needed when querying for zone NS
+			m.Ns = []dns.RR{} // authority not needed when querying for zone NS
 		}
 
 	default:
@@ -243,7 +243,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
 			w.WriteMsg(m)
 			return nil
-		} 
+		}
 		origqname = qname
 		qname = wildqname
 	}
@@ -318,7 +318,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	// log.Printf("---> Checking for exact match qname+qtype %s %s", qname, dns.TypeToString[qtype])
 	switch qtype {
 	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, tdns.TypeNOTIFY, tdns.TypeDSYNC,
-		dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
+		tdns.TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
 		if _, ok := owner.RRtypes[qtype]; ok && len(owner.RRtypes[qtype].RRs) > 0 {
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
@@ -372,4 +372,3 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	return nil
 }
-

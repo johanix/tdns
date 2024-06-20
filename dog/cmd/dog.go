@@ -137,4 +137,8 @@ func init() {
 	if err != nil {
 		fmt.Printf("Error registering DSYNC RR type: %v\n", err)
 	}
+	err = tdns.RegisterDelegRR()
+	if err != nil {
+		fmt.Printf("Error registering DELEG RR type: %v\n", err)
+	}
 }
