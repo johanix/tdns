@@ -274,9 +274,6 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 	checkedForUnchanged := false
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		if zd.ZoneName == "dnslab." && rr.Header().Name == "dnslab." {
-			zd.Logger.Printf("ReadZoneFile: %s: rr: %s", zd.ZoneName, rr.String())
-		}
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true

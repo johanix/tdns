@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
-	"github.com/orcaman/concurrent-map/v2"
+	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type RefreshCounter struct {
@@ -19,10 +19,10 @@ type RefreshCounter struct {
 	SOARefresh     uint32
 	CurRefresh     uint32
 	IncomingSerial uint32
-	KeepFunc       func(uint16) bool
-	Upstream       string
-	Downstreams    []string
-	Zonefile       string
+	// KeepFunc       func(uint16) bool
+	Upstream    string
+	Downstreams []string
+	Zonefile    string
 }
 
 func RefreshEngine(conf *Config, stopch chan struct{}) {
@@ -48,7 +48,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	var upstream, zone string
 	var downstreams []string
 	var refresh uint32
-//	var rc *RefreshCounter
+	//	var rc *RefreshCounter
 	var updated bool
 	var err error
 	var bd BumperData
@@ -64,8 +64,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 		case zr = <-zonerefch:
 			zone = zr.Name
 			resp := tdns.RefresherResponse{
-					Zone:	zr.Name,
-			        }
+				Zone: zr.Name,
+			}
 			if zone != "" {
 				if zonedata, exist = tdns.Zones.Get(zone); exist {
 					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'",
@@ -84,32 +84,33 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					updated, err = zonedata.Refresh(zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
-									   zone, err)
+							zone, err)
 					}
-//					if updated {
-//						if resetSoaSerial {
-//							zonedata.CurrentSerial = uint32(time.Now().Unix())
-//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-//								zone, zonedata.CurrentSerial)
-//						}
-//						zonedata.NotifyDownstreams()
-//					}
+					//					if updated {
+					//						if resetSoaSerial {
+					//							zonedata.CurrentSerial = uint32(time.Now().Unix())
+					//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
+					//								zone, zonedata.CurrentSerial)
+					//						}
+					//						zonedata.NotifyDownstreams()
+					//					}
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
 					zonedata = &tdns.ZoneData{
-						ZoneName:    zone,
-						ZoneStore:   zr.ZoneStore,
-						Logger:      log.Default(),
-						Upstream:    zr.Primary,
-						Downstreams: zr.Notify,
-						Zonefile:    zr.Zonefile,
-						ZoneType:    zr.ZoneType,
-						Data:	     cmap.New[tdns.OwnerData](),
+						ZoneName:       zone,
+						ZoneStore:      zr.ZoneStore,
+						Logger:         log.Default(),
+						Upstream:       zr.Primary,
+						Downstreams:    zr.Notify,
+						Zonefile:       zr.Zonefile,
+						ZoneType:       zr.ZoneType,
+						DelegationSync: zr.DelegationSync,
+						Data:           cmap.New[tdns.OwnerData](),
 					}
 					updated, err = zonedata.Refresh(zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
-									   zone, err)
+							zone, err)
 						continue // cannot do much else
 					}
 
@@ -125,7 +126,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 					// not refreshing from file all the time. use reload
 					if zr.ZoneType == tdns.Primary {
-					   refresh = 86400 // 24h
+						refresh = 86400 // 24h
 					}
 
 					refreshCounters[zone] = &RefreshCounter{
@@ -137,14 +138,14 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					}
 
 					tdns.Zones.Set(zone, zonedata)
-//					if updated {
-//						if resetSoaSerial {
-//							zonedata.CurrentSerial = uint32(time.Now().Unix())
-//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-//								zone, zonedata.CurrentSerial)
-//						}
-//						zonedata.NotifyDownstreams()
-//					}
+					//					if updated {
+					//						if resetSoaSerial {
+					//							zonedata.CurrentSerial = uint32(time.Now().Unix())
+					//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
+					//								zone, zonedata.CurrentSerial)
+					//						}
+					//						zonedata.NotifyDownstreams()
+					//					}
 				}
 
 				if updated {
@@ -154,14 +155,14 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 							zone, zonedata.CurrentSerial)
 					}
 					zonedata.NotifyDownstreams()
-				}				
+				}
 			}
 			if zr.Response != nil {
-			   zd, _ := tdns.Zones.Get(zr.Name)
-			   resp.Msg = fmt.Sprintf("RefreshEngine: %s zone %s refreshing (force=%v)",
-			   	      				  tdns.ZoneTypeToString[zd.ZoneType], zr.Name,
-								  zr.Force)
-			   zr.Response <- resp
+				zd, _ := tdns.Zones.Get(zr.Name)
+				resp.Msg = fmt.Sprintf("RefreshEngine: %s zone %s refreshing (force=%v)",
+					tdns.ZoneTypeToString[zd.ZoneType], zr.Name,
+					zr.Force)
+				zr.Response <- resp
 			}
 
 		case <-ticker.C:

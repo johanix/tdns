@@ -203,14 +203,15 @@ type Api struct {
 }
 
 type ZoneRefresher struct {
-	Name      string
-	ZoneType  ZoneType // primary | secondary
-	Primary   string
-	Notify    []string
-	ZoneStore ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile  string
-	Force     bool // force refresh, ignoring SOA serial
-	Response  chan RefresherResponse
+	Name           string
+	ZoneType       ZoneType // primary | secondary
+	Primary        string
+	Notify         []string
+	ZoneStore      ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile       string
+	DelegationSync bool
+	Force          bool // force refresh, ignoring SOA serial
+	Response       chan RefresherResponse
 }
 
 type RefresherResponse struct {

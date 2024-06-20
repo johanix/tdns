@@ -118,6 +118,7 @@ func main() {
 	go UpdaterEngine(&conf)
 	go DnsUpdateResponderEngine(&conf)
 	go DnsEngine(&conf)
+	go DelegationSyncEngine(&conf)
 
 	mainloop(&conf)
 }
@@ -233,12 +234,13 @@ func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
 		}
 
 		zrch <- tdns.ZoneRefresher{
-			Name:      dns.Fqdn(zname),
-			ZoneType:  zonetype, // primary | secondary
-			Primary:   conf.Primary,
-			ZoneStore: zonestore,
-			Notify:    conf.Notify,
-			Zonefile:  conf.Zonefile,
+			Name:           dns.Fqdn(zname),
+			ZoneType:       zonetype, // primary | secondary
+			Primary:        conf.Primary,
+			ZoneStore:      zonestore,
+			Notify:         conf.Notify,
+			Zonefile:       conf.Zonefile,
+			DelegationSync: conf.DelegationSync,
 		}
 	}
 

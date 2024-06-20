@@ -49,6 +49,8 @@ type BindPrivateKey struct {
 var keystoreSig0AddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a new SIG(0) key pair to the keystore",
+	Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
+containing either the private or the public SIG(0) key and the name of the zone.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "childzone")
 		err := KeystoreImportKey(filename)
@@ -114,7 +116,12 @@ func init() {
 	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd)
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
-	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv data")
+	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreSig0ImportCmd.MarkFlagRequired("file")
+	keystoreSig0AddCmd.MarkFlagRequired("file")
+	keystoreSig0AddCmd.MarkFlagRequired("zone")
+	keystoreSig0ImportCmd.MarkFlagRequired("zone")
 	keystoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	keystoreSig0SetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	keystoreSig0SetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
@@ -141,7 +148,7 @@ func KeystoreImportKey(filename string) error {
 			Algorithm:  alg,
 			PrivateKey: privkey,
 			KeyRR:      rr.String(),
-			State:	    "created",
+			State:      "created",
 		}
 		kr, err := SendKeystore(api, data)
 		if err != nil {
@@ -172,7 +179,7 @@ func Sig0KeyMgmt(cmd string) error {
 	}
 
 	if cmd == "setstate" {
-	       data.State = NewState
+		data.State = NewState
 	}
 
 	tr, err := SendKeystore(api, data)

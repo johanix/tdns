@@ -68,15 +68,16 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	KeyDB         *KeyDB
-	APIStopCh     chan struct{}
-	RefreshZoneCh chan tdns.ZoneRefresher
-	BumpZoneCh    chan BumperData
-	ValidatorCh   chan tdns.ValidatorRequest
-	ScannerQ      chan ScanRequest
-	UpdateQ       chan UpdateRequest
-	DnsUpdateQ    chan DnsHandlerRequest
-	DnsNotifyQ    chan DnsHandlerRequest
+	KeyDB           *KeyDB
+	APIStopCh       chan struct{}
+	RefreshZoneCh   chan tdns.ZoneRefresher
+	BumpZoneCh      chan BumperData
+	ValidatorCh     chan tdns.ValidatorRequest
+	ScannerQ        chan ScanRequest
+	UpdateQ         chan UpdateRequest
+	DnsUpdateQ      chan DnsHandlerRequest
+	DnsNotifyQ      chan DnsHandlerRequest
+	DelegationSyncQ chan DelSyncRequest
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

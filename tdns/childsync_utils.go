@@ -106,8 +106,8 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 
 	if oldapex == nil {
 		if !viper.GetBool("childsync.sync-on-boot") {
-		   	zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
-			zd.ZoneName)
+			zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
+				zd.ZoneName)
 			return false, []dns.RR{}, []dns.RR{}, nil
 		}
 		zd.Logger.Printf("Zone %s delegation sync-on-boot: faking empty old apex data", zd.ZoneName)
@@ -136,8 +136,8 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 		zd.Logger.Printf("*** Note: configured NOT to update NS RRset.\n")
 	}
 
-//	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs,
-//		oldapex.RRtypes[dns.TypeNS].RRs, zd.ZoneName)
+	//	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs,
+	//		oldapex.RRtypes[dns.TypeNS].RRs, zd.ZoneName)
 	new_ns_inb, _ := BailiwickNS(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs)
 	old_ns_inb, _ := BailiwickNS(zd.ZoneName, oldapex.RRtypes[dns.TypeNS].RRs)
 	for _, ns := range new_ns_inb {
@@ -211,14 +211,14 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
 	return true, adds, removes, nil
 }
 
-// This is only called from the CLI command "tdns-cli ddns sync"
-
+// This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
+// command line rather than the one in the keystore. Not to be used by TDNSD.
 func ChildSendDdnsSync(pzone string, target DSYNCTarget, adds, removes []dns.RR) error {
-//	const update_scheme = 2
-//	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"], update_scheme)
-//	if err != nil {
-//		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", pzone, parpri, err)
-//	}
+	//	const update_scheme = 2
+	//	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"], update_scheme)
+	//	if err != nil {
+	//		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", pzone, parpri, err)
+	//	}
 
 	msg, err := CreateUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
@@ -314,9 +314,9 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (dns.Msg, error)
 
 // Only used in the CLI version
 func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.RR, []dns.RR) {
-      if Globals.Debug {
-//	fmt.Printf("*** ComputeRRDiff(%s, %s)\n", owner, dns.TypeToString[rrtype])
-	fmt.Printf("*** ComputeRRDiff(%s, %s, %s, %s)\n", childpri, parpri, owner, dns.TypeToString[rrtype])
+	if Globals.Debug {
+		//	fmt.Printf("*** ComputeRRDiff(%s, %s)\n", owner, dns.TypeToString[rrtype])
+		fmt.Printf("*** ComputeRRDiff(%s, %s, %s, %s)\n", childpri, parpri, owner, dns.TypeToString[rrtype])
 	}
 	rrname := dns.TypeToString[rrtype]
 	rrs_parent, err := AuthQuery(owner, parpri, rrtype)
@@ -356,9 +356,9 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 	return differ, adds, removes
 }
 
-
 // XXX: Should be replaced by four calls: one per child and parent primary to get
-//      the NS RRsets and one to new ComputeBailiwickNS() that takes a []dns.RR + zone name
+//
+//	the NS RRsets and one to new ComputeBailiwickNS() that takes a []dns.RR + zone name
 func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 	ns_parent, err := AuthQuery(owner, parpri, dns.TypeNS)
 	if err != nil {
@@ -391,7 +391,7 @@ func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 }
 
 func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
-        var ns_inbailiwick []string
+	var ns_inbailiwick []string
 	for _, rr := range nsrrs {
 		if ns, ok := rr.(*dns.NS); ok {
 			if strings.HasSuffix(ns.Ns, zonename) {
@@ -435,90 +435,88 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 }
 
 func (zd *ZoneData) SyncWithParent(adds, removes []dns.RR) error {
-     zd.Logger.Printf("SyncWithParent: zone=%s adds=%v removes=%v", zd.ZoneName, adds, removes)
+	zd.Logger.Printf("SyncWithParent: zone=%s adds=%v removes=%v", zd.ZoneName, adds, removes)
 
-     scheme, dsyncrr, err := zd.BestSyncScheme()
-     if err != nil {
-     	return err
-     }
-     zd.Logger.Printf("*** SyncWithParent: will try %s scheme using: %s", scheme, dsyncrr)
+	scheme, dsyncrr, err := zd.BestSyncScheme()
+	if err != nil {
+		return err
+	}
+	zd.Logger.Printf("*** SyncWithParent: will try %s scheme using: %s", scheme, dsyncrr)
 
-     
-
-     return nil
+	// Ok, so let's do it:
+	return nil
 }
 
-// Return scheme (string), targetdsync (dns.RR), error)
+// Find the best scheme (from the POV of the child) to sync the deletation with the parent
 func (zd *ZoneData) BestSyncScheme() (string, *DSYNC, error) {
-     var active_drr *DSYNC
-     var active_scheme string
+	var active_drr *DSYNC
+	var active_scheme string
 
-     zd.Logger.Printf("BestSyncScheme: imr=%s zone=%s", Globals.IMR, zd.ZoneName)
+	zd.Logger.Printf("BestSyncScheme: imr=%s zone=%s", Globals.IMR, zd.ZoneName)
 
-     // dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
-     dsync_res, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
-     if err != nil {
-     	zd.Logger.Printf("SyncWithParent: Error from DsyncDiscovery(): %v", err)
-	return "", active_drr, err
-     }
-     if len(dsync_res.Rdata) == 0 {
-     	msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
-     	zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
-	return "", active_drr, fmt.Errorf("Error: %s", msg)
-     }
-     schemes := viper.GetStringSlice("childsync.schemes")
-     if len(schemes) == 0 {
-     	zd.Logger.Printf("SyncWithParent: Error: no syncronization schemes configured")
-	return "", active_drr, fmt.Errorf("No synchronizations schemes configured for child %s", zd.ZoneName)
-     }
+	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
+	dsync_res, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
+	if err != nil {
+		zd.Logger.Printf("SyncWithParent: Error from DsyncDiscovery(): %v", err)
+		return "", active_drr, err
+	}
+	if len(dsync_res.Rdata) == 0 {
+		msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
+		zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
+		return "", active_drr, fmt.Errorf("Error: %s", msg)
+	}
+	schemes := viper.GetStringSlice("childsync.schemes")
+	if len(schemes) == 0 {
+		zd.Logger.Printf("SyncWithParent: Error: no syncronization schemes configured for child %s", zd.ZoneName)
+		return "", active_drr, fmt.Errorf("No synchronizations schemes configured for child %s", zd.ZoneName)
+	}
 
-     for _, scheme := range schemes {
-     	 scheme = strings.ToLower(scheme)
+	for _, scheme := range schemes {
+		scheme = strings.ToLower(scheme)
 
-	 switch scheme {
-	 case "update":
-	      log.Printf("BestSyncScheme(): checking UPDATE alternative:")
-	      for _, drr := range dsync_res.Rdata {
-	      	  if drr.Scheme == 2 {
-		     active_drr = drr
-		     break
-		  }
-	      }
-	      if active_drr != nil {
-	      	 log.Printf("BestSyncSchemes: found working UPDATE config, happy with that.")
-	      	 active_scheme = "UPDATE"
-	      	 break
-	      }
-	      
-	 case "notify":
-	      if active_scheme != "" {
-	      	 break
-	      }
-	      log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
-	      for _, drr := range dsync_res.Rdata {
-	      	  if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
-		     active_drr = drr
-		     break
-		  }
-	      }
-	      if active_drr != nil {
-	      	 active_scheme = "NOTIFY"
-	      	 break
-	      }
+		switch scheme {
+		case "update":
+			log.Printf("BestSyncScheme(): checking UPDATE alternative:")
+			for _, drr := range dsync_res.Rdata {
+				if drr.Scheme == 2 {
+					active_drr = drr
+					break
+				}
+			}
+			if active_drr != nil {
+				log.Printf("BestSyncSchemes: found working UPDATE config, happy with that.")
+				active_scheme = "UPDATE"
+				break
+			}
 
-	 default:
-		msg := fmt.Sprintf("Error: zone %s unknown child scheme: %s", zd.ZoneName, scheme)
-		zd.Logger.Printf(msg)
-		return "", active_drr, fmt.Errorf(msg)
-	 }
-     }
+		case "notify":
+			if active_scheme != "" {
+				break
+			}
+			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
+			for _, drr := range dsync_res.Rdata {
+				if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
+					active_drr = drr
+					break
+				}
+			}
+			if active_drr != nil {
+				active_scheme = "NOTIFY"
+				break
+			}
 
-     zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:",
-     				       zd.ZoneName, dsync_res.Parent)
-     for _, drr := range dsync_res.Rdata {
-     	 zd.Logger.Printf("%s", drr.String())
-     }
-     zd.Logger.Printf("BestSyncScheme: Best DSYNC alternative: %s:", active_drr.String())
-     return active_scheme, active_drr, nil
+		default:
+			msg := fmt.Sprintf("Error: zone %s unknown child scheme: %s", zd.ZoneName, scheme)
+			zd.Logger.Printf(msg)
+			return "", active_drr, fmt.Errorf(msg)
+		}
+	}
+
+	zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:",
+		zd.ZoneName, dsync_res.Parent)
+	for _, drr := range dsync_res.Rdata {
+		zd.Logger.Printf("%s", drr.String())
+	}
+	zd.Logger.Printf("BestSyncScheme: Best DSYNC alternative: %s:", active_drr.String())
+	return active_scheme, active_drr, nil
 }
-

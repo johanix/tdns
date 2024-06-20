@@ -122,12 +122,15 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		return false, err
 	}
 
+	zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.DelegationSync)
+
 	if !updated {
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
 	if zd.DelegationSync {
 		// Detect whether the delegation data has changed.
+		zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
 		delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
@@ -201,6 +204,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 
 	if zd.DelegationSync {
 		// Detect whether the delegation data has changed.
+		zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
 		delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
