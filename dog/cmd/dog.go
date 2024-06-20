@@ -7,6 +7,7 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -30,7 +31,7 @@ var rootCmd = &cobra.Command{
 
 		var cleanArgs []string
 		var do_bit = false
-//		var err error
+		//		var err error
 		var serial uint32
 
 		for _, arg := range args {
@@ -49,18 +50,18 @@ var rootCmd = &cobra.Command{
 			}
 
 			if strings.HasPrefix(ucarg, "IXFR=") {
-			   serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
-			   tmp, err := strconv.Atoi(serialstr)
-			   if err != nil {
-			      log.Fatalf("Error: %v", err)
-			   }
-			   serial = uint32(tmp)
-			   fmt.Printf("RRtype is ixfr, using base serial %d\n", serial)
+				serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+				tmp, err := strconv.Atoi(serialstr)
+				if err != nil {
+					log.Fatalf("Error: %v", err)
+				}
+				serial = uint32(tmp)
+				fmt.Printf("RRtype is ixfr, using base serial %d\n", serial)
 			}
 
 			if ucarg == "+DNSSEC" {
-			   do_bit = true
-			   continue
+				do_bit = true
+				continue
 			}
 
 			cleanArgs = append(cleanArgs, arg)
@@ -77,7 +78,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		server = server + ":" + port
+		server = net.JoinHostPort(server, port)
 
 		for _, qname := range cleanArgs {
 			fmt.Printf("dog processing arg \"%s\"\n", qname)

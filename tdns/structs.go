@@ -59,6 +59,7 @@ type ZoneData struct {
 	Upstream       string   // primary from where zone is xfrred
 	Downstreams    []string // secondaries that we notify
 	Zonefile       string
+	DelegationSync bool     // should we (as child) attempt to sync delegation w/ parent?
 	Parent         string   // name of parentzone (if filled in)
 	ParentNS       []string // names of parent nameservers
 	ParentServers  []string // addresses of parent nameservers

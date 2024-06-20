@@ -17,7 +17,7 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	var updated bool
 
 	zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
-					ZoneTypeToString[zd.ZoneType], force)
+		ZoneTypeToString[zd.ZoneType], force)
 
 	switch zd.ZoneType {
 	case Primary:
@@ -36,20 +36,13 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 			return false, err
 		}
 
-		if force {
-			zd.Logger.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased",
-				zd.ZoneName)
-			updated, err = zd.FetchFromUpstream(verbose)
-			if err != nil {
-				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
-				return false, err
+		if do_transfer || force {
+			if do_transfer {
+				zd.Logger.Printf("Refresher: %s: upstream serial has increased: %d-->%d",
+					zd.ZoneName, zd.IncomingSerial, upstream_serial)
+			} else if force {
+				zd.Logger.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased", zd.ZoneName)
 			}
-			return updated, nil // zone updated, no error
-		}
-
-		if do_transfer {
-			zd.Logger.Printf("Refresher: %s: upstream serial has increased: %d-->%d",
-				zd.ZoneName, zd.IncomingSerial, upstream_serial)
 			updated, err = zd.FetchFromUpstream(verbose)
 			if err != nil {
 				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
@@ -113,14 +106,14 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
 
 	zonedata := ZoneData{
-		ZoneName:  zd.ZoneName,
-		ZoneStore: zd.ZoneStore,
-		ZoneType:  zd.ZoneType,
-		XfrType:   zd.XfrType,
-		IncomingSerial:	zd.IncomingSerial,
-		CurrentSerial:	zd.CurrentSerial,
-		Logger:    zd.Logger,
-		Verbose:   zd.Verbose,
+		ZoneName:       zd.ZoneName,
+		ZoneStore:      zd.ZoneStore,
+		ZoneType:       zd.ZoneType,
+		XfrType:        zd.XfrType,
+		IncomingSerial: zd.IncomingSerial,
+		CurrentSerial:  zd.CurrentSerial,
+		Logger:         zd.Logger,
+		Verbose:        zd.Verbose,
 	}
 
 	updated, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
@@ -130,35 +123,37 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	}
 
 	if !updated {
-	   return false, nil	// new zone not loaded, but not returning any error
+		return false, nil // new zone not loaded, but not returning any error
 	}
 
-	// Detect whether the delegation data has changed.
-	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
-	if err != nil {
-		zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
-		return false, err
-	}
-	if delchanged {
-	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed:", zd.ZoneName)
-	   for _, rr := range adds {
-	       zd.Logger.Printf("ADD: %s", rr.String())
-	   }
-	   for _, rr := range removes {
-	       zd.Logger.Printf("DEL: %s", rr.String())
-	   }
-	   err = zd.SyncWithParent(adds, removes)
-	   if err != nil {
-	      log.Printf("Error from SyncWithParent(): %v", err)
-	   }
-	} else {
-	   zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+	if zd.DelegationSync {
+		// Detect whether the delegation data has changed.
+		delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
+		if err != nil {
+			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
+			return false, err
+		}
+		if delchanged {
+			zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed:", zd.ZoneName)
+			for _, rr := range adds {
+				zd.Logger.Printf("ADD: %s", rr.String())
+			}
+			for _, rr := range removes {
+				zd.Logger.Printf("DEL: %s", rr.String())
+			}
+			err = zd.SyncWithParent(adds, removes)
+			if err != nil {
+				log.Printf("Error from SyncWithParent(): %v", err)
+			}
+		} else {
+			zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+		}
 	}
 
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
 		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir,
-							      zd.ZoneName))
+			zd.ZoneName))
 	}
 
 	zd.mu.Lock()
@@ -182,14 +177,14 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	log.Printf("Transferring zone %s via AXFR from %s\n", zd.ZoneName, zd.Upstream)
 
 	zonedata := ZoneData{
-		ZoneName:  zd.ZoneName,
-		ZoneType:  zd.ZoneType,
-		ZoneStore: zd.ZoneStore,
-		XfrType:   zd.XfrType,
-		IncomingSerial:	zd.IncomingSerial,
-		CurrentSerial:	zd.CurrentSerial,
-		Logger:    zd.Logger,
-		Verbose:   zd.Verbose,
+		ZoneName:       zd.ZoneName,
+		ZoneType:       zd.ZoneType,
+		ZoneStore:      zd.ZoneStore,
+		XfrType:        zd.XfrType,
+		IncomingSerial: zd.IncomingSerial,
+		CurrentSerial:  zd.CurrentSerial,
+		Logger:         zd.Logger,
+		Verbose:        zd.Verbose,
 	}
 
 	_, err := zonedata.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
@@ -200,28 +195,33 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 
 	if zonedata.CurrentSerial == zd.CurrentSerial {
 		zd.Logger.Printf("FetchFromUpstream: zone %s: SOA serial is unchanged (%d)",
-						     zd.ZoneName, zd.CurrentSerial)
-	   	return false, nil
+			zd.ZoneName, zd.CurrentSerial)
+		return false, nil
 	}
 
-	// Detect whether the delegation data has changed.
-	delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
-	if err != nil {
-		zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
-		return false, err
+	if zd.DelegationSync {
+		// Detect whether the delegation data has changed.
+		delchanged, adds, removes, err := zd.DelegationDataChanged(&zonedata)
+		if err != nil {
+			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
+			return false, err
+		}
+		if delchanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed:", zd.ZoneName)
+			for _, rr := range adds {
+				zd.Logger.Printf("ADD: %s", rr.String())
+			}
+			for _, rr := range removes {
+				zd.Logger.Printf("DEL: %s", rr.String())
+			}
+			err = zd.SyncWithParent(adds, removes)
+			if err != nil {
+				log.Printf("Error from SyncWithParent(): %v", err)
+			}
+		} else {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+		}
 	}
-	if delchanged {
-	   zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed:", zd.ZoneName)
-	   for _, rr := range adds {
-	       zd.Logger.Printf("ADD: %s", rr.String())
-	   }
-	   for _, rr := range removes {
-	       zd.Logger.Printf("DEL: %s", rr.String())
-	   }
-	} else {
-	   zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
-	}
-
 
 	if viper.GetBool("service.debug") {
 		filedir := viper.GetString("log.filedir")
@@ -229,7 +229,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	}
 
 	zd.mu.Lock()
-//	zd.RRs = zonedata.RRs
+	//	zd.RRs = zonedata.RRs
 	zd.Owners = zonedata.Owners
 	zd.OwnerIndex = zonedata.OwnerIndex
 	zd.IncomingSerial = zonedata.IncomingSerial
@@ -255,7 +255,7 @@ func (zd *ZoneData) NameExists(qname string) bool {
 
 	default:
 		zd.Logger.Printf("NameExists: should not get here for zonestorage: %s",
-					      ZoneStoreToString[zd.ZoneStore])
+			ZoneStoreToString[zd.ZoneStore])
 		return false
 	}
 	zd.Logger.Printf("NameExists: returning %v for qname %s", ok, qname)
@@ -299,7 +299,7 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 			return names, nil
 		}
 		names = zd.Data.Keys()
-		
+
 	default:
 		zd.Logger.Printf("GetOwnerNames: zone storage not supported: %v", zd.ZoneStore)
 		return names, fmt.Errorf("GetOwnerNames: only supported for SliceZone and MapZone, not %s",
@@ -309,21 +309,21 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 }
 
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
-     zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
-     					  qname, zd.ZoneName)
-     owner, err := zd.GetOwner(qname)
-     if err != nil || owner == nil || qname == zd.ZoneName {
-     	return false
-     }
-     if _, exists := owner.RRtypes[dns.TypeNS]; !exists {
-     	return false
-     }
-     if len(owner.RRtypes[dns.TypeNS].RRs) == 0 {
-     	return false
-     }
-     zd.Logger.Printf("IsChildDelegation: %s is an existing child of %s",
-     					  qname, zd.ZoneName)
-     return true
+	zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
+		qname, zd.ZoneName)
+	owner, err := zd.GetOwner(qname)
+	if err != nil || owner == nil || qname == zd.ZoneName {
+		return false
+	}
+	if _, exists := owner.RRtypes[dns.TypeNS]; !exists {
+		return false
+	}
+	if len(owner.RRtypes[dns.TypeNS].RRs) == 0 {
+		return false
+	}
+	zd.Logger.Printf("IsChildDelegation: %s is an existing child of %s",
+		qname, zd.ZoneName)
+	return true
 }
 
 func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
@@ -347,7 +347,7 @@ func (zd *ZoneData) PrintOwners() {
 			fmt.Printf("%d\t%s\t%s\n", i, v.Name, strings.Join(rrtypes, ", "))
 		}
 		for _, k := range zd.OwnerIndex.Keys() {
-		        v, _ := zd.OwnerIndex.Get(k)
+			v, _ := zd.OwnerIndex.Get(k)
 			fmt.Printf("%s\t%d\n", k, v)
 		}
 	case MapZone:
@@ -392,22 +392,22 @@ func WildcardReplace(rrs []dns.RR, qname, origqname string) []dns.RR {
 }
 
 func IsIxfr(rrs []dns.RR) bool {
-        first_soa := false
+	first_soa := false
 
-        if len(rrs) < 3 {
-                return false
-        }
+	if len(rrs) < 3 {
+		return false
+	}
 
-        if _, ok := rrs[0].(*dns.SOA); ok {
-                first_soa = true
-        }
+	if _, ok := rrs[0].(*dns.SOA); ok {
+		first_soa = true
+	}
 
-        if _, ok := rrs[1].(*dns.SOA); ok {
-                if first_soa {
-                        return true
-                }
-        }
-        return false
+	if _, ok := rrs[1].(*dns.SOA); ok {
+		if first_soa {
+			return true
+		}
+	}
+	return false
 }
 
 func FindZone(qname string) *ZoneData {

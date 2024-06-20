@@ -1,14 +1,14 @@
 /*
- *
+ * Johan Stenstam, <johani@johani.org>
  */
 package main
 
 import (
-        "crypto"
+	"crypto"
 	"database/sql"
 	"fmt"
 	"log"
-	// "os"
+
 	"time"
 
 	"github.com/johanix/tdns/tdns"
@@ -21,12 +21,12 @@ import (
 func (kdb *KeyDB) Sig0Mgmt(kp tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
 	const (
-		addSig0KeySql     = `
+		addSig0KeySql = `
 INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
-		setStateSig0KeySql     = "UPDATE Sig0KeyStore SET state=? WHERE zonename=? AND keyid=?"
-		deleteSig0KeySql  = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
-		getAllSig0KeysSql = `SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore`
-		getSig0KeySql  = `
+		setStateSig0KeySql = "UPDATE Sig0KeyStore SET state=? WHERE zonename=? AND keyid=?"
+		deleteSig0KeySql   = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+		getAllSig0KeysSql  = `SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore`
+		getSig0KeySql      = `
 SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 	)
 
@@ -39,12 +39,12 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	}
 
 	defer func() {
-	      if err == nil {
-		     tx.Commit()
-	      } else {
-		     log.Printf("Error: %v. Rollback.", err)
-		     tx.Rollback()
-	      }
+		if err == nil {
+			tx.Commit()
+		} else {
+			log.Printf("Error: %v. Rollback.", err)
+			tx.Rollback()
+		}
 	}()
 
 	switch kp.SubCommand {
@@ -65,15 +65,15 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 				log.Fatalf("Error from rows.Scan(): %v", err)
 			}
 			if len(privatekey) < 10 {
-			   privatekey = "ULTRA SECRET KEY"
+				privatekey = "ULTRA SECRET KEY"
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = tdns.Sig0Key{
-				Name:		keyname,
-				State:		state,
-				Algorithm:	algorithm,
-				PrivateKey:	fmt.Sprintf("%s*****%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
-				Keystr: 	keyrrstr,
+				Name:       keyname,
+				State:      state,
+				Algorithm:  algorithm,
+				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
+				Keystr:     keyrrstr,
 			}
 		}
 		resp.Sig0keys = tmp2
@@ -81,7 +81,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	case "add": // AKA "import"
 		res, err = tx.Exec(addSig0KeySql, kp.Keyname, kp.State, kp.Keyid, dns.AlgorithmToString[kp.Algorithm],
-		     	   			  kp.PrivateKey, kp.KeyRR)
+			kp.PrivateKey, kp.KeyRR)
 		log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
@@ -102,31 +102,34 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		} else {
 			rows, _ := res.RowsAffected()
 			if rows > 0 {
-			   resp.Msg = fmt.Sprintf("Updated %d rows", rows)
+				resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 			} else {
-			   resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
+				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
 			}
 		}
 
 	case "delete":
-		// 1. Find key, if not --> error
-		row := tx.QueryRow(getSig0KeySql, kp.Keyname, kp.Keyid)
+		const getSig0KeySql = `
+SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 
-		var keyname string
+		// 1. Find key, if not --> error
+		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
+
+		var zone, state, algorithm, privatekey, keyrr string
 		var keyid int
-		err := row.Scan(&keyname, &keyid)
+		err := row.Scan(&zone, &state, &keyid, &algorithm, &privatekey, &keyrr)
 		if err != nil {
- 			log.Printf("Error: %v", err)
+			log.Printf("Error: %v", err)
 			resp.Error = true
-		   	if err == sql.ErrNoRows {
-			       resp.ErrorMsg = fmt.Sprintf("Key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
-		   	} else {
-			       resp.ErrorMsg = err.Error()
-		    	}
+			if err == sql.ErrNoRows {
+				resp.ErrorMsg = fmt.Sprintf("Key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
+			} else {
+				resp.ErrorMsg = err.Error()
+			}
 			return resp, err
-		}		
-		if uint16(keyid) != kp.Keyid || keyname != kp.Keyname {
- 			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
+		}
+		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
+			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
 			return resp, nil
 		}
@@ -135,7 +138,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		res, err = tx.Exec(deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
- 			log.Printf("Error: %v", err)
+			log.Printf("Error: %v", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 			return resp, err
@@ -150,39 +153,39 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 }
 
 func (kdb *KeyDB) GetSig0Key(zonename string) (crypto.PrivateKey, crypto.Signer, *dns.KEY, error) {
-     const (
-     	   fetchSig0PrivKeySql = `
+	const (
+		fetchSig0PrivKeySql = `
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
-     )
+	)
 
-     var cs crypto.Signer
-     var k crypto.PrivateKey
-     var rr dns.RR
-     var keyrr *dns.KEY
+	var cs crypto.Signer
+	var k crypto.PrivateKey
+	var rr dns.RR
+	var keyrr *dns.KEY
 
-     tx, err := kdb.Begin()
+	tx, err := kdb.Begin()
 	if err != nil {
 		return k, cs, keyrr, err
 	}
 
-		rows, err := tx.Query(fetchSig0PrivKeySql, zonename)
+	rows, err := tx.Query(fetchSig0PrivKeySql, zonename)
+	if err != nil {
+		log.Fatalf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+	}
+	defer rows.Close()
+
+	var algorithm, privatekey, keyrrstr string
+	var keyid int
+
+	for rows.Next() {
+		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
 		if err != nil {
-			log.Fatalf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+			log.Fatalf("Error from rows.Scan(): %v", err)
 		}
-		defer rows.Close()
+		k, cs, rr, _, _, err = tdns.PrepareKey(privatekey, keyrrstr, algorithm)
+	}
 
-		var algorithm, privatekey, keyrrstr string
-		var keyid int
+	keyrr = rr.(*dns.KEY)
 
-		for rows.Next() {
-			err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
-			if err != nil {
-				log.Fatalf("Error from rows.Scan(): %v", err)
-			}
-			k, cs, rr, _, _, err = tdns.PrepareKey(privatekey, keyrrstr, algorithm)
-		}
-
-		keyrr = rr.(*dns.KEY)
-
-		return k, cs, keyrr, err     
+	return k, cs, keyrr, err
 }

@@ -18,16 +18,16 @@ type Config struct {
 	DnsEngine DnsEngineConf
 	Apiserver ApiserverConf
 	Zones     map[string]ZoneConf
-	Db	  DbConf
+	Db        DbConf
 	Ddns      struct {
 		KeyDirectory string `validate:"dir,required"`
 		Update_NS    *bool  `validate:"required"`
 		Update_A     *bool  `validate:"required"`
 		Update_AAAA  *bool  `validate:"required"`
 		Policy       struct {
-			Type    string   `validate:"required"`
-			RRtypes []string `validate:"required"`
-			KeyUpload string `validate:"required"`
+			Type      string   `validate:"required"`
+			RRtypes   []string `validate:"required"`
+			KeyUpload string   `validate:"required"`
 		}
 	}
 
@@ -45,16 +45,17 @@ type ServiceConf struct {
 }
 
 type ZoneConf struct {
-	Name     string `validate:"required"`
-	Type     string `validate:"required"`
-	Store    string `validate:"required"` // xfr | map | slice | reg
-	Primary  string
-	Notify   []string
-	Zonefile string
+	Name           string `validate:"required"`
+	Type           string `validate:"required"`
+	Store          string `validate:"required"` // xfr | map | slice | reg
+	Primary        string
+	Notify         []string
+	Zonefile       string
+	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
 }
 
 type DnsEngineConf struct {
-	Addresses	[]string `validate:"required"`
+	Addresses []string `validate:"required"`
 }
 
 type ApiserverConf struct {
@@ -63,12 +64,12 @@ type ApiserverConf struct {
 }
 
 type DbConf struct {
-     File	    string `validate:"required"`
+	File string `validate:"required"`
 }
 
 type InternalConf struct {
-        KeyDB	      *KeyDB
-        APIStopCh     chan struct{}
+	KeyDB         *KeyDB
+	APIStopCh     chan struct{}
 	RefreshZoneCh chan tdns.ZoneRefresher
 	BumpZoneCh    chan BumperData
 	ValidatorCh   chan tdns.ValidatorRequest

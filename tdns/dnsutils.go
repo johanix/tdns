@@ -274,6 +274,9 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 	checkedForUnchanged := false
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		if zd.ZoneName == "dnslab." && rr.Header().Name == "dnslab." {
+			zd.Logger.Printf("ReadZoneFile: %s: rr: %s", zd.ZoneName, rr.String())
+		}
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true
@@ -283,12 +286,10 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 				zd.ZoneName, zd.IncomingSerial, soa.Serial)
 			if soa.Serial == zd.IncomingSerial {
 				if !force {
-					zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current. Reload not needed.",
-						zd.ZoneName)
+					zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
 					return false, soa.Serial, nil
 				}
-				zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current but still forced to reload.",
-					zd.ZoneName)
+				zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current but still forced to reload.", zd.ZoneName)
 			}
 		}
 	}
@@ -354,16 +355,16 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	case *dns.RRSIG:
 		rrt := v.TypeCovered
 
-		if owner == zd.ZoneName {
-			switch ztype {
-			//			case XfrZone:
-			//				zd.RRs = append(zd.RRs, rr)
-			case MapZone:
-				tmp = omap.RRtypes[rrt]
-				tmp.RRSIGs = append(tmp.RRSIGs, rr)
-				omap.RRtypes[rrt] = tmp
-			}
-		}
+		//		if owner == zd.ZoneName {
+		//			switch ztype {
+		//			case XfrZone:
+		//				zd.RRs = append(zd.RRs, rr)
+		//			case MapZone:
+		//				tmp = omap.RRtypes[rrt]
+		//				tmp.RRSIGs = append(tmp.RRSIGs, rr)
+		//				omap.RRtypes[rrt] = tmp
+		//			}
+		//		}
 
 		switch ztype {
 		//		case XfrZone:

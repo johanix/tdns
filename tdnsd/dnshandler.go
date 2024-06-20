@@ -140,7 +140,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		zd.ZoneTransferOut(w, r)
 		return nil
 	case dns.TypeSOA:
-		zd.Logger.Printf("apex: %v", apex)
+		// zd.Logger.Printf("apex: %v", apex)
 		zd.Logger.Printf("There are %d SOA RRs in %s. rrset: %v", len(apex.RRtypes[dns.TypeSOA].RRs),
 			zd.ZoneName, apex.RRtypes[dns.TypeSOA])
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial

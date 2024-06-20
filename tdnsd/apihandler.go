@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
+
 	// "github.com/miekg/dns"
 
 	"github.com/johanix/tdns/tdns"
@@ -19,7 +20,7 @@ import (
 
 func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
-        kdb := conf.Internal.KeyDB
+	kdb := conf.Internal.KeyDB
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -36,28 +37,28 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		resp := tdns.KeystoreResponse{}
 
 		defer func() {
-		      w.Header().Set("Content-Type", "application/json")
-		      json.NewEncoder(w).Encode(resp)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
 		}()
 
 		switch kp.Command {
-// 		case "list-dnskey":
-// 			log.Printf("tdnsd keystore list-sig0 inquiry")
-// 			tmp1 := map[string]tdns.TrustAnchor{}
-// 			for _, key := range tdns.TAStore.Map.Keys() {
-// 			    val, _ := tdns.TAStore.Map.Get(key)
-// 			    tmp1[key] = tdns.TrustAnchor{
-// 						Name:		val.Name,
-// 						Validated:	val.Validated,
-// 						Dnskey:		val.Dnskey,
-// 					}
-// 			}
-// 			resp.ChildDnskeys = tmp1
+		// 		case "list-dnskey":
+		// 			log.Printf("tdnsd keystore list-sig0 inquiry")
+		// 			tmp1 := map[string]tdns.TrustAnchor{}
+		// 			for _, key := range tdns.TAStore.Map.Keys() {
+		// 			    val, _ := tdns.TAStore.Map.Get(key)
+		// 			    tmp1[key] = tdns.TrustAnchor{
+		// 						Name:		val.Name,
+		// 						Validated:	val.Validated,
+		// 						Dnskey:		val.Dnskey,
+		// 					}
+		// 			}
+		// 			resp.ChildDnskeys = tmp1
 
 		case "sig0-mgmt":
 			resp, err = kdb.Sig0Mgmt(kp)
 			if err != nil {
-			   log.Printf("Error from Sig0Mgmt(): %v", err)
+				log.Printf("Error from Sig0Mgmt(): %v", err)
 			}
 
 		default:
@@ -68,7 +69,7 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
-     kdb := conf.Internal.KeyDB
+	kdb := conf.Internal.KeyDB
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -85,8 +86,8 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		resp := tdns.TruststoreResponse{}
 
 		defer func() {
-		      w.Header().Set("Content-Type", "application/json")
-		      json.NewEncoder(w).Encode(resp)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
 		}()
 
 		switch tp.Command {
@@ -94,19 +95,19 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Printf("tdnsd truststore list-dnskey inquiry")
 			tmp1 := map[string]tdns.TrustAnchor{}
 			for _, key := range tdns.TAStore.Map.Keys() {
-			    val, _ := tdns.TAStore.Map.Get(key)
-			    tmp1[key] = tdns.TrustAnchor{
-						Name:		val.Name,
-						Validated:	val.Validated,
-						Dnskey:		val.Dnskey,
-					}
+				val, _ := tdns.TAStore.Map.Get(key)
+				tmp1[key] = tdns.TrustAnchor{
+					Name:      val.Name,
+					Validated: val.Validated,
+					Dnskey:    val.Dnskey,
+				}
 			}
 			resp.ChildDnskeys = tmp1
 
 		case "child-sig0-mgmt":
 			resp, err = kdb.ChildSig0Mgmt(tp)
 			if err != nil {
-			   log.Printf("Error from ChildSig0Mgmt(): %v", err)
+				log.Printf("Error from ChildSig0Mgmt(): %v", err)
 			}
 
 		default:
@@ -170,7 +171,7 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
-			
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
 			resp.Error = true
@@ -209,7 +210,7 @@ func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		// Find out whether delegation is in sync or not and if not then fix it
 		case "sync":
 			log.Printf("APIdelegation: zone %s: will check and sync changes to delegation data\n",
-						   dp.Zone)
+				dp.Zone)
 			resp.Msg, err = SyncZoneDelegation(conf, dp)
 			if err != nil {
 				resp.Error = true
@@ -256,39 +257,39 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "rrset":
 			log.Printf("tdnsd debug rrset inquiry")
 			if zd, ok := tdns.Zones.Get(dp.Zone); ok {
-//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
-//				if owner := &zd.Owners[idx]; owner != nil {
-				   owner, err := zd.GetOwner(dp.Qname)
-				   if err != nil {
-				   }
-				
-				   if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
+				//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
+				//				if owner := &zd.Owners[idx]; owner != nil {
+				owner, err := zd.GetOwner(dp.Qname)
+				if err != nil {
+				}
+
+				if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
 					resp.RRset = rrset
-				   }
-				   log.Printf("tdnsd debug rrset: owner: %v", owner)
+				}
+				log.Printf("tdnsd debug rrset: owner: %v", owner)
 			} else {
 				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
 			}
 
 		case "lav":
 			log.Printf("tdnsd debug lookup-and-validate inquiry")
-		        zd := tdns.FindZone(dp.Qname)
+			zd := tdns.FindZone(dp.Qname)
 			if zd == nil {
-			   resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
-			   		 dp.Qname)
-			   resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
+					dp.Qname)
+				resp.Error = true
 			} else {
-			   // tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
-			   rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
-			   if err != nil {
-			      resp.Error = true
-			      resp.ErrorMsg = err.Error()
-			   } else {
-			      if rrset != nil {
-			      	 resp.RRset = *rrset
-				 resp.Validated = valid
-			      }
-			   }
+				// tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
+				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					if rrset != nil {
+						resp.RRset = *rrset
+						resp.Validated = valid
+					}
+				}
 			}
 
 		default:
@@ -365,7 +366,7 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 	}
 
 	if resp.Msg == "" {
-	   resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
+		resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
 	}
 	return resp.Msg, nil
 }
@@ -373,12 +374,18 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 func ReloadZone(conf *Config, zone string, force bool) (string, error) {
 	var respch = make(chan tdns.RefresherResponse, 1)
 	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
-		Name:   zone,
+		Name:     zone,
 		Response: respch,
-		Force:	force,
+		Force:    force,
 	}
 
-	resp := <-respch
+	var resp tdns.RefresherResponse
+
+	select {
+	case resp = <-respch:
+	case <-time.After(2 * time.Second):
+		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
+	}
 
 	if resp.Error {
 		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
