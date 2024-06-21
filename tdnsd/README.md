@@ -30,7 +30,10 @@ In addition, TDNSD has a couple of extra features:
    generalized NOTIFY or SIG(0) signed UPDATE messages.
 
 5. Support for receiving generalised notifications (as an agent
-   for the parent).
+   for the parent). Note that at present TDNSD doesn't do much with
+   the received notifications, as it does not have a built in CDS
+   and/or CSYNC scanner. In the future there may be a separate
+   scanner that TDNSD will interact with.
 
 6. Support for sending generalized notifications (as an agent
    for the child) to the parent's designated NOTIFY Receiver (as 
