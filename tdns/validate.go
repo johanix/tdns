@@ -5,11 +5,12 @@ package tdns
 
 import (
 	"fmt"
-	"github.com/miekg/dns"
 	"log"
 	"net"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // 1. Find the child NS RRset
@@ -135,7 +136,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 			zd.Logger.Printf("LookupRRset: Error from LookupChildRRset: %v", err)
 		}
 	} else {
-	  zd.Logger.Printf("*** %s is not a child delegation from %s", qname, zd.ZoneName)
+		zd.Logger.Printf("*** %s is not a child delegation from %s", qname, zd.ZoneName)
 	}
 
 	zd.Logger.Printf("*** owner=%s has RRtypes: ", owner.Name)
@@ -288,7 +289,7 @@ func (zd *ZoneData) FindSig0key(signer string, keyid uint16) (*Sig0Key, error) {
 			return nil, err
 		}
 		if rrset == nil {
-		   return nil, fmt.Errorf("SIG(0) key %s not found", signer)
+			return nil, fmt.Errorf("SIG(0) key %s not found", signer)
 		}
 		valid, err := zd.ValidateRRset(rrset, true)
 		if err != nil {
@@ -297,7 +298,7 @@ func (zd *ZoneData) FindSig0key(signer string, keyid uint16) (*Sig0Key, error) {
 		zd.Logger.Printf("FindSig0key: Found %s KEY RRset (validated)", signer)
 		for _, rr := range rrset.RRs {
 			if keyrr, ok := rr.(*dns.KEY); ok {
-			   Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()),
+				Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()),
 					Sig0Key{
 						Name:      signer,
 						Validated: valid,
@@ -311,16 +312,14 @@ func (zd *ZoneData) FindSig0key(signer string, keyid uint16) (*Sig0Key, error) {
 }
 
 func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
-	var rcode uint8 = dns.RcodeSuccess
-
 	if len(r.Extra) == 0 {
-	   	// there is no signature on the update
-		return dns.RcodeFormatError, "", nil 
+		// there is no signature on the update
+		return dns.RcodeFormatError, "", nil
 	}
 
 	if _, ok := r.Extra[0].(*dns.SIG); !ok {
-	        // there is no SIG(0) signature on the update
-		return dns.RcodeFormatError, "", nil 
+		// there is no SIG(0) signature on the update
+		return dns.RcodeFormatError, "", nil
 	}
 
 	sig := r.Extra[0].(*dns.SIG)
@@ -328,15 +327,14 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 	msgbuf, err := r.Pack()
 	if err != nil {
 		log.Printf("= Error from msg.Pack(): %v", err)
-		rcode = dns.RcodeFormatError
+		return dns.RcodeFormatError, "", nil
 	}
 
 	sig0key, err := zd.FindSig0key(sig.RRSIG.SignerName, sig.RRSIG.KeyTag)
 	if err != nil || sig0key == nil {
 		log.Printf("* Error: update signed by unknown key \"%s\"",
-			      sig.RRSIG.SignerName)
-		rcode = dns.RcodeBadKey
-	   	return rcode, sig.RRSIG.SignerName, nil
+			sig.RRSIG.SignerName)
+		return dns.RcodeBadKey, sig.RRSIG.SignerName, nil
 	}
 
 	keyrr := sig0key.Key
@@ -346,7 +344,8 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 	err = sig.Verify(&keyrr, msgbuf)
 	if err != nil {
 		log.Printf("= Error from sig.Verify(): %v", err)
-		rcode = dns.RcodeBadSig
+		log.Printf("signername=%s, keyrr=%s", sig.RRSIG.SignerName, keyrr.String())
+		return dns.RcodeBadSig, sig.RRSIG.SignerName, err
 	} else {
 		log.Printf("* Update SIG verified correctly")
 	}
@@ -355,12 +354,12 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 		log.Printf("* Update SIG is within its validity period")
 	} else {
 		log.Printf("= Update SIG is NOT within its validity period")
-		rcode = dns.RcodeBadTime
+		return dns.RcodeBadTime, sig.RRSIG.SignerName, nil
 	}
 
 	if sig0key.Validated {
-	   log.Printf("* Update by known and validated key. All ok.")
-	   return rcode, sig.RRSIG.SignerName, nil
+		log.Printf("* Update by known and validated key. All ok.")
+		return dns.RcodeSuccess, sig.RRSIG.SignerName, nil
 	}
 	log.Printf("= Update signed by known but unvalidated key. ")
 	return dns.RcodeBadKey, sig.RRSIG.SignerName, nil

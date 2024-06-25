@@ -38,10 +38,9 @@ type Config struct {
 }
 
 type ServiceConf struct {
-	Name             string `validate:"required"`
-	Reset_Soa_Serial *bool  `validate:"required"`
-	Debug            *bool
-	Verbose          *bool
+	Name    string `validate:"required"`
+	Debug   *bool
+	Verbose *bool
 }
 
 type ZoneConf struct {
