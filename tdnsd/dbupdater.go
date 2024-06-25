@@ -41,6 +41,9 @@ func UpdaterEngine(conf *Config) error {
 					if ur.ZoneName == "" {
 						log.Printf("Updater: Request for update %d adds and %d removes.", len(ur.Adds), len(ur.Removes))
 					} else {
+						//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
+						// zone is a primary zone, and has a policy that allows updates and we're able to write the
+						// resulting updated zone back to disk...
 						log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
 						err := kdb.ApplyUpdate(ur)
 						if err != nil {

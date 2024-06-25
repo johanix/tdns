@@ -106,6 +106,8 @@ func DelegationSyncEngine(conf *Config) error {
 						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 						syncstate.Error = true
 						syncstate.ErrorMsg = err.Error()
+					} else {
+						log.Printf("DelegationSyncEngine: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
 					}
 					syncstate.Msg = msg
 					syncstate.Rcode = rcode
