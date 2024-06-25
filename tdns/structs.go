@@ -167,6 +167,8 @@ type DelegationSyncStatus struct {
 	Time        time.Time
 	InSync      bool
 	Status      string
+	Msg         string
+	Rcode       uint8
 	Adds        []dns.RR
 	Removes     []dns.RR
 	NsAdds      []dns.NS

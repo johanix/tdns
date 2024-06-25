@@ -67,12 +67,13 @@ func DelegationSyncEngine(conf *Config) error {
 					//						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncWithParent(): %v. Ignoring sync request.", ds.ZoneName, err)
 					//						continue
 					//					}
-					_, err := SyncZoneDelegation(conf, zd, ds)
+					msg, rcode, err := SyncZoneDelegation(conf, zd, ds)
 					if err != nil {
 						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.Zone, err)
 						continue
 					}
 
+					log.Printf("DelegationSyncEngine: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.Zone, msg, dns.RcodeToString[int(rcode)])
 					// 1. Figure out which scheme to use
 					// 2. Call handler for that scheme
 
@@ -100,20 +101,19 @@ func DelegationSyncEngine(conf *Config) error {
 					}
 
 					// Not in sync, let's fix that.
-					_, err = SyncZoneDelegation(conf, zd, syncstate)
+					msg, rcode, err := SyncZoneDelegation(conf, zd, syncstate)
 					if err != nil {
 						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 						syncstate.Error = true
 						syncstate.ErrorMsg = err.Error()
-						if ds.Response != nil {
-							ds.Response <- syncstate
-						}
-						continue
 					}
+					syncstate.Msg = msg
+					syncstate.Rcode = rcode
 
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
+					continue
 
 				default:
 					log.Printf("Unknown command: '%s'. Ignoring.", ds.Command)
@@ -257,7 +257,7 @@ func AnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSync
 }
 
 // SyncZoneDelegation() is used for delegation synchronization request via API.
-func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus) (string, error) {
+func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus) (string, uint8, error) {
 
 	//	syncstate, err := AnalyseZoneDelegation(conf, zd)
 	//	if err != nil {
@@ -266,7 +266,7 @@ func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.Delegati
 
 	if syncstate.InSync {
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
-			syncstate.Zone, syncstate.Parent), nil
+			syncstate.Zone, syncstate.Parent), 0, nil
 	} else {
 		log.Printf("Zone \"%s\" delegation data in parent \"%s\" is NOT in sync. Sync action needed.",
 			syncstate.Zone, syncstate.Parent)
@@ -292,21 +292,24 @@ func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.Delegati
 	scheme, dsynctarget, err := zd.BestSyncScheme()
 	if err != nil {
 		log.Printf("DelegationSyncEngine: Zone %s: Error from BestSyncScheme(): %v. Ignoring sync request.", zd.ZoneName, err)
-		return "", err
+		return "", 0, err
 	}
+
+	var msg string
+	var rcode uint8
 
 	switch scheme {
 	case "UPDATE":
-		err = SyncZoneDelegationViaUpdate(conf, zd, syncstate, dsynctarget)
+		msg, rcode, err = SyncZoneDelegationViaUpdate(conf, zd, syncstate, dsynctarget)
 	case "NOTIFY	":
-		err = SyncZoneDelegationViaNotify(conf, zd, syncstate, dsynctarget)
+		msg, rcode, err = SyncZoneDelegationViaNotify(conf, zd, syncstate, dsynctarget)
 	}
 
-	return "", err
+	return msg, rcode, err
 }
 
 func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
-	dsynctarget *tdns.DsyncTarget) error {
+	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 	kdb := conf.Internal.KeyDB
 
 	// If UPDATE:
@@ -334,7 +337,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 
 	m, err := tdns.CreateUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 
 	// 3. Fetch the SIG(0) key from the keystore
@@ -342,11 +345,11 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	_, cs, keyrr, err := kdb.GetSig0Key(zd.ZoneName)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0Key(%s): %v", zd.ZoneName, err)
-		return err
+		return "", 0, err
 	}
 	if keyrr == nil {
 		log.Printf("SyncZoneDelegationViaUpdate: No SIG(0) key found for zone %s", zd.ZoneName)
-		return fmt.Errorf("no SIG(0) key found for zone %s", zd.ZoneName)
+		return "", 0, fmt.Errorf("no SIG(0) key found for zone %s", zd.ZoneName)
 	}
 
 	// 4. Sign the msg
@@ -354,11 +357,11 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	smsg, err := tdns.SignMsgNG(m, zd.ZoneName, cs, keyrr)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
-		return err
+		return "", 0, err
 	}
 	if smsg == nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
-		return err
+		return "", 0, err
 	}
 	//	log.Printf("Signed DNS UPDATE msg:\n%s\n", smsg.String())
 
@@ -369,20 +372,21 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	rcode, err := tdns.SendUpdate(smsg, zd.Parent, dsynctarget)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", zd.Parent, err)
-		return err
+		return "", 0, err
 	}
-	log.Printf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
+	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
+	log.Printf(msg)
 
 	// 6. Check the response
 	// 7. Return result to CLI
 
-	return err
+	return msg, uint8(rcode), err
 }
 
 func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
-	dsynctarget *tdns.DsyncTarget) error {
+	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
 	// tdns.SendNotify(zd.Parent, zd.ZoneName, dt)
 
-	return nil
+	return "", 0, nil
 }
