@@ -97,15 +97,16 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
 					zonedata = &tdns.ZoneData{
-						ZoneName:       zone,
-						ZoneStore:      zr.ZoneStore,
-						Logger:         log.Default(),
-						Upstream:       zr.Primary,
-						Downstreams:    zr.Notify,
-						Zonefile:       zr.Zonefile,
-						ZoneType:       zr.ZoneType,
-						DelegationSync: zr.DelegationSync,
-						Data:           cmap.New[tdns.OwnerData](),
+						ZoneName:         zone,
+						ZoneStore:        zr.ZoneStore,
+						Logger:           log.Default(),
+						Upstream:         zr.Primary,
+						Downstreams:      zr.Notify,
+						Zonefile:         zr.Zonefile,
+						ZoneType:         zr.ZoneType,
+						DelegationSync:   zr.DelegationSync,
+						DelegationSyncCh: conf.Internal.DelegationSyncQ,
+						Data:             cmap.New[tdns.OwnerData](),
 					}
 					updated, err = zonedata.Refresh(zr.Force)
 					if err != nil {

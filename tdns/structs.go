@@ -48,21 +48,22 @@ type ZoneData struct {
 	OwnerIndex cmap.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
-	Data           cmap.ConcurrentMap[string, OwnerData]
-	XfrType        string // axfr | ixfr
-	Logger         *log.Logger
-	ZoneFile       string
-	IncomingSerial uint32 // SOA serial that we got from upstream
-	CurrentSerial  uint32 // SOA serial after local bumping
-	Verbose        bool
-	IxfrChain      []Ixfr
-	Upstream       string   // primary from where zone is xfrred
-	Downstreams    []string // secondaries that we notify
-	Zonefile       string
-	DelegationSync bool     // should we (as child) attempt to sync delegation w/ parent?
-	Parent         string   // name of parentzone (if filled in)
-	ParentNS       []string // names of parent nameservers
-	ParentServers  []string // addresses of parent nameservers
+	Data             cmap.ConcurrentMap[string, OwnerData]
+	XfrType          string // axfr | ixfr
+	Logger           *log.Logger
+	ZoneFile         string
+	IncomingSerial   uint32 // SOA serial that we got from upstream
+	CurrentSerial    uint32 // SOA serial after local bumping
+	Verbose          bool
+	IxfrChain        []Ixfr
+	Upstream         string   // primary from where zone is xfrred
+	Downstreams      []string // secondaries that we notify
+	Zonefile         string
+	DelegationSync   bool // should we (as child) attempt to sync delegation w/ parent?
+	DelegationSyncCh chan DelegationSyncRequest
+	Parent           string   // name of parentzone (if filled in)
+	ParentNS         []string // names of parent nameservers
+	ParentServers    []string // addresses of parent nameservers
 }
 
 type Ixfr struct {
@@ -152,18 +153,28 @@ type DelegationPost struct {
 }
 
 type DelegationResponse struct {
-	Time        time.Time
-	Status      string
+	Time       time.Time
+	Zone       string
+	SyncStatus DelegationSyncStatus
+	Msg        string
+	Error      bool
+	ErrorMsg   string
+}
+
+type DelegationSyncStatus struct {
 	Zone        string
 	Parent      string
+	Time        time.Time
 	InSync      bool
+	Status      string
+	Adds        []dns.RR
+	Removes     []dns.RR
 	NsAdds      []dns.NS
 	NsRemoves   []dns.NS
 	AAdds       []dns.A
 	ARemoves    []dns.A
 	AAAAAdds    []dns.AAAA
 	AAAARemoves []dns.AAAA
-	Msg         string
 	Error       bool
 	ErrorMsg    string
 }
@@ -259,4 +270,13 @@ type Sig0Key struct {
 	PrivateKey string //
 	Key        dns.KEY
 	Keystr     string
+}
+
+type DelegationSyncRequest struct {
+	Command  string
+	ZoneName string
+	ZoneData *ZoneData
+	Adds     []dns.RR
+	Removes  []dns.RR
+	Response chan DelegationSyncStatus // used for API-based requests
 }

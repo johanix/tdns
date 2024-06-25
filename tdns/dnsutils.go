@@ -598,6 +598,6 @@ func SetupIMR() {
 	}
 
 	if Globals.Verbose {
-		fmt.Printf("Using resolver \"%s\"\n", Globals.IMR)
+		log.Printf("Using resolver \"%s\"\n", Globals.IMR)
 	}
 }

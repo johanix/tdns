@@ -170,19 +170,42 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	rows, err := tx.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
-		log.Fatalf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+		return k, cs, nil, err
 	}
 	defer rows.Close()
 
 	var algorithm, privatekey, keyrrstr string
 	var keyid int
 
+	var keyfound bool
+
 	for rows.Next() {
 		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
+		log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
 		if err != nil {
-			log.Fatalf("Error from rows.Scan(): %v", err)
+			if err == sql.ErrNoRows {
+				log.Printf("No active SIG(0) key found for zone %s", zonename)
+				return k, cs, nil, err
+			}
+			log.Printf("Error from rows.Scan(): %v", err)
+			return k, cs, nil, err
 		}
+		keyfound = true
 		k, cs, rr, _, _, err = tdns.PrepareKey(privatekey, keyrrstr, algorithm)
+		if err != nil {
+			log.Printf("Error from tdns.PrepareKey(): %v", err)
+			return k, cs, nil, err
+		}
+	}
+
+	if !keyfound {
+		log.Printf("No active SIG(0) key found for zone %s", zonename)
+		return k, cs, nil, sql.ErrNoRows
+	}
+
+	if tdns.Globals.Debug {
+		log.Printf("GetSig0Key(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
 	}
 
 	keyrr = rr.(*dns.KEY)

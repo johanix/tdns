@@ -37,8 +37,8 @@ rrtype		  TEXT,
 rr		  TEXT
 )`,
 
-// The Sig0TrustStore contains public SIG(0) keys that we use to validate
-// signed DNS Updates received (from child zones)
+	// The Sig0TrustStore contains public SIG(0) keys that we use to validate
+	// signed DNS Updates received (from child zones)
 	"Sig0TrustStore": `CREATE TABLE IF NOT EXISTS 'Sig0TrustStore' (
 id		  INTEGER PRIMARY KEY,
 zonename	  TEXT,
@@ -50,8 +50,8 @@ comment		  TEXT,
 UNIQUE (zonename, keyid)
 )`,
 
-// The Sig0Keystore should contain both the private and public SIG(0) keys for
-// each zone that we're managing parent sync for.
+	// The Sig0Keystore should contain both the private and public SIG(0) keys for
+	// each zone that we're managing parent sync for.
 	"Sig0KeyStore": `CREATE TABLE IF NOT EXISTS 'Sig0KeyStore' (
 id		  INTEGER PRIMARY KEY,
 zonename	  TEXT,
@@ -63,8 +63,6 @@ keyrr		  TEXT,
 comment		  TEXT,
 UNIQUE (zonename, keyid)
 )`,
-
-
 }
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
@@ -98,13 +96,13 @@ func (db *KeyDB) Close() error {
 }
 
 // func tableExists(db *sql.DB, name string) bool {
-// 
+//
 // 	var match string
 // 	var err error
-// 
+//
 // 	sqlcmd := fmt.Sprintf("SELECT name FROM sqlite_master WHERE type='table' AND name='%s'", name)
 // 	row := db.QueryRow(sqlcmd)
-// 
+//
 // 	switch err = row.Scan(&match); err {
 // 	case sql.ErrNoRows:
 // 		fmt.Printf("Error: tableExists: table %s not found.\n", name)
@@ -148,12 +146,12 @@ func NewKeyDB(force bool) *KeyDB {
 	}
 
 	if force {
-	   	for table, _ := range DefaultTables {
-		    sqlcmd := "DROP TABLE " + table
-		    _, err = db.Exec(sqlcmd)
-		    if err != nil {
-			log.Fatalf("NewKeyDB: Error when dropping table %s: %v", table, err)
-		    }
+		for table, _ := range DefaultTables {
+			sqlcmd := "DROP TABLE " + table
+			_, err = db.Exec(sqlcmd)
+			if err != nil {
+				log.Fatalf("NewKeyDB: Error when dropping table %s: %v", table, err)
+			}
 		}
 	}
 	dbSetupTables(db)

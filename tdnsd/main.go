@@ -5,6 +5,7 @@
 package main
 
 import (
+	// "flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
+	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
@@ -23,6 +25,8 @@ import (
 )
 
 var appVersion string
+var appMode string
+var debug, verbose bool
 
 func mainloop(conf *Config) {
 	exit := make(chan os.Signal, 1)
@@ -69,6 +73,18 @@ type Zconfig struct {
 func main() {
 	var conf Config
 
+	flag.StringVar(&appMode, "mode", "server", "Mode of operation: server | scanner")
+	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
+	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
+	flag.Parse()
+
+	switch appMode {
+	case "server", "scanner":
+		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", appMode, tdns.Globals.Verbose, tdns.Globals.Debug)
+	default:
+		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
+	}
+
 	err := ParseConfig(&conf)
 
 	logfile := viper.GetString("log.file")
@@ -80,6 +96,7 @@ func main() {
 	var stopch = make(chan struct{}, 10)
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
+	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
 	go RefreshEngine(&conf, stopch)
 
 	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)

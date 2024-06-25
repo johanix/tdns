@@ -4,7 +4,7 @@
 package cmd
 
 import (
-        "bytes"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,6 +14,7 @@ import (
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
@@ -31,48 +32,49 @@ var delStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Make an API call to request TDNSD to analyse whether delegation is in sync or not",
 	Run: func(cmd *cobra.Command, args []string) {
-	     PrepArgs("zonename")
-	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
-							Command:	"status",
-							Zone:		tdns.Globals.Zonename,
-					       })
-	     if err != nil {
-	     	fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	     }
-	     
-	     if dr.Error {
-	     	fmt.Printf("Error: %s\n", dr.ErrorMsg)
-		os.Exit(1)
-	     }
+		PrepArgs("zonename")
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+			Command: "status",
+			Zone:    tdns.Globals.Zonename,
+		})
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
 
-	     fmt.Printf("%s\n", dr.Msg)
-	     if dr.InSync {
-	     	fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
-				       dr.Parent, dr.Zone)
-		os.Exit(0)
-	     }
-	     fmt.Printf("Delegation information in parent \"%s\" is NOT in sync with child \"%s\". Changes needed:\n",
-				       dr.Parent, dr.Zone)
-	     for _, rr := range dr.NsAdds {
-	     	 fmt.Printf("ADD NS: %s\n", rr.String())
-	     }
-	     for _, rr := range dr.NsRemoves {
-	     	 fmt.Printf("DEL NS: %s\n", rr.String())
-	     }
-	     for _, rr := range dr.AAdds {
-	     	 fmt.Printf("ADD IPv4 GLUE: %s\n", rr.String())
-	     }
-	     for _, rr := range dr.NsRemoves {
-	     	 fmt.Printf("DEL IPv4 GLUE: %s\n", rr.String())
-	     }
-	     for _, rr := range dr.AAAAAdds {
-	     	 fmt.Printf("ADD IPv6 GLUE: %s\n", rr.String())
-	     }
-	     for _, rr := range dr.AAAARemoves {
-	     	 fmt.Printf("DEL IPv6 GLUE: %s\n", rr.String())
-	     }
+		if dr.Error {
+			fmt.Printf("Error: %s\n", dr.ErrorMsg)
+			os.Exit(1)
+		}
 
+		fmt.Printf("%s\n", dr.Msg)
+		if dr.SyncStatus.InSync {
+			fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
+				dr.SyncStatus.Parent, dr.SyncStatus.Zone)
+			os.Exit(0)
+		}
+		fmt.Printf("Delegation information in parent \"%s\" is NOT in sync with child \"%s\". Changes needed:\n",
+			dr.SyncStatus.Parent, dr.SyncStatus.Zone)
+		out := []string{"Change|RR|RR"}
+		for _, rr := range dr.SyncStatus.NsAdds {
+			out = append(out, fmt.Sprintf("ADD NS|%s", rr.String()))
+		}
+		for _, rr := range dr.SyncStatus.NsRemoves {
+			out = append(out, fmt.Sprintf("DEL NS|%s", rr.String()))
+		}
+		for _, rr := range dr.SyncStatus.AAdds {
+			out = append(out, fmt.Sprintf("ADD IPv4 GLUE|%s", rr.String()))
+		}
+		for _, rr := range dr.SyncStatus.ARemoves {
+			out = append(out, fmt.Sprintf("DEL IPv4 GLUE|%s", rr.String()))
+		}
+		for _, rr := range dr.SyncStatus.AAAAAdds {
+			out = append(out, fmt.Sprintf("ADD IPv6 GLUE|%s", rr.String()))
+		}
+		for _, rr := range dr.SyncStatus.AAAAAdds {
+			out = append(out, fmt.Sprintf("DEL IPv6 GLUE|%s", rr.String()))
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 	},
 }
 
@@ -83,23 +85,23 @@ var delSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
-	     PrepArgs("zonename")
-	     dr, err := SendDelegationCmd(api, tdns.DelegationPost{
-							Command:	"sync",
-							Scheme:		scheme,
-							Zone:		tdns.Globals.Zonename,
-					       })
-	     if err != nil {
-	     	fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	     }
-	     
-	     if dr.Error {
-	     	fmt.Printf("Error: %s\n", dr.ErrorMsg)
-		os.Exit(1)
-	     }
+		PrepArgs("zonename")
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+			Command: "sync",
+			Scheme:  scheme,
+			Zone:    tdns.Globals.Zonename,
+		})
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
 
-	     fmt.Printf("%s\n", dr.Msg)
+		if dr.Error {
+			fmt.Printf("Error: %s\n", dr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%s\n", dr.Msg)
 	},
 }
 
@@ -111,26 +113,26 @@ var ddnsOldSyncCmd = &cobra.Command{
 			log.Fatalf("Error: child zone name not specified.")
 		}
 		PrepArgs("parentzone", "parentprimary", "childzone", "childprimary")
-// 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+		// 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
 		tdns.SetupIMR()
 
-// 		if tdns.Globals.ParentZone == "" {
-// 		   log.Fatalf("Error: parent zone name not specified.")
-// 		}
-// 		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
-// 
-// 		if childpri == "" {
-// 		   log.Fatalf("Error: child primary nameserver not specified.")
-// 		}
-// 		if parpri == "" {
-// 		   log.Fatalf("Error: parent primary nameserver not specified.")
-// 		}
+		// 		if tdns.Globals.ParentZone == "" {
+		// 		   log.Fatalf("Error: parent zone name not specified.")
+		// 		}
+		// 		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
+		//
+		// 		if childpri == "" {
+		// 		   log.Fatalf("Error: child primary nameserver not specified.")
+		// 		}
+		// 		if parpri == "" {
+		// 		   log.Fatalf("Error: parent primary nameserver not specified.")
+		// 		}
 
 		// 1. Is the delegation in sync or not?
 		fmt.Printf("Is delegation for %s in sync or not?\n", tdns.Globals.Zonename)
 		unsynched, adds, removes, err := tdns.ChildDelegationDataUnsynched(
-			   tdns.Globals.Zonename, tdns.Globals.ParentZone, childpri, parpri)
+			tdns.Globals.Zonename, tdns.Globals.ParentZone, childpri, parpri)
 		if err != nil {
 			log.Fatalf("Error from ChildSyncDelegationData(): %v", err)
 		}
@@ -138,18 +140,18 @@ var ddnsOldSyncCmd = &cobra.Command{
 			fmt.Printf("No change to delegation data. No need to update.\n")
 			os.Exit(0)
 		} else {
-		        fmt.Printf("Delegation for %s is not in sync. Needs fixing.\n",
-					       tdns.Globals.Zonename)
+			fmt.Printf("Delegation for %s is not in sync. Needs fixing.\n",
+				tdns.Globals.Zonename)
 		}
 
 		// 2. Ok, sync needed. Is DNS UPDATE a supported scheme?
 		// [figure out if yes, and all target details]
 		const update_scheme = 2
 		dsynctarget, err := tdns.LookupDSYNCTarget(tdns.Globals.ParentZone,
-			     parpri, dns.StringToType["ANY"], update_scheme)
+			parpri, dns.StringToType["ANY"], update_scheme)
 		if err != nil {
-		   log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v",
-		   		     	  tdns.Globals.ParentZone,parpri, err)
+			log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v",
+				tdns.Globals.ParentZone, parpri, err)
 		}
 
 		// 3. Create UPDATE msg
@@ -168,7 +170,7 @@ var ddnsRollCmd = &cobra.Command{
 	Use:   "roll",
 	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
 	Run: func(cmd *cobra.Command, args []string) {
-	        PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
+		PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
 		err := tdns.SendSig0KeyUpdate(childpri, parpri, true)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
@@ -180,7 +182,7 @@ var ddnsUploadCmd = &cobra.Command{
 	Use:   "upload",
 	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",
 	Run: func(cmd *cobra.Command, args []string) {
-	        PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
+		PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
 		err := tdns.SendSig0KeyUpdate(childpri, parpri, false)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
@@ -202,109 +204,109 @@ func init() {
 }
 
 func PrepArgs(required ...string) {
-     for _, arg := range required {
-     	 if tdns.Globals.Debug {
-     	    	fmt.Printf("Required: %s\n", arg)
-	 }
-	 switch arg {
-	 case "parentzone":
-	      if tdns.Globals.ParentZone == "" {
-	      	 fmt.Printf("Error: name of parent zone not specified\n")
-		 os.Exit(1)
-	      }
-	      tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
+	for _, arg := range required {
+		if tdns.Globals.Debug {
+			fmt.Printf("Required: %s\n", arg)
+		}
+		switch arg {
+		case "parentzone":
+			if tdns.Globals.ParentZone == "" {
+				fmt.Printf("Error: name of parent zone not specified\n")
+				os.Exit(1)
+			}
+			tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
 
-	 case "childzone":
-	      if tdns.Globals.Zonename == "" {
-	      	 fmt.Printf("Error: name of child zone not specified\n")
-		 os.Exit(1)
-	      }
-	      tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+		case "childzone":
+			if tdns.Globals.Zonename == "" {
+				fmt.Printf("Error: name of child zone not specified\n")
+				os.Exit(1)
+			}
+			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
-	 case "zonename":
-	      if tdns.Globals.Zonename == "" {
-	      	 fmt.Printf("Error: zone name not specified\n")
-		 os.Exit(1)
-	      }
-	      tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+		case "zonename":
+			if tdns.Globals.Zonename == "" {
+				fmt.Printf("Error: zone name not specified\n")
+				os.Exit(1)
+			}
+			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
-	 case "keyid":
-	      if keyid == 0 {
-	      	 fmt.Printf("Error: key id not specified\n")
-		 os.Exit(1)
-	      }
+		case "keyid":
+			if keyid == 0 {
+				fmt.Printf("Error: key id not specified\n")
+				os.Exit(1)
+			}
 
-	 case "parentprimary":
-	      if parpri == "" {
-	      	 fmt.Printf("Error: name of parent primary not specified\n")
-		 os.Exit(1)
-	      }
-	      if !strings.Contains(parpri, ":") {
-	      	 parpri = net.JoinHostPort(parpri, "53")
-	      }
+		case "parentprimary":
+			if parpri == "" {
+				fmt.Printf("Error: name of parent primary not specified\n")
+				os.Exit(1)
+			}
+			if !strings.Contains(parpri, ":") {
+				parpri = net.JoinHostPort(parpri, "53")
+			}
 
-	 case "childprimary":
-	      if childpri == "" {
-	      	 fmt.Printf("Error: name of child primary not specified\n")
-		 os.Exit(1)
-	      }
-	      if !strings.Contains(childpri, ":") {
-	      	 childpri = net.JoinHostPort(childpri, "53")
-	      }
+		case "childprimary":
+			if childpri == "" {
+				fmt.Printf("Error: name of child primary not specified\n")
+				os.Exit(1)
+			}
+			if !strings.Contains(childpri, ":") {
+				childpri = net.JoinHostPort(childpri, "53")
+			}
 
-	case "state":
-	      if NewState == "" {
-	      	 fmt.Printf("Error: new state of key mnot specified \n")
-		 os.Exit(1)
-	      }
-	      switch NewState {
-	      case "created", "active", "retired":
-	      default:
-	      	 fmt.Printf("Error: key state \"%s\" is not known\n", NewState)
-		 os.Exit(1)
-	      }
+		case "state":
+			if NewState == "" {
+				fmt.Printf("Error: new state of key mnot specified \n")
+				os.Exit(1)
+			}
+			switch NewState {
+			case "created", "active", "retired":
+			default:
+				fmt.Printf("Error: key state \"%s\" is not known\n", NewState)
+				os.Exit(1)
+			}
 
-	 case "filename":
-	      if filename == "" {
-	      	 fmt.Printf("Error: filename not specified\n")
-		 os.Exit(1)
-	      }
-	      _, err := os.ReadFile(filename)
-	      if err != nil {
-	      	 fmt.Printf("Error reading file: %v\n", err)
-		 os.Exit(1)
-	      }
+		case "filename":
+			if filename == "" {
+				fmt.Printf("Error: filename not specified\n")
+				os.Exit(1)
+			}
+			_, err := os.ReadFile(filename)
+			if err != nil {
+				fmt.Printf("Error reading file: %v\n", err)
+				os.Exit(1)
+			}
 
-	 default:
-		fmt.Printf("Unknown required argument: \"%s\"\n", arg)
-		os.Exit(1)
-	 }
-     }
+		default:
+			fmt.Printf("Unknown required argument: \"%s\"\n", arg)
+			os.Exit(1)
+		}
+	}
 }
 
 func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.DelegationResponse, error) {
-        var dr tdns.DelegationResponse
-	
-        bytebuf := new(bytes.Buffer)
-        json.NewEncoder(bytebuf).Encode(data)
+	var dr tdns.DelegationResponse
 
-        status, buf, err := api.Post("/delegation", bytebuf.Bytes())
-        if err != nil {
-                log.Println("Error from Api Post:", err)
-                return dr, fmt.Errorf("Error from api post: %v", err)
-        }
-        if verbose {
-                fmt.Printf("Status: %d\n", status)
-        }
+	bytebuf := new(bytes.Buffer)
+	json.NewEncoder(bytebuf).Encode(data)
 
-        err = json.Unmarshal(buf, &dr)
-        if err != nil {
-                return dr, fmt.Errorf("Error from unmarshal: %v\n", err)
-        }
+	status, buf, err := api.Post("/delegation", bytebuf.Bytes())
+	if err != nil {
+		log.Println("Error from Api Post:", err)
+		return dr, fmt.Errorf("Error from api post: %v", err)
+	}
+	if verbose {
+		fmt.Printf("Status: %d\n", status)
+	}
 
-        if dr.Error {
-                return dr, fmt.Errorf(dr.ErrorMsg)
-        }
+	err = json.Unmarshal(buf, &dr)
+	if err != nil {
+		return dr, fmt.Errorf("Error from unmarshal: %v\n", err)
+	}
 
-        return dr, nil
+	if dr.Error {
+		return dr, fmt.Errorf(dr.ErrorMsg)
+	}
+
+	return dr, nil
 }

@@ -16,15 +16,29 @@ const TypeDSYNC = 0x0F9B
 
 type DSYNC struct {
 	Type   uint16
-	Scheme uint8
+	Scheme DsyncScheme
 	Port   uint16
 	Target string
+}
+
+type DsyncScheme uint8
+
+const (
+	SchemeNotify = 1
+	SchemeUpdate = 2
+	SchemeAPI    = 3
+)
+
+var SchemeToString = map[DsyncScheme]string{
+	SchemeNotify: "NOTIFY",
+	SchemeUpdate: "UPDATE",
+	SchemeAPI:    "API",
 }
 
 func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }
 
 func (rd DSYNC) String() string {
-	return fmt.Sprintf("%s\t%d %d %s", dns.TypeToString[rd.Type], rd.Scheme, rd.Port, rd.Target)
+	return fmt.Sprintf("%s\t%s %d %s", dns.TypeToString[rd.Type], SchemeToString[rd.Scheme], rd.Port, rd.Target)
 }
 
 func (rd *DSYNC) Parse(txt []string) error {
@@ -52,7 +66,7 @@ func (rd *DSYNC) Parse(txt []string) error {
 	}
 
 	rd.Type = t
-	rd.Scheme = uint8(scheme)
+	rd.Scheme = DsyncScheme(scheme)
 	rd.Port = uint16(port)
 	rd.Target = tgt
 
@@ -66,7 +80,7 @@ func (rd *DSYNC) Pack(buf []byte) (int, error) {
 		return off, err
 	}
 
-	off, err = packUint8(rd.Scheme, buf, off)
+	off, err = packUint8(uint8(rd.Scheme), buf, off)
 	if err != nil {
 		return off, err
 	}
@@ -87,6 +101,7 @@ func (rd *DSYNC) Pack(buf []byte) (int, error) {
 func (rd *DSYNC) Unpack(buf []byte) (int, error) {
 	var off = 0
 	var err error
+	var tmp uint8
 
 	rd.Type, off, err = unpackUint16(buf, off)
 	if err != nil {
@@ -96,10 +111,11 @@ func (rd *DSYNC) Unpack(buf []byte) (int, error) {
 		return off, nil
 	}
 
-	rd.Scheme, off, err = unpackUint8(buf, off)
+	tmp, off, err = unpackUint8(buf, off)
 	if err != nil {
 		return off, err
 	}
+	rd.Scheme = DsyncScheme(tmp)
 	if off == len(buf) {
 		return off, nil
 	}

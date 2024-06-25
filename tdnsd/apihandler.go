@@ -183,6 +183,7 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 }
 
 func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	delegationsyncQ := conf.Internal.DelegationSyncQ
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -195,26 +196,58 @@ func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /delegation request (cmd: %s) from %s.\n",
 			dp.Command, r.RemoteAddr)
 
-		resp := tdns.DelegationResponse{}
+		resp := tdns.DelegationResponse{
+			Time: time.Now(),
+			Zone: dp.Zone,
+		}
+
+		var zd *tdns.ZoneData
+		var exist bool
+		if zd, exist = tdns.Zones.Get(dp.Zone); !exist {
+			msg := fmt.Sprintf("Zone \"%s\" is unknown.", dp.Zone)
+			log.Printf("APIdelegation: %s", msg)
+			resp.Error = true
+			resp.ErrorMsg = msg
+			return
+		}
+		respch := make(chan tdns.DelegationSyncStatus, 1)
+
+		syncreq := tdns.DelegationSyncRequest{
+			ZoneName: dp.Zone,
+			ZoneData: zd,
+			Response: respch,
+		}
+		var syncstate tdns.DelegationSyncStatus
 
 		switch dp.Command {
 		// Find out whether delegation is in sync or not and report on details
 		case "status":
 			log.Printf("APIdelegation: zone %s delegation status inquiry", dp.Zone)
-			resp, err = AnalyseZoneDelegation(conf, dp)
-			if err != nil {
+			syncreq.Command = "DELEGATION-STATUS"
+
+			delegationsyncQ <- syncreq
+
+			select {
+			case syncstate = <-respch:
+				resp.SyncStatus = syncstate
+			case <-time.After(4 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
 
 		// Find out whether delegation is in sync or not and if not then fix it
 		case "sync":
-			log.Printf("APIdelegation: zone %s: will check and sync changes to delegation data\n",
-				dp.Zone)
-			resp.Msg, err = SyncZoneDelegation(conf, dp)
-			if err != nil {
+			log.Printf("APIdelegation: zone %s: will check and sync changes to delegation data\n", dp.Zone)
+			syncreq.Command = "EXPLICIT-SYNC-DELEGATION"
+
+			delegationsyncQ <- syncreq
+
+			select {
+			case syncstate = <-respch:
+				resp.SyncStatus = syncstate
+			case <-time.After(4 * time.Second):
 				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp.ErrorMsg = "Timeout waiting for delegation sync response"
 			}
 
 		default:

@@ -27,7 +27,7 @@ func sigLifetime(t time.Time) (uint32, uint32) {
 	return incep, expir
 }
 
-func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (dns.Msg, error) {
+func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (*dns.Msg, error) {
 
 	sigrr := new(dns.SIG)
 	sigrr.Hdr = dns.RR_Header{
@@ -41,29 +41,30 @@ func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (dns.Ms
 	sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
 	sigrr.RRSIG.SignerName = name
 
-	fmt.Printf("SIG pre-signing: %v\n", sigrr.String())
-	fmt.Printf("Msg additional pre-signing: %d\n", len(m.Extra))
+	log.Printf("SIG pre-signing: %v\n", sigrr.String())
+	log.Printf("Msg additional pre-signing: %d\n", len(m.Extra))
 
 	res, err := sigrr.Sign(cs, &m)
 	if err != nil {
-		log.Fatalf("Error from sig.Sign: %v", err)
+		log.Printf("Error from sig.Sign(%s): %v", name, err)
+		return nil, err
 	}
 	// fmt.Printf("Res: %s\n", string(res))
-	fmt.Printf("len(signed msg): %d\n", len(res))
+	log.Printf("len(signed msg): %d\n", len(res))
 	m.Extra = append(m.Extra, sigrr)
 
-	fmt.Printf("len(msg+sig): %d\n", m.Len())
+	log.Printf("len(msg+sig): %d\n", m.Len())
 
-	fmt.Printf("Signed msg: %s\n", m.String())
+	log.Printf("Signed msg: %s\n", m.String())
 	// fmt.Printf("Completed SIG RR: %s\n", sigrr.String())
 
-	return m, nil
+	return &m, nil
 }
 
 type BindPrivateKey struct {
-     Private_Key_Format	    string	`yaml:"Private-key-format"`
-     Algorithm	    string  		`yaml:"Algorithm"`
-     PrivateKey	    string		`yaml:"PrivateKey"`
+	Private_Key_Format string `yaml:"Private-key-format"`
+	Algorithm          string `yaml:"Algorithm"`
+	PrivateKey         string `yaml:"PrivateKey"`
 }
 
 func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, string, uint8, error) {
@@ -103,7 +104,7 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
-		log.Fatalf("Error reading public key '%s': %v",	pubkey, err)
+		log.Fatalf("Error reading public key '%s': %v", pubkey, err)
 	}
 
 	var k crypto.PrivateKey
@@ -132,7 +133,7 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 		alg = rrk.Algorithm
 		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
-		
+
 	default:
 		log.Fatalf("Error: rr is of type %v", "foo")
 	}
@@ -140,7 +141,7 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 	var bpk BindPrivateKey
 	err = yaml.Unmarshal([]byte(bpkstr), &bpk)
 	if err != nil {
-	       log.Printf("Error from yaml.Unmarshal(): %v", err)
+		log.Printf("Error from yaml.Unmarshal(): %v", err)
 	}
 
 	switch alg {
@@ -161,7 +162,7 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 func PrepareKey(privkey, pubkey, algorithm string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, uint8, error) {
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
-		log.Fatalf("Error reading public key '%s': %v",	pubkey, err)
+		log.Fatalf("Error reading public key '%s': %v", pubkey, err)
 	}
 
 	src := fmt.Sprintf(`Private-key-format: v1.3
@@ -182,32 +183,32 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		ktype = "DNSKEY"
 		alg = rrk.Algorithm
-//		bpkstr = rrk.PrivateKeyString(k)
+		//		bpkstr = rrk.PrivateKeyString(k)
 		log.Printf("DNSKEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	case *dns.KEY:
 		rrk := rr.(*dns.KEY)
 		k, err = rrk.NewPrivateKey(src)
 		if err != nil {
-		   log.Printf("PrepareKey: error parsing KEY private key: %v", err)
+			log.Printf("PrepareKey: error parsing KEY private key: %v", err)
 		}
 		ktype = "KEY"
 		alg = rrk.Algorithm
-//		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
+		//		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
 		log.Printf("KEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
-		
+
 	default:
-//		log.Fatalf("Error: rr is of type %v", "foo")
+		//		log.Fatalf("Error: rr is of type %v", "foo")
 		return k, cs, rr, ktype, alg, fmt.Errorf("rr is of type %v", "foo")
 	}
 
-//	var bpk BindPrivateKey
-//	err = yaml.Unmarshal([]byte(bpkstr), &bpk)
-//	if err != nil {
-//	       log.Printf("Error from yaml.Unmarshal(): %v", err)
-//	}
+	//	var bpk BindPrivateKey
+	//	err = yaml.Unmarshal([]byte(bpkstr), &bpk)
+	//	if err != nil {
+	//	       log.Printf("Error from yaml.Unmarshal(): %v", err)
+	//	}
 
-//	log.Printf("PrepareKey: k: %v", k)
+	//	log.Printf("PrepareKey: k: %v", k)
 
 	switch alg {
 	case dns.RSASHA256, dns.RSASHA512:
@@ -223,7 +224,6 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 
 	return k, cs, rr, ktype, alg, err
 }
-
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 

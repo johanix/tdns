@@ -40,7 +40,7 @@ func DnsUpdateResponderEngine(conf *Config) error {
 
 	polviper := viper.Sub("parentsync.receivers.update")
 	if polviper == nil {
-	   log.Fatalf("Error: missing config for parentsync.receivers.update")
+		log.Fatalf("Error: missing config for parentsync.receivers.update")
 	}
 
 	policy := UpdatePolicy{

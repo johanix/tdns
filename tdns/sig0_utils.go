@@ -18,6 +18,9 @@ import (
 	"github.com/spf13/viper"
 )
 
+// XXX: FIXME: This is used from the CLI. It should change into code used by TDNSD and accessed via API.
+//
+//	The code should store the newly generated key in the keystore.
 func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
 	if keyrr != nil {
@@ -58,20 +61,23 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 		return fmt.Errorf("Error from CreateUpdate(%v): %v", dsynctarget, err)
 	}
 
+	var smsg *dns.Msg
+
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		msg, err = SignMsgNG(msg, Globals.Zonename, cs, keyrr)
+		smsg, err = SignMsgNG(msg, Globals.Zonename, cs, keyrr)
 		if err != nil {
-			return fmt.Errorf("Error from SignMsgNG(%v): %v",
-				dsynctarget, err)
+			return fmt.Errorf("Error from SignMsgNG(%v): %v", dsynctarget, err)
 		}
 	} else {
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
 	}
 
-	err = SendUpdate(msg, Globals.ParentZone, dsynctarget)
+	rcode, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
+	} else {
+		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", Globals.ParentZone, dsynctarget, dns.RcodeToString[rcode])
 	}
 	return nil
 }
@@ -189,4 +195,3 @@ func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
 	}
 	return keyrr, cs
 }
-

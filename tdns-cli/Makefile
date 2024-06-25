@@ -17,6 +17,9 @@ ${PROG}: build
 build:
 	$(GO) build $(GOFLAGS) -o ${PROG}
 
+netbsd: 
+	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
+
 test:
 	$(GO) test -v -cover
 
