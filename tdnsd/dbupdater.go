@@ -82,10 +82,10 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 	}
 
 	defer func() {
-		if err != nil {
+		if err == nil {
 			tx.Commit()
 		} else {
-			log.Printf("AppyUpdate: Error: %v. Rollback.", err)
+			log.Printf("ApplyUpdate: Error: %v. Rollback.", err)
 		}
 	}()
 
