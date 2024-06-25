@@ -245,6 +245,7 @@ func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			select {
 			case syncstate = <-respch:
 				resp.SyncStatus = syncstate
+				log.Printf("APIdelegation: zone %s: received response from DelegationSyncEngine: %s", dp.Zone, syncstate.Msg)
 			case <-time.After(4 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = "Timeout waiting for delegation sync response"
