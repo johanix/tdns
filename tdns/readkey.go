@@ -27,7 +27,7 @@ func sigLifetime(t time.Time) (uint32, uint32) {
 	return incep, expir
 }
 
-func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (*dns.Msg, error) {
+func SignMsgNG(m dns.Msg, name string, cs *crypto.Signer, keyrr *dns.KEY) (*dns.Msg, error) {
 
 	sigrr := new(dns.SIG)
 	sigrr.Hdr = dns.RR_Header{
@@ -44,7 +44,7 @@ func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (*dns.M
 	log.Printf("SIG pre-signing: %v\n", sigrr.String())
 	log.Printf("Msg additional pre-signing: %d\n", len(m.Extra))
 
-	res, err := sigrr.Sign(cs, &m)
+	res, err := sigrr.Sign(*cs, &m)
 	if err != nil {
 		log.Printf("Error from sig.Sign(%s): %v", name, err)
 		return nil, err
@@ -59,6 +59,37 @@ func SignMsgNG(m dns.Msg, name string, cs crypto.Signer, keyrr *dns.KEY) (*dns.M
 	// fmt.Printf("Completed SIG RR: %s\n", sigrr.String())
 
 	return &m, nil
+}
+
+func SignRRset(rrset *RRset, name string, cs *crypto.Signer, keyrr *dns.DNSKEY) error {
+
+	rrsig := new(dns.RRSIG)
+	rrsig.Hdr = dns.RR_Header{
+		Name:   keyrr.Header().Name,
+		Rrtype: dns.TypeRRSIG,
+		Class:  dns.ClassINET,
+		Ttl:    604800, // one week in seconds
+	}
+	rrsig.KeyTag = keyrr.KeyTag()
+	rrsig.Algorithm = keyrr.Algorithm
+	rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
+	rrsig.SignerName = name
+
+	log.Printf("RRSIG pre-signing: %v\n", rrsig.String())
+	log.Printf("RRset pre-signing: %v\n", rrset)
+
+	err := rrsig.Sign(*cs, rrset.RRs)
+	if err != nil {
+		log.Printf("Error from rrsig.Sign(%s): %v", name, err)
+		return err
+	}
+
+	rrset.RRSIGs = []dns.RR{rrsig}
+
+	log.Printf("len(rrset.RRSIGs): %d\n", len(rrset.RRSIGs))
+	log.Printf("Generated RRSIG: %s\n", rrsig.String())
+
+	return nil
 }
 
 type BindPrivateKey struct {

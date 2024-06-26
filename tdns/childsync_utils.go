@@ -229,7 +229,7 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsgNG(msg, Globals.Zonename, cs, keyrr)
+		smsg, err = SignMsgNG(msg, Globals.Zonename, &cs, keyrr)
 		if err != nil {
 			log.Printf("Error from SignMsgNG(%s): %v", Globals.Zonename, err)
 			return err

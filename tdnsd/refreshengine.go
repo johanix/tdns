@@ -105,6 +105,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
 						DelegationSync:   zr.DelegationSync,
+						OnlineSigning:    zr.OnlineSigning,
+						AllowUpdates:     zr.AllowUpdates,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
 					}

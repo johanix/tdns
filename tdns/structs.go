@@ -64,6 +64,25 @@ type ZoneData struct {
 	Parent           string   // name of parentzone (if filled in)
 	ParentNS         []string // names of parent nameservers
 	ParentServers    []string // addresses of parent nameservers
+	OnlineSigning    bool     // should we sign RRSIGs for missing signatures
+	AllowUpdates     bool     // should we allow updates to this zone
+	Frozen           bool     // if frozen no updates are allowed
+	Dirty            bool     // if true zone has been modified and we need to save the zonefile
+}
+
+// ZoneConf represents the external config for a zone; it contains no zone data
+type ZoneConf struct {
+	Name           string `validate:"required"`
+	Type           string `validate:"required"`
+	Store          string `validate:"required"` // xfr | map | slice | reg
+	Primary        string
+	Notify         []string
+	Zonefile       string
+	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+	AllowUpdates   bool // should we allow updates to this zone
+	Frozen         bool // if true no updates are allowed; not a config param
+	Dirty          bool // if true zone has been modified; not a config param
 }
 
 type Ixfr struct {
@@ -92,9 +111,11 @@ type KeystorePost struct {
 	Zone       string
 	Keyname    string
 	Keyid      uint16
+	Flags      uint16
 	Algorithm  uint8 // RSASHA256 | ED25519 | etc.
 	PrivateKey string
 	KeyRR      string
+	DnskeyRR   string
 	State      string
 }
 
@@ -102,7 +123,7 @@ type KeystoreResponse struct {
 	Time     time.Time
 	Status   string
 	Zone     string
-	Dnskeys  map[string]TrustAnchor
+	Dnskeys  map[string]DnssecKey // TrustAnchor
 	Sig0keys map[string]Sig0Key
 	Msg      string
 	Error    bool
@@ -140,6 +161,7 @@ type CommandResponse struct {
 	Status   string
 	Zone     string
 	Names    []string
+	Zones    map[string]ZoneConf
 	Msg      string
 	Error    bool
 	ErrorMsg string
@@ -223,6 +245,8 @@ type ZoneRefresher struct {
 	ZoneStore      ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile       string
 	DelegationSync bool
+	OnlineSigning  bool
+	AllowUpdates   bool
 	Force          bool // force refresh, ignoring SOA serial
 	Response       chan RefresherResponse
 }
@@ -271,6 +295,19 @@ type Sig0Key struct {
 	Trusted    bool   // is this key trusted
 	PrivateKey string //
 	Key        dns.KEY
+	Keystr     string
+}
+
+type DnssecKey struct {
+	Name      string
+	State     string
+	Keyid     uint16
+	Flags     uint16
+	Algorithm string
+	// Validated  bool   // has this key been DNSSEC validated
+	// Trusted    bool   // is this key trusted
+	PrivateKey string //
+	Key        dns.DNSKEY
 	Keystr     string
 }
 

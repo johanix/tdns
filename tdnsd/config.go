@@ -17,7 +17,7 @@ type Config struct {
 	Service   ServiceConf
 	DnsEngine DnsEngineConf
 	Apiserver ApiserverConf
-	Zones     map[string]ZoneConf
+	Zones     map[string]tdns.ZoneConf
 	Db        DbConf
 	Ddns      struct {
 		KeyDirectory string `validate:"dir,required"`
@@ -51,6 +51,10 @@ type ZoneConf struct {
 	Notify         []string
 	Zonefile       string
 	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+	AllowUpdates   bool // should we allow updates to this zone
+	Frozen         bool // if true no updates are allowed; not a config param
+	Dirty          bool // if true zone has been modified; not a config param
 }
 
 type DnsEngineConf struct {

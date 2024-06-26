@@ -67,7 +67,7 @@ func mainloop(conf *Config) {
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 type Zconfig struct {
-	Zones map[string]ZoneConf
+	Zones map[string]tdns.ZoneConf
 }
 
 func main() {
@@ -220,15 +220,16 @@ func ParseConfig(conf *Config) error {
 	return nil
 }
 
-func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
+func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 	var all_zones []string
 
-	for zname, conf := range zones {
+	for zname, zconf := range zones {
+		zname = dns.Fqdn(zname)
+		zconf.Name = zname
 		all_zones = append(all_zones, zname)
 
 		var zonestore tdns.ZoneStore
-
-		switch strings.ToLower(conf.Store) {
+		switch strings.ToLower(zconf.Store) {
 		case "xfr":
 			zonestore = tdns.XfrZone
 		case "map":
@@ -236,28 +237,33 @@ func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
 		case "slice":
 			zonestore = tdns.SliceZone
 		default:
-			log.Fatalf("Unknown zone store type: \"%s\"", conf.Store)
+			log.Fatalf("Unknown zone store type: \"%s\"", zconf.Store)
 		}
 
 		var zonetype tdns.ZoneType
 
-		switch strings.ToLower(conf.Type) {
+		switch strings.ToLower(zconf.Type) {
 		case "primary":
 			zonetype = tdns.Primary
 		case "secondary":
 			zonetype = tdns.Secondary
 		default:
-			log.Fatalf("Unknown zone type: \"%s\"", conf.Type)
+			log.Fatalf("Unknown zone type: \"%s\"", zconf.Type)
 		}
 
+		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s, delegationsync: %t, onlinesigning: %t, allowupdates: %t",
+			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile, zconf.DelegationSync, zconf.OnlineSigning, zconf.AllowUpdates)
+
 		zrch <- tdns.ZoneRefresher{
-			Name:           dns.Fqdn(zname),
+			Name:           zname,
 			ZoneType:       zonetype, // primary | secondary
-			Primary:        conf.Primary,
+			Primary:        zconf.Primary,
 			ZoneStore:      zonestore,
-			Notify:         conf.Notify,
-			Zonefile:       conf.Zonefile,
-			DelegationSync: conf.DelegationSync,
+			Notify:         zconf.Notify,
+			Zonefile:       zconf.Zonefile,
+			DelegationSync: zconf.DelegationSync,
+			OnlineSigning:  zconf.OnlineSigning,
+			AllowUpdates:   zconf.AllowUpdates,
 		}
 	}
 

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto"
 	"database/sql"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
@@ -50,7 +52,7 @@ comment		  TEXT,
 UNIQUE (zonename, keyid)
 )`,
 
-	// The Sig0Keystore should contain both the private and public SIG(0) keys for
+	// The Sig0KeyStore should contain both the private and public SIG(0) keys for
 	// each zone that we're managing parent sync for.
 	"Sig0KeyStore": `CREATE TABLE IF NOT EXISTS 'Sig0KeyStore' (
 id		  INTEGER PRIMARY KEY,
@@ -63,12 +65,43 @@ keyrr		  TEXT,
 comment		  TEXT,
 UNIQUE (zonename, keyid)
 )`,
+
+	// The DnssecKeyStore should contain both the private and public DNSSEC keys for
+	// each zone that we're managing signing for.
+	"DnssecKeyStore": `CREATE TABLE IF NOT EXISTS 'DnssecKeyStore' (
+id		  INTEGER PRIMARY KEY,
+zonename	  TEXT,
+state		  TEXT,
+keyid		  INTEGER,
+flags		  INTEGER,
+algorithm	  TEXT,
+privatekey	  TEXT,
+keyrr		  TEXT,
+comment		  TEXT,
+UNIQUE (zonename, keyid)
+)`,
 }
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
+type Sig0KeyCache struct {
+	K     crypto.PrivateKey
+	CS    crypto.Signer
+	RR    dns.RR
+	KeyRR dns.KEY
+}
+
+type DnssecKeyCache struct {
+	K     crypto.PrivateKey
+	CS    crypto.Signer
+	RR    dns.RR
+	KeyRR dns.DNSKEY
+}
+
 type KeyDB struct {
-	DB *sql.DB
-	mu sync.Mutex
+	DB          *sql.DB
+	mu          sync.Mutex
+	Sig0Cache   map[string]*Sig0KeyCache
+	DnssecCache map[string]*DnssecKeyCache // map[zonename+ksk|zsk]*dns.DNSKEY
 }
 
 func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
@@ -155,5 +188,9 @@ func NewKeyDB(force bool) *KeyDB {
 		}
 	}
 	dbSetupTables(db)
-	return &KeyDB{DB: db}
+	return &KeyDB{
+		DB:          db,
+		Sig0Cache:   make(map[string]*Sig0KeyCache),
+		DnssecCache: make(map[string]*DnssecKeyCache),
+	}
 }

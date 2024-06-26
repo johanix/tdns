@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
 	// "github.com/miekg/dns"
@@ -34,7 +35,9 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
 			kp.Command, kp.SubCommand, r.RemoteAddr)
 
-		resp := tdns.KeystoreResponse{}
+		resp := tdns.KeystoreResponse{
+			Time: time.Now(),
+		}
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
@@ -56,9 +59,19 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		// 			resp.ChildDnskeys = tmp1
 
 		case "sig0-mgmt":
-			resp, err = kdb.Sig0Mgmt(kp)
+			resp, err = kdb.Sig0KeyMgmt(kp)
 			if err != nil {
 				log.Printf("Error from Sig0Mgmt(): %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "dnssec-mgmt":
+			resp, err = kdb.DnssecKeyMgmt(kp)
+			if err != nil {
+				log.Printf("Error from DnssecMgmt(): %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			}
 
 		default:
@@ -171,6 +184,22 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
+
+		case "list-zones":
+			for zname, zconf := range conf.Zones {
+				zname = dns.Fqdn(zname)
+				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
+				zd, ok := tdns.Zones.Get(zname)
+				if !ok {
+					log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
+				} else {
+					zconf.Dirty = zd.Dirty
+					zconf.Frozen = zd.Frozen
+				}
+			}
+			resp.Zones = conf.Zones
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
