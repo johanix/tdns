@@ -73,8 +73,9 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		case dns.OpcodeQuery:
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
+
 			if zd, ok := tdns.Zones.Get(qname); ok {
-				// The qname is equal to the name of a zone we have
+				// The qname is equal to the name of a zone we are authoritative for
 				err := ApexResponder(w, r, zd, qname, qtype, dnssec_ok, kdb)
 				if err != nil {
 					log.Printf("Error in ApexResponder: %v", err)
@@ -83,7 +84,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
-				// We are not auth for this zone, so no xfrs possible
+				// We are not authoritative for this zone, so no xfrs possible
 				m := new(dns.Msg)
 				m.SetReply(r)
 				m.MsgHdr.Rcode = dns.RcodeNotAuth
@@ -96,7 +97,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			for _, zname := range tdns.Zones.Keys() {
 				known_zones = append(known_zones, zname)
 			}
-			log.Printf("DnsHandler: Known zones are: %v", known_zones)
+			// log.Printf("DnsHandler: Known zones are: %v", known_zones)
 
 			// Let's see if we can find the zone
 			zd := tdns.FindZone(qname)
@@ -114,9 +115,8 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				w.WriteMsg(m)
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
-			// log.Printf("Found matching %s (%d) zone for qname %s: %s",
-			// 	tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore,
-			//	qname, zd.ZoneName)
+
+			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)
 			err := QueryResponder(w, r, zd, qname, qtype, dnssec_ok, kdb)
 			if err != nil {
 				log.Printf("Error in QueryResponder: %v", err)
@@ -149,14 +149,19 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		return rrset
 	}
 
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
-
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
 		log.Fatalf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
 	}
+
+	if dnssec_ok {
+		apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
+		apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+	}
+
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
 
 	var v4glue, v6glue *tdns.RRset
 
@@ -177,13 +182,10 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
 		if dnssec_ok {
-			apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
-			apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
-
 			m.Answer = append(m.Answer, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
-
-			//			m.Extra = append(m.Extra, glue.RRSIGs...)
+			m.Extra = append(m.Extra, v4glue.RRSIGs...)
+			m.Extra = append(m.Extra, v6glue.RRSIGs...)
 		}
 
 	case tdns.TypeDSYNC, tdns.TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
@@ -264,15 +266,20 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 		return rrset
 	}
 
-	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
-
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		log.Fatalf("QueryResponder: failed to get apex data for zone %s", zd.ZoneName)
 	}
+
+	if dnssec_ok {
+		apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
+		apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+	}
+
+	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
 
 	var v4glue, v6glue *tdns.RRset
 	var wildqname string
@@ -291,7 +298,6 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 			if dnssec_ok {
-				apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
 				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 				// XXX: Here we need to also add the proof of non-existence via NSEC+RRSIG(NSEC) or NSEC3+RRSIG(NSEC3)... at some point
 				// covering NSEC+RRSIG(that NSEC) + // apex NSEC + RRSIG(apex NSEC)
@@ -314,7 +320,6 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 		if dnssec_ok {
-			apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 			// XXX: Here we need to also add the proof of non-existence via NSEC+RRSIG(NSEC) or NSEC3+RRSIG(NSEC3)... at some point
 			// covering NSEC+RRSIG(that NSEC) + // apex NSEC + RRSIG(apex NSEC)
@@ -350,7 +355,6 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 							tgtowner.RRtypes[qtype] = MaybeSignRRset(tgtowner.RRtypes[qtype], qname)
 							m.Answer = append(m.Answer, tgtowner.RRtypes[qtype].RRSIGs...)
 
-							apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
 							m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
 
 							m.Extra = append(m.Extra, v4glue.RRSIGs...)
@@ -401,8 +405,6 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 					if qname == origqname {
 						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
 					}
-
-					apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
 				}
 
 				if qname == origqname {
@@ -420,7 +422,6 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs[0])
 			if dnssec_ok {
-				apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
 				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 			}
 		}

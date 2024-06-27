@@ -67,12 +67,15 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "dnssec-mgmt":
+			log.Printf("APIkeystore: received /keystore request (cmd: %s subcommand: %s)\n",
+				kp.Command, kp.SubCommand)
 			resp, err = kdb.DnssecKeyMgmt(kp)
 			if err != nil {
 				log.Printf("Error from DnssecMgmt(): %v", err)
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
+			log.Printf("APIkeystore: keystore dnssec-mgmt response: %v", resp)
 
 		default:
 			log.Printf("Unknown command: %s", kp.Command)

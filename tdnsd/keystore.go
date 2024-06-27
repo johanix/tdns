@@ -38,14 +38,20 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		return resp, err
 	}
 
-	defer func() {
-		if err == nil {
-			tx.Commit()
-		} else {
-			log.Printf("Error: %v. Rollback.", err)
-			tx.Rollback()
-		}
-	}()
+	//	defer func() {
+	//		if err == nil {
+	//			err1 := tx.Commit()
+	//			if err1 != nil {
+	//				log.Printf("Sig0KeyMgmt: tx.Commit() error=%v", err1)
+	//			}
+	//		} else {
+	//			log.Printf("Error: %v. Rollback.", err)
+	//			err1 := tx.Rollback()
+	//			if err1 != nil {
+	//				log.Printf("Sig0KeyMgmt: tx.Rollback() error=%v", err1)
+	//			}
+	//		}
+	//	}()
 
 	switch kp.SubCommand {
 	case "list":
@@ -142,6 +148,20 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	default:
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
+
+	if err == nil {
+		err1 := tx.Commit()
+		log.Printf("Sig0KeyMgmt: tx.Commit() ok, err1=%v", err1)
+		if err1 != nil {
+			resp.Error = true
+			resp.ErrorMsg = err1.Error()
+		}
+	} else {
+		log.Printf("Error: %v. Rollback.", err)
+		err1 := tx.Rollback()
+		log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
+	}
+
 	return resp, nil
 }
 
@@ -166,11 +186,18 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	}
 
 	defer func() {
+		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
 		if err == nil {
-			tx.Commit()
+			err1 := tx.Commit()
+			log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
+			if err1 != nil {
+				resp.Error = true
+				resp.ErrorMsg = err1.Error()
+			}
 		} else {
 			log.Printf("Error: %v. Rollback.", err)
-			tx.Rollback()
+			err1 := tx.Rollback()
+			log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
 		}
 	}()
 
@@ -209,12 +236,13 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 	case "add": // AKA "import"
 		res, err = tx.Exec(addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm],
-			kp.PrivateKey, kp.KeyRR)
-		log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addDnskeySql, kp.Keyname, kp.Keyid, "***", kp.DnskeyRR)
+			kp.PrivateKey, kp.DnskeyRR)
+		log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			log.Printf("Error from tx.Exec(): %v", err)
 			return resp, err
 		} else {
+			log.Printf("tx.Exec(): all ok")
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
@@ -223,7 +251,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		log.Printf("tx.Exec(%s, %s, %s, %d)", setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			log.Printf("Error from tx.Exec(): %v", err)
 			return resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -261,7 +289,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		res, err = tx.Exec(deleteDnskeySql, kp.Keyname, kp.Keyid)
 		log.Printf("tx.Exec(%s, %s, %d)", deleteDnskeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			log.Printf("Error from tx.Exec(): %v", err)
 			//			resp.Error = true
 			//			resp.ErrorMsg = err.Error()
 			return resp, err
@@ -272,6 +300,20 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	default:
 		log.Printf("DnssecKeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
+
+	if err == nil {
+		err1 := tx.Commit()
+		log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
+		if err1 != nil {
+			resp.Error = true
+			resp.ErrorMsg = err1.Error()
+		}
+	} else {
+		log.Printf("Error: %v. Rollback.", err)
+		err1 := tx.Rollback()
+		log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+	}
+
 	return resp, nil
 }
 
@@ -294,6 +336,17 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	defer func() {
+		if err == nil {
+			err1 := tx.Commit()
+			log.Printf("GetSig0Key: tx.Commit() ok, err1=%v", err1)
+		} else {
+			log.Printf("GetSig0Key: Error: %v. Rollback.", err)
+			err1 := tx.Rollback()
+			log.Printf("GetSig0Key: tx.Rollback() ok, err1=%v", err1)
+		}
+	}()
 
 	rows, err := tx.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
@@ -365,6 +418,17 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	defer func() {
+		if err == nil {
+			err1 := tx.Commit()
+			log.Printf("GetDnssecKey: tx.Commit() ok, err1=%v", err1)
+		} else {
+			log.Printf("GetDnssecKey: Error: %v. Rollback.", err)
+			err1 := tx.Rollback()
+			log.Printf("GetDnssecKey: tx.Rollback() ok, err1=%v", err1)
+		}
+	}()
 
 	rows, err := tx.Query(fetchDnssecPrivKeySql, zonename)
 	if err != nil {

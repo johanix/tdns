@@ -104,10 +104,16 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		log.Printf("ChildSig0Mgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
 	if err == nil {
-		tx.Commit()
+		err1 := tx.Commit()
+		if err1 != nil {
+			log.Printf("ChildSig0Mgmt: tx.Commit() error=%v", err1)
+		}
 	} else {
 		log.Printf("Error: %v. Rollback.", err)
-		tx.Rollback()
+		err1 := tx.Rollback()
+		if err1 != nil {
+			log.Printf("ChildSig0Mgmt: tx.Rollback() error=%v", err1)
+		}
 	}
 	return resp, nil
 }
@@ -167,7 +173,12 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 
 	log.Printf("*** Enter LoadChildSig0Keys() ***")
 
-	rows, err := kdb.Query(loadsig0sql)
+	tx, err := kdb.Begin()
+	if err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(loadsig0sql)
 	if err != nil {
 		log.Fatalf("Error from kdb.Query(%s): %v", loadsig0sql, err)
 	}

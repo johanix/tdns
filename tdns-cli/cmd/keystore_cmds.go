@@ -53,9 +53,9 @@ var keystoreSig0AddCmd = &cobra.Command{
 containing either the private or the public SIG(0) key and the name of the zone.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "childzone")
-		err := KeystoreImportKey(filename)
+		err := Sig0KeyMgmt("add")
 		if err != nil {
-			fmt.Printf("Error from KeystoreImportKey(): %v\n", err)
+			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
 		}
 	},
 }
@@ -65,9 +65,9 @@ var keystoreSig0ImportCmd = &cobra.Command{
 	Short: "Add a new SIG(0) key pair to the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "childzone")
-		err := KeystoreImportKey(filename)
+		err := Sig0KeyMgmt("import")
 		if err != nil {
-			fmt.Printf("Error from KeystoreImportKey(): %v\n", err)
+			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
 		}
 	},
 }
@@ -304,6 +304,10 @@ func Sig0KeyMgmt(cmd string) error {
 		data.State = NewState
 	}
 
+	if tdns.Globals.Debug {
+		log.Printf("Sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
+	}
+
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -371,7 +375,7 @@ func DnssecKeyMgmt(cmd string) error {
 				Flags:      krr.Flags,
 				Algorithm:  alg,
 				PrivateKey: privkey,
-				KeyRR:      rr.String(),
+				DnskeyRR:   rr.String(),
 				State:      "created",
 			}
 		}

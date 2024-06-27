@@ -86,9 +86,16 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 
 	defer func() {
 		if err == nil {
-			tx.Commit()
+			err1 := tx.Commit()
+			if err1 != nil {
+				log.Printf("ApplyUpdate: tx.Commit() error=%v", err1)
+			}
 		} else {
 			log.Printf("ApplyUpdate: Error: %v. Rollback.", err)
+			err1 := tx.Rollback()
+			if err1 != nil {
+				log.Printf("ApplyUpdate: tx.Rollback() error=%v", err1)
+			}
 		}
 	}()
 
@@ -127,8 +134,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			}
 			_, err := tx.Exec(sqlcmd, owner, rrtypestr)
 			if err != nil {
-				log.Printf("Error from tx.Exec(%s, %s, %s): %v",
-					sqlcmd, owner, rrtypestr, err)
+				log.Printf("Error from tx.Exec(%s, %s, %s): %v", sqlcmd, owner, rrtypestr, err)
 				return err
 			}
 
@@ -148,8 +154,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			key := rr.(*dns.KEY)
 			keyid := key.KeyTag()
 			log.Printf("ApplyUpdate: Add KEY with keyid=%d", keyid)
-			_, err := tx.Exec(sqlcmd, owner, keyid,
-				ur.Validated, ur.Trusted, rrcopy.String())
+			_, err := tx.Exec(sqlcmd, owner, keyid, ur.Validated, ur.Trusted, rrcopy.String())
 			if err != nil {
 				log.Printf("Error from kdb.Exec(%s): %v", sqlcmd, err)
 				return err
