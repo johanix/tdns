@@ -25,4 +25,6 @@ features of **tdnsd**. The sub-commands are grouped under different prefixes:
 
 - "**tdns-cli dsync**": commands to examine DSYNC RRsets.
 
-I'm most likely forgotten some categories of commands.
+I'm most likely forgetting some categories of commands. It is always 
+possible to traverse the complete command hierarchy with the "-h" flag
+as all possible sub-commands and valid flags are always listed.
