@@ -14,9 +14,9 @@ feature set:
    zones. The support for negative responses is not quite complete.
 
 4. TDNSD is able to sign (including generating the NSEC chain) a zone 
-   via a command from "**tdns-cli**". It is also able to do online signing
-   of unsigned zones that are configured to allow that (if TDNSD has
-   access to suitable keys to sign with).
+   via a command from "**tdns-cli**". It is also able to perform online 
+   signing of unsigned zones that are configured to allow that (if
+   TDNSD has access to suitable keys to sign with).
 
 In addition, TDNSD has a couple of extra features:
 
@@ -57,6 +57,14 @@ In addition, TDNSD has a couple of extra features:
 9. Initial support for the experimental DELEG record type, including
    reading and parsing zones containing DELEG records for text files
    and receiving then via zone transfer.
+
+10. Support for a built in keystore (to store private/public DNSSEC
+    and SIG(0) key pairs). These are used to sign zone data and DNS
+    UPDATE messages.
+
+11. Support for a built in truststore (to store public DNSSEC and 
+    SIG(0) keys). These are used to validate child CDS and CSYNC
+    RRsets and DNS UPDATE messages received from child operstors.
 
 DOG is a trivial implementation of a DNS query tool, similar to the
 much more capable utility "dig" (from the BIND distribution). DOG has
