@@ -6,12 +6,17 @@ feature set:
 0. Load zones from text files on disk.
 
 1. Inbound and outbound NOTIFY support, inbound and outbound
-   AXFR support. No support for IXFR YET.
+   AXFR support. No support for IXFR yet.
 
 2. Respond correctly to non-DNSSEC queries.
 
 3. Respond mostly correctly to queries with DO=1 to DNSSEC signed
    zones. The support for negative responses is not quite complete.
+
+4. TDNSD is able to sign (including generating the NSEC chain) a zone 
+   via a command from "**tdns-cli**". It is also able to do online signing
+   of unsigned zones that are configured to allow that (if TDNSD has
+   access to suitable keys to sign with).
 
 In addition, TDNSD has a couple of extra features:
 
@@ -41,15 +46,17 @@ In addition, TDNSD has a couple of extra features:
    parent zone).
 
 7. Support for receiving SIG(0) signed UPDATE messages containing 
-   new delegation information for a child zone. Acceptance of this
-   data requires the signature to validate and is also subject to
-   local policy.
+   new delegation information for a child zone (as an agent for
+   the parent). Acceptance of this data requires the signature to
+   validate and is also subject to local policy.
 
 8. Support for sending SIG(0) signed UPDATE messages (as an agent
    for the child) to the parent's designated UPDATE Receiver (as 
    documented via one or more DSYNC RRs in the parent zone).
 
-9. Support for the experimental DELEG record type.
+9. Initial support for the experimental DELEG record type, including
+   reading and parsing zones containing DELEG records for text files
+   and receiving then via zone transfer.
 
 DOG is a trivial implementation of a DNS query tool, similar to the
 much more capable utility "dig" (from the BIND distribution). DOG has
