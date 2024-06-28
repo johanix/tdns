@@ -41,19 +41,19 @@ func SignMsgNG(m dns.Msg, name string, cs *crypto.Signer, keyrr *dns.KEY) (*dns.
 	sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
 	sigrr.RRSIG.SignerName = name
 
-	log.Printf("SIG pre-signing: %v\n", sigrr.String())
-	log.Printf("Msg additional pre-signing: %d\n", len(m.Extra))
+	// log.Printf("SIG pre-signing: %v\n", sigrr.String())
+	//log.Printf("Msg additional pre-signing: %d\n", len(m.Extra))
 
-	res, err := sigrr.Sign(*cs, &m)
+	_, err := sigrr.Sign(*cs, &m)
 	if err != nil {
 		log.Printf("Error from sig.Sign(%s): %v", name, err)
 		return nil, err
 	}
 	// fmt.Printf("Res: %s\n", string(res))
-	log.Printf("len(signed msg): %d\n", len(res))
+	// log.Printf("len(signed msg): %d\n", len(res))
 	m.Extra = append(m.Extra, sigrr)
 
-	log.Printf("len(msg+sig): %d\n", m.Len())
+	// log.Printf("len(msg+sig): %d\n", m.Len())
 
 	log.Printf("Signed msg: %s\n", m.String())
 	// fmt.Printf("Completed SIG RR: %s\n", sigrr.String())
@@ -75,8 +75,8 @@ func SignRRset(rrset *RRset, name string, cs *crypto.Signer, keyrr *dns.DNSKEY) 
 	rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
 	rrsig.SignerName = name
 
-	log.Printf("RRSIG pre-signing: %v\n", rrsig.String())
-	log.Printf("RRset pre-signing: %v\n", rrset)
+	// log.Printf("RRSIG pre-signing: %v\n", rrsig.String())
+	// log.Printf("RRset pre-signing: %v\n", rrset)
 
 	err := rrsig.Sign(*cs, rrset.RRs)
 	if err != nil {
@@ -86,8 +86,8 @@ func SignRRset(rrset *RRset, name string, cs *crypto.Signer, keyrr *dns.DNSKEY) 
 
 	rrset.RRSIGs = []dns.RR{rrsig}
 
-	log.Printf("len(rrset.RRSIGs): %d\n", len(rrset.RRSIGs))
-	log.Printf("Generated RRSIG: %s\n", rrsig.String())
+	// log.Printf("len(rrset.RRSIGs): %d\n", len(rrset.RRSIGs))
+	// log.Printf("Generated RRSIG: %s\n", rrsig.String())
 
 	return nil
 }

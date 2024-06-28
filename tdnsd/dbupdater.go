@@ -79,7 +79,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		deldelrrsetsql = `DELETE FROM ChildDelegationData WHERE owner=? AND rrtype=?`
 	)
 
-	tx, err := kdb.Begin()
+	tx, err := kdb.Begin("ApplyUpdate")
 	if err != nil {
 		return err
 	}

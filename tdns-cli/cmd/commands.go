@@ -66,20 +66,20 @@ var reloadCmd = &cobra.Command{
 	},
 }
 
-var nsecCmd = &cobra.Command{
+var zoneNsecCmd = &cobra.Command{
 	Use:   "nsec",
 	Short: "A brief description of your command",
 }
 
-var nsecGenerateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Send an NSEC generate command to tdnsd",
+var zoneSignCmd = &cobra.Command{
+	Use:   "sign",
+	Short: "Send an zone sign command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
 		cr, err := SendCommandNG(api, tdns.CommandPost{
-			Command:    "nsec",
-			SubCommand: "generate",
+			Command:    "zone",
+			SubCommand: "sign-zone",
 			Zone:       tdns.Globals.Zonename,
 			Force:      force,
 		})
@@ -98,15 +98,42 @@ var nsecGenerateCmd = &cobra.Command{
 	},
 }
 
-var nsecShowCmd = &cobra.Command{
+var zoneNsecGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Send an NSEC generate command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "generate-nsec",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneNsecShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Send an NSEC show command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
 		cr, err := SendCommandNG(api, tdns.CommandPost{
-			Command:    "nsec",
-			SubCommand: "show",
+			Command:    "zone",
+			SubCommand: "show-nsec-chain",
 			Zone:       tdns.Globals.Zonename,
 			Force:      force,
 		})
@@ -330,12 +357,12 @@ var debugShowTACmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd, nsecCmd, zoneCmd)
+	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd, zoneCmd)
 
-	zoneCmd.AddCommand(zoneListCmd)
+	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
-	nsecCmd.AddCommand(nsecGenerateCmd, nsecShowCmd)
+	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")

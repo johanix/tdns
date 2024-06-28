@@ -97,19 +97,80 @@ type DnssecKeyCache struct {
 	KeyRR dns.DNSKEY
 }
 
+type Tx struct {
+	*sql.Tx
+	KeyDB   *KeyDB
+	context string
+}
+
+func (tx *Tx) Commit() error {
+	log.Printf("---> Committing KeyDB transaction: %s", tx.context)
+	err := tx.Tx.Commit()
+	tx.KeyDB.Ctx = ""
+	if err != nil {
+		log.Printf("<--- Error committing KeyDB transaction (%s): %v", tx.context, err)
+	}
+	return err
+}
+
+func (tx *Tx) Rollback() error {
+	log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
+	err := tx.Tx.Rollback()
+	tx.KeyDB.Ctx = ""
+	if err != nil {
+		log.Printf("<--- Error rolling back KeyDB transaction (%s): %v", tx.context, err)
+	}
+	return err
+}
+
+func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
+	log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
+	result, err := tx.Tx.Exec(query, args...)
+	if err != nil {
+		log.Printf("<--- Error executing KeyDB Exec (%s): %v", tx.context, err)
+	}
+	return result, err
+}
+
+func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
+	rows, err := tx.Tx.Query(query, args...)
+	if err != nil {
+		log.Printf("<--- Error executing KeyDB query (%s): %v", tx.context, err)
+	}
+	return rows, err
+}
+
+func (tx *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
+	log.Printf("Querying row: %s with args: %v in context: %s", query, args, tx.context)
+	return tx.Tx.QueryRow(query, args...)
+}
+
 type KeyDB struct {
 	DB          *sql.DB
 	mu          sync.Mutex
 	Sig0Cache   map[string]*Sig0KeyCache
 	DnssecCache map[string]*DnssecKeyCache // map[zonename+ksk|zsk]*dns.DNSKEY
+	Ctx         string
 }
 
 func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 	return db.DB.Prepare(q)
 }
 
-func (db *KeyDB) Begin() (*sql.Tx, error) {
-	return db.DB.Begin()
+func (db *KeyDB) Begin(context string) (*Tx, error) {
+	log.Printf("---> Beginning KeyDB transaction: %s", context)
+	if db.Ctx != "" {
+		log.Printf("<--- Error: KeyDB transaction already in progress: %s", db.Ctx)
+		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
+	}
+	db.Ctx = context
+	tx, err := db.DB.Begin()
+	if err != nil {
+		log.Printf("Error beginning transaction (%s): %v", context, err)
+		return nil, err
+	}
+	return &Tx{Tx: tx, KeyDB: db, context: context}, nil
 }
 
 func (db *KeyDB) Query(query string, args ...interface{}) (*sql.Rows, error) {

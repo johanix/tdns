@@ -33,7 +33,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	var resp = tdns.KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
-	tx, err := kdb.Begin()
+	tx, err := kdb.Begin("Sig0KeyMgmt")
 	if err != nil {
 		return resp, err
 	}
@@ -180,7 +180,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	var resp = tdns.KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
-	tx, err := kdb.Begin()
+	tx, err := kdb.Begin("DnssecKeyMgmt")
 	if err != nil {
 		return resp, err
 	}
@@ -332,23 +332,23 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		return &data.K, &data.CS, &data.KeyRR, nil
 	}
 
-	tx, err := kdb.Begin()
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	//	tx, err := kdb.Begin()
+	//	if err != nil {
+	//		return nil, nil, nil, err
+	//	}
 
-	defer func() {
-		if err == nil {
-			err1 := tx.Commit()
-			log.Printf("GetSig0Key: tx.Commit() ok, err1=%v", err1)
-		} else {
-			log.Printf("GetSig0Key: Error: %v. Rollback.", err)
-			err1 := tx.Rollback()
-			log.Printf("GetSig0Key: tx.Rollback() ok, err1=%v", err1)
-		}
-	}()
+	//	defer func() {
+	//		if err == nil {
+	//			err1 := tx.Commit()
+	//			log.Printf("GetSig0Key: tx.Commit() ok, err1=%v", err1)
+	//		} else {
+	//			log.Printf("GetSig0Key: Error: %v. Rollback.", err)
+	//			err1 := tx.Rollback()
+	//			log.Printf("GetSig0Key: tx.Rollback() ok, err1=%v", err1)
+	//		}
+	//	}()
 
-	rows, err := tx.Query(fetchSig0PrivKeySql, zonename)
+	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
 		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
 		return nil, nil, nil, err
@@ -414,23 +414,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 		return &data.K, &data.CS, &data.KeyRR, nil
 	}
 
-	tx, err := kdb.Begin()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	defer func() {
-		if err == nil {
-			err1 := tx.Commit()
-			log.Printf("GetDnssecKey: tx.Commit() ok, err1=%v", err1)
-		} else {
-			log.Printf("GetDnssecKey: Error: %v. Rollback.", err)
-			err1 := tx.Rollback()
-			log.Printf("GetDnssecKey: tx.Rollback() ok, err1=%v", err1)
-		}
-	}()
-
-	rows, err := tx.Query(fetchDnssecPrivKeySql, zonename)
+	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename)
 	if err != nil {
 		log.Printf("Error from kdb.Query(%s, %s): %v", fetchDnssecPrivKeySql, zonename, err)
 		return nil, nil, nil, err
@@ -444,7 +428,6 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 
 	for rows.Next() {
 		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
-		log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				log.Printf("No active DNSSEC key found for zone %s", zonename)

@@ -140,10 +140,8 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 			err := tdns.SignRRset(&rrset, qname, cs, keyrr)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
-				return rrset
 			} else {
 				log.Printf("Signed %s: %v", qname, err)
-				return rrset
 			}
 		}
 		return rrset
@@ -257,10 +255,8 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			err := tdns.SignRRset(&rrset, qname, cs, keyrr)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
-				return rrset
 			} else {
 				log.Printf("Signed %s: %v", qname, err)
-				return rrset
 			}
 		}
 		return rrset

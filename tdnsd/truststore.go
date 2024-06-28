@@ -33,7 +33,7 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 	var resp = tdns.TruststoreResponse{Time: time.Now()}
 	var res sql.Result
 
-	tx, err := kdb.Begin()
+	tx, err := kdb.Begin("ChildSig0Mgmt")
 	if err != nil {
 		return resp, err
 	}
@@ -173,12 +173,12 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 
 	log.Printf("*** Enter LoadChildSig0Keys() ***")
 
-	tx, err := kdb.Begin()
-	if err != nil {
-		return err
-	}
+	// tx, err := kdb.Begin("LoadChildSig0Keys")
+	// if err != nil {
+	//		return err
+	//	}
 
-	rows, err := tx.Query(loadsig0sql)
+	rows, err := kdb.Query(loadsig0sql)
 	if err != nil {
 		log.Fatalf("Error from kdb.Query(%s): %v", loadsig0sql, err)
 	}
@@ -208,6 +208,10 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 			})
 		}
 	}
+	// err1 := tx.Commit()
+	// if err1 != nil {
+	//		log.Printf("LoadChildSig0Keys: tx.Commit() error=%v", err1)
+	// }
 
 	// If a validator trusted key config file is found, read it in.
 	sig0file := viper.GetString("validator.sig0.trusted.file")
@@ -219,7 +223,7 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 
 		var sig0tmp Sig0tmp
 
-		tx, err := kdb.Begin()
+		tx, err := kdb.Begin("LoadChildSig0Keys (again)")
 		if err != nil {
 			return err
 		}
@@ -256,7 +260,10 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 				log.Printf("LoadChildSig0Keys: Key %s is not a KEY?", rr.String())
 			}
 		}
-		tx.Commit()
+		err1 := tx.Commit()
+		if err1 != nil {
+			log.Printf("LoadChildSig0Keys: tx.Commit() error=%v", err1)
+		}
 	}
 	return nil
 }
