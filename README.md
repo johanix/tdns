@@ -1,7 +1,8 @@
 # tdns
 
-tdns is a small authoritative nameserver written in Go to be used various expteriments and tests.
-It is intended to be really simple to understand and modify as needed.
+tdns is a small authoritative nameserver written in Go to be used various
+experiments and tests. It is intended to be really simple to understand
+and modify as needed. The repo consists of three separate programs:
 
 ## tdnsd
 A simple authoritative DNS nameserver with some special features. 
