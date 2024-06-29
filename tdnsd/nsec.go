@@ -8,12 +8,13 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
 
-func ZoneOps(cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandResponse, error) {
+func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandResponse, error) {
 	var resp tdns.CommandResponse
 	var err error
 
@@ -36,6 +37,50 @@ func ZoneOps(cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandResponse, error) {
 	case "show-nsec-chain":
 		resp.Names, err = ShowNsecChain(zd)
 		return resp, err
+
+	case "bump-serial":
+		resp.Msg, err = BumpSerial(conf, cp.Zone)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		}
+
+	case "freeze":
+		if !zd.AllowUpdates {
+			return resp, fmt.Errorf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
+		}
+
+		if zd.Frozen {
+			return resp, fmt.Errorf("FreezeZone: zone %s is already frozen", zd.ZoneName)
+		}
+
+		zd.Frozen = true
+		tmp, ok := tdns.Zones.Get(zd.ZoneName)
+		if !ok {
+			return resp, fmt.Errorf("FreezeZone: zone %s is unknown", zd.ZoneName)
+		}
+		resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
+		return resp, nil
+
+	case "thaw":
+		if !zd.AllowUpdates {
+			return resp, fmt.Errorf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
+		}
+		if !zd.Frozen {
+			return resp, fmt.Errorf("ThawZone: zone %s is not frozen", zd.ZoneName)
+		}
+		zd.Frozen = false
+		resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
+		return resp, nil
+
+	case "reload":
+		// XXX: Note: if the zone allows updates and is dirty, then reloading should be denied
+		log.Printf("ZoneOps: reloading, will check for changes to delegation data\n")
+		resp.Msg, err = ReloadZone(conf, cp.Zone, cp.Force)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		}
 
 	default:
 		return resp, fmt.Errorf("NsecOps: unknown sub command: \"%s\"", cp.SubCommand)
@@ -199,4 +244,69 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 	}
 
 	return nil
+}
+
+func BumpSerial(conf *Config, zone string) (string, error) {
+	var respch = make(chan BumperResponse, 1)
+	conf.Internal.BumpZoneCh <- BumperData{
+		Zone:   zone,
+		Result: respch,
+	}
+
+	resp := <-respch
+
+	if resp.Error {
+		log.Printf("BumpSerial: Error from RefreshEngine: %s", resp.ErrorMsg)
+		msg := fmt.Sprintf("Zone %s: error bumping SOA serial: %s", zone, resp.ErrorMsg)
+		return msg, fmt.Errorf(msg)
+	}
+
+	if resp.Msg == "" {
+		resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
+	}
+	return resp.Msg, nil
+}
+
+func ReloadZone(conf *Config, zone string, force bool) (string, error) {
+	var respch = make(chan tdns.RefresherResponse, 1)
+	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
+		Name:     zone,
+		Response: respch,
+		Force:    force,
+	}
+
+	var resp tdns.RefresherResponse
+
+	select {
+	case resp = <-respch:
+	case <-time.After(2 * time.Second):
+		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
+	}
+
+	if resp.Error {
+		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
+		return fmt.Sprintf("Zone %s: Error reloading: %s", zone, resp.ErrorMsg),
+			fmt.Errorf("Zone %s: Error reloading: %v", zone, resp.ErrorMsg)
+	}
+
+	if resp.Msg == "" {
+		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zone)
+	}
+	return resp.Msg, nil
+}
+
+type BumperData struct {
+	Zone   string
+	Result chan BumperResponse
+}
+
+type BumperResponse struct {
+	Time      time.Time
+	Zone      string
+	Msg       string
+	OldSerial uint32
+	NewSerial uint32
+	Error     bool
+	ErrorMsg  string
+	Status    bool
 }

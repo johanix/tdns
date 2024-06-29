@@ -182,7 +182,7 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			conf.Internal.APIStopCh <- struct{}{}
 
 		case "zone":
-			resp, err = ZoneOps(cp, conf.Internal.KeyDB)
+			resp, err = ZoneOps(conf, cp, conf.Internal.KeyDB)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -198,8 +198,10 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
 				} else {
+					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Dirty, zd.Frozen)
 					zconf.Dirty = zd.Dirty
 					zconf.Frozen = zd.Frozen
+					conf.Zones[zname] = zconf
 				}
 			}
 			resp.Zones = conf.Zones
@@ -416,7 +418,7 @@ func APIdispatcher(conf *Config, done <-chan struct{}) {
 	log.Println("API dispatcher: unclear how to stop the http server nicely.")
 }
 
-func BumpSerial(conf *Config, zone string) (string, error) {
+func xxxBumpSerial(conf *Config, zone string) (string, error) {
 	var respch = make(chan BumperResponse, 1)
 	conf.Internal.BumpZoneCh <- BumperData{
 		Zone:   zone,
@@ -437,7 +439,7 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 	return resp.Msg, nil
 }
 
-func ReloadZone(conf *Config, zone string, force bool) (string, error) {
+func xxxReloadZone(conf *Config, zone string, force bool) (string, error) {
 	var respch = make(chan tdns.RefresherResponse, 1)
 	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
 		Name:     zone,
@@ -465,12 +467,12 @@ func ReloadZone(conf *Config, zone string, force bool) (string, error) {
 	return resp.Msg, nil
 }
 
-type BumperData struct {
+type xxxBumperData struct {
 	Zone   string
 	Result chan BumperResponse
 }
 
-type BumperResponse struct {
+type xxxBumperResponse struct {
 	Time      time.Time
 	Zone      string
 	Msg       string

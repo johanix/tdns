@@ -36,7 +36,7 @@ var stopCmd = &cobra.Command{
 	},
 }
 
-var reloadCmd = &cobra.Command{
+var zoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -46,9 +46,10 @@ var reloadCmd = &cobra.Command{
 		}
 
 		resp, err := SendCommandNG(api, tdns.CommandPost{
-			Command: "reload",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			Force:   force,
+			Command:    "zone",
+			SubCommand: "reload",
+			Zone:       dns.Fqdn(tdns.Globals.Zonename),
+			Force:      force,
 		})
 
 		if err != nil {
@@ -156,6 +157,60 @@ var zoneNsecShowCmd = &cobra.Command{
 	},
 }
 
+var zoneFreezeCmd = &cobra.Command{
+	Use:   "freeze",
+	Short: "Tell tdnsd to freeze a zone (i.e. no longer accept changes to the zone data)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "freeze",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneThawCmd = &cobra.Command{
+	Use:   "thaw",
+	Short: "Tell tdnsd to thaw a zone (i.e. accept changes to the zone data again)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "thaw",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
 var zoneCmd = &cobra.Command{
 	Use:   "zone",
 	Short: "Prefix command, not useable by itself",
@@ -216,14 +271,15 @@ var zoneListCmd = &cobra.Command{
 	},
 }
 
-var bumpCmd = &cobra.Command{
+var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if tdns.Globals.Zonename == "" {
-			fmt.Printf("Error: zone name not specified. Terminating.\n")
-			os.Exit(1)
-		}
+		PrepArgs("childzone")
+		//		if tdns.Globals.Zonename == "" {
+		//			fmt.Printf("Error: zone name not specified. Terminating.\n")
+		//			os.Exit(1)
+		//		}
 
 		msg, err := SendCommand("bump", dns.Fqdn(tdns.Globals.Zonename))
 		if err != nil {
@@ -235,7 +291,7 @@ var bumpCmd = &cobra.Command{
 	},
 }
 
-var bumpNGCmd = &cobra.Command{
+var zoneSerialBbumpNGCmd = &cobra.Command{
 	Use:   "bumpng",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -357,16 +413,17 @@ var debugShowTACmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd, zoneCmd)
+	rootCmd.AddCommand(stopCmd, debugCmd, zoneCmd)
 
-	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd)
+	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd, zoneSerialBbumpNGCmd)
+	zoneCmd.AddCommand(zoneFreezeCmd, zoneThawCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
-	reloadCmd.Flags().BoolVarP(&force, "force", "F", false, "force reloading, ignoring SOA serial")
+	zoneReloadCmd.Flags().BoolVarP(&force, "force", "F", false, "force reloading, ignoring SOA serial")
 
 	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
 	zoneListCmd.Flags().BoolVarP(&showfile, "file", "F", false, "Show zone input file")

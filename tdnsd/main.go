@@ -224,8 +224,13 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 	var all_zones []string
 
 	for zname, zconf := range zones {
-		zname = dns.Fqdn(zname)
-		zconf.Name = zname
+		if zname != dns.Fqdn(zname) {
+			delete(zones, zname)
+			zname = dns.Fqdn(zname)
+			zconf.Name = zname
+			zones[zname] = zconf
+		}
+
 		all_zones = append(all_zones, zname)
 
 		var zonestore tdns.ZoneStore
