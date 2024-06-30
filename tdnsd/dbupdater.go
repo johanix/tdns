@@ -12,7 +12,6 @@ import (
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
-	// "github.com/johanix/tdns/tdns"
 )
 
 type UpdateRequest struct {
@@ -227,6 +226,8 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 				continue
 			}
 		}
+
+		dump.P(owner.RRtypes)
 
 		rrset = tdns.RRset{
 			RRs:    []dns.RR{},
