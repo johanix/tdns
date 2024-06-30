@@ -10,6 +10,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
