@@ -194,6 +194,8 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is frozen", ur.ZoneName)
 	}
 
+	dump.P(zd)
+
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
