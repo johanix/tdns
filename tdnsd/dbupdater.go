@@ -194,7 +194,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is frozen", ur.ZoneName)
 	}
 
-	dump.P(zd)
+	// dump.P(zd)
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -217,9 +217,11 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			}
 		}
 
-		owner = &tdns.OwnerData{
-			Name:    ownerName,
-			RRtypes: make(map[uint16]tdns.RRset),
+		if owner == nil {
+			owner = &tdns.OwnerData{
+				Name:    ownerName,
+				RRtypes: make(map[uint16]tdns.RRset),
+			}
 		}
 
 		rrset, exists := owner.RRtypes[rrtype]
@@ -228,14 +230,13 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				continue
 			}
+			rrset = tdns.RRset{
+				RRs:    []dns.RR{},
+				RRSIGs: []dns.RR{},
+			}
 		}
 
 		dump.P(owner.RRtypes)
-
-		rrset = tdns.RRset{
-			RRs:    []dns.RR{},
-			RRSIGs: []dns.RR{},
-		}
 
 		switch class {
 		case dns.ClassNONE:
