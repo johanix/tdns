@@ -195,6 +195,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 	}
 
 	// dump.P(zd)
+	dump.P(ur.Actions)
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class

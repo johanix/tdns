@@ -36,7 +36,8 @@ parent		  TEXT,
 child		  TEXT,
 owner		  TEXT,
 rrtype		  TEXT,
-rr		  TEXT
+rr		  TEXT,
+UNIQUE (owner,rr)
 )`,
 
 	// The Sig0TrustStore contains public SIG(0) keys that we use to validate
