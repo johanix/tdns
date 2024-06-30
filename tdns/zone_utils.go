@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"path"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -149,9 +150,17 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 	}
 
 	if viper.GetBool("service.debug") {
-		filedir := viper.GetString("log.filedir")
-		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir,
-			zd.ZoneName))
+		fname, err := zd.ZoneFileName()
+		if err != nil {
+			zd.Logger.Printf("Error from ZoneFileName(%s): %v", zd.ZoneName, err)
+		} else {
+			f, err := zonedata.WriteFile(fname)
+			if err != nil {
+				zd.Logger.Printf("Error from WriteFile(%s): %v", zd.ZoneName, err)
+			} else {
+				zd.Logger.Printf("FetchFromFile: Zone %s: zone file written to %s", zd.ZoneName, f)
+			}
+		}
 	}
 
 	zd.mu.Lock()
@@ -218,8 +227,17 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	}
 
 	if viper.GetBool("service.debug") {
-		filedir := viper.GetString("log.filedir")
-		zonedata.WriteFile(fmt.Sprintf("%s/%s.tdnsd", filedir, zd.ZoneName))
+		fname, err := zd.ZoneFileName()
+		if err != nil {
+			zd.Logger.Printf("Error from ZoneFileName(%s): %v", zd.ZoneName, err)
+		} else {
+			f, err := zonedata.WriteFile(fname)
+			if err != nil {
+				zd.Logger.Printf("Error from WriteFile(%s): %v", zd.ZoneName, err)
+			} else {
+				zd.Logger.Printf("FetchFromUpstream: Zone %s: zone file written to %s", zd.ZoneName, f)
+			}
+		}
 	}
 
 	zd.mu.Lock()
@@ -236,6 +254,20 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	zd.mu.Unlock()
 
 	return true, nil
+}
+
+func (zd *ZoneData) ZoneFileName() (string, error) {
+	filedir := viper.GetString("dnsengine.zones.filedir")
+	if filedir == "" {
+		return "", fmt.Errorf("ZoneFileName: dnsengine.zones.filedir is not set")
+	}
+	filetmpl := viper.GetString("dnsengine.zones.filetmpl")
+	if filetmpl == "" {
+		return "", fmt.Errorf("ZoneFileName: dnsengine.zones.filetmpl is not set")
+	}
+	fname := fmt.Sprintf("/tmp"+filetmpl, filedir, zd.ZoneName) // Must ensure that we don't allow writing everywhere
+	fname = path.Clean(fname)
+	return fname, nil
 }
 
 func (zd *ZoneData) NameExists(qname string) bool {

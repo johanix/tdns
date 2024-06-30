@@ -167,3 +167,13 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 	}
 	return rrsets_differ, adds, removes
 }
+
+func (rrset *RRset) RemoveRR(rr dns.RR) {
+	for i, r := range rrset.RRs {
+		if dns.IsDuplicate(r, rr) {
+			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
+			rrset.RRSIGs = []dns.RR{}
+			return
+		}
+	}
+}

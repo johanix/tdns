@@ -6,9 +6,11 @@ package main
 
 import (
 	//        "fmt"
+	"fmt"
 	"log"
 	"sync"
 
+	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	// "github.com/johanix/tdns/tdns"
 )
@@ -45,9 +47,13 @@ func UpdaterEngine(conf *Config) error {
 						// zone is a primary zone, and has a policy that allows updates and we're able to write the
 						// resulting updated zone back to disk...
 						log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
-						err := kdb.ApplyUpdate(ur)
+						err := kdb.ApplyUpdateToDB(ur)
 						if err != nil {
 							log.Printf("Error from ApplyUpdate: %v", err)
+						}
+						err = ApplyUpdateToZoneData(ur)
+						if err != nil {
+							log.Printf("Error from ApplyUpdateToZoneData: %v", err)
 						}
 					}
 				default:
@@ -67,7 +73,7 @@ func UpdaterEngine(conf *Config) error {
 // 3. To delete an exact RR we need owner, rrtype and the rr.String(). Problem is if
 //    the TTL is not correct. Therefore we should always store RRs with TTL=0
 
-func (kdb *KeyDB) ApplyUpdate(ur UpdateRequest) error {
+func (kdb *KeyDB) ApplyUpdateToDB(ur UpdateRequest) error {
 	const (
 		addkeysql = `
 INSERT OR REPLACE INTO ChildSig0Keys (owner, keyid, validated, trusted, keyrr) VALUES (?, ?, ?, ?)`
@@ -168,6 +174,73 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			}
 		default:
 			log.Printf("ApplyUpdate: Error: request to add %s RR", rrtypestr)
+		}
+	}
+
+	return nil
+}
+
+func ApplyUpdateToZoneData(ur UpdateRequest) error {
+	zd, ok := tdns.Zones.Get(ur.ZoneName)
+	if !ok {
+		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is unknown", ur.ZoneName)
+	}
+
+	if !zd.AllowUpdates {
+		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is not allowed to be updated", ur.ZoneName)
+	}
+
+	if zd.Frozen {
+		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is frozen", ur.ZoneName)
+	}
+
+	for _, rr := range ur.Actions {
+		class := rr.Header().Class
+		ownerName := rr.Header().Name
+		rrtype := rr.Header().Rrtype
+		rrtypestr := dns.TypeToString[rrtype]
+
+		rrcopy := dns.Copy(rr)
+		rrcopy.Header().Ttl = 0
+		rrcopy.Header().Class = dns.ClassINET
+
+		owner, err := zd.GetOwner(ownerName)
+		if err != nil {
+			return fmt.Errorf("ApplyUpdateToZoneData: owner name %s is unknown", ownerName)
+		}
+
+		rrset, exists := owner.RRtypes[rrtype]
+		if !exists {
+			return fmt.Errorf("ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
+		}
+
+		switch class {
+		case dns.ClassNONE:
+			// ClassNONE: Remove exact RR
+			rrset.RemoveRR(rr)
+			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
+			continue
+
+		case dns.ClassANY:
+			// ClassANY: Remove RRset
+			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
+			delete(owner.RRtypes, rrtype)
+			continue
+
+		case dns.ClassINET:
+			// log.Printf("ApplyUpdate: Add RR: %s", req.String())
+		default:
+			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
+		}
+
+		switch rrtype {
+		case dns.TypeNS, dns.TypeA, dns.TypeAAAA:
+			log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
+			rrset.RRs = append(rrset.RRs, rrcopy)
+			rrset.RRSIGs = []dns.RR{}
+			continue
+		default:
+			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR", rrtypestr)
 		}
 	}
 

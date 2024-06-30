@@ -55,10 +55,6 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandRespons
 		}
 
 		zd.Frozen = true
-		tmp, ok := tdns.Zones.Get(zd.ZoneName)
-		if !ok {
-			return resp, fmt.Errorf("FreezeZone: zone %s is unknown", zd.ZoneName)
-		}
 		resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
 		return resp, nil
 
