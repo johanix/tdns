@@ -13,12 +13,18 @@ import (
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 	// "github.com/johanix/tdns/tdns"
 )
 
 func DelegationSyncEngine(conf *Config) error {
 	delsyncq := conf.Internal.DelegationSyncQ
 	var ds tdns.DelegationSyncRequest
+	var imr = viper.GetString("resolver.address")
+	if imr == "" {
+		log.Printf("DelegationSyncEngine: resolver address not specified. Terminating.")
+		return fmt.Errorf("DelegationSyncEngine: resolver address not specified")
+	}
 
 	kdb := conf.Internal.KeyDB
 	_ = kdb
@@ -27,6 +33,7 @@ func DelegationSyncEngine(conf *Config) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
+		var err error
 		for {
 			select {
 			case ds = <-delsyncq:
@@ -53,6 +60,14 @@ func DelegationSyncEngine(conf *Config) error {
 					}
 					for _, rr := range ds.Removes {
 						log.Printf("DEL: %s", rr.String())
+					}
+					zd := ds.ZoneData
+					if zd.Parent == "" || zd.Parent == "." {
+						zd.Parent, err = tdns.ParentZone(zd.ZoneName, imr)
+						if err != nil {
+							log.Printf("DelegationSyncEngine: Zone %s: Error from ParentZone(): %v. Ignoring sync request.", ds.ZoneName, err)
+							continue
+						}
 					}
 
 					ds := tdns.DelegationSyncStatus{
@@ -103,7 +118,7 @@ func DelegationSyncEngine(conf *Config) error {
 					// Not in sync, let's fix that.
 					msg, rcode, err := SyncZoneDelegation(conf, zd, syncstate)
 					if err != nil {
-						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
 						syncstate.Error = true
 						syncstate.ErrorMsg = err.Error()
 					} else {
@@ -356,7 +371,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 
 	// 4. Sign the msg
 	log.Printf("SyncZoneDelegationViaUpdate: Signing the DNS UPDATE %s", zd.ZoneName)
-	smsg, err := tdns.SignMsgNG(m, zd.ZoneName, cs, keyrr)
+	smsg, err := tdns.SignMsgNG(*m, zd.ZoneName, cs, keyrr)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
 		return "", 0, err

@@ -85,7 +85,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		deldelrrsetsql = `DELETE FROM ChildDelegationData WHERE owner=? AND rrtype=?`
 	)
 
-	tx, err := kdb.Begin("ApplyUpdate")
+	tx, err := kdb.Begin("ApplyUpdateToDB")
 	if err != nil {
 		return err
 	}
@@ -94,13 +94,13 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		if err == nil {
 			err1 := tx.Commit()
 			if err1 != nil {
-				log.Printf("ApplyUpdate: tx.Commit() error=%v", err1)
+				log.Printf("ApplyUpdateToDB: tx.Commit() error=%v", err1)
 			}
 		} else {
-			log.Printf("ApplyUpdate: Error: %v. Rollback.", err)
+			log.Printf("ApplyUpdateToDB: Error: %v. Rollback.", err)
 			err1 := tx.Rollback()
 			if err1 != nil {
-				log.Printf("ApplyUpdate: tx.Rollback() error=%v", err1)
+				log.Printf("ApplyUpdateToDB: tx.Rollback() error=%v", err1)
 			}
 		}
 	}()
@@ -122,7 +122,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			if rrtype == dns.TypeKEY {
 				sqlcmd = delkeyrrsql
 			}
-			log.Printf("ApplyUpdate: Remove RR: %s %s %s",
+			log.Printf("ApplyUpdateToDB: Remove RR: %s %s %s",
 				owner, rrtypestr, rrcopy.String())
 			_, err := tx.Exec(sqlcmd, owner, rrtypestr, rrcopy.String())
 			if err != nil {
@@ -133,7 +133,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			log.Printf("ApplyUpdate: Remove RRset: %s", rr.String())
+			log.Printf("ApplyUpdateToDB: Remove RRset: %s", rr.String())
 			sqlcmd := deldelrrsetsql
 			if rrtype == dns.TypeKEY {
 				sqlcmd = delkeyrrsetsql
@@ -145,9 +145,9 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			}
 
 		case dns.ClassINET:
-			// log.Printf("ApplyUpdate: Add RR: %s", req.String())
+			// log.Printf("ApplyUpdateToDB: Add RR: %s", req.String())
 		default:
-			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
+			log.Printf("ApplyUpdateToDB: Error: unknown class: %s", rr.String())
 		}
 
 		sqlcmd := adddelsql
@@ -159,21 +159,21 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		case dns.TypeKEY:
 			key := rr.(*dns.KEY)
 			keyid := key.KeyTag()
-			log.Printf("ApplyUpdate: Add KEY with keyid=%d", keyid)
+			log.Printf("ApplyUpdateToDB: Add KEY with keyid=%d", keyid)
 			_, err := tx.Exec(sqlcmd, owner, keyid, ur.Validated, ur.Trusted, rrcopy.String())
 			if err != nil {
 				log.Printf("Error from kdb.Exec(%s): %v", sqlcmd, err)
 				return err
 			}
 		case dns.TypeNS, dns.TypeA, dns.TypeAAAA:
-			log.Printf("ApplyUpdate: Add %s with RR=%s", rrtypestr, rrcopy.String())
+			log.Printf("ApplyUpdateToDB: Add %s with RR=%s", rrtypestr, rrcopy.String())
 			_, err := tx.Exec(sqlcmd, owner, rrtype, rrcopy.String())
 			if err != nil {
 				log.Printf("Error from kdb.Exec(%s): %v", sqlcmd, err)
 				return err
 			}
 		default:
-			log.Printf("ApplyUpdate: Error: request to add %s RR", rrtypestr)
+			log.Printf("ApplyUpdateToDB: Error: request to add %s RR", rrtypestr)
 		}
 	}
 
@@ -218,6 +218,11 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			rrset.RemoveRR(rr)
+			if len(rrset.RRs) == 0 {
+				delete(owner.RRtypes, rrtype)
+			} else {
+				owner.RRtypes[rrtype] = rrset
+			}
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
 			continue
 
@@ -238,6 +243,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
+			owner.RRtypes[rrtype] = rrset
 			continue
 		default:
 			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR", rrtypestr)

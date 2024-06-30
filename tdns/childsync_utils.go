@@ -229,7 +229,7 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsgNG(msg, Globals.Zonename, &cs, keyrr)
+		smsg, err = SignMsgNG(*msg, Globals.Zonename, &cs, keyrr)
 		if err != nil {
 			log.Printf("Error from SignMsgNG(%s): %v", Globals.Zonename, err)
 			return err
@@ -289,12 +289,12 @@ func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error)
 	return 0, fmt.Errorf("Error: none of the targets %v were reachable", target.Addresses)
 }
 
-func CreateUpdate(parent, child string, adds, removes []dns.RR) (dns.Msg, error) {
-	if parent == "." {
-		log.Fatalf("Error: parent zone name not specified. Terminating.\n")
+func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
+	if parent == "." || parent == "" {
+		return nil, fmt.Errorf("Error: parent zone name not specified. Terminating.")
 	}
-	if child == "." {
-		log.Fatalf("Error: child zone name not specified. Terminating.\n")
+	if child == "." || child == "" {
+		return nil, fmt.Errorf("Error: child zone name not specified. Terminating.")
 	}
 
 	m := new(dns.Msg)
@@ -318,7 +318,7 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (dns.Msg, error)
 	if Globals.Debug {
 		fmt.Printf("Creating update msg:\n%s\n", m.String())
 	}
-	return *m, nil
+	return m, nil
 }
 
 // Only used in the CLI version

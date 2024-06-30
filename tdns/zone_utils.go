@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"os"
 	"path"
 	"strings"
 
@@ -140,7 +141,9 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		if delchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			zd.DelegationSyncCh <- DelegationSyncRequest{
+				Command:  "SYNC-DELEGATION",
 				ZoneName: zd.ZoneName,
+				ZoneData: zd,
 				Adds:     adds,
 				Removes:  removes,
 			}
@@ -217,7 +220,9 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		if delchanged {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			zd.DelegationSyncCh <- DelegationSyncRequest{
+				Command:  "SYNC-DELEGATION",
 				ZoneName: zd.ZoneName,
+				ZoneData: zd,
 				Adds:     adds,
 				Removes:  removes,
 			}
@@ -267,6 +272,12 @@ func (zd *ZoneData) ZoneFileName() (string, error) {
 	}
 	fname := fmt.Sprintf("/tmp"+filetmpl, filedir, zd.ZoneName) // Must ensure that we don't allow writing everywhere
 	fname = path.Clean(fname)
+	dirname := path.Dir(fname)
+	if _, err := os.Stat(dirname); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirname, 0755); err != nil {
+			return "", fmt.Errorf("ZoneFileName: failed to create missing directory %s: %v", dirname, err)
+		}
+	}
 	return fname, nil
 }
 

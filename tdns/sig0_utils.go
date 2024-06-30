@@ -65,7 +65,7 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsgNG(msg, Globals.Zonename, &cs, keyrr)
+		smsg, err = SignMsgNG(*msg, Globals.Zonename, &cs, keyrr)
 		if err != nil {
 			return fmt.Errorf("Error from SignMsgNG(%v): %v", dsynctarget, err)
 		}
