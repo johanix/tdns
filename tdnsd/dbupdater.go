@@ -204,14 +204,33 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		rrcopy.Header().Ttl = 0
 		rrcopy.Header().Class = dns.ClassINET
 
+		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
+		// If it is an add then it is not ok, and then the owner must be created.
+
 		owner, err := zd.GetOwner(ownerName)
 		if err != nil {
-			return fmt.Errorf("ApplyUpdateToZoneData: owner name %s is unknown", ownerName)
+			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s is unknown", ownerName)
+			if class == dns.ClassNONE || class == dns.ClassANY {
+				continue
+			}
+		}
+
+		owner = &tdns.OwnerData{
+			Name:    ownerName,
+			RRtypes: make(map[uint16]tdns.RRset),
 		}
 
 		rrset, exists := owner.RRtypes[rrtype]
 		if !exists {
-			return fmt.Errorf("ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
+			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
+			if class == dns.ClassNONE || class == dns.ClassANY {
+				continue
+			}
+		}
+
+		rrset = tdns.RRset{
+			RRs:    []dns.RR{},
+			RRSIGs: []dns.RR{},
 		}
 
 		switch class {

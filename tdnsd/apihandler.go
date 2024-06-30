@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
 	// "github.com/miekg/dns"
@@ -190,7 +189,6 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "list-zones":
 			for zname, zconf := range conf.Zones {
-				zname = dns.Fqdn(zname)
 				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
 				zd, ok := tdns.Zones.Get(zname)
 				if !ok {
