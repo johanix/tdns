@@ -308,6 +308,18 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 			}
 		}
 
+		// When adding a new nameserver to the NS RRset any in-bailiwick glue needs to be added, even though
+		// the actual A and AAAA RRs for the glue have not changed. I.e. the change is the the address records
+		// are now glue.
+		ns_is_new_nameserver := true
+		for _, oldns := range old_ns_inb {
+			if ns == oldns {
+				ns_is_new_nameserver = false
+				break
+			}
+		}
+		log.Printf("*** %s: ns_is_new_nameserver: %v", ns, ns_is_new_nameserver)
+
 		newowner, err := newzd.GetOwner(ns)
 		if err != nil {
 			zd.Logger.Printf("Error from newzd.GetOwner(%s): %v", ns, err)
@@ -317,6 +329,10 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 		if viper.GetBool("childsync.update-a") {
 			zd.Logger.Printf("Comparing A glue for new NS %s:\n", ns)
 
+			log.Printf("newowner.RRtypes[A]:\n")
+			dump.P(newowner.RRtypes[dns.TypeA])
+			log.Printf("oldowner.RRtypes[A]:\n")
+			dump.P(oldowner.RRtypes[dns.TypeA])
 			gluediff, a_glue_adds, a_glue_removes := RRsetDiffer(ns,
 				newowner.RRtypes[dns.TypeA].RRs,
 				oldowner.RRtypes[dns.TypeA].RRs,
@@ -324,11 +340,16 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 			if gluediff {
 				resp.InSync = false
 				for _, rr := range a_glue_removes {
-					removes = append(removes, rr)
 					resp.ARemoves = append(resp.ARemoves, rr)
 				}
 				for _, rr := range a_glue_adds {
-					adds = append(adds, rr)
+					resp.AAdds = append(resp.AAdds, rr)
+				}
+			} else if ns_is_new_nameserver {
+				// When adding a new nameserver to the NS RRset, all its addresses become glue,
+				// regardless of whether the changed or not.
+				resp.InSync = false
+				for _, rr := range newowner.RRtypes[dns.TypeA].RRs {
 					resp.AAdds = append(resp.AAdds, rr)
 				}
 			}
@@ -346,11 +367,16 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 				//				differ = true
 				resp.InSync = false
 				for _, rr := range aaaa_glue_removes {
-					removes = append(removes, rr)
 					resp.AAAARemoves = append(resp.AAAARemoves, rr)
 				}
 				for _, rr := range aaaa_glue_adds {
-					adds = append(adds, rr)
+					resp.AAAAAdds = append(resp.AAAAAdds, rr)
+				}
+			} else if ns_is_new_nameserver {
+				// When adding a new nameserver to the NS RRset, all its addresses become glue,
+				// regardless of whether the changed or not.
+				resp.InSync = false
+				for _, rr := range newowner.RRtypes[dns.TypeAAAA].RRs {
 					resp.AAAAAdds = append(resp.AAAAAdds, rr)
 				}
 			}
@@ -359,7 +385,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 		}
 	}
 
-	dump.P(resp)
+	// dump.P(resp)
 
 	//if !differ {
 	if resp.InSync {

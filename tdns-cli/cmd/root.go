@@ -43,9 +43,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
-								false, "debug output")
+		false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
-								  false, "verbose output")
+		false, "verbose output")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -98,6 +98,10 @@ func initConfig() {
 	err = tdns.RegisterDsyncRR()
 	if err != nil {
 		fmt.Printf("Error registering DSYNC RR type: %v\n", err)
+	}
+	err = tdns.RegisterDelegRR()
+	if err != nil {
+		fmt.Printf("Error registering DELEG RR type: %v\n", err)
 	}
 }
 

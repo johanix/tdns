@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
@@ -149,132 +148,8 @@ func DelegationSyncEngine(conf *Config) error {
 // Note that there are two types of determining whether delegation synchronization is needed:
 // 1. Implicit: we notice that the delegation information in the child has changed and therefore NOTIFY or UPDATE the parent.
 // 2. Explicit: we query the parent for the delegation information and if it differs from the child, we NOTIFY or UPDATE the parent.
-// AnalyseZoneDelegation() is used for the second type of delegation synchronization.
-
-// 1. Query parent servers until we get a child NS RRset back
-// 2. Iterate over child NS RRset from parent and identify all in-bailiwick NS
-// 3. Query same parent server as returned the NS RRset for the glue for this child NS
-// 4. When all parent-side data is collected, compare to the data in the ZoneData struct
-
-// Return insync (bool), adds, removes ([]dns.RR) and error
-func xxxAnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSyncStatus, error) {
-	var resp = tdns.DelegationSyncStatus{Time: time.Now(), Zone: zd.ZoneName}
-
-	err := zd.FetchParentData()
-	if err != nil {
-		return resp, err
-	}
-
-	resp.Zone = zd.ZoneName
-	resp.Parent = zd.Parent
-
-	var p_nsrrs []dns.RR
-	var pserver string // outside loop to preserve for later re-use
-
-	// 1. Compare NS RRsets between parent and child
-	for _, pserver = range zd.ParentServers {
-		p_nsrrs, err = tdns.AuthQuery(zd.ZoneName, pserver, dns.TypeNS)
-		if err != nil {
-			log.Printf("Error from AuthQuery(%s, %s, NS): %v", pserver, zd.ZoneName, err)
-			continue
-		}
-
-		if len(p_nsrrs) == 0 {
-			log.Printf("Empty respone to AuthQuery(%s, %s, NS)", pserver, zd.ZoneName)
-			continue
-		}
-
-		// We have a response, no need to talk to rest of parent servers
-		break
-	}
-
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return resp, err
-	}
-
-	differ, adds, removes := tdns.RRsetDiffer(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs,
-		p_nsrrs, dns.TypeNS, zd.Logger)
-	resp.InSync = !differ
-	// log.Printf("AnalyseZoneDelegation: Zone %s: NS RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
-
-	if len(adds) > 0 {
-		//		var tmp []dns.NS
-		for _, rr := range adds {
-			resp.NsAdds = append(resp.NsAdds, rr)
-		}
-		//		resp.NsAdds = tmp
-	}
-
-	if len(removes) > 0 {
-		//		var tmp []dns.NS
-		for _, rr := range removes {
-			resp.NsRemoves = append(resp.NsRemoves, rr)
-			//			tmp = append(tmp, *rr.(*dns.NS))
-		}
-		//		resp.NsRemoves = tmp
-	}
-
-	// 2. Compute the in-bailiwick subset of nameservers
-	child_inb, _ := tdns.BailiwickNS(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs)
-	// parent_inb, _ := tdns.BailiwickNS(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs)
-
-	// 3. Compare A and AAAA glue for in child in-bailiwick nameservers
-	for _, ns := range child_inb {
-		owner, err := zd.GetOwner(ns)
-		if err != nil {
-			log.Printf("Error from zd.GetOwner(%s): %v", ns, err)
-		}
-		child_a_glue := owner.RRtypes[dns.TypeA].RRs
-		parent_a_glue, err := tdns.AuthQuery(ns, pserver, dns.TypeA)
-		if err != nil {
-			log.Printf("Error from AuthQuery(%s, %s, A): %v", pserver, child_inb, err)
-		}
-		differ, adds, removes := tdns.RRsetDiffer(ns, child_a_glue, parent_a_glue,
-			dns.TypeA, zd.Logger)
-		// log.Printf("AnalyseZoneDelegation: Zone %s: A RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
-		if differ {
-			resp.InSync = false
-			if len(adds) > 0 {
-				for _, rr := range adds {
-					resp.AAdds = append(resp.AAdds, rr)
-				}
-			}
-
-			if len(removes) > 0 {
-				for _, rr := range removes {
-					resp.ARemoves = append(resp.ARemoves, rr)
-				}
-			}
-		}
-
-		child_aaaa_glue := owner.RRtypes[dns.TypeAAAA].RRs
-		parent_aaaa_glue, err := tdns.AuthQuery(ns, pserver, dns.TypeAAAA)
-		if err != nil {
-			log.Printf("Error from AuthQuery(%s, %s, AAAA): %v", pserver, child_inb, err)
-		}
-		differ, adds, removes = tdns.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
-			dns.TypeAAAA, zd.Logger)
-		// log.Printf("AnalyseZoneDelegation: Zone %s: AAAA RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
-		if differ {
-			resp.InSync = false
-			if len(adds) > 0 {
-				for _, rr := range adds {
-					resp.AAAAAdds = append(resp.AAAAAdds, rr)
-				}
-			}
-
-			if len(removes) > 0 {
-				for _, rr := range removes {
-					resp.AAAARemoves = append(resp.AAAARemoves, rr)
-				}
-			}
-		}
-	}
-	// 4. If NS RRsets differ, then also compare glue for parent in-bailiwick nameservers
-
-	return resp, nil
-}
+// tdns.AnalyseZoneDelegation() is used for explicit delegation synchronization.
+// tdns.DelegationDataChanged() is used for implicit delegation synchronization.
 
 // SyncZoneDelegation() is used for delegation synchronization request via API.
 func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus) (string, uint8, error) {
@@ -412,7 +287,17 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
-	// tdns.SendNotify(zd.Parent, zd.ZoneName, dt)
+	// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
+	// 2. Create Notify msg
+	// 3. Send Notify msg
 
-	return "", 0, nil
+	rcode, err := tdns.SendNotify(zd.Parent, zd.ZoneName, "DNSKEY", dsynctarget)
+	if err != nil {
+		log.Printf("Error from SendNotify(%s): %v", zd.Parent, err)
+		return "", 0, err
+	}
+	msg := fmt.Sprintf("SendNotify(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
+	log.Printf(msg)
+
+	return msg, uint8(rcode), nil
 }

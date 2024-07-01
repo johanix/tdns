@@ -35,6 +35,12 @@ var SchemeToString = map[DsyncScheme]string{
 	SchemeAPI:    "API",
 }
 
+var StringToScheme = map[string]DsyncScheme{
+	"NOTIFY": SchemeNotify,
+	"UPDATE": SchemeUpdate,
+	"API":    SchemeAPI,
+}
+
 func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }
 
 func (rd DSYNC) String() string {
@@ -50,9 +56,9 @@ func (rd *DSYNC) Parse(txt []string) error {
 		return fmt.Errorf("invalid DSYNC type: %s.", txt[0])
 	}
 
-	scheme, err := strconv.Atoi(txt[1])
-	if err != nil {
-		return fmt.Errorf("invalid DSYNC scheme: %s. Error: %v", txt[1], err)
+	scheme, exist := StringToScheme[txt[1]]
+	if !exist {
+		return fmt.Errorf("invalid DSYNC scheme: %s.", txt[1])
 	}
 
 	port, err := strconv.Atoi(txt[2])
