@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -70,25 +71,25 @@ func DelegationSyncEngine(conf *Config) error {
 						}
 					}
 
-					ds := tdns.DelegationSyncStatus{
-						Zone:    ds.ZoneName,
-						Parent:  zd.Parent,
-						Adds:    ds.Adds,
-						Removes: ds.Removes,
-					}
+					//					ds := tdns.DelegationSyncStatus{
+					//						Zone:    ds.ZoneName,
+					//						Parent:  zd.Parent,
+					//						Adds:    ds.Adds,
+					//						Removes: ds.Removes,
+					//					}
 
 					//					err = zd.SyncWithParent(ds.Adds, ds.Removes)
 					//					if err != nil {
 					//						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncWithParent(): %v. Ignoring sync request.", ds.ZoneName, err)
 					//						continue
 					//					}
-					msg, rcode, err := SyncZoneDelegation(conf, zd, ds)
+					msg, rcode, err := SyncZoneDelegation(conf, zd, ds.SyncStatus)
 					if err != nil {
-						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.Zone, err)
+						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 						continue
 					}
 
-					log.Printf("DelegationSyncEngine: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.Zone, msg, dns.RcodeToString[int(rcode)])
+					log.Printf("DelegationSyncEngine: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
 					// 1. Figure out which scheme to use
 					// 2. Call handler for that scheme
 
@@ -329,6 +330,12 @@ func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.Delegati
 func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 	kdb := conf.Internal.KeyDB
+
+	dump.P(syncstate)
+
+	// Ensure that we don't count any changes twice.
+	syncstate.Adds = []dns.RR{}
+	syncstate.Removes = []dns.RR{}
 
 	// If UPDATE:
 	// 2. Create DNS UPDATE msg

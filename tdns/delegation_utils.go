@@ -322,7 +322,6 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 				oldowner.RRtypes[dns.TypeA].RRs,
 				dns.TypeA, zd.Logger)
 			if gluediff {
-				//				differ = true
 				resp.InSync = false
 				for _, rr := range a_glue_removes {
 					removes = append(removes, rr)

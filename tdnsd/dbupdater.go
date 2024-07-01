@@ -270,8 +270,9 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
 			owner.RRtypes[rrtype] = rrset
-			log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
-			log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
+			// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
+			// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
+			dump.P(owner.RRtypes[rrtype])
 			continue
 		default:
 			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR", rrtypestr)
