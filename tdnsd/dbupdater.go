@@ -204,7 +204,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		rrtypestr := dns.TypeToString[rrtype]
 
 		rrcopy := dns.Copy(rr)
-		rrcopy.Header().Ttl = 0
+		rrcopy.Header().Ttl = 3600
 		rrcopy.Header().Class = dns.ClassINET
 
 		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
@@ -247,7 +247,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
 			dump.P(rrset)
 			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", owner, rrtypestr, rrcopy.String())
-			rrset.RemoveRR(rr)
+			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
 			dump.P(rrset)
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
