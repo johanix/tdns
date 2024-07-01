@@ -220,12 +220,12 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 
 		dump.P(owner)
 
-		if owner == nil {
-			owner = &tdns.OwnerData{
-				Name:    ownerName,
-				RRtypes: make(map[uint16]tdns.RRset),
-			}
-		}
+		//		if owner == nil {
+		//			owner = &tdns.OwnerData{
+		//				Name:    ownerName,
+		//				RRtypes: make(map[uint16]tdns.RRset),
+		//			}
+		//		}
 
 		rrset, exists := owner.RRtypes[rrtype]
 		if !exists {

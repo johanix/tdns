@@ -301,8 +301,10 @@ func (zd *ZoneData) NameExists(qname string) bool {
 	return ok
 }
 
+// XXX: FIXME: SliceZones do not yet have support for adding new owner names.
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	var owner OwnerData
+	var ok bool
 	switch zd.ZoneStore {
 	case SliceZone:
 		if len(zd.Owners) == 0 {
@@ -315,12 +317,21 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		if zd.Data.IsEmpty() {
 			return nil, nil
 		}
-		owner, _ = zd.Data.Get(qname)
+		if owner, ok = zd.Data.Get(qname); !ok {
+			owner = OwnerData{
+				Name:    qname,
+				RRtypes: make(map[uint16]RRset),
+			}
+			zd.Data.Set(qname, owner)
+		}
+		return &owner, nil
+
 	default:
 		zd.Logger.Printf("GetOwner: zone storage not supported: %v", zd.ZoneStore)
 		return &owner, fmt.Errorf("GetOwner: only supported for SliceZone and MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
+	// dump.P(owner)
 	return &owner, nil
 }
 
