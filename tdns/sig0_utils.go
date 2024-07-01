@@ -18,24 +18,10 @@ import (
 	"github.com/spf13/viper"
 )
 
-func SendSig0KeyUpdate(gennewkey bool) error {
-	if Globals.Zonename == "" {
-		return fmt.Errorf("Error: child zone name not specified.")
-	}
-	Globals.Zonename = dns.Fqdn(Globals.Zonename)
-
-	if Globals.ParentZone == "" {
-		return fmt.Errorf("Error: parent zone name not specified.")
-	}
-	Globals.ParentZone = dns.Fqdn(Globals.ParentZone)
-
-	if childpri == "" {
-		return fmt.Errorf("Error: child primary nameserver not specified.")
-	}
-	if parpri == "" {
-		return fmt.Errorf("Error: parent primary nameserver not specified.")
-	}
-
+// XXX: FIXME: This is used from the CLI. It should change into code used by TDNSD and accessed via API.
+//
+//	The code should store the newly generated key in the keystore.
+func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
 	if keyrr != nil {
 		fmt.Printf("keyid=%d\n", keyrr.KeyTag())
@@ -75,20 +61,23 @@ func SendSig0KeyUpdate(gennewkey bool) error {
 		return fmt.Errorf("Error from CreateUpdate(%v): %v", dsynctarget, err)
 	}
 
+	var smsg *dns.Msg
+
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		msg, err = SignMsgNG(msg, Globals.Zonename, cs, keyrr)
+		smsg, err = SignMsgNG(*msg, Globals.Zonename, &cs, keyrr)
 		if err != nil {
-			return fmt.Errorf("Error from SignMsgNG(%v): %v",
-				dsynctarget, err)
+			return fmt.Errorf("Error from SignMsgNG(%v): %v", dsynctarget, err)
 		}
 	} else {
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
 	}
 
-	err = SendUpdate(msg, Globals.ParentZone, dsynctarget)
+	rcode, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
+	} else {
+		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", Globals.ParentZone, dsynctarget, dns.RcodeToString[rcode])
 	}
 	return nil
 }
@@ -193,7 +182,7 @@ func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
 	if keyfile != "" {
 		var ktype string
 		var err error
-		_, cs, rr, ktype, err = ReadKey(keyfile)
+		_, cs, rr, ktype, _, _, err = ReadKey(keyfile)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", keyfile, err)
 		}
@@ -206,4 +195,3 @@ func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
 	}
 	return keyrr, cs
 }
-

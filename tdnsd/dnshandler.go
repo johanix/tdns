@@ -44,46 +44,9 @@ func DnsEngine(conf *Config) error {
 }
 
 func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
-
-	zonech := conf.Internal.RefreshZoneCh
-
-        updateq := conf.Internal.UpdateQ
-
-//        keydir := viper.GetString("ddns.keydirectory")
-//        keymap, err := tdns.ReadPubKeys(keydir)
-//        if err != nil {
-//                log.Fatalf("Error from ReadPublicKeys(%s): %v", keydir, err)
-//        }
-
-        policy := UpdatePolicy{
-                Type:		viper.GetString("ddns.policy.type"),
-                RRtypes: 	map[uint16]bool{},
-                KeyUpload:	viper.GetString("ddns.policy.keyupload"),
-                Verbose: 	*conf.Service.Verbose,
-                Debug:   	*conf.Service.Debug,
-        }
-
-        switch policy.Type {
-        case "selfsub", "self":
-                // all ok, we know these
-        default:
-                log.Fatalf("Error: unknown update policy type: \"%s\". Terminating.", policy.Type)
-        }
-
-        var rrtypes []string
-        for _, rrstr := range viper.GetStringSlice("ddns.policy.rrtypes") {
-                if rrt, ok := dns.StringToType[rrstr]; ok {
-                        policy.RRtypes[rrt] = true
-                        rrtypes = append(rrtypes, rrstr)
-                } else {
-                        log.Printf("Unknown RR type: \"%s\". Ignoring.", rrstr)
-                }
-        }
-
-        if len(policy.RRtypes) == 0 {
-                log.Fatalf("Error: zero valid RRtypes listed in policy.")
-        }
-        log.Printf("DnsEngine: using update policy \"%s\" with RRtypes: %v", policy.Type, rrtypes)
+	dnsupdateq := conf.Internal.DnsUpdateQ
+	dnsnotifyq := conf.Internal.DnsNotifyQ
+	kdb := conf.Internal.KeyDB
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
@@ -96,38 +59,45 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
-			ntype := r.Question[0].Qtype
-			log.Printf("Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
-			err := NotifyResponder(w, r, qname, ntype, zonech)
-			if err != nil {
-			   log.Printf("Error from NotifyResponder: %v", err)
-			}
+			// A DNS NOTIFY may trigger time consuming outbound queries
+			dnsnotifyq <- DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			// Not waiting for a result
+			return
+
+		case dns.OpcodeUpdate:
+			// A DNS Update may trigger time consuming outbound queries
+			dnsupdateq <- DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			// Not waiting for a result
 			return
 
 		case dns.OpcodeQuery:
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
+
 			if zd, ok := tdns.Zones.Get(qname); ok {
-				// The qname is equal to the name of a zone we have
-				ApexResponder(w, r, zd, qname, qtype, dnssec_ok)
+				// The qname is equal to the name of a zone we are authoritative for
+				err := ApexResponder(w, r, zd, qname, qtype, dnssec_ok, kdb)
+				if err != nil {
+					log.Printf("Error in ApexResponder: %v", err)
+				}
 				return
 			}
 
 			if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
-			   // We are not auth for this zone, so no xfrs possible
-			   m := new(dns.Msg)
-			   m.SetReply(r)
-			   m.MsgHdr.Rcode = dns.RcodeNotAuth
-			   w.WriteMsg(m)
-			   return
+				// We are not authoritative for this zone, so no xfrs possible
+				m := new(dns.Msg)
+				m.SetReply(r)
+				m.MsgHdr.Rcode = dns.RcodeNotAuth
+				w.WriteMsg(m)
+				return
 			}
-			
+
 			log.Printf("DnsHandler: Qname is '%s', which is not a known zone.", qname)
 			known_zones := []string{}
 			for _, zname := range tdns.Zones.Keys() {
 				known_zones = append(known_zones, zname)
 			}
-			log.Printf("DnsHandler: Known zones are: %v", known_zones)
+			// log.Printf("DnsHandler: Known zones are: %v", known_zones)
 
 			// Let's see if we can find the zone
 			zd := tdns.FindZone(qname)
@@ -145,20 +115,13 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				w.WriteMsg(m)
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
-			// log.Printf("Found matching %s (%d) zone for qname %s: %s",
-			// 	tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore,
-			//	qname, zd.ZoneName)
-			QueryResponder(w, r, zd, qname, qtype, dnssec_ok)
-			return
 
-               case dns.OpcodeUpdate:
-                        log.Printf("DnsEngine: Received UPDATE for zone '%s' containing %d RRs in the update section", qname, len(r.Ns))
-
-			err := UpdateResponder(w, r, qname, policy, updateq)
+			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)
+			err := QueryResponder(w, r, zd, qname, qtype, dnssec_ok, kdb)
 			if err != nil {
-			       log.Printf("Error from UpdateResponder(): %v", err)
+				log.Printf("Error in QueryResponder: %v", err)
 			}
-                        return
+			return
 
 		default:
 			log.Printf("Error: unable to handle msgs of type %s", dns.OpcodeToString[r.Opcode])
@@ -166,15 +129,37 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
-func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool) error {
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
+func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
+	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	if err != nil {
+		log.Printf("ApexResponder: failed to get dnssec key for zone %s", zd.ZoneName)
+	}
+
+	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
+		if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
+			err := tdns.SignRRset(&rrset, qname, cs, keyrr)
+			if err != nil {
+				log.Printf("Error signing %s: %v", qname, err)
+			} else {
+				log.Printf("Signed %s: %v", qname, err)
+			}
+		}
+		return rrset
+	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
 		log.Fatalf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
 	}
+
+	if dnssec_ok {
+		apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
+		apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+	}
+
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
 
 	var v4glue, v6glue *tdns.RRset
 
@@ -183,8 +168,9 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		log.Printf("We have the %s %s, so let's try to serve it", tdns.ZoneStoreToString[zd.ZoneStore], qname)
 		zd.ZoneTransferOut(w, r)
 		return nil
+
 	case dns.TypeSOA:
-		zd.Logger.Printf("apex: %v", apex)
+		// zd.Logger.Printf("apex: %v", apex)
 		zd.Logger.Printf("There are %d SOA RRs in %s. rrset: %v", len(apex.RRtypes[dns.TypeSOA].RRs),
 			zd.ZoneName, apex.RRtypes[dns.TypeSOA])
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
@@ -196,12 +182,14 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		if dnssec_ok {
 			m.Answer = append(m.Answer, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
-			//			m.Extra = append(m.Extra, glue.RRSIGs...)
+			m.Extra = append(m.Extra, v4glue.RRSIGs...)
+			m.Extra = append(m.Extra, v6glue.RRSIGs...)
 		}
+
 	case tdns.TypeDSYNC, tdns.TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
-	     dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
-	     dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
-	     dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
+		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
+		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
+		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
 		if rrset, ok := apex.RRtypes[qtype]; ok {
 			if len(rrset.RRs) > 0 {
 				m.Answer = append(m.Answer, rrset.RRs...)
@@ -210,7 +198,10 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 				m.Extra = append(m.Extra, v4glue.RRs...)
 				m.Extra = append(m.Extra, v6glue.RRs...)
 				if dnssec_ok {
-					m.Answer = append(m.Answer, rrset.RRSIGs...)
+					apex.RRtypes[qtype] = MaybeSignRRset(apex.RRtypes[qtype], zd.ZoneName)
+					apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+
+					m.Answer = append(m.Answer, apex.RRtypes[qtype].RRSIGs...)
 					m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
 					m.Extra = append(m.Extra, v4glue.RRSIGs...)
 					m.Extra = append(m.Extra, v6glue.RRSIGs...)
@@ -218,19 +209,21 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 			} else {
 				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 				if dnssec_ok {
+					apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
 					m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 				}
 			}
 		} else {
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 			if dnssec_ok {
+				apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
 				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 			}
 		}
 		// Anything special?
 		switch qtype {
 		case dns.TypeNS:
-		     m.Ns = []dns.RR{}	// authority not needed when querying for zone NS
+			m.Ns = []dns.RR{} // authority not needed when querying for zone NS
 		}
 
 	default:
@@ -250,18 +243,39 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 // 4. If no CNAME match, check for wild card match
 // 5. Give up.
 
-func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string,
-	qtype uint16, dnssec_ok bool) error {
+func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
 
-	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
+	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	if err != nil {
+		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
+	}
+
+	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
+		if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
+			err := tdns.SignRRset(&rrset, qname, cs, keyrr)
+			if err != nil {
+				log.Printf("Error signing %s: %v", qname, err)
+			} else {
+				log.Printf("Signed %s: %v", qname, err)
+			}
+		}
+		return rrset
+	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		log.Fatalf("QueryResponder: failed to get apex data for zone %s", zd.ZoneName)
 	}
+
+	if dnssec_ok {
+		apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
+		apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+	}
+
+	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
 
 	var v4glue, v6glue *tdns.RRset
 	var wildqname string
@@ -287,7 +301,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
 			w.WriteMsg(m)
 			return nil
-		} 
+		}
 		origqname = qname
 		qname = wildqname
 	}
@@ -321,7 +335,8 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 				}
 				m.Answer = append(m.Answer, v.RRs...)
 				if dnssec_ok {
-					m.Answer = append(m.Answer, v.RRSIGs...)
+					owner.RRtypes[k] = MaybeSignRRset(owner.RRtypes[k], qname)
+					m.Answer = append(m.Answer, owner.RRtypes[k].RRSIGs...)
 				}
 				tgt := v.RRs[0].(*dns.CNAME).Target
 				if strings.HasSuffix(tgt, zd.ZoneName) {
@@ -333,8 +348,11 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 						m.Extra = append(m.Extra, v4glue.RRs...)
 						m.Extra = append(m.Extra, v6glue.RRs...)
 						if dnssec_ok {
-							m.Answer = append(m.Answer, tgtrrset.RRSIGs...)
+							tgtowner.RRtypes[qtype] = MaybeSignRRset(tgtowner.RRtypes[qtype], qname)
+							m.Answer = append(m.Answer, tgtowner.RRtypes[qtype].RRSIGs...)
+
 							m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
+
 							m.Extra = append(m.Extra, v4glue.RRSIGs...)
 							m.Extra = append(m.Extra, v6glue.RRSIGs...)
 						}
@@ -362,7 +380,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	// log.Printf("---> Checking for exact match qname+qtype %s %s", qname, dns.TypeToString[qtype])
 	switch qtype {
 	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, tdns.TypeNOTIFY, tdns.TypeDSYNC,
-		dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
+		tdns.TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
 		if _, ok := owner.RRtypes[qtype]; ok && len(owner.RRtypes[qtype].RRs) > 0 {
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
@@ -377,6 +395,14 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
 			if dnssec_ok {
+
+				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
+				if zd.OnlineSigning && cs != nil {
+					if qname == origqname {
+						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
+					}
+				}
+
 				if qname == origqname {
 					m.Answer = append(m.Answer, owner.RRtypes[qtype].RRSIGs...)
 				} else {
@@ -416,4 +442,3 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	return nil
 }
-

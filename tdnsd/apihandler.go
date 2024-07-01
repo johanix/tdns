@@ -12,10 +12,124 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
+
 	// "github.com/miekg/dns"
 
 	"github.com/johanix/tdns/tdns"
 )
+
+func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+
+	kdb := conf.Internal.KeyDB
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var kp tdns.KeystorePost
+		err := decoder.Decode(&kp)
+		if err != nil {
+			log.Println("APIkeystore: error decoding command post:", err)
+		}
+
+		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
+			kp.Command, kp.SubCommand, r.RemoteAddr)
+
+		resp := tdns.KeystoreResponse{
+			Time: time.Now(),
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}()
+
+		switch kp.Command {
+		// 		case "list-dnskey":
+		// 			log.Printf("tdnsd keystore list-sig0 inquiry")
+		// 			tmp1 := map[string]tdns.TrustAnchor{}
+		// 			for _, key := range tdns.TAStore.Map.Keys() {
+		// 			    val, _ := tdns.TAStore.Map.Get(key)
+		// 			    tmp1[key] = tdns.TrustAnchor{
+		// 						Name:		val.Name,
+		// 						Validated:	val.Validated,
+		// 						Dnskey:		val.Dnskey,
+		// 					}
+		// 			}
+		// 			resp.ChildDnskeys = tmp1
+
+		case "sig0-mgmt":
+			resp, err = kdb.Sig0KeyMgmt(kp)
+			if err != nil {
+				log.Printf("Error from Sig0Mgmt(): %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "dnssec-mgmt":
+			log.Printf("APIkeystore: received /keystore request (cmd: %s subcommand: %s)\n",
+				kp.Command, kp.SubCommand)
+			resp, err = kdb.DnssecKeyMgmt(kp)
+			if err != nil {
+				log.Printf("Error from DnssecMgmt(): %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+			log.Printf("APIkeystore: keystore dnssec-mgmt response: %v", resp)
+
+		default:
+			log.Printf("Unknown command: %s", kp.Command)
+		}
+	}
+}
+
+func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+
+	kdb := conf.Internal.KeyDB
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var tp tdns.TruststorePost
+		err := decoder.Decode(&tp)
+		if err != nil {
+			log.Println("APItruststore: error decoding command post:", err)
+		}
+
+		log.Printf("API: received /truststore request (cmd: %s subcommand: %s) from %s.\n",
+			tp.Command, tp.SubCommand, r.RemoteAddr)
+
+		resp := tdns.TruststoreResponse{}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}()
+
+		switch tp.Command {
+		case "list-dnskey":
+			log.Printf("tdnsd truststore list-dnskey inquiry")
+			tmp1 := map[string]tdns.TrustAnchor{}
+			for _, key := range tdns.TAStore.Map.Keys() {
+				val, _ := tdns.TAStore.Map.Get(key)
+				tmp1[key] = tdns.TrustAnchor{
+					Name:      val.Name,
+					Validated: val.Validated,
+					Dnskey:    val.Dnskey,
+				}
+			}
+			resp.ChildDnskeys = tmp1
+
+		case "child-sig0-mgmt":
+			resp, err = kdb.ChildSig0Mgmt(tp)
+			if err != nil {
+				log.Printf("Error from ChildSig0Mgmt(): %v", err)
+			}
+
+		default:
+			log.Printf("Unknown command: %s", tp.Command)
+		}
+	}
+}
 
 func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +180,111 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(500 * time.Millisecond)
 			conf.Internal.APIStopCh <- struct{}{}
 
+		case "zone":
+			resp, err = ZoneOps(conf, cp, conf.Internal.KeyDB)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "list-zones":
+			for zname, zconf := range conf.Zones {
+				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
+				zd, ok := tdns.Zones.Get(zname)
+				if !ok {
+					log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
+				} else {
+					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Dirty, zd.Frozen)
+					zconf.Dirty = zd.Dirty
+					zconf.Frozen = zd.Frozen
+					conf.Zones[zname] = zconf
+				}
+			}
+			resp.Zones = conf.Zones
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
+			resp.Error = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func APIdelegation(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	delegationsyncQ := conf.Internal.DelegationSyncQ
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var dp tdns.DelegationPost
+		err := decoder.Decode(&dp)
+		if err != nil {
+			log.Println("APIdelegation: error decoding delegation post:", err)
+		}
+
+		log.Printf("API: received /delegation request (cmd: %s) from %s.\n",
+			dp.Command, r.RemoteAddr)
+
+		resp := tdns.DelegationResponse{
+			Time: time.Now(),
+			Zone: dp.Zone,
+		}
+
+		var zd *tdns.ZoneData
+		var exist bool
+		if zd, exist = tdns.Zones.Get(dp.Zone); !exist {
+			msg := fmt.Sprintf("Zone \"%s\" is unknown.", dp.Zone)
+			log.Printf("APIdelegation: %s", msg)
+			resp.Error = true
+			resp.ErrorMsg = msg
+			return
+		}
+		respch := make(chan tdns.DelegationSyncStatus, 1)
+
+		syncreq := tdns.DelegationSyncRequest{
+			ZoneName: dp.Zone,
+			ZoneData: zd,
+			Response: respch,
+		}
+		var syncstate tdns.DelegationSyncStatus
+
+		switch dp.Command {
+		// Find out whether delegation is in sync or not and report on details
+		case "status":
+			log.Printf("APIdelegation: zone %s delegation status inquiry", dp.Zone)
+			syncreq.Command = "DELEGATION-STATUS"
+
+			delegationsyncQ <- syncreq
+
+			select {
+			case syncstate = <-respch:
+				resp.SyncStatus = syncstate
+			case <-time.After(4 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		// Find out whether delegation is in sync or not and if not then fix it
+		case "sync":
+			log.Printf("APIdelegation: zone %s: will check and sync changes to delegation data\n", dp.Zone)
+			syncreq.Command = "EXPLICIT-SYNC-DELEGATION"
+
+			delegationsyncQ <- syncreq
+
+			select {
+			case syncstate = <-respch:
+				resp.SyncStatus = syncstate
+				log.Printf("APIdelegation: zone %s: received response from DelegationSyncEngine: %s", dp.Zone, syncstate.Msg)
+			case <-time.After(4 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "Timeout waiting for delegation sync response"
+			}
+
+		default:
+			resp.ErrorMsg = fmt.Sprintf("Unknown delegation command: %s", dp.Command)
 			resp.Error = true
 		}
 
@@ -106,65 +323,40 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "rrset":
 			log.Printf("tdnsd debug rrset inquiry")
 			if zd, ok := tdns.Zones.Get(dp.Zone); ok {
-//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
-//				if owner := &zd.Owners[idx]; owner != nil {
-				   owner, err := zd.GetOwner(dp.Qname)
-				   if err != nil {
-				   }
-				
-				   if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
+				//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
+				//				if owner := &zd.Owners[idx]; owner != nil {
+				owner, err := zd.GetOwner(dp.Qname)
+				if err != nil {
+				}
+
+				if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
 					resp.RRset = rrset
-				   }
-				   log.Printf("tdnsd debug rrset: owner: %v", owner)
+				}
+				log.Printf("tdnsd debug rrset: owner: %v", owner)
 			} else {
 				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
 			}
 
 		case "lav":
 			log.Printf("tdnsd debug lookup-and-validate inquiry")
-		        zd := tdns.FindZone(dp.Qname)
+			zd := tdns.FindZone(dp.Qname)
 			if zd == nil {
-			   resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
-			   		 dp.Qname)
-			   resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
+					dp.Qname)
+				resp.Error = true
 			} else {
-			   // tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
-			   rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
-			   if err != nil {
-			      resp.Error = true
-			      resp.ErrorMsg = err.Error()
-			   } else {
-			      if rrset != nil {
-			      	 resp.RRset = *rrset
-				 resp.Validated = valid
-			      }
-			   }
-			}
-
-		case "show-ta":
-			log.Printf("tdnsd debug show-ta inquiry")
-			// tmp1 := map[string]dns.DNSKEY{}
-			tmp1 := map[string]tdns.TrustAnchor{}
-			for _, key := range tdns.TAStore.Map.Keys() {
-			    val, _ := tdns.TAStore.Map.Get(key)
-			    tmp1[key] = tdns.TrustAnchor{
-						Name:		val.Name,
-						Validated:	val.Validated,
-						Dnskey:		val.Dnskey,
+				// tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
+				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					if rrset != nil {
+						resp.RRset = *rrset
+						resp.Validated = valid
 					}
+				}
 			}
-			resp.TrustedDnskeys = tmp1
-			// tmp2 := map[string]dns.KEY{}
-			tmp2 := map[string]tdns.Sig0Key{}
-			for _, key := range tdns.Sig0Store.Map.Keys() {
-			    val, _ := tdns.Sig0Store.Map.Get(key)
-			    tmp2[key] = tdns.Sig0Key{
-						Name:		val.Name,
-						Validated:	val.Validated,
-						Key:		val.Key,
-					}
-			}
-			resp.TrustedSig0keys = tmp2
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
@@ -179,7 +371,10 @@ func SetupRouter(conf *Config) *mux.Router {
 	sr := r.PathPrefix("/api/v1").Headers("X-API-Key",
 		viper.GetString("apiserver.key")).Subrouter()
 	sr.HandleFunc("/ping", tdns.APIping("tdnsd")).Methods("POST")
+	sr.HandleFunc("/keystore", APIkeystore(conf)).Methods("POST")
+	sr.HandleFunc("/truststore", APItruststore(conf)).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/delegation", APIdelegation(conf)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
@@ -221,7 +416,7 @@ func APIdispatcher(conf *Config, done <-chan struct{}) {
 	log.Println("API dispatcher: unclear how to stop the http server nicely.")
 }
 
-func BumpSerial(conf *Config, zone string) (string, error) {
+func xxxBumpSerial(conf *Config, zone string) (string, error) {
 	var respch = make(chan BumperResponse, 1)
 	conf.Internal.BumpZoneCh <- BumperData{
 		Zone:   zone,
@@ -237,20 +432,26 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 	}
 
 	if resp.Msg == "" {
-	   resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
+		resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
 	}
 	return resp.Msg, nil
 }
 
-func ReloadZone(conf *Config, zone string, force bool) (string, error) {
+func xxxReloadZone(conf *Config, zone string, force bool) (string, error) {
 	var respch = make(chan tdns.RefresherResponse, 1)
 	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
-		Name:   zone,
+		Name:     zone,
 		Response: respch,
-		Force:	force,
+		Force:    force,
 	}
 
-	resp := <-respch
+	var resp tdns.RefresherResponse
+
+	select {
+	case resp = <-respch:
+	case <-time.After(2 * time.Second):
+		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
+	}
 
 	if resp.Error {
 		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
@@ -264,12 +465,12 @@ func ReloadZone(conf *Config, zone string, force bool) (string, error) {
 	return resp.Msg, nil
 }
 
-type BumperData struct {
+type xxxBumperData struct {
 	Zone   string
 	Result chan BumperResponse
 }
 
-type BumperResponse struct {
+type xxxBumperResponse struct {
 	Time      time.Time
 	Zone      string
 	Msg       string

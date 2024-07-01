@@ -6,6 +6,8 @@ package cmd
 
 import (
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -15,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var verbose, debug, short bool
+var short bool
 var rrtype uint16
 
 var port = "53"
@@ -28,19 +30,40 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 
 		var cleanArgs []string
+		var do_bit = false
+		//		var err error
+		var serial uint32
+
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				server = arg[1:]
-				if verbose {
+				if tdns.Globals.Verbose {
 					fmt.Printf("*** Will send remaining queries to server %s\n", server)
 				}
 				continue
 			}
-			rrt := strings.ToUpper(arg)
-			if foo, exist := dns.StringToType[rrt]; exist {
+
+			ucarg := strings.ToUpper(arg)
+			if foo, exist := dns.StringToType[ucarg]; exist {
 				rrtype = foo
 				continue
 			}
+
+			if strings.HasPrefix(ucarg, "IXFR=") {
+				serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+				tmp, err := strconv.Atoi(serialstr)
+				if err != nil {
+					log.Fatalf("Error: %v", err)
+				}
+				serial = uint32(tmp)
+				fmt.Printf("RRtype is ixfr, using base serial %d\n", serial)
+			}
+
+			if ucarg == "+DNSSEC" {
+				do_bit = true
+				continue
+			}
+
 			cleanArgs = append(cleanArgs, arg)
 		}
 
@@ -55,24 +78,25 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		server = server + ":" + port
+		server = net.JoinHostPort(server, port)
 
 		for _, qname := range cleanArgs {
 			fmt.Printf("dog processing arg \"%s\"\n", qname)
 
 			qname = dns.Fqdn(qname)
-			if verbose {
+			if tdns.Globals.Verbose {
 				fmt.Printf("*** Querying for %s IN %s:\n", qname, dns.TypeToString[rrtype])
 			}
 
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
-				tdns.ZoneTransferPrint(qname, server, 0, rrtype)
+				tdns.ZoneTransferPrint(qname, server, serial, rrtype)
 
 			default:
 
 				m := new(dns.Msg)
 				m.SetQuestion(qname, rrtype)
+				m.SetEdns0(4096, do_bit)
 				res, err := dns.Exchange(m, server)
 				if err != nil {
 					fmt.Printf("Error from %s: %v\n", server, err)
@@ -100,8 +124,8 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose mode")
-	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Debugging output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	//	rootCmd.PersistentFlags().StringVarP(&rrtype, "rrtype", "r", "", "DNS RR type to query for")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
@@ -113,5 +137,9 @@ func init() {
 	err = tdns.RegisterDsyncRR()
 	if err != nil {
 		fmt.Printf("Error registering DSYNC RR type: %v\n", err)
+	}
+	err = tdns.RegisterDelegRR()
+	if err != nil {
+		fmt.Printf("Error registering DELEG RR type: %v\n", err)
 	}
 }

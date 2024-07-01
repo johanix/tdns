@@ -5,6 +5,7 @@
 package main
 
 import (
+	// "flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
+	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
@@ -23,6 +25,8 @@ import (
 )
 
 var appVersion string
+var appMode string
+var debug, verbose bool
 
 func mainloop(conf *Config) {
 	exit := make(chan os.Signal, 1)
@@ -63,11 +67,23 @@ func mainloop(conf *Config) {
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 type Zconfig struct {
-	Zones map[string]ZoneConf
+	Zones map[string]tdns.ZoneConf
 }
 
 func main() {
 	var conf Config
+
+	flag.StringVar(&appMode, "mode", "server", "Mode of operation: server | scanner")
+	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
+	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
+	flag.Parse()
+
+	switch appMode {
+	case "server", "scanner":
+		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", appMode, tdns.Globals.Verbose, tdns.Globals.Debug)
+	default:
+		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
+	}
 
 	err := ParseConfig(&conf)
 
@@ -80,15 +96,11 @@ func main() {
 	var stopch = make(chan struct{}, 10)
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
+	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
 	go RefreshEngine(&conf, stopch)
 
 	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
 	go ValidatorEngine(&conf, stopch)
-
-	err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-	if err != nil {
-		log.Fatalf("Error parsing zones: %v", err)
-	}
 
 	err = tdns.RegisterNotifyRR()
 	if err != nil {
@@ -100,16 +112,30 @@ func main() {
 		log.Fatalf("Error registering new RR types: %v", err)
 	}
 
+	err = tdns.RegisterDelegRR()
+	if err != nil {
+		log.Fatalf("Error registering new RR types: %v", err)
+	}
+
+	err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
+	if err != nil {
+		log.Fatalf("Error parsing zones: %v", err)
+	}
+
 	apistopper := make(chan struct{}) //
 	conf.Internal.APIStopCh = apistopper
 	go APIdispatcher(&conf, apistopper)
 
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.UpdateQ = make(chan UpdateRequest, 5)
+	conf.Internal.DnsUpdateQ = make(chan DnsHandlerRequest, 100)
+	conf.Internal.DnsNotifyQ = make(chan DnsHandlerRequest, 100)
 
 	go ScannerEngine(&conf)
 	go UpdaterEngine(&conf)
+	go DnsUpdateResponderEngine(&conf)
 	go DnsEngine(&conf)
+	go DelegationSyncEngine(&conf)
 
 	mainloop(&conf)
 }
@@ -129,6 +155,7 @@ type TmpSig0Key struct {
 }
 
 func ParseConfig(conf *Config) error {
+	log.Printf("Enter ParseConfig")
 	viper.SetConfigFile(tdns.DefaultCfgFile)
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -141,6 +168,12 @@ func ParseConfig(conf *Config) error {
 	}
 
 	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
+	tdns.Globals.IMR = viper.GetString("resolver.address")
+	if tdns.Globals.IMR == "" {
+		log.Fatalf("Error: IMR undefined.")
+	} else {
+		log.Printf("*** Using resolver: %s", tdns.Globals.IMR)
+	}
 
 	err := viper.Unmarshal(&conf)
 	if err != nil {
@@ -177,9 +210,9 @@ func ParseConfig(conf *Config) error {
 	if err != nil {
 		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
 	}
-	err = kdb.LoadKnownSig0Keys()
+	err = kdb.LoadChildSig0Keys()
 	if err != nil {
-		log.Fatalf("Error from LoadKnownSig0Keys(): %v", err)
+		log.Fatalf("Error from LoadChildSig0Keys(): %v", err)
 	}
 
 	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
@@ -187,15 +220,21 @@ func ParseConfig(conf *Config) error {
 	return nil
 }
 
-func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
+func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 	var all_zones []string
 
-	for zname, conf := range zones {
+	for zname, zconf := range zones {
+		if zname != dns.Fqdn(zname) {
+			delete(zones, zname)
+			zname = dns.Fqdn(zname)
+			zconf.Name = zname
+			zones[zname] = zconf
+		}
+
 		all_zones = append(all_zones, zname)
 
 		var zonestore tdns.ZoneStore
-
-		switch strings.ToLower(conf.Store) {
+		switch strings.ToLower(zconf.Store) {
 		case "xfr":
 			zonestore = tdns.XfrZone
 		case "map":
@@ -203,143 +242,37 @@ func ParseZones(zones map[string]ZoneConf, zrch chan tdns.ZoneRefresher) error {
 		case "slice":
 			zonestore = tdns.SliceZone
 		default:
-			log.Fatalf("Unknown zone store type: \"%s\"", conf.Store)
+			log.Fatalf("Unknown zone store type: \"%s\"", zconf.Store)
 		}
 
 		var zonetype tdns.ZoneType
 
-		switch strings.ToLower(conf.Type) {
+		switch strings.ToLower(zconf.Type) {
 		case "primary":
 			zonetype = tdns.Primary
 		case "secondary":
 			zonetype = tdns.Secondary
 		default:
-			log.Fatalf("Unknown zone type: \"%s\"", conf.Type)
+			log.Fatalf("Unknown zone type: \"%s\"", zconf.Type)
 		}
 
+		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s, delegationsync: %t, onlinesigning: %t, allowupdates: %t",
+			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile, zconf.DelegationSync, zconf.OnlineSigning, zconf.AllowUpdates)
+
 		zrch <- tdns.ZoneRefresher{
-			Name:      dns.Fqdn(zname),
-			ZoneType:  zonetype, // primary | secondary
-			Primary:   conf.Primary,
-			ZoneStore: zonestore,
-			Notify:    conf.Notify,
-			Zonefile:  conf.Zonefile,
+			Name:           zname,
+			ZoneType:       zonetype, // primary | secondary
+			Primary:        zconf.Primary,
+			ZoneStore:      zonestore,
+			Notify:         zconf.Notify,
+			Zonefile:       zconf.Zonefile,
+			DelegationSync: zconf.DelegationSync,
+			OnlineSigning:  zconf.OnlineSigning,
+			AllowUpdates:   zconf.AllowUpdates,
 		}
 	}
 
 	log.Printf("All configured zones now refreshing: %v", all_zones)
 
-	return nil
-}
-
-func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
-	// If a validator trusted key config file is found, read it in.
-	tafile := viper.GetString("validator.dnskey.trusted.file")
-	if tafile != "" {
-		cfgdata, err := os.ReadFile(tafile)
-		if err != nil {
-			log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
-		}
-
-		var tatmp TAtmp
-		//	   var tastore = tdns.NewTAStore()
-
-		err = yaml.Unmarshal(cfgdata, &tatmp)
-		if err != nil {
-			log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
-		}
-
-		for k, v := range tatmp {
-			k = dns.Fqdn(k)
-			rr, err := dns.NewRR(v.Dnskey)
-			if err != nil {
-				log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
-			}
-
-			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
-				tdns.TAStore.Map.Set(mapkey, tdns.TrustAnchor{
-					Name:      k,
-					Validated: true, // always trust config
-					Dnskey:    *dnskeyrr,
-				})
-			}
-		}
-		//	   conf.Internal.TrustedDnskeys = tastore
-	}
-	return nil
-}
-
-func (kdb *KeyDB) LoadKnownSig0Keys() error {
-
-	const (
-		loadsig0sql = "SELECT owner, keyid, trusted, keyrr FROM ChildSig0Keys"
-	)
-
-	rows, err := kdb.Query(loadsig0sql)
-	if err != nil {
-		log.Fatalf("Error from kdb.Query(%s): %v", loadsig0sql, err)
-	}
-	defer rows.Close()
-
-	var keyname, keyrrstr string
-	var keyid int
-	var trusted bool
-
-	for rows.Next() {
-		err := rows.Scan(&keyname, &keyid, &trusted, &keyrrstr)
-		if err != nil {
-			log.Fatalf("Error from rows.Scan(): %v", err)
-		}
-
-		rr, err := dns.NewRR(keyrrstr)
-		if err != nil {
-			log.Fatalf("Error from dns.NewRR(%s): %v", keyrrstr, err)
-		}
-
-		if keyrr, ok := rr.(*dns.KEY); ok {
-			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
-			tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
-				Name:      keyname,
-				Validated: trusted,
-				Key:       *keyrr,
-			})
-		}
-	}
-
-	// If a validator trusted key config file is found, read it in.
-	sig0file := viper.GetString("validator.sig0.trusted.file")
-	if sig0file != "" {
-		cfgdata, err := os.ReadFile(sig0file)
-		if err != nil {
-			log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
-		}
-
-		var sig0tmp Sig0tmp
-		//	   var sig0conf tdns.Sig0Store
-
-		err = yaml.Unmarshal(cfgdata, &sig0tmp)
-		if err != nil {
-			log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
-		}
-
-		for k, v := range sig0tmp {
-			k = dns.Fqdn(k)
-			rr, err := dns.NewRR(v.Key)
-			if err != nil {
-				log.Fatalf("Error from dns.NewRR(%s): %v", v.Key, err)
-			}
-
-			if keyrr, ok := rr.(*dns.KEY); ok {
-				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
-				tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
-					Name:      k,
-					Validated: true, // always trust config
-					Key:       *keyrr,
-				})
-			}
-		}
-		//	   conf.Internal.TrustedSig0keys = sig0conf
-	}
 	return nil
 }

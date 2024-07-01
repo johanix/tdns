@@ -13,9 +13,9 @@ import (
 	"sync"
 
 	"github.com/miekg/dns"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
-	"github.com/orcaman/concurrent-map/v2"
 )
 
 const (
@@ -57,7 +57,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	for envelope := range answerChan {
 		if envelope.Error != nil {
 			zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
-			return 0, envelope.Error			
+			return 0, envelope.Error
 		}
 
 		for _, rr := range envelope.RR {
@@ -95,7 +95,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	wg.Add(1)
 
 	go func() {
-		tr.Out(w, r, outbound_xfr)
+		err := tr.Out(w, r, outbound_xfr)
+		if err != nil {
+			zd.Logger.Printf("Error from transfer.Out(): %v", err)
+		}
 		wg.Done()
 	}()
 
@@ -105,73 +108,77 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 
 	total_sent := 0
 	count := 0
-	env := dns.Envelope{}
+	// env := dns.Envelope{}
+	rrs := []dns.RR{soa}
 
-	env.RR = append(env.RR, soa)
+	// SOA
+	// env.RR = append(env.RR, soa)
+	// XXX: If we change the SOA serial we must also recompute the RRSIG.
+	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+	rrs = append(rrs, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+	zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+
+	// Rest of apex
+	for rrt, _ := range apex.RRtypes {
+		if rrt != dns.TypeSOA {
+			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
+			rrs = append(rrs, apex.RRtypes[rrt].RRs...)
+			zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
+			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
+			rrs = append(rrs, apex.RRtypes[rrt].RRSIGs...)
+		}
+	}
+	count = len(rrs)
 
 	switch zd.ZoneStore {
 	case SliceZone:
-		// SOA
-		env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-
-		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
-			if rrt != dns.TypeSOA {
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			}
-		}
-		count = len(env.RR)
-
 		// Rest of zone
 		for _, owner := range zd.Owners {
 			if owner.Name == zd.ZoneName {
 				continue
 			}
 			for _, rrl := range owner.RRtypes {
-				env.RR = append(env.RR, rrl.RRs...)
+				// env.RR = append(env.RR, rrl.RRs...)
+				rrs = append(rrs, rrl.RRs...)
+				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				count += len(rrl.RRs)
-				env.RR = append(env.RR, rrl.RRSIGs...)
+				// env.RR = append(env.RR, rrl.RRSIGs...)
+				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 
-				if count >= 500 {
+				if count >= 400 {
 					total_sent += count
-					outbound_xfr <- &env
-					env = dns.Envelope{}
+					// outbound_xfr <- &env
+					// env = dns.Envelope{}
+					outbound_xfr <- &dns.Envelope{RR: rrs}
+					rrs = []dns.RR{}
 					count = 0
 				}
 			}
 		}
 
 	case MapZone:
-		// SOA
-		env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-
-		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
-			if rrt != dns.TypeSOA {
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-				env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			}
-		}
-		count = len(env.RR)
-
 		// Rest of zone
 		for _, owner := range zd.Data.Keys() {
-		        omap, _ := zd.Data.Get(owner)
+			omap, _ := zd.Data.Get(owner)
 			if owner == zd.ZoneName {
 				continue
 			}
 			for _, rrl := range omap.RRtypes {
-				env.RR = append(env.RR, rrl.RRs...)
+				// env.RR = append(env.RR, rrl.RRs...)
+				rrs = append(rrs, rrl.RRs...)
+				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				count += len(rrl.RRs)
-				env.RR = append(env.RR, rrl.RRSIGs...)
+				// env.RR = append(env.RR, rrl.RRSIGs...)
+				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 
-				if count >= 500 {
+				if count >= 400 {
 					total_sent += count
-					outbound_xfr <- &env
-					env = dns.Envelope{}
+					// outbound_xfr <- &env
+					// env = dns.Envelope{}
+					outbound_xfr <- &dns.Envelope{RR: rrs}
+					rrs = []dns.RR{}
 					count = 0
 				}
 			}
@@ -179,15 +186,17 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 
 	default:
 		zd.Logger.Printf("Zone %s: zone store %d: no outbound zone transfer. Sorry.",
-				       zd.ZoneName, zd.ZoneStore)
+			zd.ZoneName, zd.ZoneStore)
 	}
 
-	env.RR = append(env.RR, soa) // trailing SOA
+	// env.RR = append(env.RR, soa) // trailing SOA
+	rrs = append(rrs, soa)
+	zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
 
-	total_sent += len(env.RR)
-	zd.Logger.Printf("ZoneTransferOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
-		zd.ZoneName, len(env.RR), total_sent)
-	outbound_xfr <- &env
+	total_sent += len(rrs)
+	zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
+		zd.ZoneName, len(rrs), total_sent)
+	outbound_xfr <- &dns.Envelope{RR: rrs}
 
 	close(outbound_xfr)
 	wg.Wait() // wait until everything is written out
@@ -216,18 +225,30 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) erro
 
 	for envelope := range answerChan {
 		if envelope.Error != nil {
+			fmt.Printf("Oops. Zone transfer envelope signals an error:\n")
 			errstr := envelope.Error.Error()
 			if strings.Contains(errstr, "bad xfr rcode: 9") {
-			   fmt.Printf("Error: %s: Not authoritative for zone %s\n",
-			   		      upstream, zname)
+				fmt.Printf("Error: %s: Not authoritative for zone %s\n",
+					upstream, zname)
 			} else {
-			   fmt.Printf("Error: zone %s error: %v", zname, errstr)
+				fmt.Printf("Error: zone %s error: %v\n", zname, errstr)
 			}
-			break
+			if !Globals.Debug {
+				fmt.Printf("Xfr error: breaking off\n")
+				break
+			} else {
+				fmt.Printf("DEBUG: envelope: %v\n", envelope)
+			}
 		}
 
+		if Globals.Debug {
+			fmt.Printf("Printing %d RRs in envelope\n", len(envelope.RR))
+		}
 		for _, rr := range envelope.RR {
 			fmt.Printf("%s\n", rr.String())
+		}
+		if Globals.Debug {
+			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))
 		}
 	}
 	return nil
@@ -255,20 +276,18 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 		if firstSoaSeen && !checkedForUnchanged {
-		   checkedForUnchanged = true
-		   apex, _ := zd.Data.Get(zd.ZoneName)
-		   soa := apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA)
-		   zd.Logger.Printf("ReadZoneFile: %s: old incoming serial: %d new SOA serial: %d",
-		   				       zd.ZoneName, zd.IncomingSerial, soa.Serial)
-		   if soa.Serial == zd.IncomingSerial {
-		      if !force {
-		      	 zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current. Reload not needed.",
-		      				      zd.ZoneName)
-		      	 return false, soa.Serial, nil
-		      }
-		      zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current but still forced to reload.",
-		      				      zd.ZoneName)
-		   }
+			checkedForUnchanged = true
+			apex, _ := zd.Data.Get(zd.ZoneName)
+			soa := apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA)
+			zd.Logger.Printf("ReadZoneFile: %s: old incoming serial: %d new SOA serial: %d",
+				zd.ZoneName, zd.IncomingSerial, soa.Serial)
+			if soa.Serial == zd.IncomingSerial {
+				if !force {
+					zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
+					return false, soa.Serial, nil
+				}
+				zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current but still forced to reload.", zd.ZoneName)
+			}
 		}
 	}
 
@@ -280,7 +299,7 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 
 	if err := zp.Err(); err != nil {
 		zd.Logger.Printf("ReadZoneFile: Error from ZoneParser(%s): %v",
-						zd.ZoneName, err)
+			zd.ZoneName, err)
 		return false, soa.Serial, fmt.Errorf("Error from ZoneParser: %v", err)
 	}
 	zd.Logger.Printf("*** Zone %s read from file. No errors.", zd.ZoneName)
@@ -308,7 +327,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 		// omap = zd.Data[owner]
 		if omap, ok = zd.Data.Get(owner); !ok {
 
-		// if omap.RRtypes == nil {
+			// if omap.RRtypes == nil {
 			omap.Name = owner
 			omap.RRtypes = map[uint16]RRset{}
 		}
@@ -333,20 +352,20 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	case *dns.RRSIG:
 		rrt := v.TypeCovered
 
-		if owner == zd.ZoneName {
-			switch ztype {
-//			case XfrZone:
-//				zd.RRs = append(zd.RRs, rr)
-			case MapZone:
-				tmp = omap.RRtypes[rrt]
-				tmp.RRSIGs = append(tmp.RRSIGs, rr)
-				omap.RRtypes[rrt] = tmp
-			}
-		}
+		//		if owner == zd.ZoneName {
+		//			switch ztype {
+		//			case XfrZone:
+		//				zd.RRs = append(zd.RRs, rr)
+		//			case MapZone:
+		//				tmp = omap.RRtypes[rrt]
+		//				tmp.RRSIGs = append(tmp.RRSIGs, rr)
+		//				omap.RRtypes[rrt] = tmp
+		//			}
+		//		}
 
 		switch ztype {
-//		case XfrZone:
-//			zd.RRs = append(zd.RRs, rr)
+		//		case XfrZone:
+		//			zd.RRs = append(zd.RRs, rr)
 		case MapZone:
 			tmp = omap.RRtypes[rrt]
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
@@ -355,8 +374,8 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 	default:
 		switch ztype {
-//		case XfrZone:
-//			zd.RRs = append(zd.RRs, rr)
+		//		case XfrZone:
+		//			zd.RRs = append(zd.RRs, rr)
 		case MapZone:
 			tmp = omap.RRtypes[rrtype]
 			tmp.RRs = append(tmp.RRs, rr)
@@ -410,7 +429,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	zonedata += soa.String() + "\n"
 	count := 1
-//	var total_sent int
+	//	var total_sent int
 
 	switch zd.ZoneStore {
 	case SliceZone:
@@ -440,11 +459,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 				count += len(rrl.RRSIGs)
 
 				if count >= 1000 {
-//				   	total_sent += count
+					//				   	total_sent += count
 					bytes, err = writer.WriteString(zonedata)
- 					if err != nil {
- 					   return err
- 					}
+					if err != nil {
+						return err
+					}
 					totalbytes += bytes
 					bytes = 0
 					count = 0
@@ -469,7 +488,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 		// Rest of zone
 		for _, owner := range zd.Data.Keys() {
-		        omap, _ := zd.Data.Get(owner)
+			omap, _ := zd.Data.Get(owner)
 			if owner == zd.ZoneName {
 				continue
 			}
@@ -480,11 +499,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 				count += len(rrl.RRSIGs)
 
 				if count >= 1000 {
-//					total_sent += count
+					//					total_sent += count
 					bytes, err = writer.WriteString(zonedata)
- 					if err != nil {
- 					   return err
- 					}
+					if err != nil {
+						return err
+					}
 					totalbytes += bytes
 					bytes = 0
 					count = 0
@@ -494,37 +513,37 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	default:
 		zd.Logger.Printf("Zone %s: zone store %d: no outbound zone transfer. Sorry.",
-				       zd.ZoneName, zd.ZoneStore)
+			zd.ZoneName, zd.ZoneStore)
 	}
 
-// 	for _, rr := range zd.RRs {
-// 		zonedata += rr.String() + "\n"
-// 		rrcount++
-// 		if rrcount%1000 == 0 {
-// 			bytes, err = writer.WriteString(zonedata)
-// 			if err != nil {
-// 				return err
-// 			}
-// 			totalbytes += bytes
-// 			bytes = 0
-// 			zonedata = ""
-// 		}
-// 	}
- 	bytes, err = writer.WriteString(zonedata)
- 	if err != nil {
- 		return err
- 	}
+	// 	for _, rr := range zd.RRs {
+	// 		zonedata += rr.String() + "\n"
+	// 		rrcount++
+	// 		if rrcount%1000 == 0 {
+	// 			bytes, err = writer.WriteString(zonedata)
+	// 			if err != nil {
+	// 				return err
+	// 			}
+	// 			totalbytes += bytes
+	// 			bytes = 0
+	// 			zonedata = ""
+	// 		}
+	// 	}
+	bytes, err = writer.WriteString(zonedata)
+	if err != nil {
+		return err
+	}
 	totalbytes += bytes
 	writer.Flush()
 	return err
 }
 
 func RRsetToString(rrs []dns.RR) string {
-     var tmp string
-     for _, rr := range rrs {
-     	 tmp += rr.String() + "\n"
-     }
-     return tmp
+	var tmp string
+	for _, rr := range rrs {
+		tmp += rr.String() + "\n"
+	}
+	return tmp
 }
 
 func InBailiwick(zone string, ns *dns.NS) bool {
@@ -535,7 +554,7 @@ func (zd *ZoneData) ComputeIndices() {
 	if zd.ZoneStore == SliceZone {
 		// for _, v := range zd.Data {
 		for _, key := range zd.Data.Keys() {
-		        v, _ := zd.Data.Get(key)
+			v, _ := zd.Data.Get(key)
 			zd.Owners = append(zd.Owners, v)
 		}
 		quickSort(zd.Owners)
@@ -571,4 +590,14 @@ func (owners Owners) Less(i, j int) bool {
 
 func quickSort(sortable sort.Interface) {
 	sorts.Quicksort(sortable)
+}
+
+func SetupIMR() {
+	if Globals.IMR == "" {
+		Globals.IMR = viper.GetString("resolver.address")
+	}
+
+	if Globals.Verbose {
+		log.Printf("Using resolver \"%s\"\n", Globals.IMR)
+	}
 }

@@ -36,7 +36,7 @@ var stopCmd = &cobra.Command{
 	},
 }
 
-var reloadCmd = &cobra.Command{
+var zoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -45,28 +45,241 @@ var reloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		msg, err := SendCommandNG(api, tdns.CommandPost{
-			Command: "reload",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			Force:   force,
+		resp, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "reload",
+			Zone:       dns.Fqdn(tdns.Globals.Zonename),
+			Force:      force,
 		})
+
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
 		}
-		if msg != "" {
-			fmt.Printf("%s\n", msg)
+		if resp.Error {
+			fmt.Printf("Error from tdnsd: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
 		}
 	},
 }
 
-var bumpCmd = &cobra.Command{
+var zoneNsecCmd = &cobra.Command{
+	Use:   "nsec",
+	Short: "A brief description of your command",
+}
+
+var zoneSignCmd = &cobra.Command{
+	Use:   "sign",
+	Short: "Send an zone sign command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "sign-zone",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneNsecGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Send an NSEC generate command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "generate-nsec",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneNsecShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Send an NSEC show command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "show-nsec-chain",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+		fmt.Printf("NSEC chain for zone \"%s\":\n", cr.Zone)
+		for _, name := range cr.Names {
+			fmt.Printf("%s\n", name)
+		}
+	},
+}
+
+var zoneFreezeCmd = &cobra.Command{
+	Use:   "freeze",
+	Short: "Tell tdnsd to freeze a zone (i.e. no longer accept changes to the zone data)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "freeze",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneThawCmd = &cobra.Command{
+	Use:   "thaw",
+	Short: "Tell tdnsd to thaw a zone (i.e. accept changes to the zone data again)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "thaw",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneCmd = &cobra.Command{
+	Use:   "zone",
+	Short: "Prefix command, not useable by itself",
+}
+
+var showhdr, showfile, shownotify, showprimary bool
+
+var zoneListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "Send an zone list command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+
+		cr, err := SendCommandNG(api, tdns.CommandPost{
+			Command: "list-zones",
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+		hdr := "Zone|Type|Store|"
+		if showprimary {
+			hdr += "Primary|"
+		}
+		if shownotify {
+			hdr += "Notify|"
+		}
+		if showfile {
+			hdr += "Zonefile|"
+		}
+		hdr += "DelegationSync|OnlineSigning|AllowUpdates|Frozen|Dirty"
+		out := []string{}
+		if showhdr {
+			out = append(out, hdr)
+		}
+		for zname, zconf := range cr.Zones {
+			line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
+			if showprimary {
+				line += fmt.Sprintf("%s|", zconf.Primary)
+			}
+			if shownotify {
+				line += fmt.Sprintf("%s|", zconf.Notify)
+			}
+			if showfile {
+				line += fmt.Sprintf("%s|", zconf.Zonefile)
+			}
+			line += fmt.Sprintf("%t|%t|%t|%t|%t", zconf.DelegationSync, zconf.OnlineSigning, zconf.AllowUpdates, zconf.Frozen, zconf.Dirty)
+			out = append(out, line)
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	},
+}
+
+var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if tdns.Globals.Zonename == "" {
-			fmt.Printf("Error: zone name not specified. Terminating.\n")
-			os.Exit(1)
-		}
+		PrepArgs("childzone")
+		//		if tdns.Globals.Zonename == "" {
+		//			fmt.Printf("Error: zone name not specified. Terminating.\n")
+		//			os.Exit(1)
+		//		}
 
 		msg, err := SendCommand("bump", dns.Fqdn(tdns.Globals.Zonename))
 		if err != nil {
@@ -78,24 +291,28 @@ var bumpCmd = &cobra.Command{
 	},
 }
 
-var bumpNGCmd = &cobra.Command{
+var zoneSerialBbumpNGCmd = &cobra.Command{
 	Use:   "bumpng",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if tdns.Globals.Zonename == "" {
-			fmt.Printf("Error: zone name not specified. Terminating.\n")
+		PrepArgs("childzone")
+
+		resp, err := SendCommandNG(api, tdns.CommandPost{
+			Command: "bump",
+			Zone:    tdns.Globals.Zonename,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if resp.Error {
+			fmt.Printf("Error from tdnsd: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 
-		msg, err := SendCommandNG(api, tdns.CommandPost{
-			Command: "bump",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-		}
-		if msg != "" {
-			fmt.Printf("%s\n", msg)
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
 		}
 	},
 }
@@ -196,17 +413,25 @@ var debugShowTACmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(bumpCmd, stopCmd, reloadCmd, debugCmd)
+	rootCmd.AddCommand(stopCmd, debugCmd, zoneCmd)
+
+	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd, zoneSerialBbumpNGCmd)
+	zoneCmd.AddCommand(zoneFreezeCmd, zoneThawCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
+	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
-	reloadCmd.Flags().BoolVarP(&force, "force", "F", false, "force reloading, ignoring SOA serial")
+	zoneReloadCmd.Flags().BoolVarP(&force, "force", "F", false, "force reloading, ignoring SOA serial")
 
-//	ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
-//	ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-//	ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
+	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
+	zoneListCmd.Flags().BoolVarP(&showfile, "file", "F", false, "Show zone input file")
+	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
+	zoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
+	// ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
+	// ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
+	// ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
 func SendCommand(cmd, zone string) (string, error) {
@@ -242,32 +467,30 @@ func SendCommand(cmd, zone string) (string, error) {
 	return cr.Msg, nil
 }
 
-func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (string, error) {
-
+func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (tdns.CommandResponse, error) {
+	var cr tdns.CommandResponse
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return "", fmt.Errorf("Error from api post: %v", err)
+		return cr, fmt.Errorf("Error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 
-	var cr tdns.CommandResponse
-
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		return "", fmt.Errorf("Error from unmarshal: %v\n", err)
+		return cr, fmt.Errorf("Error from unmarshal: %v\n", err)
 	}
 
 	if cr.Error {
-		return "", fmt.Errorf("Error from tdnsd: %s\n", cr.ErrorMsg)
+		return cr, fmt.Errorf("Error from tdnsd: %s\n", cr.ErrorMsg)
 	}
 
-	return cr.Msg, nil
+	return cr, nil
 }
 
 func SendDebug(api *tdns.Api, data tdns.DebugPost) tdns.DebugResponse {

@@ -6,49 +6,18 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/cobra"
 )
 
-var rrstr string
-
-var ToRFC3597Cmd = &cobra.Command{
-	Use:   "rfc3597",
-	Short: "Generate the RFC 3597 representation of a DNS record",
-	Run: func(cmd *cobra.Command, args []string) {
-		if rrstr == "" {
-			log.Fatalf("Record to generate RFC 3597 representation for not specified.")
-		}
-
-		rr, err := dns.NewRR(rrstr)
-		if err != nil {
-			log.Fatal("Could not parse record \"%s\": %v", rrstr, err)
-		}
-
-		fmt.Printf("Normal   (len=%d): \"%s\"\n", dns.Len(rr), rr.String())
-		u := new(dns.RFC3597)
-		u.ToRFC3597(rr)
-		fmt.Printf("RFC 3597 (len=%d): \"%s\"\n", dns.Len(u), u.String())
-	},
-}
-
-func init() {
-	//	rootCmd.AddCommand(sendCmd)
-	//	sendCmd.AddCommand(sendCdsCmd, sendCsyncCmd, sendDnskeyCmd, sendSoaCmd)
-	//	rootCmd.AddCommand(torfc3597Cmd)
-
-	//	sendCmd.PersistentFlags().StringVarP(&zonename, "zone", "z", "", "Zone to send a parent notify for")
-	ToRFC3597Cmd.Flags().StringVarP(&rrstr, "record", "r", "", "Record to convert to RFC 3597 notation")
-}
-
-func ParentZone(z, imr string) string {
+func ParentZone(z, imr string) (string, error) {
 	labels := strings.Split(z, ".")
 	var parent string
 
 	if len(labels) == 1 {
-		return z
+		return z, nil
 	} else if len(labels) > 1 {
 		upone := dns.Fqdn(strings.Join(labels[1:], "."))
 
@@ -59,26 +28,96 @@ func ParentZone(z, imr string) string {
 
 		r, err := dns.Exchange(m, imr)
 		if err != nil {
-			return fmt.Sprintf("Error from dns.Exchange: %v\n", err)
+			// return fmt.Sprintf("Error from dns.Exchange: %v\n", err)
+			return "", err
 		}
 		if r != nil {
 			if len(r.Answer) != 0 {
 				parent = r.Answer[0].Header().Name
-				return parent
+				return parent, nil
 			}
 			if len(r.Ns) > 0 {
 				for _, rr := range r.Ns {
 					if rr.Header().Rrtype == dns.TypeSOA {
 						parent = r.Ns[0].Header().Name
-						return parent
+						return parent, nil
 					}
 				}
 			}
 
 			log.Printf("ParentZone: ERROR: Failed to locate parent of '%s' via Answer and Authority. Now guessing.", z)
-			return upone
+			return upone, fmt.Errorf("Failed to located parent of '%s' via Answer and Authority", z)
 		}
 	}
 	log.Printf("ParentZone: had difficulties splitting zone '%s'\n", z)
-	return z
+	return z, fmt.Errorf("Failed to split zone name '%s' into labels.", z)
+}
+
+func (zd *ZoneData) FetchParentData() error {
+     var err error
+
+     if zd.Parent == "" {
+     	SetupIMR()
+	zd.Logger.Printf("Identifying name of parent zone for %s", zd.ZoneName)
+     	zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+	if err != nil {
+	   return err
+	}
+     }
+
+     if len(zd.ParentNS) == 0 {
+	zd.Logger.Printf("Fetching NS RRset for %s", zd.Parent)
+     	m := new(dns.Msg)
+	m.SetQuestion(zd.Parent, dns.TypeNS)
+
+	r, err := dns.Exchange(m, Globals.IMR)
+	if err != nil {
+	   return err
+	}
+	if r != nil {
+	   if len(r.Answer) > 0 {
+	      for _, rr := range r.Answer {
+	      	  if rr.Header().Rrtype == dns.TypeNS && rr.Header().Name == zd.Parent {
+		     zd.ParentNS = append(zd.ParentNS, rr.(*dns.NS).Ns)
+		  }
+	      }
+	   }
+	}
+     }
+
+     if len(zd.ParentServers) == 0 {
+	zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", zd.Parent)
+     	for _, ns := range zd.ParentNS {
+	    for _, rrtype := range []uint16{ dns.TypeA, dns.TypeAAAA } {
+     	    	m := new(dns.Msg)
+	    	m.SetQuestion(ns, rrtype)
+
+	    	r, err := dns.Exchange(m, Globals.IMR)
+	    	if err != nil {
+	       	   return err
+	    	}
+	    	if r != nil {
+	       	   if len(r.Answer) > 0 {
+	       	      for _, rr := range r.Answer {
+		      	  if rr.Header().Name == ns {
+		      	     switch rr.(type) {
+			     case *dns.A:
+		      	     	zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
+			     case *dns.AAAA:
+		      	     	zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
+			     default:
+				return fmt.Errorf("Unexpected RRtype: %s (should be %s)",
+				       dns.TypeToString[rr.Header().Rrtype],
+				       dns.TypeToString[rrtype])
+			     }
+			  }
+		      }
+		  }
+	      }
+	   }
+	}
+     }
+
+     zd.Logger.Printf("FetchParentData for parent %s: all done", zd.Parent)
+     return nil
 }

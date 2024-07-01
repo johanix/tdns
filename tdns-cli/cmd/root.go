@@ -42,8 +42,10 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 
-	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "debug output")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
+		false, "debug output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
+		false, "verbose output")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -97,6 +99,10 @@ func initConfig() {
 	if err != nil {
 		fmt.Printf("Error registering DSYNC RR type: %v\n", err)
 	}
+	err = tdns.RegisterDelegRR()
+	if err != nil {
+		fmt.Printf("Error registering DELEG RR type: %v\n", err)
+	}
 }
 
 func initApi() {
@@ -104,5 +110,5 @@ func initApi() {
 	apikey := viper.GetString("cli.tdnsd.apikey")
 	authmethod := viper.GetString("cli.tdnsd.authmethod")
 
-	api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", verbose, debug)
+	api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
 }
