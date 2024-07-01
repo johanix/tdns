@@ -218,6 +218,8 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			}
 		}
 
+		dump.P(owner)
+
 		if owner == nil {
 			owner = &tdns.OwnerData{
 				Name:    ownerName,

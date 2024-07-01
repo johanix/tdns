@@ -224,13 +224,14 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 // Returns unsynched bool, adds, removes []dns.RR, error
 func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
-		Time: time.Now(),
-		Zone: zd.ZoneName,
+		Time:   time.Now(),
+		Zone:   zd.ZoneName,
+		InSync: true,
 	}
 
 	Globals.Zonename = zd.ZoneName
 
-	var nsdiff, differ, fakeolddata bool
+	var nsdiff, fakeolddata bool
 	var adds, removes []dns.RR
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
@@ -321,7 +322,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 				oldowner.RRtypes[dns.TypeA].RRs,
 				dns.TypeA, zd.Logger)
 			if gluediff {
-				differ = true
+				//				differ = true
 				resp.InSync = false
 				for _, rr := range a_glue_removes {
 					removes = append(removes, rr)
@@ -343,7 +344,7 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 				oldowner.RRtypes[dns.TypeAAAA].RRs,
 				dns.TypeAAAA, zd.Logger)
 			if gluediff {
-				differ = true
+				//				differ = true
 				resp.InSync = false
 				for _, rr := range aaaa_glue_removes {
 					removes = append(removes, rr)
@@ -359,11 +360,13 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 		}
 	}
 
-	if !differ {
+	dump.P(resp)
+
+	//if !differ {
+	if resp.InSync {
 		fmt.Printf("Old delegation data is identical to new. No update needed.\n")
 		return false, []dns.RR{}, []dns.RR{}, resp, nil
 	}
-	dump.P(resp)
 
 	return true, adds, removes, resp, nil
 }
