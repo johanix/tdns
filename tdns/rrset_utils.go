@@ -169,11 +169,13 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 }
 
 func (rrset *RRset) RemoveRR(rr dns.RR) {
+	log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
 	for i, r := range rrset.RRs {
+		log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
 		if dns.IsDuplicate(r, rr) {
-			log.Printf("RemoveRR: Removing '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			rrset.RRSIGs = []dns.RR{}
+			log.Printf("RemoveRR: *REMOVED* '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
 			return
 		}
 	}
