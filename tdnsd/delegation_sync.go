@@ -42,7 +42,7 @@ func DelegationSyncEngine(conf *Config) error {
 				case "DELEGATION-STATUS":
 					log.Printf("DelegationSyncEngine: Zone %s request for delegation status.", zd.ZoneName)
 
-					syncstate, err := AnalyseZoneDelegation(conf, zd)
+					syncstate, err := zd.AnalyseZoneDelegation()
 					if err != nil {
 						log.Printf("DelegationSyncEngine: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 						syncstate.Error = true
@@ -95,7 +95,7 @@ func DelegationSyncEngine(conf *Config) error {
 				case "EXPLICIT-SYNC-DELEGATION":
 					log.Printf("DelegationSyncEngine: Zone %s request for explicit delegation sync.", ds.ZoneName)
 
-					syncstate, err := AnalyseZoneDelegation(conf, ds.ZoneData)
+					syncstate, err := zd.AnalyseZoneDelegation()
 					if err != nil {
 						log.Printf("DelegationSyncEngine: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 						syncstate.Error = true
@@ -155,7 +155,7 @@ func DelegationSyncEngine(conf *Config) error {
 // 4. When all parent-side data is collected, compare to the data in the ZoneData struct
 
 // Return insync (bool), adds, removes ([]dns.RR) and error
-func AnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSyncStatus, error) {
+func xxxAnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSyncStatus, error) {
 	var resp = tdns.DelegationSyncStatus{Time: time.Now(), Zone: zd.ZoneName}
 
 	err := zd.FetchParentData()
@@ -197,19 +197,20 @@ func AnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSync
 	// log.Printf("AnalyseZoneDelegation: Zone %s: NS RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 
 	if len(adds) > 0 {
-		var tmp []dns.NS
+		//		var tmp []dns.NS
 		for _, rr := range adds {
-			tmp = append(tmp, *rr.(*dns.NS))
+			resp.NsAdds = append(resp.NsAdds, rr)
 		}
-		resp.NsAdds = tmp
+		//		resp.NsAdds = tmp
 	}
 
 	if len(removes) > 0 {
-		var tmp []dns.NS
+		//		var tmp []dns.NS
 		for _, rr := range removes {
-			tmp = append(tmp, *rr.(*dns.NS))
+			resp.NsRemoves = append(resp.NsRemoves, rr)
+			//			tmp = append(tmp, *rr.(*dns.NS))
 		}
-		resp.NsRemoves = tmp
+		//		resp.NsRemoves = tmp
 	}
 
 	// 2. Compute the in-bailiwick subset of nameservers
@@ -234,13 +235,13 @@ func AnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSync
 			resp.InSync = false
 			if len(adds) > 0 {
 				for _, rr := range adds {
-					resp.AAdds = append(resp.AAdds, *rr.(*dns.A))
+					resp.AAdds = append(resp.AAdds, rr)
 				}
 			}
 
 			if len(removes) > 0 {
 				for _, rr := range removes {
-					resp.ARemoves = append(resp.ARemoves, *rr.(*dns.A))
+					resp.ARemoves = append(resp.ARemoves, rr)
 				}
 			}
 		}
@@ -257,13 +258,13 @@ func AnalyseZoneDelegation(conf *Config, zd *tdns.ZoneData) (tdns.DelegationSync
 			resp.InSync = false
 			if len(adds) > 0 {
 				for _, rr := range adds {
-					resp.AAAAAdds = append(resp.AAAAAdds, *rr.(*dns.AAAA))
+					resp.AAAAAdds = append(resp.AAAAAdds, rr)
 				}
 			}
 
 			if len(removes) > 0 {
 				for _, rr := range removes {
-					resp.AAAARemoves = append(resp.AAAARemoves, *rr.(*dns.AAAA))
+					resp.AAAARemoves = append(resp.AAAARemoves, rr)
 				}
 			}
 		}
@@ -333,23 +334,23 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	// 2. Create DNS UPDATE msg
 	// var adds, removes []dns.RR
 	for _, rr := range syncstate.NsAdds {
-		syncstate.Adds = append(syncstate.Adds, dns.RR(&rr))
+		syncstate.Adds = append(syncstate.Adds, rr)
 	}
 	for _, rr := range syncstate.AAdds {
-		syncstate.Adds = append(syncstate.Adds, dns.RR(&rr))
+		syncstate.Adds = append(syncstate.Adds, rr)
 	}
 	for _, rr := range syncstate.AAAAAdds {
-		syncstate.Adds = append(syncstate.Adds, dns.RR(&rr))
+		syncstate.Adds = append(syncstate.Adds, rr)
 	}
 
 	for _, rr := range syncstate.NsRemoves {
-		syncstate.Removes = append(syncstate.Removes, dns.RR(&rr))
+		syncstate.Removes = append(syncstate.Removes, rr)
 	}
 	for _, rr := range syncstate.ARemoves {
-		syncstate.Removes = append(syncstate.Removes, dns.RR(&rr))
+		syncstate.Removes = append(syncstate.Removes, rr)
 	}
 	for _, rr := range syncstate.AAAARemoves {
-		syncstate.Removes = append(syncstate.Removes, dns.RR(&rr))
+		syncstate.Removes = append(syncstate.Removes, rr)
 	}
 
 	m, err := tdns.CreateUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)

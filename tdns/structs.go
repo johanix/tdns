@@ -193,12 +193,12 @@ type DelegationSyncStatus struct {
 	Rcode       uint8
 	Adds        []dns.RR
 	Removes     []dns.RR
-	NsAdds      []dns.NS
-	NsRemoves   []dns.NS
-	AAdds       []dns.A
-	ARemoves    []dns.A
-	AAAAAdds    []dns.AAAA
-	AAAARemoves []dns.AAAA
+	NsAdds      []dns.RR
+	NsRemoves   []dns.RR
+	AAdds       []dns.RR
+	ARemoves    []dns.RR
+	AAAAAdds    []dns.RR
+	AAAARemoves []dns.RR
 	Error       bool
 	ErrorMsg    string
 }
@@ -312,10 +312,11 @@ type DnssecKey struct {
 }
 
 type DelegationSyncRequest struct {
-	Command  string
-	ZoneName string
-	ZoneData *ZoneData
-	Adds     []dns.RR
-	Removes  []dns.RR
-	Response chan DelegationSyncStatus // used for API-based requests
+	Command    string
+	ZoneName   string
+	ZoneData   *ZoneData
+	Adds       []dns.RR
+	Removes    []dns.RR
+	SyncStatus DelegationSyncStatus
+	Response   chan DelegationSyncStatus // used for API-based requests
 }

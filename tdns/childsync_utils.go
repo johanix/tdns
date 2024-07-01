@@ -21,7 +21,7 @@ import (
 //      the tdns-cli tool is to interact with tdnsd, it really should leverage from that rather
 //      than just do everything in the CLI.
 
-func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
+func xxxChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
 
 	var differ bool
 	var adds, removes []dns.RR
@@ -89,9 +89,9 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 //      child and parent primaries we compare the delegation data in the *ZoneData
 //      structs.
 
+// DelegationDataChanged() compares the delegation data in the old vs new *ZoneData structs.
 // Returns unsynched bool, adds, removes []dns.RR, error
-func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool,
-	[]dns.RR, []dns.RR, error) {
+func (zd *ZoneData) xxxDelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, error) {
 	Globals.Zonename = zd.ZoneName
 
 	var differ, fakeolddata bool
@@ -399,6 +399,7 @@ func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 	return child_inb, parent_inb
 }
 
+// Return the names of NS RRs that are in bailiwick for the zone.
 func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
 	var ns_inbailiwick []string
 	for _, rr := range nsrrs {
