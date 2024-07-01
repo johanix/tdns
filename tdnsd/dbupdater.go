@@ -195,7 +195,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 	}
 
 	// dump.P(zd)
-	dump.P(ur.Actions)
+	// dump.P(ur.Actions)
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -239,12 +239,16 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			}
 		}
 
-		dump.P(owner.RRtypes)
+		// dump.P(owner.RRtypes)
 
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
+			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
+			dump.P(rrset)
+			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", owner, rrtypestr, rrcopy.String())
 			rrset.RemoveRR(rr)
+			dump.P(rrset)
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
 			} else {
@@ -283,7 +287,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			owner.RRtypes[rrtype] = rrset
 			// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
 			// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
-			dump.P(owner.RRtypes[rrtype])
+			// dump.P(owner.RRtypes[rrtype])
 			continue
 		default:
 			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR", rrtypestr)
