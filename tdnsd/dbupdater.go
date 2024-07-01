@@ -267,8 +267,19 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 
 		switch rrtype {
 		case dns.TypeNS, dns.TypeA, dns.TypeAAAA:
-			rrset.RRs = append(rrset.RRs, rrcopy)
-			rrset.RRSIGs = []dns.RR{}
+			dup := false
+			for _, oldrr := range rrset.RRs {
+				if dns.IsDuplicate(oldrr, rrcopy) {
+					log.Printf("ApplyUpdateToZoneData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				log.Printf("ApplyUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
+				rrset.RRs = append(rrset.RRs, rrcopy)
+				rrset.RRSIGs = []dns.RR{}
+			}
 			owner.RRtypes[rrtype] = rrset
 			// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
 			// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])

@@ -195,6 +195,8 @@ func init() {
 	delCmd.AddCommand(delStatusCmd, delSyncCmd)
 	delSyncCmd.Flags().StringVarP(&schemestr, "scheme", "S", "", "Scheme to use for synchronization of delegation")
 
+	delSyncCmd.MarkFlagRequired("zone")
+
 	ddnsCmd.AddCommand(ddnsOldSyncCmd)
 	ddnsCmd.AddCommand(ddnsRollCmd, ddnsUploadCmd)
 

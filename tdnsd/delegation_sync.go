@@ -39,6 +39,7 @@ func DelegationSyncEngine(conf *Config) error {
 			select {
 			case ds = <-delsyncq:
 				zd := ds.ZoneData
+
 				switch ds.Command {
 				case "DELEGATION-STATUS":
 					log.Printf("DelegationSyncEngine: Zone %s request for delegation status.", zd.ZoneName)
@@ -108,7 +109,7 @@ func DelegationSyncEngine(conf *Config) error {
 					}
 
 					if syncstate.InSync {
-						log.Printf("DelegationSyncEngine: Zone %s: delegation data in parent \"%s\" is in sync. No action needed.",
+						log.Printf("DelegationSyncEngine: Zone %s: delegation data in parent \"%s\" is in sync with child. No action needed.",
 							syncstate.Zone, syncstate.Parent)
 						if ds.Response != nil {
 							ds.Response <- syncstate
@@ -134,7 +135,7 @@ func DelegationSyncEngine(conf *Config) error {
 					continue
 
 				default:
-					log.Printf("Unknown command: '%s'. Ignoring.", ds.Command)
+					log.Printf("DelegationSyncEngine: Zone %s: Unknown command: '%s'. Ignoring.", ds.ZoneName, ds.Command)
 				}
 			}
 		}
