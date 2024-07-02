@@ -288,10 +288,34 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
 	// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
+	err := zd.PublishCsyncRR()
+	if err != nil {
+		log.Printf("SyncZoneDelegationViaNotify: Error from PublishCsync(): %v", err)
+		return "", 0, err
+	}
+
+	// Try to sign the CSYNC RRset
+	if zd.AllowUpdates && zd.OnlineSigning {
+		apex, _ := zd.GetOwner(zd.ZoneName)
+		rrset := apex.RRtypes[dns.TypeCSYNC]
+		_, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecKey(zd.ZoneName)
+		if err != nil {
+			log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
+		} else {
+			if cs != nil {
+				err := tdns.SignRRset(&rrset, zd.ZoneName, cs, keyrr)
+				if err != nil {
+					log.Printf("Error signing %s: %v", zd.ZoneName, err)
+				} else {
+					log.Printf("Signed %s: %v", zd.ZoneName, err)
+				}
+			}
+		}
+	}
 	// 2. Create Notify msg
 	// 3. Send Notify msg
 
-	rcode, err := tdns.SendNotify(zd.Parent, zd.ZoneName, "DNSKEY", dsynctarget)
+	rcode, err := tdns.SendNotify(zd.Parent, zd.ZoneName, "CSYNC", dsynctarget)
 	if err != nil {
 		log.Printf("Error from SendNotify(%s): %v", zd.Parent, err)
 		return "", 0, err
