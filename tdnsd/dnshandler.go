@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strings"
 
@@ -113,8 +114,36 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			// Let's see if we can find the zone
 			zd, folded := tdns.FindZone(qname)
 			if zd == nil {
+				// No zone found, but perhaps this is a query for the .server CH tld?
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
+				qname = strings.ToLower(qname)
+				if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
+					log.Printf("DnsHandler: Qname is '%s', which is not a known zone, but likely a query for the .server CH tld", qname)
+					switch qname {
+					case "id.server.":
+						m.SetRcode(r, dns.RcodeSuccess)
+						m.Answer = append(m.Answer, &dns.TXT{
+							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+							Txt: []string{"tdnsd - an authoritative name server for experiments and POCs"},
+						})
+					case "version.server.":
+						m.SetRcode(r, dns.RcodeSuccess)
+						m.Answer = append(m.Answer, &dns.TXT{
+							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+							Txt: []string{fmt.Sprintf("tdnsd version %s", appVersion)},
+						})
+					case "hostname.server.":
+						m.SetRcode(r, dns.RcodeSuccess)
+						m.Answer = append(m.Answer, &dns.TXT{
+							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+							Txt: []string{"a.random.internet.host."},
+						})
+					default:
+					}
+					w.WriteMsg(m)
+					return
+				}
 				w.WriteMsg(m)
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
@@ -438,20 +467,19 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 		}
 		w.WriteMsg(m)
 		return nil
-
-	default:
-		// everything we don't want to deal with
-		m.MsgHdr.Rcode = dns.RcodeRefused
-		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-		v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
-		m.Extra = append(m.Extra, v4glue.RRs...)
-		m.Extra = append(m.Extra, v6glue.RRs...)
-		if dnssec_ok {
-			m.Extra = append(m.Extra, v4glue.RRSIGs...)
-			m.Extra = append(m.Extra, v6glue.RRSIGs...)
-		}
-		w.WriteMsg(m)
 	}
+
+	// Final catcheverything we don't want to deal with
+	m.MsgHdr.Rcode = dns.RcodeRefused
+	m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
+	v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
+	m.Extra = append(m.Extra, v4glue.RRs...)
+	m.Extra = append(m.Extra, v6glue.RRs...)
+	if dnssec_ok {
+		m.Extra = append(m.Extra, v4glue.RRSIGs...)
+		m.Extra = append(m.Extra, v6glue.RRSIGs...)
+	}
+	w.WriteMsg(m)
 
 	_ = origqname
 
