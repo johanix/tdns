@@ -6,9 +6,11 @@ package main
 
 import (
 	//        "fmt"
+	"crypto"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
@@ -28,6 +30,57 @@ func DelegationSyncEngine(conf *Config) error {
 
 	kdb := conf.Internal.KeyDB
 	_ = kdb
+
+	// If we support syncing with parent via DNS UPDATE then we must ensure that a KEY RR for the zone is published.
+	time.Sleep(10 * time.Second) // Allow time for zones to load
+
+	var cs *crypto.Signer
+	var keyrr *dns.KEY
+	var dnskeyrr *dns.DNSKEY
+	var err error
+
+	for zname, zd := range tdns.Zones.Items() {
+		log.Printf("DelegationSyncEngine: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
+		if zd.AllowUpdates {
+			apex, _ := zd.GetOwner(zd.ZoneName)
+			if _, exist := apex.RRtypes[dns.TypeKEY]; !exist {
+				log.Printf("DelegationSyncEngine: Fetching the private SIG(0) key for %s", zd.ZoneName)
+				_, _, keyrr, err = kdb.GetSig0Key(zd.ZoneName)
+				if err != nil {
+					log.Printf("DelegationSyncEngine: Error from kdb.GetSig0Key(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+					continue
+				}
+				if keyrr == nil {
+					log.Printf("DelegationSyncEngine: No SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
+					continue
+				}
+
+				log.Printf("DelegationSyncEngine: Publishing KEY RR for zone %s", zd.ZoneName)
+				zd.PublishKeyRR(keyrr)
+
+				if zd.OnlineSigning {
+					log.Printf("DelegationSyncEngine: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
+					_, cs, dnskeyrr, err = kdb.GetDnssecKey(zd.ZoneName)
+					if err != nil {
+						log.Printf("DelegationSyncEngine: Error from kdb.GetDnssecKey(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+						continue
+					}
+					// apex, _ := zd.GetOwner(zd.ZoneName)
+					rrset := apex.RRtypes[dns.TypeKEY]
+					// dump.P(rrset)
+					err := tdns.SignRRset(&rrset, zd.ZoneName, cs, dnskeyrr)
+					if err != nil {
+						log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
+					} else {
+						apex.RRtypes[dns.TypeKEY] = rrset
+						log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
+					}
+				}
+			} else {
+				log.Printf("DelegationSyncEngine: Zone %s KEY RRset already published", zd.ZoneName)
+			}
+		}
+	}
 
 	log.Printf("DelegationSyncEngine: starting")
 	var wg sync.WaitGroup

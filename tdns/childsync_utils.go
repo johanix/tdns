@@ -247,19 +247,6 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 	return new_ns_inb, old_ns_inb
 }
 
-// func (zd *ZoneData) SyncWithParent(adds, removes []dns.RR) error {
-//	zd.Logger.Printf("SyncWithParent: zone=%s adds=%v removes=%v", zd.ZoneName, adds, removes)
-
-//	scheme, dsynctarget, err := zd.BestSyncScheme()
-//	if err != nil {
-//		return err
-//	}
-//	zd.Logger.Printf("*** SyncWithParent: will try %s scheme using: %s. Target: %v", scheme, dsyncrr, dsynctarget)
-
-// Ok, so let's do it:
-//	return nil
-// }
-
 // Find the best scheme (from the POV of the child) to sync the deletation with the parent
 func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 	var active_drr *DSYNC
@@ -309,7 +296,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 			}
 			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
+				if drr.Scheme == SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
 					active_drr = drr
 					break
 				}

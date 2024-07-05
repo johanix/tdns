@@ -63,6 +63,14 @@ func SignMsgNG(m dns.Msg, name string, cs *crypto.Signer, keyrr *dns.KEY) (*dns.
 
 func SignRRset(rrset *RRset, name string, cs *crypto.Signer, keyrr *dns.DNSKEY) error {
 
+	if cs == nil {
+		return fmt.Errorf("SignRRset: cs is nil")
+	}
+
+	if keyrr == nil {
+		return fmt.Errorf("SignRRset: keyrr is nil")
+	}
+
 	rrsig := new(dns.RRSIG)
 	rrsig.Hdr = dns.RR_Header{
 		Name:   keyrr.Header().Name,
@@ -214,8 +222,7 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		ktype = "DNSKEY"
 		alg = rrk.Algorithm
-		//		bpkstr = rrk.PrivateKeyString(k)
-		log.Printf("DNSKEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+		// log.Printf("DNSKEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	case *dns.KEY:
 		rrk := rr.(*dns.KEY)
@@ -225,8 +232,7 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		ktype = "KEY"
 		alg = rrk.Algorithm
-		//		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
-		log.Printf("KEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+		// log.Printf("KEY PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	default:
 		//		log.Fatalf("Error: rr is of type %v", "foo")

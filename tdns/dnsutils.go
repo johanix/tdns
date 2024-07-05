@@ -116,14 +116,14 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// XXX: If we change the SOA serial we must also recompute the RRSIG.
 	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 	rrs = append(rrs, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-	zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+	// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
 
 	// Rest of apex
 	for rrt, _ := range apex.RRtypes {
 		if rrt != dns.TypeSOA {
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
 			rrs = append(rrs, apex.RRtypes[rrt].RRs...)
-			zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
+			// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
 			rrs = append(rrs, apex.RRtypes[rrt].RRSIGs...)
 		}
@@ -138,18 +138,14 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				continue
 			}
 			for _, rrl := range owner.RRtypes {
-				// env.RR = append(env.RR, rrl.RRs...)
 				rrs = append(rrs, rrl.RRs...)
-				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				count += len(rrl.RRs)
-				// env.RR = append(env.RR, rrl.RRSIGs...)
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 
 				if count >= 400 {
 					total_sent += count
-					// outbound_xfr <- &env
-					// env = dns.Envelope{}
 					outbound_xfr <- &dns.Envelope{RR: rrs}
 					rrs = []dns.RR{}
 					count = 0
@@ -165,18 +161,14 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				continue
 			}
 			for _, rrl := range omap.RRtypes {
-				// env.RR = append(env.RR, rrl.RRs...)
 				rrs = append(rrs, rrl.RRs...)
-				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				count += len(rrl.RRs)
-				// env.RR = append(env.RR, rrl.RRSIGs...)
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 
 				if count >= 400 {
 					total_sent += count
-					// outbound_xfr <- &env
-					// env = dns.Envelope{}
 					outbound_xfr <- &dns.Envelope{RR: rrs}
 					rrs = []dns.RR{}
 					count = 0
@@ -185,13 +177,13 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		}
 
 	default:
-		zd.Logger.Printf("Zone %s: zone store %d: no outbound zone transfer. Sorry.",
+		zd.Logger.Printf("Zone %s: zone store %d: outbound zone transfer not supported. Sorry.",
 			zd.ZoneName, zd.ZoneStore)
 	}
 
 	// env.RR = append(env.RR, soa) // trailing SOA
 	rrs = append(rrs, soa)
-	zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
+	// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
 
 	total_sent += len(rrs)
 	zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
@@ -302,7 +294,7 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 			zd.ZoneName, err)
 		return false, soa.Serial, fmt.Errorf("Error from ZoneParser: %v", err)
 	}
-	zd.Logger.Printf("*** Zone %s read from file. No errors.", zd.ZoneName)
+	// zd.Logger.Printf("*** Zone %s read from file. No errors.", zd.ZoneName)
 	zd.ComputeIndices() // for zonestore SliceZone, otherwise no-op
 	zd.XfrType = "axfr" // XXX: technically not true
 	return true, soa.Serial, nil
@@ -339,7 +331,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	switch v := rr.(type) {
 	case *dns.SOA:
 		if !firstSoaSeen {
-			zd.Logger.Printf("SortFunc: zone %s firstSoaSeen is nil. Setting to true", zd.ZoneName)
+			// zd.Logger.Printf("SortFunc: zone %s firstSoaSeen is nil. Setting to true", zd.ZoneName)
 			firstSoaSeen = true
 			zd.ApexLen++
 			if ztype == MapZone {
@@ -351,21 +343,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 	case *dns.RRSIG:
 		rrt := v.TypeCovered
-
-		//		if owner == zd.ZoneName {
-		//			switch ztype {
-		//			case XfrZone:
-		//				zd.RRs = append(zd.RRs, rr)
-		//			case MapZone:
-		//				tmp = omap.RRtypes[rrt]
-		//				tmp.RRSIGs = append(tmp.RRSIGs, rr)
-		//				omap.RRtypes[rrt] = tmp
-		//			}
-		//		}
-
 		switch ztype {
-		//		case XfrZone:
-		//			zd.RRs = append(zd.RRs, rr)
 		case MapZone:
 			tmp = omap.RRtypes[rrt]
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
@@ -374,8 +352,6 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 	default:
 		switch ztype {
-		//		case XfrZone:
-		//			zd.RRs = append(zd.RRs, rr)
 		case MapZone:
 			tmp = omap.RRtypes[rrtype]
 			tmp.RRs = append(tmp.RRs, rr)
@@ -383,7 +359,6 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 		}
 	}
 	if ztype == MapZone {
-		// zd.Data[owner] = omap
 		zd.Data.Set(owner, omap)
 	}
 	return firstSoaSeen
