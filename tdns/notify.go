@@ -52,8 +52,8 @@ func NotifierEngine(notifyreqQ chan NotifyRequest) error {
 				}
 				continue
 
-			default:
-				log.Printf("NotifierEngine: Zone %s: We should not get here. Ignoring.", nr.ZoneName)
+				//			default:
+				//				log.Printf("NotifierEngine: Zone %s: We should not get here. Ignoring.", nr.ZoneName)
 			}
 		}
 	}()
