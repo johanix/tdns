@@ -43,7 +43,7 @@ type ServiceConf struct {
 	Verbose *bool
 }
 
-type ZoneConf struct {
+type xxxZoneConf struct {
 	Name           string `validate:"required"`
 	Type           string `validate:"required"`
 	Store          string `validate:"required"` // xfr | map | slice | reg

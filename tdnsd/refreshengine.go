@@ -107,6 +107,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						DelegationSync:   zr.DelegationSync,
 						OnlineSigning:    zr.OnlineSigning,
 						AllowUpdates:     zr.AllowUpdates,
+						FoldCase:         zr.FoldCase,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
 					}

@@ -21,6 +21,11 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 	// 	ZoneTypeToString[zd.ZoneType], force)
 
+	if zd.FoldCase {
+		zd.Logger.Printf("zd.Refresh(): folding case for zone %s", zd.ZoneName)
+		zd.ZoneName = strings.ToLower(zd.ZoneName)
+	}
+
 	switch zd.ZoneType {
 	case Primary:
 		// zd.Logger.Printf("zd.Refresh(): Should reload zone %s from file %s", zd.ZoneName, zd.ZoneFile)
@@ -116,6 +121,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
+		FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
 	updated, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
@@ -196,6 +202,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
+		FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
 	_, err := zonedata.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
@@ -462,17 +469,29 @@ func IsIxfr(rrs []dns.RR) bool {
 	return false
 }
 
-func FindZone(qname string) *ZoneData {
+// Return zone, case fold used to match
+func FindZone(qname string) (*ZoneData, bool) {
 	var tzone string
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
 		tzone = strings.Join(labels[i:], ".")
 		if zd, ok := Zones.Get(tzone); ok {
-			return zd
+			return zd, false
+		}
+	}
+
+	// if no match for exact qname, let's try with a case folded version
+	qname = strings.ToLower(qname)
+	labels = strings.Split(qname, ".")
+
+	for i := 0; i < len(labels)-1; i++ {
+		tzone = strings.Join(labels[i:], ".")
+		if zd, ok := Zones.Get(tzone); ok {
+			return zd, true
 		}
 	}
 	log.Printf("FindZone: no zone for qname=%s found", qname)
-	return nil
+	return nil, false
 }
 
 func FindZoneNG(qname string) *ZoneData {

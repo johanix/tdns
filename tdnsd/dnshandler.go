@@ -83,6 +83,17 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				return
 			}
 
+			// Let's try case folded
+			lcqname := strings.ToLower(qname)
+			if zd, ok := tdns.Zones.Get(lcqname); ok {
+				// The qname is equal to the name of a zone we are authoritative for
+				err := ApexResponder(w, r, zd, lcqname, qtype, dnssec_ok, kdb)
+				if err != nil {
+					log.Printf("Error in ApexResponder: %v", err)
+				}
+				return
+			}
+
 			if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
 				// We are not authoritative for this zone, so no xfrs possible
 				m := new(dns.Msg)
@@ -100,7 +111,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			// log.Printf("DnsHandler: Known zones are: %v", known_zones)
 
 			// Let's see if we can find the zone
-			zd := tdns.FindZone(qname)
+			zd, folded := tdns.FindZone(qname)
 			if zd == nil {
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -114,6 +125,10 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				m.SetRcode(r, dns.RcodeRefused)
 				w.WriteMsg(m)
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
+			}
+
+			if folded {
+				qname = strings.ToLower(qname)
 			}
 
 			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)

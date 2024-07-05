@@ -110,7 +110,7 @@ func UpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq chan U
 	zone := qname
 
 	// Let's see if we can find the zone
-	zd := tdns.FindZone(qname)
+	zd, _ := tdns.FindZone(qname)
 	if zd == nil {
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
@@ -189,7 +189,7 @@ func (policy *UpdatePolicy) ApproveUpdate(zone, signername string, rcode uint8,
 		if rrtype == dns.TypeKEY && policy.KeyUpload == "unvalidated" &&
 			rrclass != dns.ClassNONE && rrclass != dns.ClassANY &&
 			len(r.Ns) == 1 {
-			zd := tdns.FindZone(zone)
+			zd, _ := tdns.FindZone(zone)
 			if zd == nil {
 				log.Printf("ApproveUpdate: update rejected (parent zone of %s not known)", rrname)
 				return false, nil

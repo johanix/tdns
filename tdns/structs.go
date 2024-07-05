@@ -66,6 +66,7 @@ type ZoneData struct {
 	ParentServers    []string // addresses of parent nameservers
 	OnlineSigning    bool     // should we sign RRSIGs for missing signatures
 	AllowUpdates     bool     // should we allow updates to this zone
+	FoldCase         bool     // should we fold case for this zone
 	Frozen           bool     // if frozen no updates are allowed
 	Dirty            bool     // if true zone has been modified and we need to save the zonefile
 }
@@ -81,6 +82,7 @@ type ZoneConf struct {
 	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
 	OnlineSigning  bool // should we sign RRSIGs for missing signatures
 	AllowUpdates   bool // should we allow updates to this zone
+	FoldCase       bool // should we fold case for this zone
 	Frozen         bool // if true no updates are allowed; not a config param
 	Dirty          bool // if true zone has been modified; not a config param
 }
@@ -247,6 +249,7 @@ type ZoneRefresher struct {
 	DelegationSync bool
 	OnlineSigning  bool
 	AllowUpdates   bool
+	FoldCase       bool // should we fold case for this zone
 	Force          bool // force refresh, ignoring SOA serial
 	Response       chan RefresherResponse
 }

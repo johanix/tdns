@@ -54,8 +54,8 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher) err
 	m.SetReply(dhr.Msg)
 
 	// Let's see if we can find the zone
-	zd := tdns.FindZone(qname)
-	if zd == nil || zd.ZoneName != qname {
+	zd, _ := tdns.FindZone(qname)
+	if zd == nil || len(zd.ZoneName) != len(qname) {
 		log.Printf("Received Notify for unknown zone %s. Ignoring.", qname)
 		m := new(dns.Msg)
 		m.SetRcode(dhr.Msg, dns.RcodeRefused)

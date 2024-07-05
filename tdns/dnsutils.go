@@ -302,6 +302,9 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 
 func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	owner := rr.Header().Name
+	if zd.FoldCase {
+		owner = strings.ToLower(owner)
+	}
 	rrtype := rr.Header().Rrtype
 
 	//	zd.Logger.Printf("SortFunc: owner=%s rrtype=%s (%d)", owner, dns.TypeToString[rrtype], rrtype)
