@@ -249,7 +249,7 @@ func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.Delegati
 	switch scheme {
 	case "UPDATE":
 		msg, rcode, err = SyncZoneDelegationViaUpdate(conf, zd, syncstate, dsynctarget)
-	case "NOTIFY	":
+	case "NOTIFY":
 		msg, rcode, err = SyncZoneDelegationViaNotify(conf, zd, syncstate, dsynctarget)
 	}
 
@@ -340,27 +340,29 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
-	// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
-	err := zd.PublishCsyncRR()
-	if err != nil {
-		log.Printf("SyncZoneDelegationViaNotify: Error from PublishCsync(): %v", err)
-		return "", 0, err
-	}
-
-	// Try to sign the CSYNC RRset
-	if zd.AllowUpdates && zd.OnlineSigning {
-		apex, _ := zd.GetOwner(zd.ZoneName)
-		rrset := apex.RRtypes[dns.TypeCSYNC]
-		_, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecKey(zd.ZoneName)
+	if zd.AllowUpdates {
+		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
+		err := zd.PublishCsyncRR()
 		if err != nil {
-			log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
-		} else {
-			if cs != nil {
-				err := tdns.SignRRset(&rrset, zd.ZoneName, cs, keyrr)
-				if err != nil {
-					log.Printf("Error signing %s: %v", zd.ZoneName, err)
-				} else {
-					log.Printf("Signed %s: %v", zd.ZoneName, err)
+			log.Printf("SyncZoneDelegationViaNotify: Error from PublishCsync(): %v", err)
+			return "", dns.RcodeServerFailure, err
+		}
+
+		// Try to sign the CSYNC RRset
+		if zd.OnlineSigning {
+			apex, _ := zd.GetOwner(zd.ZoneName)
+			rrset := apex.RRtypes[dns.TypeCSYNC]
+			_, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecKey(zd.ZoneName)
+			if err != nil {
+				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
+			} else {
+				if cs != nil {
+					err := tdns.SignRRset(&rrset, zd.ZoneName, cs, keyrr)
+					if err != nil {
+						log.Printf("Error signing %s: %v", zd.ZoneName, err)
+					} else {
+						log.Printf("Signed %s: %v", zd.ZoneName, err)
+					}
 				}
 			}
 		}
@@ -368,13 +370,24 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	// 2. Create Notify msg
 	// 3. Send Notify msg
 
-	rcode, err := tdns.SendNotify(zd.Parent, zd.ZoneName, "CSYNC", dsynctarget)
-	if err != nil {
-		log.Printf("Error from SendNotify(%s): %v", zd.Parent, err)
-		return "", 0, err
+	// Old:
+	// rcode, err := tdns.SendNotify(zd.Parent, zd.ZoneName, "CSYNC", dsynctarget)
+	// if err != nil {
+	// 	log.Printf("Error from SendNotify(%s): %v", zd.Parent, err)
+	// 	return "", 0, err
+	// }
+	// msg := fmt.Sprintf("SendNotify(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
+	// log.Printf(msg)
+
+	// New:
+	conf.Internal.NotifyQ <- tdns.NotifyRequest{
+		ZoneName: zd.ZoneName,
+		ZoneData: zd,
+		Targets:  dsynctarget.Addresses,
 	}
-	msg := fmt.Sprintf("SendNotify(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
+
+	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request for zone %s to NotifierEngine", zd.ZoneName)
 	log.Printf(msg)
 
-	return msg, uint8(rcode), nil
+	return msg, dns.RcodeSuccess, nil
 }

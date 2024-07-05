@@ -74,13 +74,14 @@ type InternalConf struct {
 	KeyDB           *KeyDB
 	APIStopCh       chan struct{}
 	RefreshZoneCh   chan tdns.ZoneRefresher
-	BumpZoneCh      chan BumperData
+	BumpZoneCh      chan tdns.BumperData
 	ValidatorCh     chan tdns.ValidatorRequest
 	ScannerQ        chan ScanRequest
 	UpdateQ         chan UpdateRequest
 	DnsUpdateQ      chan DnsHandlerRequest
 	DnsNotifyQ      chan DnsHandlerRequest
 	DelegationSyncQ chan tdns.DelegationSyncRequest
+	NotifyQ         chan tdns.NotifyRequest
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

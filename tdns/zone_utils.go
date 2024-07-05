@@ -488,3 +488,20 @@ func FindZoneNG(qname string) *ZoneData {
 	}
 	return nil
 }
+
+func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
+	resp := BumperResponse{
+		Zone: zd.ZoneName,
+	}
+
+	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
+	zd.mu.Lock()
+	resp.OldSerial = zd.CurrentSerial
+	zd.CurrentSerial++
+	resp.NewSerial = zd.CurrentSerial
+	zd.mu.Unlock()
+
+	zd.NotifyDownstreams()
+
+	return resp, nil
+}

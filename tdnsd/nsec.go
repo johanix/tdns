@@ -243,8 +243,8 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 }
 
 func BumpSerial(conf *Config, zone string) (string, error) {
-	var respch = make(chan BumperResponse, 1)
-	conf.Internal.BumpZoneCh <- BumperData{
+	var respch = make(chan tdns.BumperResponse, 1)
+	conf.Internal.BumpZoneCh <- tdns.BumperData{
 		Zone:   zone,
 		Result: respch,
 	}
@@ -291,12 +291,12 @@ func ReloadZone(conf *Config, zone string, force bool) (string, error) {
 	return resp.Msg, nil
 }
 
-type BumperData struct {
+type xxxBumperData struct {
 	Zone   string
-	Result chan BumperResponse
+	Result chan tdns.BumperResponse
 }
 
-type BumperResponse struct {
+type xxxBumperResponse struct {
 	Time      time.Time
 	Zone      string
 	Msg       string

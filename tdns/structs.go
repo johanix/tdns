@@ -320,3 +320,19 @@ type DelegationSyncRequest struct {
 	SyncStatus DelegationSyncStatus
 	Response   chan DelegationSyncStatus // used for API-based requests
 }
+
+type BumperData struct {
+	Zone   string
+	Result chan BumperResponse
+}
+
+type BumperResponse struct {
+	Time      time.Time
+	Zone      string
+	Msg       string
+	OldSerial uint32
+	NewSerial uint32
+	Error     bool
+	ErrorMsg  string
+	Status    bool
+}

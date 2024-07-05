@@ -95,12 +95,15 @@ func main() {
 
 	var stopch = make(chan struct{}, 10)
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
-	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
+	conf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
 	go RefreshEngine(&conf, stopch)
 
 	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
 	go ValidatorEngine(&conf, stopch)
+
+	conf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
+	go tdns.NotifierEngine(conf.Internal.NotifyQ)
 
 	err = tdns.RegisterNotifyRR()
 	if err != nil {

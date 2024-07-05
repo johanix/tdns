@@ -51,7 +51,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	//	var rc *RefreshCounter
 	var updated bool
 	var err error
-	var bd BumperData
+	var bd tdns.BumperData
 	var zr tdns.ZoneRefresher
 
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
@@ -200,16 +200,17 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 		case bd = <-bumpch:
 			zone = bd.Zone
-			resp := BumperResponse{
-				Zone: zone,
-			}
+			resp := tdns.BumperResponse{}
+			var err error
 			if zone != "" {
 				if zd, exist := tdns.Zones.Get(zone); exist {
+					resp, err = zd.BumpSerial()
+					if err != nil {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Error bumping SOA serial for zone '%s': %v", zone, err)
+						log.Printf(resp.ErrorMsg)
+					}
 					log.Printf("RefreshEngine: bumping SOA serial for known zone '%s'", zone)
-					resp.OldSerial = zd.CurrentSerial
-					zd.CurrentSerial++
-					resp.NewSerial = zd.CurrentSerial
-
 				} else {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Request to bump serial for unknown zone '%s'", zone)

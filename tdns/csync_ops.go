@@ -33,7 +33,30 @@ func (zd *ZoneData) PublishCsyncRR() error {
 		RRSIGs: []dns.RR{},
 	}
 
+	zd.mu.Lock()
 	apex.RRtypes[dns.TypeCSYNC] = rrset
+	zd.mu.Unlock()
+
+	zd.BumpSerial()
+
+	return nil
+}
+
+func (zd *ZoneData) UnpublishCsyncRR() error {
+	if !zd.AllowUpdates {
+		return fmt.Errorf("Zone %s does not allow updates. CSYNC unpublication not possible", zd.ZoneName)
+	}
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return err
+	}
+
+	zd.mu.Lock()
+	delete(apex.RRtypes, dns.TypeCSYNC)
+	zd.mu.Unlock()
+
+	zd.BumpSerial()
 
 	return nil
 }

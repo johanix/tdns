@@ -28,7 +28,11 @@ func (zd *ZoneData) PublishKeyRR(keyrr *dns.KEY) error {
 		RRSIGs: []dns.RR{},
 	}
 
+	zd.mu.Lock()
 	apex.RRtypes[dns.TypeKEY] = rrset
+	zd.mu.Unlock()
+
+	zd.BumpSerial()
 
 	return nil
 }

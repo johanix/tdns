@@ -154,11 +154,18 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				Msg:    "We're happy, but send more cookies"}
 
 		case "bump":
-			resp.Msg, err = BumpSerial(conf, cp.Zone)
+			// resp.Msg, err = BumpSerial(conf, cp.Zone)
+			zd, exist := tdns.Zones.Get(cp.Zone)
+			if !exist {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
+			}
+			br, err := zd.BumpSerial()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
+			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", cp.Zone, br.OldSerial, br.NewSerial)
 
 		case "reload":
 			log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
@@ -414,69 +421,4 @@ func APIdispatcher(conf *Config, done <-chan struct{}) {
 	}()
 
 	log.Println("API dispatcher: unclear how to stop the http server nicely.")
-}
-
-func xxxBumpSerial(conf *Config, zone string) (string, error) {
-	var respch = make(chan BumperResponse, 1)
-	conf.Internal.BumpZoneCh <- BumperData{
-		Zone:   zone,
-		Result: respch,
-	}
-
-	resp := <-respch
-
-	if resp.Error {
-		log.Printf("BumpSerial: Error from RefreshEngine: %s", resp.ErrorMsg)
-		msg := fmt.Sprintf("Zone %s: error bumping SOA serial: %s", zone, resp.ErrorMsg)
-		return msg, fmt.Errorf(msg)
-	}
-
-	if resp.Msg == "" {
-		resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
-	}
-	return resp.Msg, nil
-}
-
-func xxxReloadZone(conf *Config, zone string, force bool) (string, error) {
-	var respch = make(chan tdns.RefresherResponse, 1)
-	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
-		Name:     zone,
-		Response: respch,
-		Force:    force,
-	}
-
-	var resp tdns.RefresherResponse
-
-	select {
-	case resp = <-respch:
-	case <-time.After(2 * time.Second):
-		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
-	}
-
-	if resp.Error {
-		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
-		return fmt.Sprintf("Zone %s: Error reloading: %s", zone, resp.ErrorMsg),
-			fmt.Errorf("Zone %s: Error reloading: %v", zone, resp.ErrorMsg)
-	}
-
-	if resp.Msg == "" {
-		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zone)
-	}
-	return resp.Msg, nil
-}
-
-type xxxBumperData struct {
-	Zone   string
-	Result chan BumperResponse
-}
-
-type xxxBumperResponse struct {
-	Time      time.Time
-	Zone      string
-	Msg       string
-	OldSerial uint32
-	NewSerial uint32
-	Error     bool
-	ErrorMsg  string
-	Status    bool
 }
