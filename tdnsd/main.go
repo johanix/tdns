@@ -24,7 +24,7 @@ import (
 	// "github.com/orcaman/concurrent-map/v2"
 )
 
-var appVersion string
+// var appVersion string
 var appMode string
 var debug, verbose bool
 

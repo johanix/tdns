@@ -105,7 +105,7 @@ type Tx struct {
 }
 
 func (tx *Tx) Commit() error {
-	log.Printf("---> Committing KeyDB transaction: %s", tx.context)
+	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Commit()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
@@ -115,7 +115,7 @@ func (tx *Tx) Commit() error {
 }
 
 func (tx *Tx) Rollback() error {
-	log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
+	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Rollback()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
@@ -125,7 +125,7 @@ func (tx *Tx) Rollback() error {
 }
 
 func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
-	log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
+	// log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
 	result, err := tx.Tx.Exec(query, args...)
 	if err != nil {
 		log.Printf("<--- Error executing KeyDB Exec (%s): %v", tx.context, err)
@@ -134,7 +134,7 @@ func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 }
 
 func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
+	// log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
 	rows, err := tx.Tx.Query(query, args...)
 	if err != nil {
 		log.Printf("<--- Error executing KeyDB query (%s): %v", tx.context, err)
@@ -143,7 +143,7 @@ func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 }
 
 func (tx *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
-	log.Printf("Querying row: %s with args: %v in context: %s", query, args, tx.context)
+	// log.Printf("Querying row: %s with args: %v in context: %s", query, args, tx.context)
 	return tx.Tx.QueryRow(query, args...)
 }
 
@@ -160,7 +160,7 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 }
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
-	log.Printf("---> Beginning KeyDB transaction: %s", context)
+	// log.Printf("---> Beginning KeyDB transaction: %s", context)
 	if db.Ctx != "" {
 		log.Printf("<--- Error: KeyDB transaction already in progress: %s", db.Ctx)
 		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)

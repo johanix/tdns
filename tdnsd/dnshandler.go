@@ -123,21 +123,37 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 					switch qname {
 					case "id.server.":
 						m.SetRcode(r, dns.RcodeSuccess)
+						v := viper.GetString("server.id")
+						if v == "" {
+							v = "tdnsd - an authoritative name server for experiments and POCs"
+						}
 						m.Answer = append(m.Answer, &dns.TXT{
-							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-							Txt: []string{"tdnsd - an authoritative name server for experiments and POCs"},
+							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
 						})
 					case "version.server.":
 						m.SetRcode(r, dns.RcodeSuccess)
+						v := viper.GetString("server.version")
+						if v == "" {
+							v = fmt.Sprintf("tdnsd version %s", appVersion)
+						}
 						m.Answer = append(m.Answer, &dns.TXT{
-							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-							Txt: []string{fmt.Sprintf("tdnsd version %s", appVersion)},
+							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
 						})
-					case "hostname.server.":
+					case "authors.server.":
 						m.SetRcode(r, dns.RcodeSuccess)
 						m.Answer = append(m.Answer, &dns.TXT{
 							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-							Txt: []string{"a.random.internet.host."},
+							Txt: []string{"Johan Stenstam <johani@johani.org>"},
+						})
+
+					case "hostname.server.":
+						m.SetRcode(r, dns.RcodeSuccess)
+						v := viper.GetString("server.hostname")
+						if v == "" {
+							v = "a.random.internet.host."
+						}
+						m.Answer = append(m.Answer, &dns.TXT{
+							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
 						})
 					default:
 					}

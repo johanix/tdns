@@ -22,7 +22,11 @@ import (
 //
 //	The code should store the newly generated key in the keystore.
 func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
-	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
+	keyrr, cs, err := LoadSigningKey(Globals.Sig0Keyfile)
+	if err != nil {
+		return fmt.Errorf("Error from LoadSigningKey(%s): %v", Globals.Sig0Keyfile, err)
+	}
+
 	if keyrr != nil {
 		fmt.Printf("keyid=%d\n", keyrr.KeyTag())
 	} else {
@@ -151,7 +155,7 @@ func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypt
 			}
 		}
 
-		keyrr, _ = LoadSigningKey(keyname + ".key")
+		keyrr, cs, err = LoadSigningKey(keyname + ".key")
 		if err != nil {
 			return keyrr, cs, privkey, err
 		}
@@ -174,24 +178,24 @@ func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypt
 	return keyrr, cs, privkey, nil
 }
 
-func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer) {
+func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer, error) {
 	var keyrr *dns.KEY
 	var cs crypto.Signer
 	var rr dns.RR
 
 	if keyfile != "" {
-		var ktype string
+		var ktype uint16
 		var err error
 		_, cs, rr, ktype, _, _, err = ReadKey(keyfile)
 		if err != nil {
-			log.Fatalf("Error reading key '%s': %v", keyfile, err)
+			return nil, nil, fmt.Errorf("Error reading key '%s': %v", keyfile, err)
 		}
 
-		if ktype != "KEY" {
-			log.Fatalf("Key must be a KEY RR")
+		if ktype != dns.TypeKEY {
+			return nil, nil, fmt.Errorf("Key must be a KEY RR")
 		}
 
 		keyrr = rr.(*dns.KEY)
 	}
-	return keyrr, cs
+	return keyrr, cs, nil
 }

@@ -27,7 +27,11 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 		log.Fatalf("Error from CreateUpdate(%s): %v", pzone, err)
 	}
 
-	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
+	keyrr, cs, err := LoadSigningKey(Globals.Sig0Keyfile)
+	if err != nil {
+		log.Printf("Error from LoadSigningKey(%s): %v", Globals.Sig0Keyfile, err)
+		return err
+	}
 	var smsg *dns.Msg
 
 	if Globals.Sig0Keyfile != "" {

@@ -138,6 +138,8 @@ type TruststorePost struct {
 	Zone       string
 	Keyname    string
 	Keyid      int
+	Src        string // "dns" | "file"
+	KeyRR      string // RR string for key
 }
 
 type TruststoreResponse struct {

@@ -16,33 +16,38 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var childSig0Name string
-var childSig0Keyid int
+var childSig0Name, childSig0Src string
+
+// var childSig0Keyid int
 
 var truststoreCmd = &cobra.Command{
 	Use:   "truststore",
 	Short: "Prefix command to access different features of tdnsd truststore",
-	Long:  `The TDNSD truststore is where SIG(0) public keys for child zones are kept.
+	Long: `The TDNSD truststore is where SIG(0) public keys for child zones are kept.
 The CLI contains functions for listing trusted SIG(0) keys, adding and
 deleting child keys and alsowell as changing the trust state of individual keys.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("truststore called. This is likely a mistake, sub command needed")
-	},
+	//		Run: func(cmd *cobra.Command, args []string) {
+	//			fmt.Println("truststore called. This is likely a mistake, sub command needed")
+	//	},
 }
 
 var truststoreSig0Cmd = &cobra.Command{
 	Use:   "sig0",
 	Short: "Prefix command, only usable via sub-commands",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("childsig0 called")
-	},
+	//	Run: func(cmd *cobra.Command, args []string) {
+	//		fmt.Println("childsig0 called")
+	//	},
 }
 
 var truststoreSig0AddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a new SIG(0) public key to the truststore",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("truststore sig0 add called (but NYI)")
+		PrepArgs("src", "child")
+		err := Sig0TrustMgmt("add")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		}
 	},
 }
 
@@ -61,6 +66,7 @@ var truststoreSig0TrustCmd = &cobra.Command{
 	Use:   "trust",
 	Short: "Declare a child SIG(0) public key in the keystore as trusted",
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("keyid", "child")
 		err := Sig0TrustMgmt("trust")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -71,6 +77,7 @@ var truststoreSig0UntrustCmd = &cobra.Command{
 	Use:   "untrust",
 	Short: "Declare a child SIG(0) public key in the keystore as untrusted",
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("keyid", "child")
 		err := Sig0TrustMgmt("untrust")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -82,16 +89,17 @@ func init() {
 	rootCmd.AddCommand(truststoreCmd)
 	truststoreCmd.AddCommand(truststoreSig0Cmd)
 
-	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd)
-	truststoreSig0Cmd.AddCommand(truststoreSig0ListCmd)
-	truststoreSig0Cmd.AddCommand(truststoreSig0TrustCmd)
-	truststoreSig0Cmd.AddCommand(truststoreSig0UntrustCmd)
+	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd, truststoreSig0ListCmd, truststoreSig0TrustCmd, truststoreSig0UntrustCmd)
 
-	truststoreSig0Cmd.PersistentFlags().IntVarP(&childSig0Keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
-	truststoreSig0Cmd.PersistentFlags().StringVarP(&childSig0Name, "child", "c", "", "Name of child SIG(0) key to change trust for")
+	truststoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+	truststoreSig0TrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
+	truststoreSig0UntrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
+	//	truststoreSig0Cmd.PersistentFlags().StringVarP(&childSig0Name, "child", "c", "", "Name of child SIG(0) key to change trust for")
+	truststoreSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "child", "c", "", "Name of child SIG(0) key")
+	truststoreSig0AddCmd.PersistentFlags().StringVarP(&childSig0Src, "src", "s", "", "Source for SIG(0) public key, a file name or 'dns'")
 }
 
-func Sig0TrustMgmt(trustval string) error {
+func Sig0TrustMgmt(subcommand string) error {
 	tr, err := SendTruststore(api, tdns.TruststorePost{
 		Command:    "child-sig0-mgmt",
 		SubCommand: "list",
@@ -101,8 +109,18 @@ func Sig0TrustMgmt(trustval string) error {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
-	if trustval == "list" {
-		var out = []string{"Signer|KeyID|Validated|Trusted|Record"}
+
+	tsp := tdns.TruststorePost{
+		Command:    "child-sig0-mgmt",
+		SubCommand: subcommand,
+		Keyname:    tdns.Globals.Zonename,
+		Keyid:      keyid,
+	}
+	if subcommand == "list" {
+		var out []string
+		if showhdr {
+			out = append(out, "Signer|KeyID|Validated|Trusted|Record")
+		}
 		if len(tr.ChildSig0keys) > 0 {
 			fmt.Printf("Known child SIG(0) keys:\n")
 			for k, v := range tr.ChildSig0keys {
@@ -110,35 +128,57 @@ func Sig0TrustMgmt(trustval string) error {
 				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%.70s...\n",
 					tmp[0], tmp[1], v.Validated, v.Trusted, v.Keystr))
 			}
+			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		}
-		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 
 		return nil
 	}
 
-	if childSig0Name == "" {
-		fmt.Printf("Error: name of SIG(0) key not specified (with --child)\n")
-		os.Exit(1)
-	}
-	childSig0Name = dns.Fqdn(childSig0Name)
-	if childSig0Keyid == 0 {
-		fmt.Printf("Error: keyid of SIG(0) key not specified (with --keyid)\n")
-		os.Exit(1)
+	if subcommand == "add" {
+		mapkey := fmt.Sprintf("%s::%d", tdns.Globals.Zonename, keyid)
+		if _, ok := tr.ChildSig0keys[mapkey]; ok {
+			fmt.Printf("Error: key with name %s and keyid %d is already known.\n", tdns.Globals.Zonename, keyid)
+			os.Exit(1)
+		}
+		if strings.ToLower(childSig0Src) != "dns" {
+			keyrr, ktype, _, err := tdns.ReadPubKey(childSig0Src)
+			if err != nil {
+				fmt.Printf("Error reading SIG(0) public keyfile %s: %v\n", childSig0Src, err)
+				os.Exit(1)
+			}
+			if ktype != dns.TypeKEY {
+				fmt.Printf("Error: keyfile %s is not a KEY RR\n", childSig0Src)
+				os.Exit(1)
+			}
+			if keyrr.Header().Name != tdns.Globals.Zonename {
+				fmt.Printf("Error: key %s does not match zone name %s\n", keyrr.Header().Name, tdns.Globals.Zonename)
+				os.Exit(1)
+			}
+			tsp.Keyname = keyrr.Header().Name
+			tsp.Keyid = int(keyrr.(*dns.KEY).KeyTag())
+			tsp.KeyRR = keyrr.String()
+			tsp.Src = "file"
+		} else {
+			tsp.Src = "dns"
+		}
 	}
 
-	mapkey := fmt.Sprintf("%s::%d", childSig0Name, childSig0Keyid)
-	if _, ok := tr.ChildSig0keys[mapkey]; !ok {
-		fmt.Printf("Error: no key with name %s and keyid %d is known.\n",
-			childSig0Name, childSig0Keyid)
-		os.Exit(1)
+	if subcommand == "trust" || subcommand == "untrust" {
+		mapkey := fmt.Sprintf("%s::%d", tdns.Globals.Zonename, keyid)
+		if _, ok := tr.ChildSig0keys[mapkey]; !ok {
+			fmt.Printf("Error: no key with name %s and keyid %d is known.\n", tdns.Globals.Zonename, keyid)
+			os.Exit(1)
+		}
 	}
 
-	tr, err = SendTruststore(api, tdns.TruststorePost{
-		Command:    "child-sig0-mgmt",
-		SubCommand: trustval,
-		Keyname:    childSig0Name,
-		Keyid:      childSig0Keyid,
-	})
+	//	tr, err = SendTruststore(api, tdns.TruststorePost{
+	//		Command:    "child-sig0-mgmt",
+	//		SubCommand: subcommand,
+	//		Keyname:    tdns.Globals.Zonename,
+	//		Keyid:      childSig0Keyid,
+	//	})
+
+	tr, err = SendTruststore(api, tsp)
 
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

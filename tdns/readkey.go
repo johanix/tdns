@@ -106,10 +106,10 @@ type BindPrivateKey struct {
 	PrivateKey         string `yaml:"PrivateKey"`
 }
 
-func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, string, uint8, error) {
+func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, uint16, string, uint8, error) {
 
 	if filename == "" {
-		log.Fatalf("Error: filename of key not specified")
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error: filename of key not specified")
 	}
 
 	var basename, pubfile, privfile string
@@ -123,32 +123,33 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 		privfile = filename
 		pubfile = basename + ".key"
 	} else {
-		log.Fatalf("Error: filename %s does not end in either .key or .private", filename)
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error: filename %s does not end in either .key or .private", filename)
 	}
 
 	file, err := os.Open(pubfile)
 	if err != nil {
-		log.Fatalf("Error opening public key file '%s': %v", pubfile, err)
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error opening public key file '%s': %v", pubfile, err)
 	}
 	pubkeybytes, err := os.ReadFile(pubfile)
 	if err != nil {
-		log.Fatalf("Error reading public key file '%s': %v", pubfile, err)
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error reading public key file '%s': %v", pubfile, err)
 	}
 	pubkey := string(pubkeybytes)
 
 	file, err = os.Open(privfile)
 	if err != nil {
-		log.Fatalf("Error opening private key file '%s': %v", privfile, err)
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error opening private key file '%s': %v", privfile, err)
 	}
 
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
-		log.Fatalf("Error reading public key '%s': %v", pubkey, err)
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
 	}
 
 	var k crypto.PrivateKey
 	var cs crypto.Signer
-	var ktype, bpkstr string
+	var ktype uint16
+	var bpkstr string
 	var alg uint8
 
 	// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rr.Algorithm])
@@ -158,9 +159,9 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 		rrk := rr.(*dns.DNSKEY)
 		k, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
 		if err != nil {
-			log.Fatalf("Error reading private key file '%s': %v", filename, err)
+			return nil, nil, nil, 0, "", 0, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
 		}
-		ktype = "DNSKEY"
+		ktype = dns.TypeDNSKEY
 		alg = rrk.Algorithm
 		bpkstr = rrk.PrivateKeyString(k)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
@@ -168,19 +169,19 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 	case *dns.KEY:
 		rrk := rr.(*dns.KEY)
 		k, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
-		ktype = "KEY"
+		ktype = dns.TypeKEY
 		alg = rrk.Algorithm
 		bpkstr = rrk.DNSKEY.PrivateKeyString(k)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	default:
-		log.Fatalf("Error: rr is of type %v", "foo")
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error: rr is of type %v", "foo")
 	}
 
 	var bpk BindPrivateKey
 	err = yaml.Unmarshal([]byte(bpkstr), &bpk)
 	if err != nil {
-		log.Printf("Error from yaml.Unmarshal(): %v", err)
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 	}
 
 	switch alg {
@@ -191,11 +192,58 @@ func ReadKey(filename string) (crypto.PrivateKey, crypto.Signer, dns.RR, string,
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 		cs = k.(*ecdsa.PrivateKey)
 	default:
-		log.Printf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
-		err = fmt.Errorf("no support for algorithm %s yet", dns.AlgorithmToString[alg])
+		return nil, nil, nil, 0, "", 0, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
 	}
 
 	return k, cs, rr, ktype, bpk.PrivateKey, alg, err
+}
+
+func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
+
+	if filename == "" {
+		log.Fatalf("Error: filename of key not specified")
+	}
+
+	var pubfile string
+
+	if strings.HasSuffix(filename, ".key") {
+		pubfile = filename
+	} else {
+		return nil, 0, 0, fmt.Errorf("Error: filename %s for a public key must end in '.key'", filename)
+	}
+
+	pubkeybytes, err := os.ReadFile(pubfile)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("Error reading public key file %s: %v", pubfile, err)
+	}
+	pubkey := string(pubkeybytes)
+
+	rr, err := dns.NewRR(pubkey)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("Error parsing public key '%s': %v", pubkey, err)
+	}
+
+	var ktype uint16
+	var alg uint8
+
+	switch rr.(type) {
+	case *dns.DNSKEY:
+		rrk := rr.(*dns.DNSKEY)
+		ktype = dns.TypeDNSKEY
+		alg = rrk.Algorithm
+		// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+
+	case *dns.KEY:
+		rrk := rr.(*dns.KEY)
+		ktype = dns.TypeKEY
+		alg = rrk.Algorithm
+		// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+
+	default:
+		return nil, 0, 0, fmt.Errorf("Error: rr is of type %v", "foo")
+	}
+
+	return rr, ktype, alg, err
 }
 
 func PrepareKey(privkey, pubkey, algorithm string) (crypto.PrivateKey, crypto.Signer, dns.RR, string, uint8, error) {
