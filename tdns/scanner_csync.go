@@ -41,6 +41,7 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, pzd *ZoneData) error {
 
 	csync_rrset, err := pzd.LookupRRset(zone, dns.TypeCSYNC, verbose)
 	if len(csync_rrset.RRs) == 0 {
+		lg.Printf("CheckCSYNC: Zone %s: no CSYNC RR found. Terminating scan.", zone)
 		// return fmt.Errorf("CSYNC scanner: Zone %s: no CSYNC RR found.", zone)
 		return nil
 	}

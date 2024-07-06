@@ -104,7 +104,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 	if !zd.NameExists(qname) {
 		// Here we should do wildcard expansion like in QueryResponder()
 		wildqname = "*." + strings.Join(strings.Split(qname, ".")[1:], ".")
-		// log.Printf("---> Checking for existence of wildcard %s", wildqname)
+		log.Printf("---> Checking for existence of wildcard %s", wildqname)
 		if !zd.NameExists(wildqname) {
 			// no, nothing
 			zd.Logger.Printf("*** No data for %s in %s", wildqname, zd.ZoneName)
@@ -112,8 +112,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 		}
 		origqname = qname
 		qname = wildqname
-		zd.Logger.Printf("*** %s is a wildcard expansion from %s",
-			origqname, wildqname)
+		zd.Logger.Printf("*** %s is a wildcard expansion from %s", origqname, wildqname)
 	}
 
 	owner, err := zd.GetOwner(qname)
@@ -146,7 +145,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 	}
 
 	// Must instantiate the rrset
-	rrset = &RRset{}
+	// rrset = &RRset{}
 
 	// Check for exact match qname + qtype
 	if _, ok := owner.RRtypes[qtype]; ok && len(owner.RRtypes[qtype].RRs) > 0 {
@@ -192,6 +191,7 @@ func (zd *ZoneData) LookupChildRRset(qname string, qtype uint16,
 	}
 	zd.Logger.Printf("LCRRset: looked up %s %s (%d RRs):",
 		qname, dns.TypeToString[qtype], len(rrset.RRs))
+	log.Printf("LookupChildRRset: done. rrset=%v", rrset)
 	return rrset, err
 }
 
