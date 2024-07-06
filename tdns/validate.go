@@ -170,6 +170,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 		zd.Logger.Printf("%s", rr.String())
 	}
 
+	log.Printf("LookupRRset: done. rrset=%v", rrset)
 	return rrset, err
 }
 

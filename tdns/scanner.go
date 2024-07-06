@@ -80,8 +80,8 @@ func ScannerEngine(scannerq chan ScanRequest) error {
 	}
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 
-	scanner := NewScanner(viper.GetBool("services.scanner.verbose"),
-		viper.GetBool("services.scanner.debug"))
+	//scanner := NewScanner(viper.GetBool("services.scanner.verbose"), viper.GetBool("services.scanner.debug"))
+	scanner := NewScanner(true, true)
 	scanner.AddLogger("CDS")
 	scanner.AddLogger("CSYNC")
 	scanner.AddLogger("DNSKEY")

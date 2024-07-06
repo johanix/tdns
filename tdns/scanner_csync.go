@@ -22,7 +22,8 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, pzd *ZoneData) error {
 	verbose := scanner.Verbose
 	// debug := scanner.Debug
 
-	lg := scanner.Log["CSYNC"]
+	// lg := scanner.Log["CSYNC"]
+	lg := log.Default()
 
 	// lg.Printf("CheckZoneCSYNC: checking zone %s for CSYNC RR", szd.Name)
 	// 1: Does zone have a CSYNC RR?
