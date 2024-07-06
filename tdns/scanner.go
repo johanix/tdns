@@ -52,7 +52,7 @@ func NewScanner(verbose, debug bool) Scanner {
 		//		Conf:        conf,
 		//		LabDB:       conf.Internal.LabDB,
 		Log:         map[string]*log.Logger{},
-		LogTemplate: "scanner-%s.log",
+		LogTemplate: "/var/log/axfr.net/scanner-%s.log",
 		Verbose:     verbose,
 		Debug:       debug,
 	}
