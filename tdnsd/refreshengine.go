@@ -110,6 +110,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						FoldCase:         zr.FoldCase,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
+						Children:         map[string]*tdns.ChildDelegationData{},
 					}
 					updated, err = zonedata.Refresh(zr.Force)
 					if err != nil {
