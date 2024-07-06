@@ -72,7 +72,7 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		// 1. If src=file and key is supplied then add it (but as untrusted)
 		// 2. If src=dns then schedule some soort of DNS fetching exercise.
 		if kp.Src == "file" {
-			res, err = tx.Exec(addkeysql, kp.Keyname, kp.Keyid, false, false, kp.KeyRR)
+			_, err = tx.Exec(addkeysql, kp.Keyname, kp.Keyid, false, false, kp.KeyRR)
 			if err != nil {
 				log.Printf("Error: %v", err)
 				resp.Error = true

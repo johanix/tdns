@@ -15,8 +15,6 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-var imr string
-
 var notifyCmd = &cobra.Command{
 	Use:   "notify",
 	Short: "The 'notify' command is only usable via defined sub-commands",
@@ -61,10 +59,11 @@ var notifySendSoaCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(notifyCmd)
-	notifyCmd.AddCommand(notifySendCdsCmd, notifySendCsyncCmd, notifySendDnskeyCmd, 
-					       notifySendSoaCmd)
+	notifyCmd.AddCommand(notifySendCmd)
+	notifySendCmd.AddCommand(notifySendCdsCmd, notifySendCsyncCmd, notifySendDnskeyCmd,
+		notifySendSoaCmd)
 
-//	notifyCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
+	//	notifyCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
 	notifyCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
 	notifyCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
@@ -103,7 +102,7 @@ func SendNotify(zonename string, ntype string) {
 	const notify_scheme = 1
 	dsynctarget, err := tdns.LookupDSYNCTarget(lookupzone, lookupserver, dns.StringToType[ntype], notify_scheme)
 	if err != nil {
-	   log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", lookupzone, lookupserver, err)
+		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", lookupzone, lookupserver, err)
 	}
 
 	for _, dst := range dsynctarget.Addresses {
@@ -116,7 +115,7 @@ func SendNotify(zonename string, ntype string) {
 		m.SetNotify(zonename)
 
 		// remove SOA, add ntype
-		m.Question = []dns.Question{dns.Question{zonename, dns.StringToType[ntype], dns.ClassINET}}
+		m.Question = []dns.Question{dns.Question{Name: zonename, Qtype: dns.StringToType[ntype], Qclass: dns.ClassINET}}
 
 		if tdns.Globals.Debug {
 			fmt.Printf("Sending Notify:\n%s\n", m.String())

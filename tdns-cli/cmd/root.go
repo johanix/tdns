@@ -15,7 +15,7 @@ import (
 )
 
 var cfgFile, cfgFileUsed string
-var debug, verbose bool
+var verbose bool
 
 // var GlobalReportCh, ResultCh chan tdns.CheckReport
 var StopCh chan struct{}

@@ -19,7 +19,7 @@ import (
 
 // var filename string
 var keyid int
-var NewState string
+var NewState, filename string
 
 var keystoreCmd = &cobra.Command{
 	Use:   "keystore",
@@ -446,7 +446,7 @@ func SendKeystoreCmd(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreRespon
 	status, buf, err := api.Post("/keystore", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return kr, fmt.Errorf("Error from api post: %v", err)
+		return kr, fmt.Errorf("error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -454,7 +454,7 @@ func SendKeystoreCmd(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreRespon
 
 	err = json.Unmarshal(buf, &kr)
 	if err != nil {
-		return kr, fmt.Errorf("Error from unmarshal: %v\n", err)
+		return kr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 
 	if kr.Error {

@@ -241,7 +241,7 @@ func NewKeyDB(force bool) *KeyDB {
 	}
 
 	if force {
-		for table, _ := range DefaultTables {
+		for table := range DefaultTables {
 			sqlcmd := "DROP TABLE " + table
 			_, err = db.Exec(sqlcmd)
 			if err != nil {

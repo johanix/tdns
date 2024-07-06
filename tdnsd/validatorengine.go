@@ -4,7 +4,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/spf13/viper"
@@ -49,7 +48,7 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 			}
 
 			if vr.Response != nil {
-				resp.Msg = fmt.Sprintf("ValidatorEngine: responding")
+				resp.Msg = "ValidatorEngine: responding"
 				vr.Response <- resp
 			}
 		}

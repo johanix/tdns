@@ -447,7 +447,7 @@ func SendCommand(cmd, zone string) (string, error) {
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
 
-		return "", fmt.Errorf("Error from Api Post: %v", err)
+		return "", fmt.Errorf("error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -457,11 +457,11 @@ func SendCommand(cmd, zone string) (string, error) {
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		return "", fmt.Errorf("Error from unmarshal: %v\n", err)
+		return "", fmt.Errorf("error from unmarshal: %v", err)
 	}
 
 	if cr.Error {
-		return "", fmt.Errorf("Error from tdnsd: %s\n", cr.ErrorMsg)
+		return "", fmt.Errorf("error from tdnsd: %s", cr.ErrorMsg)
 	}
 
 	return cr.Msg, nil
@@ -475,7 +475,7 @@ func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (tdns.CommandResponse, 
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return cr, fmt.Errorf("Error from api post: %v", err)
+		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -483,11 +483,11 @@ func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (tdns.CommandResponse, 
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		return cr, fmt.Errorf("Error from unmarshal: %v\n", err)
+		return cr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("Error from tdnsd: %s\n", cr.ErrorMsg)
+		return cr, fmt.Errorf("error from tdnsd: %s", cr.ErrorMsg)
 	}
 
 	return cr, nil
@@ -500,7 +500,7 @@ func SendDebug(api *tdns.Api, data tdns.DebugPost) tdns.DebugResponse {
 
 	status, buf, err := api.Post("/debug", bytebuf.Bytes())
 	if err != nil {
-		log.Fatalf("Error from Api Post:", err)
+		log.Fatalf("error from api post: %v", err)
 
 	}
 	if verbose {
@@ -511,11 +511,11 @@ func SendDebug(api *tdns.Api, data tdns.DebugPost) tdns.DebugResponse {
 
 	err = json.Unmarshal(buf, &dr)
 	if err != nil {
-		log.Fatalf("Error from unmarshal: %v\n", err)
+		log.Fatalf("error from unmarshal: %v", err)
 	}
 
 	if dr.Error {
-		fmt.Printf("Error: %s\n", dr.ErrorMsg)
+		fmt.Printf("error: %s", dr.ErrorMsg)
 	}
 
 	fmt.Printf("Message: %s\n", dr.Msg)

@@ -269,25 +269,12 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	// If UPDATE:
 	// 2. Create DNS UPDATE msg
 	// var adds, removes []dns.RR
-	for _, rr := range syncstate.NsAdds {
-		syncstate.Adds = append(syncstate.Adds, rr)
-	}
-	for _, rr := range syncstate.AAdds {
-		syncstate.Adds = append(syncstate.Adds, rr)
-	}
-	for _, rr := range syncstate.AAAAAdds {
-		syncstate.Adds = append(syncstate.Adds, rr)
-	}
-
-	for _, rr := range syncstate.NsRemoves {
-		syncstate.Removes = append(syncstate.Removes, rr)
-	}
-	for _, rr := range syncstate.ARemoves {
-		syncstate.Removes = append(syncstate.Removes, rr)
-	}
-	for _, rr := range syncstate.AAAARemoves {
-		syncstate.Removes = append(syncstate.Removes, rr)
-	}
+	syncstate.Adds = append(syncstate.Adds, syncstate.NsAdds...)
+	syncstate.Adds = append(syncstate.Adds, syncstate.AAdds...)
+	syncstate.Adds = append(syncstate.Adds, syncstate.AAAAAdds...)
+	syncstate.Removes = append(syncstate.Removes, syncstate.NsRemoves...)
+	syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
+	syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
 
 	m, err := tdns.CreateUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
 	if err != nil {
@@ -329,7 +316,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		return "", 0, err
 	}
 	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
-	log.Printf(msg)
+	log.Print(msg)
 
 	// 6. Check the response
 	// 7. Return result to CLI
@@ -383,11 +370,11 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	conf.Internal.NotifyQ <- tdns.NotifyRequest{
 		ZoneName: zd.ZoneName,
 		ZoneData: zd,
-		Targets:  dsynctarget.Addresses,
+		Targets:  dsynctarget.Addresses, // already in addr:port format
 	}
 
 	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request for zone %s to NotifierEngine", zd.ZoneName)
-	log.Printf(msg)
+	log.Print(msg)
 
 	return msg, dns.RcodeSuccess, nil
 }

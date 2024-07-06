@@ -26,7 +26,6 @@ import (
 
 // var appVersion string
 var appMode string
-var debug, verbose bool
 
 func mainloop(conf *Config) {
 	exit := make(chan os.Signal, 1)
@@ -86,6 +85,9 @@ func main() {
 	}
 
 	err := ParseConfig(&conf)
+	if err != nil {
+		log.Fatalf("Error parsing config: %v", err)
+	}
 
 	logfile := viper.GetString("log.file")
 	tdns.SetupLogging(logfile)
@@ -201,7 +203,7 @@ func ParseConfig(conf *Config) error {
 	conf.Zones = zconf.Zones
 
 	fmt.Printf("YAML parsed. There are %d zones:", len(conf.Zones))
-	for key, _ := range conf.Zones {
+	for key := range conf.Zones {
 		fmt.Printf(" [%s]", key)
 	}
 	fmt.Println()

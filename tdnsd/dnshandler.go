@@ -105,10 +105,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			log.Printf("DnsHandler: Qname is '%s', which is not a known zone.", qname)
-			known_zones := []string{}
-			for _, zname := range tdns.Zones.Keys() {
-				known_zones = append(known_zones, zname)
-			}
+			// known_zones := append([]string{}, tdns.Zones.Keys()...)
 			// log.Printf("DnsHandler: Known zones are: %v", known_zones)
 
 			// Let's see if we can find the zone
@@ -367,6 +364,9 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	}
 
 	owner, err := zd.GetOwner(qname)
+	if err != nil {
+		log.Printf("QueryResponder: failed to get owner for qname %s", qname)
+	}
 
 	// 0. Check for *any* existence of qname in zone
 	// log.Printf("---> Checking for any existence of qname %s", qname)

@@ -23,7 +23,7 @@ var ToRFC3597Cmd = &cobra.Command{
 
 		rr, err := dns.NewRR(rrstr)
 		if err != nil {
-			log.Fatal("Could not parse record \"%s\": %v", rrstr, err)
+			log.Fatalf("Could not parse record \"%s\": %v", rrstr, err)
 		}
 
 		fmt.Printf("Normal   (len=%d): \"%s\"\n", dns.Len(rr), rr.String())
@@ -34,7 +34,7 @@ var ToRFC3597Cmd = &cobra.Command{
 }
 
 func init() {
-     rootCmd.AddCommand(ToRFC3597Cmd)
+	rootCmd.AddCommand(ToRFC3597Cmd)
 	//	rootCmd.AddCommand(sendCmd)
 	//	sendCmd.AddCommand(sendCdsCmd, sendCsyncCmd, sendDnskeyCmd, sendSoaCmd)
 	//	rootCmd.AddCommand(torfc3597Cmd)
@@ -42,4 +42,3 @@ func init() {
 	//	sendCmd.PersistentFlags().StringVarP(&zonename, "zone", "z", "", "Zone to send a parent notify for")
 	ToRFC3597Cmd.Flags().StringVarP(&rrstr, "record", "r", "", "Record to convert to RFC 3597 notation")
 }
-

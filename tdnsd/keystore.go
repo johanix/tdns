@@ -125,7 +125,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		if err != nil {
 			log.Printf("Error: %v", err)
 			if err == sql.ErrNoRows {
-				return resp, fmt.Errorf("Key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
+				return resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
 			return resp, err
 		}
@@ -275,7 +275,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		if err != nil {
 			log.Printf("Error: %v", err)
 			if err == sql.ErrNoRows {
-				return resp, fmt.Errorf("Key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
+				return resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
 			return resp, err
 		}

@@ -5,8 +5,6 @@
 package tdns
 
 import (
-	//        "fmt"
-
 	"fmt"
 	"log"
 	"time"

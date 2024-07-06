@@ -244,9 +244,9 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
+			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			dump.P(rrset)
-			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", owner, rrtypestr, rrcopy.String())
+			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
 			dump.P(rrset)
 			if len(rrset.RRs) == 0 {
@@ -254,7 +254,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			} else {
 				owner.RRtypes[rrtype] = rrset
 			}
-			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
+			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			continue
 
 		case dns.ClassANY:

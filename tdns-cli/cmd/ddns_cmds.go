@@ -301,7 +301,7 @@ func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.Delegation
 	status, buf, err := api.Post("/delegation", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return dr, fmt.Errorf("Error from api post: %v", err)
+		return dr, fmt.Errorf("error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -309,7 +309,7 @@ func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.Delegation
 
 	err = json.Unmarshal(buf, &dr)
 	if err != nil {
-		return dr, fmt.Errorf("Error from unmarshal: %v\n", err)
+		return dr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 
 	if dr.Error {

@@ -93,7 +93,7 @@ func xxxSendNotify(parentname, childname string, ntype string, dsynctarget *Dsyn
 		m.SetNotify(childname)
 
 		// remove SOA, add ntype
-		m.Question = []dns.Question{dns.Question{childname, dns.StringToType[ntype], dns.ClassINET}}
+		m.Question = []dns.Question{dns.Question{Name: childname, Qtype: dns.StringToType[ntype], Qclass: dns.ClassINET}}
 
 		if Globals.Debug {
 			fmt.Printf("Sending Notify:\n%s\n", m.String())
@@ -162,7 +162,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 		m.SetNotify(zd.ZoneName)
 
 		// remove SOA, add ntype
-		m.Question = []dns.Question{dns.Question{zd.ZoneName, ntype, dns.ClassINET}}
+		m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
 
 		if Globals.Debug {
 			fmt.Printf("Sending Notify:\n%s\n", m.String())

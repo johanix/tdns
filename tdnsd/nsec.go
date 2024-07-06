@@ -20,7 +20,7 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandRespons
 
 	zd, exist := tdns.Zones.Get(cp.Zone)
 	if !exist {
-		return resp, fmt.Errorf("Zone %s is unknown", cp.Zone)
+		return resp, fmt.Errorf("zone %s is unknown", cp.Zone)
 	}
 
 	resp.Zone = zd.ZoneName
@@ -152,7 +152,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 		}
 		nextname = names[nextidx]
 		var tmap = []int{int(dns.TypeNSEC)}
-		for rrt, _ := range owner.RRtypes {
+		for rrt := range owner.RRtypes {
 			if rrt == dns.TypeRRSIG {
 				hasRRSIG = true
 				continue
@@ -211,7 +211,7 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 		if zd.OnlineSigning && cs != nil {
 			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
 			if err != nil {
-				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, rrset.RRs[0].Header().Rrtype, zd.ZoneName)
+				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			} else {
 				log.Printf("SignZone: signed %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			}
@@ -276,33 +276,17 @@ func ReloadZone(conf *Config, zone string, force bool) (string, error) {
 	select {
 	case resp = <-respch:
 	case <-time.After(2 * time.Second):
-		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
+		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("zone %s: timeout waiting for response from RefreshEngine", zone)
 	}
 
 	if resp.Error {
 		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
-		return fmt.Sprintf("Zone %s: Error reloading: %s", zone, resp.ErrorMsg),
-			fmt.Errorf("Zone %s: Error reloading: %v", zone, resp.ErrorMsg)
+		return fmt.Sprintf("zone %s: Error reloading: %s", zone, resp.ErrorMsg),
+			fmt.Errorf("zone %s: Error reloading: %v", zone, resp.ErrorMsg)
 	}
 
 	if resp.Msg == "" {
 		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zone)
 	}
 	return resp.Msg, nil
-}
-
-type xxxBumperData struct {
-	Zone   string
-	Result chan tdns.BumperResponse
-}
-
-type xxxBumperResponse struct {
-	Time      time.Time
-	Zone      string
-	Msg       string
-	OldSerial uint32
-	NewSerial uint32
-	Error     bool
-	ErrorMsg  string
-	Status    bool
 }
