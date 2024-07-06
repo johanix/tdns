@@ -67,7 +67,7 @@ func (scanner *Scanner) AddLogger(rrtype string) error {
 		MaxBackups: 3,
 		MaxAge:     7,
 	}, fmt.Sprintf("%s scanner: ", rrtype), log.Lshortfile)
-	// scanner.Log[rrtype] = lg
+	scanner.Log[rrtype] = lg
 	scanner.Log[rrtype] = log.Default()
 	return nil
 }
