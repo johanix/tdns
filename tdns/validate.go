@@ -135,6 +135,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 		if err != nil {
 			zd.Logger.Printf("LookupRRset: Error from LookupChildRRset: %v", err)
 		}
+		return rrset, err
 	} else {
 		zd.Logger.Printf("*** %s is not a child delegation from %s", qname, zd.ZoneName)
 	}
