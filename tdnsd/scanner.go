@@ -9,13 +9,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns/tdns"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
 type ScanRequest struct {
 	Cmd      string
-	ZoneName string
-	RRtype   string
+	Zone     string
+	RRtype   uint16
+	Response chan ScanResponse
+}
+
+type ScanResponse struct {
+	Time    time.Time
+	Zone    string
+	RRtype  uint16
+	Result  tdns.RRset
+	Message string
 }
 
 func ScannerEngine(conf *Config) error {
@@ -28,7 +39,7 @@ func ScannerEngine(conf *Config) error {
 
 	var sr ScanRequest
 
-	log.Printf("Scanner: starting")
+	log.Printf("*** ScannerEngine: starting ***")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -42,29 +53,28 @@ func ScannerEngine(conf *Config) error {
 			case sr = <-scannerq:
 				switch sr.Cmd {
 				case "SCAN":
-					if sr.ZoneName == "" {
-						log.Printf("Scanner: Request for manual %s scan.", sr.RRtype)
-						// scanner.Run(sr.RRtype)
-					} else {
-						log.Printf("Scanner: Request for immediate scan of zone %s for RRtype %s",
-							sr.ZoneName, sr.RRtype)
-						switch sr.RRtype {
-						case "CDS":
-							// go cds_scanner(sr.ZoneName)
-						case "CSYNC":
-							// go csync_scanner(sr.ZoneName)
-						case "DNSKEY":
-							// go dnskey_scanner(sr.ZoneName)
-						}
+					if sr.Zone == "" {
+						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
+						continue
+					}
+					log.Printf("ScannerEngine: Request for immediate scan of zone %s for RRtype %s",
+						sr.Zone, dns.TypeToString[sr.RRtype])
+					switch sr.RRtype {
+					case dns.TypeCDS:
+						log.Printf("go scanner.CheckCDS(%s)", sr)
+					case dns.TypeCSYNC:
+						log.Printf("go scanner.CheckCSYNC(%s)", sr)
+					case dns.TypeDNSKEY:
+						log.Printf("go scanner.CheckDNSKEY(%s)", sr)
 					}
 				default:
-					log.Printf("Unknown command: '%s'. Ignoring.", sr.Cmd)
+					log.Printf("ScannerEngine: Unknown command: '%s'. Ignoring.", sr.Cmd)
 				}
 			}
 		}
 	}()
 	wg.Wait()
 
-	log.Println("Scanner: terminating")
+	log.Println("ScannerEngine: terminating")
 	return nil
 }

@@ -23,6 +23,8 @@ var rrtype uint16
 var port = "53"
 var server = "8.8.8.8"
 
+var options = make(map[string]string, 2)
+
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
@@ -59,8 +61,9 @@ var rootCmd = &cobra.Command{
 				fmt.Printf("RRtype is ixfr, using base serial %d\n", serial)
 			}
 
-			if ucarg == "+DNSSEC" {
-				do_bit = true
+			if strings.HasPrefix(ucarg, "+") {
+				fmt.Printf("processing dog option: %s\n", ucarg)
+				options = ProcessOptions(options, ucarg)
 				continue
 			}
 
@@ -81,8 +84,6 @@ var rootCmd = &cobra.Command{
 		server = net.JoinHostPort(server, port)
 
 		for _, qname := range cleanArgs {
-			fmt.Printf("dog processing arg \"%s\"\n", qname)
-
 			qname = dns.Fqdn(qname)
 			if tdns.Globals.Verbose {
 				fmt.Printf("*** Querying for %s IN %s:\n", qname, dns.TypeToString[rrtype])
@@ -95,7 +96,12 @@ var rootCmd = &cobra.Command{
 			default:
 
 				m := new(dns.Msg)
-				m.SetQuestion(qname, rrtype)
+				if options["opcode"] == "NOTIFY" {
+					m.SetNotify(qname)
+					m.Question = []dns.Question{dns.Question{Name: qname, Qtype: rrtype, Qclass: dns.ClassINET}}
+				} else {
+					m.SetQuestion(qname, rrtype)
+				}
 				m.SetEdns0(4096, do_bit)
 				res, err := dns.Exchange(m, server)
 				if err != nil {
@@ -142,4 +148,33 @@ func init() {
 	if err != nil {
 		fmt.Printf("Error registering DELEG RR type: %v\n", err)
 	}
+}
+
+func ProcessOptions(options map[string]string, ucarg string) map[string]string {
+	if ucarg == "+DNSSEC" {
+		options["do_bit"] = "true"
+		return options
+	}
+
+	if strings.HasPrefix(ucarg, "+OPCODE=") {
+		parts := strings.Split(ucarg, "=")
+		if len(parts) > 1 {
+			opcode, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				return options
+			}
+			switch opcode {
+			case dns.OpcodeQuery:
+				options["opcode"] = "QUERY"
+			case dns.OpcodeNotify:
+				options["opcode"] = "NOTIFY"
+			case dns.OpcodeUpdate:
+				options["opcode"] = "UPDATE"
+			}
+		}
+		return options
+	}
+
+	return options
 }

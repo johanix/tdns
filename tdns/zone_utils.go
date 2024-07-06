@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -523,4 +524,55 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 	zd.NotifyDownstreams()
 
 	return resp, nil
+}
+
+func (zd *ZoneData) FetchChildDelegationData(childname string) error {
+	if !zd.IsChildDelegation(childname) {
+		return fmt.Errorf("FetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
+	}
+	if zd.Children[childname] != nil {
+		if zd.Children[childname].ParentSerial == zd.CurrentSerial || time.Since(zd.Children[childname].Timestamp) < 24*time.Hour {
+			return nil
+		}
+	}
+	cdd := ChildDelegationData{
+		Name:         childname,
+		ParentSerial: zd.CurrentSerial,
+		Timestamp:    time.Now(),
+		RRsets:       make(map[string]map[uint16]RRset),
+		NS_rrs:       []dns.RR{},
+		A_glue:       []dns.RR{},
+		AAAA_glue:    []dns.RR{},
+	}
+
+	owner, err := zd.GetOwner(childname)
+	if err != nil {
+		return fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", childname, err)
+	}
+
+	cdd.RRsets[childname] = map[uint16]RRset{
+		dns.TypeNS: owner.RRtypes[dns.TypeNS],
+	}
+	cdd.NS_rrs = owner.RRtypes[dns.TypeNS].RRs
+
+	bns, err := BailiwickNS(childname, owner.RRtypes[dns.TypeNS].RRs)
+	if err != nil {
+		return fmt.Errorf("FetchChildDelegationData: error getting in bailiwick NS for %s: %v", childname, err)
+	}
+
+	for _, ns := range bns {
+		nsowner, err := zd.GetOwner(ns)
+		if err != nil {
+			return fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", ns, err)
+		}
+		cdd.RRsets[ns] = map[uint16]RRset{
+			dns.TypeA:    nsowner.RRtypes[dns.TypeA],
+			dns.TypeAAAA: nsowner.RRtypes[dns.TypeAAAA],
+		}
+		cdd.A_glue = append(cdd.A_glue, nsowner.RRtypes[dns.TypeA].RRs...)
+		cdd.AAAA_glue = append(cdd.AAAA_glue, nsowner.RRtypes[dns.TypeAAAA].RRs...)
+	}
+
+	zd.Children[childname] = &cdd
+	return nil
 }

@@ -15,8 +15,9 @@ import (
 func DnsNotifyResponderEngine(conf *Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
+	scannerq := conf.Internal.ScannerQ
 
-	log.Printf("DnsNotifyResponderEngine: starting")
+	log.Printf("*** DnsNotifyResponderEngine: starting")
 
 	var dhr DnsHandlerRequest
 
@@ -26,7 +27,7 @@ func DnsNotifyResponderEngine(conf *Config) error {
 		for {
 			select {
 			case dhr = <-dnsnotifyq:
-				NotifyResponder(&dhr, zonech)
+				NotifyResponder(&dhr, zonech, scannerq)
 			}
 		}
 	}()
@@ -39,12 +40,12 @@ func DnsNotifyResponderEngine(conf *Config) error {
 // func NotifyResponder(w dns.ResponseWriter, r *dns.Msg, qname string, ntype uint16,
 //
 //	zonech chan tdns.ZoneRefresher) error {
-func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher) error {
+func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher, scannerq chan ScanRequest) error {
 
 	qname := dhr.Qname
 	ntype := dhr.Msg.Question[0].Qtype
 
-	log.Printf("Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
+	// log.Printf("Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
 	//	err := NotifyResponder(w, r, qname, ntype, zonech)
 	//	if err != nil {
 	//	   log.Printf("Error from NotifyResponder: %v", err)
@@ -63,8 +64,7 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher) err
 		return nil // didn't find any zone for that qname
 	}
 
-	log.Printf("NotifyResponder: The qname %s seems to belong to the known zone %s",
-		qname, zd.ZoneName)
+	// log.Printf("NotifyResponder: The qname %s seems to belong to the known zone %s", qname, zd.ZoneName)
 
 	switch ntype {
 	case dns.TypeSOA:
@@ -72,11 +72,18 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher) err
 			Name:      qname, // send zone name into RefreshEngine
 			ZoneStore: zd.ZoneStore,
 		}
-		log.Printf("NotifyResponder: Received NOTIFY(%s) for %s. Refreshing.",
+		log.Printf("NotifyResponder: Received NOTIFY(%s) for %s Refreshing.",
 			dns.TypeToString[ntype], qname)
+
 	case dns.TypeCDS, dns.TypeCSYNC, dns.TypeDNSKEY:
-		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s",
-			dns.TypeToString[ntype], qname)
+		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
+			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
+		scannerq <- ScanRequest{
+			Cmd:    "SCAN",
+			Zone:   qname,
+			RRtype: ntype,
+		}
+
 	default:
 		log.Printf("NotifyResponder: Unknown type of notification: NOTIFY(%s)",
 			dns.TypeToString[ntype])

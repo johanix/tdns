@@ -38,21 +38,6 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		return resp, err
 	}
 
-	//	defer func() {
-	//		if err == nil {
-	//			err1 := tx.Commit()
-	//			if err1 != nil {
-	//				log.Printf("Sig0KeyMgmt: tx.Commit() error=%v", err1)
-	//			}
-	//		} else {
-	//			log.Printf("Error: %v. Rollback.", err)
-	//			err1 := tx.Rollback()
-	//			if err1 != nil {
-	//				log.Printf("Sig0KeyMgmt: tx.Rollback() error=%v", err1)
-	//			}
-	//		}
-	//	}()
-
 	switch kp.SubCommand {
 	case "list":
 		rows, err := tx.Query(getAllSig0KeysSql)
@@ -88,7 +73,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	case "add": // AKA "import"
 		res, err = tx.Exec(addSig0KeySql, kp.Keyname, kp.State, kp.Keyid, dns.AlgorithmToString[kp.Algorithm],
 			kp.PrivateKey, kp.KeyRR)
-		log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
+		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
 			return resp, err
@@ -99,7 +84,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	case "setstate":
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
-		log.Printf("tx.Exec(%s, %s, %s, %d)", setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
+		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			log.Printf("Error: %v", err)
 			return resp, err
@@ -137,7 +122,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 		// 3. Return all good, now untrusted
 		res, err = tx.Exec(deleteSig0KeySql, kp.Keyname, kp.Keyid)
-		log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
+		// log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
 			log.Printf("Error: %v", err)
 			return resp, err
@@ -151,7 +136,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	if err == nil {
 		err1 := tx.Commit()
-		log.Printf("Sig0KeyMgmt: tx.Commit() ok, err1=%v", err1)
+		// log.Printf("Sig0KeyMgmt: tx.Commit() ok, err1=%v", err1)
 		if err1 != nil {
 			resp.Error = true
 			resp.ErrorMsg = err1.Error()
@@ -159,7 +144,11 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	} else {
 		log.Printf("Error: %v. Rollback.", err)
 		err1 := tx.Rollback()
-		log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
+		if err1 != nil {
+			resp.Error = true
+			resp.ErrorMsg = err1.Error()
+		}
+		// log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
 	}
 
 	return resp, nil

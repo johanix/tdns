@@ -139,6 +139,7 @@ func main() {
 	go ScannerEngine(&conf)
 	go UpdaterEngine(&conf)
 	go DnsUpdateResponderEngine(&conf)
+	go DnsNotifyResponderEngine(&conf)
 	go DnsEngine(&conf)
 	go DelegationSyncEngine(&conf)
 

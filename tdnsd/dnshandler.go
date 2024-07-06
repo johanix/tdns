@@ -57,6 +57,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			dnssec_ok = opt.Do()
 		}
 		// log.Printf("DNSSEC OK: %v", dnssec_ok)
+		log.Printf("DnsHandler: qname: %s opcode: %s (%d)", qname, dns.OpcodeToString[r.Opcode], r.Opcode)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:

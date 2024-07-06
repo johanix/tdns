@@ -59,16 +59,18 @@ type ZoneData struct {
 	Upstream         string   // primary from where zone is xfrred
 	Downstreams      []string // secondaries that we notify
 	Zonefile         string
-	DelegationSync   bool // should we (as child) attempt to sync delegation w/ parent?
 	DelegationSyncCh chan DelegationSyncRequest
 	Parent           string   // name of parentzone (if filled in)
 	ParentNS         []string // names of parent nameservers
 	ParentServers    []string // addresses of parent nameservers
-	OnlineSigning    bool     // should we sign RRSIGs for missing signatures
-	AllowUpdates     bool     // should we allow updates to this zone
-	FoldCase         bool     // should we fold case for this zone
-	Frozen           bool     // if frozen no updates are allowed
-	Dirty            bool     // if true zone has been modified and we need to save the zonefile
+	Children         map[string]*ChildDelegationData
+	// XXX: All of the following should go into a map[string]bool
+	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+	AllowUpdates   bool // should we allow updates to this zone
+	FoldCase       bool // should we fold case for this zone
+	Frozen         bool // if frozen no updates are allowed
+	Dirty          bool // if true zone has been modified and we need to save the zonefile
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -105,6 +107,16 @@ type RRset struct {
 	Name   string
 	RRs    []dns.RR
 	RRSIGs []dns.RR
+}
+
+type ChildDelegationData struct {
+	ParentSerial uint32    // The parent serial that this data was correct for
+	Timestamp    time.Time // Time at which this data was fetched
+	Name         string
+	RRsets       map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
+	NS_rrs       []dns.RR
+	A_glue       []dns.RR
+	AAAA_glue    []dns.RR
 }
 
 type KeystorePost struct {

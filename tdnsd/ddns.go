@@ -73,7 +73,7 @@ func DnsUpdateResponderEngine(conf *Config) error {
 	}
 	log.Printf("DnsUpdateResponderEngine: using update policy \"%s\" with RRtypes: %v", policy.Type, rrtypes)
 
-	log.Printf("DnsUpdateResponderEngine: starting")
+	log.Printf("*** DnsUpdateResponderEngine: starting")
 
 	var dhr DnsHandlerRequest
 
