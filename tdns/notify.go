@@ -15,7 +15,7 @@ import (
 type NotifyRequest struct {
 	ZoneName string
 	ZoneData *ZoneData
-	RRType   uint16
+	RRtype   uint16
 	Targets  []string // []addr:port
 	Urgent   bool
 	Response chan NotifyResponse
@@ -45,7 +45,7 @@ func NotifierEngine(notifyreqQ chan NotifyRequest) error {
 
 				log.Printf("NotifierEngine: Zone %s: will notify downstreams", zd.ZoneName)
 
-				zd.SendNotify(nr.RRType, nr.Targets)
+				zd.SendNotify(nr.RRtype, nr.Targets)
 
 				if nr.Response != nil {
 					nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}
@@ -155,7 +155,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 
 	for _, dst := range targets {
 		if Globals.Verbose {
-			log.Printf("Sending NOTIFY(%s) to %s\n", ntype, dst)
+			log.Printf("Sending NOTIFY(%s) to %s\n", dns.TypeToString[ntype], dst)
 		}
 
 		m := new(dns.Msg)
@@ -170,7 +170,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 
 		res, err := dns.Exchange(m, dst)
 		if err != nil {
-			log.Printf("Error from dns.Exchange(%s, NOTIFY(%s)): %v. Trying next NOTIFY target.", dst, ntype, err)
+			log.Printf("Error from dns.Exchange(%s, NOTIFY(%s)): %v. Trying next NOTIFY target.", dst, dns.TypeToString[ntype], err)
 			continue
 		}
 
@@ -186,5 +186,5 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 			return res.Rcode, nil
 		}
 	}
-	return dns.RcodeServerFailure, fmt.Errorf("Error: No response from any NOTIFY target to NOTIFY(%s)", ntype)
+	return dns.RcodeServerFailure, fmt.Errorf("Error: No response from any NOTIFY target to NOTIFY(%s)", dns.TypeToString[ntype])
 }

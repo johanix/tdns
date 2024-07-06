@@ -16,7 +16,7 @@ default: ${PROG}
 
 ${PROG}: build
 
-version.go:
+version.go:	VERSION Makefile
 	/bin/sh make-version.sh $(VERSION)-$(COMMIT) $(APPDATE) $(PROG)
 
 build:	version.go

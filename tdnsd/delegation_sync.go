@@ -366,10 +366,12 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	// msg := fmt.Sprintf("SendNotify(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
 	// log.Printf(msg)
 
+	dump.P(dsynctarget)
 	// New:
 	conf.Internal.NotifyQ <- tdns.NotifyRequest{
 		ZoneName: zd.ZoneName,
 		ZoneData: zd,
+		RRtype:   dns.TypeCSYNC,         // this is only about syncinf delegation data, not about rolling DNSSEC keys.
 		Targets:  dsynctarget.Addresses, // already in addr:port format
 	}
 

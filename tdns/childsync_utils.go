@@ -317,14 +317,17 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 		}
 	}
 
-	zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:", zd.ZoneName, dsync_res.Parent)
+	zd.Logger.Printf("BestSyncScheme: zone %s (parent %s) DSYNC alternatives are:", zd.ZoneName, dsync_res.Parent)
 	for _, drr := range dsync_res.Rdata {
-		zd.Logger.Printf("%s", drr.String())
+		zd.Logger.Printf("%s\tIN\tDSYNC\t%s", dsync_res.Qname, drr.String())
 	}
 
-	dsynctarget.Addresses, err = net.LookupHost(active_drr.Target)
+	tmp, err := net.LookupHost(active_drr.Target)
 	if err != nil {
 		return "", nil, fmt.Errorf("Error: %v", err)
+	}
+	for _, addr := range tmp {
+		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(addr, fmt.Sprintf("%d", active_drr.Port)))
 	}
 
 	if Globals.Verbose {

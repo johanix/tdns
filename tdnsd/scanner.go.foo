@@ -17,6 +17,7 @@ import (
 type ScanRequest struct {
 	Cmd      string
 	Zone     string
+	ZoneData *tdns.ZoneData
 	RRtype   uint16
 	Response chan ScanResponse
 }

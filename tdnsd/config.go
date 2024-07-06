@@ -62,7 +62,7 @@ type InternalConf struct {
 	RefreshZoneCh   chan tdns.ZoneRefresher
 	BumpZoneCh      chan tdns.BumperData
 	ValidatorCh     chan tdns.ValidatorRequest
-	ScannerQ        chan ScanRequest
+	ScannerQ        chan tdns.ScanRequest
 	UpdateQ         chan UpdateRequest
 	DnsUpdateQ      chan DnsHandlerRequest
 	DnsNotifyQ      chan DnsHandlerRequest

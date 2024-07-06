@@ -131,12 +131,12 @@ func main() {
 	conf.Internal.APIStopCh = apistopper
 	go APIdispatcher(&conf, apistopper)
 
-	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
+	conf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
 	conf.Internal.UpdateQ = make(chan UpdateRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsHandlerRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsHandlerRequest, 100)
 
-	go ScannerEngine(&conf)
+	go tdns.ScannerEngine(conf.Internal.ScannerQ)
 	go UpdaterEngine(&conf)
 	go DnsUpdateResponderEngine(&conf)
 	go DnsNotifyResponderEngine(&conf)
