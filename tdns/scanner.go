@@ -106,18 +106,18 @@ func ScannerEngine(scannerq chan ScanRequest) error {
 						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
 						continue
 					}
-					zd, exist := FindZone(sr.Zone)
-					if !exist {
-						log.Printf("ScannerEngine: Zone containing %s not found. Ignoring.", sr.Zone)
-						continue
-					}
+					//					zd := FindZone(sr.Zone)
+					//					if  {
+					//						log.Printf("ScannerEngine: Zone containing %s not found. Ignoring.", sr.Zone)
+					//						continue
+					//					}
 					log.Printf("ScannerEngine: Request for immediate scan of zone %s for RRtype %s",
 						sr.Zone, dns.TypeToString[sr.RRtype])
 					switch sr.RRtype {
 					case dns.TypeCDS:
 						log.Printf("go scanner.CheckCDS(sr)")
 					case dns.TypeCSYNC:
-						go scanner.CheckCSYNC(sr, zd)
+						go scanner.CheckCSYNC(sr, sr.ZoneData)
 					case dns.TypeDNSKEY:
 						log.Printf("go scanner.CheckDNSKEY(sr)")
 					}

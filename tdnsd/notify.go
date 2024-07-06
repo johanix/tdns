@@ -56,7 +56,7 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher, sca
 
 	// Let's see if we can find the zone
 	zd, _ := tdns.FindZone(qname)
-	if zd == nil {
+	if zd == nil || !zd.IsChildDelegation(qname) {
 		log.Printf("Received Notify for unknown zone %s. Ignoring.", qname)
 		m := new(dns.Msg)
 		m.SetRcode(dhr.Msg, dns.RcodeRefused)
@@ -75,7 +75,17 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher, sca
 		log.Printf("NotifyResponder: Received NOTIFY(%s) for %s Refreshing.",
 			dns.TypeToString[ntype], qname)
 
-	case dns.TypeCDS, dns.TypeCSYNC, dns.TypeDNSKEY:
+	case dns.TypeCDS, dns.TypeCSYNC:
+		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
+			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
+		scannerq <- tdns.ScanRequest{
+			Cmd:      "SCAN",
+			Zone:     qname,
+			ZoneData: zd,
+			RRtype:   ntype,
+		}
+
+	case dns.TypeDNSKEY:
 		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		scannerq <- tdns.ScanRequest{
