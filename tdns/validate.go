@@ -95,6 +95,7 @@ func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 }
 
 func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRset, error) {
+	zd.Logger.Printf("LookupRRset: looking up %s %s", qname, dns.TypeToString[qtype])
 	var rrset *RRset
 	var wildqname string
 	origqname := qname

@@ -527,6 +527,7 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 }
 
 func (zd *ZoneData) FetchChildDelegationData(childname string) error {
+	zd.Logger.Printf("FetchChildDelegationData: fetching delegation data for %s", childname)
 	if !zd.IsChildDelegation(childname) {
 		return fmt.Errorf("FetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
 	}

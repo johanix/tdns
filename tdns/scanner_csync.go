@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -261,6 +262,7 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, pzd *ZoneData) error {
 
 func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, pzd *ZoneData) ([]dns.RR, bool, error) {
 
+	log.Printf("CsyncAnalyzeA: zone %s, new_nsrrs %v", zone, new_nsrrs)
 	// cur_v4glue, err := scanner.LabDB.FetchChildDataFromDB(zone, dns.TypeA)
 	cur_v4glue := pzd.Children[zone].A_glue
 
@@ -315,6 +317,7 @@ func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, pzd *Zon
 
 func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, pzd *ZoneData) ([]dns.RR, bool, error) {
 	//func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, pzd *ZoneData) (*RRset, bool, error) {
+	log.Printf("CsyncAnalyzeAAAA: zone %s, new_nsrrs %v", zone, new_nsrrs)
 	cur_v6glue := pzd.Children[zone].AAAA_glue
 
 	scanner.Log["CSYNC"].Printf("*** CsyncAnalyzeAAAA: current v6 glue: %v", cur_v6glue)
@@ -367,7 +370,7 @@ func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, pzd *
 
 // Returns: new_rrs, changed=true, error
 func (scanner *Scanner) CsyncAnalyzeNS(zone string, pzd *ZoneData) ([]dns.RR, bool, error) {
-
+	log.Printf("CsyncAnalyzeNS: zone %s", zone)
 	cur_NSrrs := pzd.Children[zone].NS_rrs
 
 	scanner.Log["CSYNC"].Printf("*** CsyncAnalyzeNS: current NS RRset: %v", cur_NSrrs)
@@ -411,6 +414,7 @@ func (scanner *Scanner) CsyncAnalyzeNS(zone string, pzd *ZoneData) ([]dns.RR, bo
 var KnownCsyncMinSOAs = map[string]uint32{}
 
 func (scanner *Scanner) ZoneCSYNCKnown(zone string, csyncrr *dns.CSYNC) bool {
+	log.Printf("ZoneCSYNCKnown: checking if CSYNC for %s is known", zone)
 	new_minsoa := csyncrr.Serial
 	var old_minsoa uint32
 	var ok bool
