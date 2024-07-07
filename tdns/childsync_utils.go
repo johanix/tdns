@@ -55,6 +55,7 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 	return nil
 }
 
+// Note: the target.Addresses must already be in addr:port format.
 func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
 	if zonename == "." {
 		log.Printf("Error: zone name not specified. Terminating.\n")
@@ -72,7 +73,7 @@ func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error)
 			log.Printf("Sending Update:\n%s\n", msg.String())
 		}
 
-		dst = net.JoinHostPort(dst, fmt.Sprintf("%d", target.Port))
+		// dst = net.JoinHostPort(dst, fmt.Sprintf("%d", target.Port))
 		res, err := dns.Exchange(msg, dst)
 		if err != nil {
 			log.Printf("Error from dns.Exchange(%s, UPDATE): %v. Trying next address", dst, err)

@@ -16,6 +16,7 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
+//	"github.com/gookit/goutil/dump"
 )
 
 const (
@@ -266,6 +267,7 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 	checkedForUnchanged := false
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+	    	// log.Printf("ReadZoneFile: RR: %s", rr.String())
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true
@@ -283,8 +285,21 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 		}
 	}
 
+	if err := zp.Err(); err != nil {
+	   log.Printf("Error from ZoneParser: %v", err)
+	   return false, 0, err
+	}
+
 	apex, _ := zd.GetOwner(zd.ZoneName)
-	soa := apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA)
+//	dump.P(apex)
+	soa_rrset := apex.RRtypes[dns.TypeSOA]
+	var soa *dns.SOA
+	if len(soa_rrset.RRs) > 0 {
+	   soa = soa_rrset.RRs[0].(*dns.SOA)
+	} else {
+	   log.Printf("ReadZoneFile: Error: SOA: %v", soa_rrset)
+	   return false, 0, fmt.Errorf("Error loading zone %s from file %s", zd.ZoneName, f.Name())
+	}
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial

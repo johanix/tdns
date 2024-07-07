@@ -436,7 +436,7 @@ func DnssecKeyMgmt(cmd string) error {
 
 func SendKeystoreCmd(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
-	fmt.Printf("Sending keystore command: %v\n", data)
+	// fmt.Printf("Sending keystore command: %v\n", data)
 
 	var kr tdns.KeystoreResponse
 

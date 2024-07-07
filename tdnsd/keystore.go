@@ -175,18 +175,22 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	}
 
 	defer func() {
-		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
+//		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
 		if err == nil {
 			err1 := tx.Commit()
-			log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
 			if err1 != nil {
+			   	log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
 				resp.Error = true
 				resp.ErrorMsg = err1.Error()
 			}
 		} else {
 			log.Printf("Error: %v. Rollback.", err)
 			err1 := tx.Rollback()
-			log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+			if err1 != nil {
+			   log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+			   resp.Error = true
+			   resp.ErrorMsg = err1.Error()
+			}
 		}
 	}()
 
@@ -226,7 +230,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	case "add": // AKA "import"
 		res, err = tx.Exec(addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm],
 			kp.PrivateKey, kp.DnskeyRR)
-		log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
+		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
 			log.Printf("Error from tx.Exec(): %v", err)
 			return resp, err
@@ -238,7 +242,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 	case "setstate":
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
-		log.Printf("tx.Exec(%s, %s, %s, %d)", setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
+		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			log.Printf("Error from tx.Exec(): %v", err)
 			return resp, err
@@ -290,18 +294,18 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		log.Printf("DnssecKeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
 
-	if err == nil {
-		err1 := tx.Commit()
-		log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
-		if err1 != nil {
-			resp.Error = true
-			resp.ErrorMsg = err1.Error()
-		}
-	} else {
-		log.Printf("Error: %v. Rollback.", err)
-		err1 := tx.Rollback()
-		log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
-	}
+//	if err == nil {
+//		err1 := tx.Commit()
+//		log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
+//		if err1 != nil {
+//			resp.Error = true
+//			resp.ErrorMsg = err1.Error()
+//		}
+//	} else {
+//		log.Printf("Error: %v. Rollback.", err)
+//		err1 := tx.Rollback()
+//		log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+//	}
 
 	return resp, nil
 }
