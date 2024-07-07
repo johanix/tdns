@@ -16,11 +16,12 @@ import (
 )
 
 type ScanRequest struct {
-	Cmd      string
-	Zone     string
-	ZoneData *ZoneData
-	RRtype   uint16
-	Response chan ScanResponse
+	Cmd              string
+	ChildZone        string
+	CurrentChildData ChildDelegationData // Current parent-side delegation data for child
+	ZoneData         *ZoneData
+	RRtype           uint16
+	Response         chan ScanResponse
 }
 
 type ScanResponse struct {
@@ -39,6 +40,7 @@ type Scanner struct {
 	// Conf  *Config
 	// LabDB *LabDB
 	// RRtype  string
+	AuthQueryQ  chan AuthQueryRequest
 	IMR         string
 	LogFile     string
 	LogTemplate string
@@ -47,8 +49,9 @@ type Scanner struct {
 	Debug       bool
 }
 
-func NewScanner(verbose, debug bool) Scanner {
+func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) Scanner {
 	s := Scanner{
+		AuthQueryQ: authqueryq,
 		//		Conf:        conf,
 		//		LabDB:       conf.Internal.LabDB,
 		Log:         map[string]*log.Logger{},
@@ -72,7 +75,7 @@ func (scanner *Scanner) AddLogger(rrtype string) error {
 	return nil
 }
 
-func ScannerEngine(scannerq chan ScanRequest) error {
+func ScannerEngine(scannerq chan ScanRequest, authqueryq chan AuthQueryRequest) error {
 	//	scannerq := conf.Internal.ScannerQ
 	interval := viper.GetInt("scanner.interval")
 	if interval < 10 {
@@ -81,7 +84,7 @@ func ScannerEngine(scannerq chan ScanRequest) error {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 
 	//scanner := NewScanner(viper.GetBool("services.scanner.verbose"), viper.GetBool("services.scanner.debug"))
-	scanner := NewScanner(true, true)
+	scanner := NewScanner(authqueryq, true, true)
 	scanner.AddLogger("CDS")
 	scanner.AddLogger("CSYNC")
 	scanner.AddLogger("DNSKEY")
@@ -103,7 +106,7 @@ func ScannerEngine(scannerq chan ScanRequest) error {
 			case sr = <-scannerq:
 				switch sr.Cmd {
 				case "SCAN":
-					if sr.Zone == "" {
+					if sr.ChildZone == "" {
 						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
 						continue
 					}
@@ -113,12 +116,12 @@ func ScannerEngine(scannerq chan ScanRequest) error {
 					//						continue
 					//					}
 					log.Printf("ScannerEngine: Request for immediate scan of zone %s for RRtype %s",
-						sr.Zone, dns.TypeToString[sr.RRtype])
+						sr.ChildZone, dns.TypeToString[sr.RRtype])
 					switch sr.RRtype {
 					case dns.TypeCDS:
 						log.Printf("go scanner.CheckCDS(sr)")
 					case dns.TypeCSYNC:
-						go scanner.CheckCSYNC(sr, sr.ZoneData)
+						go scanner.CheckCSYNC(sr, &sr.CurrentChildData)
 					case dns.TypeDNSKEY:
 						log.Printf("go scanner.CheckDNSKEY(sr)")
 					}

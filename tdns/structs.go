@@ -110,13 +110,14 @@ type RRset struct {
 }
 
 type ChildDelegationData struct {
-	ParentSerial uint32    // The parent serial that this data was correct for
-	Timestamp    time.Time // Time at which this data was fetched
-	Name         string
-	RRsets       map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
-	NS_rrs       []dns.RR
-	A_glue       []dns.RR
-	AAAA_glue    []dns.RR
+	DelHasChanged bool      // When returned from a scanner, this indicates that a change has been detected
+	ParentSerial  uint32    // The parent serial that this data was correct for
+	Timestamp     time.Time // Time at which this data was fetched
+	Name          string
+	RRsets        map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
+	NS_rrs        []dns.RR
+	A_glue        []dns.RR
+	AAAA_glue     []dns.RR
 }
 
 type KeystorePost struct {

@@ -135,8 +135,10 @@ func main() {
 	conf.Internal.UpdateQ = make(chan UpdateRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsHandlerRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsHandlerRequest, 100)
+	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
 
-	go tdns.ScannerEngine(conf.Internal.ScannerQ)
+	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
+	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
 	go UpdaterEngine(&conf)
 	go DnsUpdateResponderEngine(&conf)
 	go DnsNotifyResponderEngine(&conf)

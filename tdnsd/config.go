@@ -68,6 +68,7 @@ type InternalConf struct {
 	DnsNotifyQ      chan DnsHandlerRequest
 	DelegationSyncQ chan tdns.DelegationSyncRequest
 	NotifyQ         chan tdns.NotifyRequest
+	AuthQueryQ      chan tdns.AuthQueryRequest
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

@@ -79,20 +79,20 @@ func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher, sca
 		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		scannerq <- tdns.ScanRequest{
-			Cmd:      "SCAN",
-			Zone:     qname,
-			ZoneData: zd,
-			RRtype:   ntype,
+			Cmd:       "SCAN",
+			ChildZone: qname,
+			ZoneData:  zd,
+			RRtype:    ntype,
 		}
 
 	case dns.TypeDNSKEY:
 		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		scannerq <- tdns.ScanRequest{
-			Cmd:      "SCAN",
-			Zone:     qname,
-			ZoneData: zd,
-			RRtype:   ntype,
+			Cmd:       "SCAN",
+			ChildZone: qname,
+			ZoneData:  zd,
+			RRtype:    ntype,
 		}
 
 	default:

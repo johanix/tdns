@@ -108,6 +108,158 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 	return rrs, nil
 }
 
+// AuthQueryNG is the same as AuthQuery, but returns an RRset instead of a []dns.RR
+// to be able to keep any RRSIGs. AuthQuery should be phased out.
+// ns must be in addr:port format
+type AuthQueryRequest struct {
+	qname     string
+	ns        string
+	rrtype    uint16
+	transport string
+	response  chan *AuthQueryResponse
+}
+
+type AuthQueryResponse struct {
+	rrset *RRset
+	err   error
+}
+
+func AuthQueryEngine(requests chan AuthQueryRequest) {
+	log.Printf("*** AuthQueryEngine: Starting ***	")
+
+	tcpclient := new(dns.Client)
+	tcpclient.Net = "tcp"
+
+	for req := range requests {
+		log.Printf("*** AuthQueryEngine: Received request for %s %s from %s ***", req.qname, dns.TypeToString[req.rrtype], req.ns)
+		rrset := RRset{
+			Name: req.qname,
+		}
+
+		m := new(dns.Msg)
+		m.SetQuestion(req.qname, req.rrtype)
+		// Set the DNSSEC OK (DO) bit in the EDNS0 options
+		edns0 := new(dns.OPT)
+		edns0.Hdr.Name = "."
+		edns0.Hdr.Rrtype = dns.TypeOPT
+		edns0.SetDo()
+		m.Extra = append(m.Extra, edns0)
+
+		if Globals.Debug {
+			fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", req.qname,
+				dns.TypeToString[req.rrtype], req.ns)
+		}
+
+		var err error
+		var res *dns.Msg
+
+		switch req.transport {
+		case "tcp":
+			res, _, err = tcpclient.Exchange(m, req.ns)
+		default:
+			res, err = dns.Exchange(m, req.ns)
+		}
+
+		if err != nil {
+			req.response <- &AuthQueryResponse{&rrset, err}
+			continue
+		}
+
+		if res.Rcode != dns.RcodeSuccess {
+			req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("Query for %s %s received rcode: %s",
+				req.qname, dns.TypeToString[req.rrtype], dns.RcodeToString[res.Rcode])}
+			continue
+		}
+
+		if len(res.Answer) > 0 {
+			if Globals.Debug {
+				fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
+			}
+			for _, rr := range res.Answer {
+				if rr.Header().Rrtype == req.rrtype {
+					if Globals.Debug {
+						fmt.Printf("%s\n", rr.String())
+					}
+
+					rrset.RRs = append(rrset.RRs, rr)
+
+				} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
+					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				} else {
+					log.Printf("AuthQueryNG: Error: answer is not an %s RR: %s", dns.TypeToString[req.rrtype], rr.String())
+				}
+			}
+			req.response <- &AuthQueryResponse{&rrset, nil}
+			continue
+		}
+
+		if len(res.Ns) > 0 {
+			if Globals.Debug {
+				fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
+			}
+			for _, rr := range res.Ns {
+				if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
+					if Globals.Debug {
+						fmt.Printf("AuthQueryNG: Found: %s\n", rr.String())
+					}
+
+					rrset.RRs = append(rrset.RRs, rr)
+
+				} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
+					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				}
+			}
+			if len(rrset.RRs) > 0 {
+				req.response <- &AuthQueryResponse{&rrset, nil}
+				continue
+			}
+		}
+
+		if len(res.Extra) > 0 {
+			if Globals.Debug {
+				fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
+			}
+			for _, rr := range res.Extra {
+				if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
+					if Globals.Debug {
+						fmt.Printf("%s\n", rr.String())
+					}
+
+					rrset.RRs = append(rrset.RRs, rr)
+
+				} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
+					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				}
+			}
+			req.response <- &AuthQueryResponse{&rrset, nil}
+			continue
+		}
+
+		req.response <- &AuthQueryResponse{&rrset, nil}
+	}
+}
+
+func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport string) (*RRset, error) {
+	//	requests := make(chan AuthQueryRequest)
+	//defer close(requests)
+
+	response := make(chan *AuthQueryResponse)
+	defer close(response)
+
+	//	go AuthQueryEngine(requests)
+
+	scanner.AuthQueryQ <- AuthQueryRequest{
+		qname:     qname,
+		ns:        ns,
+		rrtype:    rrtype,
+		transport: transport,
+		response:  response,
+	}
+
+	resp := <-response
+	return resp.rrset, resp.err
+}
+
 func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]
