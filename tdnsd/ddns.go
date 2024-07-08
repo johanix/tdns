@@ -96,7 +96,7 @@ func DnsUpdateResponderEngine(conf *Config) error {
 // func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
 //
 //	policy UpdatePolicy, updateq chan UpdateRequest) error {
-func UpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq chan UpdateRequest) error {
+func UpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq chan tdns.UpdateRequest) error {
 	w := dhr.ResponseWriter
 	r := dhr.Msg
 	qname := dhr.Qname
@@ -153,7 +153,7 @@ func UpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq chan U
 	}
 
 	// send into suitable channel for pending updates
-	updateq <- UpdateRequest{
+	updateq <- tdns.UpdateRequest{
 		Cmd:       "UPDATE",
 		ZoneName:  zone,
 		Actions:   r.Ns,

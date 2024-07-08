@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandResponse, error) {
+func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandResponse, error) {
 	var resp tdns.CommandResponse
 	var err error
 
@@ -46,7 +46,8 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandRespons
 		}
 
 	case "freeze":
-		if !zd.AllowUpdates {
+//		if !zd.AllowUpdates {
+		if !zd.Options["allowupdates"] {
 			return resp, fmt.Errorf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 		}
 
@@ -59,7 +60,8 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandRespons
 		return resp, nil
 
 	case "thaw":
-		if !zd.AllowUpdates {
+//		if !zd.AllowUpdates {
+		if !zd.Options["allowupdates"] {
 			return resp, fmt.Errorf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
 		}
 		if !zd.Frozen {
@@ -108,8 +110,9 @@ func ShowNsecChain(zd *tdns.ZoneData) ([]string, error) {
 	return nsecrrs, nil
 }
 
-func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
-	if !zd.AllowUpdates {
+func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
+//	if !zd.AllowUpdates {
+	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
 	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
@@ -117,8 +120,9 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 		log.Printf("GenerateNsecChain: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
 
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *KeyDB) tdns.RRset {
-		if zd.OnlineSigning && cs != nil {
+	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
+		// if zd.OnlineSigning && cs != nil {
+		if zd.Options["onlinesigning"] && cs != nil {
 			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
 			if err != nil {
 				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
@@ -164,7 +168,8 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 				tmap = append(tmap, int(rrt))
 			}
 		}
-		if hasRRSIG || (zd.OnlineSigning && cs != nil) {
+		// if hasRRSIG || (zd.OnlineSigning && cs != nil) {
+		if hasRRSIG || (zd.Options["onlinesigning"] && cs != nil) {
 			tmap = append(tmap, int(dns.TypeRRSIG))
 		}
 
@@ -193,8 +198,9 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 	return nil
 }
 
-func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
-	if !zd.AllowUpdates {
+func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
+//	if !zd.AllowUpdates {
+	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
 	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
@@ -207,8 +213,9 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 		return err
 	}
 
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *KeyDB) tdns.RRset {
-		if zd.OnlineSigning && cs != nil {
+	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
+		// if zd.OnlineSigning && cs != nil {
+		if zd.Options["onlinesigning"] && cs != nil {
 			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
 			if err != nil {
 				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)

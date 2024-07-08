@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package main
+package tdns
 
 import (
 	"crypto"
@@ -14,7 +14,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 var DefaultTables = map[string]string{
@@ -153,6 +152,7 @@ type KeyDB struct {
 	Sig0Cache   map[string]*Sig0KeyCache
 	DnssecCache map[string]*DnssecKeyCache // map[zonename+ksk|zsk]*dns.DNSKEY
 	Ctx         string
+	UpdateQ     chan UpdateRequest
 }
 
 func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
@@ -229,8 +229,11 @@ func dbSetupTables(db *sql.DB) bool {
 	return false
 }
 
-func NewKeyDB(force bool) *KeyDB {
-	dbfile := viper.GetString("db.file")
+func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
+	// dbfile := viper.GetString("db.file")
+	if dbfile == "" {
+	   return nil, fmt.Errorf("error: DB filename unspecified")
+	}
 	fmt.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
 	if err := os.Chmod(dbfile, 0664); err != nil {
 		log.Printf("NewKeyDB: Error trying to ensure that db %s is writable: %v", dbfile, err)
@@ -254,5 +257,6 @@ func NewKeyDB(force bool) *KeyDB {
 		DB:          db,
 		Sig0Cache:   make(map[string]*Sig0KeyCache),
 		DnssecCache: make(map[string]*DnssecKeyCache),
-	}
+		UpdateQ:     make(chan UpdateRequest),
+	}, nil
 }

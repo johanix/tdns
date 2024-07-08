@@ -1,7 +1,7 @@
 /*
- *
+ * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package main
+package tdns
 
 import (
 	"database/sql"
@@ -10,14 +10,28 @@ import (
 	"os"
 	"time"
 
-	"github.com/johanix/tdns/tdns"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
-func (kdb *KeyDB) ChildSig0Mgmt(kp tdns.TruststorePost) (tdns.TruststoreResponse, error) {
+// XXX: These should die
+type TAtmp map[string]TmpAnchor
+
+type TmpAnchor struct {
+	Name   string
+	Dnskey string
+}
+
+type Sig0tmp map[string]TmpSig0Key
+
+type TmpSig0Key struct {
+	Name string
+	Key  string
+}
+
+func (kdb *KeyDB) Sig0TrustMgmt(kp TruststorePost) (TruststoreResponse, error) {
 
 	const (
 		addkeysql = `
@@ -30,7 +44,7 @@ SELECT child, keyid, trusted, validated, keyrr FROM Sig0TrustStore WHERE zonenam
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 	)
 
-	var resp = tdns.TruststoreResponse{Time: time.Now()}
+	var resp = TruststoreResponse{Time: time.Now()}
 	var res sql.Result
 
 	tx, err := kdb.Begin("ChildSig0Mgmt")
@@ -51,14 +65,14 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		var keyid int
 		var trusted, validated bool
 
-		tmp2 := map[string]tdns.Sig0Key{}
+		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
 			err := rows.Scan(&keyname, &keyid, &trusted, &validated, &keyrrstr)
 			if err != nil {
 				log.Fatalf("Error from rows.Scan(): %v", err)
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
-			tmp2[mapkey] = tdns.Sig0Key{
+			tmp2[mapkey] = Sig0Key{
 				Name:      keyname,
 				Validated: validated,
 				Trusted:   trusted,
@@ -161,7 +175,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
 				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
-				tdns.TAStore.Map.Set(mapkey, tdns.TrustAnchor{
+				TAStore.Map.Set(mapkey, TrustAnchor{
 					Name:      k,
 					Validated: true, // always trust config
 					Dnskey:    *dnskeyrr,
@@ -189,6 +203,7 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 	)
 
 	log.Printf("*** Enter LoadChildSig0Keys() ***")
+	// dump.P(kdb)
 
 	// tx, err := kdb.Begin("LoadChildSig0Keys")
 	// if err != nil {
@@ -218,7 +233,7 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 
 		if keyrr, ok := rr.(*dns.KEY); ok {
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
-			tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
+			Sig0Store.Map.Set(mapkey, Sig0Key{
 				Name:      keyname,
 				Validated: validated,
 				Trusted:   trusted,
@@ -261,7 +276,7 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 			if keyrr, ok := rr.(*dns.KEY); ok {
 				log.Printf("* LoadChildSig0Keys: loading key %s", k)
 				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
-				tdns.Sig0Store.Map.Set(mapkey, tdns.Sig0Key{
+				Sig0Store.Map.Set(mapkey, Sig0Key{
 					Name:      k,
 					Keyid:     keyrr.KeyTag(),
 					Validated: true, // always trust config

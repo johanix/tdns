@@ -1,7 +1,7 @@
 /*
- * Johan Stenstam, <johani@johani.org>
+ * Copyright (c) Johan Stenstam, <johani@johani.org>
  */
-package main
+package tdns
 
 import (
 	"crypto"
@@ -11,14 +11,13 @@ import (
 
 	"time"
 
-	"github.com/johanix/tdns/tdns"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	// "github.com/spf13/viper"
 	// "gopkg.in/yaml.v3"
 )
 
-func (kdb *KeyDB) Sig0KeyMgmt(kp tdns.KeystorePost) (tdns.KeystoreResponse, error) {
+func (kdb *KeyDB) Sig0KeyMgmt(kp KeystorePost) (KeystoreResponse, error) {
 
 	const (
 		addSig0KeySql = `
@@ -30,7 +29,7 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, privatek
 SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 	)
 
-	var resp = tdns.KeystoreResponse{Time: time.Now()}
+	var resp = KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
 	tx, err := kdb.Begin("Sig0KeyMgmt")
@@ -38,18 +37,21 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		return resp, err
 	}
 
+	log.Printf("Sig0KeyMgmt: request: %s", kp.SubCommand)
+
 	switch kp.SubCommand {
 	case "list":
-		rows, err := tx.Query(getAllSig0KeysSql)
+		rows, err := kdb.Query(getAllSig0KeysSql)
 		if err != nil {
-			log.Fatalf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			log.Printf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			return resp, fmt.Errorf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
 
 		var keyname, state, algorithm, privatekey, keyrrstr string
 		var keyid int
 
-		tmp2 := map[string]tdns.Sig0Key{}
+		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &privatekey, &keyrrstr)
 			if err != nil {
@@ -59,7 +61,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 				privatekey = "ULTRA SECRET KEY"
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
-			tmp2[mapkey] = tdns.Sig0Key{
+			tmp2[mapkey] = Sig0Key{
 				Name:       keyname,
 				State:      state,
 				Algorithm:  algorithm,
@@ -136,7 +138,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	if err == nil {
 		err1 := tx.Commit()
-		// log.Printf("Sig0KeyMgmt: tx.Commit() ok, err1=%v", err1)
+		log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok, err1=%v", err, err1)
 		if err1 != nil {
 			resp.Error = true
 			resp.ErrorMsg = err1.Error()
@@ -154,7 +156,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	return resp, nil
 }
 
-func (kdb *KeyDB) DnssecKeyMgmt(kp tdns.KeystorePost) (tdns.KeystoreResponse, error) {
+func (kdb *KeyDB) DnssecKeyMgmt(kp KeystorePost) (KeystoreResponse, error) {
 
 	const (
 		addDnskeySql = `
@@ -166,7 +168,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags,algorithm, 
 SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	)
 
-	var resp = tdns.KeystoreResponse{Time: time.Now()}
+	var resp = KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
 	tx, err := kdb.Begin("DnssecKeyMgmt")
@@ -175,11 +177,11 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	}
 
 	defer func() {
-//		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
+		//		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
 		if err == nil {
 			err1 := tx.Commit()
 			if err1 != nil {
-			   	log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
+				log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
 				resp.Error = true
 				resp.ErrorMsg = err1.Error()
 			}
@@ -187,9 +189,9 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			log.Printf("Error: %v. Rollback.", err)
 			err1 := tx.Rollback()
 			if err1 != nil {
-			   log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
-			   resp.Error = true
-			   resp.ErrorMsg = err1.Error()
+				log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+				resp.Error = true
+				resp.ErrorMsg = err1.Error()
 			}
 		}
 	}()
@@ -205,7 +207,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		var keyname, state, algorithm, privatekey, keyrrstr string
 		var keyid, flags int
 
-		tmp2 := map[string]tdns.DnssecKey{}
+		tmp2 := map[string]DnssecKey{}
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 			if err != nil {
@@ -215,7 +217,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 				privatekey = "ULTRA SECRET KEY"
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
-			tmp2[mapkey] = tdns.DnssecKey{
+			tmp2[mapkey] = DnssecKey{
 				Name:       keyname,
 				State:      state,
 				Flags:      uint16(flags),
@@ -294,18 +296,18 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		log.Printf("DnssecKeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
 
-//	if err == nil {
-//		err1 := tx.Commit()
-//		log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
-//		if err1 != nil {
-//			resp.Error = true
-//			resp.ErrorMsg = err1.Error()
-//		}
-//	} else {
-//		log.Printf("Error: %v. Rollback.", err)
-//		err1 := tx.Rollback()
-//		log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
-//	}
+	//	if err == nil {
+	//		err1 := tx.Commit()
+	//		log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
+	//		if err1 != nil {
+	//			resp.Error = true
+	//			resp.ErrorMsg = err1.Error()
+	//		}
+	//	} else {
+	//		log.Printf("Error: %v. Rollback.", err)
+	//		err1 := tx.Rollback()
+	//		log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+	//	}
 
 	return resp, nil
 }
@@ -349,7 +351,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 			return nil, nil, nil, err
 		}
 		keyfound = true
-		k, cs, rr, _, _, err = tdns.PrepareKey(privatekey, keyrrstr, algorithm)
+		k, cs, rr, _, _, err = PrepareKey(privatekey, keyrrstr, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKey(): %v", err)
 			return nil, nil, nil, err
@@ -361,7 +363,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		return nil, nil, nil, sql.ErrNoRows
 	}
 
-	if tdns.Globals.Debug {
+	if Globals.Debug {
 		log.Printf("GetSig0Key(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
 	}
 
@@ -414,7 +416,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 			return nil, nil, nil, err
 		}
 		keyfound = true
-		k, cs, rr, _, _, err = tdns.PrepareKey(privatekey, keyrrstr, algorithm)
+		k, cs, rr, _, _, err = PrepareKey(privatekey, keyrrstr, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKey(): %v", err)
 			return nil, nil, nil, err
@@ -426,7 +428,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 		return nil, nil, nil, sql.ErrNoRows
 	}
 
-	if tdns.Globals.Debug {
+	if Globals.Debug {
 		log.Printf("GetDnssecKey(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
 	}
 

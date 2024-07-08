@@ -64,11 +64,12 @@ type ZoneData struct {
 	ParentNS         []string // names of parent nameservers
 	ParentServers    []string // addresses of parent nameservers
 	Children         map[string]*ChildDelegationData
-	// XXX: All of the following should go into a map[string]bool
-	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-	AllowUpdates   bool // should we allow updates to this zone
-	FoldCase       bool // should we fold case for this zone
+	Options		 map[string]bool
+	// XXX: All of the following should go into a options =  map[string]bool
+//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+//	AllowUpdates   bool // should we allow updates to this zone
+//	FoldCase       bool // should we fold case for this zone
 	Frozen         bool // if frozen no updates are allowed
 	Dirty          bool // if true zone has been modified and we need to save the zonefile
 }
@@ -81,10 +82,11 @@ type ZoneConf struct {
 	Primary        string
 	Notify         []string
 	Zonefile       string
-	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-	AllowUpdates   bool // should we allow updates to this zone
-	FoldCase       bool // should we fold case for this zone
+	Options	       []string
+//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+//	AllowUpdates   bool // should we allow updates to this zone
+//	FoldCase       bool // should we fold case for this zone
 	Frozen         bool // if true no updates are allowed; not a config param
 	Dirty          bool // if true zone has been modified; not a config param
 }
@@ -261,10 +263,11 @@ type ZoneRefresher struct {
 	Notify         []string
 	ZoneStore      ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile       string
-	DelegationSync bool
-	OnlineSigning  bool
-	AllowUpdates   bool
-	FoldCase       bool // should we fold case for this zone
+	Options	       map[string]bool
+//	DelegationSync bool
+//	OnlineSigning  bool
+//	AllowUpdates   bool
+//	FoldCase       bool // should we fold case for this zone
 	Force          bool // force refresh, ignoring SOA serial
 	Response       chan RefresherResponse
 }

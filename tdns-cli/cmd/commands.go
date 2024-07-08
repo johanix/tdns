@@ -248,7 +248,8 @@ var zoneListCmd = &cobra.Command{
 		if showfile {
 			hdr += "Zonefile|"
 		}
-		hdr += "DelegationSync|OnlineSigning|AllowUpdates|Frozen|Dirty"
+		// hdr += "DelegationSync|OnlineSigning|AllowUpdates|Frozen|Dirty"
+		hdr += "Frozen|Dirty|Options"
 		out := []string{}
 		if showhdr {
 			out = append(out, hdr)
@@ -264,7 +265,7 @@ var zoneListCmd = &cobra.Command{
 			if showfile {
 				line += fmt.Sprintf("%s|", zconf.Zonefile)
 			}
-			line += fmt.Sprintf("%t|%t|%t|%t|%t", zconf.DelegationSync, zconf.OnlineSigning, zconf.AllowUpdates, zconf.Frozen, zconf.Dirty)
+			line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, zconf.Options)
 			out = append(out, line)
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
