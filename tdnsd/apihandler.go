@@ -32,8 +32,8 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIkeystore: error decoding command post:", err)
 		}
 
-		// log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
-		//	kp.Command, kp.SubCommand, r.RemoteAddr)
+		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
+			kp.Command, kp.SubCommand, r.RemoteAddr)
 
 		resp := tdns.KeystoreResponse{
 			Time: time.Now(),
@@ -121,9 +121,9 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ChildDnskeys = tmp1
 
 		case "child-sig0-mgmt":
-			resp, err = kdb.ChildSig0Mgmt(tp)
+			resp, err = kdb.Sig0TrustMgmt(tp)
 			if err != nil {
-				log.Printf("Error from ChildSig0Mgmt(): %v", err)
+				log.Printf("Error from Sig0TrustMgmt(): %v", err)
 			}
 
 		default:

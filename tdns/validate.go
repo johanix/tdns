@@ -360,10 +360,16 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg) (uint8, string, error) {
 		return dns.RcodeBadTime, sig.RRSIG.SignerName, nil
 	}
 
-	if sig0key.Validated {
-		log.Printf("* Update by known and validated key. All ok.")
+	if sig0key.Trusted {
+		log.Printf("* Update by known and trusted SIG(0) key. Validation succeeded.")
 		return dns.RcodeSuccess, sig.RRSIG.SignerName, nil
 	}
+
+	if sig0key.Validated {
+		log.Printf("* Update by known and validated but NOT YET TRUSTED key. Validation failed.")
+		return dns.RcodeBadKey, sig.RRSIG.SignerName, nil
+	}
+
 	log.Printf("= Update signed by known but unvalidated key. ")
 	return dns.RcodeBadKey, sig.RRSIG.SignerName, nil
 }

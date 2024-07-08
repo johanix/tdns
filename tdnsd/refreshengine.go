@@ -104,12 +104,14 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams:      zr.Notify,
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
-						DelegationSync:   zr.DelegationSync,
-						OnlineSigning:    zr.OnlineSigning,
-						AllowUpdates:     zr.AllowUpdates,
-						FoldCase:         zr.FoldCase,
+						Options:	  zr.Options,
+						// DelegationSync:   zr.DelegationSync,
+						// OnlineSigning:    zr.OnlineSigning,
+						// AllowUpdates:     zr.AllowUpdates,
+						// FoldCase:         zr.FoldCase,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
+						// XXX: I think this is going away:
 						Children:         map[string]*tdns.ChildDelegationData{},
 					}
 					updated, err = zonedata.Refresh(zr.Force)

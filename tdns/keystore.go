@@ -37,11 +37,14 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		return resp, err
 	}
 
+	log.Printf("Sig0KeyMgmt: request: %s", kp.SubCommand)
+
 	switch kp.SubCommand {
 	case "list":
-		rows, err := tx.Query(getAllSig0KeysSql)
+		rows, err := kdb.Query(getAllSig0KeysSql)
 		if err != nil {
-			log.Fatalf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			log.Printf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			return resp, fmt.Errorf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
 
@@ -135,7 +138,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	if err == nil {
 		err1 := tx.Commit()
-		// log.Printf("Sig0KeyMgmt: tx.Commit() ok, err1=%v", err1)
+		log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok, err1=%v", err, err1)
 		if err1 != nil {
 			resp.Error = true
 			resp.ErrorMsg = err1.Error()

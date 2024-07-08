@@ -41,7 +41,8 @@ func DelegationSyncEngine(conf *Config) error {
 
 	for zname, zd := range tdns.Zones.Items() {
 		log.Printf("DelegationSyncEngine: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
-		if zd.AllowUpdates {
+//		if zd.AllowUpdates {
+		if zd.Options["allowupdates"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			if _, exist := apex.RRtypes[dns.TypeKEY]; !exist {
 				log.Printf("DelegationSyncEngine: Fetching the private SIG(0) key for %s", zd.ZoneName)
@@ -58,7 +59,8 @@ func DelegationSyncEngine(conf *Config) error {
 				log.Printf("DelegationSyncEngine: Publishing KEY RR for zone %s", zd.ZoneName)
 				zd.PublishKeyRR(keyrr)
 
-				if zd.OnlineSigning {
+				// if zd.OnlineSigning {
+				if zd.Options["onlinesigning"] {
 					log.Printf("DelegationSyncEngine: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
 					_, cs, dnskeyrr, err = kdb.GetDnssecKey(zd.ZoneName)
 					if err != nil {
@@ -260,7 +262,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 	kdb := conf.Internal.KeyDB
 
-	dump.P(syncstate)
+	// dump.P(syncstate)
 
 	// Ensure that we don't count any changes twice.
 	syncstate.Adds = []dns.RR{}
@@ -327,7 +329,8 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
-	if zd.AllowUpdates {
+//	if zd.AllowUpdates {
+	if zd.Options["allowupdates"] {
 		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
 		err := zd.PublishCsyncRR()
 		if err != nil {
@@ -336,7 +339,8 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		}
 
 		// Try to sign the CSYNC RRset
-		if zd.OnlineSigning {
+		// if zd.OnlineSigning {
+		if zd.Options["onlinesigning"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
 			_, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecKey(zd.ZoneName)

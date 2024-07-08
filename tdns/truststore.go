@@ -31,7 +31,7 @@ type TmpSig0Key struct {
 	Key  string
 }
 
-func (kdb *KeyDB) ChildSig0Mgmt(kp TruststorePost) (TruststoreResponse, error) {
+func (kdb *KeyDB) Sig0TrustMgmt(kp TruststorePost) (TruststoreResponse, error) {
 
 	const (
 		addkeysql = `

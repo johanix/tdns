@@ -10,7 +10,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/gookit/goutil/dump"
+//	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
 
@@ -185,7 +185,8 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is unknown", ur.ZoneName)
 	}
 
-	if !zd.AllowUpdates {
+//	if !zd.AllowUpdates {
+	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is not allowed to be updated", ur.ZoneName)
 	}
 
@@ -217,7 +218,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			}
 		}
 
-		dump.P(owner)
+		// dump.P(owner)
 
 		//		if owner == nil {
 		//			owner = &tdns.OwnerData{
@@ -244,10 +245,10 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
-			dump.P(rrset)
+			// dump.P(rrset)
 			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
-			dump.P(rrset)
+			// dump.P(rrset)
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
 			} else {

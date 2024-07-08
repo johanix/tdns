@@ -84,13 +84,11 @@ func main() {
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
 	}
 
-	kdb := tdns.NewKeyDB(false)
-	conf.Internal.KeyDB = kdb
-
 	err := ParseConfig(&conf)
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)
 	}
+	kdb := conf.Internal.KeyDB
 
 	logfile := viper.GetString("log.file")
 	tdns.SetupLogging(logfile)
@@ -155,7 +153,7 @@ func main() {
 type TAtmp map[string]TmpAnchor
 
 type TmpAnchor struct {
-	Name   string
+     	Name   string
 	Dnskey string
 }
 
@@ -215,7 +213,11 @@ func ParseConfig(conf *Config) error {
 	}
 	fmt.Println()
 
-	kdb := conf.Internal.KeyDB
+	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+	if err != nil {
+	   log.Fatalf("Error from NewKeyDB: %v", err)
+	}
+	conf.Internal.KeyDB = kdb
 
 	err = kdb.LoadDnskeyTrustAnchors()
 	if err != nil {
@@ -267,8 +269,26 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 			log.Fatalf("Unknown zone type: \"%s\"", zconf.Type)
 		}
 
-		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s, delegationsync: %t, onlinesigning: %t, allowupdates: %t",
-			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile, zconf.DelegationSync, zconf.OnlineSigning, zconf.AllowUpdates)
+		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
+			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
+
+		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.Options)
+		options := map[string]bool{}
+		var cleanoptions []string
+		for _, option := range zconf.Options {
+		    option := strings.ToLower(option)
+		    switch option {
+		    case "delegationsync", "onlinesigning", "allowupdates", "allowchildupdates",
+		    	 "foldcase":
+		    	 options[option] = true
+			 cleanoptions = append(cleanoptions, option)
+		    default:
+			log.Fatalf("Zone %s: Unknown option: \"%s\"", zname, option)
+		    }
+		}
+		zconf.Options = cleanoptions
+		zones[zname] = zconf
+		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 
 		zrch <- tdns.ZoneRefresher{
 			Name:           zname,
@@ -277,9 +297,10 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 			ZoneStore:      zonestore,
 			Notify:         zconf.Notify,
 			Zonefile:       zconf.Zonefile,
-			DelegationSync: zconf.DelegationSync,
-			OnlineSigning:  zconf.OnlineSigning,
-			AllowUpdates:   zconf.AllowUpdates,
+			Options:	options,
+			// DelegationSync: zconf.DelegationSync,
+			// OnlineSigning:  zconf.OnlineSigning,
+			// AllowUpdates:   zconf.AllowUpdates,
 		}
 	}
 

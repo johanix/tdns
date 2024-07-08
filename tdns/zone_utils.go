@@ -22,7 +22,8 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 	// 	ZoneTypeToString[zd.ZoneType], force)
 
-	if zd.FoldCase {
+	// if zd.FoldCase {
+	if zd.Options["foldcase"] {
 		zd.Logger.Printf("zd.Refresh(): folding case for zone %s", zd.ZoneName)
 		zd.ZoneName = strings.ToLower(zd.ZoneName)
 	}
@@ -122,7 +123,8 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
-		FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+		Options:	zd.Options,
+		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
 	updated, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
@@ -131,13 +133,14 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		return false, err
 	}
 
-	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.DelegationSync)
+	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
 
 	if !updated {
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
-	if zd.DelegationSync {
+	// if zd.DelegationSync {
+	if zd.Options["delegationsync"] {
 		// Detect whether the delegation data has changed.
 		// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
 		delchanged, adds, removes, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
@@ -203,7 +206,8 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
-		FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+		Options:	zd.Options,
+		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
 	_, err := zonedata.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
@@ -218,7 +222,8 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		return false, nil
 	}
 
-	if zd.DelegationSync {
+	// if zd.DelegationSync {
+	if zd.Options["delegationsync"] {
 		// Detect whether the delegation data has changed.
 		//zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
 		delchanged, adds, removes, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
