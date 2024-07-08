@@ -187,7 +187,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
-func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
+func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *tdns.KeyDB) error {
 	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
 	if err != nil {
 		log.Printf("ApexResponder: failed to get dnssec key for zone %s", zd.ZoneName)
@@ -301,7 +301,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 // 4. If no CNAME match, check for wild card match
 // 5. Give up.
 
-func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
+func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *tdns.KeyDB) error {
 
 	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
 	if err != nil {

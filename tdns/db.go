@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package main
+package tdns
 
 import (
 	"crypto"
@@ -153,6 +153,7 @@ type KeyDB struct {
 	Sig0Cache   map[string]*Sig0KeyCache
 	DnssecCache map[string]*DnssecKeyCache // map[zonename+ksk|zsk]*dns.DNSKEY
 	Ctx         string
+	UpdateQ     chan UpdateRequest
 }
 
 func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
@@ -254,5 +255,6 @@ func NewKeyDB(force bool) *KeyDB {
 		DB:          db,
 		Sig0Cache:   make(map[string]*Sig0KeyCache),
 		DnssecCache: make(map[string]*DnssecKeyCache),
+		UpdateQ:     make(chan UpdateRequest),
 	}
 }

@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandResponse, error) {
+func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandResponse, error) {
 	var resp tdns.CommandResponse
 	var err error
 
@@ -108,7 +108,7 @@ func ShowNsecChain(zd *tdns.ZoneData) ([]string, error) {
 	return nsecrrs, nil
 }
 
-func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
+func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	if !zd.AllowUpdates {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
@@ -117,7 +117,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 		log.Printf("GenerateNsecChain: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
 
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *KeyDB) tdns.RRset {
+	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
 		if zd.OnlineSigning && cs != nil {
 			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
 			if err != nil {
@@ -193,7 +193,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 	return nil
 }
 
-func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
+func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	if !zd.AllowUpdates {
 		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
@@ -207,7 +207,7 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 		return err
 	}
 
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *KeyDB) tdns.RRset {
+	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
 		if zd.OnlineSigning && cs != nil {
 			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
 			if err != nil {

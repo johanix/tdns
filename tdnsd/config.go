@@ -57,13 +57,13 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	KeyDB           *KeyDB
+	KeyDB           *tdns.KeyDB
 	APIStopCh       chan struct{}
 	RefreshZoneCh   chan tdns.ZoneRefresher
 	BumpZoneCh      chan tdns.BumperData
 	ValidatorCh     chan tdns.ValidatorRequest
 	ScannerQ        chan tdns.ScanRequest
-	UpdateQ         chan UpdateRequest
+	UpdateQ         chan tdns.UpdateRequest
 	DnsUpdateQ      chan DnsHandlerRequest
 	DnsNotifyQ      chan DnsHandlerRequest
 	DelegationSyncQ chan tdns.DelegationSyncRequest

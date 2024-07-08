@@ -84,6 +84,9 @@ func main() {
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
 	}
 
+	kdb := tdns.NewKeyDB(false)
+	conf.Internal.KeyDB = kdb
+
 	err := ParseConfig(&conf)
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)
@@ -96,6 +99,7 @@ func main() {
 	fmt.Printf("TDNSD version %s starting.\n", appVersion)
 
 	var stopch = make(chan struct{}, 10)
+
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	conf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
@@ -132,14 +136,14 @@ func main() {
 	go APIdispatcher(&conf, apistopper)
 
 	conf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
-	conf.Internal.UpdateQ = make(chan UpdateRequest, 5)
+	conf.Internal.UpdateQ = kdb.UpdateQ
 	conf.Internal.DnsUpdateQ = make(chan DnsHandlerRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsHandlerRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
 
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
-	go UpdaterEngine(&conf)
+	go kdb.UpdaterEngine(stopch)
 	go DnsUpdateResponderEngine(&conf)
 	go DnsNotifyResponderEngine(&conf)
 	go DnsEngine(&conf)
@@ -211,8 +215,7 @@ func ParseConfig(conf *Config) error {
 	}
 	fmt.Println()
 
-	kdb := NewKeyDB(false)
-	conf.Internal.KeyDB = kdb
+	kdb := conf.Internal.KeyDB
 
 	err = kdb.LoadDnskeyTrustAnchors()
 	if err != nil {

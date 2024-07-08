@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package main
+package tdns
 
 import (
 	//        "fmt"
@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/gookit/goutil/dump"
-	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
 
@@ -25,11 +24,11 @@ type UpdateRequest struct {
 	Trusted   bool     // Content of update is trusted (via validation or policy)
 }
 
-func UpdaterEngine(conf *Config) error {
-	updateq := conf.Internal.UpdateQ
+func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
+	updateq := kdb.UpdateQ
 	var ur UpdateRequest
 
-	kdb := conf.Internal.KeyDB
+	// kdb := conf.Internal.KeyDB
 
 	log.Printf("Updater: starting")
 	var wg sync.WaitGroup
@@ -181,7 +180,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 }
 
 func ApplyUpdateToZoneData(ur UpdateRequest) error {
-	zd, ok := tdns.Zones.Get(ur.ZoneName)
+	zd, ok := Zones.Get(ur.ZoneName)
 	if !ok {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is unknown", ur.ZoneName)
 	}
@@ -223,7 +222,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		//		if owner == nil {
 		//			owner = &tdns.OwnerData{
 		//				Name:    ownerName,
-		//				RRtypes: make(map[uint16]tdns.RRset),
+		//				RRtypes: make(map[uint16]RRset),
 		//			}
 		//		}
 
@@ -233,7 +232,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				continue
 			}
-			rrset = tdns.RRset{
+			rrset = RRset{
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
 			}
