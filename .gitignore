@@ -12,6 +12,8 @@ tdnsd/tdnsd
 tdns-cli/tdns-cli
 dog/dog
 
+*/version.go
+
 *~
 */*~
 */*/*~
