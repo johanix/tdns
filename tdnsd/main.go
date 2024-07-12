@@ -107,7 +107,7 @@ func main() {
 	go ValidatorEngine(&conf, stopch)
 
 	conf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
-	go tdns.NotifierEngine(conf.Internal.NotifyQ)
+	go tdns.Notifier(conf.Internal.NotifyQ)
 
 	err = tdns.RegisterNotifyRR()
 	if err != nil {
@@ -145,7 +145,7 @@ func main() {
 	go DnsUpdateResponderEngine(&conf)
 	go DnsNotifyResponderEngine(&conf)
 	go DnsEngine(&conf)
-	go DelegationSyncEngine(&conf)
+	go DelegationSyncher(&conf)
 
 	mainloop(&conf)
 }
@@ -153,7 +153,7 @@ func main() {
 type TAtmp map[string]TmpAnchor
 
 type TmpAnchor struct {
-     	Name   string
+	Name   string
 	Dnskey string
 }
 
@@ -215,7 +215,7 @@ func ParseConfig(conf *Config) error {
 
 	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
 	if err != nil {
-	   log.Fatalf("Error from NewKeyDB: %v", err)
+		log.Fatalf("Error from NewKeyDB: %v", err)
 	}
 	conf.Internal.KeyDB = kdb
 
@@ -276,28 +276,28 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 		options := map[string]bool{}
 		var cleanoptions []string
 		for _, option := range zconf.Options {
-		    option := strings.ToLower(option)
-		    switch option {
-		    case "delegationsync", "onlinesigning", "allowupdates", "allowchildupdates",
-		    	 "foldcase":
-		    	 options[option] = true
-			 cleanoptions = append(cleanoptions, option)
-		    default:
-			log.Fatalf("Zone %s: Unknown option: \"%s\"", zname, option)
-		    }
+			option := strings.ToLower(option)
+			switch option {
+			case "delegationsync", "onlinesigning", "allowupdates", "allowchildupdates",
+				"foldcase":
+				options[option] = true
+				cleanoptions = append(cleanoptions, option)
+			default:
+				log.Fatalf("Zone %s: Unknown option: \"%s\"", zname, option)
+			}
 		}
 		zconf.Options = cleanoptions
 		zones[zname] = zconf
 		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 
 		zrch <- tdns.ZoneRefresher{
-			Name:           zname,
-			ZoneType:       zonetype, // primary | secondary
-			Primary:        zconf.Primary,
-			ZoneStore:      zonestore,
-			Notify:         zconf.Notify,
-			Zonefile:       zconf.Zonefile,
-			Options:	options,
+			Name:      zname,
+			ZoneType:  zonetype, // primary | secondary
+			Primary:   zconf.Primary,
+			ZoneStore: zonestore,
+			Notify:    zconf.Notify,
+			Zonefile:  zconf.Zonefile,
+			Options:   options,
 			// DelegationSync: zconf.DelegationSync,
 			// OnlineSigning:  zconf.OnlineSigning,
 			// AllowUpdates:   zconf.AllowUpdates,

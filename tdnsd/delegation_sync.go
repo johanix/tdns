@@ -19,7 +19,7 @@ import (
 	// "github.com/johanix/tdns/tdns"
 )
 
-func DelegationSyncEngine(conf *Config) error {
+func DelegationSyncher(conf *Config) error {
 	delsyncq := conf.Internal.DelegationSyncQ
 	var ds tdns.DelegationSyncRequest
 	var imr = viper.GetString("resolver.address")
@@ -40,46 +40,54 @@ func DelegationSyncEngine(conf *Config) error {
 	var err error
 
 	for zname, zd := range tdns.Zones.Items() {
-		log.Printf("DelegationSyncEngine: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
-//		if zd.AllowUpdates {
+		log.Printf("DelegationSyncher: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
+		apex, _ := zd.GetOwner(zd.ZoneName)
+		_, keyrrexist := apex.RRtypes[dns.TypeKEY]
 		if zd.Options["allowupdates"] {
-			apex, _ := zd.GetOwner(zd.ZoneName)
-			if _, exist := apex.RRtypes[dns.TypeKEY]; !exist {
-				log.Printf("DelegationSyncEngine: Fetching the private SIG(0) key for %s", zd.ZoneName)
+			if !keyrrexist {
+				log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
 				_, _, keyrr, err = kdb.GetSig0Key(zd.ZoneName)
 				if err != nil {
-					log.Printf("DelegationSyncEngine: Error from kdb.GetSig0Key(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+					log.Printf("DelegationSyncher: Error from kdb.GetSig0Key(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 					continue
 				}
 				if keyrr == nil {
-					log.Printf("DelegationSyncEngine: No SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
+					log.Printf("DelegationSyncher: No SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
 					continue
 				}
 
-				log.Printf("DelegationSyncEngine: Publishing KEY RR for zone %s", zd.ZoneName)
+				log.Printf("DelegationSyncher: Publishing KEY RR for zone %s", zd.ZoneName)
 				zd.PublishKeyRR(keyrr)
+				keyrrexist = true
+			} else {
+				log.Printf("DelegationSyncher: Zone %s KEY RRset already published", zd.ZoneName)
+			}
 
-				// if zd.OnlineSigning {
-				if zd.Options["onlinesigning"] {
-					log.Printf("DelegationSyncEngine: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
-					_, cs, dnskeyrr, err = kdb.GetDnssecKey(zd.ZoneName)
-					if err != nil {
-						log.Printf("DelegationSyncEngine: Error from kdb.GetDnssecKey(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
-						continue
-					}
-					// apex, _ := zd.GetOwner(zd.ZoneName)
-					rrset := apex.RRtypes[dns.TypeKEY]
-					// dump.P(rrset)
-					err := tdns.SignRRset(&rrset, zd.ZoneName, cs, dnskeyrr)
-					if err != nil {
-						log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
-					} else {
-						apex.RRtypes[dns.TypeKEY] = rrset
-						log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
-					}
+			if keyrrexist && zd.Options["onlinesigning"] {
+				log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
+				_, cs, dnskeyrr, err = kdb.GetDnssecKey(zd.ZoneName)
+				if err != nil {
+					log.Printf("DelegationSyncher: Error from kdb.GetDnssecKey(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+					continue
+				}
+				// apex, _ := zd.GetOwner(zd.ZoneName)
+				rrset := apex.RRtypes[dns.TypeKEY]
+				// dump.P(rrset)
+				err := tdns.SignRRset(&rrset, zd.ZoneName, cs, dnskeyrr)
+				if err != nil {
+					log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
+				} else {
+					apex.RRtypes[dns.TypeKEY] = rrset
+					log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
 				}
 			} else {
-				log.Printf("DelegationSyncEngine: Zone %s KEY RRset already published", zd.ZoneName)
+				log.Printf("DelegationSyncher: Zone %s does not allow online signing, KEY RRset cannot be re-signed", zd.ZoneName)
+			}
+		} else {
+			if keyrrexist {
+				log.Printf("DelegationSyncher: Zone %s does not allow updates, but a KEY RRset is already published in the zone.", zd.ZoneName)
+			} else {
+				log.Printf("DelegationSyncher: Zone %s does not allow updates. Cannot publish a KEY RRset.", zd.ZoneName)
 			}
 		}
 	}
@@ -329,7 +337,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
-//	if zd.AllowUpdates {
+	//	if zd.AllowUpdates {
 	if zd.Options["allowupdates"] {
 		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
 		err := zd.PublishCsyncRR()

@@ -30,7 +30,7 @@ type NotifyResponse struct {
 
 // XXX: The whole point with the NotifierEngine is to be able to control the max rate of send notifications per
 // zone. This is not yet implemented, but this is where to do it.
-func NotifierEngine(notifyreqQ chan NotifyRequest) error {
+func Notifier(notifyreqQ chan NotifyRequest) error {
 
 	var nr NotifyRequest
 
