@@ -64,31 +64,31 @@ type ZoneData struct {
 	ParentNS         []string // names of parent nameservers
 	ParentServers    []string // addresses of parent nameservers
 	Children         map[string]*ChildDelegationData
-	Options		 map[string]bool
+	Options          map[string]bool
 	// XXX: All of the following should go into a options =  map[string]bool
-//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-//	AllowUpdates   bool // should we allow updates to this zone
-//	FoldCase       bool // should we fold case for this zone
-	Frozen         bool // if frozen no updates are allowed
-	Dirty          bool // if true zone has been modified and we need to save the zonefile
+	//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+	//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+	//	AllowUpdates   bool // should we allow updates to this zone
+	//	FoldCase       bool // should we fold case for this zone
+	Frozen bool // if frozen no updates are allowed
+	Dirty  bool // if true zone has been modified and we need to save the zonefile
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
-	Name           string `validate:"required"`
-	Type           string `validate:"required"`
-	Store          string `validate:"required"` // xfr | map | slice | reg
-	Primary        string
-	Notify         []string
-	Zonefile       string
-	Options	       []string
-//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-//	AllowUpdates   bool // should we allow updates to this zone
-//	FoldCase       bool // should we fold case for this zone
-	Frozen         bool // if true no updates are allowed; not a config param
-	Dirty          bool // if true zone has been modified; not a config param
+	Name     string `validate:"required"`
+	Type     string `validate:"required"`
+	Store    string `validate:"required"` // xfr | map | slice | reg
+	Primary  string
+	Notify   []string
+	Zonefile string
+	Options  []string
+	//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
+	//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
+	//	AllowUpdates   bool // should we allow updates to this zone
+	//	FoldCase       bool // should we fold case for this zone
+	Frozen bool // if true no updates are allowed; not a config param
+	Dirty  bool // if true zone has been modified; not a config param
 }
 
 type Ixfr struct {
@@ -115,11 +115,15 @@ type ChildDelegationData struct {
 	DelHasChanged bool      // When returned from a scanner, this indicates that a change has been detected
 	ParentSerial  uint32    // The parent serial that this data was correct for
 	Timestamp     time.Time // Time at which this data was fetched
-	Name          string
+	ChildName     string
 	RRsets        map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
 	NS_rrs        []dns.RR
 	A_glue        []dns.RR
 	AAAA_glue     []dns.RR
+	NS_rrset      *RRset
+	DS_rrset      *RRset
+	A_rrsets      []*RRset
+	AAAA_rrsets   []*RRset
 }
 
 type KeystorePost struct {
@@ -257,19 +261,19 @@ type Api struct {
 }
 
 type ZoneRefresher struct {
-	Name           string
-	ZoneType       ZoneType // primary | secondary
-	Primary        string
-	Notify         []string
-	ZoneStore      ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile       string
-	Options	       map[string]bool
-//	DelegationSync bool
-//	OnlineSigning  bool
-//	AllowUpdates   bool
-//	FoldCase       bool // should we fold case for this zone
-	Force          bool // force refresh, ignoring SOA serial
-	Response       chan RefresherResponse
+	Name      string
+	ZoneType  ZoneType // primary | secondary
+	Primary   string
+	Notify    []string
+	ZoneStore ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile  string
+	Options   map[string]bool
+	//	DelegationSync bool
+	//	OnlineSigning  bool
+	//	AllowUpdates   bool
+	//	FoldCase       bool // should we fold case for this zone
+	Force    bool // force refresh, ignoring SOA serial
+	Response chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -297,10 +301,11 @@ type TAStoreT struct {
 }
 
 type TrustAnchor struct {
-	Name      string
-	Validated bool
-	Trusted   bool
-	Dnskey    dns.DNSKEY
+	Name       string
+	Validated  bool
+	Trusted    bool
+	Dnskey     dns.DNSKEY
+	Expiration time.Time
 }
 
 type Sig0StoreT struct {

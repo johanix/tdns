@@ -123,7 +123,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
-		Options:	zd.Options,
+		Options:        zd.Options,
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -206,7 +206,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
-		Options:	zd.Options,
+		Options:        zd.Options,
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -531,18 +531,18 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 	return resp, nil
 }
 
-func (zd *ZoneData) FetchChildDelegationData(childname string) error {
+func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegationData, error) {
 	zd.Logger.Printf("FetchChildDelegationData: fetching delegation data for %s", childname)
 	if !zd.IsChildDelegation(childname) {
-		return fmt.Errorf("FetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
+		return nil, fmt.Errorf("FetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
 	}
-	if zd.Children[childname] != nil {
-		if zd.Children[childname].ParentSerial == zd.CurrentSerial || time.Since(zd.Children[childname].Timestamp) < 24*time.Hour {
-			return nil
-		}
-	}
+	//	if zd.Children[childname] != nil {
+	//		if zd.Children[childname].ParentSerial == zd.CurrentSerial || time.Since(zd.Children[childname].Timestamp) < 24*time.Hour {
+	//			return nil
+	//		}
+	//	}
 	cdd := ChildDelegationData{
-		Name:         childname,
+		ChildName:    childname,
 		ParentSerial: zd.CurrentSerial,
 		Timestamp:    time.Now(),
 		RRsets:       make(map[string]map[uint16]RRset),
@@ -553,23 +553,25 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) error {
 
 	owner, err := zd.GetOwner(childname)
 	if err != nil {
-		return fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", childname, err)
+		return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", childname, err)
 	}
 
 	cdd.RRsets[childname] = map[uint16]RRset{
 		dns.TypeNS: owner.RRtypes[dns.TypeNS],
+		dns.TypeDS: owner.RRtypes[dns.TypeDS],
 	}
+
 	cdd.NS_rrs = owner.RRtypes[dns.TypeNS].RRs
 
 	bns, err := BailiwickNS(childname, owner.RRtypes[dns.TypeNS].RRs)
 	if err != nil {
-		return fmt.Errorf("FetchChildDelegationData: error getting in bailiwick NS for %s: %v", childname, err)
+		return nil, fmt.Errorf("FetchChildDelegationData: error getting in bailiwick NS for %s: %v", childname, err)
 	}
 
 	for _, ns := range bns {
 		nsowner, err := zd.GetOwner(ns)
 		if err != nil {
-			return fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", ns, err)
+			return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", ns, err)
 		}
 		cdd.RRsets[ns] = map[uint16]RRset{
 			dns.TypeA:    nsowner.RRtypes[dns.TypeA],
@@ -580,5 +582,5 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) error {
 	}
 
 	zd.Children[childname] = &cdd
-	return nil
+	return &cdd, nil
 }

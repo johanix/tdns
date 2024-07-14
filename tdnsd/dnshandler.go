@@ -429,10 +429,11 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	// 1. Check for child delegation
 	// log.Printf("---> Checking for child delegation for %s", qname)
-	childns, v4glue, v6glue := zd.FindDelegation(qname, dnssec_ok)
-	if childns != nil {
+	cdd, v4glue, v6glue := zd.FindDelegation(qname, dnssec_ok)
+	// if childns != nil {
+	if cdd.NS_rrset != nil {
 		m.MsgHdr.Authoritative = false
-		m.Ns = append(m.Ns, childns.RRs...)
+		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
 		w.WriteMsg(m)

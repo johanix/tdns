@@ -10,7 +10,7 @@ import (
 	"log"
 	"sync"
 
-//	"github.com/gookit/goutil/dump"
+	//	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
 
@@ -27,8 +27,6 @@ type UpdateRequest struct {
 func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 	updateq := kdb.UpdateQ
 	var ur UpdateRequest
-
-	// kdb := conf.Internal.KeyDB
 
 	log.Printf("Updater: starting")
 	var wg sync.WaitGroup
@@ -185,7 +183,7 @@ func ApplyUpdateToZoneData(ur UpdateRequest) error {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is unknown", ur.ZoneName)
 	}
 
-//	if !zd.AllowUpdates {
+	// XXX: The test for allowupdates or allowchildupdates should be done in the updater, not here.
 	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("ApplyUpdateToZoneData: zone %s is not allowed to be updated", ur.ZoneName)
 	}

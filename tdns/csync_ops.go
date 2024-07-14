@@ -10,7 +10,6 @@ import (
 )
 
 func (zd *ZoneData) PublishCsyncRR() error {
-//	if !zd.AllowUpdates {
 	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("Zone %s does not allow updates. CSYNC publication not possible", zd.ZoneName)
 	}
@@ -44,7 +43,6 @@ func (zd *ZoneData) PublishCsyncRR() error {
 }
 
 func (zd *ZoneData) UnpublishCsyncRR() error {
-//	if !zd.AllowUpdates {
 	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("Zone %s does not allow updates. CSYNC unpublication not possible", zd.ZoneName)
 	}

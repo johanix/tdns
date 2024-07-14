@@ -153,6 +153,7 @@ func UpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq chan t
 	}
 
 	// send into suitable channel for pending updates
+	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
 	updateq <- tdns.UpdateRequest{
 		Cmd:       "UPDATE",
 		ZoneName:  zone,
