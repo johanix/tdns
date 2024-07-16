@@ -207,8 +207,11 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 		return fmt.Errorf("ApplyChildUpdateToZoneData: zone %s is unknown", ur.ZoneName)
 	}
 
-	// dump.P(zd)
-	// dump.P(ur.Actions)
+	zd.mu.Lock()
+	defer func() {
+		zd.mu.Unlock()
+		zd.BumpSerial()
+	}()
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -238,15 +241,6 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			zd.AddOwner(owner)
 		}
 
-		// dump.P(owner)
-
-		//		if owner == nil {
-		//			owner = &tdns.OwnerData{
-		//				Name:    ownerName,
-		//				RRtypes: make(map[uint16]RRset),
-		//			}
-		//		}
-
 		rrset, exists := owner.RRtypes[rrtype]
 		if !exists {
 			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
@@ -259,16 +253,12 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			}
 		}
 
-		// dump.P(owner.RRtypes)
-
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
-			// dump.P(rrset)
 			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
-			// dump.P(rrset)
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
 			} else {
@@ -284,7 +274,6 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			continue
 
 		case dns.ClassINET:
-			// log.Printf("ApplyUpdate: Add RR: %s", req.String())
 		default:
 			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
 		}
@@ -294,8 +283,6 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			continue
 		}
 
-		//		switch rrtype {
-		// case dns.TypeNS, dns.TypeA, dns.TypeAAAA:
 		dup := false
 		for _, oldrr := range rrset.RRs {
 			if dns.IsDuplicate(oldrr, rrcopy) {
@@ -314,9 +301,6 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
 		// dump.P(owner.RRtypes[rrtype])
 		continue
-		// default:
-		// 	log.Printf("ApplyChildUpdateToZoneData: Error: request to add %s RR", rrtypestr)
-		// }
 	}
 
 	return nil
@@ -328,8 +312,11 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 		return fmt.Errorf("ApplyZoneUpdateToZoneData: zone %s is unknown", ur.ZoneName)
 	}
 
-	// dump.P(zd)
-	// dump.P(ur.Actions)
+	zd.mu.Lock()
+	defer func() {
+		zd.mu.Unlock()
+		zd.BumpSerial()
+	}()
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -359,15 +346,6 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 			zd.AddOwner(owner)
 		}
 
-		// dump.P(owner)
-
-		//		if owner == nil {
-		//			owner = &tdns.OwnerData{
-		//				Name:    ownerName,
-		//				RRtypes: make(map[uint16]RRset),
-		//			}
-		//		}
-
 		rrset, exists := owner.RRtypes[rrtype]
 		if !exists {
 			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
@@ -380,16 +358,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 			}
 		}
 
-		// dump.P(owner.RRtypes)
-
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
-			// dump.P(rrset)
 			log.Printf("ApplyUpdateToZoneData: Removed RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
-			// dump.P(rrset)
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
 			} else {
@@ -405,7 +379,6 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 			continue
 
 		case dns.ClassINET:
-			// log.Printf("ApplyUpdate: Add RR: %s", req.String())
 		default:
 			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
 		}
@@ -415,8 +388,6 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 			continue
 		}
 
-		//switch rrtype {
-		//case dns.TypeNS, dns.TypeA, dns.TypeAAAA:
 		dup := false
 		for _, oldrr := range rrset.RRs {
 			if dns.IsDuplicate(oldrr, rrcopy) {
@@ -435,9 +406,6 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
 		// dump.P(owner.RRtypes[rrtype])
 		continue
-		// default:
-		//			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR", rrtypestr)
-		// }
 	}
 
 	return nil

@@ -189,15 +189,15 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *tdns.KeyDB) error {
-	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
 		log.Printf("ApexResponder: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
 		// if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
-		if zd.Options["onlinesigning"] && cs != nil && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, cs, keyrr)
+		if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			err := tdns.SignRRset(&rrset, qname, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -305,15 +305,15 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 
 func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *tdns.KeyDB) error {
 
-	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
 		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
 		// if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
-		if zd.Options["onlinesigning"] && cs != nil && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, cs, keyrr)
+		if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			err := tdns.SignRRset(&rrset, qname, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -466,7 +466,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				// if zd.OnlineSigning && cs != nil {
-				if zd.Options["onlinesigning"] && cs != nil {
+				if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
 					}

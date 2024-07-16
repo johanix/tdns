@@ -278,8 +278,8 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 		for _, option := range zconf.Options {
 			option := strings.ToLower(option)
 			switch option {
-			case "delegationsync", "onlinesigning", "allowupdates", "allowchildupdates",
-				"foldcase":
+			case "delegation-sync", "online-signing", "allow-updates", "allow-child-updates",
+				"fold-case", "black-lies":
 				options[option] = true
 				cleanoptions = append(cleanoptions, option)
 			default:

@@ -123,6 +123,7 @@ type OwnerData struct {
 
 type RRset struct {
 	Name   string
+	RRtype uint16
 	RRs    []dns.RR
 	RRSIGs []dns.RR
 }

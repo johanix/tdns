@@ -312,7 +312,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	return resp, nil
 }
 
-func (kdb *KeyDB) GetSig0Key(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.KEY, error) {
+func (kdb *KeyDB) GetSig0PrivKey(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.KEY, error) {
 	const (
 		fetchSig0PrivKeySql = `
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
@@ -378,7 +378,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	return &k, &cs, keyrr, err
 }
 
-func (kdb *KeyDB) GetDnssecKey(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.DNSKEY, error) {
+func (kdb *KeyDB) xxxGetDnssecPrivKey(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.DNSKEY, error) {
 	const (
 		fetchDnssecPrivKeySql = `
 SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
@@ -390,7 +390,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 	var keyrr *dns.DNSKEY
 
 	if data, ok := kdb.DnssecCache[zonename]; ok {
-		return &data.K, &data.CS, &data.KeyRR, nil
+		return &data.KSKs[0].K, &data.KSKs[0].CS, &data.KSKs[0].KeyRR, nil
 	}
 
 	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename)
@@ -434,12 +434,109 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 
 	keyrr = rr.(*dns.DNSKEY)
 
-	kdb.DnssecCache[zonename] = &DnssecKeyCache{
-		K:     k,
-		CS:    cs,
-		RR:    rr,
-		KeyRR: *keyrr,
+	kdb.DnssecCache[zonename] = &DnssecActiveKeys{
+		KSKs: []*DnssecKeyCache{
+			&DnssecKeyCache{
+				K:     k,
+				CS:    cs,
+				RR:    rr,
+				KeyRR: *keyrr,
+			},
+		},
 	}
 
 	return &k, &cs, keyrr, err
+}
+
+// func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.DNSKEY, error) {
+func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*DnssecActiveKeys, error) {
+	const (
+		fetchDnssecPrivKeySql = `
+SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
+	)
+
+	var cs crypto.Signer
+	var k crypto.PrivateKey
+	var rr dns.RR
+	var keyrr *dns.DNSKEY
+
+	if data, ok := kdb.DnssecCache[zonename]; ok {
+		return data, nil
+	}
+
+	var dak DnssecActiveKeys
+
+	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename)
+	if err != nil {
+		log.Printf("Error from kdb.Query(%s, %s): %v", fetchDnssecPrivKeySql, zonename, err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var algorithm, privatekey, keyrrstr string
+	var flags, keyid int
+
+	var keyfound bool
+
+	for rows.Next() {
+		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				log.Printf("No active DNSSEC key found for zone %s", zonename)
+				return nil, err
+			}
+			log.Printf("Error from rows.Scan(): %v", err)
+			return nil, err
+		}
+		keyfound = true
+		k, cs, rr, _, _, err := PrepareKey(privatekey, keyrrstr, algorithm)
+		if err != nil {
+			log.Printf("Error from tdns.PrepareKey(): %v", err)
+			return nil, err
+
+		}
+		dkc := &DnssecKeyCache{
+			K:     k,
+			CS:    cs,
+			RR:    rr,
+			KeyRR: *keyrr,
+		}
+		if (flags & 0x0100) != 0 {
+			dak.KSKs = append(dak.KSKs, dkc)
+		} else {
+			dak.ZSKs = append(dak.ZSKs, dkc)
+		}
+	}
+
+	if !keyfound {
+		log.Printf("No active DNSSEC key found for zone %s", zonename)
+		return nil, sql.ErrNoRows
+	}
+
+	// No KSK found is a hard error
+	if len(dak.KSKs) == 0 {
+		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
+		return nil, sql.ErrNoRows
+	}
+
+	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
+	if len(dak.ZSKs) == 0 {
+		dak.ZSKs = append(dak.ZSKs, dak.KSKs[0])
+	}
+
+	if Globals.Debug {
+		log.Printf("GetDnssecKey(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
+	}
+
+	keyrr = rr.(*dns.DNSKEY)
+
+	// kdb.DnssecCache[zonename] = &DnssecKeyCache{
+	//		K:     k,
+	//		CS:    cs,
+	//		RR:    rr,
+	//		KeyRR: *keyrr,
+	//	}
+	kdb.DnssecCache[zonename] = &dak
+
+	return &dak, err
 }

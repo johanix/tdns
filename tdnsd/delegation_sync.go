@@ -46,7 +46,7 @@ func DelegationSyncher(conf *Config) error {
 		if zd.Options["allowupdates"] {
 			if !keyrrexist {
 				log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
-				_, _, keyrr, err = kdb.GetSig0Key(zd.ZoneName)
+				_, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
 				if err != nil {
 					log.Printf("DelegationSyncher: Error from kdb.GetSig0Key(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 					continue
@@ -65,15 +65,18 @@ func DelegationSyncher(conf *Config) error {
 
 			if keyrrexist && zd.Options["onlinesigning"] {
 				log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
-				_, cs, dnskeyrr, err = kdb.GetDnssecKey(zd.ZoneName)
+				// _, cs, dnskeyrr, err = kdb.GetDnssecPrivKey(zd.ZoneName)
+				dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 				if err != nil {
-					log.Printf("DelegationSyncher: Error from kdb.GetDnssecKey(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+					log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 					continue
 				}
+				cs = &dak.ZSKs[0].CS
+				dnskeyrr = &dak.ZSKs[0].KeyRR
 				// apex, _ := zd.GetOwner(zd.ZoneName)
 				rrset := apex.RRtypes[dns.TypeKEY]
 				// dump.P(rrset)
-				err := tdns.SignRRset(&rrset, zd.ZoneName, cs, dnskeyrr)
+				err = tdns.SignRRset(&rrset, zd.ZoneName, cs, dnskeyrr)
 				if err != nil {
 					log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 				} else {
@@ -293,7 +296,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 
 	// 3. Fetch the SIG(0) key from the keystore
 	log.Printf("SyncZoneDelegationViaUpdate: Fetching the private key for %s", zd.ZoneName)
-	_, cs, keyrr, err := kdb.GetSig0Key(zd.ZoneName)
+	_, cs, keyrr, err := kdb.GetSig0PrivKey(zd.ZoneName)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0Key(%s): %v", zd.ZoneName, err)
 		return "", 0, err
@@ -351,11 +354,14 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		if zd.Options["onlinesigning"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
-			_, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecKey(zd.ZoneName)
+			// _, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecPrivKey(zd.ZoneName)
+			dak, err := conf.Internal.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
 			if err != nil {
 				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
 			} else {
-				if cs != nil {
+				if len(dak.ZSKs) > 0 {
+					cs := &dak.ZSKs[0].CS
+					keyrr := &dak.ZSKs[0].KeyRR
 					err := tdns.SignRRset(&rrset, zd.ZoneName, cs, keyrr)
 					if err != nil {
 						log.Printf("Error signing %s: %v", zd.ZoneName, err)

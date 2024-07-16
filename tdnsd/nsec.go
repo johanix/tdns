@@ -112,14 +112,15 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
-	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
-		log.Printf("GenerateNsecChain: failed to get dnssec key for zone %s", zd.ZoneName)
+		log.Printf("GenerateNsecChain: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		return err
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
-		if zd.Options["onlinesigning"] && cs != nil {
-			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
+		if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 {
+			err := tdns.SignRRset(&rrset, zone, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
 			if err != nil {
 				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
 			} else {
@@ -164,7 +165,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 				tmap = append(tmap, int(rrt))
 			}
 		}
-		if hasRRSIG || (zd.Options["onlinesigning"] && cs != nil) {
+		if hasRRSIG || (zd.Options["onlinesigning"] && len(dak.KSKs) > 0) {
 			tmap = append(tmap, int(dns.TypeRRSIG))
 		}
 
@@ -197,9 +198,10 @@ func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	if !zd.Options["allowupdates"] {
 		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
-	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
-		log.Printf("GenerateNsecChain: failed to get dnssec key for zone %s", zd.ZoneName)
+		log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		return err
 	}
 
 	err = GenerateNsecChain(zd, kdb)
@@ -208,8 +210,9 @@ func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
-		if zd.Options["onlinesigning"] && cs != nil {
-			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
+		if zd.Options["onlinesigning"] {
+			var err error
+			err = tdns.SignRRset(&rrset, zone, &dak.KSKs[0].CS, &dak.KSKs[0].KeyRR)
 			if err != nil {
 				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			} else {

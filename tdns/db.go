@@ -97,6 +97,11 @@ type DnssecKeyCache struct {
 	KeyRR dns.DNSKEY
 }
 
+type DnssecActiveKeys struct {
+	KSKs []*DnssecKeyCache
+	ZSKs []*DnssecKeyCache
+}
+
 type Tx struct {
 	*sql.Tx
 	KeyDB   *KeyDB
@@ -150,7 +155,7 @@ type KeyDB struct {
 	DB          *sql.DB
 	mu          sync.Mutex
 	Sig0Cache   map[string]*Sig0KeyCache
-	DnssecCache map[string]*DnssecKeyCache // map[zonename+ksk|zsk]*dns.DNSKEY
+	DnssecCache map[string]*DnssecActiveKeys // map[zonename]*DnssecActiveKeys
 	Ctx         string
 	UpdateQ     chan UpdateRequest
 }
@@ -232,7 +237,7 @@ func dbSetupTables(db *sql.DB) bool {
 func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 	// dbfile := viper.GetString("db.file")
 	if dbfile == "" {
-	   return nil, fmt.Errorf("error: DB filename unspecified")
+		return nil, fmt.Errorf("error: DB filename unspecified")
 	}
 	fmt.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
 	if err := os.Chmod(dbfile, 0664); err != nil {
@@ -256,7 +261,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 	return &KeyDB{
 		DB:          db,
 		Sig0Cache:   make(map[string]*Sig0KeyCache),
-		DnssecCache: make(map[string]*DnssecKeyCache),
+		DnssecCache: make(map[string]*DnssecActiveKeys),
 		UpdateQ:     make(chan UpdateRequest),
 	}, nil
 }
