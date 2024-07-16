@@ -286,7 +286,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
 	syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
 
-	m, err := tdns.CreateUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
+	m, err := tdns.CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
 	if err != nil {
 		return "", 0, err
 	}
@@ -320,7 +320,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	log.Printf("SyncZoneDelegationViaUpdate: Sending the signed update to %s (addresses: %v) port %d",
 		dsynctarget.Name, dsynctarget.Addresses, dsynctarget.Port)
 
-	rcode, err := tdns.SendUpdate(smsg, zd.Parent, dsynctarget)
+	rcode, err := tdns.SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", zd.Parent, err)
 		return "", 0, err

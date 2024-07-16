@@ -65,30 +65,46 @@ type ZoneData struct {
 	ParentServers    []string // addresses of parent nameservers
 	Children         map[string]*ChildDelegationData
 	Options          map[string]bool
-	// XXX: All of the following should go into a options =  map[string]bool
-	//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-	//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-	//	AllowUpdates   bool // should we allow updates to this zone
-	//	FoldCase       bool // should we fold case for this zone
-	Frozen bool // if frozen no updates are allowed
-	Dirty  bool // if true zone has been modified and we need to save the zonefile
+	UpdatePolicy     UpdatePolicy
+	KeyDB            *KeyDB
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
-	Name     string `validate:"required"`
-	Type     string `validate:"required"`
-	Store    string `validate:"required"` // xfr | map | slice | reg
-	Primary  string
-	Notify   []string
-	Zonefile string
-	Options  []string
-	//	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-	//	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-	//	AllowUpdates   bool // should we allow updates to this zone
-	//	FoldCase       bool // should we fold case for this zone
-	Frozen bool // if true no updates are allowed; not a config param
-	Dirty  bool // if true zone has been modified; not a config param
+	Name         string `validate:"required"`
+	Type         string `validate:"required"`
+	Store        string `validate:"required"` // xfr | map | slice | reg
+	Primary      string
+	Notify       []string
+	Zonefile     string
+	Options      []string
+	Frozen       bool // true if zone is frozen; not a config param
+	Dirty        bool // true if zone has been modified; not a config param
+	UpdatePolicy UpdatePolicyConf
+}
+
+type UpdatePolicyConf struct {
+	Child struct {
+		Type         string // "selfsub" | "self"
+		RRtypes      []string
+		KeyBootstrap string
+	}
+	Zone struct {
+		Type    string // "selfsub" | "self" | "sub" | ...
+		RRtypes []string
+	}
+	Validate bool
+}
+type UpdatePolicy struct {
+	Child    UpdatePolicyDetail
+	Zone     UpdatePolicyDetail
+	Validate bool
+}
+
+type UpdatePolicyDetail struct {
+	Type         string // "selfsub" | "self"
+	RRtypes      map[uint16]bool
+	KeyBootstrap string
 }
 
 type Ixfr struct {
@@ -272,8 +288,9 @@ type ZoneRefresher struct {
 	//	OnlineSigning  bool
 	//	AllowUpdates   bool
 	//	FoldCase       bool // should we fold case for this zone
-	Force    bool // force refresh, ignoring SOA serial
-	Response chan RefresherResponse
+	UpdatePolicy UpdatePolicy
+	Force        bool // force refresh, ignoring SOA serial
+	Response     chan RefresherResponse
 }
 
 type RefresherResponse struct {

@@ -317,34 +317,75 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error
 // If key not found *TrustAnchor is nil
 func (zd *ZoneData) FindSig0key(signer string, keyid uint16) (*Sig0Key, error) {
 	mapkey := fmt.Sprintf("%s::%d", signer, keyid)
-	sk, ok := Sig0Store.Map.Get(mapkey)
-	if !ok {
-		zd.Logger.Printf("FindSig0key: Request for KEY with id %s: not found, will fetch.", mapkey)
-		rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
-		if err != nil {
-			return nil, err
-		}
-		if rrset == nil {
-			return nil, fmt.Errorf("SIG(0) key %s not found", signer)
-		}
-		valid, err := zd.ValidateRRset(rrset, true)
-		if err != nil {
-			return nil, err
-		}
-		zd.Logger.Printf("FindSig0key: Found %s KEY RRset (validated)", signer)
-		for _, rr := range rrset.RRs {
-			if keyrr, ok := rr.(*dns.KEY); ok {
-				Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()),
-					Sig0Key{
-						Name:      signer,
-						Validated: valid,
-						Key:       *keyrr,
-					})
-			}
-		}
-		sk, ok = Sig0Store.Map.Get(mapkey)
+
+	// 1. Try to fetch the key from the Sig0Store cache
+	if sk, ok := Sig0Store.Map.Get(mapkey); ok {
+		return &sk, nil
 	}
-	return &sk, nil
+
+	const (
+		fetchsig0trustanchor = "SELECT validated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
+	)
+
+	// 2. Try to fetch the key from the Sig0TrustStore database
+	rows, err := zd.KeyDB.Query(fetchsig0trustanchor, signer, keyid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var validated, trusted bool
+		var keyrrstr string
+		err = rows.Scan(&validated, &trusted, &keyrrstr)
+		if err != nil {
+			return nil, err
+		}
+		rr, err := dns.NewRR(keyrrstr)
+		if err != nil {
+			return nil, err
+		}
+		keyrr, ok := rr.(*dns.KEY)
+		if !ok {
+			return nil, fmt.Errorf("FindSig0Key: Error: SIG(0) key %s in KeyDB is not a KEY RR", signer)
+		}
+		sk := Sig0Key{
+			Name:      signer,
+			Validated: validated,
+			Trusted:   trusted,
+			Key:       *keyrr,
+		}
+		Sig0Store.Map.Set(mapkey, sk)
+		return &sk, nil
+	}
+
+	// 3. Try to fetch the key by looking up and validating the KEY RRset via DNS
+	zd.Logger.Printf("FindSig0key: Request for KEY with id %s: not found, will fetch.", mapkey)
+	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
+	if err != nil {
+		return nil, err
+	}
+	if rrset == nil {
+		return nil, fmt.Errorf("SIG(0) key %s not found", signer)
+	}
+	valid, err := zd.ValidateRRset(rrset, true)
+	if err != nil {
+		return nil, err
+	}
+	zd.Logger.Printf("FindSig0key: Found %s KEY RRset (validated)", signer)
+	for _, rr := range rrset.RRs {
+		if keyrr, ok := rr.(*dns.KEY); ok {
+			sk := Sig0Key{
+				Name:      signer,
+				Validated: valid,
+				Key:       *keyrr,
+			}
+			Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()), sk)
+			return &sk, nil
+		}
+	}
+
+	return nil, fmt.Errorf("SIG(0) key %s not found", signer)
 }
 
 // XXX: This should not be a method of ZoneData, but rather a function.

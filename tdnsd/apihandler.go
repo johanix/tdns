@@ -204,9 +204,9 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
 				} else {
-					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Dirty, zd.Frozen)
-					zconf.Dirty = zd.Dirty
-					zconf.Frozen = zd.Frozen
+					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
+					zconf.Dirty = zd.Options["dirty"]
+					zconf.Frozen = zd.Options["frozen"]
 					conf.Zones[zname] = zconf
 				}
 			}

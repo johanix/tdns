@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
@@ -96,23 +97,26 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					//					}
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
+					dump.P(zr.UpdatePolicy)
 					zonedata = &tdns.ZoneData{
-						ZoneName:         zone,
-						ZoneStore:        zr.ZoneStore,
-						Logger:           log.Default(),
-						Upstream:         zr.Primary,
-						Downstreams:      zr.Notify,
-						Zonefile:         zr.Zonefile,
-						ZoneType:         zr.ZoneType,
-						Options:	  zr.Options,
+						ZoneName:    zone,
+						ZoneStore:   zr.ZoneStore,
+						Logger:      log.Default(),
+						Upstream:    zr.Primary,
+						Downstreams: zr.Notify,
+						Zonefile:    zr.Zonefile,
+						ZoneType:    zr.ZoneType,
+						Options:     zr.Options,
 						// DelegationSync:   zr.DelegationSync,
 						// OnlineSigning:    zr.OnlineSigning,
 						// AllowUpdates:     zr.AllowUpdates,
 						// FoldCase:         zr.FoldCase,
+						UpdatePolicy:     zr.UpdatePolicy,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
+						KeyDB:            conf.Internal.KeyDB,
 						// XXX: I think this is going away:
-						Children:         map[string]*tdns.ChildDelegationData{},
+						Children: map[string]*tdns.ChildDelegationData{},
 					}
 					updated, err = zonedata.Refresh(zr.Force)
 					if err != nil {

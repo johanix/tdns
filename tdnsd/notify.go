@@ -19,7 +19,7 @@ func DnsNotifyResponderEngine(conf *Config) error {
 
 	log.Printf("*** DnsNotifyResponderEngine: starting")
 
-	var dhr DnsHandlerRequest
+	var dhr tdns.DnsHandlerRequest
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -40,24 +40,20 @@ func DnsNotifyResponderEngine(conf *Config) error {
 // func NotifyResponder(w dns.ResponseWriter, r *dns.Msg, qname string, ntype uint16,
 //
 //	zonech chan tdns.ZoneRefresher) error {
-func NotifyResponder(dhr *DnsHandlerRequest, zonech chan tdns.ZoneRefresher, scannerq chan tdns.ScanRequest) error {
+func NotifyResponder(dhr *tdns.DnsHandlerRequest, zonech chan tdns.ZoneRefresher, scannerq chan tdns.ScanRequest) error {
 
 	qname := dhr.Qname
 	ntype := dhr.Msg.Question[0].Qtype
 
-	// log.Printf("Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
-	//	err := NotifyResponder(w, r, qname, ntype, zonech)
-	//	if err != nil {
-	//	   log.Printf("Error from NotifyResponder: %v", err)
-	//	}
+	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
 
 	m := new(dns.Msg)
 	m.SetReply(dhr.Msg)
 
 	// Let's see if we can find the zone
 	zd, _ := tdns.FindZone(qname)
-	if zd == nil || !zd.IsChildDelegation(qname) {
-		log.Printf("Received Notify for unknown zone %s. Ignoring.", qname)
+	if zd == nil && !zd.IsChildDelegation(qname) {
+		log.Printf("NotifyResponder: Received Notify for unknown zone %s. Ignoring.", qname)
 		m := new(dns.Msg)
 		m.SetRcode(dhr.Msg, dns.RcodeRefused)
 		dhr.ResponseWriter.WriteMsg(m)

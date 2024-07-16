@@ -22,9 +22,9 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 	//		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", pzone, parpri, err)
 	//	}
 
-	msg, err := CreateUpdate(pzone, Globals.Zonename, adds, removes)
+	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		log.Fatalf("Error from CreateUpdate(%s): %v", pzone, err)
+		log.Fatalf("Error from CreateChildUpdate(%s): %v", pzone, err)
 	}
 
 	keyrr, cs, err := LoadSigningKey(Globals.Sig0Keyfile)
@@ -45,7 +45,7 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 		fmt.Printf("Keyfile not specified, not signing message.\n")
 	}
 
-	rcode, err := SendUpdate(smsg, pzone, target)
+	rcode, err := SendUpdate(smsg, pzone, target.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", target, err)
 		return err
@@ -56,24 +56,24 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 }
 
 // Note: the target.Addresses must already be in addr:port format.
-func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
+// func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
+func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
 	if zonename == "." {
 		log.Printf("Error: zone name not specified. Terminating.\n")
 		return 0, fmt.Errorf("zone name not specified")
 	}
 
-	log.Printf("SendUpdate(%s, %s) target has addresses: %v", zonename, target.Name, target.Addresses)
+	log.Printf("SendUpdate(%s) target has %d addresses: %v", zonename, len(addrs), addrs)
 
-	for _, dst := range target.Addresses {
+	for _, dst := range addrs {
 		if Globals.Verbose {
-			log.Printf("Sending DNS UPDATE for parent zone %s to %s on address %s:%d\n", zonename, target.Name, dst, target.Port)
+			log.Printf("Sending DNS UPDATE for zone %s to %s\n", zonename, dst)
 		}
 
 		if Globals.Debug {
 			log.Printf("Sending Update:\n%s\n", msg.String())
 		}
 
-		// dst = net.JoinHostPort(dst, fmt.Sprintf("%d", target.Port))
 		res, err := dns.Exchange(msg, dst)
 		if err != nil {
 			log.Printf("Error from dns.Exchange(%s, UPDATE): %v. Trying next address", dst, err)
@@ -94,10 +94,13 @@ func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error)
 			return res.Rcode, nil
 		}
 	}
-	return 0, fmt.Errorf("Error: none of the targets %v were reachable", target.Addresses)
+	return 0, fmt.Errorf("Error: none of the target addresses %v were reachable", addrs)
 }
 
-func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
+// Parent is the zone to apply the update to.
+// XXX: This is to focused on creating updates for child delegation info. Need a more general
+// function that can create updates for other things too.
+func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("Error: parent zone name not specified. Terminating.")
 	}
@@ -111,6 +114,7 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error
 	m.Remove(removes)
 	m.Insert(adds)
 
+	// XXX: This logic is ok, but it should be in the caller, not here.
 	for _, nsr := range removes {
 		if ns, ok := nsr.(*dns.NS); ok { // if removing an NS, then also remove any glue
 			if strings.HasSuffix(ns.Ns, child) {
@@ -122,6 +126,23 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error
 			}
 		}
 	}
+
+	if Globals.Debug {
+		fmt.Printf("Creating update msg:\n%s\n", m.String())
+	}
+	return m, nil
+}
+
+func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
+	if zone == "." || zone == "" {
+		return nil, fmt.Errorf("CreateUpdate: Error: zone to update not specified. Terminating.")
+	}
+
+	m := new(dns.Msg)
+	m.SetUpdate(zone)
+
+	m.Remove(removes)
+	m.Insert(adds)
 
 	if Globals.Debug {
 		fmt.Printf("Creating update msg:\n%s\n", m.String())

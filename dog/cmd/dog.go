@@ -39,9 +39,6 @@ var rootCmd = &cobra.Command{
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				server = arg[1:]
-				if tdns.Globals.Verbose {
-					fmt.Printf("*** Will send remaining queries to server %s\n", server)
-				}
 				continue
 			}
 
@@ -83,10 +80,14 @@ var rootCmd = &cobra.Command{
 
 		server = net.JoinHostPort(server, port)
 
+		if tdns.Globals.Verbose {
+			fmt.Printf("*** Will send %s to server %s\n", options["opcode"], server)
+		}
+
 		for _, qname := range cleanArgs {
 			qname = dns.Fqdn(qname)
 			if tdns.Globals.Verbose {
-				fmt.Printf("*** Querying for %s IN %s:\n", qname, dns.TypeToString[rrtype])
+				fmt.Printf("*** %s for %s IN %s:\n", options["opcode"], qname, dns.TypeToString[rrtype])
 			}
 
 			switch rrtype {
@@ -99,6 +100,8 @@ var rootCmd = &cobra.Command{
 				if options["opcode"] == "NOTIFY" {
 					m.SetNotify(qname)
 					m.Question = []dns.Question{dns.Question{Name: qname, Qtype: rrtype, Qclass: dns.ClassINET}}
+				} else if options["opcode"] == "UPDATE" {
+					m.SetUpdate(qname)
 				} else {
 					m.SetQuestion(qname, rrtype)
 				}

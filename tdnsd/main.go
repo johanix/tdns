@@ -135,8 +135,8 @@ func main() {
 
 	conf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
 	conf.Internal.UpdateQ = kdb.UpdateQ
-	conf.Internal.DnsUpdateQ = make(chan DnsHandlerRequest, 100)
-	conf.Internal.DnsNotifyQ = make(chan DnsHandlerRequest, 100)
+	conf.Internal.DnsUpdateQ = make(chan tdns.DnsHandlerRequest, 100)
+	conf.Internal.DnsNotifyQ = make(chan tdns.DnsHandlerRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
 
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
@@ -290,17 +290,68 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 		zones[zname] = zconf
 		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 
+		log.Printf("ParseZones: zone %s incoming update policy: %v", zname, zconf.UpdatePolicy)
+
+		for _, ptype := range []string{zconf.UpdatePolicy.Child.Type, zconf.UpdatePolicy.Zone.Type} {
+			switch ptype {
+			case "selfsub", "self":
+				// all ok, we know these
+			case "none", "":
+				// these are also ok, but imply that no updates are allowed
+				options["allowupdates"] = false
+				options["allowchildupdates"] = false
+			default:
+				log.Fatalf("Error: zone %s has an unknown update policy type: \"%s\". Terminating.", zname, ptype)
+			}
+		}
+
+		var rrt uint16
+		var exist bool
+		childrrtypes := map[uint16]bool{}
+		for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
+			rrtype = strings.ToUpper(rrtype)
+			if rrt, exist = dns.StringToType[rrtype]; exist {
+				childrrtypes[rrt] = true
+			}
+		}
+
+		zonerrtypes := map[uint16]bool{}
+		for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
+			rrtype = strings.ToUpper(rrtype)
+			if rrt, exist = dns.StringToType[rrtype]; exist {
+				zonerrtypes[rrt] = true
+			}
+		}
+
+		//			switch rrt {
+		//			case "A", "AAAA", "MX", "TXT", "NS", "DS", "KEY":
+		//				rrtypes[dns.StringToType[rrt]] = true
+		//			default:
+		//				log.Fatalf("Zone %s: Unsupported RRtype in update policy: \"%s\"", zname, rrt)
+		//			}
+
+		policy := tdns.UpdatePolicy{
+			Child: tdns.UpdatePolicyDetail{
+				Type:         zconf.UpdatePolicy.Child.Type,
+				RRtypes:      childrrtypes,
+				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
+			},
+			Zone: tdns.UpdatePolicyDetail{
+				Type:    zconf.UpdatePolicy.Zone.Type,
+				RRtypes: zonerrtypes,
+			},
+		}
+		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
+
 		zrch <- tdns.ZoneRefresher{
-			Name:      zname,
-			ZoneType:  zonetype, // primary | secondary
-			Primary:   zconf.Primary,
-			ZoneStore: zonestore,
-			Notify:    zconf.Notify,
-			Zonefile:  zconf.Zonefile,
-			Options:   options,
-			// DelegationSync: zconf.DelegationSync,
-			// OnlineSigning:  zconf.OnlineSigning,
-			// AllowUpdates:   zconf.AllowUpdates,
+			Name:         zname,
+			ZoneType:     zonetype, // primary | secondary
+			Primary:      zconf.Primary,
+			ZoneStore:    zonestore,
+			Notify:       zconf.Notify,
+			Zonefile:     zconf.Zonefile,
+			Options:      options,
+			UpdatePolicy: policy,
 		}
 	}
 

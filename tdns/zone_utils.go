@@ -348,6 +348,19 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	return &owner, nil
 }
 
+func (zd *ZoneData) AddOwner(owner *OwnerData) {
+	zd.mu.Lock()
+	switch zd.ZoneStore {
+	case SliceZone:
+		zd.Owners = append(zd.Owners, *owner)
+		zd.OwnerIndex.Set(owner.Name, len(zd.Owners)-1)
+
+	case MapZone:
+		zd.Data.Set(owner.Name, *owner)
+	}
+	zd.mu.Unlock()
+}
+
 func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 	var names []string
 	switch zd.ZoneStore {
@@ -371,6 +384,7 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 	return names, nil
 }
 
+// XXX: Is qname the name of a zone cut for a child zone?
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
 	zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
 		qname, zd.ZoneName)
@@ -475,6 +489,8 @@ func IsIxfr(rrs []dns.RR) bool {
 	return false
 }
 
+// Find the closest enclosing auth zone that has qname below it (qname is either auth data
+// in the zone or located further down in a child zone that we are not auth for).
 // Return zone, case fold used to match
 func FindZone(qname string) (*ZoneData, bool) {
 	var tzone string

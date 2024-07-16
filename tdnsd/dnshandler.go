@@ -9,6 +9,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -62,13 +63,13 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		switch r.Opcode {
 		case dns.OpcodeNotify:
 			// A DNS NOTIFY may trigger time consuming outbound queries
-			dnsnotifyq <- DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsnotifyq <- tdns.DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeUpdate:
 			// A DNS Update may trigger time consuming outbound queries
-			dnsupdateq <- DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsupdateq <- tdns.DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
@@ -430,8 +431,11 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	// 1. Check for child delegation
 	// log.Printf("---> Checking for child delegation for %s", qname)
 	cdd, v4glue, v6glue := zd.FindDelegation(qname, dnssec_ok)
-	// if childns != nil {
-	if cdd.NS_rrset != nil {
+
+	dump.P(cdd)
+
+	// If there is delegation data and an NS RRset is present, return a referral
+	if cdd != nil && cdd.NS_rrset != nil {
 		m.MsgHdr.Authoritative = false
 		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 		m.Extra = append(m.Extra, v4glue.RRs...)

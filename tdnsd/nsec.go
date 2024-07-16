@@ -50,11 +50,11 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 			return resp, fmt.Errorf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 		}
 
-		if zd.Frozen {
+		if zd.Options["frozen"] {
 			return resp, fmt.Errorf("FreezeZone: zone %s is already frozen", zd.ZoneName)
 		}
 
-		zd.Frozen = true
+		zd.Options["frozen"] = true
 		resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
 		return resp, nil
 
@@ -62,10 +62,10 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 		if !zd.Options["allowupdates"] || !zd.Options["allowchildupdates"] {
 			return resp, fmt.Errorf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
 		}
-		if !zd.Frozen {
+		if !zd.Options["frozen"] {
 			return resp, fmt.Errorf("ThawZone: zone %s is not frozen", zd.ZoneName)
 		}
-		zd.Frozen = false
+		zd.Options["frozen"] = false
 		resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
 		return resp, nil
 

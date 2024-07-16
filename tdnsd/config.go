@@ -64,8 +64,8 @@ type InternalConf struct {
 	ValidatorCh     chan tdns.ValidatorRequest
 	ScannerQ        chan tdns.ScanRequest
 	UpdateQ         chan tdns.UpdateRequest
-	DnsUpdateQ      chan DnsHandlerRequest
-	DnsNotifyQ      chan DnsHandlerRequest
+	DnsUpdateQ      chan tdns.DnsHandlerRequest
+	DnsNotifyQ      chan tdns.DnsHandlerRequest
 	DelegationSyncQ chan tdns.DelegationSyncRequest
 	NotifyQ         chan tdns.NotifyRequest
 	AuthQueryQ      chan tdns.AuthQueryRequest

@@ -60,9 +60,9 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 			Globals.ParentZone, parpri, err)
 	}
 
-	msg, err := CreateUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)
+	msg, err := CreateChildUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)
 	if err != nil {
-		return fmt.Errorf("Error from CreateUpdate(%v): %v", dsynctarget, err)
+		return fmt.Errorf("Error from CreateChildUpdate(%v): %v", dsynctarget, err)
 	}
 
 	var smsg *dns.Msg
@@ -77,11 +77,11 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
 	}
 
-	rcode, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget)
+	rcode, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
 	} else {
-		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", Globals.ParentZone, dsynctarget, dns.RcodeToString[rcode])
+		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", Globals.ParentZone, dsynctarget.Addresses, dns.RcodeToString[rcode])
 	}
 	return nil
 }
