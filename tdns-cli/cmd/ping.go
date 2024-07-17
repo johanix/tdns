@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var pings, fetches, updates int
+var pings int
 
 var PingCmd = &cobra.Command{
 	Use:   "ping",

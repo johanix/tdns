@@ -43,20 +43,6 @@ type ServiceConf struct {
 	Verbose *bool
 }
 
-type ZoneConf struct {
-	Name           string `validate:"required"`
-	Type           string `validate:"required"`
-	Store          string `validate:"required"` // xfr | map | slice | reg
-	Primary        string
-	Notify         []string
-	Zonefile       string
-	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-	AllowUpdates   bool // should we allow updates to this zone
-	Frozen         bool // if true no updates are allowed; not a config param
-	Dirty          bool // if true zone has been modified; not a config param
-}
-
 type DnsEngineConf struct {
 	Addresses []string `validate:"required"`
 }
@@ -71,16 +57,18 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	KeyDB           *KeyDB
+	KeyDB           *tdns.KeyDB
 	APIStopCh       chan struct{}
 	RefreshZoneCh   chan tdns.ZoneRefresher
-	BumpZoneCh      chan BumperData
+	BumpZoneCh      chan tdns.BumperData
 	ValidatorCh     chan tdns.ValidatorRequest
-	ScannerQ        chan ScanRequest
-	UpdateQ         chan UpdateRequest
-	DnsUpdateQ      chan DnsHandlerRequest
-	DnsNotifyQ      chan DnsHandlerRequest
+	ScannerQ        chan tdns.ScanRequest
+	UpdateQ         chan tdns.UpdateRequest
+	DnsUpdateQ      chan tdns.DnsHandlerRequest
+	DnsNotifyQ      chan tdns.DnsHandlerRequest
 	DelegationSyncQ chan tdns.DelegationSyncRequest
+	NotifyQ         chan tdns.NotifyRequest
+	AuthQueryQ      chan tdns.AuthQueryRequest
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {
@@ -110,8 +98,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 }
 
 func ValidateZones(c *Config, cfgfile string) error {
-	var config *Config
-	config = c
+	config := c
 
 	var configsections = make(map[string]interface{}, 5)
 

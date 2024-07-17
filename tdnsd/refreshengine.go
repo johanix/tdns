@@ -35,11 +35,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 	if !viper.GetBool("service.refresh") {
 		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt on Notifies.")
-		for {
-			select {
-			case <-zonerefch: // ensure that we keep reading to keep the
-				continue // channel open
-			}
+		for range zonerefch {
+			// ensure that we keep reading to keep the channel open
+			continue
 		}
 	} else {
 		log.Printf("RefreshEngine: Starting")
@@ -51,7 +49,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	//	var rc *RefreshCounter
 	var updated bool
 	var err error
-	var bd BumperData
+	var bd tdns.BumperData
 	var zr tdns.ZoneRefresher
 
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
@@ -86,14 +84,6 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
 							zone, err)
 					}
-					//					if updated {
-					//						if resetSoaSerial {
-					//							zonedata.CurrentSerial = uint32(time.Now().Unix())
-					//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-					//								zone, zonedata.CurrentSerial)
-					//						}
-					//						zonedata.NotifyDownstreams()
-					//					}
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
 					zonedata = &tdns.ZoneData{
@@ -104,11 +94,13 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams:      zr.Notify,
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
-						DelegationSync:   zr.DelegationSync,
-						OnlineSigning:    zr.OnlineSigning,
-						AllowUpdates:     zr.AllowUpdates,
+						Options:          zr.Options,
+						UpdatePolicy:     zr.UpdatePolicy,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
+						KeyDB:            conf.Internal.KeyDB,
+						// XXX: I think this is going away:
+						Children: map[string]*tdns.ChildDelegationData{},
 					}
 					updated, err = zonedata.Refresh(zr.Force)
 					if err != nil {
@@ -200,16 +192,17 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 		case bd = <-bumpch:
 			zone = bd.Zone
-			resp := BumperResponse{
-				Zone: zone,
-			}
+			resp := tdns.BumperResponse{}
+			var err error
 			if zone != "" {
 				if zd, exist := tdns.Zones.Get(zone); exist {
+					resp, err = zd.BumpSerial()
+					if err != nil {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Error bumping SOA serial for zone '%s': %v", zone, err)
+						log.Printf(resp.ErrorMsg)
+					}
 					log.Printf("RefreshEngine: bumping SOA serial for known zone '%s'", zone)
-					resp.OldSerial = zd.CurrentSerial
-					zd.CurrentSerial++
-					resp.NewSerial = zd.CurrentSerial
-
 				} else {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Request to bump serial for unknown zone '%s'", zone)

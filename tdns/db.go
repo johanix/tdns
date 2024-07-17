@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package main
+package tdns
 
 import (
 	"crypto"
@@ -14,7 +14,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 var DefaultTables = map[string]string{
@@ -84,11 +83,26 @@ UNIQUE (zonename, keyid)
 }
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
+type PrivateKeyCache struct {
+	K          crypto.PrivateKey
+	PrivateKey string // This is only used when reading from file with ReadKeyNG()
+	CS         crypto.Signer
+	RR         dns.RR
+	KeyType    uint16
+	Algorithm  uint8
+	KeyRR      dns.KEY
+	DnskeyRR   dns.DNSKEY
+}
+
 type Sig0KeyCache struct {
 	K     crypto.PrivateKey
 	CS    crypto.Signer
 	RR    dns.RR
 	KeyRR dns.KEY
+}
+
+type Sig0ActiveKeys struct {
+	Keys []*PrivateKeyCache
 }
 
 type DnssecKeyCache struct {
@@ -98,6 +112,11 @@ type DnssecKeyCache struct {
 	KeyRR dns.DNSKEY
 }
 
+type DnssecActiveKeys struct {
+	KSKs []*PrivateKeyCache
+	ZSKs []*PrivateKeyCache
+}
+
 type Tx struct {
 	*sql.Tx
 	KeyDB   *KeyDB
@@ -105,7 +124,7 @@ type Tx struct {
 }
 
 func (tx *Tx) Commit() error {
-	log.Printf("---> Committing KeyDB transaction: %s", tx.context)
+	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Commit()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
@@ -115,7 +134,7 @@ func (tx *Tx) Commit() error {
 }
 
 func (tx *Tx) Rollback() error {
-	log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
+	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Rollback()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
@@ -125,7 +144,7 @@ func (tx *Tx) Rollback() error {
 }
 
 func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
-	log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
+	// log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
 	result, err := tx.Tx.Exec(query, args...)
 	if err != nil {
 		log.Printf("<--- Error executing KeyDB Exec (%s): %v", tx.context, err)
@@ -134,7 +153,7 @@ func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 }
 
 func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
+	// log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
 	rows, err := tx.Tx.Query(query, args...)
 	if err != nil {
 		log.Printf("<--- Error executing KeyDB query (%s): %v", tx.context, err)
@@ -143,16 +162,18 @@ func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 }
 
 func (tx *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
-	log.Printf("Querying row: %s with args: %v in context: %s", query, args, tx.context)
+	// log.Printf("Querying row: %s with args: %v in context: %s", query, args, tx.context)
 	return tx.Tx.QueryRow(query, args...)
 }
 
 type KeyDB struct {
-	DB          *sql.DB
-	mu          sync.Mutex
-	Sig0Cache   map[string]*Sig0KeyCache
-	DnssecCache map[string]*DnssecKeyCache // map[zonename+ksk|zsk]*dns.DNSKEY
+	DB *sql.DB
+	mu sync.Mutex
+	// Sig0Cache   map[string]*Sig0KeyCache
+	Sig0Cache   map[string]*Sig0ActiveKeys
+	DnssecCache map[string]*DnssecActiveKeys // map[zonename]*DnssecActiveKeys
 	Ctx         string
+	UpdateQ     chan UpdateRequest
 }
 
 func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
@@ -160,7 +181,7 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 }
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
-	log.Printf("---> Beginning KeyDB transaction: %s", context)
+	// log.Printf("---> Beginning KeyDB transaction: %s", context)
 	if db.Ctx != "" {
 		log.Printf("<--- Error: KeyDB transaction already in progress: %s", db.Ctx)
 		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
@@ -213,7 +234,9 @@ func (db *KeyDB) Close() error {
 // }
 
 func dbSetupTables(db *sql.DB) bool {
-	fmt.Printf("Setting up missing tables\n")
+	if Globals.Verbose {
+		log.Printf("Setting up missing tables\n")
+	}
 
 	for t, s := range DefaultTables {
 		stmt, err := db.Prepare(s)
@@ -229,30 +252,36 @@ func dbSetupTables(db *sql.DB) bool {
 	return false
 }
 
-func NewKeyDB(force bool) *KeyDB {
-	dbfile := viper.GetString("db.file")
-	fmt.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
+func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
+	// dbfile := viper.GetString("db.file")
+	if dbfile == "" {
+		return nil, fmt.Errorf("error: DB filename unspecified")
+	}
+	if Globals.Verbose {
+		log.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
+	}
 	if err := os.Chmod(dbfile, 0664); err != nil {
-		log.Printf("NewKeyDB: Error trying to ensure that db %s is writable: %v", dbfile, err)
+		return nil, fmt.Errorf("NewKeyDB: Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}
 	db, err := sql.Open("sqlite3", dbfile)
 	if err != nil {
-		log.Fatalf("NewKeyDB: Error from sql.Open: %v", err)
+		return nil, fmt.Errorf("NewKeyDB: Error from sql.Open: %v", err)
 	}
 
 	if force {
-		for table, _ := range DefaultTables {
+		for table := range DefaultTables {
 			sqlcmd := "DROP TABLE " + table
 			_, err = db.Exec(sqlcmd)
 			if err != nil {
-				log.Fatalf("NewKeyDB: Error when dropping table %s: %v", table, err)
+				return nil, fmt.Errorf("NewKeyDB: Error when dropping table %s: %v", table, err)
 			}
 		}
 	}
 	dbSetupTables(db)
 	return &KeyDB{
 		DB:          db,
-		Sig0Cache:   make(map[string]*Sig0KeyCache),
-		DnssecCache: make(map[string]*DnssecKeyCache),
-	}
+		Sig0Cache:   make(map[string]*Sig0ActiveKeys),
+		DnssecCache: make(map[string]*DnssecActiveKeys),
+		UpdateQ:     make(chan UpdateRequest),
+	}, nil
 }

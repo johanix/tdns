@@ -24,9 +24,8 @@ import (
 	// "github.com/orcaman/concurrent-map/v2"
 )
 
-var appVersion string
+// var appVersion string
 var appMode string
-var debug, verbose bool
 
 func mainloop(conf *Config) {
 	exit := make(chan os.Signal, 1)
@@ -86,6 +85,10 @@ func main() {
 	}
 
 	err := ParseConfig(&conf)
+	if err != nil {
+		log.Fatalf("Error parsing config: %v", err)
+	}
+	kdb := conf.Internal.KeyDB
 
 	logfile := viper.GetString("log.file")
 	tdns.SetupLogging(logfile)
@@ -94,13 +97,17 @@ func main() {
 	fmt.Printf("TDNSD version %s starting.\n", appVersion)
 
 	var stopch = make(chan struct{}, 10)
+
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
-	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
+	conf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
 	go RefreshEngine(&conf, stopch)
 
 	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
 	go ValidatorEngine(&conf, stopch)
+
+	conf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
+	go tdns.Notifier(conf.Internal.NotifyQ)
 
 	err = tdns.RegisterNotifyRR()
 	if err != nil {
@@ -126,16 +133,19 @@ func main() {
 	conf.Internal.APIStopCh = apistopper
 	go APIdispatcher(&conf, apistopper)
 
-	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
-	conf.Internal.UpdateQ = make(chan UpdateRequest, 5)
-	conf.Internal.DnsUpdateQ = make(chan DnsHandlerRequest, 100)
-	conf.Internal.DnsNotifyQ = make(chan DnsHandlerRequest, 100)
+	conf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
+	conf.Internal.UpdateQ = kdb.UpdateQ
+	conf.Internal.DnsUpdateQ = make(chan tdns.DnsHandlerRequest, 100)
+	conf.Internal.DnsNotifyQ = make(chan tdns.DnsHandlerRequest, 100)
+	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
 
-	go ScannerEngine(&conf)
-	go UpdaterEngine(&conf)
-	go DnsUpdateResponderEngine(&conf)
+	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
+	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+	go kdb.UpdaterEngine(stopch)
+	go UpdateHandler(&conf)
+	go NotifyHandler(&conf)
 	go DnsEngine(&conf)
-	go DelegationSyncEngine(&conf)
+	go DelegationSyncher(&conf)
 
 	mainloop(&conf)
 }
@@ -198,12 +208,15 @@ func ParseConfig(conf *Config) error {
 	conf.Zones = zconf.Zones
 
 	fmt.Printf("YAML parsed. There are %d zones:", len(conf.Zones))
-	for key, _ := range conf.Zones {
+	for key := range conf.Zones {
 		fmt.Printf(" [%s]", key)
 	}
 	fmt.Println()
 
-	kdb := NewKeyDB(false)
+	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+	if err != nil {
+		log.Fatalf("Error from NewKeyDB: %v", err)
+	}
 	conf.Internal.KeyDB = kdb
 
 	err = kdb.LoadDnskeyTrustAnchors()
@@ -256,19 +269,93 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 			log.Fatalf("Unknown zone type: \"%s\"", zconf.Type)
 		}
 
-		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s, delegationsync: %t, onlinesigning: %t, allowupdates: %t",
-			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile, zconf.DelegationSync, zconf.OnlineSigning, zconf.AllowUpdates)
+		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
+			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
+
+		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.Options)
+		options := map[string]bool{}
+		var cleanoptions []string
+		for _, option := range zconf.Options {
+			option := strings.ToLower(option)
+			switch option {
+			case "delegation-sync", // child should attempt to sync deledation data with parent
+				"online-signing",      // zone may be signed (and re-signed) online as needed
+				"allow-updates",       // zone allows DNS UPDATEs to authoritiative data
+				"allow-child-updates", // zone allows updates to child delegation information
+				"fold-case",           // fold case of owner names to lower to make query matching case insensitive
+				"black-lies":          // zone may implement DNSSEC signed negative responses via so-called black lies.
+				options[option] = true
+				cleanoptions = append(cleanoptions, option)
+			default:
+				log.Fatalf("Zone %s: Unknown option: \"%s\"", zname, option)
+			}
+		}
+		zconf.Options = cleanoptions
+		zones[zname] = zconf
+		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
+
+		log.Printf("ParseZones: zone %s incoming update policy: %v", zname, zconf.UpdatePolicy)
+
+		for _, ptype := range []string{zconf.UpdatePolicy.Child.Type, zconf.UpdatePolicy.Zone.Type} {
+			switch ptype {
+			case "selfsub", "self":
+				// all ok, we know these
+			case "none", "":
+				// these are also ok, but imply that no updates are allowed
+				options["allowupdates"] = false
+				options["allowchildupdates"] = false
+			default:
+				log.Fatalf("Error: zone %s has an unknown update policy type: \"%s\". Terminating.", zname, ptype)
+			}
+		}
+
+		var rrt uint16
+		var exist bool
+		childrrtypes := map[uint16]bool{}
+		for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
+			rrtype = strings.ToUpper(rrtype)
+			if rrt, exist = dns.StringToType[rrtype]; exist {
+				childrrtypes[rrt] = true
+			}
+		}
+
+		zonerrtypes := map[uint16]bool{}
+		for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
+			rrtype = strings.ToUpper(rrtype)
+			if rrt, exist = dns.StringToType[rrtype]; exist {
+				zonerrtypes[rrt] = true
+			}
+		}
+
+		//			switch rrt {
+		//			case "A", "AAAA", "MX", "TXT", "NS", "DS", "KEY":
+		//				rrtypes[dns.StringToType[rrt]] = true
+		//			default:
+		//				log.Fatalf("Zone %s: Unsupported RRtype in update policy: \"%s\"", zname, rrt)
+		//			}
+
+		policy := tdns.UpdatePolicy{
+			Child: tdns.UpdatePolicyDetail{
+				Type:         zconf.UpdatePolicy.Child.Type,
+				RRtypes:      childrrtypes,
+				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
+			},
+			Zone: tdns.UpdatePolicyDetail{
+				Type:    zconf.UpdatePolicy.Zone.Type,
+				RRtypes: zonerrtypes,
+			},
+		}
+		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 
 		zrch <- tdns.ZoneRefresher{
-			Name:           zname,
-			ZoneType:       zonetype, // primary | secondary
-			Primary:        zconf.Primary,
-			ZoneStore:      zonestore,
-			Notify:         zconf.Notify,
-			Zonefile:       zconf.Zonefile,
-			DelegationSync: zconf.DelegationSync,
-			OnlineSigning:  zconf.OnlineSigning,
-			AllowUpdates:   zconf.AllowUpdates,
+			Name:         zname,
+			ZoneType:     zonetype, // primary | secondary
+			Primary:      zconf.Primary,
+			ZoneStore:    zonestore,
+			Notify:       zconf.Notify,
+			Zonefile:     zconf.Zonefile,
+			Options:      options,
+			UpdatePolicy: policy,
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -210,8 +211,12 @@ func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) 
 	if Globals.Verbose {
 		fmt.Printf("%s has the IP addresses: %v\n", dsync.Target, addrs)
 	}
+
+	for _, a := range addrs {
+		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(a, strconv.Itoa(int(dsync.Port))))
+	}
+
 	dsynctarget.Port = dsync.Port
-	dsynctarget.Addresses = addrs
 	dsynctarget.Name = dsync.Target
 
 	return &dsynctarget, nil

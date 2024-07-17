@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -34,9 +35,10 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
 			kp.Command, kp.SubCommand, r.RemoteAddr)
 
-		resp := tdns.KeystoreResponse{
-			Time: time.Now(),
-		}
+		// resp := tdns.KeystoreResponse{
+		// 	Time: time.Now(),
+		// }
+		var resp *tdns.KeystoreResponse
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
@@ -61,23 +63,31 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp, err = kdb.Sig0KeyMgmt(kp)
 			if err != nil {
 				log.Printf("Error from Sig0Mgmt(): %v", err)
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp = &tdns.KeystoreResponse{
+					Error:    true,
+					ErrorMsg: err.Error(),
+				}
 			}
 
 		case "dnssec-mgmt":
-			log.Printf("APIkeystore: received /keystore request (cmd: %s subcommand: %s)\n",
-				kp.Command, kp.SubCommand)
+			// log.Printf("APIkeystore: received /keystore request (cmd: %s subcommand: %s)\n",
+			//	kp.Command, kp.SubCommand)
 			resp, err = kdb.DnssecKeyMgmt(kp)
 			if err != nil {
 				log.Printf("Error from DnssecMgmt(): %v", err)
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp = &tdns.KeystoreResponse{
+					Error:    true,
+					ErrorMsg: err.Error(),
+				}
 			}
-			log.Printf("APIkeystore: keystore dnssec-mgmt response: %v", resp)
+			// log.Printf("APIkeystore: keystore dnssec-mgmt response: %v", resp)
 
 		default:
 			log.Printf("Unknown command: %s", kp.Command)
+			resp = &tdns.KeystoreResponse{
+				Error:    true,
+				ErrorMsg: fmt.Sprintf("Unknown command: %s", kp.Command),
+			}
 		}
 	}
 }
@@ -98,7 +108,8 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /truststore request (cmd: %s subcommand: %s) from %s.\n",
 			tp.Command, tp.SubCommand, r.RemoteAddr)
 
-		resp := tdns.TruststoreResponse{}
+		// resp := tdns.TruststoreResponse{}
+		var resp *tdns.TruststoreResponse
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
@@ -117,12 +128,18 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					Dnskey:    val.Dnskey,
 				}
 			}
-			resp.ChildDnskeys = tmp1
+			resp = &tdns.TruststoreResponse{
+				ChildDnskeys: tmp1,
+			}
 
 		case "child-sig0-mgmt":
-			resp, err = kdb.ChildSig0Mgmt(tp)
+			resp, err = kdb.Sig0TrustMgmt(tp)
 			if err != nil {
-				log.Printf("Error from ChildSig0Mgmt(): %v", err)
+				log.Printf("Error from Sig0TrustMgmt(): %v", err)
+				resp = &tdns.TruststoreResponse{
+					Error:    true,
+					ErrorMsg: err.Error(),
+				}
 			}
 
 		default:
@@ -154,11 +171,18 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				Msg:    "We're happy, but send more cookies"}
 
 		case "bump":
-			resp.Msg, err = BumpSerial(conf, cp.Zone)
+			// resp.Msg, err = BumpSerial(conf, cp.Zone)
+			zd, exist := tdns.Zones.Get(cp.Zone)
+			if !exist {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
+			}
+			br, err := zd.BumpSerial()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
+			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", cp.Zone, br.OldSerial, br.NewSerial)
 
 		case "reload":
 			log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
@@ -196,9 +220,9 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
 				} else {
-					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Dirty, zd.Frozen)
-					zconf.Dirty = zd.Dirty
-					zconf.Frozen = zd.Frozen
+					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
+					zconf.Dirty = zd.Options["dirty"]
+					zconf.Frozen = zd.Options["frozen"]
 					conf.Zones[zname] = zconf
 				}
 			}
@@ -327,6 +351,8 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				//				if owner := &zd.Owners[idx]; owner != nil {
 				owner, err := zd.GetOwner(dp.Qname)
 				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
 				}
 
 				if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
@@ -339,12 +365,15 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "lav":
 			log.Printf("tdnsd debug lookup-and-validate inquiry")
-			zd := tdns.FindZone(dp.Qname)
+			zd, folded := tdns.FindZone(dp.Qname)
 			if zd == nil {
 				resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
 					dp.Qname)
 				resp.Error = true
 			} else {
+				if folded {
+					dp.Qname = strings.ToLower(dp.Qname)
+				}
 				// tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
 				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
 				if err != nil {
@@ -414,69 +443,4 @@ func APIdispatcher(conf *Config, done <-chan struct{}) {
 	}()
 
 	log.Println("API dispatcher: unclear how to stop the http server nicely.")
-}
-
-func xxxBumpSerial(conf *Config, zone string) (string, error) {
-	var respch = make(chan BumperResponse, 1)
-	conf.Internal.BumpZoneCh <- BumperData{
-		Zone:   zone,
-		Result: respch,
-	}
-
-	resp := <-respch
-
-	if resp.Error {
-		log.Printf("BumpSerial: Error from RefreshEngine: %s", resp.ErrorMsg)
-		msg := fmt.Sprintf("Zone %s: error bumping SOA serial: %s", zone, resp.ErrorMsg)
-		return msg, fmt.Errorf(msg)
-	}
-
-	if resp.Msg == "" {
-		resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zone, resp.OldSerial, resp.NewSerial)
-	}
-	return resp.Msg, nil
-}
-
-func xxxReloadZone(conf *Config, zone string, force bool) (string, error) {
-	var respch = make(chan tdns.RefresherResponse, 1)
-	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
-		Name:     zone,
-		Response: respch,
-		Force:    force,
-	}
-
-	var resp tdns.RefresherResponse
-
-	select {
-	case resp = <-respch:
-	case <-time.After(2 * time.Second):
-		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
-	}
-
-	if resp.Error {
-		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
-		return fmt.Sprintf("Zone %s: Error reloading: %s", zone, resp.ErrorMsg),
-			fmt.Errorf("Zone %s: Error reloading: %v", zone, resp.ErrorMsg)
-	}
-
-	if resp.Msg == "" {
-		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zone)
-	}
-	return resp.Msg, nil
-}
-
-type xxxBumperData struct {
-	Zone   string
-	Result chan BumperResponse
-}
-
-type xxxBumperResponse struct {
-	Time      time.Time
-	Zone      string
-	Msg       string
-	OldSerial uint32
-	NewSerial uint32
-	Error     bool
-	ErrorMsg  string
-	Status    bool
 }

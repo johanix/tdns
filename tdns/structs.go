@@ -55,34 +55,57 @@ type ZoneData struct {
 	IncomingSerial   uint32 // SOA serial that we got from upstream
 	CurrentSerial    uint32 // SOA serial after local bumping
 	Verbose          bool
+	Debug            bool
 	IxfrChain        []Ixfr
 	Upstream         string   // primary from where zone is xfrred
 	Downstreams      []string // secondaries that we notify
 	Zonefile         string
-	DelegationSync   bool // should we (as child) attempt to sync delegation w/ parent?
 	DelegationSyncCh chan DelegationSyncRequest
 	Parent           string   // name of parentzone (if filled in)
 	ParentNS         []string // names of parent nameservers
 	ParentServers    []string // addresses of parent nameservers
-	OnlineSigning    bool     // should we sign RRSIGs for missing signatures
-	AllowUpdates     bool     // should we allow updates to this zone
-	Frozen           bool     // if frozen no updates are allowed
-	Dirty            bool     // if true zone has been modified and we need to save the zonefile
+	Children         map[string]*ChildDelegationData
+	Options          map[string]bool
+	UpdatePolicy     UpdatePolicy
+	KeyDB            *KeyDB
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
-	Name           string `validate:"required"`
-	Type           string `validate:"required"`
-	Store          string `validate:"required"` // xfr | map | slice | reg
-	Primary        string
-	Notify         []string
-	Zonefile       string
-	DelegationSync bool // should we (as child) attempt to sync delegation w/ parent?
-	OnlineSigning  bool // should we sign RRSIGs for missing signatures
-	AllowUpdates   bool // should we allow updates to this zone
-	Frozen         bool // if true no updates are allowed; not a config param
-	Dirty          bool // if true zone has been modified; not a config param
+	Name         string `validate:"required"`
+	Type         string `validate:"required"`
+	Store        string `validate:"required"` // xfr | map | slice | reg
+	Primary      string
+	Notify       []string
+	Zonefile     string
+	Options      []string
+	Frozen       bool // true if zone is frozen; not a config param
+	Dirty        bool // true if zone has been modified; not a config param
+	UpdatePolicy UpdatePolicyConf
+}
+
+type UpdatePolicyConf struct {
+	Child struct {
+		Type         string // "selfsub" | "self"
+		RRtypes      []string
+		KeyBootstrap string
+	}
+	Zone struct {
+		Type    string // "selfsub" | "self" | "sub" | ...
+		RRtypes []string
+	}
+	Validate bool
+}
+type UpdatePolicy struct {
+	Child    UpdatePolicyDetail
+	Zone     UpdatePolicyDetail
+	Validate bool
+}
+
+type UpdatePolicyDetail struct {
+	Type         string // "selfsub" | "self"
+	RRtypes      map[uint16]bool
+	KeyBootstrap string
 }
 
 type Ixfr struct {
@@ -101,22 +124,39 @@ type OwnerData struct {
 
 type RRset struct {
 	Name   string
+	RRtype uint16
 	RRs    []dns.RR
 	RRSIGs []dns.RR
 }
 
+type ChildDelegationData struct {
+	DelHasChanged bool      // When returned from a scanner, this indicates that a change has been detected
+	ParentSerial  uint32    // The parent serial that this data was correct for
+	Timestamp     time.Time // Time at which this data was fetched
+	ChildName     string
+	RRsets        map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
+	NS_rrs        []dns.RR
+	A_glue        []dns.RR
+	AAAA_glue     []dns.RR
+	NS_rrset      *RRset
+	DS_rrset      *RRset
+	A_rrsets      []*RRset
+	AAAA_rrsets   []*RRset
+}
+
 type KeystorePost struct {
-	Command    string // "sig0"
-	SubCommand string // "list" | "add" | "delete" | ...
-	Zone       string
-	Keyname    string
-	Keyid      uint16
-	Flags      uint16
-	Algorithm  uint8 // RSASHA256 | ED25519 | etc.
-	PrivateKey string
-	KeyRR      string
-	DnskeyRR   string
-	State      string
+	Command         string // "sig0"
+	SubCommand      string // "list" | "add" | "delete" | ...
+	Zone            string
+	Keyname         string
+	Keyid           uint16
+	Flags           uint16
+	Algorithm       uint8 // RSASHA256 | ED25519 | etc.
+	PrivateKey      string
+	KeyRR           string
+	DnskeyRR        string
+	PrivateKeyCache *PrivateKeyCache
+	State           string
 }
 
 type KeystoreResponse struct {
@@ -136,6 +176,8 @@ type TruststorePost struct {
 	Zone       string
 	Keyname    string
 	Keyid      int
+	Src        string // "dns" | "file"
+	KeyRR      string // RR string for key
 }
 
 type TruststoreResponse struct {
@@ -184,8 +226,8 @@ type DelegationResponse struct {
 }
 
 type DelegationSyncStatus struct {
-	Zone        string
-	Parent      string
+	ZoneName    string
+	Parent      string // use zd.Parent instead
 	Time        time.Time
 	InSync      bool
 	Status      string
@@ -238,17 +280,20 @@ type Api struct {
 }
 
 type ZoneRefresher struct {
-	Name           string
-	ZoneType       ZoneType // primary | secondary
-	Primary        string
-	Notify         []string
-	ZoneStore      ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile       string
-	DelegationSync bool
-	OnlineSigning  bool
-	AllowUpdates   bool
-	Force          bool // force refresh, ignoring SOA serial
-	Response       chan RefresherResponse
+	Name      string
+	ZoneType  ZoneType // primary | secondary
+	Primary   string
+	Notify    []string
+	ZoneStore ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile  string
+	Options   map[string]bool
+	//	DelegationSync bool
+	//	OnlineSigning  bool
+	//	AllowUpdates   bool
+	//	FoldCase       bool // should we fold case for this zone
+	UpdatePolicy UpdatePolicy
+	Force        bool // force refresh, ignoring SOA serial
+	Response     chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -276,10 +321,11 @@ type TAStoreT struct {
 }
 
 type TrustAnchor struct {
-	Name      string
-	Validated bool
-	Trusted   bool
-	Dnskey    dns.DNSKEY
+	Name       string
+	Validated  bool
+	Trusted    bool
+	Dnskey     dns.DNSKEY
+	Expiration time.Time
 }
 
 type Sig0StoreT struct {
@@ -312,11 +358,27 @@ type DnssecKey struct {
 }
 
 type DelegationSyncRequest struct {
-	Command    string
-	ZoneName   string
-	ZoneData   *ZoneData
-	Adds       []dns.RR
-	Removes    []dns.RR
+	Command  string
+	ZoneName string
+	ZoneData *ZoneData
+	// Adds       []dns.RR
+	// Removes    []dns.RR
 	SyncStatus DelegationSyncStatus
 	Response   chan DelegationSyncStatus // used for API-based requests
+}
+
+type BumperData struct {
+	Zone   string
+	Result chan BumperResponse
+}
+
+type BumperResponse struct {
+	Time      time.Time
+	Zone      string
+	Msg       string
+	OldSerial uint32
+	NewSerial uint32
+	Error     bool
+	ErrorMsg  string
+	Status    bool
 }

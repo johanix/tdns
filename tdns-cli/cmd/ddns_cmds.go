@@ -50,11 +50,11 @@ var delStatusCmd = &cobra.Command{
 		fmt.Printf("%s\n", dr.Msg)
 		if dr.SyncStatus.InSync {
 			fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
-				dr.SyncStatus.Parent, dr.SyncStatus.Zone)
+				dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
 			os.Exit(0)
 		}
 		fmt.Printf("Delegation information in parent \"%s\" is NOT in sync with child \"%s\". Changes needed:\n",
-			dr.SyncStatus.Parent, dr.SyncStatus.Zone)
+			dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
 		out := []string{"Change|RR|RR"}
 		for _, rr := range dr.SyncStatus.NsAdds {
 			out = append(out, fmt.Sprintf("ADD NS|%s", rr.String()))
@@ -218,7 +218,7 @@ func PrepArgs(required ...string) {
 			}
 			tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
 
-		case "childzone":
+		case "childzone", "child":
 			if tdns.Globals.Zonename == "" {
 				fmt.Printf("Error: name of child zone not specified\n")
 				os.Exit(1)
@@ -227,14 +227,14 @@ func PrepArgs(required ...string) {
 
 		case "zonename":
 			if tdns.Globals.Zonename == "" {
-				fmt.Printf("Error: zone name not specified\n")
+				fmt.Printf("Error: zone name not specified using --zone flag\n")
 				os.Exit(1)
 			}
 			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
 		case "keyid":
 			if keyid == 0 {
-				fmt.Printf("Error: key id not specified\n")
+				fmt.Printf("Error: key id not specified using --keyid flag\n")
 				os.Exit(1)
 			}
 
@@ -279,6 +279,12 @@ func PrepArgs(required ...string) {
 				os.Exit(1)
 			}
 
+		case "src":
+			if childSig0Src == "" {
+				fmt.Printf("Error: source not specified\n")
+				os.Exit(1)
+			}
+
 		default:
 			fmt.Printf("Unknown required argument: \"%s\"\n", arg)
 			os.Exit(1)
@@ -295,7 +301,7 @@ func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.Delegation
 	status, buf, err := api.Post("/delegation", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return dr, fmt.Errorf("Error from api post: %v", err)
+		return dr, fmt.Errorf("error from api post: %v", err)
 	}
 	if verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -303,7 +309,7 @@ func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.Delegation
 
 	err = json.Unmarshal(buf, &dr)
 	if err != nil {
-		return dr, fmt.Errorf("Error from unmarshal: %v\n", err)
+		return dr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 
 	if dr.Error {

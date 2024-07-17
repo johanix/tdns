@@ -14,13 +14,13 @@ import (
 	"github.com/miekg/dns"
 )
 
-func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandResponse, error) {
+func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandResponse, error) {
 	var resp tdns.CommandResponse
 	var err error
 
 	zd, exist := tdns.Zones.Get(cp.Zone)
 	if !exist {
-		return resp, fmt.Errorf("Zone %s is unknown", cp.Zone)
+		return resp, fmt.Errorf("zone %s is unknown", cp.Zone)
 	}
 
 	resp.Zone = zd.ZoneName
@@ -46,26 +46,26 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *KeyDB) (tdns.CommandRespons
 		}
 
 	case "freeze":
-		if !zd.AllowUpdates {
+		if !zd.Options["allow-updates"] || !zd.Options["allow-child-updates"] {
 			return resp, fmt.Errorf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 		}
 
-		if zd.Frozen {
+		if zd.Options["frozen"] {
 			return resp, fmt.Errorf("FreezeZone: zone %s is already frozen", zd.ZoneName)
 		}
 
-		zd.Frozen = true
+		zd.Options["frozen"] = true
 		resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
 		return resp, nil
 
 	case "thaw":
-		if !zd.AllowUpdates {
+		if !zd.Options["allow-updates"] || !zd.Options["allow-child-updates"] {
 			return resp, fmt.Errorf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
 		}
-		if !zd.Frozen {
+		if !zd.Options["frozen"] {
 			return resp, fmt.Errorf("ThawZone: zone %s is not frozen", zd.ZoneName)
 		}
-		zd.Frozen = false
+		zd.Options["frozen"] = false
 		resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
 		return resp, nil
 
@@ -108,18 +108,19 @@ func ShowNsecChain(zd *tdns.ZoneData) ([]string, error) {
 	return nsecrrs, nil
 }
 
-func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
-	if !zd.AllowUpdates {
+func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
+	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
-	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
-		log.Printf("GenerateNsecChain: failed to get dnssec key for zone %s", zd.ZoneName)
+		log.Printf("GenerateNsecChain: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		return err
 	}
 
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *KeyDB) tdns.RRset {
-		if zd.OnlineSigning && cs != nil {
-			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
+	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
+		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
+			err := tdns.SignRRset(&rrset, zone, dak)
 			if err != nil {
 				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
 			} else {
@@ -152,7 +153,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 		}
 		nextname = names[nextidx]
 		var tmap = []int{int(dns.TypeNSEC)}
-		for rrt, _ := range owner.RRtypes {
+		for rrt := range owner.RRtypes {
 			if rrt == dns.TypeRRSIG {
 				hasRRSIG = true
 				continue
@@ -164,7 +165,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 				tmap = append(tmap, int(rrt))
 			}
 		}
-		if hasRRSIG || (zd.OnlineSigning && cs != nil) {
+		if hasRRSIG || (zd.Options["online-signing"] && len(dak.KSKs) > 0) {
 			tmap = append(tmap, int(dns.TypeRRSIG))
 		}
 
@@ -193,13 +194,14 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *KeyDB) error {
 	return nil
 }
 
-func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
-	if !zd.AllowUpdates {
+func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
+	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
-	_, cs, keyrr, err := kdb.GetDnssecKey(zd.ZoneName)
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
-		log.Printf("GenerateNsecChain: failed to get dnssec key for zone %s", zd.ZoneName)
+		log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		return err
 	}
 
 	err = GenerateNsecChain(zd, kdb)
@@ -207,11 +209,11 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 		return err
 	}
 
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *KeyDB) tdns.RRset {
-		if zd.OnlineSigning && cs != nil {
-			err := tdns.SignRRset(&rrset, zone, cs, keyrr)
+	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
+		if zd.Options["online-signing"] {
+			err := tdns.SignRRset(&rrset, zone, dak)
 			if err != nil {
-				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, rrset.RRs[0].Header().Rrtype, zd.ZoneName)
+				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			} else {
 				log.Printf("SignZone: signed %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			}
@@ -243,8 +245,8 @@ func SignZone(zd *tdns.ZoneData, kdb *KeyDB) error {
 }
 
 func BumpSerial(conf *Config, zone string) (string, error) {
-	var respch = make(chan BumperResponse, 1)
-	conf.Internal.BumpZoneCh <- BumperData{
+	var respch = make(chan tdns.BumperResponse, 1)
+	conf.Internal.BumpZoneCh <- tdns.BumperData{
 		Zone:   zone,
 		Result: respch,
 	}
@@ -276,33 +278,17 @@ func ReloadZone(conf *Config, zone string, force bool) (string, error) {
 	select {
 	case resp = <-respch:
 	case <-time.After(2 * time.Second):
-		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("Zone %s: timeout waiting for response from RefreshEngine", zone)
+		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zone), fmt.Errorf("zone %s: timeout waiting for response from RefreshEngine", zone)
 	}
 
 	if resp.Error {
 		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
-		return fmt.Sprintf("Zone %s: Error reloading: %s", zone, resp.ErrorMsg),
-			fmt.Errorf("Zone %s: Error reloading: %v", zone, resp.ErrorMsg)
+		return fmt.Sprintf("zone %s: Error reloading: %s", zone, resp.ErrorMsg),
+			fmt.Errorf("zone %s: Error reloading: %v", zone, resp.ErrorMsg)
 	}
 
 	if resp.Msg == "" {
 		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zone)
 	}
 	return resp.Msg, nil
-}
-
-type BumperData struct {
-	Zone   string
-	Result chan BumperResponse
-}
-
-type BumperResponse struct {
-	Time      time.Time
-	Zone      string
-	Msg       string
-	OldSerial uint32
-	NewSerial uint32
-	Error     bool
-	ErrorMsg  string
-	Status    bool
 }

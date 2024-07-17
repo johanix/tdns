@@ -1,20 +1,61 @@
 zones:
-   axfr.net:
-      name:		axfr.net.
-      type:		secondary
-      store:		slice
-      primary:		master.johani.org:53
-      notify:	  	[ 127.0.0.1:5399 ]
-   stenstam.net:
-      name:		stenstam.net
-      type:		secondary
-      store:		map
-      primary:		master.johani.org:53
-      notify:		[ 127.0.0.1:5399 ]
    test.net:
       name:		test.net
       type:		primary
-      zonefile:		/etc/axfr.net/zones/test.net.zone
+      zonefile:		/etc/axfr.net/zones/test.net
       store:		map
-      primary:		master.johani.org:53
       notify:		[ 127.0.0.1:5399 ]
+      options:		[ online-signing, allow-updates, fold-case, allow-child-updates ]
+      updatepolicy:
+         child:		
+            type:		selfsub
+            rrtypes:		[ A, AAAA, NS, DS, KEY ]
+            keybootstrap:	none
+         zone:
+            type:		selfsub
+            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+   child.test.net:
+      name:		child.test.net
+      type:		primary
+      zonefile:		/etc/axfr.net/zones/child.test.net
+      store:		map
+      notify:		[ 127.0.0.1:5399 ]
+      options:		[ delegation-sync, allow-updates, online-signing ]
+      updatepolicy:
+         child:		
+            type:		selfsub
+            rrtypes:		[ A, AAAA, NS, DS, KEY ]
+            keybootstrap:	none
+         zone:
+            type:		selfsub
+            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+   uchild.p.axfr.net:
+      name:		uchild.p.axfr.net
+      type:		primary
+      zonefile:		/etc/axfr.net/zones/uchild.p.axfr.net
+      store:		map
+      notify:		[ 127.0.0.1:5399 ]
+      options:		[ delegation-sync, online-signing, allow-updates ]
+      updatepolicy:
+         child:		
+            type:		selfsub
+            rrtypes:		[ A, AAAA, NS, DS, KEY ]
+            keybootstrap:	none
+         zone:
+            type:		selfsub
+            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+   p.axfr.net:
+      name:		p.axfr.net
+      type:		primary
+      zonefile:		/etc/axfr.net/zones/p.axfr.net
+      store:		map
+      notify:		[ 127.0.0.1:5399 ]
+      options:		[ delegation-sync, online-signing, allow-updates, allow-child-updates ]
+      updatepolicy:
+         child:		
+            type:		selfsub
+            rrtypes:		[ A, AAAA, NS, DS, KEY ]
+            keybootstrap:	none
+         zone:
+            type:		selfsub
+            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]

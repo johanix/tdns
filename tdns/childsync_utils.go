@@ -13,232 +13,36 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Only used from CLI (tdns-cli ddns sync)
-// Returns unsynched bool, adds, removes []dns.RR, error
-
-// XXX: This requires lots of recursive queries and does not take advantage of the zonedata struct
-//      in tdnsd most likely having cached most of this information. Since the only reason for
-//      the tdns-cli tool is to interact with tdnsd, it really should leverage from that rather
-//      than just do everything in the CLI.
-
-func xxxChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
-
-	var differ bool
-	var adds, removes []dns.RR
-
-	if viper.GetBool("childsync.update-ns") {
-		differ, adds, removes = ComputeRRDiff(childpri, parpri,
-			Globals.Zonename, dns.TypeNS)
-	} else {
-		fmt.Printf("*** Note: configured NOT to update NS RRset.\n")
-	}
-
-	child_ns_inb, parent_ns_inb := ComputeBailiwickNS(childpri, parpri,
-		Globals.Zonename)
-	for _, ns := range child_ns_inb {
-		fmt.Printf("Child in-bailiwick NS: %s\n", ns)
-	}
-	for _, ns := range parent_ns_inb {
-		fmt.Printf("Parent in-bailiwick NS: %s\n", ns)
-	}
-
-	for _, ns := range child_ns_inb {
-		if viper.GetBool("childsync.update-a") {
-			fmt.Printf("Comparing A glue for child NS %s:\n", ns)
-			gluediff, a_glue_adds, a_glue_removes := ComputeRRDiff(childpri,
-				parpri, ns, dns.TypeA)
-			if gluediff {
-				differ = true
-				for _, rr := range a_glue_removes {
-					removes = append(removes, rr)
-				}
-				for _, rr := range a_glue_adds {
-					adds = append(adds, rr)
-				}
-			}
-		} else {
-			fmt.Printf("*** Note: configured NOT to update A glue.\n")
-		}
-
-		if viper.GetBool("childsync.update-aaaa") {
-			fmt.Printf("Comparing AAAA glue for child NS %s:\n", ns)
-			gluediff, aaaa_glue_adds, aaaa_glue_removes := ComputeRRDiff(childpri,
-				parpri, ns, dns.TypeAAAA)
-			if gluediff {
-				differ = true
-				for _, rr := range aaaa_glue_removes {
-					removes = append(removes, rr)
-				}
-				for _, rr := range aaaa_glue_adds {
-					adds = append(adds, rr)
-				}
-			}
-		} else {
-			fmt.Printf("*** Note: configured NOT to update AAAA glue.\n")
-		}
-	}
-
-	if !differ {
-		fmt.Printf("Parent delegation data is in sync with child. No update needed.\n")
-		return false, []dns.RR{}, []dns.RR{}, nil
-	}
-	return true, adds, removes, nil
-}
-
-// XXX: This is similar to ChildDelegationDataUnsynched, but instead of querying the
-//      child and parent primaries we compare the delegation data in the *ZoneData
-//      structs.
-
-// DelegationDataChanged() compares the delegation data in the old vs new *ZoneData structs.
-// Returns unsynched bool, adds, removes []dns.RR, error
-func (zd *ZoneData) xxxDelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, error) {
-	Globals.Zonename = zd.ZoneName
-
-	var differ, fakeolddata bool
-	var adds, removes []dns.RR
-
-	oldapex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, []dns.RR{}, []dns.RR{},
-			fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
-	}
-
-	if oldapex == nil {
-		if !viper.GetBool("childsync.sync-on-boot") {
-			zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
-				zd.ZoneName)
-			return false, []dns.RR{}, []dns.RR{}, nil
-		}
-		zd.Logger.Printf("Zone %s delegation sync-on-boot: faking empty old apex data", zd.ZoneName)
-		fakeolddata = true
-		oldapex = &OwnerData{
-			Name: zd.ZoneName,
-			RRtypes: map[uint16]RRset{
-				dns.TypeNS:   RRset{},
-				dns.TypeA:    RRset{},
-				dns.TypeAAAA: RRset{},
-			},
-		}
-	}
-
-	newapex, err := newzd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, []dns.RR{}, []dns.RR{},
-			fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
-	}
-
-	if viper.GetBool("childsync.update-ns") {
-		differ, adds, removes = RRsetDiffer(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs,
-			oldapex.RRtypes[dns.TypeNS].RRs,
-			dns.TypeNS, zd.Logger)
-	} else {
-		zd.Logger.Printf("*** Note: configured NOT to update NS RRset.\n")
-	}
-
-	//	new_ns_inb, old_ns_inb := ComputeBailiwickNS_NG(newapex.RRtypes[dns.TypeNS].RRs,
-	//		oldapex.RRtypes[dns.TypeNS].RRs, zd.ZoneName)
-	new_ns_inb, _ := BailiwickNS(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs)
-	old_ns_inb, _ := BailiwickNS(zd.ZoneName, oldapex.RRtypes[dns.TypeNS].RRs)
-	for _, ns := range new_ns_inb {
-		zd.Logger.Printf("New in-bailiwick NS: %s\n", ns)
-	}
-	for _, ns := range old_ns_inb {
-		zd.Logger.Printf("Old in-bailiwick NS: %s\n", ns)
-	}
-
-	var oldowner *OwnerData
-	for _, ns := range new_ns_inb {
-		if fakeolddata {
-			oldowner = oldapex
-		} else {
-			oldowner, err = zd.GetOwner(ns)
-		}
-		if err != nil {
-			return false, []dns.RR{}, []dns.RR{},
-				fmt.Errorf("Error from zd.GetOwner(%s): %v", ns, err)
-		}
-		newowner, err := newzd.GetOwner(ns)
-		if err != nil {
-			return false, []dns.RR{}, []dns.RR{},
-				fmt.Errorf("Error from newzd.GetOwner(%s): %v", ns, err)
-		}
-
-		if viper.GetBool("childsync.update-a") {
-			zd.Logger.Printf("Comparing A glue for new NS %s:\n", ns)
-
-			gluediff, a_glue_adds, a_glue_removes := RRsetDiffer(ns,
-				newowner.RRtypes[dns.TypeA].RRs,
-				oldowner.RRtypes[dns.TypeA].RRs,
-				dns.TypeA, zd.Logger)
-			if gluediff {
-				differ = true
-				for _, rr := range a_glue_removes {
-					removes = append(removes, rr)
-				}
-				for _, rr := range a_glue_adds {
-					adds = append(adds, rr)
-				}
-			}
-		} else {
-			zd.Logger.Printf("*** Note: configured NOT to update A glue.\n")
-		}
-
-		if viper.GetBool("childsync.update-aaaa") {
-			zd.Logger.Printf("Comparing AAAA glue for new NS %s:\n", ns)
-			gluediff, aaaa_glue_adds, aaaa_glue_removes := RRsetDiffer(ns,
-				newowner.RRtypes[dns.TypeAAAA].RRs,
-				oldowner.RRtypes[dns.TypeAAAA].RRs,
-				dns.TypeAAAA, zd.Logger)
-			if gluediff {
-				differ = true
-				for _, rr := range aaaa_glue_removes {
-					removes = append(removes, rr)
-				}
-				for _, rr := range aaaa_glue_adds {
-					adds = append(adds, rr)
-				}
-			}
-		} else {
-			fmt.Printf("*** Note: configured NOT to update AAAA glue.\n")
-		}
-	}
-
-	if !differ {
-		fmt.Printf("Old delegation data is identical to new. No update needed.\n")
-		return false, []dns.RR{}, []dns.RR{}, nil
-	}
-	return true, adds, removes, nil
-}
-
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
 // command line rather than the one in the keystore. Not to be used by TDNSD.
 func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) error {
-	//	const update_scheme = 2
-	//	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"], update_scheme)
-	//	if err != nil {
-	//		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", pzone, parpri, err)
-	//	}
-
-	msg, err := CreateUpdate(pzone, Globals.Zonename, adds, removes)
+	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		log.Fatalf("Error from CreateUpdate(%s): %v", pzone, err)
+		return fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err)
 	}
 
-	keyrr, cs := LoadSigningKey(Globals.Sig0Keyfile)
+	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
+	if err != nil {
+		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
+		return err
+	}
 	var smsg *dns.Msg
+	sak := &Sig0ActiveKeys{
+		Keys: []*PrivateKeyCache{pkc},
+	}
 
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsgNG(*msg, Globals.Zonename, &cs, keyrr)
+		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
-			log.Printf("Error from SignMsgNG(%s): %v", Globals.Zonename, err)
+			log.Printf("Error from SignMsgNG2(%s): %v", Globals.Zonename, err)
 			return err
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")
 	}
 
-	rcode, err := SendUpdate(smsg, pzone, target)
+	rcode, err := SendUpdate(smsg, pzone, target.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", target, err)
 		return err
@@ -248,24 +52,25 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 	return nil
 }
 
-func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
+// Note: the target.Addresses must already be in addr:port format.
+// func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
+func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
 	if zonename == "." {
 		log.Printf("Error: zone name not specified. Terminating.\n")
 		return 0, fmt.Errorf("zone name not specified")
 	}
 
-	log.Printf("SendUpdate(%s, %s) target has addresses: %v", zonename, target.Name, target.Addresses)
+	log.Printf("SendUpdate(%s) target has %d addresses: %v", zonename, len(addrs), addrs)
 
-	for _, dst := range target.Addresses {
+	for _, dst := range addrs {
 		if Globals.Verbose {
-			log.Printf("Sending DNS UPDATE for parent zone %s to %s on address %s:%d\n", zonename, target.Name, dst, target.Port)
+			log.Printf("Sending DNS UPDATE for zone %s to %s\n", zonename, dst)
 		}
 
 		if Globals.Debug {
 			log.Printf("Sending Update:\n%s\n", msg.String())
 		}
 
-		dst = net.JoinHostPort(dst, fmt.Sprintf("%d", target.Port))
 		res, err := dns.Exchange(msg, dst)
 		if err != nil {
 			log.Printf("Error from dns.Exchange(%s, UPDATE): %v. Trying next address", dst, err)
@@ -286,10 +91,13 @@ func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error)
 			return res.Rcode, nil
 		}
 	}
-	return 0, fmt.Errorf("Error: none of the targets %v were reachable", target.Addresses)
+	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were reachable", addrs)
 }
 
-func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
+// Parent is the zone to apply the update to.
+// XXX: This is to focused on creating updates for child delegation info. Need a more general
+// function that can create updates for other things too.
+func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("Error: parent zone name not specified. Terminating.")
 	}
@@ -303,6 +111,7 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error
 	m.Remove(removes)
 	m.Insert(adds)
 
+	// XXX: This logic is ok, but it should be in the caller, not here.
 	for _, nsr := range removes {
 		if ns, ok := nsr.(*dns.NS); ok { // if removing an NS, then also remove any glue
 			if strings.HasSuffix(ns.Ns, child) {
@@ -314,6 +123,23 @@ func CreateUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error
 			}
 		}
 	}
+
+	if Globals.Debug {
+		fmt.Printf("Creating update msg:\n%s\n", m.String())
+	}
+	return m, nil
+}
+
+func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
+	if zone == "." || zone == "" {
+		return nil, fmt.Errorf("CreateUpdate: Error: zone to update not specified. Terminating.")
+	}
+
+	m := new(dns.Msg)
+	m.SetUpdate(zone)
+
+	m.Remove(removes)
+	m.Insert(adds)
 
 	if Globals.Debug {
 		fmt.Printf("Creating update msg:\n%s\n", m.String())
@@ -444,19 +270,6 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 	return new_ns_inb, old_ns_inb
 }
 
-// func (zd *ZoneData) SyncWithParent(adds, removes []dns.RR) error {
-//	zd.Logger.Printf("SyncWithParent: zone=%s adds=%v removes=%v", zd.ZoneName, adds, removes)
-
-//	scheme, dsynctarget, err := zd.BestSyncScheme()
-//	if err != nil {
-//		return err
-//	}
-//	zd.Logger.Printf("*** SyncWithParent: will try %s scheme using: %s. Target: %v", scheme, dsyncrr, dsynctarget)
-
-// Ok, so let's do it:
-//	return nil
-// }
-
 // Find the best scheme (from the POV of the child) to sync the deletation with the parent
 func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 	var active_drr *DSYNC
@@ -506,7 +319,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 			}
 			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == 1 && drr.Type == dns.TypeCSYNC {
+				if drr.Scheme == SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
 					active_drr = drr
 					break
 				}
@@ -523,14 +336,17 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 		}
 	}
 
-	zd.Logger.Printf("BestSyncScheme: zone %s parent %s. DSYNC alternatives are:", zd.ZoneName, dsync_res.Parent)
+	zd.Logger.Printf("BestSyncScheme: zone %s (parent %s) DSYNC alternatives are:", zd.ZoneName, dsync_res.Parent)
 	for _, drr := range dsync_res.Rdata {
-		zd.Logger.Printf("%s", drr.String())
+		zd.Logger.Printf("%s\tIN\tDSYNC\t%s", dsync_res.Qname, drr.String())
 	}
 
-	dsynctarget.Addresses, err = net.LookupHost(active_drr.Target)
+	tmp, err := net.LookupHost(active_drr.Target)
 	if err != nil {
 		return "", nil, fmt.Errorf("Error: %v", err)
+	}
+	for _, addr := range tmp {
+		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(addr, fmt.Sprintf("%d", active_drr.Port)))
 	}
 
 	if Globals.Verbose {

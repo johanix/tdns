@@ -4,12 +4,15 @@
 package tdns
 
 import (
-	"github.com/miekg/dns"
 	"strings"
+
+	"github.com/gookit/goutil/dump"
+	"github.com/miekg/dns"
 )
 
+// XXX: This should be merged with the FetchChildDelegationData() function
 // Returns [] NS RRs + [] v4glue RRs + [] v6glue RRs
-func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*RRset, *RRset, *RRset) {
+func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*ChildDelegationData, *RRset, *RRset) {
 	var child string
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
@@ -21,10 +24,16 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*RRset, *RRset
 			childrrs, _ := zd.GetOwner(child)
 			zd.Logger.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
 			if childns, ok := childrrs.RRtypes[dns.TypeNS]; ok {
+				childds := childrrs.RRtypes[dns.TypeDS]
+				cdd := ChildDelegationData{
+					ChildName: child,
+					NS_rrset:  &childns,
+					DS_rrset:  &childds,
+				}
 				// zd.Logger.Printf("FindDelegation for qname='%s': there are NS RRs for '%s'", qname, child)
 				// Ok, we found a delegation. Do we need any glue?
 				v4glue, v6glue := zd.FindGlue(childns, dnssec_ok)
-				return &childns, v4glue, v6glue
+				return &cdd, v4glue, v6glue
 			}
 		}
 	}
@@ -33,8 +42,10 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*RRset, *RRset
 }
 
 // Returns two RRsets with A glue and AAAA glue. Each RRset may be nil.
+// XXX: This is wrong. The v4 (and v6) glue is not an *RRset, but a []*RRset
 func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
-	zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
+	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
+	dump.P(nsrrs)
 	var v4glue, v6glue, maybe_4glue, maybe_6glue RRset
 	var nsname string
 	zone := nsrrs.RRs[0].Header().Name
@@ -60,7 +71,7 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 			}
 		} else {
 			zd.Logger.Printf("FindGlue: in the NS RRset I found this RRSIG: %s",
-						    rr.String())
+				rr.String())
 		}
 	}
 

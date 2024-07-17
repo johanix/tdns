@@ -1,6 +1,7 @@
 PROG:=tdnsd
 COMMIT:=`git describe --dirty=+WiP --always`
 VERSION=`cat ./VERSION`
+APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
 GOFLAGS:=-ldflags "-X app.version=$(VERSION)-$(COMMIT)"
 
@@ -15,7 +16,10 @@ default: ${PROG}
 
 ${PROG}: build
 
-build:
+version.go:	VERSION Makefile
+	/bin/sh make-version.sh $(VERSION)-$(COMMIT) $(APPDATE) $(PROG)
+
+build:	version.go
 	GOOS=$(shell uname -s | tr A-Z a-z) $(GO) build $(GOFLAGS) -o ${PROG}
 
 netbsd: 
