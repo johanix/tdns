@@ -38,16 +38,6 @@ delegations:
       update-ns:        true
       update-a:         true
       update-aaaa:      true   
-   parentsync:
-      policy:
-         type:          selfsub
-         rrtypes:       [ A, AAAA, NS, KEY ]   
-         keyupload:     unvalidated
-
-ddns:
-   policy:
-      type:             selfsub
-      rrtypes:          [ A, AAAA, NS, KEY ]
 
 scanner:
    interval:    	60

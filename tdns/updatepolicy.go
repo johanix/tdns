@@ -7,19 +7,9 @@ package tdns
 import (
 	"log"
 	"strings"
-	"sync"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
-
-// type UpdatePolicy struct {
-//	Type      string // only "selfsub" known at the moment
-//	RRtypes   map[uint16]bool
-//	KeyUpload string // only "unvalidated" is used
-//	Verbose   bool
-//	Debug     bool
-//}
 
 type DnsHandlerRequest struct {
 	ResponseWriter dns.ResponseWriter
@@ -27,42 +17,6 @@ type DnsHandlerRequest struct {
 	Qname          string
 }
 
-func xxxDnsUpdateResponderEngine(dnsupdateq chan DnsHandlerRequest, updateq chan UpdateRequest) error {
-
-	//        keydir := viper.GetString("ddns.keydirectory")
-	//        keymap, err := tdns.ReadPubKeys(keydir)
-	//        if err != nil {
-	//                log.Fatalf("Error from ReadPublicKeys(%s): %v", keydir, err)
-	//        }
-
-	polviper := viper.Sub("parentsync.receivers.update")
-	if polviper == nil {
-		log.Fatalf("Error: missing config for parentsync.receivers.update")
-	}
-
-	log.Printf("*** DnsUpdateResponderEngine: starting")
-
-	var dhr DnsHandlerRequest
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		for {
-			select {
-			case dhr = <-dnsupdateq:
-				UpdateResponder(&dhr, updateq)
-			}
-		}
-	}()
-	wg.Wait()
-
-	log.Println("DnsUpdateResponderEngine: terminating")
-	return nil
-}
-
-// func UpdateResponder(w dns.ResponseWriter, r *dns.Msg, qname string,
-//
-//	policy UpdatePolicy, updateq chan UpdateRequest) error {
 func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 	w := dhr.ResponseWriter
 	r := dhr.Msg
