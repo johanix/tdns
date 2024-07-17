@@ -55,6 +55,7 @@ type ZoneData struct {
 	IncomingSerial   uint32 // SOA serial that we got from upstream
 	CurrentSerial    uint32 // SOA serial after local bumping
 	Verbose          bool
+	Debug            bool
 	IxfrChain        []Ixfr
 	Upstream         string   // primary from where zone is xfrred
 	Downstreams      []string // secondaries that we notify
@@ -224,8 +225,8 @@ type DelegationResponse struct {
 }
 
 type DelegationSyncStatus struct {
-	Zone        string
-	Parent      string
+	ZoneName    string
+	Parent      string // use zd.Parent instead
 	Time        time.Time
 	InSync      bool
 	Status      string
@@ -356,11 +357,11 @@ type DnssecKey struct {
 }
 
 type DelegationSyncRequest struct {
-	Command    string
-	ZoneName   string
-	ZoneData   *ZoneData
-	Adds       []dns.RR
-	Removes    []dns.RR
+	Command  string
+	ZoneName string
+	ZoneData *ZoneData
+	// Adds       []dns.RR
+	// Removes    []dns.RR
 	SyncStatus DelegationSyncStatus
 	Response   chan DelegationSyncStatus // used for API-based requests
 }

@@ -26,14 +26,14 @@ import (
 
 // Return insync (bool), adds, removes ([]dns.RR) and error
 func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
-	var resp = DelegationSyncStatus{Time: time.Now(), Zone: zd.ZoneName}
+	var resp = DelegationSyncStatus{Time: time.Now(), ZoneName: zd.ZoneName}
 
 	err := zd.FetchParentData()
 	if err != nil {
 		return resp, err
 	}
 
-	resp.Parent = zd.Parent
+	// resp.Parent = zd.Parent
 
 	var p_nsrrs []dns.RR
 	var pserver string // outside loop to preserve for later re-use
@@ -222,9 +222,9 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 // Returns unsynched bool, adds, removes []dns.RR, error
 func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
-		Time:   time.Now(),
-		Zone:   zd.ZoneName,
-		InSync: true,
+		Time:     time.Now(),
+		ZoneName: zd.ZoneName,
+		InSync:   true,
 	}
 
 	Globals.Zonename = zd.ZoneName

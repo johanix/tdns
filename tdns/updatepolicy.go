@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -86,8 +85,8 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 		return nil // didn't find any zone for that qname
 	}
 
-	dump.P(zd.Options)
-	dump.P(zd.UpdatePolicy)
+	// dump.P(zd.Options)
+	// dump.P(zd.UpdatePolicy)
 
 	// 2. Is qname a zone cut for a child zone?
 	// cdd, v4glue, v6glue := zd.FindDelegation(qname, true)
@@ -96,7 +95,7 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 	if isdel {
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
-		if !zd.Options["allowchildupdates"] || zd.Options["frozen"] {
+		if !zd.Options["allow-child-updates"] || zd.Options["frozen"] {
 			zd.Logger.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
@@ -105,7 +104,7 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 		}
 	} else if zd.NameExists(qname) {
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
-		if !zd.Options["allowupdates"] || zd.Options["frozen"] {
+		if !zd.Options["allow-updates"] || zd.Options["frozen"] {
 			zd.Logger.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)

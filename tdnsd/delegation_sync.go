@@ -43,7 +43,7 @@ func DelegationSyncher(conf *Config) error {
 		log.Printf("DelegationSyncher: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
 		apex, _ := zd.GetOwner(zd.ZoneName)
 		_, keyrrexist := apex.RRtypes[dns.TypeKEY]
-		if zd.Options["allowupdates"] {
+		if zd.Options["allow-updates"] {
 			if !keyrrexist {
 				log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
 				_, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
@@ -63,7 +63,7 @@ func DelegationSyncher(conf *Config) error {
 				log.Printf("DelegationSyncher: Zone %s KEY RRset already published", zd.ZoneName)
 			}
 
-			if keyrrexist && zd.Options["onlinesigning"] {
+			if keyrrexist && zd.Options["online-signing"] {
 				log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
 				// _, cs, dnskeyrr, err = kdb.GetDnssecPrivKey(zd.ZoneName)
 				dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
@@ -104,6 +104,7 @@ func DelegationSyncher(conf *Config) error {
 			select {
 			case ds = <-delsyncq:
 				zd := ds.ZoneData
+				dss := ds.SyncStatus
 
 				switch ds.Command {
 				case "DELEGATION-STATUS":
@@ -121,13 +122,14 @@ func DelegationSyncher(conf *Config) error {
 					continue
 
 				case "SYNC-DELEGATION":
-					log.Printf("DelegationSyncher: Zone %s request for delegation sync %d adds and %d removes.", ds.ZoneName, len(ds.Adds), len(ds.Removes))
-					for _, rr := range ds.Adds {
-						log.Printf("ADD: %s", rr.String())
-					}
-					for _, rr := range ds.Removes {
-						log.Printf("DEL: %s", rr.String())
-					}
+					log.Printf("DelegationSyncher: Zone %s request for delegation sync -%d+%d NS adds and -%d+%d A glue and -%d+%d AAAA glue.", ds.ZoneName,
+						len(dss.NsRemoves), len(dss.NsAdds), len(dss.ARemoves), len(dss.AAdds), len(dss.AAAARemoves), len(dss.AAAAAdds))
+					// for _, rr := range ds.Adds {
+					// 	log.Printf("ADD: %s", rr.String())
+					// }
+					// for _, rr := range ds.Removes {
+					// 	log.Printf("DEL: %s", rr.String())
+					// }
 					zd := ds.ZoneData
 					if zd.Parent == "" || zd.Parent == "." {
 						zd.Parent, err = tdns.ParentZone(zd.ZoneName, imr)
@@ -137,18 +139,6 @@ func DelegationSyncher(conf *Config) error {
 						}
 					}
 
-					//					ds := tdns.DelegationSyncStatus{
-					//						Zone:    ds.ZoneName,
-					//						Parent:  zd.Parent,
-					//						Adds:    ds.Adds,
-					//						Removes: ds.Removes,
-					//					}
-
-					//					err = zd.SyncWithParent(ds.Adds, ds.Removes)
-					//					if err != nil {
-					//						log.Printf("DelegationSyncEngine: Zone %s: Error from SyncWithParent(): %v. Ignoring sync request.", ds.ZoneName, err)
-					//						continue
-					//					}
 					msg, rcode, err := SyncZoneDelegation(conf, zd, ds.SyncStatus)
 					if err != nil {
 						log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
@@ -175,7 +165,7 @@ func DelegationSyncher(conf *Config) error {
 
 					if syncstate.InSync {
 						log.Printf("DelegationSyncher: Zone %s: delegation data in parent \"%s\" is in sync with child. No action needed.",
-							syncstate.Zone, syncstate.Parent)
+							syncstate.ZoneName, syncstate.Parent)
 						if ds.Response != nil {
 							ds.Response <- syncstate
 						}
@@ -227,10 +217,10 @@ func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.Delegati
 
 	if syncstate.InSync {
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
-			syncstate.Zone, syncstate.Parent), 0, nil
+			syncstate.ZoneName, zd.Parent), 0, nil
 	} else {
 		log.Printf("Zone \"%s\" delegation data in parent \"%s\" is NOT in sync. Sync action needed.",
-			syncstate.Zone, syncstate.Parent)
+			syncstate.ZoneName, zd.Parent)
 	}
 
 	// var zd *tdns.ZoneData
@@ -340,8 +330,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
 	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
 
-	//	if zd.AllowUpdates {
-	if zd.Options["allowupdates"] {
+	if zd.Options["allow-updates"] {
 		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
 		err := zd.PublishCsyncRR()
 		if err != nil {
@@ -350,8 +339,7 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		}
 
 		// Try to sign the CSYNC RRset
-		// if zd.OnlineSigning {
-		if zd.Options["onlinesigning"] {
+		if zd.Options["online-signing"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
 			// _, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecPrivKey(zd.ZoneName)

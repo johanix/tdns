@@ -23,7 +23,7 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	// 	ZoneTypeToString[zd.ZoneType], force)
 
 	// if zd.FoldCase {
-	if zd.Options["foldcase"] {
+	if zd.Options["fold-case"] {
 		zd.Logger.Printf("zd.Refresh(): folding case for zone %s", zd.ZoneName)
 		zd.ZoneName = strings.ToLower(zd.ZoneName)
 	}
@@ -139,11 +139,10 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
-	// if zd.DelegationSync {
-	if zd.Options["delegationsync"] {
+	if zd.Options["delegation-sync"] {
 		// Detect whether the delegation data has changed.
 		// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, adds, removes, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
+		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 			return false, err
@@ -151,11 +150,11 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		if delchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			zd.DelegationSyncCh <- DelegationSyncRequest{
-				Command:    "SYNC-DELEGATION",
-				ZoneName:   zd.ZoneName,
-				ZoneData:   zd,
-				Adds:       adds,
-				Removes:    removes,
+				Command:  "SYNC-DELEGATION",
+				ZoneName: zd.ZoneName,
+				ZoneData: zd,
+				// Adds:       adds,
+				// Removes:    removes,
 				SyncStatus: delsyncstatus,
 			}
 		} else {
@@ -222,11 +221,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		return false, nil
 	}
 
-	// if zd.DelegationSync {
-	if zd.Options["delegationsync"] {
+	if zd.Options["delegation-sync"] {
 		// Detect whether the delegation data has changed.
 		//zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, adds, removes, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
+		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 			return false, err
@@ -238,8 +236,8 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
 				SyncStatus: delsyncstatus,
-				Adds:       adds,
-				Removes:    removes,
+				// Adds:       adds,
+				// Removes:    removes,
 			}
 		} else {
 			// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)

@@ -196,7 +196,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
 		// if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
-		if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			err := tdns.SignRRset(&rrset, qname, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
@@ -312,7 +312,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
 		// if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
-		if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			err := tdns.SignRRset(&rrset, qname, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
@@ -466,7 +466,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				// if zd.OnlineSigning && cs != nil {
-				if zd.Options["onlinesigning"] && len(dak.ZSKs) > 0 {
+				if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
 					}

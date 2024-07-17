@@ -6,6 +6,7 @@ package tdns
 import (
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
 
@@ -43,7 +44,8 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*ChildDelegati
 // Returns two RRsets with A glue and AAAA glue. Each RRset may be nil.
 // XXX: This is wrong. The v4 (and v6) glue is not an *RRset, but a []*RRset
 func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
-	zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
+	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
+	dump.P(nsrrs)
 	var v4glue, v6glue, maybe_4glue, maybe_6glue RRset
 	var nsname string
 	zone := nsrrs.RRs[0].Header().Name

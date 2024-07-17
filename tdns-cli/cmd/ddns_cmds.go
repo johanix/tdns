@@ -50,11 +50,11 @@ var delStatusCmd = &cobra.Command{
 		fmt.Printf("%s\n", dr.Msg)
 		if dr.SyncStatus.InSync {
 			fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
-				dr.SyncStatus.Parent, dr.SyncStatus.Zone)
+				dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
 			os.Exit(0)
 		}
 		fmt.Printf("Delegation information in parent \"%s\" is NOT in sync with child \"%s\". Changes needed:\n",
-			dr.SyncStatus.Parent, dr.SyncStatus.Zone)
+			dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
 		out := []string{"Change|RR|RR"}
 		for _, rr := range dr.SyncStatus.NsAdds {
 			out = append(out, fmt.Sprintf("ADD NS|%s", rr.String()))

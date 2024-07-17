@@ -278,8 +278,12 @@ func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) er
 		for _, option := range zconf.Options {
 			option := strings.ToLower(option)
 			switch option {
-			case "delegation-sync", "online-signing", "allow-updates", "allow-child-updates",
-				"fold-case", "black-lies":
+			case "delegation-sync", // child should attempt to sync deledation data with parent
+				"online-signing",      // zone may be signed (and re-signed) online as needed
+				"allow-updates",       // zone allows DNS UPDATEs to authoritiative data
+				"allow-child-updates", // zone allows updates to child delegation information
+				"fold-case",           // fold case of owner names to lower to make query matching case insensitive
+				"black-lies":          // zone may implement DNSSEC signed negative responses via so-called black lies.
 				options[option] = true
 				cleanoptions = append(cleanoptions, option)
 			default:

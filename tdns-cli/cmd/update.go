@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var zone, server, keyfile string
@@ -33,6 +34,12 @@ var updateCreateCmd = &cobra.Command{
 Will end the loop on the operation (or domain name) "QUIT"`,
 	Run: func(cmd *cobra.Command, args []string) {
 
+		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+		if err != nil {
+			fmt.Printf("Error from NewKeyDB(): %v\n", err)
+			os.Exit(1)
+		}
+
 		var adds, removes []dns.RR
 
 		var ops = []string{"zone", "add", "del", "show", "send", "set-ttl", "server", "quit"}
@@ -40,6 +47,8 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 
 		var ttl int = 60
 		var op, rrstr, port string
+
+		zone = dns.Fqdn(zone)
 
 	cmdloop:
 		for {
@@ -60,7 +69,7 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 				// ttl = time.Duration(tmp) * time.Second
 				// fmt.Printf("TTL: got: %d ttl: %v\n", tmp, ttl)
 			case "add", "del":
-				if zone == "" {
+				if zone == "." {
 					fmt.Println("Target zone not set, please set it first")
 					continue
 				}
@@ -85,7 +94,7 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 				}
 
 			case "show":
-				if zone == "" {
+				if zone == "." {
 					fmt.Println("Target zone not set, please set it first")
 					continue
 				}
@@ -144,6 +153,19 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 					}
 
 					m, err := tdns.SignMsgNG(*msg, zone, &cs, keyrr)
+					if err != nil {
+						fmt.Printf("Error signing message: %v\n", err)
+						os.Exit(1)
+					}
+					msg = m
+				} else {
+					fmt.Printf("No SIG(0) keyfile specified, trying to fetch active key from keystore\n")
+					_, cs, rr, err := kdb.GetSig0PrivKey(zone)
+					if err != nil {
+						fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", zone, err)
+						os.Exit(1)
+					}
+					m, err := tdns.SignMsgNG(*msg, zone, cs, rr)
 					if err != nil {
 						fmt.Printf("Error signing message: %v\n", err)
 						os.Exit(1)

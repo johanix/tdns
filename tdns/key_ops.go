@@ -10,7 +10,7 @@ import (
 )
 
 func (zd *ZoneData) PublishKeyRR(keyrr *dns.KEY) error {
-	if !zd.Options["allowupdates"] {
+	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("Zone %s does not allow updates. KEY RR publication not possible", zd.ZoneName)
 	}
 

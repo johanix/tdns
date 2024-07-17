@@ -364,6 +364,72 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	}
 
 	if Globals.Debug {
+		log.Printf("GetSig0Key(%s) returned key %v", zonename, rr) // \nk=%v\ncs=%v\n", zonename, rr, k, cs)
+	}
+
+	keyrr = rr.(*dns.KEY)
+	kdb.Sig0Cache[zonename] = &Sig0KeyCache{
+		K:     k,
+		CS:    cs,
+		RR:    rr,
+		KeyRR: *keyrr,
+	}
+
+	return &k, &cs, keyrr, err
+}
+
+func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.KEY, error) {
+	const (
+		fetchSig0PrivKeySql = `
+SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
+	)
+
+	var cs crypto.Signer
+	var k crypto.PrivateKey
+	var rr dns.RR
+	var keyrr *dns.KEY
+
+	if data, ok := kdb.Sig0Cache[zonename]; ok {
+		return &data.K, &data.CS, &data.KeyRR, nil
+	}
+
+	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
+	if err != nil {
+		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+		return nil, nil, nil, err
+	}
+	defer rows.Close()
+
+	var algorithm, privatekey, keyrrstr string
+	var keyid int
+
+	var keyfound bool
+
+	for rows.Next() {
+		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
+		// log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				log.Printf("No active SIG(0) key found for zone %s", zonename)
+				return nil, nil, nil, err
+			}
+			log.Printf("Error from rows.Scan(): %v", err)
+			return nil, nil, nil, err
+		}
+		keyfound = true
+		k, cs, rr, _, _, err = PrepareKey(privatekey, keyrrstr, algorithm)
+		if err != nil {
+			log.Printf("Error from tdns.PrepareKey(): %v", err)
+			return nil, nil, nil, err
+		}
+	}
+
+	if !keyfound {
+		log.Printf("No active SIG(0) key found for zone %s", zonename)
+		return nil, nil, nil, sql.ErrNoRows
+	}
+
+	if Globals.Debug {
 		log.Printf("GetSig0Key(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
 	}
 

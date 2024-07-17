@@ -128,7 +128,7 @@ func xxxUpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq cha
 	if isdel {
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
-		if !zd.Options["allowchildupdates"] {
+		if !zd.Options["allow-child-updates"] {
 			zd.Logger.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
@@ -137,7 +137,7 @@ func xxxUpdateResponder(dhr *DnsHandlerRequest, policy UpdatePolicy, updateq cha
 		}
 	} else if zd.NameExists(qname) {
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
-		if !zd.Options["allowupdates"] {
+		if !zd.Options["allow-updates"] {
 			zd.Logger.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)

@@ -117,14 +117,18 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// XXX: If we change the SOA serial we must also recompute the RRSIG.
 	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 	rrs = append(rrs, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-	// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+	if Globals.Debug {
+		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+	}
 
 	// Rest of apex
 	for rrt, _ := range apex.RRtypes {
 		if rrt != dns.TypeSOA {
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
 			rrs = append(rrs, apex.RRtypes[rrt].RRs...)
-			// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
+			if Globals.Debug {
+				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
+			}
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
 			rrs = append(rrs, apex.RRtypes[rrt].RRSIGs...)
 		}
@@ -140,7 +144,9 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrl := range owner.RRtypes {
 				rrs = append(rrs, rrl.RRs...)
-				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+				if Globals.Debug {
+					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+				}
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
@@ -163,7 +169,9 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrl := range omap.RRtypes {
 				rrs = append(rrs, rrl.RRs...)
-				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+				if Globals.Debug {
+					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+				}
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
@@ -184,7 +192,9 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 
 	// env.RR = append(env.RR, soa) // trailing SOA
 	rrs = append(rrs, soa)
-	// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
+	if Globals.Debug {
+		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
+	}
 
 	total_sent += len(rrs)
 	zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
@@ -318,7 +328,7 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	owner := rr.Header().Name
 	// if zd.FoldCase {
-	if zd.Options["foldcase"] {
+	if zd.Options["fold-case"] {
 		owner = strings.ToLower(owner)
 	}
 	rrtype := rr.Header().Rrtype

@@ -10,7 +10,7 @@ import (
 )
 
 func (zd *ZoneData) PublishCsyncRR() error {
-	if !zd.Options["allowupdates"] {
+	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("Zone %s does not allow updates. CSYNC publication not possible", zd.ZoneName)
 	}
 
@@ -25,6 +25,12 @@ func (zd *ZoneData) PublishCsyncRR() error {
 		Serial:     zd.CurrentSerial,
 		Flags:      flags,
 		TypeBitMap: typebitmap,
+	}
+	csync.Hdr = dns.RR_Header{
+		Name:   zd.ZoneName,
+		Rrtype: dns.TypeCSYNC,
+		Class:  dns.ClassINET,
+		Ttl:    120,
 	}
 
 	rrset := RRset{
@@ -43,7 +49,7 @@ func (zd *ZoneData) PublishCsyncRR() error {
 }
 
 func (zd *ZoneData) UnpublishCsyncRR() error {
-	if !zd.Options["allowupdates"] {
+	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("Zone %s does not allow updates. CSYNC unpublication not possible", zd.ZoneName)
 	}
 
