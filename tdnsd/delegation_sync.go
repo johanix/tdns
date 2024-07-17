@@ -6,7 +6,7 @@ package main
 
 import (
 	//        "fmt"
-	"crypto"
+
 	"fmt"
 	"log"
 	"sync"
@@ -34,10 +34,10 @@ func DelegationSyncher(conf *Config) error {
 	// If we support syncing with parent via DNS UPDATE then we must ensure that a KEY RR for the zone is published.
 	time.Sleep(10 * time.Second) // Allow time for zones to load
 
-	var cs *crypto.Signer
-	var keyrr *dns.KEY
-	var dnskeyrr *dns.DNSKEY
-	var err error
+	// var cs *crypto.Signer
+	// var keyrr *dns.KEY
+	// var dnskeyrr *dns.DNSKEY
+	// var err error
 
 	for zname, zd := range tdns.Zones.Items() {
 		log.Printf("DelegationSyncher: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
@@ -46,18 +46,19 @@ func DelegationSyncher(conf *Config) error {
 		if zd.Options["allow-updates"] {
 			if !keyrrexist {
 				log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
-				_, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
+				// _, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
+				sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
 				if err != nil {
-					log.Printf("DelegationSyncher: Error from kdb.GetSig0Key(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+					log.Printf("DelegationSyncher: Error from kdb.GetSig0ActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 					continue
 				}
-				if keyrr == nil {
-					log.Printf("DelegationSyncher: No SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
+				if len(sak.Keys) == 0 {
+					log.Printf("DelegationSyncher: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
 					continue
 				}
 
 				log.Printf("DelegationSyncher: Publishing KEY RR for zone %s", zd.ZoneName)
-				zd.PublishKeyRR(keyrr)
+				zd.PublishKeyRRs(sak)
 				keyrrexist = true
 			} else {
 				log.Printf("DelegationSyncher: Zone %s KEY RRset already published", zd.ZoneName)
@@ -65,18 +66,13 @@ func DelegationSyncher(conf *Config) error {
 
 			if keyrrexist && zd.Options["online-signing"] {
 				log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
-				// _, cs, dnskeyrr, err = kdb.GetDnssecPrivKey(zd.ZoneName)
 				dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 				if err != nil {
 					log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 					continue
 				}
-				cs = &dak.ZSKs[0].CS
-				dnskeyrr = &dak.ZSKs[0].KeyRR
-				// apex, _ := zd.GetOwner(zd.ZoneName)
 				rrset := apex.RRtypes[dns.TypeKEY]
-				// dump.P(rrset)
-				err = tdns.SignRRset(&rrset, zd.ZoneName, cs, dnskeyrr)
+				err = tdns.SignRRset(&rrset, zd.ZoneName, dak)
 				if err != nil {
 					log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 				} else {
@@ -95,7 +91,7 @@ func DelegationSyncher(conf *Config) error {
 		}
 	}
 
-	log.Printf("DelegationSyncher: starting")
+	log.Printf("*** DelegationSyncher: starting ***")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -286,19 +282,19 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 
 	// 3. Fetch the SIG(0) key from the keystore
 	log.Printf("SyncZoneDelegationViaUpdate: Fetching the private key for %s", zd.ZoneName)
-	_, cs, keyrr, err := kdb.GetSig0PrivKey(zd.ZoneName)
+	sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
 	if err != nil {
-		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0Key(%s): %v", zd.ZoneName, err)
+		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0ActiveKeys(%s): %v", zd.ZoneName, err)
 		return "", 0, err
 	}
-	if keyrr == nil {
-		log.Printf("SyncZoneDelegationViaUpdate: No SIG(0) key found for zone %s", zd.ZoneName)
-		return "", 0, fmt.Errorf("no SIG(0) key found for zone %s", zd.ZoneName)
+	if len(sak.Keys) == 0 {
+		log.Printf("SyncZoneDelegationViaUpdate: No active SIG(0) key found for zone %s", zd.ZoneName)
+		return "", 0, fmt.Errorf("no active SIG(0) key found for zone %s", zd.ZoneName)
 	}
 
 	// 4. Sign the msg
 	log.Printf("SyncZoneDelegationViaUpdate: Signing the DNS UPDATE %s", zd.ZoneName)
-	smsg, err := tdns.SignMsgNG(*m, zd.ZoneName, cs, keyrr)
+	smsg, err := tdns.SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
 		return "", 0, err
@@ -307,7 +303,6 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
 		return "", 0, err
 	}
-	//	log.Printf("Signed DNS UPDATE msg:\n%s\n", smsg.String())
 
 	// 5. Send the msg
 	log.Printf("SyncZoneDelegationViaUpdate: Sending the signed update to %s (addresses: %v) port %d",
@@ -342,15 +337,12 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		if zd.Options["online-signing"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
-			// _, cs, keyrr, err := conf.Internal.KeyDB.GetDnssecPrivKey(zd.ZoneName)
 			dak, err := conf.Internal.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
 			if err != nil {
 				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
 			} else {
 				if len(dak.ZSKs) > 0 {
-					cs := &dak.ZSKs[0].CS
-					keyrr := &dak.ZSKs[0].KeyRR
-					err := tdns.SignRRset(&rrset, zd.ZoneName, cs, keyrr)
+					err := tdns.SignRRset(&rrset, zd.ZoneName, dak)
 					if err != nil {
 						log.Printf("Error signing %s: %v", zd.ZoneName, err)
 					} else {

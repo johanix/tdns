@@ -4,7 +4,6 @@
 package tdns
 
 import (
-	"crypto"
 	"database/sql"
 	"fmt"
 	"log"
@@ -13,8 +12,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	// "github.com/spf13/viper"
-	// "gopkg.in/yaml.v3"
 )
 
 func (kdb *KeyDB) Sig0KeyMgmt(kp KeystorePost) (KeystoreResponse, error) {
@@ -36,6 +33,25 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	if err != nil {
 		return resp, err
 	}
+
+	defer func() {
+		if err == nil {
+			err1 := tx.Commit()
+			log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok, err1=%v", err, err1)
+			if err1 != nil {
+				resp.Error = true
+				resp.ErrorMsg = err1.Error()
+			}
+		} else {
+			log.Printf("Error: %v. Rollback.", err)
+			err1 := tx.Rollback()
+			if err1 != nil {
+				resp.Error = true
+				resp.ErrorMsg = err1.Error()
+			}
+			// log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
+		}
+	}()
 
 	log.Printf("Sig0KeyMgmt: request: %s", kp.SubCommand)
 
@@ -65,7 +81,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 				Name:       keyname,
 				State:      state,
 				Algorithm:  algorithm,
-				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
+				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:4], privatekey[len(privatekey)-4:]),
 				Keystr:     keyrrstr,
 			}
 		}
@@ -73,8 +89,9 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		resp.Msg = "Here are all the SIG(0) keys that we know"
 
 	case "add": // AKA "import"
-		res, err = tx.Exec(addSig0KeySql, kp.Keyname, kp.State, kp.Keyid, dns.AlgorithmToString[kp.Algorithm],
-			kp.PrivateKey, kp.KeyRR)
+		pkc := kp.PrivateKeyCache
+		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
+			dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.KeyRR.String())
 		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
@@ -134,23 +151,6 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	default:
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
-	}
-
-	if err == nil {
-		err1 := tx.Commit()
-		log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok, err1=%v", err, err1)
-		if err1 != nil {
-			resp.Error = true
-			resp.ErrorMsg = err1.Error()
-		}
-	} else {
-		log.Printf("Error: %v. Rollback.", err)
-		err1 := tx.Rollback()
-		if err1 != nil {
-			resp.Error = true
-			resp.ErrorMsg = err1.Error()
-		}
-		// log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
 	}
 
 	return resp, nil
@@ -230,8 +230,13 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp.Msg = "Here are all the DNSSEC keys that we know"
 
 	case "add": // AKA "import"
-		res, err = tx.Exec(addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm],
-			kp.PrivateKey, kp.DnskeyRR)
+		//		res, err = tx.Exec(addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm],
+		//			kp.PrivateKey, kp.DnskeyRR)
+
+		pkc := kp.PrivateKeyCache
+		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
+			dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.DnskeyRR.String())
+
 		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
 			log.Printf("Error from tx.Exec(): %v", err)
@@ -296,41 +301,23 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		log.Printf("DnssecKeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
 
-	//	if err == nil {
-	//		err1 := tx.Commit()
-	//		log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
-	//		if err1 != nil {
-	//			resp.Error = true
-	//			resp.ErrorMsg = err1.Error()
-	//		}
-	//	} else {
-	//		log.Printf("Error: %v. Rollback.", err)
-	//		err1 := tx.Rollback()
-	//		log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
-	//	}
-
 	return resp, nil
 }
 
-func (kdb *KeyDB) GetSig0PrivKey(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.KEY, error) {
+func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {
 	const (
 		fetchSig0PrivKeySql = `
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
 	)
 
-	var cs crypto.Signer
-	var k crypto.PrivateKey
-	var rr dns.RR
-	var keyrr *dns.KEY
-
-	if data, ok := kdb.Sig0Cache[zonename]; ok {
-		return &data.K, &data.CS, &data.KeyRR, nil
+	if sak, ok := kdb.Sig0Cache[zonename]; ok {
+		return sak, nil
 	}
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
 		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
-		return nil, nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -338,6 +325,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	var keyid int
 
 	var keyfound bool
+	var sak Sig0ActiveKeys
 
 	for rows.Next() {
 		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
@@ -345,186 +333,39 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		if err != nil {
 			if err == sql.ErrNoRows {
 				log.Printf("No active SIG(0) key found for zone %s", zonename)
-				return nil, nil, nil, err
+				return nil, err
 			}
 			log.Printf("Error from rows.Scan(): %v", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 		keyfound = true
-		k, cs, rr, _, _, err = PrepareKey(privatekey, keyrrstr, algorithm)
+		pkc, err := PrepareKeyCache(privatekey, keyrrstr, algorithm)
 		if err != nil {
-			log.Printf("Error from tdns.PrepareKey(): %v", err)
-			return nil, nil, nil, err
+			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
+			return nil, err
 		}
+		sak.Keys = append(sak.Keys, pkc)
 	}
 
 	if !keyfound {
 		log.Printf("No active SIG(0) key found for zone %s", zonename)
-		return nil, nil, nil, sql.ErrNoRows
+		return nil, sql.ErrNoRows
 	}
 
 	if Globals.Debug {
-		log.Printf("GetSig0Key(%s) returned key %v", zonename, rr) // \nk=%v\ncs=%v\n", zonename, rr, k, cs)
+		log.Printf("GetSig0ActiveKey(%s) returned keys %v", zonename, sak)
 	}
 
-	keyrr = rr.(*dns.KEY)
-	kdb.Sig0Cache[zonename] = &Sig0KeyCache{
-		K:     k,
-		CS:    cs,
-		RR:    rr,
-		KeyRR: *keyrr,
-	}
+	kdb.Sig0Cache[zonename] = &sak
 
-	return &k, &cs, keyrr, err
+	return &sak, err
 }
 
-func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.KEY, error) {
-	const (
-		fetchSig0PrivKeySql = `
-SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
-	)
-
-	var cs crypto.Signer
-	var k crypto.PrivateKey
-	var rr dns.RR
-	var keyrr *dns.KEY
-
-	if data, ok := kdb.Sig0Cache[zonename]; ok {
-		return &data.K, &data.CS, &data.KeyRR, nil
-	}
-
-	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
-	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
-		return nil, nil, nil, err
-	}
-	defer rows.Close()
-
-	var algorithm, privatekey, keyrrstr string
-	var keyid int
-
-	var keyfound bool
-
-	for rows.Next() {
-		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
-		// log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				log.Printf("No active SIG(0) key found for zone %s", zonename)
-				return nil, nil, nil, err
-			}
-			log.Printf("Error from rows.Scan(): %v", err)
-			return nil, nil, nil, err
-		}
-		keyfound = true
-		k, cs, rr, _, _, err = PrepareKey(privatekey, keyrrstr, algorithm)
-		if err != nil {
-			log.Printf("Error from tdns.PrepareKey(): %v", err)
-			return nil, nil, nil, err
-		}
-	}
-
-	if !keyfound {
-		log.Printf("No active SIG(0) key found for zone %s", zonename)
-		return nil, nil, nil, sql.ErrNoRows
-	}
-
-	if Globals.Debug {
-		log.Printf("GetSig0Key(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
-	}
-
-	keyrr = rr.(*dns.KEY)
-	kdb.Sig0Cache[zonename] = &Sig0KeyCache{
-		K:     k,
-		CS:    cs,
-		RR:    rr,
-		KeyRR: *keyrr,
-	}
-
-	return &k, &cs, keyrr, err
-}
-
-func (kdb *KeyDB) xxxGetDnssecPrivKey(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.DNSKEY, error) {
-	const (
-		fetchDnssecPrivKeySql = `
-SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
-	)
-
-	var cs crypto.Signer
-	var k crypto.PrivateKey
-	var rr dns.RR
-	var keyrr *dns.DNSKEY
-
-	if data, ok := kdb.DnssecCache[zonename]; ok {
-		return &data.KSKs[0].K, &data.KSKs[0].CS, &data.KSKs[0].KeyRR, nil
-	}
-
-	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename)
-	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchDnssecPrivKeySql, zonename, err)
-		return nil, nil, nil, err
-	}
-	defer rows.Close()
-
-	var algorithm, privatekey, keyrrstr string
-	var keyid int
-
-	var keyfound bool
-
-	for rows.Next() {
-		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				log.Printf("No active DNSSEC key found for zone %s", zonename)
-				return nil, nil, nil, err
-			}
-			log.Printf("Error from rows.Scan(): %v", err)
-			return nil, nil, nil, err
-		}
-		keyfound = true
-		k, cs, rr, _, _, err = PrepareKey(privatekey, keyrrstr, algorithm)
-		if err != nil {
-			log.Printf("Error from tdns.PrepareKey(): %v", err)
-			return nil, nil, nil, err
-		}
-	}
-
-	if !keyfound {
-		log.Printf("No active DNSSEC key found for zone %s", zonename)
-		return nil, nil, nil, sql.ErrNoRows
-	}
-
-	if Globals.Debug {
-		log.Printf("GetDnssecKey(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
-	}
-
-	keyrr = rr.(*dns.DNSKEY)
-
-	kdb.DnssecCache[zonename] = &DnssecActiveKeys{
-		KSKs: []*DnssecKeyCache{
-			&DnssecKeyCache{
-				K:     k,
-				CS:    cs,
-				RR:    rr,
-				KeyRR: *keyrr,
-			},
-		},
-	}
-
-	return &k, &cs, keyrr, err
-}
-
-// func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*crypto.PrivateKey, *crypto.Signer, *dns.DNSKEY, error) {
 func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*DnssecActiveKeys, error) {
 	const (
 		fetchDnssecPrivKeySql = `
-SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
+SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
 	)
-
-	var cs crypto.Signer
-	var k crypto.PrivateKey
-	var rr dns.RR
-	var keyrr *dns.DNSKEY
 
 	if data, ok := kdb.DnssecCache[zonename]; ok {
 		return data, nil
@@ -555,22 +396,17 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 			return nil, err
 		}
 		keyfound = true
-		k, cs, rr, _, _, err := PrepareKey(privatekey, keyrrstr, algorithm)
+		pkc, err := PrepareKeyCache(privatekey, keyrrstr, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKey(): %v", err)
 			return nil, err
 
 		}
-		dkc := &DnssecKeyCache{
-			K:     k,
-			CS:    cs,
-			RR:    rr,
-			KeyRR: *keyrr,
-		}
+
 		if (flags & 0x0100) != 0 {
-			dak.KSKs = append(dak.KSKs, dkc)
+			dak.KSKs = append(dak.KSKs, pkc)
 		} else {
-			dak.ZSKs = append(dak.ZSKs, dkc)
+			dak.ZSKs = append(dak.ZSKs, pkc)
 		}
 	}
 
@@ -591,17 +427,9 @@ SELECT keyid, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? 
 	}
 
 	if Globals.Debug {
-		log.Printf("GetDnssecKey(%s) returned key %v\nk=%v\ncs=%v\n", zonename, rr, k, cs)
+		log.Printf("GetDnssecKey(%s) returned key %v", zonename, dak)
 	}
 
-	keyrr = rr.(*dns.DNSKEY)
-
-	// kdb.DnssecCache[zonename] = &DnssecKeyCache{
-	//		K:     k,
-	//		CS:    cs,
-	//		RR:    rr,
-	//		KeyRR: *keyrr,
-	//	}
 	kdb.DnssecCache[zonename] = &dak
 
 	return &dak, err

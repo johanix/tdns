@@ -12,21 +12,13 @@ import (
 	"github.com/miekg/dns"
 )
 
-type UpdatePolicy struct {
-	Type      string // only "selfsub" known at the moment
-	RRtypes   map[uint16]bool
-	KeyUpload string // only "unvalidated" is used
-	Verbose   bool
-	Debug     bool
-}
-
 type DnsHandlerRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
 	Qname          string
 }
 
-func DnsUpdateResponderEngine(conf *Config) error {
+func UpdateHandler(conf *Config) error {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	updateq := conf.Internal.UpdateQ
 

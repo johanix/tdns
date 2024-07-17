@@ -12,7 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func DnsNotifyResponderEngine(conf *Config) error {
+func NotifyHandler(conf *Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	scannerq := conf.Internal.ScannerQ

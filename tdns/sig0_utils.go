@@ -22,41 +22,43 @@ import (
 //
 //	The code should store the newly generated key in the keystore.
 func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
-	keyrr, cs, err := LoadSigningKey(Globals.Sig0Keyfile)
+	pkc, err := LoadSig0SigningKeyNG(Globals.Sig0Keyfile)
 	if err != nil {
-		return fmt.Errorf("Error from LoadSigningKey(%s): %v", Globals.Sig0Keyfile, err)
+		return fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 	}
 
-	if keyrr != nil {
-		fmt.Printf("keyid=%d\n", keyrr.KeyTag())
+	if pkc != nil {
+		fmt.Printf("keyid=%d\n", pkc.KeyRR.KeyTag())
 	} else {
 		fmt.Printf("No signing key specified.\n")
+	}
+
+	sak := &Sig0ActiveKeys{
+		Keys: []*PrivateKeyCache{pkc},
 	}
 
 	var adds, removes []dns.RR
 
 	if gennewkey {
-		newkey, newcs, newpriv, err := GenerateSigningKey(Globals.Zonename,
-			keyrr.Algorithm)
+		newpkc, err := GenerateSigningKey(Globals.Zonename, pkc.Algorithm)
 		if err != nil {
 			return fmt.Errorf("Error from GenerateSigningKey: %v", err)
 		}
-		_ = newcs // XXX: should store the cs and new private key somewhere.
-		_ = newpriv
-		fmt.Printf("new key: %s\n", newkey.String())
+		// _ = newcs // XXX: should store the cs and new private key in the KeyDB.
+		// _ = newpriv
+		fmt.Printf("new key: %s\n", newpkc.KeyRR.String())
 
-		adds = []dns.RR{newkey}
-		removes = []dns.RR{keyrr}
+		adds = []dns.RR{&newpkc.KeyRR}
+		removes = []dns.RR{&pkc.KeyRR}
 	} else {
-		adds = []dns.RR{keyrr}
+		adds = []dns.RR{&pkc.KeyRR}
 		removes = []dns.RR{}
 	}
 
 	const update_scheme = 2
-	dsynctarget, err := LookupDSYNCTarget(Globals.ParentZone, parpri, dns.StringToType["ANY"],
-		update_scheme)
+	dsynctarget, err := LookupDSYNCTarget(Globals.ParentZone, parpri, dns.StringToType["ANY"], update_scheme)
 	if err != nil {
-		return fmt.Errorf("Error from LookupDDNSTarget(%s, %s): %v",
+		return fmt.Errorf("Error from LookupDSYNCTarget(%s, %s): %v",
 			Globals.ParentZone, parpri, err)
 	}
 
@@ -69,7 +71,7 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsgNG(*msg, Globals.Zonename, &cs, keyrr)
+		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
 			return fmt.Errorf("Error from SignMsgNG(%v): %v", dsynctarget, err)
 		}
@@ -86,11 +88,11 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	return nil
 }
 
-func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypto.PrivateKey, error) {
-	var keyrr *dns.KEY
-	var cs crypto.Signer
+func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	var privkey crypto.PrivateKey
 	var err error
+
+	var pkc *PrivateKeyCache
 
 	mode := viper.GetString("roll.keygen.mode")
 
@@ -110,7 +112,6 @@ func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypt
 		nkey.Hdr.Name = owner
 		nkey.Hdr.Rrtype = dns.TypeKEY
 		nkey.Hdr.Class = dns.ClassINET
-		// nkey.Algorithm  = dns.StringToAlgorithm["ED25519"]
 		nkey.Algorithm = alg
 		privkey, err = nkey.Generate(bits)
 		if err != nil {
@@ -124,7 +125,7 @@ func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypt
 		log.Printf("Generated signer: %v", privkey)
 
 		nkey.Hdr.Rrtype = dns.TypeKEY
-		keyrr = nkey
+		pkc.KeyRR = *nkey
 
 	case "external":
 		keygenprog := viper.GetString("roll.keygen.generator")
@@ -155,47 +156,42 @@ func GenerateSigningKey(owner string, alg uint8) (*dns.KEY, crypto.Signer, crypt
 			}
 		}
 
-		keyrr, cs, err = LoadSigningKey(keyname + ".key")
+		pkc, err = LoadSig0SigningKeyNG(keyname + ".key")
 		if err != nil {
-			return keyrr, cs, privkey, err
+			return nil, err
 		}
 
 	default:
 		log.Fatalf("Error: unknown keygen mode: \"%s\".", mode)
 	}
 
-	switch alg {
+	switch pkc.Algorithm {
 	case dns.RSASHA256:
-		cs = privkey.(*rsa.PrivateKey)
+		pkc.CS = privkey.(*rsa.PrivateKey)
 	case dns.ED25519:
-		cs = privkey.(*ed25519.PrivateKey)
+		pkc.CS = privkey.(*ed25519.PrivateKey)
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
-		cs = privkey.(*ecdsa.PrivateKey)
+		pkc.CS = privkey.(*ecdsa.PrivateKey)
 	default:
 		log.Fatalf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
 	}
 
-	return keyrr, cs, privkey, nil
+	return pkc, nil
 }
 
-func LoadSigningKey(keyfile string) (*dns.KEY, crypto.Signer, error) {
-	var keyrr *dns.KEY
-	var cs crypto.Signer
-	var rr dns.RR
+func LoadSig0SigningKeyNG(keyfile string) (*PrivateKeyCache, error) {
+	var pkc *PrivateKeyCache
 
 	if keyfile != "" {
-		var ktype uint16
 		var err error
-		_, cs, rr, ktype, _, _, err = ReadKey(keyfile)
+		pkc, err = ReadPrivateKey(keyfile)
 		if err != nil {
-			return nil, nil, fmt.Errorf("Error reading key '%s': %v", keyfile, err)
+			return nil, fmt.Errorf("Error reading SIG(0) key file '%s': %v", keyfile, err)
 		}
 
-		if ktype != dns.TypeKEY {
-			return nil, nil, fmt.Errorf("Key must be a KEY RR")
+		if pkc.KeyType != dns.TypeKEY {
+			return nil, fmt.Errorf("Key must be a KEY RR")
 		}
-
-		keyrr = rr.(*dns.KEY)
 	}
-	return keyrr, cs, nil
+	return pkc, nil
 }

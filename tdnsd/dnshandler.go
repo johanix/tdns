@@ -162,8 +162,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				w.WriteMsg(m)
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
-			// log.Printf("After FindZone zd.ZoneStore: %v (%s)", zd.ZoneStore,
-			//	tdns.ZoneStoreToString[zd.ZoneStore])
+
 			if zd.ZoneStore == tdns.XfrZone {
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -195,9 +194,8 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
-		// if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
 		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
+			err := tdns.SignRRset(&rrset, qname, dak)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -311,9 +309,8 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
-		// if zd.OnlineSigning && cs != nil && len(rrset.RRSIGs) == 0 {
 		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
+			err := tdns.SignRRset(&rrset, qname, dak)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {

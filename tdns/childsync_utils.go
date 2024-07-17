@@ -16,29 +16,26 @@ import (
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
 // command line rather than the one in the keystore. Not to be used by TDNSD.
 func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) error {
-	//	const update_scheme = 2
-	//	dsynctarget, err := LookupDSYNCTarget(pzone, parpri, dns.StringToType["ANY"], update_scheme)
-	//	if err != nil {
-	//		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", pzone, parpri, err)
-	//	}
-
 	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
 		log.Fatalf("Error from CreateChildUpdate(%s): %v", pzone, err)
 	}
 
-	keyrr, cs, err := LoadSigningKey(Globals.Sig0Keyfile)
+	pkc, err := LoadSig0SigningKeyNG(Globals.Sig0Keyfile)
 	if err != nil {
-		log.Printf("Error from LoadSigningKey(%s): %v", Globals.Sig0Keyfile, err)
+		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 		return err
 	}
 	var smsg *dns.Msg
+	sak := &Sig0ActiveKeys{
+		Keys: []*PrivateKeyCache{pkc},
+	}
 
 	if Globals.Sig0Keyfile != "" {
 		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsgNG(*msg, Globals.Zonename, &cs, keyrr)
+		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
-			log.Printf("Error from SignMsgNG(%s): %v", Globals.Zonename, err)
+			log.Printf("Error from SignMsgNG2(%s): %v", Globals.Zonename, err)
 			return err
 		}
 	} else {

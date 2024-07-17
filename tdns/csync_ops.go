@@ -41,6 +41,7 @@ func (zd *ZoneData) PublishCsyncRR() error {
 
 	zd.mu.Lock()
 	apex.RRtypes[dns.TypeCSYNC] = rrset
+	zd.Options["dirty"] = true
 	zd.mu.Unlock()
 
 	zd.BumpSerial()
@@ -60,6 +61,7 @@ func (zd *ZoneData) UnpublishCsyncRR() error {
 
 	zd.mu.Lock()
 	delete(apex.RRtypes, dns.TypeCSYNC)
+	zd.Options["dirty"] = true
 	zd.mu.Unlock()
 
 	zd.BumpSerial()

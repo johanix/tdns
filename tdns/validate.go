@@ -543,3 +543,56 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 
 	return true, nil
 }
+
+// From Mieks DNS lib:
+// const year68 = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits.
+
+// ValidityPeriod uses RFC1982 serial arithmetic to calculate
+// if a signature period is valid. If t is the zero time, the
+// current time is taken other t is. Returns true if the signature
+// is valid at the given time, otherwise returns false.
+func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
+	var utc int64
+	if t.IsZero() {
+		utc = time.Now().UTC().Unix()
+	} else {
+		utc = t.UTC().Unix()
+	}
+	modi := (int64(inc) - utc) / year68
+	mode := (int64(exp) - utc) / year68
+	ti := int64(inc) + modi*year68
+	te := int64(exp) + mode*year68
+	return ti <= utc && utc <= te
+}
+
+// ValidityPeriod uses RFC1982 serial arithmetic to calculate
+// if a signature period is valid. If t is the zero time, the
+// current time is taken other t is. Returns true if the signature
+// is valid at the given time, otherwise returns false.
+func xxxSIGValidityPeriod(sig *dns.SIG, t time.Time) bool {
+	var utc int64
+	if t.IsZero() {
+		utc = time.Now().UTC().Unix()
+	} else {
+		utc = t.UTC().Unix()
+	}
+	modi := (int64(sig.Inception) - utc) / year68
+	mode := (int64(sig.Expiration) - utc) / year68
+	ti := int64(sig.Inception) + modi*year68
+	te := int64(sig.Expiration) + mode*year68
+	return ti <= utc && utc <= te
+}
+
+func xxxRRSIGValidityPeriod(rrsig *dns.RRSIG, t time.Time) bool {
+	var utc int64
+	if t.IsZero() {
+		utc = time.Now().UTC().Unix()
+	} else {
+		utc = t.UTC().Unix()
+	}
+	modi := (int64(rrsig.Inception) - utc) / year68
+	mode := (int64(rrsig.Expiration) - utc) / year68
+	ti := int64(rrsig.Inception) + modi*year68
+	te := int64(rrsig.Expiration) + mode*year68
+	return ti <= utc && utc <= te
+}

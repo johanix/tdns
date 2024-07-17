@@ -83,11 +83,26 @@ UNIQUE (zonename, keyid)
 }
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
+type PrivateKeyCache struct {
+	K          crypto.PrivateKey
+	PrivateKey string // This is only used when reading from file with ReadKeyNG()
+	CS         crypto.Signer
+	RR         dns.RR
+	KeyType    uint16
+	Algorithm  uint8
+	KeyRR      dns.KEY
+	DnskeyRR   dns.DNSKEY
+}
+
 type Sig0KeyCache struct {
 	K     crypto.PrivateKey
 	CS    crypto.Signer
 	RR    dns.RR
 	KeyRR dns.KEY
+}
+
+type Sig0ActiveKeys struct {
+	Keys []*PrivateKeyCache
 }
 
 type DnssecKeyCache struct {
@@ -98,8 +113,8 @@ type DnssecKeyCache struct {
 }
 
 type DnssecActiveKeys struct {
-	KSKs []*DnssecKeyCache
-	ZSKs []*DnssecKeyCache
+	KSKs []*PrivateKeyCache
+	ZSKs []*PrivateKeyCache
 }
 
 type Tx struct {
@@ -152,9 +167,10 @@ func (tx *Tx) QueryRow(query string, args ...interface{}) *sql.Row {
 }
 
 type KeyDB struct {
-	DB          *sql.DB
-	mu          sync.Mutex
-	Sig0Cache   map[string]*Sig0KeyCache
+	DB *sql.DB
+	mu sync.Mutex
+	// Sig0Cache   map[string]*Sig0KeyCache
+	Sig0Cache   map[string]*Sig0ActiveKeys
 	DnssecCache map[string]*DnssecActiveKeys // map[zonename]*DnssecActiveKeys
 	Ctx         string
 	UpdateQ     chan UpdateRequest
@@ -260,7 +276,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 	dbSetupTables(db)
 	return &KeyDB{
 		DB:          db,
-		Sig0Cache:   make(map[string]*Sig0KeyCache),
+		Sig0Cache:   make(map[string]*Sig0ActiveKeys),
 		DnssecCache: make(map[string]*DnssecActiveKeys),
 		UpdateQ:     make(chan UpdateRequest),
 	}, nil

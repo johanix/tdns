@@ -145,17 +145,18 @@ type ChildDelegationData struct {
 }
 
 type KeystorePost struct {
-	Command    string // "sig0"
-	SubCommand string // "list" | "add" | "delete" | ...
-	Zone       string
-	Keyname    string
-	Keyid      uint16
-	Flags      uint16
-	Algorithm  uint8 // RSASHA256 | ED25519 | etc.
-	PrivateKey string
-	KeyRR      string
-	DnskeyRR   string
-	State      string
+	Command         string // "sig0"
+	SubCommand      string // "list" | "add" | "delete" | ...
+	Zone            string
+	Keyname         string
+	Keyid           uint16
+	Flags           uint16
+	Algorithm       uint8 // RSASHA256 | ED25519 | etc.
+	PrivateKey      string
+	KeyRR           string
+	DnskeyRR        string
+	PrivateKeyCache *PrivateKeyCache
+	State           string
 }
 
 type KeystoreResponse struct {

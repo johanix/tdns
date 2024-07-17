@@ -50,6 +50,8 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 
 		zone = dns.Fqdn(zone)
 
+		var sak *tdns.Sig0ActiveKeys
+
 	cmdloop:
 		for {
 			// count++
@@ -136,23 +138,20 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 				}
 
 				if keyfile != "" {
-					_, cs, rr, ktype, _, _, err := tdns.ReadKey(keyfile)
+					pkc, err := tdns.ReadKeyNG(keyfile)
 					if err != nil {
-						fmt.Printf("Error reading keyfile: %v\n", err)
+						fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
 						os.Exit(1)
 					}
-					if ktype != dns.TypeKEY {
-						fmt.Printf("Keyfile is not a SIG(0) keyfile\n")
-						os.Exit(1)
-					}
-
-					keyrr, ok := rr.(*dns.KEY)
-					if !ok {
-						fmt.Printf("Key record is not a KEY record\n")
+					if pkc.KeyType != dns.TypeKEY {
+						fmt.Printf("Keyfile did not contain a SIG(0) key\n")
 						os.Exit(1)
 					}
 
-					m, err := tdns.SignMsgNG(*msg, zone, &cs, keyrr)
+					sak.Keys = append(sak.Keys, pkc)
+
+					// m, err := tdns.SignMsgNG(*msg, zone, &cs, keyrr)
+					m, err := tdns.SignMsgNG2(*msg, zone, sak)
 					if err != nil {
 						fmt.Printf("Error signing message: %v\n", err)
 						os.Exit(1)
@@ -160,12 +159,12 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 					msg = m
 				} else {
 					fmt.Printf("No SIG(0) keyfile specified, trying to fetch active key from keystore\n")
-					_, cs, rr, err := kdb.GetSig0PrivKey(zone)
+					sak, err := kdb.GetSig0ActiveKeys(zone)
 					if err != nil {
 						fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", zone, err)
 						os.Exit(1)
 					}
-					m, err := tdns.SignMsgNG(*msg, zone, cs, rr)
+					m, err := tdns.SignMsgNG2(*msg, zone, sak)
 					if err != nil {
 						fmt.Printf("Error signing message: %v\n", err)
 						os.Exit(1)

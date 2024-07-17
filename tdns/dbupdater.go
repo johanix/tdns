@@ -239,6 +239,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 				RRtypes: make(map[uint16]RRset),
 			}
 			zd.AddOwner(owner)
+			zd.Options["dirty"] = true
 		}
 
 		rrset, exists := owner.RRtypes[rrtype]
@@ -261,8 +262,10 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
+				zd.Options["dirty"] = true
 			} else {
 				owner.RRtypes[rrtype] = rrset
+				zd.Options["dirty"] = true
 			}
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			continue
@@ -271,6 +274,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			// ClassANY: Remove RRset
 			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
 			delete(owner.RRtypes, rrtype)
+			zd.Options["dirty"] = true
 			continue
 
 		case dns.ClassINET:
@@ -295,11 +299,13 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			log.Printf("ApplyChildUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
+			zd.Options["dirty"] = true
 		}
 		owner.RRtypes[rrtype] = rrset
 		// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
 		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
 		// dump.P(owner.RRtypes[rrtype])
+		zd.Options["dirty"] = true
 		continue
 	}
 
@@ -470,6 +476,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 		// dump.P(owner.RRtypes[rrtype])
 		continue
 	}
+
+	zd.Options["dirty"] = !dss.InSync
 
 	// XXX: The data in dss is not quite complete. We catch changes to the NS RRset, and changes to glue
 	// for the in-bailiwick nameserver. But we don't catch that we should remove glue for a nameserver that is

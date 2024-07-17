@@ -120,7 +120,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 
 	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
 		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
-			err := tdns.SignRRset(&rrset, zone, &dak.ZSKs[0].CS, &dak.ZSKs[0].KeyRR)
+			err := tdns.SignRRset(&rrset, zone, dak)
 			if err != nil {
 				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
 			} else {
@@ -212,7 +212,7 @@ func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
 		if zd.Options["online-signing"] {
 			var err error
-			err = tdns.SignRRset(&rrset, zone, &dak.KSKs[0].CS, &dak.KSKs[0].KeyRR)
+			err = tdns.SignRRset(&rrset, zone, dak)
 			if err != nil {
 				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			} else {

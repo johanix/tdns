@@ -211,45 +211,6 @@ func init() {
 	keystoreDnssecSetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
 }
 
-func KeystoreImportKey(filename string) error {
-	_, _, rr, _, privkey, alg, err := tdns.ReadKey(filename)
-	if err != nil {
-		log.Fatalf("Error reading key '%s': %v", filename, err)
-	}
-
-	if krr, ok := rr.(*dns.KEY); ok {
-		if rr.Header().Name != tdns.Globals.Zonename {
-			log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
-				rr.Header().Name, tdns.Globals.Zonename)
-		}
-
-		data := tdns.KeystorePost{
-			Command:    "sig0-mgmt",
-			SubCommand: "add",
-			Zone:       tdns.Globals.Zonename,
-			Keyname:    rr.Header().Name,
-			Keyid:      krr.KeyTag(),
-			Algorithm:  alg,
-			PrivateKey: privkey,
-			KeyRR:      rr.String(),
-			State:      "created",
-		}
-		kr, err := SendKeystoreCmd(api, data)
-		if err != nil {
-			fmt.Printf("Error from SendKeystore: %v", err)
-			os.Exit(1)
-		}
-		if kr.Error {
-			fmt.Printf("%s\n", kr.ErrorMsg)
-			os.Exit(1)
-		}
-		if len(kr.Msg) != 0 {
-			fmt.Printf("%s\n", kr.Msg)
-		}
-	}
-	return nil
-}
-
 func Sig0KeyMgmt(cmd string) error {
 	data := tdns.KeystorePost{
 		Command:    "sig0-mgmt",
@@ -261,27 +222,25 @@ func Sig0KeyMgmt(cmd string) error {
 		// no action
 
 	case "add", "import":
-		_, _, rr, _, privkey, alg, err := tdns.ReadKey(filename)
+		pkc, err := tdns.ReadKeyNG(filename)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
 
-		if krr, ok := rr.(*dns.KEY); ok {
-			if rr.Header().Name != tdns.Globals.Zonename {
+		fmt.Printf("KeyRR: %s\n", pkc.KeyRR.String())
+
+		if pkc != nil && pkc.KeyType == dns.TypeKEY {
+			if pkc.KeyRR.Header().Name != tdns.Globals.Zonename {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
-					rr.Header().Name, tdns.Globals.Zonename)
+					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
 			}
 
 			data = tdns.KeystorePost{
-				Command:    "sig0-mgmt",
-				SubCommand: "add",
-				Zone:       tdns.Globals.Zonename,
-				Keyname:    rr.Header().Name,
-				Keyid:      krr.KeyTag(),
-				Algorithm:  alg,
-				PrivateKey: privkey,
-				KeyRR:      rr.String(),
-				State:      "created",
+				Command:         "sig0-mgmt",
+				SubCommand:      "add",
+				Zone:            tdns.Globals.Zonename,
+				PrivateKeyCache: pkc,
+				State:           "created",
 			}
 		}
 
@@ -293,12 +252,6 @@ func Sig0KeyMgmt(cmd string) error {
 		fmt.Printf("Unknown keystore command: \"%s\"\n", cmd)
 		os.Exit(1)
 	}
-
-	//	if cmd == "delete" || cmd == "setstate" {
-	//		data.Keyid = uint16(keyid)
-	//		data.Zone = tdns.Globals.Zonename
-	//		data.Keyname = tdns.Globals.Zonename
-	//	}
 
 	if cmd == "setstate" {
 		data.State = NewState
@@ -355,28 +308,25 @@ func DnssecKeyMgmt(cmd string) error {
 
 	case "add", "import":
 		fmt.Printf("Adding DNSSEC key pair to keystore\n")
-		_, _, rr, _, privkey, alg, err := tdns.ReadKey(filename)
+		pkc, err := tdns.ReadKeyNG(filename)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
 
-		if krr, ok := rr.(*dns.DNSKEY); ok {
-			if rr.Header().Name != tdns.Globals.Zonename {
+		fmt.Printf("DNSKEY RR: %s\n", pkc.DnskeyRR.String())
+
+		if pkc != nil && pkc.KeyType == dns.TypeDNSKEY {
+			if pkc.DnskeyRR.Header().Name != tdns.Globals.Zonename {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
-					rr.Header().Name, tdns.Globals.Zonename)
+					tdns.Globals.Zonename, pkc.DnskeyRR.Header().Name)
 			}
 
 			data = tdns.KeystorePost{
-				Command:    "dnssec-mgmt",
-				SubCommand: "add",
-				Zone:       tdns.Globals.Zonename,
-				Keyname:    rr.Header().Name,
-				Keyid:      krr.KeyTag(),
-				Flags:      krr.Flags,
-				Algorithm:  alg,
-				PrivateKey: privkey,
-				DnskeyRR:   rr.String(),
-				State:      "created",
+				Command:         "dnssec-mgmt",
+				SubCommand:      "add",
+				Zone:            tdns.Globals.Zonename,
+				PrivateKeyCache: pkc,
+				State:           "created",
 			}
 		}
 
@@ -388,12 +338,6 @@ func DnssecKeyMgmt(cmd string) error {
 		fmt.Printf("Unknown keystore command: \"%s\"\n", cmd)
 		os.Exit(1)
 	}
-
-	//	if cmd == "delete" || cmd == "setstate" {
-	//		data.Keyid = uint16(keyid)
-	//		data.Zone = tdns.Globals.Zonename
-	//		data.Keyname = tdns.Globals.Zonename
-	//	}
 
 	if cmd == "setstate" {
 		data.State = NewState
