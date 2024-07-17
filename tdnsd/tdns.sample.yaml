@@ -7,17 +7,26 @@ cli:
 service:
    name:		TDNSD
    verbose:		true
-   debug:		false   # writes processed zone to disk
+   debug:		true   # writes processed zone to disk
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
    reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
 
 dnsengine:
-   addresses:		[ 127.0.0.1:5354 ]
+   addresses:		[ 127.0.0.1:5354, '[::1]:5354']
+   zones:
+      config:		/etc/axfr.net/tdns-zones.yaml
+      filedir:		/etc/axfr.net/zones
+      filetmpl:		"%s/%s.zone"		# zonename.zone
 
 apiserver:
    address:     	127.0.0.1:8989
    key:         	winter-is-coming-santa-stuck-in-chimney
+
+server:
+   id:			ooga booga boo
+   version:		v99.99
+   hostname:		there-is-no-place-like-127.0.0.1
 
 validator:
    active:		true
@@ -31,16 +40,18 @@ validator:
          file:		/etc/axfr.net/sig0-keys.yaml
 
 resolver:
-   address:		[ 13.239.122.123:53 ]
+   address:		8.8.8.8:53 
 
-delegations:
-   childsync:
-      update-ns:        true
-      update-a:         true
-      update-aaaa:      true   
+childsync:		# What to do when we are the child
+   schemes:		[ update ] #, notify ] # this child will use either
+   update-ns:		true
+   update-a:		true
+   update-aaaa:		true
+   sync-on-boot:	false
+   syncwithparent:	true
 
-scanner:
-   interval:    	60
+# scanner:
+#    interval:    	60
 
 db:
    file:		/var/tmp/tdns.db
