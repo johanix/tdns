@@ -29,7 +29,11 @@ func DnsEngine(conf *Config) error {
 		for _, net := range []string{"udp", "tcp"} {
 			go func(addr, net string) {
 				log.Printf("DnsEngine: serving on %s (%s)\n", addr, net)
-				server := &dns.Server{Addr: addr, Net: net}
+				server := &dns.Server{
+					Addr:          addr,
+					Net:           net,
+					MsgAcceptFunc: tdns.MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				}
 
 				// Must bump the buffer size of incoming UDP msgs, as updates
 				// may be much larger then queries
