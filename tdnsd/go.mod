@@ -2,10 +2,7 @@ module tdnsd
 
 go 1.21
 
-replace (
-	github.com/johanix/tdns/tdns => ../tdns
-	github.com/miekg/dns => ../../dns
-)
+replace github.com/johanix/tdns/tdns => ../tdns
 
 require (
 	github.com/go-playground/validator/v10 v10.11.1
