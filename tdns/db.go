@@ -234,7 +234,9 @@ func (db *KeyDB) Close() error {
 // }
 
 func dbSetupTables(db *sql.DB) bool {
-	fmt.Printf("Setting up missing tables\n")
+	if Globals.Verbose {
+		log.Printf("Setting up missing tables\n")
+	}
 
 	for t, s := range DefaultTables {
 		stmt, err := db.Prepare(s)
@@ -255,13 +257,15 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 	if dbfile == "" {
 		return nil, fmt.Errorf("error: DB filename unspecified")
 	}
-	fmt.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
+	if Globals.Verbose {
+		log.Printf("NewKeyDB: using sqlite db in file %s\n", dbfile)
+	}
 	if err := os.Chmod(dbfile, 0664); err != nil {
-		log.Printf("NewKeyDB: Error trying to ensure that db %s is writable: %v", dbfile, err)
+		return nil, fmt.Errorf("NewKeyDB: Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}
 	db, err := sql.Open("sqlite3", dbfile)
 	if err != nil {
-		log.Fatalf("NewKeyDB: Error from sql.Open: %v", err)
+		return nil, fmt.Errorf("NewKeyDB: Error from sql.Open: %v", err)
 	}
 
 	if force {
@@ -269,7 +273,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 			sqlcmd := "DROP TABLE " + table
 			_, err = db.Exec(sqlcmd)
 			if err != nil {
-				log.Fatalf("NewKeyDB: Error when dropping table %s: %v", table, err)
+				return nil, fmt.Errorf("NewKeyDB: Error when dropping table %s: %v", table, err)
 			}
 		}
 	}

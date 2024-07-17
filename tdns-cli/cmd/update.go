@@ -22,17 +22,21 @@ var zone, server, keyfile string
 
 var updateCmd = &cobra.Command{
 	Use:   "update",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example: to quickly create a Cobra application.`,
+	Short: "Prefix, only useable via the 'update create' subcommand",
 }
 
 var updateCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create and ultimately send a DNS UPDATE msg",
-	Long: `Will query for operation (add|del|show|send|set-ttl|list-tags|quit), domain name and tags.
-Will end the loop on the operation (or domain name) "QUIT"`,
+	Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
+When the message is complete it may be signed and sent by the 'send' command. After a 
+message has been send the loop will start again with a new, empty message to create.
+Loop ends on the command "QUIT"
+
+The zone to update is mandatory to specify on the command line with the --zone flag.`,
 	Run: func(cmd *cobra.Command, args []string) {
+
+		PrepArgs("zonename")
 
 		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
 		if err != nil {
@@ -42,15 +46,43 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 
 		var adds, removes []dns.RR
 
-		var ops = []string{"zone", "add", "del", "show", "send", "set-ttl", "server", "quit"}
-		fmt.Printf("Defined operations are: %v\n", ops)
-
 		var ttl int = 60
 		var op, rrstr, port string
 
-		zone = dns.Fqdn(zone)
+		zone = dns.Fqdn(tdns.Globals.Zonename)
 
 		var sak *tdns.Sig0ActiveKeys
+		var signing bool = false
+
+		if keyfile != "" {
+			pkc, err := tdns.ReadPrivateKey(keyfile)
+			if err != nil {
+				fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
+				signing = true
+			}
+			if pkc.KeyType != dns.TypeKEY {
+				fmt.Printf("Keyfile did not contain a SIG(0) key\n")
+				signing = true
+			}
+			if signing {
+				fmt.Printf("Using keyfile %s\n", keyfile)
+				sak = &tdns.Sig0ActiveKeys{
+					Keys: []*tdns.PrivateKeyCache{pkc},
+				}
+			} else {
+				fmt.Printf("Warning: no SIG(0) signing of update messages possible.\n")
+			}
+		} else {
+			sak, err = kdb.GetSig0ActiveKeys(zone)
+			if err != nil {
+				fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", zone, err)
+			} else {
+				fmt.Printf("SIG(0) private key for zone %s successfully fetched from keystore\n", zone)
+			}
+		}
+
+		var ops = []string{"zone", "add", "del", "show", "send", "set-ttl", "server", "quit"}
+		fmt.Printf("Defined operations are: %v\n", ops)
 
 	cmdloop:
 		for {
@@ -62,14 +94,14 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 				break cmdloop
 
 			case "zone":
-				zone = tdns.TtyQuestion("Zone", "127.0.0.1", false)
-				zone = dns.Fqdn(zone)
+				fmt.Printf("Zone must be specified on the command line\n")
+				os.Exit(1)
+				// zone = tdns.TtyQuestion("Zone", "foo.com", false)
+				// zone = dns.Fqdn(zone)
 
 			case "set-ttl":
 				ttl = tdns.TtyIntQuestion("TTL (in seconds)", 60, false)
-				// fmt.Printf("TTL: got: %d\n", tmp)
-				// ttl = time.Duration(tmp) * time.Second
-				// fmt.Printf("TTL: got: %d ttl: %v\n", tmp, ttl)
+
 			case "add", "del":
 				if zone == "." {
 					fmt.Println("Target zone not set, please set it first")
@@ -138,7 +170,7 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 				}
 
 				if keyfile != "" {
-					pkc, err := tdns.ReadKeyNG(keyfile)
+					pkc, err := tdns.ReadPrivateKey(keyfile)
 					if err != nil {
 						fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
 						os.Exit(1)
@@ -150,8 +182,7 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 
 					sak.Keys = append(sak.Keys, pkc)
 
-					// m, err := tdns.SignMsgNG(*msg, zone, &cs, keyrr)
-					m, err := tdns.SignMsgNG2(*msg, zone, sak)
+					m, err := tdns.SignMsg(*msg, zone, sak)
 					if err != nil {
 						fmt.Printf("Error signing message: %v\n", err)
 						os.Exit(1)
@@ -164,7 +195,7 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 						fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", zone, err)
 						os.Exit(1)
 					}
-					m, err := tdns.SignMsgNG2(*msg, zone, sak)
+					m, err := tdns.SignMsg(*msg, zone, sak)
 					if err != nil {
 						fmt.Printf("Error signing message: %v\n", err)
 						os.Exit(1)
@@ -190,7 +221,7 @@ Will end the loop on the operation (or domain name) "QUIT"`,
 func init() {
 	rootCmd.AddCommand(updateCmd)
 	updateCmd.AddCommand(updateCreateCmd)
-	updateCreateCmd.Flags().StringVarP(&zone, "zone", "z", "", "Zone to update")
-	updateCreateCmd.Flags().StringVarP(&server, "server", "S", "", "Server to send update to")
+	// updateCreateCmd.Flags().StringVarP(&zone, "zone", "z", "", "Zone to update")
+	updateCreateCmd.Flags().StringVarP(&server, "server", "S", "", "Server to send update to (in addr:port format)")
 	updateCreateCmd.Flags().StringVarP(&keyfile, "key", "K", "", "SIG(0) keyfile to use for signing the update")
 }

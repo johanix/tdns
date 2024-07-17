@@ -227,14 +227,14 @@ func PrepArgs(required ...string) {
 
 		case "zonename":
 			if tdns.Globals.Zonename == "" {
-				fmt.Printf("Error: zone name not specified\n")
+				fmt.Printf("Error: zone name not specified using --zone flag\n")
 				os.Exit(1)
 			}
 			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
 		case "keyid":
 			if keyid == 0 {
-				fmt.Printf("Error: key id not specified\n")
+				fmt.Printf("Error: key id not specified using --keyid flag\n")
 				os.Exit(1)
 			}
 

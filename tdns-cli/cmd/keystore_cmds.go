@@ -222,7 +222,7 @@ func Sig0KeyMgmt(cmd string) error {
 		// no action
 
 	case "add", "import":
-		pkc, err := tdns.ReadKeyNG(filename)
+		pkc, err := tdns.ReadPrivateKey(filename)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
@@ -308,7 +308,7 @@ func DnssecKeyMgmt(cmd string) error {
 
 	case "add", "import":
 		fmt.Printf("Adding DNSSEC key pair to keystore\n")
-		pkc, err := tdns.ReadKeyNG(filename)
+		pkc, err := tdns.ReadPrivateKey(filename)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
