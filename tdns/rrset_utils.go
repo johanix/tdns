@@ -53,7 +53,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 			} else if _, ok := rr.(*dns.RRSIG); ok {
 				// ignore RRSIGs for the moment
 			} else {
-				log.Fatalf("Error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
+				return []dns.RR{}, fmt.Errorf("Error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
 			}
 		}
 		return rrs, nil

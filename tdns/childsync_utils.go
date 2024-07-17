@@ -18,10 +18,10 @@ import (
 func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) error {
 	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		log.Fatalf("Error from CreateChildUpdate(%s): %v", pzone, err)
+		return fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err)
 	}
 
-	pkc, err := LoadSig0SigningKeyNG(Globals.Sig0Keyfile)
+	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 		return err

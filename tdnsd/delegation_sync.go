@@ -96,98 +96,87 @@ func DelegationSyncher(conf *Config) error {
 	wg.Add(1)
 	go func() {
 		var err error
-		for {
-			select {
-			case ds = <-delsyncq:
-				zd := ds.ZoneData
-				dss := ds.SyncStatus
+		for ds = range delsyncq {
+			zd := ds.ZoneData
+			dss := ds.SyncStatus
 
-				switch ds.Command {
-				case "DELEGATION-STATUS":
-					log.Printf("DelegationSyncher: Zone %s request for delegation status.", zd.ZoneName)
+			switch ds.Command {
+			case "DELEGATION-STATUS":
+				log.Printf("DelegationSyncher: Zone %s request for delegation status.", zd.ZoneName)
 
-					syncstate, err := zd.AnalyseZoneDelegation()
-					if err != nil {
-						log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
-						syncstate.Error = true
-						syncstate.ErrorMsg = err.Error()
-					}
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-
-				case "SYNC-DELEGATION":
-					log.Printf("DelegationSyncher: Zone %s request for delegation sync -%d+%d NS adds and -%d+%d A glue and -%d+%d AAAA glue.", ds.ZoneName,
-						len(dss.NsRemoves), len(dss.NsAdds), len(dss.ARemoves), len(dss.AAdds), len(dss.AAAARemoves), len(dss.AAAAAdds))
-					// for _, rr := range ds.Adds {
-					// 	log.Printf("ADD: %s", rr.String())
-					// }
-					// for _, rr := range ds.Removes {
-					// 	log.Printf("DEL: %s", rr.String())
-					// }
-					zd := ds.ZoneData
-					if zd.Parent == "" || zd.Parent == "." {
-						zd.Parent, err = tdns.ParentZone(zd.ZoneName, imr)
-						if err != nil {
-							log.Printf("DelegationSyncher: Zone %s: Error from ParentZone(): %v. Ignoring sync request.", ds.ZoneName, err)
-							continue
-						}
-					}
-
-					msg, rcode, err := SyncZoneDelegation(conf, zd, ds.SyncStatus)
-					if err != nil {
-						log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
-						continue
-					}
-
-					log.Printf("DelegationSyncher: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
-					// 1. Figure out which scheme to use
-					// 2. Call handler for that scheme
-
-				case "EXPLICIT-SYNC-DELEGATION":
-					log.Printf("DelegationSyncher: Zone %s request for explicit delegation sync.", ds.ZoneName)
-
-					syncstate, err := zd.AnalyseZoneDelegation()
-					if err != nil {
-						log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
-						syncstate.Error = true
-						syncstate.ErrorMsg = err.Error()
-						if ds.Response != nil {
-							ds.Response <- syncstate
-						}
-						continue
-					}
-
-					if syncstate.InSync {
-						log.Printf("DelegationSyncher: Zone %s: delegation data in parent \"%s\" is in sync with child. No action needed.",
-							syncstate.ZoneName, syncstate.Parent)
-						if ds.Response != nil {
-							ds.Response <- syncstate
-						}
-						continue
-					}
-
-					// Not in sync, let's fix that.
-					msg, rcode, err := SyncZoneDelegation(conf, zd, syncstate)
-					if err != nil {
-						log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
-						syncstate.Error = true
-						syncstate.ErrorMsg = err.Error()
-					} else {
-						log.Printf("DelegationSyncher: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
-					}
-					syncstate.Msg = msg
-					syncstate.Rcode = rcode
-
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-
-				default:
-					log.Printf("DelegationSyncher: Zone %s: Unknown command: '%s'. Ignoring.", ds.ZoneName, ds.Command)
+				syncstate, err := zd.AnalyseZoneDelegation()
+				if err != nil {
+					log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+					syncstate.Error = true
+					syncstate.ErrorMsg = err.Error()
 				}
+				if ds.Response != nil {
+					ds.Response <- syncstate
+				}
+				continue
+
+			case "SYNC-DELEGATION":
+				log.Printf("DelegationSyncher: Zone %s request for delegation sync -%d+%d NS adds and -%d+%d A glue and -%d+%d AAAA glue.", ds.ZoneName,
+					len(dss.NsRemoves), len(dss.NsAdds), len(dss.ARemoves), len(dss.AAdds), len(dss.AAAARemoves), len(dss.AAAAAdds))
+				zd := ds.ZoneData
+				if zd.Parent == "" || zd.Parent == "." {
+					zd.Parent, err = tdns.ParentZone(zd.ZoneName, imr)
+					if err != nil {
+						log.Printf("DelegationSyncher: Zone %s: Error from ParentZone(): %v. Ignoring sync request.", ds.ZoneName, err)
+						continue
+					}
+				}
+
+				msg, rcode, err := SyncZoneDelegation(conf, zd, ds.SyncStatus)
+				if err != nil {
+					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+					continue
+				}
+
+				log.Printf("DelegationSyncher: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
+
+			case "EXPLICIT-SYNC-DELEGATION":
+				log.Printf("DelegationSyncher: Zone %s request for explicit delegation sync.", ds.ZoneName)
+
+				syncstate, err := zd.AnalyseZoneDelegation()
+				if err != nil {
+					log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+					syncstate.Error = true
+					syncstate.ErrorMsg = err.Error()
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					continue
+				}
+
+				if syncstate.InSync {
+					log.Printf("DelegationSyncher: Zone %s: delegation data in parent \"%s\" is in sync with child. No action needed.",
+						syncstate.ZoneName, syncstate.Parent)
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					continue
+				}
+
+				// Not in sync, let's fix that.
+				msg, rcode, err := SyncZoneDelegation(conf, zd, syncstate)
+				if err != nil {
+					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
+					syncstate.Error = true
+					syncstate.ErrorMsg = err.Error()
+				} else {
+					log.Printf("DelegationSyncher: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
+				}
+				syncstate.Msg = msg
+				syncstate.Rcode = rcode
+
+				if ds.Response != nil {
+					ds.Response <- syncstate
+				}
+				continue
+
+			default:
+				log.Printf("DelegationSyncher: Zone %s: Unknown command: '%s'. Ignoring.", ds.ZoneName, ds.Command)
 			}
 		}
 	}()

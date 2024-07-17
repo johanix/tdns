@@ -8,7 +8,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
@@ -36,11 +35,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 	if !viper.GetBool("service.refresh") {
 		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt on Notifies.")
-		for {
-			select {
-			case <-zonerefch: // ensure that we keep reading to keep the
-				continue // channel open
-			}
+		for range zonerefch {
+			// ensure that we keep reading to keep the channel open
+			continue
 		}
 	} else {
 		log.Printf("RefreshEngine: Starting")
@@ -87,30 +84,17 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
 							zone, err)
 					}
-					//					if updated {
-					//						if resetSoaSerial {
-					//							zonedata.CurrentSerial = uint32(time.Now().Unix())
-					//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-					//								zone, zonedata.CurrentSerial)
-					//						}
-					//						zonedata.NotifyDownstreams()
-					//					}
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
-					dump.P(zr.UpdatePolicy)
 					zonedata = &tdns.ZoneData{
-						ZoneName:    zone,
-						ZoneStore:   zr.ZoneStore,
-						Logger:      log.Default(),
-						Upstream:    zr.Primary,
-						Downstreams: zr.Notify,
-						Zonefile:    zr.Zonefile,
-						ZoneType:    zr.ZoneType,
-						Options:     zr.Options,
-						// DelegationSync:   zr.DelegationSync,
-						// OnlineSigning:    zr.OnlineSigning,
-						// AllowUpdates:     zr.AllowUpdates,
-						// FoldCase:         zr.FoldCase,
+						ZoneName:         zone,
+						ZoneStore:        zr.ZoneStore,
+						Logger:           log.Default(),
+						Upstream:         zr.Primary,
+						Downstreams:      zr.Notify,
+						Zonefile:         zr.Zonefile,
+						ZoneType:         zr.ZoneType,
+						Options:          zr.Options,
 						UpdatePolicy:     zr.UpdatePolicy,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),

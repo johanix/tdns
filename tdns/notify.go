@@ -79,7 +79,7 @@ func xxxSendNotify(parentname, childname string, ntype string, dsynctarget *Dsyn
 	default:
 		// lookupzone = lib.ParentZone(zonename, lib.Globals.IMR)
 		if Globals.ParentZone == "" {
-			log.Fatalf("Error: parent zone name not specified.")
+			return dns.RcodeServerFailure, fmt.Errorf("Error: parent zone name not specified.")
 		}
 	}
 

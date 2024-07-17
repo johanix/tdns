@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (kdb *KeyDB) Sig0KeyMgmt(kp KeystorePost) (KeystoreResponse, error) {
+func (kdb *KeyDB) Sig0KeyMgmt(kp KeystorePost) (*KeystoreResponse, error) {
 
 	const (
 		addSig0KeySql = `
@@ -31,7 +31,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	tx, err := kdb.Begin("Sig0KeyMgmt")
 	if err != nil {
-		return resp, err
+		return &resp, err
 	}
 
 	defer func() {
@@ -60,7 +60,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		rows, err := kdb.Query(getAllSig0KeysSql)
 		if err != nil {
 			log.Printf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
-			return resp, fmt.Errorf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			return &resp, fmt.Errorf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
 
@@ -71,7 +71,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &privatekey, &keyrrstr)
 			if err != nil {
-				log.Fatalf("Error from rows.Scan(): %v", err)
+				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
 			if len(privatekey) < 10 {
 				privatekey = "ULTRA SECRET KEY"
@@ -95,7 +95,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
-			return resp, err
+			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
@@ -106,7 +106,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			log.Printf("Error: %v", err)
-			return resp, err
+			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
 			if rows > 0 {
@@ -129,14 +129,14 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		if err != nil {
 			log.Printf("Error: %v", err)
 			if err == sql.ErrNoRows {
-				return resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
+				return &resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
-			return resp, err
+			return &resp, err
 		}
 		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
 			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
-			return resp, nil
+			return &resp, nil
 		}
 
 		// 3. Return all good, now untrusted
@@ -144,7 +144,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		// log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
 			log.Printf("Error: %v", err)
-			return resp, err
+			return &resp, err
 		}
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
@@ -153,10 +153,10 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
 
-	return resp, nil
+	return &resp, nil
 }
 
-func (kdb *KeyDB) DnssecKeyMgmt(kp KeystorePost) (KeystoreResponse, error) {
+func (kdb *KeyDB) DnssecKeyMgmt(kp KeystorePost) (*KeystoreResponse, error) {
 
 	const (
 		addDnskeySql = `
@@ -173,7 +173,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 	tx, err := kdb.Begin("DnssecKeyMgmt")
 	if err != nil {
-		return resp, err
+		return &resp, err
 	}
 
 	defer func() {
@@ -200,7 +200,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	case "list":
 		rows, err := tx.Query(getAllDnskeysSql)
 		if err != nil {
-			log.Fatalf("Error from kdb.Query(%s): %v", getAllDnskeysSql, err)
+			return nil, fmt.Errorf("Error from kdb.Query(%s): %v", getAllDnskeysSql, err)
 		}
 		defer rows.Close()
 
@@ -211,7 +211,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 			if err != nil {
-				log.Fatalf("Error from rows.Scan(): %v", err)
+				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
 			if len(privatekey) < 10 {
 				privatekey = "ULTRA SECRET KEY"
@@ -240,7 +240,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
 			log.Printf("Error from tx.Exec(): %v", err)
-			return resp, err
+			return &resp, err
 		} else {
 			log.Printf("tx.Exec(): all ok")
 			rows, _ := res.RowsAffected()
@@ -252,7 +252,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			log.Printf("Error from tx.Exec(): %v", err)
-			return resp, err
+			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
 			if rows > 0 {
@@ -275,14 +275,14 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		if err != nil {
 			log.Printf("Error: %v", err)
 			if err == sql.ErrNoRows {
-				return resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
+				return &resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
-			return resp, err
+			return &resp, err
 		}
 		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
 			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
-			return resp, nil
+			return &resp, nil
 		}
 
 		// 3. Return all good, now untrusted
@@ -292,7 +292,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			log.Printf("Error from tx.Exec(): %v", err)
 			//			resp.Error = true
 			//			resp.ErrorMsg = err.Error()
-			return resp, err
+			return &resp, err
 		}
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("Key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
@@ -301,7 +301,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		log.Printf("DnssecKeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
 	}
 
-	return resp, nil
+	return &resp, nil
 }
 
 func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {

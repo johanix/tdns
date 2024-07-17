@@ -29,11 +29,8 @@ func UpdateHandler(conf *Config) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		for {
-			select {
-			case dhr = <-dnsupdateq:
-				tdns.UpdateResponder(&dhr, updateq)
-			}
+		for dhr = range dnsupdateq {
+			tdns.UpdateResponder(&dhr, updateq)
 		}
 	}()
 	wg.Wait()

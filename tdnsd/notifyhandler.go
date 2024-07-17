@@ -24,11 +24,8 @@ func NotifyHandler(conf *Config) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		for {
-			select {
-			case dhr = <-dnsnotifyq:
-				NotifyResponder(&dhr, zonech, scannerq)
-			}
+		for dhr = range dnsnotifyq {
+			NotifyResponder(&dhr, zonech, scannerq)
 		}
 	}()
 	wg.Wait()

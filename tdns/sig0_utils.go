@@ -22,7 +22,7 @@ import (
 //
 //	The code should store the newly generated key in the keystore.
 func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
-	pkc, err := LoadSig0SigningKeyNG(Globals.Sig0Keyfile)
+	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		return fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 	}
@@ -115,7 +115,7 @@ func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 		nkey.Algorithm = alg
 		privkey, err = nkey.Generate(bits)
 		if err != nil {
-			log.Fatalf("Error from nkey.Generate: %v", err)
+			return nil, fmt.Errorf("Error from nkey.Generate: %v", err)
 		}
 
 		kbasename := fmt.Sprintf("K%s+%03d+%03d", owner, nkey.Algorithm, nkey.KeyTag())
@@ -130,7 +130,7 @@ func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	case "external":
 		keygenprog := viper.GetString("roll.keygen.generator")
 		if keygenprog == "" {
-			log.Fatalf("Error: key generator program not specified.")
+			return nil, fmt.Errorf("Error: key generator program not specified.")
 		}
 
 		algstr := dns.AlgorithmToString[alg]
@@ -156,13 +156,13 @@ func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 			}
 		}
 
-		pkc, err = LoadSig0SigningKeyNG(keyname + ".key")
+		pkc, err = LoadSig0SigningKey(keyname + ".key")
 		if err != nil {
 			return nil, err
 		}
 
 	default:
-		log.Fatalf("Error: unknown keygen mode: \"%s\".", mode)
+		return nil, fmt.Errorf("Error: unknown keygen mode: \"%s\".", mode)
 	}
 
 	switch pkc.Algorithm {
@@ -173,13 +173,13 @@ func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 		pkc.CS = privkey.(*ecdsa.PrivateKey)
 	default:
-		log.Fatalf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
+		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
 	}
 
 	return pkc, nil
 }
 
-func LoadSig0SigningKeyNG(keyfile string) (*PrivateKeyCache, error) {
+func LoadSig0SigningKey(keyfile string) (*PrivateKeyCache, error) {
 	var pkc *PrivateKeyCache
 
 	if keyfile != "" {

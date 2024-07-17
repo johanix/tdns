@@ -35,9 +35,10 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
 			kp.Command, kp.SubCommand, r.RemoteAddr)
 
-		resp := tdns.KeystoreResponse{
-			Time: time.Now(),
-		}
+		// resp := tdns.KeystoreResponse{
+		// 	Time: time.Now(),
+		// }
+		var resp *tdns.KeystoreResponse
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
@@ -62,8 +63,10 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp, err = kdb.Sig0KeyMgmt(kp)
 			if err != nil {
 				log.Printf("Error from Sig0Mgmt(): %v", err)
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp = &tdns.KeystoreResponse{
+					Error:    true,
+					ErrorMsg: err.Error(),
+				}
 			}
 
 		case "dnssec-mgmt":
@@ -72,13 +75,19 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp, err = kdb.DnssecKeyMgmt(kp)
 			if err != nil {
 				log.Printf("Error from DnssecMgmt(): %v", err)
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp = &tdns.KeystoreResponse{
+					Error:    true,
+					ErrorMsg: err.Error(),
+				}
 			}
 			// log.Printf("APIkeystore: keystore dnssec-mgmt response: %v", resp)
 
 		default:
 			log.Printf("Unknown command: %s", kp.Command)
+			resp = &tdns.KeystoreResponse{
+				Error:    true,
+				ErrorMsg: fmt.Sprintf("Unknown command: %s", kp.Command),
+			}
 		}
 	}
 }
@@ -99,7 +108,8 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /truststore request (cmd: %s subcommand: %s) from %s.\n",
 			tp.Command, tp.SubCommand, r.RemoteAddr)
 
-		resp := tdns.TruststoreResponse{}
+		// resp := tdns.TruststoreResponse{}
+		var resp *tdns.TruststoreResponse
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
@@ -118,12 +128,18 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					Dnskey:    val.Dnskey,
 				}
 			}
-			resp.ChildDnskeys = tmp1
+			resp = &tdns.TruststoreResponse{
+				ChildDnskeys: tmp1,
+			}
 
 		case "child-sig0-mgmt":
 			resp, err = kdb.Sig0TrustMgmt(tp)
 			if err != nil {
 				log.Printf("Error from Sig0TrustMgmt(): %v", err)
+				resp = &tdns.TruststoreResponse{
+					Error:    true,
+					ErrorMsg: err.Error(),
+				}
 			}
 
 		default:
@@ -335,6 +351,8 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				//				if owner := &zd.Owners[idx]; owner != nil {
 				owner, err := zd.GetOwner(dp.Qname)
 				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
 				}
 
 				if rrset, ok := owner.RRtypes[dp.Qtype]; ok {

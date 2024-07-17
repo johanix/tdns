@@ -211,8 +211,7 @@ func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 
 	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
 		if zd.Options["online-signing"] {
-			var err error
-			err = tdns.SignRRset(&rrset, zone, dak)
+			err := tdns.SignRRset(&rrset, zone, dak)
 			if err != nil {
 				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 			} else {

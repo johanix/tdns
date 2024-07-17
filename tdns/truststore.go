@@ -31,7 +31,7 @@ type TmpSig0Key struct {
 	Key  string
 }
 
-func (kdb *KeyDB) Sig0TrustMgmt(kp TruststorePost) (TruststoreResponse, error) {
+func (kdb *KeyDB) Sig0TrustMgmt(kp TruststorePost) (*TruststoreResponse, error) {
 
 	const (
 		addkeysql = `
@@ -49,7 +49,7 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 
 	tx, err := kdb.Begin("ChildSig0Mgmt")
 	if err != nil {
-		return resp, err
+		return &resp, err
 	}
 
 	switch kp.SubCommand {
@@ -57,7 +57,7 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 
 		rows, err := tx.Query(getallchildsig0keyssql)
 		if err != nil {
-			log.Fatalf("Error from kdb.Query(%s): %v", getallchildsig0keyssql, err)
+			return nil, fmt.Errorf("Error from kdb.Query(%s): %v", getallchildsig0keyssql, err)
 		}
 		defer rows.Close()
 
@@ -69,7 +69,7 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		for rows.Next() {
 			err := rows.Scan(&keyname, &keyid, &trusted, &validated, &keyrrstr)
 			if err != nil {
-				log.Fatalf("Error from rows.Scan(): %v", err)
+				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = Sig0Key{
@@ -146,7 +146,7 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 			log.Printf("ChildSig0Mgmt: tx.Rollback() error=%v", err1)
 		}
 	}
-	return resp, nil
+	return &resp, nil
 }
 
 func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
@@ -155,7 +155,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 	if tafile != "" {
 		cfgdata, err := os.ReadFile(tafile)
 		if err != nil {
-			log.Fatalf("Error from ReadFile(%s): %v", tafile, err)
+			return fmt.Errorf("Error from ReadFile(%s): %v", tafile, err)
 		}
 
 		var tatmp TAtmp
@@ -163,14 +163,14 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 
 		err = yaml.Unmarshal(cfgdata, &tatmp)
 		if err != nil {
-			log.Fatalf("Error from yaml.Unmarshal(TAtmp): %v", err)
+			return fmt.Errorf("Error from yaml.Unmarshal(TAtmp): %v", err)
 		}
 
 		for k, v := range tatmp {
 			k = dns.Fqdn(k)
 			rr, err := dns.NewRR(v.Dnskey)
 			if err != nil {
-				log.Fatalf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
+				return fmt.Errorf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
 			}
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
@@ -212,7 +212,7 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 
 	rows, err := kdb.Query(loadsig0sql)
 	if err != nil {
-		log.Fatalf("Error from kdb.Query(%s): %v", loadsig0sql, err)
+		return fmt.Errorf("Error from kdb.Query(%s): %v", loadsig0sql, err)
 	}
 	defer rows.Close()
 
@@ -223,12 +223,12 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 	for rows.Next() {
 		err := rows.Scan(&keyname, &keyid, &trusted, &validated, &keyrrstr)
 		if err != nil {
-			log.Fatalf("Error from rows.Scan(): %v", err)
+			return fmt.Errorf("Error from rows.Scan(): %v", err)
 		}
 
 		rr, err := dns.NewRR(keyrrstr)
 		if err != nil {
-			log.Fatalf("Error from dns.NewRR(%s): %v", keyrrstr, err)
+			return fmt.Errorf("Error from dns.NewRR(%s): %v", keyrrstr, err)
 		}
 
 		if keyrr, ok := rr.(*dns.KEY); ok {
@@ -251,7 +251,7 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 	if sig0file != "" {
 		cfgdata, err := os.ReadFile(sig0file)
 		if err != nil {
-			log.Fatalf("Error from ReadFile(%s): %v", sig0file, err)
+			return fmt.Errorf("Error from ReadFile(%s): %v", sig0file, err)
 		}
 
 		var sig0tmp Sig0tmp
@@ -263,14 +263,14 @@ SELECT child, keyid, validated, trusted, keyrr FROM Sig0TrustStore WHERE zonenam
 
 		err = yaml.Unmarshal(cfgdata, &sig0tmp)
 		if err != nil {
-			log.Fatalf("Error from yaml.Unmarshal(Sig0config): %v", err)
+			return fmt.Errorf("Error from yaml.Unmarshal(Sig0config): %v", err)
 		}
 
 		for k, v := range sig0tmp {
 			k = dns.Fqdn(k)
 			rr, err := dns.NewRR(v.Key)
 			if err != nil {
-				log.Fatalf("Error from dns.NewRR(%s): %v", v.Key, err)
+				return fmt.Errorf("Error from dns.NewRR(%s): %v", v.Key, err)
 			}
 
 			if keyrr, ok := rr.(*dns.KEY); ok {
