@@ -21,7 +21,9 @@ features of **tdnsd**. The sub-commands are grouped under different prefixes:
 
 - "**tdns-cli truststore**": commands to manage the truststore (i.e. the
   repository of public keys for child zones, used to validate SIG(0)
-  signed DNS UPDATE messages, DNSSEC signed CSYNC and CDS RRsets, etc.
+  signed DNS UPDATE messages, DNSSEC signed CSYNC and CDS RRsets, etc. The
+  commands include support for managing the **trust state** of each key
+  (as opposed to whether the key is *known* or *validated*).
 
 - "**tdns-cli notify**": commands to issue various types of generalized
   NOTIFY messages.
