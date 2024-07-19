@@ -11,6 +11,9 @@ features of **tdnsd**. The sub-commands are grouped under different prefixes:
 
 - "**tdns-cli ddns**": various commands to send DNS UPDATE messages.
 
+- "**tdns-cli update create**": a command to interactively compose a DNS UPDATE
+  message before signing and sending it.
+
 - "**tdns-cli keystore**": commands to manage the keystore (i.e. the
   repository of private/public key pairs used to SIG(0) sign UPDATE
   messages, DNSSEC sign a zone, etc). The commands include listing, 
