@@ -28,7 +28,9 @@ features of **tdnsd**. The sub-commands are grouped under different prefixes:
 - "**tdns-cli notify**": commands to issue various types of generalized
   NOTIFY messages.
 
-- "**tdns-cli dsync**": commands to examine DSYNC RRsets.
+- "**tdns-cli dsync**": commands to examine DSYNC RRsets. (This is less
+  relevant now that the **dog** tool is able to query for and present
+  DSYNC RRsets natively.
 
 I'm most likely forgetting some categories of commands. It is always 
 possible to traverse the complete command hierarchy with the "-h" flag
