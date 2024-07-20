@@ -4,14 +4,18 @@
 package tdns
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
@@ -171,6 +175,8 @@ func PrepareKeyCache(privkey, pubkey, algorithm string) (*PrivateKeyCache, error
 Algorithm: %d (%s)
 PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 
+	dump.P(src)
+
 	var pkc PrivateKeyCache
 
 	switch rr.(type) {
@@ -210,6 +216,42 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 	}
 
 	return &pkc, err
+}
+
+// XXX: This is a copy of the PrivateKeyToString() in crypto/x509/x509.go
+func PrivateKeyToString(privkey crypto.PrivateKey) (string, error) {
+	var pemBlock *pem.Block
+
+	switch k := privkey.(type) {
+	case *rsa.PrivateKey:
+		pemBlock = &pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(k),
+		}
+	case *ecdsa.PrivateKey:
+		der, err := x509.MarshalECPrivateKey(k)
+		if err != nil {
+			return "", fmt.Errorf("error marshaling ECDSA private key: %v", err)
+		}
+		pemBlock = &pem.Block{
+			Type:  "EC PRIVATE KEY",
+			Bytes: der,
+		}
+	case ed25519.PrivateKey:
+		der, err := x509.MarshalPKCS8PrivateKey(k)
+		if err != nil {
+			return "", fmt.Errorf("error marshaling Ed25519 private key: %v", err)
+		}
+		pemBlock = &pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: der,
+		}
+	default:
+		return "", fmt.Errorf("unsupported private key type")
+	}
+
+	// return string(pem.EncodeToMemory(pemBlock)), nil
+	return string(pemBlock.Bytes), nil
 }
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {

@@ -128,7 +128,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 	// Check for child delegation
 	cdd, v4glue, v6glue := zd.FindDelegation(qname, true)
 	// if childns != nil {
-	if cdd.NS_rrset != nil {
+	if cdd != nil && cdd.NS_rrset != nil {
 		zd.Logger.Printf("LRRset: found a delegation for %s in known zone %s",
 			qname, zd.ZoneName)
 

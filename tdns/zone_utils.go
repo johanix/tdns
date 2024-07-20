@@ -714,7 +714,7 @@ func (kdb *KeyDB) GenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error
 	}
 	pkc, err := kdb.GenerateSigningKey(zd.ZoneName, alg) //
 	if err != nil {
-		zd.Logger.Printf("Error from GenerateSigningKey(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from kdb.GenerateSigningKey(%s): %v", zd.ZoneName, err)
 		return nil, err
 	}
 	sak := &Sig0ActiveKeys{

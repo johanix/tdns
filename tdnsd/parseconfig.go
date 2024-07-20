@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -155,7 +154,7 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 					os.Exit(1)
 				} else {
 					fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
-					dump.P(zconf)
+					// dump.P(zconf)
 				}
 			} else {
 				fmt.Printf("Zone %s refers to the NON-existing template %s. Ignored.\n", zname, zconf.Template)

@@ -8,6 +8,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"encoding/base64"
 
 	"fmt"
 	"log"
@@ -89,6 +90,7 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	return nil
 }
 
+// XXX: This should die in favour of the kdb.GenerateSigningKey() below.
 func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	var privkey crypto.PrivateKey
 	var err error
@@ -222,11 +224,43 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 
 		nkey.Hdr.Rrtype = dns.TypeKEY
 		dump.P(nkey)
+		dump.P(privkey)
 
-		pkc = &PrivateKeyCache{
-			KeyType:   dns.TypeKEY,
-			Algorithm: nkey.Algorithm,
-			KeyRR:     *nkey,
+		var privkeystr string
+
+		switch privkey.(type) {
+		case ed25519.PrivateKey:
+			privkeystr = base64.StdEncoding.EncodeToString([]byte(privkey.([]uint8)))
+			//		case *rsa.PrivateKey:
+			//			tmp, err := x509.MarshalECPrivateKey(privkey.(*rsa.PrivateKey))
+			//			if err != nil {
+			//				return nil, fmt.Errorf("Error from x509.MarshalECPrivateKey: %v", err)
+			//			}
+			//			privkeystr = base64.StdEncoding.EncodeToString(tmp)
+		default:
+			return nil, fmt.Errorf("Error: unknown private key type: %T", privkey)
+		}
+
+		if pkbytes, ok := privkey.([]uint8); ok {
+			privkeystr = base64.StdEncoding.EncodeToString([]byte(pkbytes))
+			// privkeystr, err := PrivateKeyToString(privkey)
+			if err != nil {
+				return nil, fmt.Errorf("Error from PrivateKeyToString: %v", err)
+			}
+
+		} else {
+			return nil, fmt.Errorf("Error: privkey is not []byte")
+		}
+
+		//		pkc = &PrivateKeyCache{
+		//			KeyType:   dns.TypeKEY,
+		//			Algorithm: nkey.Algorithm,
+		//			KeyRR:     *nkey,
+		//		}
+
+		pkc, err = PrepareKeyCache(privkeystr, nkey.String(), dns.AlgorithmToString[alg])
+		if err != nil {
+			return nil, fmt.Errorf("Error from PreparePrivateKeyCache: %v", err)
 		}
 
 	case "external":
@@ -268,16 +302,16 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		return nil, fmt.Errorf("Error: unknown keygen mode: \"%s\".", mode)
 	}
 
-	switch pkc.Algorithm {
-	case dns.RSASHA256:
-		pkc.CS = privkey.(*rsa.PrivateKey)
-	case dns.ED25519:
-		pkc.CS = privkey.(ed25519.PrivateKey)
-	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
-		pkc.CS = privkey.(*ecdsa.PrivateKey)
-	default:
-		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
-	}
+	//	switch pkc.Algorithm {
+	//	case dns.RSASHA256:
+	//		pkc.CS = privkey.(*rsa.PrivateKey)
+	//	case dns.ED25519:
+	//		pkc.CS = privkey.(ed25519.PrivateKey)
+	//	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
+	//		pkc.CS = privkey.(*ecdsa.PrivateKey)
+	//	default:
+	//		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[alg])
+	//	}
 
 	const (
 		addSig0KeySql = `
