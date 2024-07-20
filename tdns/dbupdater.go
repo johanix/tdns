@@ -484,7 +484,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 	// no longer in the NS RRset, nor that we should add glue for a nameserver that is newly in the NS RRset.
 	// But it's a start.
 
-	if zd.Options["delegation-sync"] && !dss.InSync {
+	if zd.Options["delegation-sync-child"] && !dss.InSync {
 		zd.DelegationSyncCh <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
 			ZoneName:   zd.ZoneName,

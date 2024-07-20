@@ -73,14 +73,26 @@ type ZoneData struct {
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
 	Name         string `validate:"required"`
+	Zonefile     string
 	Type         string `validate:"required"`
 	Store        string `validate:"required"` // xfr | map | slice | reg
-	Primary      string
+	Primary      string // upstream, for secondary zones
 	Notify       []string
-	Zonefile     string
 	Options      []string
 	Frozen       bool // true if zone is frozen; not a config param
 	Dirty        bool // true if zone has been modified; not a config param
+	UpdatePolicy UpdatePolicyConf
+	Template     string
+}
+
+type TemplateConf struct {
+	Name         string `validate:"required"`
+	Zonefile     string
+	Type         string
+	Store        string
+	Primary      string // upstream, for secondary zones
+	Notify       []string
+	Options      []string
 	UpdatePolicy UpdatePolicyConf
 }
 

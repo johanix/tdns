@@ -332,8 +332,9 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		// log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
+				// This is not an error, so lets just return an empty Sig0ActiveKeys
 				log.Printf("No active SIG(0) key found for zone %s", zonename)
-				return nil, err
+				return &sak, nil
 			}
 			log.Printf("Error from rows.Scan(): %v", err)
 			return nil, err
@@ -348,8 +349,9 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	}
 
 	if !keyfound {
+		// This is not an error, so lets just return an empty Sig0ActiveKeys
 		log.Printf("No active SIG(0) key found for zone %s", zonename)
-		return nil, sql.ErrNoRows
+		return &sak, nil
 	}
 
 	if Globals.Debug {

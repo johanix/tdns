@@ -1,39 +1,51 @@
+templates:
+   # the parent template allows updates to both auth data and child delegations
+   primary-parent:
+      store:		map
+      type:		primary
+#      zonefile:		/tmp/%s.zone
+      notify:		[ 127.0.0.1:5399 ]
+      options:		[ delegation-sync, delegation-sync-parent, online-signing, allow-updates, allow-child-updates ]
+      updatepolicy:
+         child:		
+            type:		selfsub
+            rrtypes:		[ A, AAAA, NS, DS, KEY ]
+            keybootstrap:	none
+         zone:
+            type:		selfsub
+            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+
+   # the child template only allows updates to auth data, not delegations
+   primary-child:
+      store:		map
+      type:		primary
+#      zonefile:		/tmp/%s.zone
+      notify:		[ 127.0.0.1:5399 ]
+      options:		[ delegation-sync, delegation-sync-child, online-signing, allow-updates ]
+      updatepolicy:
+         zone:
+            type:		selfsub
+            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+
 zones:
    test.net:
       name:		test.net
-      type:		primary
       zonefile:		/etc/axfr.net/zones/test.net
-      store:		map
-      notify:		[ 127.0.0.1:5399 ]
-      options:		[ online-signing, allow-updates, fold-case, allow-child-updates ]
-      updatepolicy:
-         child:		
-            type:		selfsub
-            rrtypes:		[ A, AAAA, NS, DS, KEY ]
-            keybootstrap:	none
-         zone:
-            type:		selfsub
-            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+      template:		primary-parent
+
    child.test.net:
       name:		child.test.net
-      type:		primary
       zonefile:		/etc/axfr.net/zones/child.test.net
-      store:		map
-      notify:		[ 127.0.0.1:5399 ]
-      options:		[ delegation-sync, allow-updates, online-signing ]
-      updatepolicy:
-         child:		
-            type:		selfsub
-            rrtypes:		[ A, AAAA, NS, DS, KEY ]
-            keybootstrap:	none
-         zone:
-            type:		selfsub
-            rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+      template:		primary-child
+
+   uchild.parent.axfr.net:
+      name:		uchild.parent.axfr.net
+      zonefile:		/etc/axfr.net/zones/uchild.parent.axfr.net
+      template:		primary-parent
+
    uchild.p.axfr.net:
       name:		uchild.p.axfr.net
-      type:		primary
       zonefile:		/etc/axfr.net/zones/uchild.p.axfr.net
-      store:		map
       notify:		[ 127.0.0.1:5399 ]
       options:		[ delegation-sync, online-signing, allow-updates ]
       updatepolicy:
@@ -44,13 +56,12 @@ zones:
          zone:
             type:		selfsub
             rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+      template:		primary-child
+
    p.axfr.net:
       name:		p.axfr.net
-      type:		primary
       zonefile:		/etc/axfr.net/zones/p.axfr.net
-      store:		map
-      notify:		[ 127.0.0.1:5399 ]
-      options:		[ delegation-sync, online-signing, allow-updates, allow-child-updates ]
+      options:		[ delegation-sync, delegation-sync-parent, online-signing, allow-updates, allow-child-updates ]
       updatepolicy:
          child:		
             type:		selfsub
@@ -59,3 +70,4 @@ zones:
          zone:
             type:		selfsub
             rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+      template:		primary-parent

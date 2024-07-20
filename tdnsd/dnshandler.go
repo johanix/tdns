@@ -249,7 +249,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		}
 
 	case tdns.TypeDSYNC, tdns.TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
-		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
+		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD, dns.TypeKEY,
 		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
 		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
 		if rrset, ok := apex.RRtypes[qtype]; ok {

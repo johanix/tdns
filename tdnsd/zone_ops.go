@@ -27,11 +27,11 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 
 	switch cp.SubCommand {
 	case "sign-zone":
-		err := SignZone(zd, kdb)
+		err := zd.SignZone(kdb)
 		return resp, err
 
 	case "generate-nsec":
-		err := GenerateNsecChain(zd, kdb)
+		err := zd.GenerateNsecChain(kdb)
 		return resp, err
 
 	case "show-nsec-chain":
@@ -108,7 +108,7 @@ func ShowNsecChain(zd *tdns.ZoneData) ([]string, error) {
 	return nsecrrs, nil
 }
 
-func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
+func xxxGenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
@@ -194,7 +194,7 @@ func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	return nil
 }
 
-func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
+func xxxSignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
@@ -204,7 +204,7 @@ func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
 		return err
 	}
 
-	err = GenerateNsecChain(zd, kdb)
+	err = zd.GenerateNsecChain(kdb)
 	if err != nil {
 		return err
 	}

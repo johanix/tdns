@@ -1,0 +1,240 @@
+/*
+ * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ */
+package tdns
+
+import (
+	"fmt"
+	"log"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+func sigLifetime(t time.Time) (uint32, uint32) {
+	sigJitter := time.Duration(60 * time.Second)
+	sigValidityInterval := time.Duration(5 * time.Minute)
+	incep := uint32(t.Add(-sigJitter).Unix())
+	expir := uint32(t.Add(sigValidityInterval).Add(sigJitter).Unix())
+	return incep, expir
+}
+
+func SignMsg(m dns.Msg, name string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
+
+	if sak == nil || len(sak.Keys) == 0 {
+		return nil, fmt.Errorf("SignMsg: no active SIG(0) keys available")
+	}
+
+	for _, key := range sak.Keys {
+		sigrr := new(dns.SIG)
+		sigrr.Hdr = dns.RR_Header{
+			Name:   key.KeyRR.Header().Name,
+			Rrtype: dns.TypeSIG,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		}
+		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
+		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
+		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
+		sigrr.RRSIG.SignerName = name
+
+		_, err := sigrr.Sign(key.CS, &m)
+		if err != nil {
+			log.Printf("Error from sig.Sign(%s): %v", name, err)
+			return nil, err
+		}
+		m.Extra = append(m.Extra, sigrr)
+	}
+	log.Printf("Signed msg: %s\n", m.String())
+
+	return &m, nil
+}
+
+func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys) error {
+
+	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
+		return fmt.Errorf("SignRRset: no active DNSSEC keys available")
+	}
+
+	if len(rrset.RRs) == 0 {
+		return fmt.Errorf("SignRRsetNG: rrset has no RRs")
+	}
+
+	var signingkeys []*PrivateKeyCache
+
+	if rrset.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
+		signingkeys = dak.KSKs
+	} else {
+		signingkeys = dak.ZSKs
+	}
+
+	for _, key := range signingkeys {
+		rrsig := new(dns.RRSIG)
+		rrsig.Hdr = dns.RR_Header{
+			Name:   key.DnskeyRR.Header().Name,
+			Rrtype: dns.TypeRRSIG,
+			Class:  dns.ClassINET,
+			Ttl:    604800, // one week in seconds
+		}
+		rrsig.KeyTag = key.DnskeyRR.KeyTag()
+		rrsig.Algorithm = key.DnskeyRR.Algorithm
+		rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
+		rrsig.SignerName = name
+
+		err := rrsig.Sign(key.CS, rrset.RRs)
+		if err != nil {
+			log.Printf("Error from rrsig.Sign(%s): %v", name, err)
+			return err
+		}
+
+		rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
+	}
+
+	return nil
+}
+
+func (zd *ZoneData) SignZone(kdb *KeyDB) error {
+	if !zd.Options["sign-zone"] {
+		return fmt.Errorf("Zone %s should not be signed", zd.ZoneName)
+	}
+
+	if !zd.Options["allow-updates"] {
+		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
+	}
+
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+	if err != nil {
+		log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		return err
+	}
+
+	// It's either black lies or we need a traditional NSEC chain
+	if !zd.Options["black-lies"] {
+		err = zd.GenerateNsecChain(kdb)
+		if err != nil {
+			return err
+		}
+	}
+
+	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
+		if zd.Options["online-signing"] {
+			err := SignRRset(&rrset, zone, dak)
+			if err != nil {
+				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
+			} else {
+				log.Printf("SignZone: signed %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
+			}
+		}
+		return rrset
+	}
+
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return err
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return err
+		}
+
+		for rrt, rrset := range owner.RRtypes {
+			if rrt == dns.TypeRRSIG {
+				continue
+			}
+			owner.RRtypes[rrt] = MaybeSignRRset(rrset, zd.ZoneName, kdb)
+		}
+	}
+
+	return nil
+}
+
+func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
+	if !zd.Options["allow-updates"] {
+		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
+	}
+	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+	if err != nil {
+		log.Printf("GenerateNsecChain: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		return err
+	}
+
+	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
+		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
+			err := SignRRset(&rrset, zone, dak)
+			if err != nil {
+				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
+			} else {
+				log.Printf("GenerateNsecChain: signed %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
+			}
+		}
+		return rrset
+	}
+
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return err
+	}
+	sort.Strings(names)
+
+	var nextidx int
+	var nextname string
+
+	var hasRRSIG bool
+
+	for idx, name := range names {
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return err
+		}
+
+		nextidx = idx + 1
+		if nextidx == len(names) {
+			nextidx = 0
+		}
+		nextname = names[nextidx]
+		var tmap = []int{int(dns.TypeNSEC)}
+		for rrt := range owner.RRtypes {
+			if rrt == dns.TypeRRSIG {
+				hasRRSIG = true
+				continue
+			}
+			if rrt != dns.TypeNSEC {
+				if rrt == 0 {
+					log.Printf("GenerateNsecChain: name: %s rrt: %v (not good)", name, rrt)
+				}
+				tmap = append(tmap, int(rrt))
+			}
+		}
+		if hasRRSIG || (zd.Options["online-signing"] && len(dak.KSKs) > 0) {
+			tmap = append(tmap, int(dns.TypeRRSIG))
+		}
+
+		log.Printf("GenerateNsecChain: name: %s tmap: %v", name, tmap)
+
+		sort.Ints(tmap) // unfortunately the NSEC TypeBitMap must be in order...
+		var rrts = make([]string, len(tmap))
+		for idx, t := range tmap {
+			rrts[idx] = dns.TypeToString[uint16(t)]
+		}
+
+		log.Printf("GenerateNsecChain: creating NSEC RR for name %s: %v %v", name, tmap, rrts)
+
+		items := []string{name, "NSEC", nextname}
+		items = append(items, rrts...)
+		nsecrr, err := dns.NewRR(strings.Join(items, " "))
+		if err != nil {
+			return err
+		}
+		tmp := owner.RRtypes[dns.TypeNSEC]
+		tmp.RRs = []dns.RR{nsecrr}
+		owner.RRtypes[dns.TypeNSEC] = MaybeSignRRset(tmp, zd.ZoneName, kdb)
+
+	}
+
+	return nil
+}

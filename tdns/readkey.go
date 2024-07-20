@@ -9,96 +9,12 @@ import (
 	"crypto/rsa"
 
 	"fmt"
-	"log"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
-
-func sigLifetime(t time.Time) (uint32, uint32) {
-	sigJitter := time.Duration(60 * time.Second)
-	sigValidityInterval := time.Duration(5 * time.Minute)
-	incep := uint32(t.Add(-sigJitter).Unix())
-	expir := uint32(t.Add(sigValidityInterval).Add(sigJitter).Unix())
-	return incep, expir
-}
-
-func SignMsg(m dns.Msg, name string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
-
-	if sak == nil || len(sak.Keys) == 0 {
-		return nil, fmt.Errorf("SignMsg: no active SIG(0) keys available")
-	}
-
-	for _, key := range sak.Keys {
-		sigrr := new(dns.SIG)
-		sigrr.Hdr = dns.RR_Header{
-			Name:   key.KeyRR.Header().Name,
-			Rrtype: dns.TypeSIG,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		}
-		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
-		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
-		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
-		sigrr.RRSIG.SignerName = name
-
-		_, err := sigrr.Sign(key.CS, &m)
-		if err != nil {
-			log.Printf("Error from sig.Sign(%s): %v", name, err)
-			return nil, err
-		}
-		m.Extra = append(m.Extra, sigrr)
-	}
-	log.Printf("Signed msg: %s\n", m.String())
-
-	return &m, nil
-}
-
-func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys) error {
-
-	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
-		return fmt.Errorf("SignRRset: no active DNSSEC keys available")
-	}
-
-	if len(rrset.RRs) == 0 {
-		return fmt.Errorf("SignRRsetNG: rrset has no RRs")
-	}
-
-	var signingkeys []*PrivateKeyCache
-
-	if rrset.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
-		signingkeys = dak.KSKs
-	} else {
-		signingkeys = dak.ZSKs
-	}
-
-	for _, key := range signingkeys {
-		rrsig := new(dns.RRSIG)
-		rrsig.Hdr = dns.RR_Header{
-			Name:   key.DnskeyRR.Header().Name,
-			Rrtype: dns.TypeRRSIG,
-			Class:  dns.ClassINET,
-			Ttl:    604800, // one week in seconds
-		}
-		rrsig.KeyTag = key.DnskeyRR.KeyTag()
-		rrsig.Algorithm = key.DnskeyRR.Algorithm
-		rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
-		rrsig.SignerName = name
-
-		err := rrsig.Sign(key.CS, rrset.RRs)
-		if err != nil {
-			log.Printf("Error from rrsig.Sign(%s): %v", name, err)
-			return err
-		}
-
-		rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
-	}
-
-	return nil
-}
 
 type BindPrivateKey struct {
 	Private_Key_Format string `yaml:"Private-key-format"`

@@ -30,7 +30,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 
-	var refreshCounters = make(map[string]*RefreshCounter, 5)
+	// var refreshCounters = make(map[string]*RefreshCounter, 5)
+	var refreshCounters = cmap.New[*RefreshCounter]()
 	ticker := time.NewTicker(1 * time.Second)
 
 	if !viper.GetBool("service.refresh") {
@@ -45,7 +46,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 	var upstream, zone string
 	var downstreams []string
-	var refresh uint32
+	// var refresh uint32
 	//	var rc *RefreshCounter
 	var updated bool
 	var err error
@@ -68,25 +69,35 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 				if zonedata, exist = tdns.Zones.Get(zone); exist {
 					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'",
 						zone)
-					if _, haveParams := refreshCounters[zone]; !haveParams {
+					// if _, haveParams := refreshCounters[zone]; !haveParams {
+					if _, haveParams := refreshCounters.Get(zone); !haveParams {
 						soa, _ := zonedata.GetSOA()
-						refreshCounters[zone] = &RefreshCounter{
+						refreshCounters.Set(zone, &RefreshCounter{
 							Name:        zone,
 							SOARefresh:  soa.Refresh,
 							CurRefresh:  1, // force immediate refresh
 							Upstream:    zr.Primary,
 							Downstreams: zr.Notify,
 							Zonefile:    zr.Zonefile,
+						})
+					}
+					// XXX: Should do refresh in parallel
+					go func() {
+						zd := zonedata // must have unique variable
+						updated, err := zd.Refresh(zr.Force)
+						if err != nil {
+							log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
+								zone, err)
 						}
-					}
-					updated, err = zonedata.Refresh(zr.Force)
-					if err != nil {
-						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
-							zone, err)
-					}
+						if updated {
+							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
+						}
+					}()
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
-					zonedata = &tdns.ZoneData{
+					// XXX: We want to do this in parallel
+					// go func() {
+					zd := &tdns.ZoneData{
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,
 						Logger:           log.Default(),
@@ -102,37 +113,48 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						// XXX: I think this is going away:
 						Children: map[string]*tdns.ChildDelegationData{},
 					}
-					updated, err = zonedata.Refresh(zr.Force)
+					updated, err = zd.Refresh(zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
 							zone, err)
-						continue // cannot do much else
+						// continue // cannot do much else
+						return // terminate goroutine
 					}
-
-					soa, _ := zonedata.GetSOA()
-					if soa != nil {
-						refresh = soa.Refresh
+					refresh, err := FindSoaRefresh(zd)
+					if err != nil {
+						log.Printf("Error from FindSoaRefresh(%s): %v", zone, err)
 					}
+					// soa, _ := zonedata.GetSOA()
+					// if soa != nil {
+					//	refresh = soa.Refresh
+					// }
 					// Is there a max refresh counter configured, then use it.
-					maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
-					if maxrefresh != 0 && maxrefresh < refresh {
-						refresh = maxrefresh
-					}
+					// maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
+					// if maxrefresh != 0 && maxrefresh < refresh {
+					//	refresh = maxrefresh
+					//}
 
 					// not refreshing from file all the time. use reload
-					if zr.ZoneType == tdns.Primary {
-						refresh = 86400 // 24h
-					}
+					// if zr.ZoneType == tdns.Primary {
+					//	refresh = 86400 // 24h
+					// }
 
-					refreshCounters[zone] = &RefreshCounter{
+					refreshCounters.Set(zone, &RefreshCounter{
 						Name:        zone,
 						SOARefresh:  refresh,
 						CurRefresh:  refresh,
 						Upstream:    upstream,
 						Downstreams: downstreams,
+					})
+
+					// This is a new zone being added to the server. Let's see if the zone
+					// config should cause any specific changes to the zone data to be made.
+					err = zd.SetupZoneSync()
+					if err != nil {
+						log.Printf("Error from SetupZone(%s): %v", zone, err)
 					}
 
-					tdns.Zones.Set(zone, zonedata)
+					tdns.Zones.Set(zone, zd)
 					//					if updated {
 					//						if resetSoaSerial {
 					//							zonedata.CurrentSerial = uint32(time.Now().Unix())
@@ -141,15 +163,16 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					//						}
 					//						zonedata.NotifyDownstreams()
 					//					}
-				}
+					// }()
 
-				if updated {
-					if resetSoaSerial {
-						zonedata.CurrentSerial = uint32(time.Now().Unix())
-						log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-							zone, zonedata.CurrentSerial)
+					if updated {
+						if resetSoaSerial {
+							zd.CurrentSerial = uint32(time.Now().Unix())
+							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
+								zone, zd.CurrentSerial)
+						}
+						zd.NotifyDownstreams()
 					}
-					zonedata.NotifyDownstreams()
 				}
 			}
 			if zr.Response != nil {
@@ -162,7 +185,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 		case <-ticker.C:
 			// log.Printf("RefEng: ticker. refCounters: %v", refreshCounters)
-			for zone, rc := range refreshCounters {
+			for zone, rc := range refreshCounters.Items() {
 				// log.Printf("RefEng: ticker for %s: curref: %d", zone, v.CurRefresh)
 				rc.CurRefresh--
 				if rc.CurRefresh <= 0 {
@@ -212,4 +235,23 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 			bd.Result <- resp
 		}
 	}
+}
+
+func FindSoaRefresh(zd *tdns.ZoneData) (uint32, error) {
+	var refresh uint32
+	soa, _ := zd.GetSOA()
+	if soa != nil {
+		refresh = soa.Refresh
+	}
+	// Is there a max refresh counter configured, then use it.
+	maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
+	if maxrefresh != 0 && maxrefresh < refresh {
+		refresh = maxrefresh
+	}
+
+	// not refreshing from file all the time. use reload
+	if zd.ZoneType == tdns.Primary {
+		refresh = 86400 // 24h
+	}
+	return refresh, nil
 }

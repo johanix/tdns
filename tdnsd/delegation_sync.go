@@ -43,52 +43,68 @@ func DelegationSyncher(conf *Config) error {
 		log.Printf("DelegationSyncher: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
 		apex, _ := zd.GetOwner(zd.ZoneName)
 		_, keyrrexist := apex.RRtypes[dns.TypeKEY]
-		if zd.Options["allow-updates"] {
-			if !keyrrexist {
-				log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
-				// _, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
-				sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
-				if err != nil {
-					log.Printf("DelegationSyncher: Error from kdb.GetSig0ActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
-					continue
-				}
-				if len(sak.Keys) == 0 {
-					log.Printf("DelegationSyncher: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
-					continue
-				}
 
-				log.Printf("DelegationSyncher: Publishing KEY RR for zone %s", zd.ZoneName)
-				zd.PublishKeyRRs(sak)
-				keyrrexist = true
-			} else {
-				log.Printf("DelegationSyncher: Zone %s KEY RRset already published", zd.ZoneName)
-			}
-
-			if keyrrexist && zd.Options["online-signing"] {
-				log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
-				dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-				if err != nil {
-					log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
-					continue
-				}
-				rrset := apex.RRtypes[dns.TypeKEY]
-				err = tdns.SignRRset(&rrset, zd.ZoneName, dak)
-				if err != nil {
-					log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
-				} else {
-					apex.RRtypes[dns.TypeKEY] = rrset
-					log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
-				}
-			} else {
-				log.Printf("DelegationSyncher: Zone %s does not allow online signing, KEY RRset cannot be re-signed", zd.ZoneName)
-			}
-		} else {
+		// 1. Are updates to the zone data allowed?
+		if !zd.Options["allow-updates"] {
 			if keyrrexist {
 				log.Printf("DelegationSyncher: Zone %s does not allow updates, but a KEY RRset is already published in the zone.", zd.ZoneName)
 			} else {
 				log.Printf("DelegationSyncher: Zone %s does not allow updates. Cannot publish a KEY RRset.", zd.ZoneName)
 			}
+			continue
 		}
+
+		// 2. Updates allowed, but there is no KEY RRset published.
+		if !keyrrexist {
+			log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
+			// _, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
+			sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
+			if err != nil {
+				log.Printf("DelegationSyncher: Error from kdb.GetSig0ActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+				continue
+			}
+			if len(sak.Keys) == 0 {
+				log.Printf("DelegationSyncher: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
+				sak, err = kdb.GenerateNewSig0ActiveKey(zd)
+				if err != nil {
+					log.Printf("DelegationSyncher: Error from kdb.GenerateNewSig0ActiveKey(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+					continue
+				}
+			}
+
+			if len(sak.Keys) == 0 {
+				log.Printf("DelegationSyncher: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
+				continue
+			}
+			log.Printf("DelegationSyncher: Publishing KEY RR for zone %s", zd.ZoneName)
+			zd.PublishKeyRRs(sak)
+			keyrrexist = true
+			//		} else {
+			//			log.Printf("DelegationSyncher: Zone %s KEY RRset already published", zd.ZoneName)
+			//			continue
+		}
+
+		// 3. There is a KEY RRset, question is whether it is signed or not
+		if zd.Options["online-signing"] {
+			log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
+			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+			if err != nil {
+				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+				continue
+			}
+			rrset := apex.RRtypes[dns.TypeKEY]
+			err = tdns.SignRRset(&rrset, zd.ZoneName, dak)
+			if err != nil {
+				log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
+			} else {
+				apex.RRtypes[dns.TypeKEY] = rrset
+				log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
+			}
+			continue
+		}
+
+		// 4. End of the line
+		log.Printf("DelegationSyncher: Zone %s does not allow online signing, KEY RRset cannot be re-signed", zd.ZoneName)
 	}
 
 	log.Printf("*** DelegationSyncher: starting ***")
