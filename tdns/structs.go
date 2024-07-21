@@ -349,6 +349,7 @@ type Sig0Key struct {
 	State      string
 	Keyid      uint16
 	Algorithm  string
+	Creator    string
 	Validated  bool   // has this key been DNSSEC validated
 	Trusted    bool   // is this key trusted
 	PrivateKey string //
@@ -362,6 +363,7 @@ type DnssecKey struct {
 	Keyid     uint16
 	Flags     uint16
 	Algorithm string
+	Creator   string
 	// Validated  bool   // has this key been DNSSEC validated
 	// Trusted    bool   // is this key trusted
 	PrivateKey string //

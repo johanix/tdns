@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -38,12 +39,6 @@ var keystoreSig0Cmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("keystore sig0 called (but NYI)")
 	},
-}
-
-type BindPrivateKey struct {
-	Private_Key_Format string `yaml:"Private-key-format"`
-	Algorithm          string `yaml:"Algorithm"`
-	PrivateKey         string `yaml:"PrivateKey"`
 }
 
 var keystoreSig0AddCmd = &cobra.Command{
@@ -227,6 +222,8 @@ func Sig0KeyMgmt(cmd string) error {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
 
+		dump.P(pkc)
+
 		fmt.Printf("KeyRR: %s\n", pkc.KeyRR.String())
 
 		if pkc != nil && pkc.KeyType == dns.TypeKEY {
@@ -234,6 +231,8 @@ func Sig0KeyMgmt(cmd string) error {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
 					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
 			}
+
+			log.Printf("[tdns-cli]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
 
 			data = tdns.KeystorePost{
 				Command:         "sig0-mgmt",

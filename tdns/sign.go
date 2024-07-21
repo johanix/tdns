@@ -97,7 +97,7 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys) error {
 
 func (zd *ZoneData) SignZone(kdb *KeyDB) error {
 	if !zd.Options["sign-zone"] {
-		return fmt.Errorf("Zone %s should not be signed", zd.ZoneName)
+		return fmt.Errorf("Zone %s should not be signed (option sign-zone=false)", zd.ZoneName)
 	}
 
 	if !zd.Options["allow-updates"] {

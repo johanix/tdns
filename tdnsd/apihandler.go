@@ -74,7 +74,7 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			//	kp.Command, kp.SubCommand)
 			resp, err = kdb.DnssecKeyMgmt(kp)
 			if err != nil {
-				log.Printf("Error from DnssecMgmt(): %v", err)
+				log.Printf("Error from DnssecKeyMgmt(): %v", err)
 				resp = &tdns.KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),

@@ -198,6 +198,10 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
+		if dak == nil {
+			log.Printf("ApexResponder: MaybeSignRRset: Warning: dak is nil")
+			return rrset
+		}
 		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			err := tdns.SignRRset(&rrset, qname, dak)
 			if err != nil {
@@ -313,6 +317,10 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
+		if dak == nil {
+			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
+			return rrset
+		}
 		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			err := tdns.SignRRset(&rrset, qname, dak)
 			if err != nil {

@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"log"
 
 	"fmt"
 	"os"
@@ -92,6 +93,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		pkc.KeyRR = *rrk
 		pkc.PrivateKey = rrk.DNSKEY.PrivateKeyString(pkc.K)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+		fmt.Printf("[readkey]PrivateKey: %s\n", pkc.PrivateKey)
 
 	default:
 		return nil, fmt.Errorf("Error: rr is of type %v", "foo")
@@ -102,6 +104,10 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 	}
+
+	log.Printf("ReadPrivateKey: pkc.PrivateKey: %s", pkc.PrivateKey)
+	log.Printf("ReadPrivateKey: bpk.PrivateKey: %s", bpk.PrivateKey)
+	pkc.PrivateKey = bpk.PrivateKey
 
 	switch pkc.Algorithm {
 	case dns.RSASHA256, dns.RSASHA512:
@@ -166,6 +172,7 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 }
 
 func PrepareKeyCache(privkey, pubkey, algorithm string) (*PrivateKeyCache, error) {
+	log.Printf("PrepareKeyCache: privkey: %s, pubkey: %s, algorithm: %s", privkey, pubkey, algorithm)
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)

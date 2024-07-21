@@ -8,7 +8,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
-	"encoding/base64"
+	"path/filepath"
 
 	"fmt"
 	"log"
@@ -226,11 +226,13 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		dump.P(nkey)
 		dump.P(privkey)
 
-		var privkeystr string
+		// var privkeystr string
+
+		// log.Printf("privkey (internal): %s", privkey.(string))
 
 		switch privkey.(type) {
 		case ed25519.PrivateKey:
-			privkeystr = base64.StdEncoding.EncodeToString([]byte(privkey.([]uint8)))
+			//privkeystr = base64.StdEncoding.EncodeToString(privkey.(ed25519.PrivateKey))
 			//		case *rsa.PrivateKey:
 			//			tmp, err := x509.MarshalECPrivateKey(privkey.(*rsa.PrivateKey))
 			//			if err != nil {
@@ -241,16 +243,16 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 			return nil, fmt.Errorf("Error: unknown private key type: %T", privkey)
 		}
 
-		if pkbytes, ok := privkey.([]uint8); ok {
-			privkeystr = base64.StdEncoding.EncodeToString([]byte(pkbytes))
-			// privkeystr, err := PrivateKeyToString(privkey)
-			if err != nil {
-				return nil, fmt.Errorf("Error from PrivateKeyToString: %v", err)
-			}
+		// if pkbytes, ok := privkey.([]uint8); ok {
+		//privkeystr = base64.StdEncoding.EncodeToString([]byte(pkbytes))
+		// privkeystr, err := PrivateKeyToString(privkey)
+		// if err != nil {
+		// 	return nil, fmt.Errorf("Error from PrivateKeyToString: %v", err)
+		// }
 
-		} else {
-			return nil, fmt.Errorf("Error: privkey is not []byte")
-		}
+		// } else {
+		// 	return nil, fmt.Errorf("Error: privkey is not []byte")
+		// }
 
 		//		pkc = &PrivateKeyCache{
 		//			KeyType:   dns.TypeKEY,
@@ -258,10 +260,10 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		//			KeyRR:     *nkey,
 		//		}
 
-		pkc, err = PrepareKeyCache(privkeystr, nkey.String(), dns.AlgorithmToString[alg])
-		if err != nil {
-			return nil, fmt.Errorf("Error from PreparePrivateKeyCache: %v", err)
-		}
+		// pkc, err = PrepareKeyCache(privkey.(string), nkey.String(), dns.AlgorithmToString[alg])
+		// if err != nil {
+		// 	return nil, fmt.Errorf("Error from PreparePrivateKeyCache: %v", err)
+		// }
 
 	case "external":
 		// keygenprog := viper.GetString("roll.keygen.generator")
@@ -271,8 +273,9 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		}
 
 		algstr := dns.AlgorithmToString[alg]
+		keydir := "/tmp"
 
-		cmdline := fmt.Sprintf("%s -a %s -T KEY -n ZONE %s", keygenprog, algstr, owner)
+		cmdline := fmt.Sprintf("%s -K %s -a %s -T KEY -n ZONE %s", keygenprog, keydir, algstr, owner)
 		fmt.Printf("cmd: %s\n", cmdline)
 		cmdsl := strings.Fields(cmdline)
 		command := exec.Command(cmdsl[0], cmdsl[1:]...)
@@ -281,22 +284,36 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 			log.Printf("Error from exec: %v: %v\n", cmdsl, err)
 		}
 
-		var keyname string
+		var keyname, keyfile string
 
+		log.Printf("out: %s", out)
 		for _, l := range strings.Split(string(out), "\n") {
 			if len(l) != 0 {
 				elems := strings.Fields(l)
 				if strings.HasPrefix(elems[0], "K"+owner) {
 					keyname = elems[0]
-					fmt.Printf("New key is in file %s\n", keyname)
+					keyfile = fmt.Sprintf("%s/%s.private", keydir, keyname)
+					keyfile = filepath.Clean(keyfile)
+					fmt.Printf("Generated key is in file %s\n", keyfile)
 				}
 			}
 		}
 
-		pkc, err = LoadSig0SigningKey(keyname + ".key")
+		log.Printf("keyfile: %s, keydir: %s, keyname: %s", keyfile, keydir, keyname)
+
+		// pkc, err = LoadSig0SigningKey(fmt.Sprintf("%s/%s", keydir, keyname))
+		pkc, err = ReadPrivateKey(keyfile)
 		if err != nil {
 			return nil, err
 		}
+		log.Printf("[generatesigningkey]PrivateKey: %s", pkc.PrivateKey)
+
+		dump.P(pkc)
+
+		log.Printf("[GenSigKey]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
+		log.Printf("Generated key: %s", pkc.KeyRR.String())
+		log.Printf("Generated private key string: %s", pkc.K)
+		log.Printf("Generated private key: %v", pkc.PrivateKey)
 
 	default:
 		return nil, fmt.Errorf("Error: unknown keygen mode: \"%s\".", mode)
@@ -315,7 +332,7 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 
 	const (
 		addSig0KeySql = `
-INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	)
 
 	tx, err := kdb.Begin("GenerateSigningKey")
@@ -328,7 +345,7 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, privatek
 	}()
 
 	_, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, "active", pkc.KeyRR.KeyTag(),
-		dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.KeyRR.String())
+		dns.AlgorithmToString[pkc.Algorithm], "tdnsd", pkc.PrivateKey, pkc.KeyRR.String())
 	// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 	if err != nil {
 		log.Printf("Error storing generated SIG(0) key in keystore: %v", err)
