@@ -260,7 +260,7 @@ func Sig0KeyMgmt(cmd string) error {
 		log.Printf("Sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
 	}
 
-	tr, err := SendKeystoreCmd(api, data)
+	tr, err := SendKeystoreCmd(tdns.Globals.Api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -342,7 +342,7 @@ func DnssecKeyMgmt(cmd string) error {
 		data.State = NewState
 	}
 
-	tr, err := SendKeystoreCmd(api, data)
+	tr, err := SendKeystoreCmd(tdns.Globals.Api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -377,7 +377,7 @@ func DnssecKeyMgmt(cmd string) error {
 	return nil
 }
 
-func SendKeystoreCmd(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
+func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
 	// fmt.Printf("Sending keystore command: %v\n", data)
 

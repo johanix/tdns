@@ -14,6 +14,7 @@ type GlobalStuff struct {
 	Zonename    string
 	ParentZone  string
 	Sig0Keyfile string
+	Api         *ApiClient
 }
 
 var Globals = GlobalStuff{

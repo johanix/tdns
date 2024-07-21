@@ -26,6 +26,11 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 	resp.Zone = zd.ZoneName
 
 	switch cp.SubCommand {
+	case "write-zone":
+		msg, err := zd.WriteZone(false)
+		resp.Msg = msg
+		return resp, err
+
 	case "sign-zone":
 		err := zd.SignZone(kdb)
 		return resp, err
@@ -46,7 +51,9 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 		}
 
 	case "freeze":
-		if !zd.Options["allow-updates"] || !zd.Options["allow-child-updates"] {
+		// If a zone has modifications, freezing implies that the updated
+		// zone data should be written out to disk.
+		if !zd.Options["allow-updates"] && !zd.Options["allow-child-updates"] {
 			return resp, fmt.Errorf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 		}
 
@@ -54,8 +61,16 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 			return resp, fmt.Errorf("FreezeZone: zone %s is already frozen", zd.ZoneName)
 		}
 
-		zd.Options["frozen"] = true
-		resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
+		// zd.mu.Lock()
+		zd.SetOption("frozen", true)
+		//zd.mu.Unlock()
+		if zd.Options["dirty"] {
+			tosource := true
+			zd.WriteZone(tosource)
+			resp.Msg = fmt.Sprintf("Zone %s is now frozen, modifications will be written to disk", zd.ZoneName)
+		} else {
+			resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
+		}
 		return resp, nil
 
 	case "thaw":
@@ -72,7 +87,8 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 	case "reload":
 		// XXX: Note: if the zone allows updates and is dirty, then reloading should be denied
 		log.Printf("ZoneOps: reloading, will check for changes to delegation data\n")
-		resp.Msg, err = ReloadZone(conf, cp.Zone, cp.Force)
+		// resp.Msg, err = ReloadZone(cp.Zone, cp.Force)
+		resp.Msg, err = zd.ReloadZone(conf.Internal.RefreshZoneCh, cp.Force)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -266,6 +282,10 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 }
 
 func ReloadZone(conf *Config, zone string, force bool) (string, error) {
+	//	if !zd.Options["dirty"] {
+	//		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
+	//		return msg, fmt.Errorf(msg)
+	//	}
 	var respch = make(chan tdns.RefresherResponse, 1)
 	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
 		Name:     zone,

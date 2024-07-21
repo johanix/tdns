@@ -281,7 +281,7 @@ type DebugResponse struct {
 	ErrorMsg        string
 }
 
-type Api struct {
+type ApiClient struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string

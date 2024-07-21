@@ -294,6 +294,35 @@ func (zd *ZoneData) ZoneFileName() (string, error) {
 	return fname, nil
 }
 
+func (zd *ZoneData) WriteZone(tosource bool) (string, error) {
+	var fname string
+	var err error
+	if tosource {
+		fname = zd.Zonefile
+	} else {
+		fname, err = zd.ZoneFileName()
+		if err != nil {
+			return err.Error(), err
+		}
+	}
+	if !zd.Options["dirty"] {
+		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
+	}
+	_, err = zd.WriteFile(fname)
+	if err == nil {
+		zd.mu.Lock()
+		zd.Options["dirty"] = false
+		zd.mu.Unlock()
+	}
+	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
+}
+
+func (zd *ZoneData) SetOption(name string, value bool) {
+	zd.mu.Lock()
+	zd.Options[name] = value
+	zd.mu.Unlock()
+}
+
 func (zd *ZoneData) NameExists(qname string) bool {
 	var ok bool
 	switch zd.ZoneStore {
@@ -681,9 +710,9 @@ func (zd *ZoneData) SetupZoneSync() error {
 					if alg == 0 {
 						return fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
 					}
-					pkc, err := kdb.GenerateSigningKey(zd.ZoneName, dns.ED25519) //
+					pkc, err := kdb.GeneratePrivateKey(zd.ZoneName, dns.TypeKEY, alg) //
 					if err != nil {
-						zd.Logger.Printf("Error from GenerateSigningKey(%s): %v", zd.ZoneName, err)
+						zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 						return err
 					}
 					sak := &Sig0ActiveKeys{
@@ -712,9 +741,9 @@ func (kdb *KeyDB) GenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error
 	if alg == 0 {
 		return nil, fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
 	}
-	pkc, err := kdb.GenerateSigningKey(zd.ZoneName, alg) //
+	pkc, err := kdb.GeneratePrivateKey(zd.ZoneName, dns.TypeKEY, alg) //
 	if err != nil {
-		zd.Logger.Printf("Error from kdb.GenerateSigningKey(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 		return nil, err
 	}
 	sak := &Sig0ActiveKeys{
@@ -726,4 +755,36 @@ func (kdb *KeyDB) GenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error
 	//		return nil, err
 	//	}
 	return sak, nil
+}
+
+func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
+	if !zd.Options["dirty"] {
+		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
+		return msg, fmt.Errorf(msg)
+	}
+	var respch = make(chan RefresherResponse, 1)
+	refreshCh <- ZoneRefresher{
+		Name:     zd.ZoneName,
+		Response: respch,
+		Force:    force,
+	}
+
+	var resp RefresherResponse
+
+	select {
+	case resp = <-respch:
+	case <-time.After(2 * time.Second):
+		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zd.ZoneName), fmt.Errorf("zone %s: timeout waiting for response from RefreshEngine", zd.ZoneName)
+	}
+
+	if resp.Error {
+		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
+		return fmt.Sprintf("zone %s: Error reloading: %s", zd.ZoneName, resp.ErrorMsg),
+			fmt.Errorf("zone %s: Error reloading: %v", zd.ZoneName, resp.ErrorMsg)
+	}
+
+	if resp.Msg == "" {
+		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zd.ZoneName)
+	}
+	return resp.Msg, nil
 }

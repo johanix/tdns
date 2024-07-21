@@ -45,7 +45,7 @@ var zoneReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		resp, err := SendCommandNG(api, tdns.CommandPost{
+		resp, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command:    "zone",
 			SubCommand: "reload",
 			Zone:       dns.Fqdn(tdns.Globals.Zonename),
@@ -78,9 +78,36 @@ var zoneSignCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendCommandNG(api, tdns.CommandPost{
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command:    "zone",
 			SubCommand: "sign-zone",
+			Zone:       tdns.Globals.Zonename,
+			Force:      force,
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if cr.Error {
+			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var zoneWriteCmd = &cobra.Command{
+	Use:   "write",
+	Short: "Send an zone write command to tdnsd",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
+			Command:    "zone",
+			SubCommand: "write-zone",
 			Zone:       tdns.Globals.Zonename,
 			Force:      force,
 		})
@@ -105,7 +132,7 @@ var zoneNsecGenerateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendCommandNG(api, tdns.CommandPost{
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command:    "zone",
 			SubCommand: "generate-nsec",
 			Zone:       tdns.Globals.Zonename,
@@ -132,7 +159,7 @@ var zoneNsecShowCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendCommandNG(api, tdns.CommandPost{
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command:    "zone",
 			SubCommand: "show-nsec-chain",
 			Zone:       tdns.Globals.Zonename,
@@ -163,7 +190,7 @@ var zoneFreezeCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendCommandNG(api, tdns.CommandPost{
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command:    "zone",
 			SubCommand: "freeze",
 			Zone:       tdns.Globals.Zonename,
@@ -190,7 +217,7 @@ var zoneThawCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendCommandNG(api, tdns.CommandPost{
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command:    "zone",
 			SubCommand: "thaw",
 			Zone:       tdns.Globals.Zonename,
@@ -223,7 +250,7 @@ var zoneListCmd = &cobra.Command{
 	Short: "Send an zone list command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 
-		cr, err := SendCommandNG(api, tdns.CommandPost{
+		cr, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command: "list-zones",
 		})
 		if err != nil {
@@ -298,7 +325,7 @@ var zoneSerialBbumpNGCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		resp, err := SendCommandNG(api, tdns.CommandPost{
+		resp, err := SendCommandNG(tdns.Globals.Api, tdns.CommandPost{
 			Command: "bump",
 			Zone:    tdns.Globals.Zonename,
 		})
@@ -340,7 +367,7 @@ var debugRRsetCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		dr := SendDebug(api, tdns.DebugPost{
+		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
 			Command: "rrset",
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Qname:   dns.Fqdn(debugQname),
@@ -368,7 +395,7 @@ var debugLAVCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		dr := SendDebug(api, tdns.DebugPost{
+		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
 			Command: "lav",
 			Qname:   dns.Fqdn(debugQname),
 			Qtype:   qtype,
@@ -383,7 +410,7 @@ var debugShowTACmd = &cobra.Command{
 	Short: "Request tdnsd to return known trust anchors",
 	Run: func(cmd *cobra.Command, args []string) {
 
-		dr := SendDebug(api, tdns.DebugPost{
+		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
 			Command: "show-ta",
 			Verbose: true,
 		})
@@ -417,7 +444,7 @@ func init() {
 	rootCmd.AddCommand(stopCmd, debugCmd, zoneCmd)
 
 	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd, zoneSerialBbumpNGCmd)
-	zoneCmd.AddCommand(zoneFreezeCmd, zoneThawCmd)
+	zoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
@@ -445,7 +472,7 @@ func SendCommand(cmd, zone string) (string, error) {
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/command", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.Post("/command", bytebuf.Bytes())
 	if err != nil {
 
 		return "", fmt.Errorf("error from api post: %v", err)
@@ -468,7 +495,7 @@ func SendCommand(cmd, zone string) (string, error) {
 	return cr.Msg, nil
 }
 
-func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (tdns.CommandResponse, error) {
+func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResponse, error) {
 	var cr tdns.CommandResponse
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
@@ -494,7 +521,7 @@ func SendCommandNG(api *tdns.Api, data tdns.CommandPost) (tdns.CommandResponse, 
 	return cr, nil
 }
 
-func SendDebug(api *tdns.Api, data tdns.DebugPost) tdns.DebugResponse {
+func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
 
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)

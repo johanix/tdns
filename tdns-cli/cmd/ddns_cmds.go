@@ -33,7 +33,7 @@ var delStatusCmd = &cobra.Command{
 	Short: "Make an API call to request TDNSD to analyse whether delegation is in sync or not",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
 			Command: "status",
 			Zone:    tdns.Globals.Zonename,
 		})
@@ -86,7 +86,7 @@ var delSyncCmd = &cobra.Command{
 	Short: "Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
 			Command: "sync",
 			Scheme:  scheme,
 			Zone:    tdns.Globals.Zonename,
@@ -292,7 +292,7 @@ func PrepArgs(required ...string) {
 	}
 }
 
-func SendDelegationCmd(api *tdns.Api, data tdns.DelegationPost) (tdns.DelegationResponse, error) {
+func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.DelegationResponse, error) {
 	var dr tdns.DelegationResponse
 
 	bytebuf := new(bytes.Buffer)

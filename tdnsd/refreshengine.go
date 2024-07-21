@@ -56,8 +56,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
 	for {
-		var zonedata *tdns.ZoneData
-		var exist bool
+		// var zonedata *tdns.ZoneData
+		// var exist bool
 
 		select {
 		case zr = <-zonerefch:
@@ -66,12 +66,18 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 				Zone: zr.Name,
 			}
 			if zone != "" {
-				if zonedata, exist = tdns.Zones.Get(zone); exist {
+				if zd, exist := tdns.Zones.Get(zone); exist {
+					if zd.ZoneType == tdns.Primary && zd.Options["dirty"] {
+						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
+						log.Printf(resp.Msg)
+						zr.Response <- resp
+						continue
+					}
 					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'",
 						zone)
 					// if _, haveParams := refreshCounters[zone]; !haveParams {
 					if _, haveParams := refreshCounters.Get(zone); !haveParams {
-						soa, _ := zonedata.GetSOA()
+						soa, _ := zd.GetSOA()
 						refreshCounters.Set(zone, &RefreshCounter{
 							Name:        zone,
 							SOARefresh:  soa.Refresh,
@@ -82,8 +88,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						})
 					}
 					// XXX: Should do refresh in parallel
-					go func() {
-						zd := zonedata // must have unique variable
+					go func(zd *tdns.ZoneData) {
 						updated, err := zd.Refresh(zr.Force)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
@@ -92,7 +97,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 						}
-					}()
+					}(zd)
 				} else {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
 					// XXX: We want to do this in parallel
@@ -117,8 +122,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
 							zone, err)
-						// continue // cannot do much else
-						return // terminate goroutine
+						continue // cannot do much else
+						// return // terminate goroutine
 					}
 					refresh, err := FindSoaRefresh(zd)
 					if err != nil {

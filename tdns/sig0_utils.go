@@ -182,9 +182,13 @@ func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	return pkc, nil
 }
 
-func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
+func (kdb *KeyDB) GeneratePrivateKey(owner string, rrtype uint16, alg uint8) (*PrivateKeyCache, error) {
 	var privkey crypto.PrivateKey
 	var err error
+
+	if rrtype != dns.TypeKEY && rrtype != dns.TypeDNSKEY {
+		return nil, fmt.Errorf("Error: rrtype must be KEY or DNSKEY")
+	}
 
 	var pkc *PrivateKeyCache
 
@@ -222,7 +226,7 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		log.Printf("Generated key: %s", nkey.String())
 		log.Printf("Generated signer: %v", privkey)
 
-		nkey.Hdr.Rrtype = dns.TypeKEY
+		nkey.Hdr.Rrtype = rrtype
 		dump.P(nkey)
 		dump.P(privkey)
 
@@ -275,7 +279,11 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		algstr := dns.AlgorithmToString[alg]
 		keydir := "/tmp"
 
-		cmdline := fmt.Sprintf("%s -K %s -a %s -T KEY -n ZONE %s", keygenprog, keydir, algstr, owner)
+		keytype := "-T KEY"
+		if rrtype == dns.TypeDNSKEY {
+			keytype = ""
+		}
+		cmdline := fmt.Sprintf("%s -K %s -a %s %s -n ZONE %s", keygenprog, keydir, algstr, keytype, owner)
 		fmt.Printf("cmd: %s\n", cmdline)
 		cmdsl := strings.Fields(cmdline)
 		command := exec.Command(cmdsl[0], cmdsl[1:]...)
@@ -305,6 +313,8 @@ func (kdb *KeyDB) GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache,
 		pkc, err = ReadPrivateKey(keyfile)
 		if err != nil {
 			return nil, err
+		} else {
+			log.Printf("Generated %s key files %s/%s.{key,private} successfully imported. May be deleted.", dns.TypeToString[rrtype], keydir, keyname)
 		}
 		log.Printf("[generatesigningkey]PrivateKey: %s", pkc.PrivateKey)
 

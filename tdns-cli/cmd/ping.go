@@ -37,7 +37,7 @@ func PingUpstreamServer() {
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/ping", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.Post("/ping", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
 		return

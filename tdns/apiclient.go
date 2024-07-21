@@ -17,8 +17,8 @@ import (
 	"net/http"
 )
 
-func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *Api {
-	api := Api{
+func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *ApiClient {
+	api := ApiClient{
 		Name:       name,
 		BaseUrl:    baseurl,
 		apiKey:     apikey,
@@ -70,7 +70,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 }
 
 // request helper function
-func (api *Api) requestHelper(req *http.Request) (int, []byte, error) {
+func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 
 	req.Header.Add("Content-Type", "application/json")
 
@@ -111,13 +111,13 @@ func (api *Api) requestHelper(req *http.Request) (int, []byte, error) {
 			log.Println("JSON parse error: ", error)
 		}
 		fmt.Printf("requestHelper: received %d bytes of response data:\n%s\n", len(buf),
-					   prettyJSON.String())
+			prettyJSON.String())
 	}
 
 	return resp.StatusCode, buf, err
 }
 
-func (api *Api) Post(endpoint string, data []byte) (int, []byte, error) {
+func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer
@@ -126,7 +126,7 @@ func (api *Api) Post(endpoint string, data []byte) (int, []byte, error) {
 			log.Println("JSON parse error: ", error)
 		}
 		fmt.Printf("api.Post: posting to URL '%s' %d bytes of data:\n%s\n",
-				      api.BaseUrl+endpoint, len(data), prettyJSON.String())
+			api.BaseUrl+endpoint, len(data), prettyJSON.String())
 	}
 
 	req, err := http.NewRequest(http.MethodPost, api.BaseUrl+endpoint,
@@ -138,7 +138,7 @@ func (api *Api) Post(endpoint string, data []byte) (int, []byte, error) {
 }
 
 // api Delete (not tested)
-func (api *Api) Delete(endpoint string) (int, []byte, error) {
+func (api *ApiClient) Delete(endpoint string) (int, []byte, error) {
 
 	if api.Debug {
 		fmt.Printf("api.Delete: posting to URL '%s'\n",
@@ -153,7 +153,7 @@ func (api *Api) Delete(endpoint string) (int, []byte, error) {
 }
 
 // api Get (not tested)
-func (api *Api) Get(endpoint string) (int, []byte, error) {
+func (api *ApiClient) Get(endpoint string) (int, []byte, error) {
 
 	if api.Debug {
 		fmt.Printf("api.Get: GET URL '%s'\n", api.BaseUrl+endpoint)
@@ -167,7 +167,7 @@ func (api *Api) Get(endpoint string) (int, []byte, error) {
 }
 
 // api Put
-func (api *Api) Put(endpoint string, data []byte) (int, []byte, error) {
+func (api *ApiClient) Put(endpoint string, data []byte) (int, []byte, error) {
 
 	if api.Debug {
 		fmt.Printf("api.Put: posting to URL '%s' %d bytes of data: %v\n",

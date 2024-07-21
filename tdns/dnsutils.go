@@ -431,23 +431,22 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	soa := apex.RRtypes[dns.TypeSOA].RRs[0]
 	soa.(*dns.SOA).Serial = zd.CurrentSerial
 
-	zonedata += soa.String() + "\n"
-	count := 1
+	//	zonedata += soa.String() + "\n"
+	count := 0
 	//	var total_sent int
 
 	switch zd.ZoneStore {
 	case SliceZone:
 		// SOA
-		zonedata += RRsetToString(apex.RRtypes[dns.TypeSOA].RRSIGs)
-		count += len(apex.RRtypes[dns.TypeSOA].RRSIGs)
+		soa := apex.RRtypes[dns.TypeSOA]
+		zonedata += RRsetToString(&soa)
+		count += len(soa.RRs) + len(soa.RRSIGs)
 
 		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
+		for rrt, rrset := range apex.RRtypes {
 			if rrt != dns.TypeSOA {
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRs)
-				count += len(apex.RRtypes[rrt].RRs)
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRSIGs)
-				count += len(apex.RRtypes[rrt].RRSIGs)
+				zonedata += RRsetToString(&rrset)
+				count += len(rrset.RRs) + len(rrset.RRSIGs)
 			}
 		}
 
@@ -457,10 +456,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 				continue
 			}
 			for _, rrl := range owner.RRtypes {
-				zonedata += RRsetToString(rrl.RRs)
-				count += len(rrl.RRs)
-				zonedata += RRsetToString(rrl.RRSIGs)
-				count += len(rrl.RRSIGs)
+				zonedata += RRsetToString(&rrl)
+				count += len(rrl.RRs) + len(rrl.RRSIGs)
 
 				if count >= 1000 {
 					//				   	total_sent += count
@@ -477,16 +474,15 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	case MapZone:
 		// SOA
-		zonedata += RRsetToString(apex.RRtypes[dns.TypeSOA].RRSIGs)
-		count += len(apex.RRtypes[dns.TypeSOA].RRSIGs)
+		soa := apex.RRtypes[dns.TypeSOA]
+		zonedata += RRsetToString(&soa)
+		count += len(soa.RRs) + len(soa.RRSIGs)
 
 		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
+		for rrt, rrset := range apex.RRtypes {
 			if rrt != dns.TypeSOA {
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRs)
-				count += len(apex.RRtypes[rrt].RRs)
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRSIGs)
-				count += len(apex.RRtypes[rrt].RRSIGs)
+				zonedata += RRsetToString(&rrset)
+				count += len(rrset.RRs) + len(rrset.RRSIGs)
 			}
 		}
 
@@ -497,10 +493,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 				continue
 			}
 			for _, rrl := range omap.RRtypes {
-				zonedata += RRsetToString(rrl.RRs)
-				count += len(rrl.RRs)
-				zonedata += RRsetToString(rrl.RRSIGs)
-				count += len(rrl.RRSIGs)
+				zonedata += RRsetToString(&rrl)
+				count += len(rrl.RRs) + len(rrl.RRSIGs)
 
 				if count >= 1000 {
 					//					total_sent += count
@@ -542,9 +536,20 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	return err
 }
 
-func RRsetToString(rrs []dns.RR) string {
+func RRsetToStringOG(rrs []dns.RR) string {
 	var tmp string
 	for _, rr := range rrs {
+		tmp += rr.String() + "\n"
+	}
+	return tmp
+}
+
+func RRsetToString(rrset *RRset) string {
+	var tmp string
+	for _, rr := range rrset.RRs {
+		tmp += rr.String() + "\n"
+	}
+	for _, rr := range rrset.RRSIGs {
 		tmp += rr.String() + "\n"
 	}
 	return tmp
