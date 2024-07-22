@@ -286,23 +286,20 @@ type ApiClient struct {
 	Client     *http.Client
 	BaseUrl    string
 	apiKey     string
-	Authmethod string
+	AuthMethod string
+	UseTLS     bool
 	Verbose    bool
 	Debug      bool
 }
 
 type ZoneRefresher struct {
-	Name      string
-	ZoneType  ZoneType // primary | secondary
-	Primary   string
-	Notify    []string
-	ZoneStore ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile  string
-	Options   map[string]bool
-	//	DelegationSync bool
-	//	OnlineSigning  bool
-	//	AllowUpdates   bool
-	//	FoldCase       bool // should we fold case for this zone
+	Name         string
+	ZoneType     ZoneType // primary | secondary
+	Primary      string
+	Notify       []string
+	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile     string
+	Options      map[string]bool
 	UpdatePolicy UpdatePolicy
 	Force        bool // force refresh, ignoring SOA serial
 	Response     chan RefresherResponse

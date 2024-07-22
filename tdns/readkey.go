@@ -16,7 +16,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
@@ -181,8 +180,6 @@ func PrepareKeyCache(privkey, pubkey, algorithm string) (*PrivateKeyCache, error
 	src := fmt.Sprintf(`Private-key-format: v1.3
 Algorithm: %d (%s)
 PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
-
-	dump.P(src)
 
 	var pkc PrivateKeyCache
 

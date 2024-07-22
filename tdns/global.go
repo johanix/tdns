@@ -15,6 +15,8 @@ type GlobalStuff struct {
 	ParentZone  string
 	Sig0Keyfile string
 	Api         *ApiClient
+	PingCount   int
+	Slurp       bool
 }
 
 var Globals = GlobalStuff{

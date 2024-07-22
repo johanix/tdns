@@ -294,7 +294,7 @@ func (zd *ZoneData) ZoneFileName() (string, error) {
 	return fname, nil
 }
 
-func (zd *ZoneData) WriteZone(tosource bool) (string, error) {
+func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	var fname string
 	var err error
 	if tosource {
@@ -305,7 +305,7 @@ func (zd *ZoneData) WriteZone(tosource bool) (string, error) {
 			return err.Error(), err
 		}
 	}
-	if !zd.Options["dirty"] {
+	if !zd.Options["dirty"] && !force {
 		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
 	}
 	_, err = zd.WriteFile(fname)

@@ -13,10 +13,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
@@ -42,7 +42,7 @@ func xxxShellExec(cmdline string) (string, error) {
 }
 
 func (api *ApiClient) StopDaemon() {
-	_, resp, err := api.UpdateDaemon(DaemonPost{Command: "stop"}, false)
+	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
 	if err != nil {
 		fmt.Printf("Error from stop command: %v\n", err.Error())
 		if err.Error() == "Connection refused" {
@@ -70,7 +70,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
 		maxwait = 5
 	}
 
-	_, resp, err := api.UpdateDaemon(DaemonPost{Command: "status"}, false) // don't die
+	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
 	if err != nil {
 		if err.Error() == "Connection refused" {
 			fmt.Printf("Daemon not responding. Starting new daemon (timeout: %d seconds)\n", maxwait)
@@ -135,7 +135,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
 						case <-check_ticker.C:
 							// check status
 
-							_, r, err := api.UpdateDaemon(DaemonPost{Command: "status"},
+							_, r, err := api.UpdateDaemon(CommandPost{Command: "status"},
 								false)
 							if err == nil {
 								// All ok, daemon started, no error
@@ -144,7 +144,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
 								os.Exit(0)
 							} else {
 								if err.Error() == "Connection refused" {
-									if GlobalCF.Verbose {
+									if Globals.Verbose {
 										fmt.Printf("Status: connection refused, but not yet giving up\n")
 									}
 									continue // with the for loop
@@ -198,24 +198,24 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
 	}
 }
 
-func (api *ApiClient) UpdateDaemon(data DaemonPost, dieOnError bool) (int, DaemonResponse, error) {
+func (api *ApiClient) UpdateDaemon(data CommandPost, dieOnError bool) (int, CommandResponse, error) {
 
-	var dr DaemonResponse
-	status, buf, err := api.RequestNG(http.MethodPost, "/daemon", data, dieOnError)
+	var cr CommandResponse
+	status, buf, err := api.RequestNG(http.MethodPost, "/command", data, dieOnError)
 	if err != nil {
 		if strings.Contains(err.Error(), "connection refused") {
-			return 501, dr, errors.New("Connection refused")
+			return 501, cr, errors.New("Connection refused")
 		} else {
-			return 501, dr, err
+			return 501, cr, err
 		}
 	}
 
-	err = json.Unmarshal(buf, &dr)
+	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		log.Printf("Error parsing JSON for DaemonResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal DaemonResponse: %v\n", err)
+		log.Printf("Error parsing JSON for CommandResponse: %s", string(buf))
+		log.Fatalf("Error from unmarshal CommandResponse: %v\n", err)
 	}
-	return status, dr, err
+	return status, cr, err
 }
 
 func (api *ApiClient) SendPing(pingcount int, dieOnError bool) (PingResponse, error) {
@@ -250,32 +250,38 @@ func SendUnixPing(target string, dieOnError bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if GlobalCF.Debug {
+	if Globals.Debug {
 		fmt.Printf("ShellExec output: '%s'\n", string(out))
 	}
 	return true, nil
 }
 
-func (api *ApiClient) SendCommand(data GroupCmdPost) (GroupCmdResponse, error) {
+// func (api *ApiClient) SendCommand(data GroupCmdPost) (GroupCmdResponse, error) {
 
-	_, buf, err := api.RequestNG(http.MethodPost, "/command", data, false) // dieOnError=false
+//	_, buf, err := api.RequestNG(http.MethodPost, "/command", data, false) // dieOnError=false
 
-	if err != nil {
-		return GroupCmdResponse{}, err
-	}
+//	if err != nil {
+//		return GroupCmdResponse{}, err
+//	}
 
-	var cr GroupCmdResponse
-	err = json.Unmarshal(buf, &cr)
-	if err != nil {
-		log.Printf("Error parsing JSON for GroupCmdResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal of GroupCmdResponse: %v\n", err)
-	}
+//	var cr GroupCmdResponse
+//	err = json.Unmarshal(buf, &cr)
+//	if err != nil {
+//		log.Printf("Error parsing JSON for GroupCmdResponse: %s", string(buf))
+//		log.Fatalf("Error from unmarshal of GroupCmdResponse: %v\n", err)
+//	}
 
-	//	if cr.Error {
-	//		fmt.Printf("Error from remote end: %s\n", cr.ErrorMsg)
-	//	}
-	// fmt.Printf("%s\n", cr.Msg)
-	return cr, nil
+//	if cr.Error {
+//		fmt.Printf("Error from remote end: %s\n", cr.ErrorMsg)
+//	}
+// fmt.Printf("%s\n", cr.Msg)
+//	return cr, nil
+//}
+
+type ShowAPIresponse struct {
+	Status int
+	Msg    string
+	Data   []string
 }
 
 func (api *ApiClient) ShowApi() {
@@ -294,36 +300,49 @@ func (api *ApiClient) ShowApi() {
 
 var newapi bool
 
-// const timelayout = "2006-01-02 15:04:05"
-
 var ServerName string = "PLACEHOLDER"
 
-var PingCmd = &cobra.Command{
-	Use:   "ping",
-	Short: "Send an API ping request and present the response",
-	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) != 0 {
-			log.Fatal("ping must have no arguments")
-		}
+func CopyFile(src, dst string) (int64, error) {
+	sourceFileStat, err := os.Stat(src)
+	if err != nil {
+		return 0, err
+	}
 
-		pr, err := axl.GlobalCF.Api.SendPing(axl.GlobalCF.PingCount, false)
-		if err != nil {
-			if strings.Contains(err.Error(), "connection refused") {
-				fmt.Printf("Error: connection refused. Most likely the daemon is not running\n")
-				os.Exit(1)
-			} else {
-				log.Fatalf("Error from SendPing: %v", err)
-			}
-		}
+	if !sourceFileStat.Mode().IsRegular() {
+		return 0, fmt.Errorf("%s is not a regular file", src)
+	}
 
-		uptime := time.Now().Sub(pr.BootTime).Round(time.Second)
-		if axl.GlobalCF.Verbose {
-			fmt.Printf("%s from %s @ %s (version %s): pings: %d, pongs: %d, uptime: %v time: %s, client: %s\n",
-				pr.Msg, pr.Daemon, pr.ServerHost, pr.Version, pr.Pings,
-				pr.Pongs, uptime, pr.Time.Format(timelayout), pr.Client)
-		} else {
-			fmt.Printf("%s: pings: %d, pongs: %d, uptime: %v, time: %s\n",
-				pr.Msg, pr.Pings, pr.Pongs, uptime, pr.Time.Format(timelayout))
-		}
-	},
+	source, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer source.Close()
+
+	dstdir := filepath.Dir(dst)
+	if err := os.MkdirAll(dstdir, os.ModePerm); err != nil {
+		return 0, err
+	}
+
+	tmpdst, err := os.Create(dst + ".tmp")
+	if err != nil {
+		return 0, err
+	}
+
+	defer tmpdst.Close()
+	nBytes, err := io.Copy(tmpdst, source)
+	if err != nil {
+		return 0, err
+	}
+
+	err = tmpdst.Close()
+	if err != nil {
+		return 0, err
+	}
+
+	err = os.Rename(dst+".tmp", dst)
+	if err != nil {
+		return 0, err
+	}
+
+	return nBytes, err
 }

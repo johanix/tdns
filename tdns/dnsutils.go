@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -210,13 +211,38 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	return total_sent, nil
 }
 
-func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) error {
+func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
 		// msg.SetIxfr(zname, serial, soa.Ns, soa.Mbox)
 		msg.SetIxfr(zname, serial, "", "")
 	} else {
 		msg.SetAxfr(zname)
+	}
+
+	printKeyRR := func(rr dns.RR, rrtype, ktype string, keyid uint16) {
+		parts := strings.Split(rr.String(), rrtype)
+		rhp := strings.Fields(parts[1])
+		l := len(parts[0])
+		fmt.Printf("%s %s %s %s %s (\n", parts[0][:l-1], rrtype, rhp[0], rhp[1], rhp[2])
+		spaces := strings.Repeat(" ", len(parts[0])+1)
+		var keyparts []string
+		part := rhp[3]
+		for len(part) > 72-len(spaces) {
+			keyparts = append(keyparts, part[:72-len(spaces)])
+			part = part[72-len(spaces):]
+		}
+		keyparts = append(keyparts, part)
+		for idx, part := range keyparts {
+			if idx == len(keyparts)-1 {
+				fmt.Printf("%s %s )\n", spaces, part)
+			} else {
+				fmt.Printf("%s %s\n", spaces, part)
+			}
+		}
+		alg, _ := strconv.Atoi(rhp[2])
+		algstr := dns.AlgorithmToString[uint8(alg)]
+		fmt.Printf("%s ; %s alg = %s ; key id = %d\n", spaces, ktype, algstr, keyid)
 	}
 
 	transfer := new(dns.Transfer)
@@ -248,7 +274,47 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) erro
 			fmt.Printf("Printing %d RRs in envelope\n", len(envelope.RR))
 		}
 		for _, rr := range envelope.RR {
-			fmt.Printf("%s\n", rr.String())
+			if options["multi"] == "true" {
+				switch rr.(type) {
+				case *dns.KEY:
+					keyid := rr.(*dns.KEY).KeyTag()
+					t := ""
+					printKeyRR(rr, "KEY", t, keyid)
+				case *dns.DNSKEY:
+					keyid := rr.(*dns.DNSKEY).KeyTag()
+					t := " ZSK ;"
+					if rr.(*dns.DNSKEY).Flags == 257 {
+						t = " KSK ;"
+					}
+					printKeyRR(rr, "DNSKEY", t, keyid)
+
+				case *dns.RRSIG:
+					parts := strings.Split(rr.String(), "RRSIG")
+					rhp := strings.Fields(parts[1])
+					l := len(parts[0])
+					fmt.Printf("%s %s %s %s %s %s (\n", parts[0][:l-1], "RRSIG", rhp[0], rhp[1], rhp[2], rhp[3])
+					spaces := strings.Repeat(" ", len(parts[0])+1)
+					fmt.Printf("%s %s %s %s %s\n", spaces, rhp[4], rhp[5], rhp[6], rhp[7])
+					var rrsigparts []string
+					part := rhp[8]
+					for len(part) > 72-len(spaces) {
+						rrsigparts = append(rrsigparts, part[:72-len(spaces)])
+						part = part[72-len(spaces):]
+					}
+					rrsigparts = append(rrsigparts, part)
+					for idx, part := range rrsigparts {
+						if idx == len(rrsigparts)-1 {
+							fmt.Printf("%s %s )\n", spaces, part)
+						} else {
+							fmt.Printf("%s %s\n", spaces, part)
+						}
+					}
+				default:
+					fmt.Printf("%s\n", rr.String())
+				}
+			} else {
+				fmt.Printf("%s\n", rr.String())
+			}
 		}
 		if Globals.Debug {
 			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))

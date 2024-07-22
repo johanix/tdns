@@ -376,9 +376,10 @@ func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*DnssecActiveKeys, error
 SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
 	)
 
-	if data, ok := kdb.DnssecCache[zonename]; ok {
-		return data, nil
-	}
+	// XXX: Should use this once we've found all the bugs in the sqlite code
+	//	if data, ok := kdb.DnssecCache[zonename]; ok {
+	//		return data, nil
+	//	}
 
 	var dak DnssecActiveKeys
 
@@ -392,8 +393,6 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	var algorithm, privatekey, keyrrstr string
 	var flags, keyid int
 
-	var keyfound bool
-
 	for rows.Next() {
 		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 		if err != nil {
@@ -404,7 +403,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 			log.Printf("Error from rows.Scan(): %v", err)
 			return nil, err
 		}
-		keyfound = true
+
 		pkc, err := PrepareKeyCache(privatekey, keyrrstr, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKey(): %v", err)
@@ -412,17 +411,19 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 		}
 
-		if (flags & 0x0100) != 0 {
+		if (flags & 0x0001) != 0 {
 			dak.KSKs = append(dak.KSKs, pkc)
+			log.Printf("Adding KSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		} else {
 			dak.ZSKs = append(dak.ZSKs, pkc)
+			log.Printf("Adding ZSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		}
 	}
 
-	if !keyfound {
-		log.Printf("No active DNSSEC key found for zone %s", zonename)
-		return nil, sql.ErrNoRows
-	}
+	//	if !kskfound {
+	//		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
+	//		return nil, sql.ErrNoRows
+	//	}
 
 	// No KSK found is a hard error
 	if len(dak.KSKs) == 0 {
@@ -432,6 +433,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
 	if len(dak.ZSKs) == 0 {
+		log.Printf("No active DNSSEC ZSK found for zone %s, reusing KSK", zonename)
 		dak.ZSKs = append(dak.ZSKs, dak.KSKs[0])
 	}
 

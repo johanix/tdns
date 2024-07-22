@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	flag "github.com/spf13/pflag"
@@ -65,6 +66,8 @@ func mainloop(conf *Config) {
 
 func main() {
 	var conf Config
+
+	conf.ServerBootTime = time.Now()
 
 	flag.StringVar(&appMode, "mode", "server", "Mode of operation: server | scanner")
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")

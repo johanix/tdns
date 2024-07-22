@@ -44,36 +44,6 @@ const timelayout = "2006-01-02 15:04:05"
 
 var ServerName string = "PLACEHOLDER"
 
-var PingCmd = &cobra.Command{
-	Use:   "ping",
-	Short: "Send an API ping request and present the response",
-	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) != 0 {
-			log.Fatal("ping must have no arguments")
-		}
-
-		pr, err := tdns.Globals.Api.SendPing(tdns.Globals.PingCount, false)
-		if err != nil {
-			if strings.Contains(err.Error(), "connection refused") {
-				fmt.Printf("Error: connection refused. Most likely the daemon is not running\n")
-				os.Exit(1)
-			} else {
-				log.Fatalf("Error from SendPing: %v", err)
-			}
-		}
-
-		uptime := time.Now().Sub(pr.BootTime).Round(time.Second)
-		if tdns.Globals.Verbose {
-			fmt.Printf("%s from %s @ %s (version %s): pings: %d, pongs: %d, uptime: %v time: %s, client: %s\n",
-				pr.Msg, pr.Daemon, pr.ServerHost, pr.Version, pr.Pings,
-				pr.Pongs, uptime, pr.Time.Format(timelayout), pr.Client)
-		} else {
-			fmt.Printf("%s: pings: %d, pongs: %d, uptime: %v, time: %s\n",
-				pr.Msg, pr.Pings, pr.Pongs, uptime, pr.Time.Format(timelayout))
-		}
-	},
-}
-
 var updateBinary bool
 
 var DaemonCmd = &cobra.Command{
@@ -87,7 +57,7 @@ var DaemonStatusCmd = &cobra.Command{
 	Short: "Query for the status of the management daemon",
 	Long:  `Query for the status of the management daemon`,
 	Run: func(cmd *cobra.Command, args []string) {
-		_, resp, _ := tdns.Globals.Api.UpdateDaemon(tdns.DaemonPost{Command: "status"},
+		_, resp, _ := tdns.Globals.Api.UpdateDaemon(tdns.CommandPost{Command: "status"},
 			true)
 		fmt.Printf("Status: %s Message: %s\n", resp.Status, resp.Msg)
 	},
@@ -100,7 +70,7 @@ var DaemonReloadCmd = &cobra.Command{
 	Long: `Reload config from file (the assumption is that something in the config has changed).
 Right now this doesn't do much, but later on various services will be able to restart.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		_, resp, _ := tdns.Global.Api.UpdateDaemon(tdns.DaemonPost{Command: "reload"}, true)
+		_, resp, _ := tdns.Globals.Api.UpdateDaemon(tdns.CommandPost{Command: "reload"}, true)
 		fmt.Printf("Reload: %s Message: %s\n", resp.Status, resp.Msg)
 	},
 }
@@ -191,6 +161,8 @@ and prints that out in a (hopefully) comprehensible fashion.`,
 }
 
 func init() {
+	rootCmd.AddCommand(PingCmd)
+	rootCmd.AddCommand(DaemonCmd)
 	DaemonCmd.AddCommand(DaemonStatusCmd, DaemonReloadCmd)
 	DaemonCmd.AddCommand(DaemonStartCmd, DaemonStopCmd, DaemonRestartCmd)
 	DaemonCmd.AddCommand(DaemonApiCmd)

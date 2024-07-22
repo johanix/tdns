@@ -6,6 +6,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	// "github.com/orcaman/concurrent-map/v2"
 	"github.com/go-playground/validator/v10"
@@ -14,12 +15,13 @@ import (
 )
 
 type Config struct {
-	Service   ServiceConf
-	DnsEngine DnsEngineConf
-	Apiserver ApiserverConf
-	Zones     map[string]tdns.ZoneConf
-	Db        DbConf
-	Ddns      struct {
+	ServerBootTime time.Time
+	Service        ServiceConf
+	DnsEngine      DnsEngineConf
+	Apiserver      ApiserverConf
+	Zones          map[string]tdns.ZoneConf
+	Db             DbConf
+	Ddns           struct {
 		KeyDirectory string `validate:"dir,required"`
 		Update_NS    *bool  `validate:"required"`
 		Update_A     *bool  `validate:"required"`

@@ -52,7 +52,7 @@ func SignMsg(m dns.Msg, name string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys) error {
+func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) error {
 
 	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
 		return fmt.Errorf("SignRRset: no active DNSSEC keys available")
@@ -71,32 +71,49 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys) error {
 	}
 
 	for _, key := range signingkeys {
-		rrsig := new(dns.RRSIG)
-		rrsig.Hdr = dns.RR_Header{
-			Name:   key.DnskeyRR.Header().Name,
-			Rrtype: dns.TypeRRSIG,
-			Class:  dns.ClassINET,
-			Ttl:    604800, // one week in seconds
-		}
-		rrsig.KeyTag = key.DnskeyRR.KeyTag()
-		rrsig.Algorithm = key.DnskeyRR.Algorithm
-		rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
-		rrsig.SignerName = name
-
-		err := rrsig.Sign(key.CS, rrset.RRs)
-		if err != nil {
-			log.Printf("Error from rrsig.Sign(%s): %v", name, err)
-			return err
+		shouldSign := true
+		for idx, oldsig := range rrset.RRSIGs {
+			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
+				// Check if the existing RRSIG by the same key is older than one hour
+				inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
+				if (time.Since(inceptionTime) < time.Hour) && !force {
+					log.Printf("SignRRset: keeping existing RRSIG( %s %s ) by the same DNSKEY (less than one hour old)", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
+					shouldSign = false
+				} else {
+					log.Printf("SignRRset: removing older RRSIG( %s %s ) by the same DNSKEY", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
+					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
+				}
+			}
 		}
 
-		rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
+		if shouldSign {
+			rrsig := new(dns.RRSIG)
+			rrsig.Hdr = dns.RR_Header{
+				Name:   key.DnskeyRR.Header().Name,
+				Rrtype: dns.TypeRRSIG,
+				Class:  dns.ClassINET,
+				Ttl:    604800, // one week in seconds
+			}
+			rrsig.KeyTag = key.DnskeyRR.KeyTag()
+			rrsig.Algorithm = key.DnskeyRR.Algorithm
+			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
+			rrsig.SignerName = name
+
+			err := rrsig.Sign(key.CS, rrset.RRs)
+			if err != nil {
+				log.Printf("Error from rrsig.Sign(%s): %v", name, err)
+				return err
+			}
+
+			rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
+		}
 	}
 
 	return nil
 }
 
-func (zd *ZoneData) SignZone(kdb *KeyDB) error {
-	if !zd.Options["sign-zone"] {
+func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
+	if !zd.Options["sign-zone"] || !zd.Options["online-signing"] {
 		return fmt.Errorf("Zone %s should not be signed (option sign-zone=false)", zd.ZoneName)
 	}
 
@@ -118,14 +135,10 @@ func (zd *ZoneData) SignZone(kdb *KeyDB) error {
 		}
 	}
 
-	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
-		if zd.Options["online-signing"] {
-			err := SignRRset(&rrset, zone, dak)
-			if err != nil {
-				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
-			} else {
-				log.Printf("SignZone: signed %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
-			}
+	MaybeSignRRset := func(rrset RRset, zone string) RRset {
+		err := SignRRset(&rrset, zone, dak, force)
+		if err != nil {
+			log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 		}
 		return rrset
 	}
@@ -136,6 +149,16 @@ func (zd *ZoneData) SignZone(kdb *KeyDB) error {
 	}
 	sort.Strings(names)
 
+	err = zd.PublishDnskeyRRs(dak)
+	if err != nil {
+		return err
+	}
+
+	// apex, err := zd.GetOwner(zd.ZoneName)
+	// if err != nil {
+	// 	return err
+	// }
+
 	for _, name := range names {
 		owner, err := zd.GetOwner(name)
 		if err != nil {
@@ -144,9 +167,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB) error {
 
 		for rrt, rrset := range owner.RRtypes {
 			if rrt == dns.TypeRRSIG {
-				continue
+				continue // should not happen
 			}
-			owner.RRtypes[rrt] = MaybeSignRRset(rrset, zd.ZoneName, kdb)
+			owner.RRtypes[rrt] = MaybeSignRRset(rrset, zd.ZoneName)
 		}
 	}
 
@@ -163,17 +186,17 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		return err
 	}
 
-	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
-		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
-			err := SignRRset(&rrset, zone, dak)
-			if err != nil {
-				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
-			} else {
-				log.Printf("GenerateNsecChain: signed %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
-			}
-		}
-		return rrset
-	}
+	//	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
+	//		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
+	//			err := SignRRset(&rrset, zone, dak)
+	//			if err != nil {
+	//				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
+	//			} else {
+	//				log.Printf("GenerateNsecChain: signed %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
+	//			}
+	//		}
+	//		return rrset
+	//	}
 
 	names, err := zd.GetOwnerNames()
 	if err != nil {
@@ -232,7 +255,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		}
 		tmp := owner.RRtypes[dns.TypeNSEC]
 		tmp.RRs = []dns.RR{nsecrr}
-		owner.RRtypes[dns.TypeNSEC] = MaybeSignRRset(tmp, zd.ZoneName, kdb)
+		//		owner.RRtypes[dns.TypeNSEC] = MaybeSignRRset(tmp, zd.ZoneName, kdb)
 
 	}
 

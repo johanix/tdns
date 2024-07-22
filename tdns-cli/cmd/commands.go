@@ -74,7 +74,7 @@ var zoneNsecCmd = &cobra.Command{
 
 var zoneSignCmd = &cobra.Command{
 	Use:   "sign",
-	Short: "Send an zone sign command to tdnsd",
+	Short: "Send a zone sign command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
@@ -101,7 +101,7 @@ var zoneSignCmd = &cobra.Command{
 
 var zoneWriteCmd = &cobra.Command{
 	Use:   "write",
-	Short: "Send an zone write command to tdnsd",
+	Short: "Send a zone write command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
@@ -451,7 +451,7 @@ func init() {
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
-	zoneReloadCmd.Flags().BoolVarP(&force, "force", "F", false, "force reloading, ignoring SOA serial")
+	zoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
 
 	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
 	zoneListCmd.Flags().BoolVarP(&showfile, "file", "F", false, "Show zone input file")

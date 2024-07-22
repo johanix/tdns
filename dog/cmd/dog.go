@@ -92,7 +92,7 @@ var rootCmd = &cobra.Command{
 
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
-				tdns.ZoneTransferPrint(qname, server, serial, rrtype)
+				tdns.ZoneTransferPrint(qname, server, serial, rrtype, options)
 
 			default:
 
@@ -156,6 +156,10 @@ func init() {
 func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 	if ucarg == "+DNSSEC" {
 		options["do_bit"] = "true"
+		return options
+	}
+	if ucarg == "+MULTI" {
+		options["multi"] = "true"
 		return options
 	}
 

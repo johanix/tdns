@@ -93,7 +93,7 @@ func DelegationSyncher(conf *Config) error {
 				continue
 			}
 			rrset := apex.RRtypes[dns.TypeKEY]
-			err = tdns.SignRRset(&rrset, zd.ZoneName, dak)
+			err = tdns.SignRRset(&rrset, zd.ZoneName, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 			} else {
@@ -347,7 +347,7 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
 			} else {
 				if len(dak.ZSKs) > 0 {
-					err := tdns.SignRRset(&rrset, zd.ZoneName, dak)
+					err := tdns.SignRRset(&rrset, zd.ZoneName, dak, true) // Let's force signing
 					if err != nil {
 						log.Printf("Error signing %s: %v", zd.ZoneName, err)
 					} else {
