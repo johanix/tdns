@@ -60,7 +60,7 @@ func DelegationSyncher(conf *Config) error {
 				log.Printf("DelegationSyncher: Publishing KEY RR for zone %s", zd.ZoneName)
 				err = zd.PublishKeyRRs(sak)
 				if err != nil {
-					log.Printf("DelegationSyncher: Error from Error from PublishCsync(): %s", err)
+					log.Printf("DelegationSyncher: Error from PublishKeyRRs(): %s", err)
 				} else {
 					keyrrexist = true
 				}
