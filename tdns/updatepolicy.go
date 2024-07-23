@@ -107,6 +107,8 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 		return err
 	}
 
+	log.Printf("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
+		isdel, rcode, validated, trusted, signername)
 	// send response
 	m = m.SetRcode(m, int(rcode))
 	w.WriteMsg(m)
@@ -121,6 +123,7 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 		zd.Logger.Printf("DnsEngine: Update NOT validated. Ignored.")
 		return nil
 	}
+
 	// rcode from validation is input to ApproveUpdate only to enable
 	// the possibility of upload of unvalidated keys
 	approved, updatezone, err := zd.ApproveUpdate(zone, signername, rcode, validated, trusted, isdel, r)
