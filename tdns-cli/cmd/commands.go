@@ -454,7 +454,7 @@ func init() {
 	zoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
 
 	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
-	zoneListCmd.Flags().BoolVarP(&showfile, "file", "F", false, "Show zone input file")
+	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
 	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
 	zoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
 	// ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
