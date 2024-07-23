@@ -153,6 +153,9 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 	if !updatezone {
 		cmd = "TRUSTSTORE-UPDATE"
 	}
+
+	log.Printf("UpdateResponder: cmd=%s zone=%s validated=%v trusted=%v", cmd, zone, validated, trusted)
+
 	// send into suitable channel for pending updates
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
 	updateq <- UpdateRequest{

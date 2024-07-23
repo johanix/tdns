@@ -76,7 +76,7 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 							tppost := TruststorePost{
 								SubCommand: "add",
 								Src:        "child-update",
-								Keyname:    ur.ZoneName,
+								Keyname:    keyrr.Header().Name,
 								Keyid:      int(keyrr.KeyTag()),
 								KeyRR:      rr.String(),
 								Validated:  ur.Validated,
