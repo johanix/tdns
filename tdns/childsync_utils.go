@@ -91,7 +91,7 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
 			return res.Rcode, nil
 		}
 	}
-	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were reachable", addrs)
+	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were unreachable", addrs)
 }
 
 // Parent is the zone to apply the update to.

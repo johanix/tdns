@@ -446,13 +446,37 @@ func (zd *ZoneData) ValidateAndTrustUpdate(r *dns.Msg) (uint8, bool, bool, strin
 
 	keyrr := sig0key.Key
 
-	// zd.Logger.Printf("tdns.Validate(): signer name: \"%s\"", sig.RRSIG.SignerName)
+	// XXX: This is a tricky corner. If the signature doesn't validate against a trusted (or not
+	// so trusted) key that we have or have looked up, the we must account for the possibility that
+	// this is acutally an attempt att uploading an unvalidated key for later validation and trust
+	// in the key store.
 
+	// Therefore a failed verification, while an error, shouldn't be a show stopper.
 	err = sig.Verify(&keyrr, msgbuf)
 	if err != nil {
-		zd.Logger.Printf("= Error from sig.Verify(): %v", err)
+		zd.Logger.Printf("= Error from sig.Verify(): %v. This is not a show stopper, since this could be an attempt to upload an unvalidated key.", err)
 		zd.Logger.Printf("signername=%s, keyrr=%s", sig.RRSIG.SignerName, keyrr.String())
-		return dns.RcodeBadSig, false, false, sig.RRSIG.SignerName, err
+		// return dns.RcodeBadSig, false, false, sig.RRSIG.SignerName, err
+		if len(r.Ns) != 1 {
+			zd.Logger.Printf("= Update is not a single SIG(0) key. This is a show stopper")
+			return dns.RcodeBadSig, false, false, sig.RRSIG.SignerName, err
+		}
+		ownkeyrr, ok := r.Ns[0].(*dns.KEY)
+		if !ok {
+			return dns.RcodeBadSig, false, false, sig.RRSIG.SignerName, err
+		}
+		zd.Logger.Printf("* Update is a single SIG(0) key: %s (keyid %d)", ownkeyrr.Header().Name, ownkeyrr.KeyTag())
+
+		err = sig.Verify(ownkeyrr, msgbuf)
+		if err != nil {
+			zd.Logger.Printf("= Error from sig.Verify() trying to verify if the key is self-signed: %v. ", err)
+			zd.Logger.Printf("signername=%s, keyrr=%s", sig.RRSIG.SignerName, ownkeyrr.String())
+			zd.Logger.Printf("Giving up on this update and returning an error")
+			return dns.RcodeBadSig, false, false, sig.RRSIG.SignerName, err
+		}
+		zd.Logger.Printf("* Update is a single SIG(0) key \"%s\" (keyid %d) which is correctly self-signed",
+			keyrr.Header().Name, keyrr.KeyTag)
+		return dns.RcodeSuccess, false, false, sig.RRSIG.SignerName, nil
 	} else {
 		zd.Logger.Printf("* Update SIG(0) signature verified correctly")
 	}
