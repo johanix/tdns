@@ -47,6 +47,7 @@ zonename	  TEXT,
 keyid		  INTEGER,
 validated	  INTEGER,
 trusted		  INTEGER,
+source		  TEXT,
 keyrr		  TEXT,
 comment		  TEXT,
 UNIQUE (zonename, keyid)
@@ -92,6 +93,7 @@ type PrivateKeyCache struct {
 	RR         dns.RR
 	KeyType    uint16
 	Algorithm  uint8
+	KeyId      uint16
 	KeyRR      dns.KEY
 	DnskeyRR   dns.DNSKEY
 }

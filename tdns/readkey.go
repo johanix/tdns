@@ -171,11 +171,13 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 }
 
 func PrepareKeyCache(privkey, pubkey, algorithm string) (*PrivateKeyCache, error) {
-	log.Printf("PrepareKeyCache: privkey: %s, pubkey: %s, algorithm: %s", privkey, pubkey, algorithm)
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
 	}
+	//safeprivkey := fmt.Sprintf("%s*****%s", privkey[0:5], privkey[len(privkey)-5:])
+	// log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, privkey: %s, pubkey: %s",
+	// 	rr.Header().Name, algorithm, safeprivkey, pubkey)
 
 	src := fmt.Sprintf(`Private-key-format: v1.3
 Algorithm: %d (%s)
@@ -192,6 +194,7 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		pkc.KeyType = dns.TypeDNSKEY
 		pkc.Algorithm = rrk.Algorithm
+		pkc.KeyId = rrk.KeyTag()
 		pkc.DnskeyRR = *rrk
 
 	case *dns.KEY:
@@ -202,6 +205,7 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		pkc.KeyType = dns.TypeKEY
 		pkc.Algorithm = rrk.Algorithm
+		pkc.KeyId = rrk.KeyTag()
 		pkc.KeyRR = *rrk
 
 	default:
@@ -218,6 +222,8 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 	default:
 		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
 	}
+	// log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d, privkey: %s, pubkey: %s",
+	// 	rr.Header().Name, algorithm, pkc.KeyId, safeprivkey, pubkey)
 
 	return &pkc, err
 }

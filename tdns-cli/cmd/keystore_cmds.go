@@ -185,6 +185,8 @@ func init() {
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd)
 	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
 
+	keystoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.MarkFlagRequired("file")
@@ -273,9 +275,12 @@ func Sig0KeyMgmt(cmd string) error {
 
 	switch cmd {
 	case "list":
-		var out = []string{"Signer|State|KeyID|Algorithm|PrivKey|KEY Record"}
+		var out []string
+		if showhdr {
+			out = append(out, "Signer|State|KeyID|Algorithm|PrivKey|KEY Record")
+		}
 		if len(tr.Sig0keys) > 0 {
-			fmt.Printf("Known SIG(0) key pairs:\n")
+			// fmt.Printf("Known SIG(0) key pairs:\n")
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
 				out = append(out, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
@@ -355,7 +360,10 @@ func DnssecKeyMgmt(cmd string) error {
 
 	switch cmd {
 	case "list":
-		var out = []string{"Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record"}
+		var out []string
+		if showhdr {
+			out = append(out, "Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record")
+		}
 		if len(tr.Dnskeys) > 0 {
 			fmt.Printf("Known DNSSEC key pairs:\n")
 			for k, v := range tr.Dnskeys {

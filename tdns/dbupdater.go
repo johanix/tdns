@@ -42,39 +42,51 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 				}
 				switch ur.Cmd {
 				case "CHILD-UPDATE":
-					if ur.ZoneName == "" {
-						log.Printf("Updater: Request for update is missing a zonename. Ignored.")
-						continue
-					} else {
-						//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
-						// zone is a primary zone, and has a policy that allows updates and we're able to write the
-						// resulting updated zone back to disk...
-						log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
-						err := kdb.ApplyChildUpdateToDB(ur)
-						if err != nil {
-							log.Printf("Error from ApplyChildUpdateToDB: %v", err)
-						}
-						err = zd.ApplyChildUpdateToZoneData(ur)
-						if err != nil {
-							log.Printf("Error from ApplyUpdateToZoneData: %v", err)
-						}
+					//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
+					// zone is a primary zone, and has a policy that allows updates and we're able to write the
+					// resulting updated zone back to disk...
+					log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
+					err := kdb.ApplyChildUpdateToDB(ur)
+					if err != nil {
+						log.Printf("Error from ApplyChildUpdateToDB: %v", err)
 					}
+					err = zd.ApplyChildUpdateToZoneData(ur)
+					if err != nil {
+						log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+					}
+
 				case "ZONE-UPDATE":
-					if ur.ZoneName == "" {
-						log.Printf("Updater: Request for update is missing a zonename. Ignored.")
-						continue
-					} else {
-						//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
-						// zone is a primary zone, and has a policy that allows updates and we're able to write the
-						// resulting updated zone back to disk...
-						log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
-						// err := kdb.ApplyZoneUpdateToDB(ur)
-						// if err != nil {
-						// 	log.Printf("Error from ApplyChildUpdateToDB: %v", err)
-						// }
-						err := zd.ApplyZoneUpdateToZoneData(ur)
-						if err != nil {
-							log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+					//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
+					// zone is a primary zone, and has a policy that allows updates and we're able to write the
+					// resulting updated zone back to disk...
+					log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
+					// err := kdb.ApplyZoneUpdateToDB(ur)
+					// if err != nil {
+					// 	log.Printf("Error from ApplyChildUpdateToDB: %v", err)
+					// }
+					err := zd.ApplyZoneUpdateToZoneData(ur)
+					if err != nil {
+						log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+					}
+
+				case "TRUSTSTORE-UPDATE":
+					log.Printf("Updater: Request for update to SIG(0) TrustStore: %d actions.", len(ur.Actions))
+					for _, rr := range ur.Actions {
+						if keyrr, ok := rr.(*dns.KEY); ok {
+							tppost := TruststorePost{
+								SubCommand: "add",
+								Src:        "child-update",
+								Keyname:    ur.ZoneName,
+								Keyid:      int(keyrr.KeyTag()),
+								KeyRR:      rr.String(),
+								Validated:  ur.Validated,
+								Trusted:    ur.Trusted,
+							}
+
+							_, err := kdb.Sig0TrustMgmt(tppost)
+							if err != nil {
+								log.Printf("Error from ApplyTruststoreUpdateToDB: %v", err)
+							}
 						}
 					}
 				default:

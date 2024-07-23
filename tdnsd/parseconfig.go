@@ -99,9 +99,9 @@ func ParseConfig(conf *Config) error {
 	if err != nil {
 		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
 	}
-	err = kdb.LoadChildSig0Keys()
+	err = kdb.LoadSig0ChildKeys()
 	if err != nil {
-		log.Fatalf("Error from LoadChildSig0Keys(): %v", err)
+		log.Fatalf("Error from LoadSig0ChildKeys(): %v", err)
 	}
 
 	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
@@ -260,6 +260,7 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 				Type:         zconf.UpdatePolicy.Child.Type,
 				RRtypes:      childrrtypes,
 				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
+				KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
 			},
 			Zone: tdns.UpdatePolicyDetail{
 				Type:    zconf.UpdatePolicy.Zone.Type,

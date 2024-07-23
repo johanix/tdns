@@ -220,19 +220,25 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 		msg.SetAxfr(zname)
 	}
 
-	printKeyRR := func(rr dns.RR, rrtype, ktype string, keyid uint16) {
-		parts := strings.Split(rr.String(), rrtype)
-		rhp := strings.Fields(parts[1])
-		l := len(parts[0])
-		fmt.Printf("%s %s %s %s %s (\n", parts[0][:l-1], rrtype, rhp[0], rhp[1], rhp[2])
-		spaces := strings.Repeat(" ", len(parts[0])+1)
-		var keyparts []string
-		part := rhp[3]
-		for len(part) > 72-len(spaces) {
-			keyparts = append(keyparts, part[:72-len(spaces)])
-			part = part[72-len(spaces):]
+	maxlen := 35
+	rightmargin := 72
+
+	printKeyRR := func(rr dns.RR, rrtype, ktype string, keyid uint16, maxlen int) {
+		p := strings.Fields(rr.String())
+		// rhp := strings.Fields(parts[1])
+		namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+		if len(namepad) < 1 {
+			namepad = " "
 		}
-		keyparts = append(keyparts, part)
+		fmt.Printf("%s%s%s %s %s %s %s %s (\n", p[0], namepad, p[1], p[2], p[3], p[4], p[5], p[6])
+		spaces := strings.Repeat(" ", maxlen)
+		var keyparts []string
+		keystr := p[7]
+		for len(keystr) > 72-len(spaces) {
+			keyparts = append(keyparts, keystr[:rightmargin-len(spaces)])
+			keystr = keystr[72-len(spaces):]
+		}
+		keyparts = append(keyparts, keystr)
 		for idx, part := range keyparts {
 			if idx == len(keyparts)-1 {
 				fmt.Printf("%s %s )\n", spaces, part)
@@ -240,7 +246,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 				fmt.Printf("%s %s\n", spaces, part)
 			}
 		}
-		alg, _ := strconv.Atoi(rhp[2])
+		alg, _ := strconv.Atoi(p[6])
 		algstr := dns.AlgorithmToString[uint8(alg)]
 		fmt.Printf("%s ; %s alg = %s ; key id = %d\n", spaces, ktype, algstr, keyid)
 	}
@@ -273,33 +279,38 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 		if Globals.Debug {
 			fmt.Printf("Printing %d RRs in envelope\n", len(envelope.RR))
 		}
+
 		for _, rr := range envelope.RR {
 			if options["multi"] == "true" {
 				switch rr.(type) {
 				case *dns.KEY:
 					keyid := rr.(*dns.KEY).KeyTag()
 					t := ""
-					printKeyRR(rr, "KEY", t, keyid)
+					printKeyRR(rr, "KEY", t, keyid, maxlen)
 				case *dns.DNSKEY:
 					keyid := rr.(*dns.DNSKEY).KeyTag()
 					t := " ZSK ;"
 					if rr.(*dns.DNSKEY).Flags == 257 {
 						t = " KSK ;"
 					}
-					printKeyRR(rr, "DNSKEY", t, keyid)
+					printKeyRR(rr, "DNSKEY", t, keyid, maxlen)
 
 				case *dns.RRSIG:
-					parts := strings.Split(rr.String(), "RRSIG")
-					rhp := strings.Fields(parts[1])
-					l := len(parts[0])
-					fmt.Printf("%s %s %s %s %s %s (\n", parts[0][:l-1], "RRSIG", rhp[0], rhp[1], rhp[2], rhp[3])
-					spaces := strings.Repeat(" ", len(parts[0])+1)
-					fmt.Printf("%s %s %s %s %s\n", spaces, rhp[4], rhp[5], rhp[6], rhp[7])
+					p := strings.Fields(rr.String())
+					// rhp := strings.Fields(p[1])
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					if len(namepad) < 1 {
+						namepad = " "
+					}
+					fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:8], " "))
+					// spaces := strings.Repeat(" ", len(parts[0])+1)
+					spaces := strings.Repeat(" ", maxlen)
+					fmt.Printf("%s %s %s %s %s\n", spaces, p[8], p[9], p[10], p[11])
 					var rrsigparts []string
-					part := rhp[8]
-					for len(part) > 72-len(spaces) {
-						rrsigparts = append(rrsigparts, part[:72-len(spaces)])
-						part = part[72-len(spaces):]
+					part := p[12]
+					for len(part) > rightmargin-len(spaces) {
+						rrsigparts = append(rrsigparts, part[:rightmargin-len(spaces)])
+						part = part[rightmargin-len(spaces):]
 					}
 					rrsigparts = append(rrsigparts, part)
 					for idx, part := range rrsigparts {
@@ -309,8 +320,42 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 							fmt.Printf("%s %s\n", spaces, part)
 						}
 					}
+
+				case *dns.SVCB:
+					p := strings.Fields(rr.String())
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					if len(namepad) < 1 {
+						namepad = " "
+					}
+					spaces := strings.Repeat(" ", maxlen)
+					fmt.Printf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
+					if len(p) > 6 {
+						fmt.Printf(" (\n")
+						fmt.Printf("%s %s )\n", spaces, strings.Join(p[6:], " "))
+					} else {
+						fmt.Printf("\n")
+					}
+
+				case *dns.SOA:
+					p := strings.Fields(rr.String())
+					// rhp := strings.Fields(p[1])
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					if len(namepad) < 1 {
+						namepad = " "
+					}
+					fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:6], " "))
+					spaces := strings.Repeat(" ", maxlen)
+					fmt.Printf("%s %s%s ; SOA serial\n", spaces, p[6], strings.Repeat(" ", 10-len(p[6])))
+					fmt.Printf("%s %s%s ; Refresh\n", spaces, p[7], strings.Repeat(" ", 10-len(p[7])))
+					fmt.Printf("%s %s%s ; Retry\n", spaces, p[8], strings.Repeat(" ", 10-len(p[8])))
+					fmt.Printf("%s %s%s ; Expire\n", spaces, p[9], strings.Repeat(" ", 10-len(p[9])))
+					fmt.Printf("%s %s )%s ; Ncache TTL\n", spaces, p[10], strings.Repeat(" ", 10-len(p[10])-2))
+
 				default:
-					fmt.Printf("%s\n", rr.String())
+					p := strings.Fields(rr.String())
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					// fmt.Printf("len(qname)=%d, len(ttl)=%d, namepad=%d\n", len(p[0]), len(p[1]), len(namepad))
+					fmt.Printf("%s%s%s\n", p[0], namepad, strings.Join(p[1:], " "))
 				}
 			} else {
 				fmt.Printf("%s\n", rr.String())
@@ -602,7 +647,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	return err
 }
 
-func RRsetToStringOG(rrs []dns.RR) string {
+func xxxRRsetToStringOG(rrs []dns.RR) string {
 	var tmp string
 	for _, rr := range rrs {
 		tmp += rr.String() + "\n"

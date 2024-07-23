@@ -98,9 +98,10 @@ type TemplateConf struct {
 
 type UpdatePolicyConf struct {
 	Child struct {
-		Type         string // "selfsub" | "self"
+		Type         string // selfsub | self | sub | none
 		RRtypes      []string
-		KeyBootstrap string
+		KeyBootstrap []string // manual | dnssec-validated | consistent-lookup
+		KeyUpload    string
 	}
 	Zone struct {
 		Type    string // "selfsub" | "self" | "sub" | ...
@@ -117,7 +118,8 @@ type UpdatePolicy struct {
 type UpdatePolicyDetail struct {
 	Type         string // "selfsub" | "self"
 	RRtypes      map[uint16]bool
-	KeyBootstrap string
+	KeyBootstrap []string
+	KeyUpload    string
 }
 
 type Ixfr struct {
@@ -188,6 +190,8 @@ type TruststorePost struct {
 	Zone       string
 	Keyname    string
 	Keyid      int
+	Trusted    bool
+	Validated  bool
 	Src        string // "dns" | "file"
 	KeyRR      string // RR string for key
 }
@@ -349,6 +353,7 @@ type Sig0Key struct {
 	Creator    string
 	Validated  bool   // has this key been DNSSEC validated
 	Trusted    bool   // is this key trusted
+	Source     string // "dns" | "file" | "keystore" | "child-update"
 	PrivateKey string //
 	Key        dns.KEY
 	Keystr     string

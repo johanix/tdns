@@ -317,9 +317,9 @@ func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
 	)
 
-	if sak, ok := kdb.Sig0Cache[zonename]; ok {
-		return sak, nil
-	}
+	// if sak, ok := kdb.Sig0Cache[zonename]; ok {
+	// 	return sak, nil
+	// }
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
@@ -413,10 +413,10 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 		if (flags & 0x0001) != 0 {
 			dak.KSKs = append(dak.KSKs, pkc)
-			log.Printf("Adding KSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
+			//log.Printf("Adding KSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		} else {
 			dak.ZSKs = append(dak.ZSKs, pkc)
-			log.Printf("Adding ZSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
+			// log.Printf("Adding ZSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		}
 	}
 

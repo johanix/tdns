@@ -21,7 +21,7 @@ func sigLifetime(t time.Time) (uint32, uint32) {
 	return incep, expir
 }
 
-func SignMsg(m dns.Msg, name string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
+func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 
 	if sak == nil || len(sak.Keys) == 0 {
 		return nil, fmt.Errorf("SignMsg: no active SIG(0) keys available")
@@ -38,11 +38,11 @@ func SignMsg(m dns.Msg, name string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
 		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
 		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
-		sigrr.RRSIG.SignerName = name
+		sigrr.RRSIG.SignerName = signer
 
 		_, err := sigrr.Sign(key.CS, &m)
 		if err != nil {
-			log.Printf("Error from sig.Sign(%s): %v", name, err)
+			log.Printf("Error from sig.Sign(%s): %v", signer, err)
 			return nil, err
 		}
 		m.Extra = append(m.Extra, sigrr)
