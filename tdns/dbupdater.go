@@ -85,7 +85,7 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 
 							_, err := kdb.Sig0TrustMgmt(tppost)
 							if err != nil {
-								log.Printf("Error from ApplyTruststoreUpdateToDB: %v", err)
+								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 							}
 						}
 					}

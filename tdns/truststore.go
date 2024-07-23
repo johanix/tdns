@@ -35,7 +35,7 @@ func (kdb *KeyDB) Sig0TrustMgmt(tp TruststorePost) (*TruststoreResponse, error) 
 
 	const (
 		addkeysql = `
-INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, trusted, validated, source, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
 		getallchildsig0keyssql = `
 SELECT zonename, keyid, trusted, validated, source, keyrr FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
@@ -124,7 +124,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d imported from KeyStore to TrustStore", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "child-update" {
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, true, true, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
