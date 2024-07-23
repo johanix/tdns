@@ -30,6 +30,9 @@ func UpdateResponder(dhr *DnsHandlerRequest, updateq chan UpdateRequest) error {
 	// This is a DNS UPDATE, so the Query Section becomes the Zone Section
 	zone := qname
 
+	if len(r.Ns) == 1 {
+		qname = r.Ns[0].Header().Name // If there is only one RR in the update, we will use that name as the qname
+	}
 	// 1. Is qname inside or below a zone that we're auth for?
 	// Let's see if we can find the zone
 	zd, _ := FindZone(qname)
