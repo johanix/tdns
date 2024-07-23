@@ -475,8 +475,10 @@ func (zd *ZoneData) ValidateAndTrustUpdate(r *dns.Msg) (uint8, bool, bool, strin
 			return dns.RcodeBadSig, false, false, sig.RRSIG.SignerName, err
 		}
 		zd.Logger.Printf("* Update is a single SIG(0) key \"%s\" (keyid %d) which is correctly self-signed",
-			keyrr.Header().Name, keyrr.KeyTag)
-		return dns.RcodeSuccess, false, false, sig.RRSIG.SignerName, nil
+			ownkeyrr.Header().Name, ownkeyrr.KeyTag())
+		// XXX: we claim this to be a validated update as it is correctly self-signed
+		// But it is obviously not trusted.
+		return dns.RcodeSuccess, true, false, sig.RRSIG.SignerName, nil
 	} else {
 		zd.Logger.Printf("* Update SIG(0) signature verified correctly")
 	}
