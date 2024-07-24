@@ -67,13 +67,18 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		switch r.Opcode {
 		case dns.OpcodeNotify:
 			// A DNS NOTIFY may trigger time consuming outbound queries
-			dnsnotifyq <- tdns.DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsnotifyq <- tdns.DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeUpdate:
 			// A DNS Update may trigger time consuming outbound queries
-			dnsupdateq <- tdns.DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsupdateq <- tdns.DnsUpdateRequest{
+				ResponseWriter: w,
+				Msg:            r,
+				Qname:          qname,
+				Status:         &tdns.UpdateStatus{},
+			}
 			// Not waiting for a result
 			return
 

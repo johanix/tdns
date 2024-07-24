@@ -22,6 +22,7 @@ type UpdateRequest struct {
 	Actions   []dns.RR // The Update section from the dns.Msg
 	Validated bool     // Signature over update msg is validated
 	Trusted   bool     // Content of update is trusted (via validation or policy)
+	Status    *UpdateStatus
 }
 
 func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {

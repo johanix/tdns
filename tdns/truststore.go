@@ -453,30 +453,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	}
 
 	// 4. Try to fetch the key by looking up and validating the KEY RRset via DNS
-	zd.Logger.Printf("FindSig0TrustedKey: SIG(0) key with id %s: not found in TrustStore, will fetch via DNS.", mapkey)
-	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
-	if err != nil {
-		return nil, err
-	}
-	if rrset == nil {
-		return nil, fmt.Errorf("SIG(0) trusted key %s not found", signer)
-	}
-	valid, err := zd.ValidateRRset(rrset, true)
-	if err != nil {
-		return nil, err
-	}
-	zd.Logger.Printf("FindSig0TrustedKey: Found %s KEY RRset (validated)", signer)
-	for _, rr := range rrset.RRs {
-		if keyrr, ok := rr.(*dns.KEY); ok {
-			sk := Sig0Key{
-				Name:      signer,
-				Validated: valid,
-				Key:       *keyrr,
-			}
-			// Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()), sk)
-			return &sk, nil
-		}
-	}
+	// No. That's wrong. This is about finding, *trusted* keys.
 
 	return nil, fmt.Errorf("SIG(0) trusted key %s not found in TrustStore", signer)
 }

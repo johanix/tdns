@@ -413,8 +413,8 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 
 // XXX: Is qname the name of a zone cut for a child zone?
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
-	zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
-		qname, zd.ZoneName)
+	// zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
+	// 	qname, zd.ZoneName)
 	owner, err := zd.GetOwner(qname)
 	if err != nil || owner == nil || qname == zd.ZoneName {
 		return false
@@ -425,8 +425,8 @@ func (zd *ZoneData) IsChildDelegation(qname string) bool {
 	if len(owner.RRtypes[dns.TypeNS].RRs) == 0 {
 		return false
 	}
-	zd.Logger.Printf("IsChildDelegation: %s is an existing child of %s",
-		qname, zd.ZoneName)
+	// zd.Logger.Printf("IsChildDelegation: %s is an existing child of %s",
+	// 	qname, zd.ZoneName)
 	return true
 }
 

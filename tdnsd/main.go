@@ -133,8 +133,8 @@ func main() {
 
 	conf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
 	conf.Internal.UpdateQ = kdb.UpdateQ
-	conf.Internal.DnsUpdateQ = make(chan tdns.DnsHandlerRequest, 100)
-	conf.Internal.DnsNotifyQ = make(chan tdns.DnsHandlerRequest, 100)
+	conf.Internal.DnsUpdateQ = make(chan tdns.DnsUpdateRequest, 100)
+	conf.Internal.DnsNotifyQ = make(chan tdns.DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
 
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)

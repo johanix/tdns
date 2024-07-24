@@ -398,3 +398,49 @@ type BumperResponse struct {
 	ErrorMsg  string
 	Status    bool
 }
+
+// A Signer is a struct where we keep track of the signer name and keyid
+// for a DNS UPDATE message.
+type Sig0Signer struct {
+	Name    string   // from the SIG
+	KeyId   uint16   // from the SIG
+	Sig0Key *Sig0Key // a key that matches the signer name and keyid
+}
+
+// The UpdateStatus is used to track the evolving status of
+// a received DNS UPDATE as it passes through the validation
+// and approval processes.
+
+type UpdateStatus struct {
+	Zone                  string       // zone that the update applies to
+	ChildZone             string       // zone that the update applies to
+	Type                  string       // auth | child
+	Data                  string       // auth | delegation | key
+	ValidatorKey          *Sig0Key     // key that validated the update
+	Signers               []Sig0Signer // possible validators
+	SignerName            string       // name of the key that signed the update
+	SignatureType         string       // by-trusted | by-known | by-self
+	ValidationRcode       uint8        // Rcode from the validation process
+	Validated             bool         // true if the update has passed validation
+	ValidatedByTrustedKey bool         // true if the update has passed validation by a trusted key
+	SafetyChecked         bool         // true if the update has been safety checked
+	PolicyChecked         bool         // true if the update has been policy checked
+	Approved              bool         // true if the update has been approved
+	Msg                   string
+	Error                 bool
+	ErrorMsg              string
+	Status                bool
+}
+
+type NotifyStatus struct {
+	Zone          string // zone that the update applies to
+	ChildZone     string // zone that the update applies to
+	Type          uint16 // CDS | CSYNC | DNSKEY | DELEG
+	ScanStatus    string // "ok" | "changed" | "failed"
+	SafetyChecked bool   // true if the update has been safety checked
+	Approved      bool   // true if the update has been approved
+	Msg           string
+	Error         bool
+	ErrorMsg      string
+	Status        bool
+}
