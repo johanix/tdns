@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/gookit/goutil/dump"
@@ -275,7 +276,7 @@ func Sig0KeyMgmt(cmd string) error {
 
 	switch cmd {
 	case "list":
-		var out []string
+		var out, tmplist []string
 		if showhdr {
 			out = append(out, "Signer|State|KeyID|Algorithm|PrivKey|KEY Record")
 		}
@@ -283,9 +284,11 @@ func Sig0KeyMgmt(cmd string) error {
 			// fmt.Printf("Known SIG(0) key pairs:\n")
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
 					tmp[0], v.State, tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
 			}
+			sort.Strings(tmplist)
+			out = append(out, tmplist...)
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		} else {
 			fmt.Printf("No SIG(0) key pairs found\n")

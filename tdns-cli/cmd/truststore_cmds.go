@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/johanix/tdns/tdns"
@@ -131,7 +132,7 @@ func Sig0TrustMgmt(subcommand string) error {
 		Keyid:      keyid,
 	}
 	if subcommand == "list" {
-		var out []string
+		var out, tmplist []string
 		if showhdr {
 			out = append(out, "Signer|KeyID|Validated|Trusted|Source|Record")
 		}
@@ -139,9 +140,11 @@ func Sig0TrustMgmt(subcommand string) error {
 			// fmt.Printf("Known child SIG(0) keys:\n")
 			for k, v := range tr.ChildSig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%s|%.70s...\n",
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%v|%v|%s|%.70s...\n",
 					tmp[0], tmp[1], v.Validated, v.Trusted, v.Source, v.Keystr))
 			}
+			sort.Strings(tmplist)
+			out = append(out, tmplist...)
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		}
 
