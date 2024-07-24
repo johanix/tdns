@@ -193,9 +193,29 @@ cmdloop:
 			}
 
 			if op == "add" {
-				adds = append(adds, rr)
+				duplicate := false
+				for _, arr := range adds {
+					if dns.IsDuplicate(rr, arr) {
+						fmt.Printf("Record already added: %s\n", rrstr)
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					adds = append(adds, rr)
+				}
 			} else {
-				removes = append(removes, rr)
+				duplicate := false
+				for _, rrr := range removes {
+					if dns.IsDuplicate(rr, rrr) {
+						fmt.Printf("Record already removed: %s\n", rrstr)
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					removes = append(removes, rr)
+				}
 			}
 
 		case "show":
