@@ -1,0 +1,50 @@
+uchild.parent.axfr.net.	7200	IN	SOA	when.pigs.can.fly. hostmaster.johani.org. (
+					2023122679
+					7200
+					1800
+					604800
+					7200 )
+uchild.parent.axfr.net.	7200	IN	NS	nsc.uchild.parent.axfr.net.
+uchild.parent.axfr.net.	7200	IN	NS	foo.uchild.parent.axfr.net.
+uchild.parent.axfr.net.	7200	IN	NS	bar.uchild.parent.axfr.net.
+uchild.parent.axfr.net.	7200	IN	NS	hhh.uchild.parent.axfr.net.
+uchild.parent.axfr.net.	7200	IN	NS	iii.uchild.parent.axfr.net.
+
+aaa.uchild.parent.axfr.net. IN	A	1.2.3.4
+bbb.uchild.parent.axfr.net. IN	A	1.2.3.5
+ccc.uchild.parent.axfr.net. IN	A	1.2.3.6
+ddd.uchild.parent.axfr.net. IN	A	1.2.3.7
+eee.uchild.parent.axfr.net. IN	A	1.2.3.8
+fff.uchild.parent.axfr.net. IN	A	1.2.3.9
+ggg.uchild.parent.axfr.net. IN	A	1.2.3.44
+hhh.uchild.parent.axfr.net. IN	A	1.2.3.99
+iii.uchild.parent.axfr.net. IN	A	1.2.3.12
+jjj.uchild.parent.axfr.net. IN	A	1.2.3.13
+kkk.uchild.parent.axfr.net. IN	A	1.2.3.14
+lll.uchild.parent.axfr.net. IN	A	1.2.3.15
+
+aaa.uchild.parent.axfr.net. IN	AAAA	2001:b80::4
+bbb.uchild.parent.axfr.net. IN	AAAA	2001:b80::5
+ccc.uchild.parent.axfr.net. IN	AAAA	2001:b80::6
+ddd.uchild.parent.axfr.net. IN	AAAA	2001:b80::7
+eee.uchild.parent.axfr.net. IN	AAAA	2001:b80::8
+fff.uchild.parent.axfr.net. IN	AAAA	2001:b80::9
+ggg.uchild.parent.axfr.net. IN	AAAA	2001:b80::cccc
+hhh.uchild.parent.axfr.net. IN	AAAA	2001:b80::aa
+iii.uchild.parent.axfr.net. IN	AAAA	2001:b80::12
+jjj.uchild.parent.axfr.net. IN	AAAA	2001:b80::13
+kkk.uchild.parent.axfr.net. IN	AAAA	2001:b80::14
+lll.uchild.parent.axfr.net. IN	AAAA	2001:b80::15
+
+emil.*.uchild.parent.axfr.net. 7200 IN	A	1.2.3.50
+anka.uchild.parent.axfr.net. 7200 IN	A	1.2.3.4
+bar.uchild.parent.axfr.net. 300	IN	A	41.76.135.53
+citron.uchild.parent.axfr.net. 7200 IN	CNAME	gunga.uchild.parent.axfr.net.
+foo.uchild.parent.axfr.net. 300	IN	A	41.76.135.99
+foo.uchild.parent.axfr.net. 300	IN	AAAA	3ffe:b80:ff:ff:ff::cafe
+frotz.uchild.parent.axfr.net. 300 IN	TXT	"frutz"
+gunga.uchild.parent.axfr.net. 7200 IN	A	1.2.3.60
+gunga.uchild.parent.axfr.net. 7200 IN	SRV	10 20 30 srv.uchild.parent.axfr.net.
+isblock.uchild.parent.axfr.net.	7200 IN	A	1.2.3.70
+kanel.uchild.parent.axfr.net. 7200 IN	A	1.2.3.80
+nsc.uchild.parent.axfr.net. 300	IN	A	41.76.135.53

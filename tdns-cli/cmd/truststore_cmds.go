@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/johanix/tdns/tdns"
@@ -45,6 +46,18 @@ var truststoreSig0AddCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("src", "child")
 		err := Sig0TrustMgmt("add")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		}
+	},
+}
+
+var truststoreSig0DeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete a SIG(0) public key from the truststore",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("child")
+		err := Sig0TrustMgmt("delete")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
@@ -89,9 +102,11 @@ func init() {
 	rootCmd.AddCommand(truststoreCmd)
 	truststoreCmd.AddCommand(truststoreSig0Cmd)
 
-	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd, truststoreSig0ListCmd, truststoreSig0TrustCmd, truststoreSig0UntrustCmd)
+	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd, truststoreSig0DeleteCmd, truststoreSig0ListCmd,
+		truststoreSig0TrustCmd, truststoreSig0UntrustCmd)
 
 	truststoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+	truststoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	truststoreSig0TrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 	truststoreSig0UntrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 	//	truststoreSig0Cmd.PersistentFlags().StringVarP(&childSig0Name, "child", "c", "", "Name of child SIG(0) key to change trust for")
@@ -100,7 +115,7 @@ func init() {
 }
 
 func Sig0TrustMgmt(subcommand string) error {
-	tr, err := SendTruststore(api, tdns.TruststorePost{
+	tr, err := SendTruststore(tdns.Globals.Api, tdns.TruststorePost{
 		Command:    "child-sig0-mgmt",
 		SubCommand: "list",
 	})
@@ -117,17 +132,19 @@ func Sig0TrustMgmt(subcommand string) error {
 		Keyid:      keyid,
 	}
 	if subcommand == "list" {
-		var out []string
+		var out, tmplist []string
 		if showhdr {
-			out = append(out, "Signer|KeyID|Validated|Trusted|Record")
+			out = append(out, "Signer|KeyID|Validated|Trusted|Source|Record")
 		}
 		if len(tr.ChildSig0keys) > 0 {
-			fmt.Printf("Known child SIG(0) keys:\n")
+			// fmt.Printf("Known child SIG(0) keys:\n")
 			for k, v := range tr.ChildSig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("%s|%s|%v|%v|%.70s...\n",
-					tmp[0], tmp[1], v.Validated, v.Trusted, v.Keystr))
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%v|%v|%s|%.70s...\n",
+					tmp[0], tmp[1], v.Validated, v.Trusted, v.Source, v.Keystr))
 			}
+			sort.Strings(tmplist)
+			out = append(out, tmplist...)
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		}
 
@@ -163,6 +180,11 @@ func Sig0TrustMgmt(subcommand string) error {
 		}
 	}
 
+	if subcommand == "delete" {
+		tsp.Keyid = keyid
+		tsp.Keyname = tdns.Globals.Zonename
+	}
+
 	if subcommand == "trust" || subcommand == "untrust" {
 		mapkey := fmt.Sprintf("%s::%d", tdns.Globals.Zonename, keyid)
 		if _, ok := tr.ChildSig0keys[mapkey]; !ok {
@@ -178,7 +200,7 @@ func Sig0TrustMgmt(subcommand string) error {
 	//		Keyid:      childSig0Keyid,
 	//	})
 
-	tr, err = SendTruststore(api, tsp)
+	tr, err = SendTruststore(tdns.Globals.Api, tsp)
 
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -192,7 +214,7 @@ func Sig0TrustMgmt(subcommand string) error {
 	return nil
 }
 
-func SendTruststore(api *tdns.Api, data tdns.TruststorePost) (tdns.TruststoreResponse, error) {
+func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.TruststoreResponse, error) {
 
 	var tr tdns.TruststoreResponse
 

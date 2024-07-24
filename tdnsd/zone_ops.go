@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/johanix/tdns/tdns"
@@ -26,12 +25,17 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 	resp.Zone = zd.ZoneName
 
 	switch cp.SubCommand {
+	case "write-zone":
+		msg, err := zd.WriteZone(false, cp.Force)
+		resp.Msg = msg
+		return resp, err
+
 	case "sign-zone":
-		err := SignZone(zd, kdb)
+		err := zd.SignZone(kdb, cp.Force)
 		return resp, err
 
 	case "generate-nsec":
-		err := GenerateNsecChain(zd, kdb)
+		err := zd.GenerateNsecChain(kdb)
 		return resp, err
 
 	case "show-nsec-chain":
@@ -46,7 +50,9 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 		}
 
 	case "freeze":
-		if !zd.Options["allow-updates"] || !zd.Options["allow-child-updates"] {
+		// If a zone has modifications, freezing implies that the updated
+		// zone data should be written out to disk.
+		if !zd.Options["allow-updates"] && !zd.Options["allow-child-updates"] {
 			return resp, fmt.Errorf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 		}
 
@@ -54,8 +60,16 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 			return resp, fmt.Errorf("FreezeZone: zone %s is already frozen", zd.ZoneName)
 		}
 
-		zd.Options["frozen"] = true
-		resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
+		// zd.mu.Lock()
+		zd.SetOption("frozen", true)
+		//zd.mu.Unlock()
+		if zd.Options["dirty"] {
+			tosource := true
+			zd.WriteZone(tosource, false)
+			resp.Msg = fmt.Sprintf("Zone %s is now frozen, modifications will be written to disk", zd.ZoneName)
+		} else {
+			resp.Msg = fmt.Sprintf("Zone %s is now frozen", zd.ZoneName)
+		}
 		return resp, nil
 
 	case "thaw":
@@ -72,7 +86,8 @@ func ZoneOps(conf *Config, cp tdns.CommandPost, kdb *tdns.KeyDB) (tdns.CommandRe
 	case "reload":
 		// XXX: Note: if the zone allows updates and is dirty, then reloading should be denied
 		log.Printf("ZoneOps: reloading, will check for changes to delegation data\n")
-		resp.Msg, err = ReloadZone(conf, cp.Zone, cp.Force)
+		// resp.Msg, err = ReloadZone(cp.Zone, cp.Force)
+		resp.Msg, err = zd.ReloadZone(conf.Internal.RefreshZoneCh, cp.Force)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -108,142 +123,6 @@ func ShowNsecChain(zd *tdns.ZoneData) ([]string, error) {
 	return nsecrrs, nil
 }
 
-func GenerateNsecChain(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
-	}
-	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-	if err != nil {
-		log.Printf("GenerateNsecChain: failed to get dnssec active keys for zone %s", zd.ZoneName)
-		return err
-	}
-
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
-		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
-			err := tdns.SignRRset(&rrset, zone, dak)
-			if err != nil {
-				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
-			} else {
-				log.Printf("GenerateNsecChain: signed %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
-			}
-		}
-		return rrset
-	}
-
-	names, err := zd.GetOwnerNames()
-	if err != nil {
-		return err
-	}
-	sort.Strings(names)
-
-	var nextidx int
-	var nextname string
-
-	var hasRRSIG bool
-
-	for idx, name := range names {
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return err
-		}
-
-		nextidx = idx + 1
-		if nextidx == len(names) {
-			nextidx = 0
-		}
-		nextname = names[nextidx]
-		var tmap = []int{int(dns.TypeNSEC)}
-		for rrt := range owner.RRtypes {
-			if rrt == dns.TypeRRSIG {
-				hasRRSIG = true
-				continue
-			}
-			if rrt != dns.TypeNSEC {
-				if rrt == 0 {
-					log.Printf("GenerateNsecChain: name: %s rrt: %v (not good)", name, rrt)
-				}
-				tmap = append(tmap, int(rrt))
-			}
-		}
-		if hasRRSIG || (zd.Options["online-signing"] && len(dak.KSKs) > 0) {
-			tmap = append(tmap, int(dns.TypeRRSIG))
-		}
-
-		log.Printf("GenerateNsecChain: name: %s tmap: %v", name, tmap)
-
-		sort.Ints(tmap) // unfortunately the NSEC TypeBitMap must be in order...
-		var rrts = make([]string, len(tmap))
-		for idx, t := range tmap {
-			rrts[idx] = dns.TypeToString[uint16(t)]
-		}
-
-		log.Printf("GenerateNsecChain: creating NSEC RR for name %s: %v %v", name, tmap, rrts)
-
-		items := []string{name, "NSEC", nextname}
-		items = append(items, rrts...)
-		nsecrr, err := dns.NewRR(strings.Join(items, " "))
-		if err != nil {
-			return err
-		}
-		tmp := owner.RRtypes[dns.TypeNSEC]
-		tmp.RRs = []dns.RR{nsecrr}
-		owner.RRtypes[dns.TypeNSEC] = MaybeSignRRset(tmp, zd.ZoneName, kdb)
-
-	}
-
-	return nil
-}
-
-func SignZone(zd *tdns.ZoneData, kdb *tdns.KeyDB) error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
-	}
-	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-	if err != nil {
-		log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
-		return err
-	}
-
-	err = GenerateNsecChain(zd, kdb)
-	if err != nil {
-		return err
-	}
-
-	MaybeSignRRset := func(rrset tdns.RRset, zone string, kdb *tdns.KeyDB) tdns.RRset {
-		if zd.Options["online-signing"] {
-			err := tdns.SignRRset(&rrset, zone, dak)
-			if err != nil {
-				log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
-			} else {
-				log.Printf("SignZone: signed %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
-			}
-		}
-		return rrset
-	}
-
-	names, err := zd.GetOwnerNames()
-	if err != nil {
-		return err
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return err
-		}
-
-		for rrt, rrset := range owner.RRtypes {
-			if rrt == dns.TypeRRSIG {
-				continue
-			}
-			owner.RRtypes[rrt] = MaybeSignRRset(rrset, zd.ZoneName, kdb)
-		}
-	}
-
-	return nil
-}
-
 func BumpSerial(conf *Config, zone string) (string, error) {
 	var respch = make(chan tdns.BumperResponse, 1)
 	conf.Internal.BumpZoneCh <- tdns.BumperData{
@@ -266,6 +145,10 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 }
 
 func ReloadZone(conf *Config, zone string, force bool) (string, error) {
+	//	if !zd.Options["dirty"] {
+	//		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
+	//		return msg, fmt.Errorf(msg)
+	//	}
 	var respch = make(chan tdns.RefresherResponse, 1)
 	conf.Internal.RefreshZoneCh <- tdns.ZoneRefresher{
 		Name:     zone,

@@ -73,22 +73,35 @@ type ZoneData struct {
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
 	Name         string `validate:"required"`
+	Zonefile     string
 	Type         string `validate:"required"`
 	Store        string `validate:"required"` // xfr | map | slice | reg
-	Primary      string
+	Primary      string // upstream, for secondary zones
 	Notify       []string
-	Zonefile     string
 	Options      []string
 	Frozen       bool // true if zone is frozen; not a config param
 	Dirty        bool // true if zone has been modified; not a config param
+	UpdatePolicy UpdatePolicyConf
+	Template     string
+}
+
+type TemplateConf struct {
+	Name         string `validate:"required"`
+	Zonefile     string
+	Type         string
+	Store        string
+	Primary      string // upstream, for secondary zones
+	Notify       []string
+	Options      []string
 	UpdatePolicy UpdatePolicyConf
 }
 
 type UpdatePolicyConf struct {
 	Child struct {
-		Type         string // "selfsub" | "self"
+		Type         string // selfsub | self | sub | none
 		RRtypes      []string
-		KeyBootstrap string
+		KeyBootstrap []string // manual | dnssec-validated | consistent-lookup
+		KeyUpload    string
 	}
 	Zone struct {
 		Type    string // "selfsub" | "self" | "sub" | ...
@@ -105,7 +118,8 @@ type UpdatePolicy struct {
 type UpdatePolicyDetail struct {
 	Type         string // "selfsub" | "self"
 	RRtypes      map[uint16]bool
-	KeyBootstrap string
+	KeyBootstrap []string
+	KeyUpload    string
 }
 
 type Ixfr struct {
@@ -176,6 +190,8 @@ type TruststorePost struct {
 	Zone       string
 	Keyname    string
 	Keyid      int
+	Trusted    bool
+	Validated  bool
 	Src        string // "dns" | "file"
 	KeyRR      string // RR string for key
 }
@@ -269,28 +285,25 @@ type DebugResponse struct {
 	ErrorMsg        string
 }
 
-type Api struct {
+type ApiClient struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string
 	apiKey     string
-	Authmethod string
+	AuthMethod string
+	UseTLS     bool
 	Verbose    bool
 	Debug      bool
 }
 
 type ZoneRefresher struct {
-	Name      string
-	ZoneType  ZoneType // primary | secondary
-	Primary   string
-	Notify    []string
-	ZoneStore ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile  string
-	Options   map[string]bool
-	//	DelegationSync bool
-	//	OnlineSigning  bool
-	//	AllowUpdates   bool
-	//	FoldCase       bool // should we fold case for this zone
+	Name         string
+	ZoneType     ZoneType // primary | secondary
+	Primary      string
+	Notify       []string
+	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile     string
+	Options      map[string]bool
 	UpdatePolicy UpdatePolicy
 	Force        bool // force refresh, ignoring SOA serial
 	Response     chan RefresherResponse
@@ -337,8 +350,10 @@ type Sig0Key struct {
 	State      string
 	Keyid      uint16
 	Algorithm  string
+	Creator    string
 	Validated  bool   // has this key been DNSSEC validated
 	Trusted    bool   // is this key trusted
+	Source     string // "dns" | "file" | "keystore" | "child-update"
 	PrivateKey string //
 	Key        dns.KEY
 	Keystr     string
@@ -350,6 +365,7 @@ type DnssecKey struct {
 	Keyid     uint16
 	Flags     uint16
 	Algorithm string
+	Creator   string
 	// Validated  bool   // has this key been DNSSEC validated
 	// Trusted    bool   // is this key trusted
 	PrivateKey string //
@@ -381,4 +397,50 @@ type BumperResponse struct {
 	Error     bool
 	ErrorMsg  string
 	Status    bool
+}
+
+// A Signer is a struct where we keep track of the signer name and keyid
+// for a DNS UPDATE message.
+type Sig0Signer struct {
+	Name    string   // from the SIG
+	KeyId   uint16   // from the SIG
+	Sig0Key *Sig0Key // a key that matches the signer name and keyid
+}
+
+// The UpdateStatus is used to track the evolving status of
+// a received DNS UPDATE as it passes through the validation
+// and approval processes.
+
+type UpdateStatus struct {
+	Zone                  string       // zone that the update applies to
+	ChildZone             string       // zone that the update applies to
+	Type                  string       // auth | child
+	Data                  string       // auth | delegation | key
+	ValidatorKey          *Sig0Key     // key that validated the update
+	Signers               []Sig0Signer // possible validators
+	SignerName            string       // name of the key that signed the update
+	SignatureType         string       // by-trusted | by-known | by-self
+	ValidationRcode       uint8        // Rcode from the validation process
+	Validated             bool         // true if the update has passed validation
+	ValidatedByTrustedKey bool         // true if the update has passed validation by a trusted key
+	SafetyChecked         bool         // true if the update has been safety checked
+	PolicyChecked         bool         // true if the update has been policy checked
+	Approved              bool         // true if the update has been approved
+	Msg                   string
+	Error                 bool
+	ErrorMsg              string
+	Status                bool
+}
+
+type NotifyStatus struct {
+	Zone          string // zone that the update applies to
+	ChildZone     string // zone that the update applies to
+	Type          uint16 // CDS | CSYNC | DNSKEY | DELEG
+	ScanStatus    string // "ok" | "changed" | "failed"
+	SafetyChecked bool   // true if the update has been safety checked
+	Approved      bool   // true if the update has been approved
+	Msg           string
+	Error         bool
+	ErrorMsg      string
+	Status        bool
 }

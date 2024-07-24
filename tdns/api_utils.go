@@ -13,21 +13,25 @@ import (
 )
 
 type PingPost struct {
-	Message string
-	Pings   int
+	Msg   string
+	Pings int
 }
 
 type PingResponse struct {
-	Time    time.Time
-	Client  string
-	Message string
-	Pings   int
-	Pongs   int
+	Time       time.Time
+	Client     string
+	BootTime   time.Time
+	Version    string
+	ServerHost string // "master.dnslab"
+	Daemon     string // "tdnsd"
+	Msg        string
+	Pings      int
+	Pongs      int
 }
 
 var pongs int = 0
 
-func APIping(appName string) func(w http.ResponseWriter, r *http.Request) {
+func APIping(appName string, bootTime time.Time) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		tls := ""
@@ -46,11 +50,12 @@ func APIping(appName string) func(w http.ResponseWriter, r *http.Request) {
 		pongs += 1
 		hostname, _ := os.Hostname()
 		response := PingResponse{
-			Time:    time.Now(),
-			Client:  r.RemoteAddr,
-			Message: fmt.Sprintf("%spong from %s @ %s", tls, appName, hostname),
-			Pings:   pp.Pings + 1,
-			Pongs:   pongs,
+			Time:     time.Now(),
+			BootTime: bootTime,
+			Client:   r.RemoteAddr,
+			Msg:      fmt.Sprintf("%spong from %s @ %s", tls, appName, hostname),
+			Pings:    pp.Pings + 1,
+			Pongs:    pongs,
 		}
 
 		w.Header().Set("Content-Type", "application/json")

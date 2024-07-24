@@ -10,6 +10,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"io"
+	"os"
+	"strings"
 
 	"fmt"
 	"io/ioutil"
@@ -17,12 +20,12 @@ import (
 	"net/http"
 )
 
-func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *Api {
-	api := Api{
+func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *ApiClient {
+	api := ApiClient{
 		Name:       name,
 		BaseUrl:    baseurl,
 		apiKey:     apikey,
-		Authmethod: authmethod,
+		AuthMethod: authmethod,
 	}
 
 	if rootcafile == "insecure" {
@@ -63,33 +66,33 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 	if debug {
 		fmt.Printf("Setting up %s API client:\n", name)
 		fmt.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
-			api.BaseUrl, api.apiKey, api.Authmethod)
+			api.BaseUrl, api.apiKey, api.AuthMethod)
 	}
 
 	return &api
 }
 
 // request helper function
-func (api *Api) requestHelper(req *http.Request) (int, []byte, error) {
+func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 
 	req.Header.Add("Content-Type", "application/json")
 
-	if api.Authmethod == "" {
+	if api.AuthMethod == "" {
 		// do not add any authentication header at all
-	} else if api.Authmethod == "X-API-Key" {
+	} else if api.AuthMethod == "X-API-Key" {
 		req.Header.Add("X-API-Key", api.apiKey)
-	} else if api.Authmethod == "Authorization" {
+	} else if api.AuthMethod == "Authorization" {
 		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
 	} else {
 		log.Printf("Error: Client API Post: unknown auth method: %s. Aborting.\n",
-			api.Authmethod)
-		return 501, []byte{}, fmt.Errorf("unknown auth method: %s", api.Authmethod)
+			api.AuthMethod)
+		return 501, []byte{}, fmt.Errorf("unknown auth method: %s", api.AuthMethod)
 	}
 
 	if api.Debug {
 		fmt.Println()
 		fmt.Printf("requestHelper: about to send request using auth method '%s' and key '%s'\n",
-			api.Authmethod, api.apiKey)
+			api.AuthMethod, api.apiKey)
 	}
 
 	if api.apiKey == "" {
@@ -111,13 +114,13 @@ func (api *Api) requestHelper(req *http.Request) (int, []byte, error) {
 			log.Println("JSON parse error: ", error)
 		}
 		fmt.Printf("requestHelper: received %d bytes of response data:\n%s\n", len(buf),
-					   prettyJSON.String())
+			prettyJSON.String())
 	}
 
 	return resp.StatusCode, buf, err
 }
 
-func (api *Api) Post(endpoint string, data []byte) (int, []byte, error) {
+func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer
@@ -126,7 +129,7 @@ func (api *Api) Post(endpoint string, data []byte) (int, []byte, error) {
 			log.Println("JSON parse error: ", error)
 		}
 		fmt.Printf("api.Post: posting to URL '%s' %d bytes of data:\n%s\n",
-				      api.BaseUrl+endpoint, len(data), prettyJSON.String())
+			api.BaseUrl+endpoint, len(data), prettyJSON.String())
 	}
 
 	req, err := http.NewRequest(http.MethodPost, api.BaseUrl+endpoint,
@@ -138,7 +141,7 @@ func (api *Api) Post(endpoint string, data []byte) (int, []byte, error) {
 }
 
 // api Delete (not tested)
-func (api *Api) Delete(endpoint string) (int, []byte, error) {
+func (api *ApiClient) Delete(endpoint string) (int, []byte, error) {
 
 	if api.Debug {
 		fmt.Printf("api.Delete: posting to URL '%s'\n",
@@ -153,7 +156,7 @@ func (api *Api) Delete(endpoint string) (int, []byte, error) {
 }
 
 // api Get (not tested)
-func (api *Api) Get(endpoint string) (int, []byte, error) {
+func (api *ApiClient) Get(endpoint string) (int, []byte, error) {
 
 	if api.Debug {
 		fmt.Printf("api.Get: GET URL '%s'\n", api.BaseUrl+endpoint)
@@ -167,7 +170,7 @@ func (api *Api) Get(endpoint string) (int, []byte, error) {
 }
 
 // api Put
-func (api *Api) Put(endpoint string, data []byte) (int, []byte, error) {
+func (api *ApiClient) Put(endpoint string, data []byte) (int, []byte, error) {
 
 	if api.Debug {
 		fmt.Printf("api.Put: posting to URL '%s' %d bytes of data: %v\n",
@@ -180,4 +183,94 @@ func (api *Api) Put(endpoint string, data []byte) (int, []byte, error) {
 		log.Fatalf("Error from http.NewRequest: Error: %v", err)
 	}
 	return api.requestHelper(req)
+}
+
+func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {
+	if !api.Debug {
+		return
+	}
+
+	if api.UseTLS {
+		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, api.BaseUrl+endpoint)
+	} else {
+		fmt.Printf("API%s: apiurl: %s\n", method, api.BaseUrl+endpoint)
+	}
+
+	if (method == http.MethodPost) || (method == http.MethodPut) {
+		var prettyJSON bytes.Buffer
+
+		error := json.Indent(&prettyJSON, data, "", "  ")
+		if error != nil {
+			log.Println("JSON parse error: ", error)
+		}
+		fmt.Printf("API%s: posting %d bytes of data: %s\n", method, len(data), prettyJSON.String())
+	}
+}
+
+func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
+	bytebuf := new(bytes.Buffer)
+	err := json.NewEncoder(bytebuf).Encode(data)
+	if err != nil {
+		fmt.Printf("api.RequestNG: Error from json.NewEncoder: %v\n", err)
+		if dieOnError {
+			os.Exit(1)
+		}
+	}
+
+	api.UrlReport(method, endpoint, bytebuf.Bytes())
+
+	if api.Debug {
+		fmt.Printf("api.RequestNG: %s %s dieOnError: %v\n", method, endpoint, dieOnError)
+	}
+
+	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
+	req.Header.Add("Content-Type", "application/json")
+	if api.AuthMethod == "X-API-Key" {
+		req.Header.Add("X-API-Key", api.apiKey)
+	} else if api.AuthMethod == "Authorization" {
+		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
+	} else if api.AuthMethod == "none" {
+		// do not add any authentication header at all
+	}
+	resp, err := api.Client.Do(req)
+
+	if err != nil {
+		if api.Debug {
+			fmt.Printf("api.RequestNG: %s %s dieOnError: %v err: %v\n", method, endpoint, dieOnError, err)
+		}
+
+		var msg string
+		if strings.Contains(err.Error(), "connection refused") {
+			msg = fmt.Sprintf("Connection refused. Server process probably not running.")
+		} else {
+			msg = fmt.Sprintf("Error from API request %s: %v", method, err)
+		}
+		if dieOnError {
+			fmt.Printf("%s\n", msg)
+			os.Exit(1)
+		} else {
+			return 501, nil, err
+		}
+	}
+
+	status := resp.StatusCode
+	defer resp.Body.Close()
+	if api.Debug {
+		fmt.Printf("Status from %s: %d\n", method, status)
+	}
+
+	buf, err := io.ReadAll(resp.Body)
+
+	if api.Debug {
+		var prettyJSON bytes.Buffer
+
+		error := json.Indent(&prettyJSON, buf, "", "  ")
+		if error != nil {
+			log.Println("JSON parse error: ", error)
+		}
+		fmt.Printf("API%s: received %d bytes of response data: %s\n", method, len(buf), prettyJSON.String())
+	}
+
+	// not bothering to copy buf, this is a one-off
+	return status, buf, nil
 }

@@ -1,0 +1,20 @@
+child.test.net.               7200    IN      SOA     when.pigs.can.fly. hostmaster.johani.org. (
+                                2023122606 7200 1800 604800 7200 )
+                        7200    IN      NS      nsa.johani.org.
+                        7200    IN      NS      nsb.johani.org.
+                        7200    IN      NS      nsc.johani.org.
+                        7200    IN      NS      bar.child.test.net.
+                        120     IN      MX      1 mxc.johani.org.
+foo.child.test.net.		300	IN	A	1.2.3.4
+foo.child.test.net.		300	IN	AAAA	53::53
+bar.child.test.net.		300	IN	A	1.2.3.99
+
+anka.child.test.net.          7200    IN      A       1.2.3.4
+citron.child.test.net.        7200    IN      A       1.2.3.40
+emil.*.child.test.net.        7200    IN      A       1.2.3.50
+gunga.child.test.net.         7200    IN      A       1.2.3.60
+gunga.child.test.net.         7200    IN      SRV     10 20 30 srv.child.test.net.
+isblock.child.test.net.       7200    IN      A       1.2.3.70
+kanel.child.test.net.         7200    IN      A       1.2.3.80
+kanel.child.test.net.         7200    IN      TXT     "allan tar kakan i 4711 baud"
+kanel.child.test.net.         7200    IN      TXT     "vi aro alla oense"

@@ -22,6 +22,7 @@ type UpdateRequest struct {
 	Actions   []dns.RR // The Update section from the dns.Msg
 	Validated bool     // Signature over update msg is validated
 	Trusted   bool     // Content of update is trusted (via validation or policy)
+	Status    *UpdateStatus
 }
 
 func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
@@ -42,39 +43,51 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 				}
 				switch ur.Cmd {
 				case "CHILD-UPDATE":
-					if ur.ZoneName == "" {
-						log.Printf("Updater: Request for update is missing a zonename. Ignored.")
-						continue
-					} else {
-						//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
-						// zone is a primary zone, and has a policy that allows updates and we're able to write the
-						// resulting updated zone back to disk...
-						log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
-						err := kdb.ApplyChildUpdateToDB(ur)
-						if err != nil {
-							log.Printf("Error from ApplyChildUpdateToDB: %v", err)
-						}
-						err = zd.ApplyChildUpdateToZoneData(ur)
-						if err != nil {
-							log.Printf("Error from ApplyUpdateToZoneData: %v", err)
-						}
+					//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
+					// zone is a primary zone, and has a policy that allows updates and we're able to write the
+					// resulting updated zone back to disk...
+					log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
+					err := kdb.ApplyChildUpdateToDB(ur)
+					if err != nil {
+						log.Printf("Error from ApplyChildUpdateToDB: %v", err)
 					}
+					err = zd.ApplyChildUpdateToZoneData(ur)
+					if err != nil {
+						log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+					}
+
 				case "ZONE-UPDATE":
-					if ur.ZoneName == "" {
-						log.Printf("Updater: Request for update is missing a zonename. Ignored.")
-						continue
-					} else {
-						//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
-						// zone is a primary zone, and has a policy that allows updates and we're able to write the
-						// resulting updated zone back to disk...
-						log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
-						// err := kdb.ApplyZoneUpdateToDB(ur)
-						// if err != nil {
-						// 	log.Printf("Error from ApplyChildUpdateToDB: %v", err)
-						// }
-						err := zd.ApplyZoneUpdateToZoneData(ur)
-						if err != nil {
-							log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+					//	XXX: Here we do have the option of modifying the direct contents of the zone. Assuming the
+					// zone is a primary zone, and has a policy that allows updates and we're able to write the
+					// resulting updated zone back to disk...
+					log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
+					// err := kdb.ApplyZoneUpdateToDB(ur)
+					// if err != nil {
+					// 	log.Printf("Error from ApplyChildUpdateToDB: %v", err)
+					// }
+					err := zd.ApplyZoneUpdateToZoneData(ur)
+					if err != nil {
+						log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+					}
+
+				case "TRUSTSTORE-UPDATE":
+					log.Printf("Updater: Request for update to SIG(0) TrustStore: %d actions.", len(ur.Actions))
+					for _, rr := range ur.Actions {
+						if keyrr, ok := rr.(*dns.KEY); ok {
+							tppost := TruststorePost{
+								SubCommand: "add",
+								Src:        "child-update",
+								Keyname:    keyrr.Header().Name,
+								Keyid:      int(keyrr.KeyTag()),
+								KeyRR:      rr.String(),
+								Validated:  ur.Validated,
+								Trusted:    ur.Trusted,
+							}
+
+							_, err := kdb.Sig0TrustMgmt(tppost)
+							if err != nil {
+								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
+							}
 						}
 					}
 				default:
@@ -484,7 +497,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) error {
 	// no longer in the NS RRset, nor that we should add glue for a nameserver that is newly in the NS RRset.
 	// But it's a start.
 
-	if zd.Options["delegation-sync"] && !dss.InSync {
+	if zd.Options["delegation-sync-child"] && !dss.InSync {
 		zd.DelegationSyncCh <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
 			ZoneName:   zd.ZoneName,

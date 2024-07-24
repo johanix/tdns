@@ -67,13 +67,18 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		switch r.Opcode {
 		case dns.OpcodeNotify:
 			// A DNS NOTIFY may trigger time consuming outbound queries
-			dnsnotifyq <- tdns.DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsnotifyq <- tdns.DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeUpdate:
 			// A DNS Update may trigger time consuming outbound queries
-			dnsupdateq <- tdns.DnsHandlerRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsupdateq <- tdns.DnsUpdateRequest{
+				ResponseWriter: w,
+				Msg:            r,
+				Qname:          qname,
+				Status:         &tdns.UpdateStatus{},
+			}
 			// Not waiting for a result
 			return
 
@@ -198,8 +203,12 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
-		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, dak)
+		if dak == nil {
+			log.Printf("ApexResponder: MaybeSignRRset: Warning: dak is nil")
+			return rrset
+		}
+		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			err := tdns.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -249,7 +258,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		}
 
 	case tdns.TypeDSYNC, tdns.TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
-		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD,
+		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD, dns.TypeKEY,
 		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
 		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
 		if rrset, ok := apex.RRtypes[qtype]; ok {
@@ -313,8 +322,12 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	}
 
 	MaybeSignRRset := func(rrset tdns.RRset, qname string) tdns.RRset {
-		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, dak)
+		if dak == nil {
+			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
+			return rrset
+		}
+		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			err := tdns.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -467,7 +480,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				// if zd.OnlineSigning && cs != nil {
-				if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
+				if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
 					}

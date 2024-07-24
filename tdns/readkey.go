@@ -4,101 +4,21 @@
 package tdns
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"log"
 
 	"fmt"
-	"log"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
-
-func sigLifetime(t time.Time) (uint32, uint32) {
-	sigJitter := time.Duration(60 * time.Second)
-	sigValidityInterval := time.Duration(5 * time.Minute)
-	incep := uint32(t.Add(-sigJitter).Unix())
-	expir := uint32(t.Add(sigValidityInterval).Add(sigJitter).Unix())
-	return incep, expir
-}
-
-func SignMsg(m dns.Msg, name string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
-
-	if sak == nil || len(sak.Keys) == 0 {
-		return nil, fmt.Errorf("SignMsg: no active SIG(0) keys available")
-	}
-
-	for _, key := range sak.Keys {
-		sigrr := new(dns.SIG)
-		sigrr.Hdr = dns.RR_Header{
-			Name:   key.KeyRR.Header().Name,
-			Rrtype: dns.TypeSIG,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		}
-		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
-		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
-		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
-		sigrr.RRSIG.SignerName = name
-
-		_, err := sigrr.Sign(key.CS, &m)
-		if err != nil {
-			log.Printf("Error from sig.Sign(%s): %v", name, err)
-			return nil, err
-		}
-		m.Extra = append(m.Extra, sigrr)
-	}
-	log.Printf("Signed msg: %s\n", m.String())
-
-	return &m, nil
-}
-
-func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys) error {
-
-	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
-		return fmt.Errorf("SignRRset: no active DNSSEC keys available")
-	}
-
-	if len(rrset.RRs) == 0 {
-		return fmt.Errorf("SignRRsetNG: rrset has no RRs")
-	}
-
-	var signingkeys []*PrivateKeyCache
-
-	if rrset.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
-		signingkeys = dak.KSKs
-	} else {
-		signingkeys = dak.ZSKs
-	}
-
-	for _, key := range signingkeys {
-		rrsig := new(dns.RRSIG)
-		rrsig.Hdr = dns.RR_Header{
-			Name:   key.DnskeyRR.Header().Name,
-			Rrtype: dns.TypeRRSIG,
-			Class:  dns.ClassINET,
-			Ttl:    604800, // one week in seconds
-		}
-		rrsig.KeyTag = key.DnskeyRR.KeyTag()
-		rrsig.Algorithm = key.DnskeyRR.Algorithm
-		rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
-		rrsig.SignerName = name
-
-		err := rrsig.Sign(key.CS, rrset.RRs)
-		if err != nil {
-			log.Printf("Error from rrsig.Sign(%s): %v", name, err)
-			return err
-		}
-
-		rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
-	}
-
-	return nil
-}
 
 type BindPrivateKey struct {
 	Private_Key_Format string `yaml:"Private-key-format"`
@@ -172,6 +92,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		pkc.KeyRR = *rrk
 		pkc.PrivateKey = rrk.DNSKEY.PrivateKeyString(pkc.K)
 		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
+		fmt.Printf("[readkey]PrivateKey: %s\n", pkc.PrivateKey)
 
 	default:
 		return nil, fmt.Errorf("Error: rr is of type %v", "foo")
@@ -182,6 +103,10 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 	}
+
+	log.Printf("ReadPrivateKey: pkc.PrivateKey: %s", pkc.PrivateKey)
+	log.Printf("ReadPrivateKey: bpk.PrivateKey: %s", bpk.PrivateKey)
+	pkc.PrivateKey = bpk.PrivateKey
 
 	switch pkc.Algorithm {
 	case dns.RSASHA256, dns.RSASHA512:
@@ -250,6 +175,9 @@ func PrepareKeyCache(privkey, pubkey, algorithm string) (*PrivateKeyCache, error
 	if err != nil {
 		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
 	}
+	//safeprivkey := fmt.Sprintf("%s*****%s", privkey[0:5], privkey[len(privkey)-5:])
+	// log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, privkey: %s, pubkey: %s",
+	// 	rr.Header().Name, algorithm, safeprivkey, pubkey)
 
 	src := fmt.Sprintf(`Private-key-format: v1.3
 Algorithm: %d (%s)
@@ -266,6 +194,7 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		pkc.KeyType = dns.TypeDNSKEY
 		pkc.Algorithm = rrk.Algorithm
+		pkc.KeyId = rrk.KeyTag()
 		pkc.DnskeyRR = *rrk
 
 	case *dns.KEY:
@@ -276,6 +205,7 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 		}
 		pkc.KeyType = dns.TypeKEY
 		pkc.Algorithm = rrk.Algorithm
+		pkc.KeyId = rrk.KeyTag()
 		pkc.KeyRR = *rrk
 
 	default:
@@ -292,8 +222,46 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 	default:
 		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
 	}
+	// log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d, privkey: %s, pubkey: %s",
+	// 	rr.Header().Name, algorithm, pkc.KeyId, safeprivkey, pubkey)
 
 	return &pkc, err
+}
+
+// XXX: This is a copy of the PrivateKeyToString() in crypto/x509/x509.go
+func PrivateKeyToString(privkey crypto.PrivateKey) (string, error) {
+	var pemBlock *pem.Block
+
+	switch k := privkey.(type) {
+	case *rsa.PrivateKey:
+		pemBlock = &pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(k),
+		}
+	case *ecdsa.PrivateKey:
+		der, err := x509.MarshalECPrivateKey(k)
+		if err != nil {
+			return "", fmt.Errorf("error marshaling ECDSA private key: %v", err)
+		}
+		pemBlock = &pem.Block{
+			Type:  "EC PRIVATE KEY",
+			Bytes: der,
+		}
+	case ed25519.PrivateKey:
+		der, err := x509.MarshalPKCS8PrivateKey(k)
+		if err != nil {
+			return "", fmt.Errorf("error marshaling Ed25519 private key: %v", err)
+		}
+		pemBlock = &pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: der,
+		}
+	default:
+		return "", fmt.Errorf("unsupported private key type")
+	}
+
+	// return string(pem.EncodeToMemory(pemBlock)), nil
+	return string(pemBlock.Bytes), nil
 }
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {

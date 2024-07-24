@@ -40,7 +40,9 @@ validator:
          file:		/etc/axfr.net/sig0-keys.yaml
 
 resolver:
-   address:		8.8.8.8:53 
+#   address:		8.8.8.8:53 
+   address:		172.16.1.11:53 
+#   address:		10.0.1.1:53
 
 childsync:		# What to do when we are the child
    schemes:		[ update ] #, notify ] # this child will use either
@@ -49,6 +51,17 @@ childsync:		# What to do when we are the child
    update-aaaa:		true
    sync-on-boot:	false
    syncwithparent:	true
+
+delegationsync:
+   parent:
+      # in parent zones, we support these schemes, and will publish DSYNC RRs
+      # if allowed to:
+      schemes:		[ notify, update ]
+   child:
+      # in child zones, we will attempt the following schemes, if the parent
+      # supports them and we're allowed to modify the child zone if needed
+      # (adding CDS, CSYNC, KEY RRs, re-signing, etc):
+      schemes:		[ notify ]
 
 # scanner:
 #    interval:    	60

@@ -18,12 +18,12 @@ func (kdb *KeyDB) Sig0KeyMgmt(kp KeystorePost) (*KeystoreResponse, error) {
 
 	const (
 		addSig0KeySql = `
-INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		setStateSig0KeySql = "UPDATE Sig0KeyStore SET state=? WHERE zonename=? AND keyid=?"
 		deleteSig0KeySql   = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
-		getAllSig0KeysSql  = `SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore`
+		getAllSig0KeysSql  = `SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore`
 		getSig0KeySql      = `
-SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 	)
 
 	var resp = KeystoreResponse{Time: time.Now()}
@@ -64,12 +64,12 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		}
 		defer rows.Close()
 
-		var keyname, state, algorithm, privatekey, keyrrstr string
+		var keyname, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid int
 
 		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &privatekey, &keyrrstr)
+			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
 			if err != nil {
 				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
@@ -81,6 +81,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 				Name:       keyname,
 				State:      state,
 				Algorithm:  algorithm,
+				Creator:    creator,
 				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:4], privatekey[len(privatekey)-4:]),
 				Keystr:     keyrrstr,
 			}
@@ -90,8 +91,11 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
+		log.Printf("[Sig0KeyMgmt]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
+		// res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
+		// 	dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.KeyRR.String())
 		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
-			dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.KeyRR.String())
+			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.PrivateKey, pkc.KeyRR.String())
 		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
@@ -160,12 +164,12 @@ func (kdb *KeyDB) DnssecKeyMgmt(kp KeystorePost) (*KeystoreResponse, error) {
 
 	const (
 		addDnskeySql = `
-INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags,algorithm, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		setStateDnskeySql = "UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?"
 		deleteDnskeySql   = `DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
-		getAllDnskeysSql  = `SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore`
+		getAllDnskeysSql  = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore`
 		getDnskeySql      = `
-SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	)
 
 	var resp = KeystoreResponse{Time: time.Now()}
@@ -204,12 +208,12 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		}
 		defer rows.Close()
 
-		var keyname, state, algorithm, privatekey, keyrrstr string
+		var keyname, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid, flags int
 
 		tmp2 := map[string]DnssecKey{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &privatekey, &keyrrstr)
+			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr)
 			if err != nil {
 				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
@@ -222,6 +226,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 				State:      state,
 				Flags:      uint16(flags),
 				Algorithm:  algorithm,
+				Creator:    creator,
 				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
 				Keystr:     keyrrstr,
 			}
@@ -234,8 +239,10 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		//			kp.PrivateKey, kp.DnskeyRR)
 
 		pkc := kp.PrivateKeyCache
+		//		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
+		//			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.K, pkc.DnskeyRR.String())
 		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
-			dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.DnskeyRR.String())
+			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.PrivateKey, pkc.DnskeyRR.String())
 
 		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
@@ -310,9 +317,9 @@ func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
 	)
 
-	if sak, ok := kdb.Sig0Cache[zonename]; ok {
-		return sak, nil
-	}
+	// if sak, ok := kdb.Sig0Cache[zonename]; ok {
+	// 	return sak, nil
+	// }
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
@@ -332,8 +339,9 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		// log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
+				// This is not an error, so lets just return an empty Sig0ActiveKeys
 				log.Printf("No active SIG(0) key found for zone %s", zonename)
-				return nil, err
+				return &sak, nil
 			}
 			log.Printf("Error from rows.Scan(): %v", err)
 			return nil, err
@@ -348,8 +356,9 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	}
 
 	if !keyfound {
+		// This is not an error, so lets just return an empty Sig0ActiveKeys
 		log.Printf("No active SIG(0) key found for zone %s", zonename)
-		return nil, sql.ErrNoRows
+		return &sak, nil
 	}
 
 	if Globals.Debug {
@@ -367,9 +376,10 @@ func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*DnssecActiveKeys, error
 SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
 	)
 
-	if data, ok := kdb.DnssecCache[zonename]; ok {
-		return data, nil
-	}
+	// XXX: Should use this once we've found all the bugs in the sqlite code
+	//	if data, ok := kdb.DnssecCache[zonename]; ok {
+	//		return data, nil
+	//	}
 
 	var dak DnssecActiveKeys
 
@@ -383,19 +393,17 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	var algorithm, privatekey, keyrrstr string
 	var flags, keyid int
 
-	var keyfound bool
-
 	for rows.Next() {
 		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				log.Printf("No active DNSSEC key found for zone %s", zonename)
-				return nil, err
+				return &dak, nil
 			}
 			log.Printf("Error from rows.Scan(): %v", err)
 			return nil, err
 		}
-		keyfound = true
+
 		pkc, err := PrepareKeyCache(privatekey, keyrrstr, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKey(): %v", err)
@@ -403,17 +411,19 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 		}
 
-		if (flags & 0x0100) != 0 {
+		if (flags & 0x0001) != 0 {
 			dak.KSKs = append(dak.KSKs, pkc)
+			//log.Printf("Adding KSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		} else {
 			dak.ZSKs = append(dak.ZSKs, pkc)
+			// log.Printf("Adding ZSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		}
 	}
 
-	if !keyfound {
-		log.Printf("No active DNSSEC key found for zone %s", zonename)
-		return nil, sql.ErrNoRows
-	}
+	//	if !kskfound {
+	//		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
+	//		return nil, sql.ErrNoRows
+	//	}
 
 	// No KSK found is a hard error
 	if len(dak.KSKs) == 0 {
@@ -423,6 +433,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
 	if len(dak.ZSKs) == 0 {
+		log.Printf("No active DNSSEC ZSK found for zone %s, reusing KSK", zonename)
 		dak.ZSKs = append(dak.ZSKs, dak.KSKs[0])
 	}
 

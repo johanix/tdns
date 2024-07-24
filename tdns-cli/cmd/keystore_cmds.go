@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -38,12 +40,6 @@ var keystoreSig0Cmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("keystore sig0 called (but NYI)")
 	},
-}
-
-type BindPrivateKey struct {
-	Private_Key_Format string `yaml:"Private-key-format"`
-	Algorithm          string `yaml:"Algorithm"`
-	PrivateKey         string `yaml:"PrivateKey"`
 }
 
 var keystoreSig0AddCmd = &cobra.Command{
@@ -190,6 +186,8 @@ func init() {
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd)
 	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
 
+	keystoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.MarkFlagRequired("file")
@@ -227,6 +225,8 @@ func Sig0KeyMgmt(cmd string) error {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
 
+		dump.P(pkc)
+
 		fmt.Printf("KeyRR: %s\n", pkc.KeyRR.String())
 
 		if pkc != nil && pkc.KeyType == dns.TypeKEY {
@@ -234,6 +234,8 @@ func Sig0KeyMgmt(cmd string) error {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
 					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
 			}
+
+			log.Printf("[tdns-cli]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
 
 			data = tdns.KeystorePost{
 				Command:         "sig0-mgmt",
@@ -261,7 +263,7 @@ func Sig0KeyMgmt(cmd string) error {
 		log.Printf("Sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
 	}
 
-	tr, err := SendKeystoreCmd(api, data)
+	tr, err := SendKeystoreCmd(tdns.Globals.Api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -274,14 +276,19 @@ func Sig0KeyMgmt(cmd string) error {
 
 	switch cmd {
 	case "list":
-		var out = []string{"Signer|State|KeyID|Algorithm|PrivKey|KEY Record"}
+		var out, tmplist []string
+		if showhdr {
+			out = append(out, "Signer|State|KeyID|Algorithm|PrivKey|KEY Record")
+		}
 		if len(tr.Sig0keys) > 0 {
-			fmt.Printf("Known SIG(0) key pairs:\n")
+			// fmt.Printf("Known SIG(0) key pairs:\n")
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
 					tmp[0], v.State, tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
 			}
+			sort.Strings(tmplist)
+			out = append(out, tmplist...)
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		} else {
 			fmt.Printf("No SIG(0) key pairs found\n")
@@ -343,7 +350,7 @@ func DnssecKeyMgmt(cmd string) error {
 		data.State = NewState
 	}
 
-	tr, err := SendKeystoreCmd(api, data)
+	tr, err := SendKeystoreCmd(tdns.Globals.Api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -356,7 +363,10 @@ func DnssecKeyMgmt(cmd string) error {
 
 	switch cmd {
 	case "list":
-		var out = []string{"Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record"}
+		var out []string
+		if showhdr {
+			out = append(out, "Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record")
+		}
 		if len(tr.Dnskeys) > 0 {
 			fmt.Printf("Known DNSSEC key pairs:\n")
 			for k, v := range tr.Dnskeys {
@@ -378,7 +388,7 @@ func DnssecKeyMgmt(cmd string) error {
 	return nil
 }
 
-func SendKeystoreCmd(api *tdns.Api, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
+func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
 	// fmt.Printf("Sending keystore command: %v\n", data)
 

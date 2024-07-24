@@ -91,7 +91,7 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
 			return res.Rcode, nil
 		}
 	}
-	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were reachable", addrs)
+	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were unreachable", addrs)
 }
 
 // Parent is the zone to apply the update to.
@@ -281,7 +281,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
 	dsync_res, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
 	if err != nil {
-		zd.Logger.Printf("SyncWithParent: Error from DsyncDiscovery(): %v", err)
+		zd.Logger.Printf("BestSyncScheme: Error from DsyncDiscovery(): %v", err)
 		return "", nil, err
 	}
 	if len(dsync_res.Rdata) == 0 {
@@ -289,9 +289,9 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 		zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
 		return "", nil, fmt.Errorf("Error: %s", msg)
 	}
-	schemes := viper.GetStringSlice("childsync.schemes")
+	schemes := viper.GetStringSlice("delegationsync.child.schemes")
 	if len(schemes) == 0 {
-		zd.Logger.Printf("SyncWithParent: Error: no syncronization schemes configured for child %s", zd.ZoneName)
+		zd.Logger.Printf("BestSyncScheme: Error: no syncronization schemes configured for child %s", zd.ZoneName)
 		return "", nil, fmt.Errorf("No synchronizations schemes configured for child %s", zd.ZoneName)
 	}
 

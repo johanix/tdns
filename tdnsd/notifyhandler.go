@@ -19,7 +19,7 @@ func NotifyHandler(conf *Config) error {
 
 	log.Printf("*** DnsNotifyResponderEngine: starting")
 
-	var dhr tdns.DnsHandlerRequest
+	var dhr tdns.DnsNotifyRequest
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -37,7 +37,7 @@ func NotifyHandler(conf *Config) error {
 // func NotifyResponder(w dns.ResponseWriter, r *dns.Msg, qname string, ntype uint16,
 //
 //	zonech chan tdns.ZoneRefresher) error {
-func NotifyResponder(dhr *tdns.DnsHandlerRequest, zonech chan tdns.ZoneRefresher, scannerq chan tdns.ScanRequest) error {
+func NotifyResponder(dhr *tdns.DnsNotifyRequest, zonech chan tdns.ZoneRefresher, scannerq chan tdns.ScanRequest) error {
 
 	qname := dhr.Qname
 	ntype := dhr.Msg.Question[0].Qtype

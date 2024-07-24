@@ -74,7 +74,7 @@ func APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			//	kp.Command, kp.SubCommand)
 			resp, err = kdb.DnssecKeyMgmt(kp)
 			if err != nil {
-				log.Printf("Error from DnssecMgmt(): %v", err)
+				log.Printf("Error from DnssecKeyMgmt(): %v", err)
 				resp = &tdns.KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
@@ -161,14 +161,15 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("API: received /command request (cmd: %s) from %s.\n",
 			cp.Command, r.RemoteAddr)
 
-		resp := tdns.CommandResponse{}
+		resp := tdns.CommandResponse{
+			Time: time.Now(),
+		}
 
 		switch cp.Command {
 		case "status":
 			log.Printf("Daemon status inquiry\n")
-			resp = tdns.CommandResponse{
-				Status: "ok", // only status we know, so far
-				Msg:    "We're happy, but send more cookies"}
+			resp.Status = "ok" // only status we know, so far
+			resp.Msg = "We're happy, but send more cookies"
 
 		case "bump":
 			// resp.Msg, err = BumpSerial(conf, cp.Zone)
@@ -195,10 +196,9 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "stop":
 			log.Printf("Daemon instructed to stop\n")
 			// var done struct{}
-			resp = tdns.CommandResponse{
-				Status: "stopping",
-				Msg:    "Daemon was happy, but now winding down",
-			}
+			resp.Status = "stopping"
+			resp.Msg = "Daemon was happy, but now winding down"
+
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			time.Sleep(500 * time.Millisecond)
@@ -216,11 +216,11 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
 				zd, ok := tdns.Zones.Get(zname)
 				if !ok {
-					log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
+					//	log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
 				} else {
-					log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
+					//	log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
 					zconf.Dirty = zd.Options["dirty"]
 					zconf.Frozen = zd.Options["frozen"]
 					conf.Zones[zname] = zconf
@@ -399,7 +399,7 @@ func SetupRouter(conf *Config) *mux.Router {
 
 	sr := r.PathPrefix("/api/v1").Headers("X-API-Key",
 		viper.GetString("apiserver.key")).Subrouter()
-	sr.HandleFunc("/ping", tdns.APIping("tdnsd")).Methods("POST")
+	sr.HandleFunc("/ping", tdns.APIping("tdnsd", conf.ServerBootTime)).Methods("POST")
 	sr.HandleFunc("/keystore", APIkeystore(conf)).Methods("POST")
 	sr.HandleFunc("/truststore", APItruststore(conf)).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")

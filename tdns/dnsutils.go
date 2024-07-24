@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -210,13 +211,44 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	return total_sent, nil
 }
 
-func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) error {
+func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
 		// msg.SetIxfr(zname, serial, soa.Ns, soa.Mbox)
 		msg.SetIxfr(zname, serial, "", "")
 	} else {
 		msg.SetAxfr(zname)
+	}
+
+	maxlen := 35
+	rightmargin := 72
+
+	printKeyRR := func(rr dns.RR, rrtype, ktype string, keyid uint16, maxlen int) {
+		p := strings.Fields(rr.String())
+		// rhp := strings.Fields(parts[1])
+		namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+		if len(namepad) < 1 {
+			namepad = " "
+		}
+		fmt.Printf("%s%s%s %s %s %s %s %s (\n", p[0], namepad, p[1], p[2], p[3], p[4], p[5], p[6])
+		spaces := strings.Repeat(" ", maxlen)
+		var keyparts []string
+		keystr := p[7]
+		for len(keystr) > 72-len(spaces) {
+			keyparts = append(keyparts, keystr[:rightmargin-len(spaces)])
+			keystr = keystr[72-len(spaces):]
+		}
+		keyparts = append(keyparts, keystr)
+		for idx, part := range keyparts {
+			if idx == len(keyparts)-1 {
+				fmt.Printf("%s %s )\n", spaces, part)
+			} else {
+				fmt.Printf("%s %s\n", spaces, part)
+			}
+		}
+		alg, _ := strconv.Atoi(p[6])
+		algstr := dns.AlgorithmToString[uint8(alg)]
+		fmt.Printf("%s ; %s alg = %s ; key id = %d\n", spaces, ktype, algstr, keyid)
 	}
 
 	transfer := new(dns.Transfer)
@@ -247,8 +279,87 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16) erro
 		if Globals.Debug {
 			fmt.Printf("Printing %d RRs in envelope\n", len(envelope.RR))
 		}
+
 		for _, rr := range envelope.RR {
-			fmt.Printf("%s\n", rr.String())
+			if options["multi"] == "true" {
+				switch rr.(type) {
+				case *dns.KEY:
+					keyid := rr.(*dns.KEY).KeyTag()
+					t := ""
+					printKeyRR(rr, "KEY", t, keyid, maxlen)
+				case *dns.DNSKEY:
+					keyid := rr.(*dns.DNSKEY).KeyTag()
+					t := " ZSK ;"
+					if rr.(*dns.DNSKEY).Flags == 257 {
+						t = " KSK ;"
+					}
+					printKeyRR(rr, "DNSKEY", t, keyid, maxlen)
+
+				case *dns.RRSIG:
+					p := strings.Fields(rr.String())
+					// rhp := strings.Fields(p[1])
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					if len(namepad) < 1 {
+						namepad = " "
+					}
+					fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:8], " "))
+					// spaces := strings.Repeat(" ", len(parts[0])+1)
+					spaces := strings.Repeat(" ", maxlen)
+					fmt.Printf("%s %s %s %s %s\n", spaces, p[8], p[9], p[10], p[11])
+					var rrsigparts []string
+					part := p[12]
+					for len(part) > rightmargin-len(spaces) {
+						rrsigparts = append(rrsigparts, part[:rightmargin-len(spaces)])
+						part = part[rightmargin-len(spaces):]
+					}
+					rrsigparts = append(rrsigparts, part)
+					for idx, part := range rrsigparts {
+						if idx == len(rrsigparts)-1 {
+							fmt.Printf("%s %s )\n", spaces, part)
+						} else {
+							fmt.Printf("%s %s\n", spaces, part)
+						}
+					}
+
+				case *dns.SVCB:
+					p := strings.Fields(rr.String())
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					if len(namepad) < 1 {
+						namepad = " "
+					}
+					spaces := strings.Repeat(" ", maxlen)
+					fmt.Printf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
+					if len(p) > 6 {
+						fmt.Printf(" (\n")
+						fmt.Printf("%s %s )\n", spaces, strings.Join(p[6:], " "))
+					} else {
+						fmt.Printf("\n")
+					}
+
+				case *dns.SOA:
+					p := strings.Fields(rr.String())
+					// rhp := strings.Fields(p[1])
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					if len(namepad) < 1 {
+						namepad = " "
+					}
+					fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:6], " "))
+					spaces := strings.Repeat(" ", maxlen)
+					fmt.Printf("%s %s%s ; SOA serial\n", spaces, p[6], strings.Repeat(" ", 10-len(p[6])))
+					fmt.Printf("%s %s%s ; Refresh\n", spaces, p[7], strings.Repeat(" ", 10-len(p[7])))
+					fmt.Printf("%s %s%s ; Retry\n", spaces, p[8], strings.Repeat(" ", 10-len(p[8])))
+					fmt.Printf("%s %s%s ; Expire\n", spaces, p[9], strings.Repeat(" ", 10-len(p[9])))
+					fmt.Printf("%s %s )%s ; Ncache TTL\n", spaces, p[10], strings.Repeat(" ", 10-len(p[10])-2))
+
+				default:
+					p := strings.Fields(rr.String())
+					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+					// fmt.Printf("len(qname)=%d, len(ttl)=%d, namepad=%d\n", len(p[0]), len(p[1]), len(namepad))
+					fmt.Printf("%s%s%s\n", p[0], namepad, strings.Join(p[1:], " "))
+				}
+			} else {
+				fmt.Printf("%s\n", rr.String())
+			}
 		}
 		if Globals.Debug {
 			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))
@@ -431,23 +542,22 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	soa := apex.RRtypes[dns.TypeSOA].RRs[0]
 	soa.(*dns.SOA).Serial = zd.CurrentSerial
 
-	zonedata += soa.String() + "\n"
-	count := 1
+	//	zonedata += soa.String() + "\n"
+	count := 0
 	//	var total_sent int
 
 	switch zd.ZoneStore {
 	case SliceZone:
 		// SOA
-		zonedata += RRsetToString(apex.RRtypes[dns.TypeSOA].RRSIGs)
-		count += len(apex.RRtypes[dns.TypeSOA].RRSIGs)
+		soa := apex.RRtypes[dns.TypeSOA]
+		zonedata += RRsetToString(&soa)
+		count += len(soa.RRs) + len(soa.RRSIGs)
 
 		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
+		for rrt, rrset := range apex.RRtypes {
 			if rrt != dns.TypeSOA {
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRs)
-				count += len(apex.RRtypes[rrt].RRs)
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRSIGs)
-				count += len(apex.RRtypes[rrt].RRSIGs)
+				zonedata += RRsetToString(&rrset)
+				count += len(rrset.RRs) + len(rrset.RRSIGs)
 			}
 		}
 
@@ -457,10 +567,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 				continue
 			}
 			for _, rrl := range owner.RRtypes {
-				zonedata += RRsetToString(rrl.RRs)
-				count += len(rrl.RRs)
-				zonedata += RRsetToString(rrl.RRSIGs)
-				count += len(rrl.RRSIGs)
+				zonedata += RRsetToString(&rrl)
+				count += len(rrl.RRs) + len(rrl.RRSIGs)
 
 				if count >= 1000 {
 					//				   	total_sent += count
@@ -477,16 +585,15 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	case MapZone:
 		// SOA
-		zonedata += RRsetToString(apex.RRtypes[dns.TypeSOA].RRSIGs)
-		count += len(apex.RRtypes[dns.TypeSOA].RRSIGs)
+		soa := apex.RRtypes[dns.TypeSOA]
+		zonedata += RRsetToString(&soa)
+		count += len(soa.RRs) + len(soa.RRSIGs)
 
 		// Rest of apex
-		for rrt, _ := range apex.RRtypes {
+		for rrt, rrset := range apex.RRtypes {
 			if rrt != dns.TypeSOA {
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRs)
-				count += len(apex.RRtypes[rrt].RRs)
-				zonedata += RRsetToString(apex.RRtypes[rrt].RRSIGs)
-				count += len(apex.RRtypes[rrt].RRSIGs)
+				zonedata += RRsetToString(&rrset)
+				count += len(rrset.RRs) + len(rrset.RRSIGs)
 			}
 		}
 
@@ -497,10 +604,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 				continue
 			}
 			for _, rrl := range omap.RRtypes {
-				zonedata += RRsetToString(rrl.RRs)
-				count += len(rrl.RRs)
-				zonedata += RRsetToString(rrl.RRSIGs)
-				count += len(rrl.RRSIGs)
+				zonedata += RRsetToString(&rrl)
+				count += len(rrl.RRs) + len(rrl.RRSIGs)
 
 				if count >= 1000 {
 					//					total_sent += count
@@ -542,9 +647,20 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	return err
 }
 
-func RRsetToString(rrs []dns.RR) string {
+func xxxRRsetToStringOG(rrs []dns.RR) string {
 	var tmp string
 	for _, rr := range rrs {
+		tmp += rr.String() + "\n"
+	}
+	return tmp
+}
+
+func RRsetToString(rrset *RRset) string {
+	var tmp string
+	for _, rr := range rrset.RRs {
+		tmp += rr.String() + "\n"
+	}
+	for _, rr := range rrset.RRSIGs {
 		tmp += rr.String() + "\n"
 	}
 	return tmp

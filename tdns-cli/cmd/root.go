@@ -21,7 +21,7 @@ var verbose bool
 var StopCh chan struct{}
 var LocalConfig string
 
-var api *tdns.Api
+// var api *tdns.ApiClient
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
@@ -110,5 +110,5 @@ func initApi() {
 	apikey := viper.GetString("cli.tdnsd.apikey")
 	authmethod := viper.GetString("cli.tdnsd.authmethod")
 
-	api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
+	tdns.Globals.Api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
 }

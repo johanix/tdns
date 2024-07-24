@@ -12,7 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-type DnsHandlerRequest struct {
+type xxxDnsHandlerRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
 	Qname          string
@@ -24,7 +24,7 @@ func UpdateHandler(conf *Config) error {
 
 	log.Printf("*** DnsUpdateResponderEngine: starting")
 
-	var dhr tdns.DnsHandlerRequest
+	var dhr tdns.DnsUpdateRequest
 
 	var wg sync.WaitGroup
 	wg.Add(1)
