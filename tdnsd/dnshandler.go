@@ -357,6 +357,22 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	// log.Printf("---> Checking for existence of qname %s", qname)
 	if !zd.NameExists(qname) {
+		log.Printf("---> No exact match for %s in zone %s", qname, zd.ZoneName)
+
+		// 1. Check for child delegation
+		log.Printf("---> Checking for child delegation for %s", qname)
+		cdd, v4glue, v6glue := zd.FindDelegation(qname, dnssec_ok)
+
+		// If there is delegation data and an NS RRset is present, return a referral
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != tdns.TypeDELEG {
+			log.Printf("---> Sending referral for %s", qname)
+			m.MsgHdr.Authoritative = false
+			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
+			m.Extra = append(m.Extra, v4glue.RRs...)
+			m.Extra = append(m.Extra, v6glue.RRs...)
+			w.WriteMsg(m)
+			return nil
+		}
 
 		wildqname = "*." + strings.Join(strings.Split(qname, ".")[1:], ".")
 		// log.Printf("---> Checking for existence of wildcard %s", wildqname)
@@ -376,6 +392,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			w.WriteMsg(m)
 			return nil
 		}
+		log.Printf("---> Wildcard match for %s (matches %s) in zone %s", qname, wildqname, zd.ZoneName)
 		origqname = qname
 		qname = wildqname
 	}
@@ -402,7 +419,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	}
 
 	// 2. Check for qname + CNAME
-	// log.Printf("---> Checking for qname + CNAME %s", qname)
+	log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
 	if len(owner.RRtypes) == 1 {
 		for k, v := range owner.RRtypes {
 			if k == dns.TypeCNAME {
@@ -449,6 +466,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	// If there is delegation data and an NS RRset is present, return a referral
 	if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != tdns.TypeDELEG {
+		log.Printf("---> Sending referral for %s", qname)
 		m.MsgHdr.Authoritative = false
 		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 		m.Extra = append(m.Extra, v4glue.RRs...)
@@ -458,7 +476,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 	}
 
 	// 2. Check for exact match qname+qtype
-	// log.Printf("---> Checking for exact match qname+qtype %s %s", qname, dns.TypeToString[qtype])
+	log.Printf("---> Checking for exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
 	switch qtype {
 	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, tdns.TypeNOTIFY, tdns.TypeDSYNC,
 		tdns.TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
@@ -496,6 +514,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
 			}
 		} else {
+			log.Printf("---> No exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
 			// ensure correct serial
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs[0])
