@@ -185,15 +185,16 @@ type KeystoreResponse struct {
 }
 
 type TruststorePost struct {
-	Command    string // "sig0"
-	SubCommand string // "list-child-keys" | "trust-child-key" | "untrust-child-key"
-	Zone       string
-	Keyname    string
-	Keyid      int
-	Trusted    bool
-	Validated  bool
-	Src        string // "dns" | "file"
-	KeyRR      string // RR string for key
+	Command         string // "sig0"
+	SubCommand      string // "list-child-keys" | "trust-child-key" | "untrust-child-key"
+	Zone            string
+	Keyname         string
+	Keyid           int
+	Validated       bool
+	DnssecValidated bool
+	Trusted         bool
+	Src             string // "dns" | "file"
+	KeyRR           string // RR string for key
 }
 
 type TruststoreResponse struct {
@@ -329,7 +330,7 @@ type ValidatorResponse struct {
 }
 
 // type TAStore map[string]map[uint16]TrustAnchor
-type TAStoreT struct {
+type DnskeyCacheT struct {
 	Map cmap.ConcurrentMap[string, TrustAnchor]
 }
 
@@ -346,17 +347,18 @@ type Sig0StoreT struct {
 }
 
 type Sig0Key struct {
-	Name       string
-	State      string
-	Keyid      uint16
-	Algorithm  string
-	Creator    string
-	Validated  bool   // has this key been DNSSEC validated
-	Trusted    bool   // is this key trusted
-	Source     string // "dns" | "file" | "keystore" | "child-update"
-	PrivateKey string //
-	Key        dns.KEY
-	Keystr     string
+	Name            string
+	State           string
+	Keyid           uint16
+	Algorithm       string
+	Creator         string
+	Validated       bool   // has this key been validated
+	DnssecValidated bool   // has this key been DNSSEC validated
+	Trusted         bool   // is this key trusted
+	Source          string // "dns" | "file" | "keystore" | "child-update"
+	PrivateKey      string //
+	Key             dns.KEY
+	Keystr          string
 }
 
 type DnssecKey struct {
@@ -401,10 +403,11 @@ type BumperResponse struct {
 
 // A Signer is a struct where we keep track of the signer name and keyid
 // for a DNS UPDATE message.
-type Sig0Signer struct {
-	Name    string   // from the SIG
-	KeyId   uint16   // from the SIG
-	Sig0Key *Sig0Key // a key that matches the signer name and keyid
+type Sig0UpdateSigner struct {
+	Name      string   // from the SIG
+	KeyId     uint16   // from the SIG
+	Sig0Key   *Sig0Key // a key that matches the signer name and keyid
+	Validated bool     // true if this key validated the update
 }
 
 // The UpdateStatus is used to track the evolving status of
@@ -412,20 +415,20 @@ type Sig0Signer struct {
 // and approval processes.
 
 type UpdateStatus struct {
-	Zone                  string       // zone that the update applies to
-	ChildZone             string       // zone that the update applies to
-	Type                  string       // auth | child
-	Data                  string       // auth | delegation | key
-	ValidatorKey          *Sig0Key     // key that validated the update
-	Signers               []Sig0Signer // possible validators
-	SignerName            string       // name of the key that signed the update
-	SignatureType         string       // by-trusted | by-known | by-self
-	ValidationRcode       uint8        // Rcode from the validation process
-	Validated             bool         // true if the update has passed validation
-	ValidatedByTrustedKey bool         // true if the update has passed validation by a trusted key
-	SafetyChecked         bool         // true if the update has been safety checked
-	PolicyChecked         bool         // true if the update has been policy checked
-	Approved              bool         // true if the update has been approved
+	Zone                  string             // zone that the update applies to
+	ChildZone             string             // zone that the update applies to
+	Type                  string             // auth | child
+	Data                  string             // auth | delegation | key
+	ValidatorKey          *Sig0Key           // key that validated the update
+	Signers               []Sig0UpdateSigner // possible validators
+	SignerName            string             // name of the key that signed the update
+	SignatureType         string             // by-trusted | by-known | self-signed
+	ValidationRcode       uint8              // Rcode from the validation process
+	Validated             bool               // true if the update has passed validation
+	ValidatedByTrustedKey bool               // true if the update has passed validation by a trusted key
+	SafetyChecked         bool               // true if the update has been safety checked
+	PolicyChecked         bool               // true if the update has been policy checked
+	Approved              bool               // true if the update has been approved
 	Msg                   string
 	Error                 bool
 	ErrorMsg              string
@@ -438,6 +441,7 @@ type NotifyStatus struct {
 	Type          uint16 // CDS | CSYNC | DNSKEY | DELEG
 	ScanStatus    string // "ok" | "changed" | "failed"
 	SafetyChecked bool   // true if the update has been safety checked
+	PolicyChecked bool   // true if the update has been policy checked
 	Approved      bool   // true if the update has been approved
 	Msg           string
 	Error         bool

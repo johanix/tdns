@@ -35,11 +35,11 @@ func (kdb *KeyDB) Sig0TrustMgmt(tp TruststorePost) (*TruststoreResponse, error) 
 
 	const (
 		addkeysql = `
-INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		getallchildsig0keyssql = `
-SELECT zonename, keyid, trusted, validated, source, keyrr FROM Sig0TrustStore`
+SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
-SELECT child, keyid, trusted, validated, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
+SELECT child, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		deleteSig0KeySql = `
@@ -82,21 +82,22 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 		var keyname, keyrrstr, source string
 		var keyid int
-		var trusted, validated bool
+		var validated, dnssecvalidated, trusted bool
 
 		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &keyid, &trusted, &validated, &source, &keyrrstr)
+			err := rows.Scan(&keyname, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrrstr)
 			if err != nil {
 				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = Sig0Key{
-				Name:      keyname,
-				Validated: validated,
-				Trusted:   trusted,
-				Source:    source,
-				Keystr:    keyrrstr,
+				Name:            keyname,
+				Validated:       validated,
+				DnssecValidated: dnssecvalidated,
+				Trusted:         trusted,
+				Source:          source,
+				Keystr:          keyrrstr,
 			}
 		}
 		resp.ChildSig0keys = tmp2
@@ -106,7 +107,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		// 1. If src=file and key is supplied then add it (but as untrusted)
 		// 2. If src=dns then schedule some soort of DNS fetching exercise.
 		if tp.Src == "file" {
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, false, false, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, false, false, false, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
@@ -115,7 +116,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d added (not yet trusted)", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "keystore" {
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, true, true, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, true, false, true, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
@@ -124,7 +125,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d imported from KeyStore to TrustStore", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "child-update" {
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.Trusted, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
@@ -240,7 +241,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
 				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
-				TAStore.Map.Set(mapkey, TrustAnchor{
+				DnskeyCache.Map.Set(mapkey, TrustAnchor{
 					Name:      k,
 					Validated: true, // always trust config
 					Dnskey:    *dnskeyrr,
@@ -378,7 +379,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	// }
 
 	const (
-		fetchsig0trustanchor = "SELECT validated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
+		fetchsig0trustanchor = "SELECT validated, dnssecvalidated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
 	)
 
 	// 2. Try to fetch the key from the Sig0TrustStore database
@@ -389,9 +390,9 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	defer rows.Close()
 
 	for rows.Next() {
-		var validated, trusted bool
+		var validated, dnssecvalidated, trusted bool
 		var keyrrstr string
-		err = rows.Scan(&validated, &trusted, &keyrrstr)
+		err = rows.Scan(&validated, &dnssecvalidated, &trusted, &keyrrstr)
 		if err != nil {
 			return nil, err
 		}
@@ -404,53 +405,57 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 			return nil, fmt.Errorf("FindSig0TrustedKey: Error: SIG(0) key %s in KeyDB is not a KEY RR", signer)
 		}
 		sk := Sig0Key{
-			Name:      signer,
-			Validated: validated,
-			Trusted:   trusted,
-			Key:       *keyrr,
+			Name:            signer,
+			Validated:       validated,
+			DnssecValidated: dnssecvalidated,
+			Trusted:         trusted,
+			Key:             *keyrr,
 		}
 		Sig0Store.Map.Set(mapkey, sk)
 		return &sk, nil
 	}
 
 	// 3. Try to fetch the key from the Sig0KeyStore database.
+	// We no longer do this. Instead we import or delete the public key into/from the TrustStore
+	// when we add/delete it to/from the KeyStore.
+
 	// XXX: Note that if the key is present and active in the KeyStore (because it is for a
 	// zone that we are authoritative for) but not in the TrustStore then we will import it
 	// into the TrustStore automatically.
 
-	sak, err := zd.KeyDB.GetSig0ActiveKeys(signer)
-	if err != nil {
-		return nil, err
-	}
+	// sak, err := zd.KeyDB.GetSig0ActiveKeys(signer)
+	//	if err != nil {
+	//		return nil, err
+	//	}
 
-	if len(sak.Keys) > 0 {
-		for _, key := range sak.Keys {
-			if key.KeyRR.KeyTag() == keyid {
-				// This key that is present and active in the KeyStore is not present in the TrustStore
-				// Let's add it now.
-				tspost := TruststorePost{
-					Command:    "truststore",
-					SubCommand: "add",
-					Keyname:    signer,
-					Keyid:      int(keyid),
-					Src:        "keystore",
-					KeyRR:      key.KeyRR.String(),
-				}
-				tsresp, err := zd.KeyDB.Sig0TrustMgmt(tspost)
-				if err != nil {
-					return nil, err
-				}
-				log.Printf("FindSig0TrustedKey: %s", tsresp.Msg)
-				sa := Sig0Key{
-					Name:      signer,
-					Key:       key.KeyRR,
-					Validated: true,
-					Trusted:   true,
-				}
-				return &sa, nil
-			}
-		}
-	}
+	//	if len(sak.Keys) > 0 {
+	//		for _, key := range sak.Keys {
+	//			if key.KeyRR.KeyTag() == keyid {
+	//				// This key that is present and active in the KeyStore is not present in the TrustStore
+	//				// Let's add it now.
+	//				tspost := TruststorePost{
+	//					Command:    "truststore",
+	//					SubCommand: "add",
+	//					Keyname:    signer,
+	//					Keyid:      int(keyid),
+	//					Src:        "keystore",
+	//					KeyRR:      key.KeyRR.String(),
+	//				}
+	//				tsresp, err := zd.KeyDB.Sig0TrustMgmt(tspost)
+	//				if err != nil {
+	//					return nil, err
+	//				}
+	//				log.Printf("FindSig0TrustedKey: %s", tsresp.Msg)
+	//				sa := Sig0Key{
+	//					Name:      signer,
+	//					Key:       key.KeyRR,
+	//					Validated: true,
+	//					Trusted:   true,
+	//				}
+	//				return &sa, nil
+	//			}
+	//		}
+	//	}
 
 	// 4. Try to fetch the key by looking up and validating the KEY RRset via DNS
 	// No. That's wrong. This is about finding, *trusted* keys.

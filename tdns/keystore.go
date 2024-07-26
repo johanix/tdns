@@ -89,6 +89,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Sig0keys = tmp2
 		resp.Msg = "Here are all the SIG(0) keys that we know"
 
+	// XXX: FIXME: "add" should also add the public key to the TrustStore.
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
 		log.Printf("[Sig0KeyMgmt]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
@@ -102,8 +103,23 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
-			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
+			resp.Msg = fmt.Sprintf("Updated %d rows.\nAdded private+public key to KeyStore.", rows)
 		}
+
+		// Now also add the public key to the TrustStore.
+		tspost := TruststorePost{
+			Command:    "truststore",
+			SubCommand: "add",
+			Keyname:    pkc.KeyRR.Header().Name,
+			Keyid:      int(pkc.KeyRR.KeyTag()),
+			Src:        "keystore",
+			KeyRR:      pkc.KeyRR.String(),
+		}
+		tsresp, err := kdb.Sig0TrustMgmt(tspost)
+		if err != nil {
+			return nil, err
+		}
+		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "setstate":
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
@@ -120,6 +136,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			}
 		}
 
+	// XXX: FIXME: "delete" should also delete the public key from the TrustStore.
 	case "delete":
 		const getSig0KeySql = `
 SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
@@ -152,6 +169,19 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		}
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
+
+		// Now also delete it from the TrustStore.
+		tspost := TruststorePost{
+			Command:    "truststore",
+			SubCommand: "delete",
+			Keyname:    kp.Keyname,
+			Keyid:      int(kp.Keyid),
+		}
+		tsresp, err := kdb.Sig0TrustMgmt(tspost)
+		if err != nil {
+			return &resp, err
+		}
+		resp.Msg += fmt.Sprintf("\nDeleted public key from TrustStore: %s", tsresp.Msg)
 
 	default:
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)

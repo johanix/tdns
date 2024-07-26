@@ -632,15 +632,13 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync() error {
-	kdb := zd.KeyDB
-
 	if !zd.Options["allow-updates"] {
 		return nil // this zone does not allow any modifications
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		zd.Logger.Printf("Error durng SetupZone(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error during SetupZoneSync(%s): %v", zd.ZoneName, err)
 		return err
 	}
 
@@ -652,19 +650,13 @@ func (zd *ZoneData) SetupZoneSync() error {
 		dsync_rrset, exist := apex.RRtypes[TypeDSYNC]
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
-			zd.Logger.Printf("SetupZone(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
+			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
 		} else {
-			zd.Logger.Printf("SetupZone(%s): No DSYNC RRset in zone. Will add.", zd.ZoneName)
-			for _, scheme := range viper.GetStringSlice("delegationsync.parent.schemes") {
-				dsync_rrset = RRset{
-					RRtype: TypeDSYNC,
-				}
-				switch scheme {
-				case "notify":
-				case "update":
-				default:
-					zd.Logger.Printf("Error parsing key delegationsync.parent.schemes: unknown scheme: \"%s\". Ignored.", scheme)
-				}
+			zd.Logger.Printf("SetupZoneSync(%s): No DSYNC RRset in zone. Will add.", zd.ZoneName)
+			err := zd.PublishDsyncRRs()
+			if err != nil {
+				zd.Logger.Printf("Error from PublishDsyncRRs(%s): %v", zd.ZoneName, err)
+				return err
 			}
 		}
 	}
@@ -674,58 +666,15 @@ func (zd *ZoneData) SetupZoneSync() error {
 			switch scheme {
 			case "update":
 				// 1. Is there a KEY RRset already?
-				key_rrset, exist := apex.RRtypes[dns.TypeKEY]
-				numpubkeys := len(key_rrset.RRs)
-				if exist && numpubkeys > 0 {
-					// If there is already a KEY RRset, we must ensure that we have access to the
-					// private key to be able to sign updates.
-					if numpubkeys > 1 {
-						zd.Logger.Printf("Warning: Zone %s has %d KEY records published. This is likely a mistake.", zd.ZoneName, numpubkeys)
-					}
-					// 1. Get the keys from the keystore
-					zd.Logger.Printf("SetupZone(%s, child-side): KEY RRset exists. Checking availability of private key.", zd.ZoneName)
-					sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
-					if err != nil {
-						zd.Logger.Printf("Error from GetSig0ActiveKeys(%s): %v", zd.ZoneName, err)
-						return err
-					}
-					// 2. Iterate through the keys to match against keyid of published keys.
-					for _, pkey := range key_rrset.RRs {
-						found := false
-						pkeyid := pkey.(*dns.KEY).KeyTag()
-						for _, key := range sak.Keys {
-							if key.KeyRR.KeyTag() == pkeyid {
-								found = true
-								break
-							}
-						}
-						if !found {
-							zd.Logger.Printf("Warning: Zone %s: no active private key for the published KEY with keyid=%d. This key should be removed.", zd.ZoneName, pkeyid)
-						}
-					}
-				} else {
-					// XXX: We must generate a new key pair, store it in the keystore and publish the public key.
-					algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-					alg := dns.StringToAlgorithm[strings.ToLower(algstr)]
-					if alg == 0 {
-						return fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
-					}
-					pkc, err := kdb.GeneratePrivateKey(zd.ZoneName, dns.TypeKEY, alg) //
-					if err != nil {
-						zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-						return err
-					}
-					sak := &Sig0ActiveKeys{
-						Keys: []*PrivateKeyCache{pkc},
-					}
-					err = zd.PublishKeyRRs(sak)
-					if err != nil {
-						zd.Logger.Printf("Error from PublishKeyRRs(%s): %v", zd.ZoneName, err)
-						return err
-					}
+				err := zd.VerifyPublishedKeyRRs()
+				if err != nil {
+					zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
+					return err
 				}
-			case "notify":
 
+			case "notify":
+				// Nothing to do here as CSYNC and CDS will only be published when
+				// the zone is modified, not proactively.
 			default:
 			}
 		}
@@ -735,13 +684,13 @@ func (zd *ZoneData) SetupZoneSync() error {
 }
 
 // XXX: FIXME: Use the algorithm from the config instead of hardoding ED25519
-func (kdb *KeyDB) GenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error) {
+func (kdb *KeyDB) xxxGenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error) {
 	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	if alg == 0 {
 		return nil, fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
 	}
-	pkc, err := kdb.GeneratePrivateKey(zd.ZoneName, dns.TypeKEY, alg) //
+	pkc, err := kdb.GenerateKeypair(zd.ZoneName, dns.TypeKEY, alg) //
 	if err != nil {
 		zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 		return nil, err

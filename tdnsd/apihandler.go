@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
 	// "github.com/miekg/dns"
@@ -120,8 +121,8 @@ func APItruststore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "list-dnskey":
 			log.Printf("tdnsd truststore list-dnskey inquiry")
 			tmp1 := map[string]tdns.TrustAnchor{}
-			for _, key := range tdns.TAStore.Map.Keys() {
-				val, _ := tdns.TAStore.Map.Get(key)
+			for _, key := range tdns.DnskeyCache.Map.Keys() {
+				val, _ := tdns.DnskeyCache.Map.Get(key)
 				tmp1[key] = tdns.TrustAnchor{
 					Name:      val.Name,
 					Validated: val.Validated,
@@ -359,6 +360,26 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					resp.RRset = rrset
 				}
 				log.Printf("tdnsd debug rrset: owner: %v", owner)
+			} else {
+				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
+			}
+
+		case "validate-rrset":
+			log.Printf("tdnsd debug validate-rrset")
+			if zd, ok := tdns.Zones.Get(dp.Zone); ok {
+
+				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, true)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else if rrset == nil {
+					resp.Msg = fmt.Sprintf("Found no RRset for %s %s", dp.Qname, dns.TypeToString[dp.Qtype])
+				} else {
+					resp.Msg = fmt.Sprintf("Found %s %s RRset (validated: %v)", dp.Qname, dns.TypeToString[dp.Qtype], valid)
+					for _, rr := range rrset.RRs {
+						resp.Msg += fmt.Sprintf("\n%s", rr.String())
+					}
+				}
 			} else {
 				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
 			}

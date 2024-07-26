@@ -118,20 +118,26 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// this is an update to auth data) then the update will validate and the SIG(0) key will be
 	// trusted. We always trust SIG(0) keys in the zone we are authoritative for.
 
-	rcode, validated, trusted, signername, err := zd.ValidateUpdate(r, dur.Status)
+	err := zd.ValidateUpdate(r, dur.Status)
 	// err := zd.ValidateAndTrustUpdate(r, dur.Status)
 	if err != nil {
-		zd.Logger.Printf("Error from ValidateAndTrustUpdate(): %v", err)
+		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		m.SetRcode(m, dns.RcodeServerFailure)
 		// XXX: Here it would be nice to also return an extended error code, but let's save that for later.
 		w.WriteMsg(m)
 		return err
 	}
 
-	dur.Status.ValidationRcode = rcode
-	dur.Status.Validated = validated
-	dur.Status.ValidatedByTrustedKey = trusted
-	dur.Status.SignerName = signername
+	// Now we have the update validated by one or more keys, but we don't yet know if any of these keys
+	// are trusted.
+
+	err = zd.TrustUpdate(r, dur.Status)
+	if err != nil {
+		zd.Logger.Printf("Error from TrustUpdate(): %v", err)
+		m.SetRcode(m, int(dur.Status.ValidationRcode))
+		w.WriteMsg(m)
+		return err
+	}
 
 	//	dur.Log("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
 	//		isdel, rcode, validated, trusted, signername)
@@ -145,10 +151,10 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		// Let's not return here, this could be an unvalidated key upload.
 	}
 
-	if !dur.Status.Validated {
-		dur.Log("DnsEngine: Update NOT validated. Ignored.")
-		return nil
-	}
+	//	if !dur.Status.Validated {
+	//		dur.Log("DnsEngine: Update NOT validated. Ignored.")
+	//		return nil
+	//	}
 
 	// rcode from validation is input to ApproveUpdate only to enable
 	// the possibility of upload of unvalidated keys

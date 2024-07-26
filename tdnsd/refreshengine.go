@@ -19,10 +19,9 @@ type RefreshCounter struct {
 	SOARefresh     uint32
 	CurRefresh     uint32
 	IncomingSerial uint32
-	// KeepFunc       func(uint16) bool
-	Upstream    string
-	Downstreams []string
-	Zonefile    string
+	Upstream       string
+	Downstreams    []string
+	Zonefile       string
 }
 
 func RefreshEngine(conf *Config, stopch chan struct{}) {
@@ -56,9 +55,6 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
 	for {
-		// var zonedata *tdns.ZoneData
-		// var exist bool
-
 		select {
 		case zr = <-zonerefch:
 			zone = zr.Name
@@ -156,7 +152,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					// config should cause any specific changes to the zone data to be made.
 					err = zd.SetupZoneSync()
 					if err != nil {
-						log.Printf("Error from SetupZone(%s): %v", zone, err)
+						log.Printf("Error from SetupZoneSync(%s): %v", zone, err)
 					}
 
 					tdns.Zones.Set(zone, zd)

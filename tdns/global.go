@@ -27,10 +27,10 @@ var Globals = GlobalStuff{
 
 var Zones = cmap.New[*ZoneData]()
 
-var TAStore = NewTAStore()
+var DnskeyCache = NewDnskeyCache()
 
-func NewTAStore() *TAStoreT {
-	return &TAStoreT{
+func NewDnskeyCache() *DnskeyCacheT {
+	return &DnskeyCacheT{
 		Map: cmap.New[TrustAnchor](),
 	}
 }

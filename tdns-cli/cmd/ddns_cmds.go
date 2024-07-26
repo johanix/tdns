@@ -16,6 +16,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var ddnsCmd = &cobra.Command{
@@ -171,7 +172,12 @@ var ddnsRollCmd = &cobra.Command{
 	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
-		err := tdns.SendSig0KeyUpdate(childpri, parpri, true)
+		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+		if err != nil {
+			fmt.Printf("Error from NewKeyDB(): %v\n", err)
+			os.Exit(1)
+		}
+		err = kdb.SendSig0KeyUpdate(childpri, parpri, true)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}
@@ -183,7 +189,12 @@ var ddnsUploadCmd = &cobra.Command{
 	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
-		err := tdns.SendSig0KeyUpdate(childpri, parpri, false)
+		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+		if err != nil {
+			fmt.Printf("Error from NewKeyDB(): %v\n", err)
+			os.Exit(1)
+		}
+		err = kdb.SendSig0KeyUpdate(childpri, parpri, false)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}

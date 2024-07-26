@@ -346,8 +346,8 @@ var zoneSerialBbumpNGCmd = &cobra.Command{
 }
 
 var debugRRsetCmd = &cobra.Command{
-	Use:   "rrset",
-	Short: "Request the contents of a particular RRset from tdnsd",
+	Use: "rrset",
+
 	Run: func(cmd *cobra.Command, args []string) {
 		if tdns.Globals.Zonename == "" {
 			fmt.Printf("Error: zone name not specified. Terminating.\n")
@@ -369,6 +369,39 @@ var debugRRsetCmd = &cobra.Command{
 
 		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
 			Command: "rrset",
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			Qname:   dns.Fqdn(debugQname),
+			Qtype:   qtype,
+		})
+		fmt.Printf("debug response: %v\n", dr)
+	},
+}
+
+var debugValidateRRsetCmd = &cobra.Command{
+	Use: "validate-rrset",
+
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("childzone")
+		//		if tdns.Globals.Zonename == "" {
+		//			fmt.Printf("Error: zone name not specified. Terminating.\n")
+		//			os.Exit(1)
+		//		}
+		if debugQname == "" {
+			fmt.Printf("Error: qname name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+		if debugQtype == "" {
+			fmt.Printf("Error: qtype name not specified. Terminating.\n")
+			os.Exit(1)
+		}
+		qtype := dns.StringToType[strings.ToUpper(debugQtype)]
+		if qtype == 0 {
+			fmt.Printf("Error: unknown qtype: '%s'. Terminating.\n", debugQtype)
+			os.Exit(1)
+		}
+
+		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
+			Command: "validate-rrset",
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Qname:   dns.Fqdn(debugQname),
 			Qtype:   qtype,
@@ -446,7 +479,7 @@ func init() {
 	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd, zoneSerialBbumpNGCmd)
 	zoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
 
-	debugCmd.AddCommand(debugRRsetCmd, debugLAVCmd, debugShowTACmd)
+	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd)
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")

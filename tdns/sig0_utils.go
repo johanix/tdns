@@ -20,10 +20,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-// XXX: FIXME: This is used from the CLI. It should change into code used by TDNSD and accessed via API.
+// XXX: FIXME: This is only used from the CLI. It should change into code used by TDNSD and
 //
-//	The code should store the newly generated key in the keystore.
-func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
+//	     accessed via API.
+//
+//		The code should store the newly generated key in the keystore.
+func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		return fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
@@ -42,7 +44,7 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	var adds, removes []dns.RR
 
 	if gennewkey {
-		newpkc, err := GenerateSigningKey(Globals.Zonename, pkc.Algorithm)
+		newpkc, err := kdb.GenerateKeypair(Globals.Zonename, dns.TypeKEY, pkc.Algorithm)
 		if err != nil {
 			return fmt.Errorf("Error from GenerateSigningKey: %v", err)
 		}
@@ -91,7 +93,7 @@ func SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 }
 
 // XXX: This should die in favour of the kdb.GenerateSigningKey() below.
-func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
+func xxxGenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	var privkey crypto.PrivateKey
 	var err error
 
@@ -182,7 +184,9 @@ func GenerateSigningKey(owner string, alg uint8) (*PrivateKeyCache, error) {
 	return pkc, nil
 }
 
-func (kdb *KeyDB) GeneratePrivateKey(owner string, rrtype uint16, alg uint8) (*PrivateKeyCache, error) {
+// Generate a new private/public key pair of the right algorithm and the right rrtype and store in
+// the KeyStore. Return the key as a pkc
+func (kdb *KeyDB) GenerateKeypair(owner string, rrtype uint16, alg uint8) (*PrivateKeyCache, error) {
 	var privkey crypto.PrivateKey
 	var err error
 

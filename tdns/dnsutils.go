@@ -321,19 +321,29 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 						}
 					}
 
-				case *dns.SVCB:
-					p := strings.Fields(rr.String())
-					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
-					if len(namepad) < 1 {
-						namepad = " "
-					}
-					spaces := strings.Repeat(" ", maxlen)
-					fmt.Printf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
-					if len(p) > 6 {
-						fmt.Printf(" (\n")
-						fmt.Printf("%s %s )\n", spaces, strings.Join(p[6:], " "))
-					} else {
-						fmt.Printf("\n")
+				case *dns.SVCB, *dns.PrivateRR:
+					switch rr.Header().Rrtype {
+					case TypeDELEG, dns.TypeSVCB:
+						p := strings.Fields(rr.String())
+						namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+						if len(namepad) < 1 {
+							namepad = " "
+						}
+						spaces := strings.Repeat(" ", maxlen)
+						fmt.Printf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
+						if len(p) > 6 {
+							fmt.Printf(" (\n")
+							fmt.Printf("%s %s )\n", spaces, strings.Join(p[6:], " "))
+						} else {
+							fmt.Printf("\n")
+						}
+
+					default:
+						// fmt.Printf("This is a %s RR\n", dns.TypeToString[rr.Header().Rrtype])
+						// This is most likely a DSYNC
+						p := strings.Fields(rr.String())
+						namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
+						fmt.Printf("%s%s%s\n", p[0], namepad, strings.Join(p[1:], " "))
 					}
 
 				case *dns.SOA:

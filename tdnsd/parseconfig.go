@@ -203,7 +203,8 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 				"allow-child-updates",   // zone allows updates to child delegation information
 				"fold-case",             // fold case of owner names to lower to make query matching case insensitive
 				"sign-zone",             // keep zone signed
-				"black-lies":            // zone may implement DNSSEC signed negative responses via so-called black lies.
+				"black-lies",            // zone may implement DNSSEC signed negative responses via so-called black lies.
+				"publish-key":           // publish a SIG(0) KEY recordfor the zone
 				options[option] = true
 				cleanoptions = append(cleanoptions, option)
 			default:

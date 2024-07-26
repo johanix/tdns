@@ -55,7 +55,7 @@ type ApiserverConf struct {
 }
 
 type DbConf struct {
-	File string `validate:"required"`
+	File string // `validate:"required"`
 }
 
 type InternalConf struct {

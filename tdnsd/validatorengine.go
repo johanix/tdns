@@ -6,12 +6,27 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
+
+type CacheRRset struct {
+	RRset     *tdns.RRset
+	Validated bool
+	Expires   time.Time
+}
+
+type RRsetCache cmap.ConcurrentMap[string, CacheRRset]
+
+func NewRRsetCache() *RRsetCache {
+	cache := cmap.New[CacheRRset]()
+	return (*RRsetCache)(&cache)
+}
 
 // The ValidatorEngine is responsible for validating RRsets on request. The reason to have it as a separate
 // goroutine is to easier be able to keep state and minimize complexity in other parts of the code. Note that
@@ -34,6 +49,8 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 	} else {
 		log.Printf("ValidatorEngine: Starting")
 	}
+
+	// var DnskeyCache = NewRRsetCache()
 
 	var rrset *tdns.RRset
 	// var owner
@@ -75,7 +92,6 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 			if err != nil {
 				resp.Msg = fmt.Sprintf("ValidatorEngine: error fetching the %s %s RRset from the ZoneData: %v", ownername, rrtype, err)
 				log.Print(resp.Msg)
-				// resp.Validated = false
 				vr.Response <- resp
 				continue
 			}
@@ -84,7 +100,6 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 				// XXX: If we get here, then the owner name is not in the zone, but in a child zone (if it exists at all).
 				resp.Msg = fmt.Sprintf("ValidatorEngine: the %s %s RRset is not in the auth zone %s. Validated=false", ownername, rrtype, zd.ZoneName)
 				log.Print(resp.Msg)
-				// resp.Validated = false
 				vr.Response <- resp
 				continue
 			}
@@ -105,7 +120,6 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 			if cdd.DS_rrset == nil {
 				resp.Msg = fmt.Sprintf("ValidatorEngine: RRset %s %s is below an unsigned delegation", ownername, rrtype)
 				log.Print(resp.Msg)
-				// resp.Validated = false
 				vr.Response <- resp
 				continue
 			}
@@ -114,7 +128,6 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 			if err != nil {
 				resp.Msg = fmt.Sprintf("ValidatorEngine: Error from ValidateChildDnskeys: %v", err)
 				log.Print(resp.Msg)
-				// resp.Validated = false
 				vr.Response <- resp
 				continue
 			}
@@ -122,7 +135,6 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 			if !valid {
 				resp.Msg = fmt.Sprintf("ValidatorEngine: Child %s DNSKEY RRset is not valid", ownername)
 				log.Print(resp.Msg)
-				// resp.Validated = false
 				vr.Response <- resp
 				continue
 			}

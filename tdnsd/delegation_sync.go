@@ -9,6 +9,7 @@ import (
 
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,11 +65,21 @@ func DelegationSyncher(conf *Config) error {
 				continue
 			}
 			if len(sak.Keys) == 0 {
-				log.Printf("DelegationSyncher: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
-				sak, err = kdb.GenerateNewSig0ActiveKey(zd)
-				if err != nil {
-					log.Printf("DelegationSyncher: Error from kdb.GenerateNewSig0ActiveKey(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+				log.Printf("DelegationSyncher: No active SIG(0) key found for zone %s. Will generate new key to enable parent sync via UPDATE.", zd.ZoneName)
+
+				algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+				alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+				if alg == 0 {
+					log.Printf("DelegationSyncher: Unknown keygen algorithm: \"%s\"", algstr)
 					continue
+				}
+				pkc, err := kdb.GenerateKeypair(zd.ZoneName, dns.TypeKEY, alg) //
+				if err != nil {
+					zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
+					continue
+				}
+				sak = &tdns.Sig0ActiveKeys{
+					Keys: []*tdns.PrivateKeyCache{pkc},
 				}
 			}
 

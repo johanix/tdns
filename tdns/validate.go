@@ -39,6 +39,26 @@ func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16,
 	return rrset, valid, nil
 }
 
+// This is mostly used for debugging of the DNSSEC validation code
+// func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16) (string, error) {
+//	zd.Logger.Printf("LookupAndValidateRRset: Looking up %s %s in DNS", qname, dns.TypeToString[qtype])
+//	rrset, err := zd.LookupRRset(qname, qtype, true)
+//	if err != nil {
+//		return fmt.Sprintf("error from LookupRRset(%s, %s): %v", qname, dns.TypeToString[qtype], err), err
+//	}
+//	if rrset == nil {
+//		return fmt.Sprintf("LookupRRset(%s, %s) returned nil", qname, dns.TypeToString[qtype]), fmt.Errorf("LookupRRset(%s, %s) returned nil", qname, dns.TypeToString[qtype])
+//	}
+//	valid, err := zd.ValidateRRset(rrset, true)
+//	if err != nil {
+//		return fmt.Sprintf("error from ValidateRRset(%s, %s): %v", qname, dns.TypeToString[qtype], err), err
+//	}
+
+//	msg := fmt.Sprintf("LookupAndValidateRRset: Found %s %s RRset (validated: %v)", qname, dns.TypeToString[qtype], valid)
+//	zd.Logger.Printf(msg)
+//	return msg, nil
+//}
+
 // XXX: This should not be a method of ZoneData, but rather a function.
 func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 	if len(rrset.RRSIGs) == 0 {
@@ -287,7 +307,7 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 // If key not found *TrustAnchor is nil
 func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error) {
 	mapkey := signer + "::" + string(keyid)
-	ta, ok := TAStore.Map.Get(mapkey)
+	ta, ok := DnskeyCache.Map.Get(mapkey)
 	if !ok {
 		zd.Logger.Printf("FindDnskey: Request for DNSKEY with id %s: not found, will fetch.", mapkey)
 		rrset, err := zd.LookupRRset(signer, dns.TypeDNSKEY, true)
@@ -301,7 +321,7 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error
 		zd.Logger.Printf("FindDnskey: Found %s DNSKEY RRset (validated)", signer)
 		for _, rr := range rrset.RRs {
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-				TAStore.Map.Set(signer+"::"+string(dnskeyrr.KeyTag()),
+				DnskeyCache.Map.Set(signer+"::"+string(dnskeyrr.KeyTag()),
 					TrustAnchor{
 						Name:      signer,
 						Validated: valid,
@@ -309,7 +329,7 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error
 					})
 			}
 		}
-		ta, ok = TAStore.Map.Get(mapkey)
+		ta, ok = DnskeyCache.Map.Get(mapkey)
 	}
 	return &ta, nil
 }
@@ -415,28 +435,33 @@ func (zd *ZoneData) xxxFindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key
 	return nil, fmt.Errorf("SIG(0) trusted key %s not found in TrustStore", signer)
 }
 
-// XXX: This should not be a method of ZoneData, but rather of KeyDB.
-// Return rcode, validated, trusted, signername, error
-func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) (uint8, bool, bool, string, error) {
-	if len(r.Extra) == 0 {
-		// there is no signature on the update
+// The general idea is to iterate over all SIG RRs in the Additional section of the update to find
+// all keys that signed the update. Then iterate over all the located keys to see which key, if any,
+// successfully validates the update.
+
+// XXX: This should perhaps not be a method of ZoneData, but rather of KeyDB.
+func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
+	msgbuf, err := r.Pack()
+	if err != nil {
+		zd.Logger.Printf("= Error from msg.Pack(): %v", err)
+		us.ValidationRcode = dns.RcodeFormatError
+		return err
+	}
+
+	if len(r.Extra) == 0 { // there is no signature on the update
 		us.ValidationRcode = dns.RcodeFormatError
 		us.Validated = false
 		us.ValidatedByTrustedKey = false
-		return dns.RcodeFormatError, false, false, "", nil
+		return fmt.Errorf("Update has no signature")
 	}
 
-	// var sig0key *Sig0Key
-	var err error
 	var sig *dns.SIG
 	var ok bool
 
-	// XXX: We should try all SIGs, not only the first. But in practice it is very unlikely
-	// with updates that carry multiple signatures.
+	// Iterate over all SIG RRs in the Additional section of the update to find all keys that
+	// signed the update.
 	for _, rr := range r.Extra {
 		var sig0key *Sig0Key
-		var keyid uint16
-		var signername string
 		if _, ok := rr.(*dns.SIG); !ok {
 			us.Log("ValidateAndTrustUpdate: RR in Additional is not a SIG RR, continuing")
 			continue
@@ -448,33 +473,33 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) (uint8, bool, b
 			continue
 		}
 
-		keyid = sig.RRSIG.KeyTag
-		signername = sig.RRSIG.SignerName
-
+		keyid := sig.RRSIG.KeyTag
+		signername := sig.RRSIG.SignerName
 		us.Log("* Update is signed by SIG(0) key \"%s\" (keyid %d).", signername, keyid)
 
-		// We have the name and keyid of the key that signed the update. There are now four possible
-		// alternatives for locating the key:
+		// We have the name and keyid of the key that generated this signature. There are now
+		// four possible alternatives for locating the key:
 		// 1. The key is in the TrustStore (either as a child key or a key for an auth zone)
 		// 2. The key is in the KeyStore (as a key for an auth zone). This should only happen if (1) is true.
-		// 3. The key is in the child zone and we can look it up via DNS (and hopefully validate it)
+		// 3. The key is published in the child zone and we can look it up via DNS (and hopefully validate it)
 		// 4. The key is not to be found anywhere, but the update is a self-signed upload of a SIG(0)
 		//    key for the same zone (i.e. the key is in the update as a KEY RR).
-		// If all these fail the update must be rejected.
+		// If all these fail and we don't find the key then the update must be rejected.
 
 		// 1. Is the key in the TrustStore?
 		sig0key, err = zd.FindSig0TrustedKey(signername, keyid)
 		if err == nil && sig0key != nil {
-			us.Signers = append(us.Signers, Sig0Signer{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+			us.Log("* The SIG(0) key \"%s\" (keyid %d) was found in the TrustStore", signername, keyid)
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			us.Log("* Failed to find a trusted SIG(0) key for \"%s\" (keyid %d) in the TrustStore",
+			us.Log("* The SIG(0) key \"%s\" (keyid %d) was NOT found in the TrustStore",
 				signername, keyid)
 		}
 
 		// 2. Is the key in the KeyStore?. I don't think this is correct. If we want to be able
 		// to validate against keys in the KeyStore, then those keys should have their public
-		// parts promoted to the TrustStore automatically.
+		// parts promoted to the TrustStore automatically (and we now do that automatically).
 
 		// sig0key, err = zd.Keystore(signername, keyid)
 		// if err == nil && sig0key != nil {
@@ -488,15 +513,16 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) (uint8, bool, b
 		// 3. Try to find the key via DNS in the child zone
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
-			us.Signers = append(us.Signers, Sig0Signer{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+			us.Log("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			us.Log("* Failed to find a SIG(0) key for \"%s\" (keyid %d) via DNS", signername, keyid)
+			us.Log("* The SIG(0) key \"%s\" (keyid %d) was NOT found via DNS lookup", signername, keyid)
 		}
 
 		// Last chance: Is the key in the update?
 		if len(r.Ns) != 1 {
-			us.Log("= Update is not a single SIG(0) key, so this cannot be a self-signed update")
+			us.Log("-- Update does not consist of a single SIG(0) key, so this cannot be a self-signed KEY upload")
 			continue
 		}
 
@@ -506,13 +532,14 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) (uint8, bool, b
 			sig0key = &Sig0Key{
 				Name:   signername,
 				Key:    *tmp,
-				Source: "child-upload",
+				Source: "child-key-upload",
 			}
-			us.Signers = append(us.Signers, Sig0Signer{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			us.Data = "key"
+			us.Log("* The update is a self-signed KEY upload for the SIG(0) key \"%s\" (keyid %d)", signername, keyid)
 			continue
 		default:
-			us.Log("= Update is not a SIG(0) key, so this cannot be a self-signed update")
+			us.Log("-- Update is not a SIG(0) key, so this cannot be a self-signed KEY upload")
 			continue
 		}
 	}
@@ -521,60 +548,59 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) (uint8, bool, b
 	// SIG validating the update. Now we must iterate over the keys to see if any of them actually
 	// verify correctly.
 
-	msgbuf, err := r.Pack()
-	if err != nil {
-		zd.Logger.Printf("= Error from msg.Pack(): %v", err)
-		return dns.RcodeFormatError, false, false, "", nil
-	}
-
-	// XXX: This is a tricky corner. If the signature doesn't validate against a trusted (or not
-	// so trusted) key that we have or have looked up, the we must account for the possibility that
-	// this is acutally an attempt att uploading an unvalidated key for later validation and trust
-	// in the key store.
-
-	// Therefore a failed verification, while an error, shouldn't be a show stopper.
 	for _, signer := range us.Signers {
 		keyrr := signer.Sig0Key.Key
 		err = sig.Verify(&keyrr, msgbuf)
 		if err != nil {
-			us.Log("= Error from sig.Verify(): %v (verifying against key %s %i). Trying next key", err, signer.Name, signer.KeyId)
+			// This key failed to validate the update. Try the next key.
+			us.Log("-- The signature by the SIG(0) key \"%s\" (keyid %d) failed to verify the update: %v", signer.Name, signer.KeyId, err)
 			continue
 		}
 
 		// Ok, we have a signature that validated.
 		if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now()) {
-			zd.Logger.Printf("* Update SIG is within its validity period")
+			us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
 		} else {
-			zd.Logger.Printf("= Update SIG is NOT within its validity period")
+			us.Log("-- The signature by the SIG(0) key \"%s\" (keyid %d) is NOT within its validity period", signer.Name, signer.KeyId)
 			us.ValidationRcode = dns.RcodeBadTime
-			return dns.RcodeBadTime, false, false, sig.RRSIG.SignerName, nil
+			// This key validated the signature, but the signature is not within its validity period.
+			// Try the next key.
+			continue
 		}
 
-		if signer.Sig0Key.Trusted {
-			zd.Logger.Printf("* Update by known and trusted SIG(0) key. Validation succeeded.")
-			us.ValidationRcode = dns.RcodeSuccess
-			us.ValidatedByTrustedKey = true
-			us.Validated = true
-			return dns.RcodeSuccess, true, true, sig.RRSIG.SignerName, nil
-		}
-
-		if signer.Sig0Key.Validated {
-			zd.Logger.Printf("* Update by known and validated but NOT YET TRUSTED key. Validation succeeded, trust failed.")
-			us.ValidationRcode = dns.RcodeBadKey
-			us.Validated = true
-			return dns.RcodeBadKey, true, false, sig.RRSIG.SignerName, nil
-		}
-
-		zd.Logger.Printf("= Update signed by known but unvalidated key. ")
-		us.Validated = false
-		us.ValidationRcode = dns.RcodeBadKey
-		return dns.RcodeBadKey, false, false, sig.RRSIG.SignerName, nil
+		us.Log("* Update validated by known and validated key.")
+		us.ValidationRcode = dns.RcodeSuccess
+		us.Validated = true // Now at least one key has validated the update
+		signer.Validated = true
+		continue
 	}
 
-	// If we get here then no signature validated and hence the update is rejected.
-	us.Validated = false
-	us.ValidationRcode = dns.RcodeBadSig
-	return dns.RcodeBadSig, false, false, "", nil
+	// When we get here then we have tried to validate all signatures and the result is in
+	// the us.Signers data.
+	return nil
+}
+
+// Evaluate the keys that signed the update and determine the trust status of the update.
+func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
+	for _, key := range us.Signers {
+		if key.Sig0Key.Trusted {
+			zd.Logger.Printf("* Update is signed by trusted SIG(0) key \"%s\" (keyid %d).", key.Name, key.KeyId)
+			us.SignatureType = "by-trusted"
+			return nil
+		}
+		if key.Sig0Key.DnssecValidated {
+			us.SignatureType = "by-dnssec-validated"
+			return nil
+		}
+		if key.Sig0Key.Source == "child-key-upload" {
+			us.SignatureType = "self-signed"
+			return nil
+		}
+	}
+	// If we get here then the update is not signed by any trusted, or DNSSEC validated key. Nor
+	// is it self-signed.
+	us.ValidationRcode = dns.RcodeBadKey
+	return fmt.Errorf("Update is not signed by a trusted SIG(0) key")
 }
 
 // ValidateChildDnskeys: we have the ChildDelegationData for the child zone,
@@ -585,10 +611,12 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) (uint8, bool, b
 // 4. Store the child DNSKEY RRset in the TrustAnchor store
 // 5. Return true if the child DNSKEY RRset is validated
 func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool) (bool, error) {
+
 	addrs, err := ChildGlueRRsetsToAddrs(cdd.A_rrsets, cdd.AAAA_rrsets)
 	if err != nil {
 		return false, err
 	}
+
 	dnskeyrrset, err := zd.LookupChildRRsetNG(cdd.ChildName, dns.TypeDNSKEY, addrs, verbose)
 	if err != nil {
 		return false, err
@@ -598,7 +626,8 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 
 	for _, rr := range dnskeyrrset.RRs {
 		if dnskey, ok := rr.(*dns.DNSKEY); ok {
-			if dnskey.Flags != 257 {
+			// if dnskey.Flags != 257 {
+			if dnskey.Flags&0x0001 == 0 { // ZSK
 				continue
 			}
 			keyid := dnskey.KeyTag()
@@ -617,7 +646,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY matches DS record. Adding to TAStore.")
 							// DNSKEY is verified against the DS record
 
-							// Store the KSK in the TAStore
+							// Store the KSK in the DnskeyCache
 							keyname := dnskey.Header().Name
 							lookupKey := keyname + "::" + fmt.Sprint(keyid)
 							expiration := time.Now().Add(time.Duration(dnskey.Header().Ttl) * time.Second)
@@ -627,7 +656,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 								Dnskey:     *dnskey,
 								Expiration: expiration,
 							}
-							TAStore.Map.Set(lookupKey, ta)
+							DnskeyCache.Map.Set(lookupKey, ta)
 							zd.Logger.Printf("ValidateChildDnskeys: Stored KSK in TAStore with key %s and expiration %v", lookupKey, expiration)
 							kskValidated = true
 						} else {
@@ -663,8 +692,8 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 					Dnskey:     *dnskey,
 					Expiration: expiration,
 				}
-				TAStore.Map.Set(lookupKey, ta)
-				zd.Logger.Printf("ValidateChildDnskeys: Stored ZSK in TAStore with key %s and expiration %v", lookupKey, expiration)
+				DnskeyCache.Map.Set(lookupKey, ta)
+				zd.Logger.Printf("ValidateChildDnskeys: Stored ZSK in DnskeyCache with key %s and expiration %v", lookupKey, expiration)
 			}
 		}
 	}
@@ -726,12 +755,13 @@ func xxxRRSIGValidityPeriod(rrsig *dns.RRSIG, t time.Time) bool {
 }
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
+	zd.Logger.Printf("FindSig0KeyViaDNS: Looking up SIG(0) key %s (keyid %d) in DNS", signer, keyid)
 	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
 	if err != nil {
 		return nil, err
 	}
 	if rrset == nil {
-		return nil, fmt.Errorf("SIG(0) key %s not found in DNS", signer)
+		return nil, fmt.Errorf("SIG(0) key %s (keyid %d) not found in DNS", signer, keyid)
 	}
 	valid, err := zd.ValidateRRset(rrset, true)
 	if err != nil {
