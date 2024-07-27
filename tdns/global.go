@@ -26,19 +26,3 @@ var Globals = GlobalStuff{
 }
 
 var Zones = cmap.New[*ZoneData]()
-
-var DnskeyCache = NewDnskeyCache()
-
-func NewDnskeyCache() *DnskeyCacheT {
-	return &DnskeyCacheT{
-		Map: cmap.New[TrustAnchor](),
-	}
-}
-
-var Sig0Store = NewSig0StoreT()
-
-func NewSig0StoreT() *Sig0StoreT {
-	return &Sig0StoreT{
-		Map: cmap.New[Sig0Key](),
-	}
-}

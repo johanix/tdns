@@ -240,8 +240,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 			}
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-				mapkey := fmt.Sprintf("%s::%d", k, dnskeyrr.KeyTag())
-				DnskeyCache.Map.Set(mapkey, TrustAnchor{
+				DnskeyCache.Set(k, dnskeyrr.KeyTag(), &TrustAnchor{
 					Name:      k,
 					Validated: true, // always trust config
 					Dnskey:    *dnskeyrr,

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -260,6 +261,12 @@ func ChildGlueRRsToAddrs(v4glue, v6glue []dns.RR) ([]string, error) {
 
 func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	rrtype uint16, verbose bool) (*RRset, int, error) {
+
+	crrset := RRsetCache.Get(qname, rrtype)
+	if crrset != nil {
+		lg.Printf("AuthDNSQuery: found %s %s in cache", qname, dns.TypeToString[rrtype])
+		return crrset.RRset, int(crrset.Rcode), nil
+	}
 	var rrset RRset
 	var rcode int
 
@@ -298,9 +305,16 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 							dns.TypeToString[rrtype])
 					}
 				}
+				RRsetCache.Set(qname, rrtype, &CachedRRset{
+					Name:       qname,
+					RRtype:     rrtype,
+					Rcode:      uint8(rcode),
+					RRset:      &rrset,
+					Expiration: time.Now().Add(time.Duration(rrset.RRs[0].Header().Ttl) * time.Second),
+				})
 				return &rrset, rcode, nil
 			} else {
-				if rcode == dns.StringToRcode["NOERROR"] {
+				if rcode == dns.RcodeSuccess {
 					return &rrset, rcode, nil // no point in continuing
 				}
 				continue // go to next server

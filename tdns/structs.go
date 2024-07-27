@@ -282,6 +282,7 @@ type DebugResponse struct {
 	//	TrustedSig0keys	map[string]dns.KEY
 	TrustedDnskeys  []TrustAnchor
 	TrustedSig0keys map[string]Sig0Key
+	CachedRRsets    []CachedRRset
 	Validated       bool
 	Msg             string
 	Error           bool
@@ -377,6 +378,19 @@ type DnssecKey struct {
 	PrivateKey string //
 	Key        dns.DNSKEY
 	Keystr     string
+}
+
+type CachedRRset struct {
+	Name       string
+	RRtype     uint16
+	Rcode      uint8
+	RRset      *RRset
+	Validated  bool
+	Expiration time.Time
+}
+
+type RRsetCacheT struct {
+	Map cmap.ConcurrentMap[string, CachedRRset]
 }
 
 type DelegationSyncRequest struct {

@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
@@ -475,13 +476,38 @@ var debugShowTACmd = &cobra.Command{
 	},
 }
 
+var debugShowRRsetCacheCmd = &cobra.Command{
+	Use:   "show-rrset-cache",
+	Short: "Request tdnsd to return cached RRsets",
+	Run: func(cmd *cobra.Command, args []string) {
+
+		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
+			Command: "show-rrset-cache",
+			Verbose: true,
+		})
+
+		var out = []string{"Name|RRtype|Expire|Record"}
+
+		if len(dr.TrustedDnskeys) > 0 {
+			fmt.Printf("Cached RRsets:\n")
+			for _, crrset := range dr.CachedRRsets {
+				for _, rr := range crrset.RRset.RRs {
+					out = append(out, fmt.Sprintf("%s|%s|%v|%v",
+						crrset.Name, crrset.RRtype, time.Until(crrset.Expiration).Seconds(), rr.String()))
+				}
+			}
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(stopCmd, debugCmd, zoneCmd)
 
 	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd, zoneSerialBbumpNGCmd)
 	zoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
 
-	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd)
+	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")

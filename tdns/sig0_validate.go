@@ -234,7 +234,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		}
 
 		// Ok, we have a signature that validated.
-		if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now()) {
+		if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
 			us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
 		} else {
 			us.Log("-- The signature by the SIG(0) key \"%s\" (keyid %d) is NOT within its validity period", signer.Name, signer.KeyId)

@@ -37,7 +37,7 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 		}
 		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
 		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
-		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now())
+		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now().UTC())
 		sigrr.RRSIG.SignerName = signer
 
 		_, err := sigrr.Sign(key.CS, &m)
@@ -96,7 +96,7 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) err
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
-			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now())
+			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now().UTC())
 			rrsig.SignerName = name
 
 			err := rrsig.Sign(key.CS, rrset.RRs)

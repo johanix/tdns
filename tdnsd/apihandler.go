@@ -421,6 +421,19 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.TrustedDnskeys = tas
 
+		case "show-rrsetcache":
+			log.Printf("tdnsd debug show-rrsetcache")
+			resp.Msg = fmt.Sprintf("RRsetCache: %v", tdns.RRsetCache.Map.Keys())
+			rrsets := []tdns.CachedRRset{}
+			for _, rrsetkey := range tdns.RRsetCache.Map.Keys() {
+				rrset, ok := tdns.RRsetCache.Map.Get(rrsetkey)
+				if !ok {
+					continue
+				}
+				rrsets = append(rrsets, rrset)
+			}
+			resp.CachedRRsets = rrsets
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true
