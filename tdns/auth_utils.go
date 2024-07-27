@@ -11,7 +11,7 @@ import (
 
 // XXX: This should be merged with the FetchChildDelegationData() function
 // Returns [] NS RRs + [] v4glue RRs + [] v6glue RRs
-func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*ChildDelegationData, *RRset, *RRset) {
+func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegationData {
 	var child string
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
@@ -31,13 +31,19 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) (*ChildDelegati
 				}
 				// zd.Logger.Printf("FindDelegation for qname='%s': there are NS RRs for '%s'", qname, child)
 				// Ok, we found a delegation. Do we need any glue?
-				v4glue, v6glue := zd.FindGlue(childns, dnssec_ok)
-				return &cdd, v4glue, v6glue
+				zd.Logger.Printf("FindDelegation: cdd=%v", cdd)
+				v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs := zd.FindGlueSimple(childns, dnssec_ok)
+				cdd.A_glue = v4glue
+				cdd.AAAA_glue = v6glue
+				cdd.A_glue_rrsigs = v4glue_rrsigs
+				cdd.AAAA_glue_rrsigs = v6glue_rrsigs
+				zd.Logger.Printf("FindDelegation: v4glue=%v, v6glue=%v", v4glue, v6glue)
+				return &cdd
 			}
 		}
 	}
 	zd.Logger.Printf("FindZone: no delegation for qname=%s found in %s", qname, zd.ZoneName)
-	return nil, nil, nil
+	return nil
 }
 
 // Returns two RRsets with A glue and AAAA glue. Each RRset may be nil.
@@ -97,4 +103,43 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 		// 			       zone, zd.ZoneName)
 	}
 	return &v4glue, &v6glue
+}
+
+func (zd *ZoneData) FindGlueSimple(nsrrs RRset, dnssec_ok bool) ([]dns.RR, []dns.RR, []dns.RR, []dns.RR) {
+	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
+	// dump.P(nsrrs)
+	var v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs []dns.RR
+	var nsname string
+	zone := nsrrs.RRs[0].Header().Name
+	for _, rr := range nsrrs.RRs {
+		if nsrr, ok := rr.(*dns.NS); ok {
+			nsname = nsrr.Ns
+			zd.Logger.Printf("FindGlue: zone '%s' has a nameserver '%s'", zone, nsname)
+			// nsnidx, exist := zd.OwnerIndex[nsname]
+			if !zd.NameExists(nsname) {
+				continue // no match for nsname in zd.OwnerIndex (i.e nameserver is out of bailiwick)
+			}
+			nsnamerrs, _ := zd.GetOwner(nsname)
+
+			if ns_A_rrs, ok := nsnamerrs.RRtypes[dns.TypeA]; ok {
+				// Ok, we found an A RR
+				v4glue = append(v4glue, ns_A_rrs.RRs...)
+				v4glue_rrsigs = append(v4glue_rrsigs, ns_A_rrs.RRSIGs...)
+			}
+			if ns_AAAA_rrs, ok := nsnamerrs.RRtypes[dns.TypeAAAA]; ok {
+				// Ok, we found an AAAA RR
+				v6glue = append(v6glue, ns_AAAA_rrs.RRs...)
+				v6glue_rrsigs = append(v6glue_rrsigs, ns_AAAA_rrs.RRSIGs...)
+			}
+		} else {
+			zd.Logger.Printf("FindGlue: in the NS RRset I found this RRSIG: %s", rr.String())
+		}
+	}
+
+	if !dnssec_ok {
+		v4glue_rrsigs = []dns.RR{} // drop any RRSIGs
+		v6glue_rrsigs = []dns.RR{} // drop any RRSIGs
+	}
+
+	return v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs
 }

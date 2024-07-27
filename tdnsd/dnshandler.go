@@ -361,15 +361,15 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 		// 1. Check for child delegation
 		log.Printf("---> Checking for child delegation for %s", qname)
-		cdd, v4glue, v6glue := zd.FindDelegation(qname, dnssec_ok)
+		cdd := zd.FindDelegation(qname, dnssec_ok)
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != tdns.TypeDELEG {
 			log.Printf("---> Sending referral for %s", qname)
 			m.MsgHdr.Authoritative = false
 			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
-			m.Extra = append(m.Extra, v4glue.RRs...)
-			m.Extra = append(m.Extra, v6glue.RRs...)
+			m.Extra = append(m.Extra, cdd.A_glue...)
+			m.Extra = append(m.Extra, cdd.AAAA_glue...)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -460,7 +460,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 
 	// 1. Check for child delegation
 	// log.Printf("---> Checking for child delegation for %s", qname)
-	cdd, v4glue, v6glue := zd.FindDelegation(qname, dnssec_ok)
+	cdd := zd.FindDelegation(qname, dnssec_ok)
 
 	// dump.P(cdd)
 
@@ -469,8 +469,8 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 		log.Printf("---> Sending referral for %s", qname)
 		m.MsgHdr.Authoritative = false
 		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
-		m.Extra = append(m.Extra, v4glue.RRs...)
-		m.Extra = append(m.Extra, v6glue.RRs...)
+		m.Extra = append(m.Extra, cdd.A_glue...)
+		m.Extra = append(m.Extra, cdd.AAAA_glue...)
 		w.WriteMsg(m)
 		return nil
 	}

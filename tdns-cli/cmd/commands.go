@@ -382,10 +382,6 @@ var debugValidateRRsetCmd = &cobra.Command{
 
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
-		//		if tdns.Globals.Zonename == "" {
-		//			fmt.Printf("Error: zone name not specified. Terminating.\n")
-		//			os.Exit(1)
-		//		}
 		if debugQname == "" {
 			fmt.Printf("Error: qname name not specified. Terminating.\n")
 			os.Exit(1)
@@ -406,7 +402,14 @@ var debugValidateRRsetCmd = &cobra.Command{
 			Qname:   dns.Fqdn(debugQname),
 			Qtype:   qtype,
 		})
-		fmt.Printf("debug response: %v\n", dr)
+
+		if dr.Msg != "" {
+			fmt.Printf("%s\n", dr.Msg)
+		}
+
+		if tdns.Globals.Debug {
+			fmt.Printf("debug response: %v\n", dr)
+		}
 	},
 }
 
@@ -448,14 +451,13 @@ var debugShowTACmd = &cobra.Command{
 			Verbose: true,
 		})
 
-		var out = []string{"Type|Signer|KeyID|Trusted|Record"}
+		var out = []string{"Type|Signer|KeyID|Validated|Trusted|Record"}
 
 		if len(dr.TrustedDnskeys) > 0 {
 			fmt.Printf("Known DNSKEYs:\n")
-			for k, v := range dr.TrustedDnskeys {
-				tmp := strings.Split(k, "::")
-				out = append(out, fmt.Sprintf("DNSKEY|%s|%s|%v|%.70s...",
-					tmp[0], tmp[1], v.Validated, v.Dnskey.String()))
+			for _, ta := range dr.TrustedDnskeys {
+				out = append(out, fmt.Sprintf("DNSKEY|%s|%d|%v|%v|%.70s...",
+					ta.Name, ta.Keyid, ta.Validated, ta.Trusted, ta.Dnskey.String()))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))

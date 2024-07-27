@@ -84,7 +84,7 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 			continue
 		}
 
-		cdd, _, _ := zd.FindDelegation(ownername, true)
+		cdd := zd.FindDelegation(ownername, true)
 		if cdd == nil {
 			// If we get here the RRset is in the auth zone represented by zd.
 			log.Printf("ValidatorEngine: the %s %s RRset is not in a child zone, but in the %s auth zone. Validated=true", ownername, rrtype, zd.ZoneName)

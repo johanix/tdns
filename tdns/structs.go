@@ -144,18 +144,20 @@ type RRset struct {
 }
 
 type ChildDelegationData struct {
-	DelHasChanged bool      // When returned from a scanner, this indicates that a change has been detected
-	ParentSerial  uint32    // The parent serial that this data was correct for
-	Timestamp     time.Time // Time at which this data was fetched
-	ChildName     string
-	RRsets        map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
-	NS_rrs        []dns.RR
-	A_glue        []dns.RR
-	AAAA_glue     []dns.RR
-	NS_rrset      *RRset
-	DS_rrset      *RRset
-	A_rrsets      []*RRset
-	AAAA_rrsets   []*RRset
+	DelHasChanged    bool      // When returned from a scanner, this indicates that a change has been detected
+	ParentSerial     uint32    // The parent serial that this data was correct for
+	Timestamp        time.Time // Time at which this data was fetched
+	ChildName        string
+	RRsets           map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
+	NS_rrs           []dns.RR
+	A_glue           []dns.RR
+	A_glue_rrsigs    []dns.RR
+	AAAA_glue        []dns.RR
+	AAAA_glue_rrsigs []dns.RR
+	NS_rrset         *RRset
+	DS_rrset         *RRset
+	A_rrsets         []*RRset
+	AAAA_rrsets      []*RRset
 }
 
 type KeystorePost struct {
@@ -278,7 +280,7 @@ type DebugResponse struct {
 	RRset      RRset
 	//	TrustedDnskeys	map[string]dns.DNSKEY
 	//	TrustedSig0keys	map[string]dns.KEY
-	TrustedDnskeys  map[string]TrustAnchor
+	TrustedDnskeys  []TrustAnchor
 	TrustedSig0keys map[string]Sig0Key
 	Validated       bool
 	Msg             string
@@ -336,9 +338,11 @@ type DnskeyCacheT struct {
 
 type TrustAnchor struct {
 	Name       string
+	Keyid      uint16
 	Validated  bool
 	Trusted    bool
-	Dnskey     dns.DNSKEY
+	Dnskey     dns.DNSKEY // just this key
+	RRset      *RRset     // complete RRset
 	Expiration time.Time
 }
 

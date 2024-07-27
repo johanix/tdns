@@ -408,6 +408,19 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+		case "show-ta":
+			log.Printf("tdnsd debug show-ta")
+			resp.Msg = fmt.Sprintf("TAStore: %v", tdns.DnskeyCache.Map.Keys())
+			tas := []tdns.TrustAnchor{}
+			for _, taname := range tdns.DnskeyCache.Map.Keys() {
+				ta, ok := tdns.DnskeyCache.Map.Get(taname)
+				if !ok {
+					continue
+				}
+				tas = append(tas, ta)
+			}
+			resp.TrustedDnskeys = tas
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true

@@ -322,11 +322,11 @@ func (kdb *KeyDB) GenerateKeypair(owner string, rrtype uint16, alg uint8) (*Priv
 		}
 		log.Printf("[generatesigningkey]PrivateKey: %s", pkc.PrivateKey)
 
-		dump.P(pkc)
+		// dump.P(pkc)
 
-		log.Printf("[GenSigKey]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
+		// log.Printf("[GenSigKey]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
 		log.Printf("Generated key: %s", pkc.KeyRR.String())
-		log.Printf("Generated private key string: %s", pkc.K)
+		// log.Printf("Generated private key string: %s", pkc.K)
 		log.Printf("Generated private key: %v", pkc.PrivateKey)
 
 	default:
