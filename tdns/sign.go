@@ -13,11 +13,14 @@ import (
 	"github.com/miekg/dns"
 )
 
-func sigLifetime(t time.Time) (uint32, uint32) {
+func sigLifetime(t time.Time, lifetime uint32) (uint32, uint32) {
 	sigJitter := time.Duration(60 * time.Second)
-	sigValidityInterval := time.Duration(5 * time.Minute)
+	sigValidity := time.Duration(lifetime) * time.Second
+	if lifetime == 0 {
+		sigValidity = time.Duration(5 * time.Minute)
+	}
 	incep := uint32(t.Add(-sigJitter).Unix())
-	expir := uint32(t.Add(sigValidityInterval).Add(sigJitter).Unix())
+	expir := uint32(t.Add(sigValidity).Add(sigJitter).Unix())
 	return incep, expir
 }
 
@@ -37,7 +40,7 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 		}
 		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
 		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
-		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now().UTC())
+		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now().UTC(), 60*5) // 5 minutes
 		sigrr.RRSIG.SignerName = signer
 
 		_, err := sigrr.Sign(key.CS, &m)
@@ -96,7 +99,7 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) err
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
-			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now().UTC())
+			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now().UTC(), 3600*24*30) // 30 days
 			rrsig.SignerName = name
 
 			err := rrsig.Sign(key.CS, rrset.RRs)
