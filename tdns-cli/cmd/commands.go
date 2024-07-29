@@ -477,12 +477,12 @@ var debugShowTACmd = &cobra.Command{
 }
 
 var debugShowRRsetCacheCmd = &cobra.Command{
-	Use:   "show-rrset-cache",
+	Use:   "show-rrsetcache",
 	Short: "Request tdnsd to return cached RRsets",
 	Run: func(cmd *cobra.Command, args []string) {
 
 		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
-			Command: "show-rrset-cache",
+			Command: "show-rrsetcache",
 			Verbose: true,
 		})
 

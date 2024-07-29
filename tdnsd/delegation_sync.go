@@ -56,9 +56,8 @@ func DelegationSyncher(conf *Config) error {
 		}
 
 		// 2. Updates allowed, but there is no KEY RRset published.
-		if !keyrrexist {
+		if !keyrrexist && zd.Options["publish-key"] {
 			log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
-			// _, _, keyrr, err = kdb.GetSig0PrivKey(zd.ZoneName)
 			sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
 			if err != nil {
 				log.Printf("DelegationSyncher: Error from kdb.GetSig0ActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
@@ -94,14 +93,10 @@ func DelegationSyncher(conf *Config) error {
 			} else {
 				keyrrexist = true
 			}
-
-			//		} else {
-			//			log.Printf("DelegationSyncher: Zone %s KEY RRset already published", zd.ZoneName)
-			//			continue
 		}
 
 		// 3. There is a KEY RRset, question is whether it is signed or not
-		if zd.Options["online-signing"] {
+		if keyrrexist && zd.Options["online-signing"] {
 			log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
 			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 			if err != nil {
