@@ -632,13 +632,13 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync() error {
-	if !zd.Options["allow-updates"] {
+	if !zd.Options["allow-updates"] || zd.Options["agent"] {
 		return nil // this zone does not allow any modifications
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		zd.Logger.Printf("Error during SetupZoneSync(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
 		return err
 	}
 
@@ -681,29 +681,6 @@ func (zd *ZoneData) SetupZoneSync() error {
 	}
 
 	return nil
-}
-
-// XXX: FIXME: Use the algorithm from the config instead of hardoding ED25519
-func (kdb *KeyDB) xxxGenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error) {
-	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		return nil, fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
-	}
-	pkc, err := kdb.GenerateKeypair(zd.ZoneName, dns.TypeKEY, alg) //
-	if err != nil {
-		zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-		return nil, err
-	}
-	sak := &Sig0ActiveKeys{
-		Keys: []*PrivateKeyCache{pkc},
-	}
-	//	err = zd.PublishKeyRRs(sak)
-	//	if err != nil {
-	//		zd.Logger.Printf("Error from PublishKeyRRs(%s): %v", zd.ZoneName, err)
-	//		return nil, err
-	//	}
-	return sak, nil
 }
 
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {

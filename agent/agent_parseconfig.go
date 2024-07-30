@@ -84,6 +84,7 @@ func ParseConfig(conf *Config) error {
 	conf.Zones = zconf.Zones
 
 	fmt.Printf("YAML parsed. There are %d zones:", len(conf.Zones))
+
 	for key := range conf.Zones {
 		fmt.Printf(" [%s]", key)
 	}
@@ -130,6 +131,8 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 	//	}
 
 	zones := zconfig.Zones
+
+	primary_zones := []string{}
 
 	for zname, zconf := range zconfig.Zones {
 		if zname != dns.Fqdn(zname) {
@@ -180,13 +183,13 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
 			zonetype = tdns.Primary
+			primary_zones = append(primary_zones, zname)
 		case "secondary":
 			zonetype = tdns.Secondary
 			if zconf.Primary == "" {
 				log.Printf("Error: Zone %s is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
 				delete(zones, zname)
 			}
-
 		default:
 			log.Printf("Error: Zone %s: Unknown zone type: \"%s\". Zone ignored.", zname, zconf.Type)
 			delete(zones, zname)
@@ -209,7 +212,8 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 				"fold-case",             // fold case of owner names to lower to make query matching case insensitive
 				"sign-zone",             // keep zone signed
 				"black-lies",            // zone may implement DNSSEC signed negative responses via so-called black lies.
-				"publish-key":           // publish a SIG(0) KEY recordfor the zone
+				"publish-key",           // publish a SIG(0) KEY record for the zone
+				"agent":                 // zone is managed by the TDNS agent; always true for the agent
 				options[option] = true
 				cleanoptions = append(cleanoptions, option)
 			default:
@@ -237,7 +241,6 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 		}
 
 		var rrt uint16
-		// var exist bool
 		childrrtypes := map[uint16]bool{}
 		for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
 			rrtype = strings.ToUpper(rrtype)
@@ -253,13 +256,6 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 				zonerrtypes[rrt] = true
 			}
 		}
-
-		//			switch rrt {
-		//			case "A", "AAAA", "MX", "TXT", "NS", "DS", "KEY":
-		//				rrtypes[dns.StringToType[rrt]] = true
-		//			default:
-		//				log.Fatalf("Zone %s: Unsupported RRtype in update policy: \"%s\"", zname, rrt)
-		//			}
 
 		policy := tdns.UpdatePolicy{
 			Child: tdns.UpdatePolicyDetail{
@@ -285,6 +281,11 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 			Options:      options,
 			UpdatePolicy: policy,
 		}
+	}
+
+	if len(primary_zones) > 0 {
+		fmt.Printf("Error: The TDNS agent does not support primary zones: %v\n", primary_zones)
+		log.Fatalf("Error: The TDNS agent does not support primary zones: %v", primary_zones)
 	}
 
 	conf.Zones = zones

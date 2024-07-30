@@ -10,6 +10,7 @@
 
 tdnsd/tdnsd
 tdns-cli/tdns-cli
+agent/tdns-agent
 dog/dog
 
 */version.go

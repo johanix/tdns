@@ -172,28 +172,14 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = "We're happy, but send more cookies"
 
-		case "bump":
-			// resp.Msg, err = BumpSerial(conf, cp.Zone)
+		case "reload":
 			zd, exist := tdns.Zones.Get(cp.Zone)
 			if !exist {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
-			}
-			br, err := zd.BumpSerial()
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-			}
-			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", cp.Zone, br.OldSerial, br.NewSerial)
-
-		case "reload":
-			log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
-			zd, ok := tdns.Zones.Get(cp.Zone)
-			if !ok {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
 			} else {
-				resp.Msg, err = zd.ReloadZone(nil, cp.Force) // Ignoring the return channel here.
+				log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
+				resp.Msg, err = zd.ReloadZone(nil, cp.Force)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
@@ -211,12 +197,12 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(500 * time.Millisecond)
 			conf.Internal.APIStopCh <- struct{}{}
 
-		case "zone":
-			resp, err = ZoneOps(conf, cp, conf.Internal.KeyDB)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-			}
+			//		case "zone":
+			//			resp, err = ZoneOps(conf, cp, conf.Internal.KeyDB)
+			//			if err != nil {
+			//				resp.Error = true
+			//				resp.ErrorMsg = err.Error()
+			//			}
 
 		case "list-zones":
 			for zname, zconf := range conf.Zones {

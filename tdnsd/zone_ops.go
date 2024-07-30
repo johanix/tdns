@@ -144,7 +144,7 @@ func BumpSerial(conf *Config, zone string) (string, error) {
 	return resp.Msg, nil
 }
 
-func ReloadZone(conf *Config, zone string, force bool) (string, error) {
+func xxxReloadZone(conf *Config, zone string, force bool) (string, error) {
 	//	if !zd.Options["dirty"] {
 	//		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
 	//		return msg, fmt.Errorf(msg)
