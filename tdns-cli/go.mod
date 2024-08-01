@@ -8,6 +8,7 @@ replace github.com/johanix/tdns/tdns => ../tdns
 
 require (
 	github.com/go-playground/validator/v10 v10.11.1
+	github.com/gookit/goutil v0.6.15
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.50
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -20,7 +21,7 @@ require (
 	github.com/go-playground/locales v0.14.0 // indirect
 	github.com/go-playground/universal-translator v0.18.0 // indirect
 	github.com/gookit/color v1.5.4 // indirect
-	github.com/gookit/goutil v0.6.15 // indirect
+	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.0.1 // indirect
 	github.com/leodido/go-urn v1.2.1 // indirect

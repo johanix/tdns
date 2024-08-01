@@ -228,6 +228,23 @@ type CommandResponse struct {
 	ErrorMsg string
 }
 
+type ZoneCmdPost struct {
+	Command    string
+	SubCommand string
+	Zone       string
+	Force      bool
+}
+
+type ZoneCmdResponse struct {
+	Time     time.Time
+	Status   string
+	Zone     string
+	Names    []string
+	Zones    map[string]ZoneConf
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
 type DelegationPost struct {
 	Command string // status | sync | ...
 	Scheme  uint8  // 1=notify | 2=update

@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package main
+package tdns
 
 import (
 	//        "fmt"
@@ -14,23 +14,22 @@ import (
 	"time"
 
 	"github.com/gookit/goutil/dump"
-	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	// "github.com/johanix/tdns/tdns"
 )
 
-func DelegationSyncher(conf *Config) error {
-	delsyncq := conf.Internal.DelegationSyncQ
-	var ds tdns.DelegationSyncRequest
+func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest) error {
+	// func DelegationSyncher(delsyncq chan tdns.DelegationSyncRequest, kdb *tdns.KeyDB) error {
+	//delsyncq := conf.Internal.DelegationSyncQ
+	var ds DelegationSyncRequest
 	var imr = viper.GetString("resolver.address")
 	if imr == "" {
 		log.Printf("DelegationSyncEngine: resolver address not specified. Terminating.")
 		return fmt.Errorf("DelegationSyncEngine: resolver address not specified")
 	}
 
-	kdb := conf.Internal.KeyDB
-	_ = kdb
+	// kdb := conf.Internal.KeyDB
 
 	// If we support syncing with parent via DNS UPDATE then we must ensure that a KEY RR for the zone is published.
 	time.Sleep(10 * time.Second) // Allow time for zones to load
@@ -40,7 +39,7 @@ func DelegationSyncher(conf *Config) error {
 	// var dnskeyrr *dns.DNSKEY
 	// var err error
 
-	for zname, zd := range tdns.Zones.Items() {
+	for zname, zd := range Zones.Items() {
 		log.Printf("DelegationSyncher: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
 		apex, _ := zd.GetOwner(zd.ZoneName)
 		_, keyrrexist := apex.RRtypes[dns.TypeKEY]
@@ -77,8 +76,8 @@ func DelegationSyncher(conf *Config) error {
 					zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 					continue
 				}
-				sak = &tdns.Sig0ActiveKeys{
-					Keys: []*tdns.PrivateKeyCache{pkc},
+				sak = &Sig0ActiveKeys{
+					Keys: []*PrivateKeyCache{pkc},
 				}
 			}
 
@@ -104,7 +103,7 @@ func DelegationSyncher(conf *Config) error {
 				continue
 			}
 			rrset := apex.RRtypes[dns.TypeKEY]
-			err = tdns.SignRRset(&rrset, zd.ZoneName, dak, false)
+			err = SignRRset(&rrset, zd.ZoneName, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 			} else {
@@ -147,14 +146,14 @@ func DelegationSyncher(conf *Config) error {
 					len(dss.NsRemoves), len(dss.NsAdds), len(dss.ARemoves), len(dss.AAdds), len(dss.AAAARemoves), len(dss.AAAAAdds))
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = tdns.ParentZone(zd.ZoneName, imr)
+					zd.Parent, err = ParentZone(zd.ZoneName, imr)
 					if err != nil {
 						log.Printf("DelegationSyncher: Zone %s: Error from ParentZone(): %v. Ignoring sync request.", ds.ZoneName, err)
 						continue
 					}
 				}
 
-				msg, rcode, err := SyncZoneDelegation(conf, zd, ds.SyncStatus)
+				msg, rcode, err := zd.SyncZoneDelegation(kdb, notifyq, ds.SyncStatus)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 					continue
@@ -186,7 +185,7 @@ func DelegationSyncher(conf *Config) error {
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, err := SyncZoneDelegation(conf, zd, syncstate)
+				msg, rcode, err := zd.SyncZoneDelegation(kdb, notifyq, syncstate)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
 					syncstate.Error = true
@@ -220,7 +219,7 @@ func DelegationSyncher(conf *Config) error {
 // tdns.DelegationDataChanged() is used for implicit delegation synchronization.
 
 // SyncZoneDelegation() is used for delegation synchronization request via API.
-func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus) (string, uint8, error) {
+func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus) (string, uint8, error) {
 
 	//	syncstate, err := AnalyseZoneDelegation(conf, zd)
 	//	if err != nil {
@@ -263,17 +262,17 @@ func SyncZoneDelegation(conf *Config, zd *tdns.ZoneData, syncstate tdns.Delegati
 
 	switch scheme {
 	case "UPDATE":
-		msg, rcode, err = SyncZoneDelegationViaUpdate(conf, zd, syncstate, dsynctarget)
+		msg, rcode, err = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, dsynctarget)
 	case "NOTIFY":
-		msg, rcode, err = SyncZoneDelegationViaNotify(conf, zd, syncstate, dsynctarget)
+		msg, rcode, err = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, dsynctarget)
 	}
 
 	return msg, rcode, err
 }
 
-func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
-	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
-	kdb := conf.Internal.KeyDB
+func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate DelegationSyncStatus,
+	dsynctarget *DsyncTarget) (string, uint8, error) {
+	// kdb := conf.Internal.KeyDB
 
 	// dump.P(syncstate)
 
@@ -291,7 +290,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
 	syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
 
-	m, err := tdns.CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
+	m, err := CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
 	if err != nil {
 		return "", 0, err
 	}
@@ -310,7 +309,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 
 	// 4. Sign the msg
 	log.Printf("SyncZoneDelegationViaUpdate: Signing the DNS UPDATE %s", zd.ZoneName)
-	smsg, err := tdns.SignMsg(*m, zd.ZoneName, sak)
+	smsg, err := SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
 		return "", 0, err
@@ -324,7 +323,7 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	log.Printf("SyncZoneDelegationViaUpdate: Sending the signed update to %s (addresses: %v) port %d",
 		dsynctarget.Name, dsynctarget.Addresses, dsynctarget.Port)
 
-	rcode, err := tdns.SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
+	rcode, err := SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", zd.Parent, err)
 		return "", 0, err
@@ -338,8 +337,8 @@ func SyncZoneDelegationViaUpdate(conf *Config, zd *tdns.ZoneData, syncstate tdns
 	return msg, uint8(rcode), err
 }
 
-func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns.DelegationSyncStatus,
-	dsynctarget *tdns.DsyncTarget) (string, uint8, error) {
+func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus,
+	dsynctarget *DsyncTarget) (string, uint8, error) {
 
 	if zd.Options["allow-updates"] {
 		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
@@ -353,12 +352,12 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 		if zd.Options["online-signing"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
-			dak, err := conf.Internal.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
+			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 			if err != nil {
 				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
 			} else {
 				if len(dak.ZSKs) > 0 {
-					err := tdns.SignRRset(&rrset, zd.ZoneName, dak, true) // Let's force signing
+					err := SignRRset(&rrset, zd.ZoneName, dak, true) // Let's force signing
 					if err != nil {
 						log.Printf("Error signing %s: %v", zd.ZoneName, err)
 					} else {
@@ -382,10 +381,10 @@ func SyncZoneDelegationViaNotify(conf *Config, zd *tdns.ZoneData, syncstate tdns
 
 	dump.P(dsynctarget)
 	// New:
-	conf.Internal.NotifyQ <- tdns.NotifyRequest{
+	notifyq <- NotifyRequest{
 		ZoneName: zd.ZoneName,
 		ZoneData: zd,
-		RRtype:   dns.TypeCSYNC,         // this is only about syncinf delegation data, not about rolling DNSSEC keys.
+		RRtype:   dns.TypeCSYNC,         // this is only about syncing delegation data, not about rolling DNSSEC keys.
 		Targets:  dsynctarget.Addresses, // already in addr:port format
 	}
 

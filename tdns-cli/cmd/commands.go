@@ -18,10 +18,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var debugQname, debugQtype string
 var force bool
 
-var debugCmd = &cobra.Command{
+var xxxdebugCmd = &cobra.Command{
 	Use:   "debug",
 	Short: "A brief description of your command",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -37,7 +36,7 @@ var stopCmd = &cobra.Command{
 	},
 }
 
-var zoneReloadCmd = &cobra.Command{
+var xxxzoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -68,12 +67,12 @@ var zoneReloadCmd = &cobra.Command{
 	},
 }
 
-var zoneNsecCmd = &cobra.Command{
+var xxxzoneNsecCmd = &cobra.Command{
 	Use:   "nsec",
 	Short: "A brief description of your command",
 }
 
-var zoneSignCmd = &cobra.Command{
+var xxxzoneSignCmd = &cobra.Command{
 	Use:   "sign",
 	Short: "Send a zone sign command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -100,7 +99,7 @@ var zoneSignCmd = &cobra.Command{
 	},
 }
 
-var zoneWriteCmd = &cobra.Command{
+var xxxzoneWriteCmd = &cobra.Command{
 	Use:   "write",
 	Short: "Send a zone write command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -127,7 +126,7 @@ var zoneWriteCmd = &cobra.Command{
 	},
 }
 
-var zoneNsecGenerateCmd = &cobra.Command{
+var xxxzoneNsecGenerateCmd = &cobra.Command{
 	Use:   "generate",
 	Short: "Send an NSEC generate command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -154,7 +153,7 @@ var zoneNsecGenerateCmd = &cobra.Command{
 	},
 }
 
-var zoneNsecShowCmd = &cobra.Command{
+var xxxzoneNsecShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Send an NSEC show command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -185,7 +184,7 @@ var zoneNsecShowCmd = &cobra.Command{
 	},
 }
 
-var zoneFreezeCmd = &cobra.Command{
+var xxxzoneFreezeCmd = &cobra.Command{
 	Use:   "freeze",
 	Short: "Tell tdnsd to freeze a zone (i.e. no longer accept changes to the zone data)",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -212,7 +211,7 @@ var zoneFreezeCmd = &cobra.Command{
 	},
 }
 
-var zoneThawCmd = &cobra.Command{
+var xxxzoneThawCmd = &cobra.Command{
 	Use:   "thaw",
 	Short: "Tell tdnsd to thaw a zone (i.e. accept changes to the zone data again)",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -239,14 +238,14 @@ var zoneThawCmd = &cobra.Command{
 	},
 }
 
-var zoneCmd = &cobra.Command{
+var xxxzoneCmd = &cobra.Command{
 	Use:   "zone",
 	Short: "Prefix command, not useable by itself",
 }
 
 var showhdr, showfile, shownotify, showprimary bool
 
-var zoneListCmd = &cobra.Command{
+var xxxzoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Send an zone list command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -300,7 +299,7 @@ var zoneListCmd = &cobra.Command{
 	},
 }
 
-var zoneSerialBumpCmd = &cobra.Command{
+var xxxzoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -320,7 +319,7 @@ var zoneSerialBumpCmd = &cobra.Command{
 	},
 }
 
-var zoneSerialBbumpNGCmd = &cobra.Command{
+var xxxzoneSerialBbumpNGCmd = &cobra.Command{
 	Use:   "bumpng",
 	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -346,7 +345,7 @@ var zoneSerialBbumpNGCmd = &cobra.Command{
 	},
 }
 
-var debugRRsetCmd = &cobra.Command{
+var xxxxdebugRRsetCmd = &cobra.Command{
 	Use: "rrset",
 
 	Run: func(cmd *cobra.Command, args []string) {
@@ -378,7 +377,7 @@ var debugRRsetCmd = &cobra.Command{
 	},
 }
 
-var debugValidateRRsetCmd = &cobra.Command{
+var xxxdebugValidateRRsetCmd = &cobra.Command{
 	Use: "validate-rrset",
 
 	Run: func(cmd *cobra.Command, args []string) {
@@ -414,7 +413,7 @@ var debugValidateRRsetCmd = &cobra.Command{
 	},
 }
 
-var debugLAVCmd = &cobra.Command{
+var xxxdebugLAVCmd = &cobra.Command{
 	Use:   "lav",
 	Short: "Request tdnsd to lookup and validate a child RRset",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -442,7 +441,7 @@ var debugLAVCmd = &cobra.Command{
 
 	},
 }
-var debugShowTACmd = &cobra.Command{
+var xxxdebugShowTACmd = &cobra.Command{
 	Use:   "show-ta",
 	Short: "Request tdnsd to return known trust anchors",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -476,7 +475,7 @@ var debugShowTACmd = &cobra.Command{
 	},
 }
 
-var debugShowRRsetCacheCmd = &cobra.Command{
+var xxxdebugShowRRsetCacheCmd = &cobra.Command{
 	Use:   "show-rrsetcache",
 	Short: "Request tdnsd to return cached RRsets",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -502,22 +501,8 @@ var debugShowRRsetCacheCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(stopCmd, debugCmd, zoneCmd)
+	rootCmd.AddCommand(stopCmd)
 
-	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd, zoneSerialBbumpNGCmd)
-	zoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
-
-	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
-	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
-
-	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
-	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
-	zoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
-
-	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
-	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
-	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
-	zoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
 	// ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
 	// ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
 	// ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
@@ -580,33 +565,4 @@ func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResp
 	}
 
 	return cr, nil
-}
-
-func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
-
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
-
-	status, buf, err := api.Post("/debug", bytebuf.Bytes())
-	if err != nil {
-		log.Fatalf("error from api post: %v", err)
-
-	}
-	if verbose {
-		fmt.Printf("Status: %d\n", status)
-	}
-
-	var dr tdns.DebugResponse
-
-	err = json.Unmarshal(buf, &dr)
-	if err != nil {
-		log.Fatalf("error from unmarshal: %v", err)
-	}
-
-	if dr.Error {
-		fmt.Printf("error: %s", dr.ErrorMsg)
-	}
-
-	fmt.Printf("Message: %s\n", dr.Msg)
-	return dr
 }

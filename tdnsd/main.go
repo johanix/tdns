@@ -143,7 +143,7 @@ func main() {
 	go UpdateHandler(&conf)
 	go NotifyHandler(&conf)
 	go DnsEngine(&conf)
-	go DelegationSyncher(&conf)
+	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
 
 	mainloop(&conf)
 }

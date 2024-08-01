@@ -298,3 +298,27 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 
 	return nil
 }
+
+func (zd *ZoneData) ShowNsecChain() ([]string, error) {
+	var nsecrrs []string
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return nsecrrs, err
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return nsecrrs, err
+		}
+		if name != zd.ZoneName {
+			rrs := owner.RRtypes[dns.TypeNSEC].RRs
+			if len(rrs) == 1 {
+				nsecrrs = append(nsecrrs, rrs[0].String())
+			}
+		}
+	}
+
+	return nsecrrs, nil
+}
