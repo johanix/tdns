@@ -162,6 +162,22 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 	// 	return err
 	// }
 
+	var delegations []string
+	for _, name := range names {
+		if name == zd.ZoneName {
+			continue
+		}
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return err
+		}
+		if _, exist := owner.RRtypes[dns.TypeNS]; exist {
+			delegations = append(delegations, name)
+		}
+	}
+
+	log.Printf("SignZone: Zone %s has the delegations: %v", zd.ZoneName, delegations)
+
 	for _, name := range names {
 		owner, err := zd.GetOwner(name)
 		if err != nil {
@@ -171,6 +187,24 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		for rrt, rrset := range owner.RRtypes {
 			if rrt == dns.TypeRRSIG {
 				continue // should not happen
+			}
+			if rrt == dns.TypeNS && name != zd.ZoneName {
+				continue // dont' sign delegations
+			}
+			// XXX: What is the best way to identify that an RR is a glue record?
+			var wasglue bool
+			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
+				log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
+				for _, del := range delegations {
+					if strings.HasSuffix(name, del) {
+						log.Printf("SignZone: not signing glue record %s %s for delegation %s", name, dns.TypeToString[uint16(rrt)], del)
+						wasglue = true
+						continue
+					}
+				}
+			}
+			if wasglue {
+				continue
 			}
 			owner.RRtypes[rrt] = MaybeSignRRset(rrset, zd.ZoneName)
 		}
