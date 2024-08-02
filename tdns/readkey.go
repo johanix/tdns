@@ -4,13 +4,9 @@
 package tdns
 
 import (
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
-	"log"
 
 	"fmt"
 	"os"
@@ -46,7 +42,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		return nil, fmt.Errorf("Error: filename %s does not end in either .key or .private", filename)
 	}
 
-	file, err := os.Open(pubfile)
+	_, err := os.Open(pubfile)
 	if err != nil {
 		return nil, fmt.Errorf("Error opening public key file '%s': %v", pubfile, err)
 	}
@@ -55,71 +51,80 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		return nil, fmt.Errorf("Error reading public key file '%s': %v", pubfile, err)
 	}
 	pubkey := string(pubkeybytes)
-
-	file, err = os.Open(privfile)
-	if err != nil {
-		return nil, fmt.Errorf("Error opening private key file '%s': %v", privfile, err)
-	}
-
-	rr, err := dns.NewRR(pubkey)
+	_, err = dns.NewRR(pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
 	}
 
-	var pkc PrivateKeyCache
-
-	switch rr.(type) {
-	case *dns.DNSKEY:
-		rrk := rr.(*dns.DNSKEY)
-		pkc.K, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
-		if err != nil {
-			return nil, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
-		}
-		pkc.KeyType = dns.TypeDNSKEY
-		pkc.Algorithm = rrk.Algorithm
-		pkc.DnskeyRR = *rrk
-		pkc.PrivateKey = rrk.PrivateKeyString(pkc.K)
-		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
-
-	case *dns.KEY:
-		rrk := rr.(*dns.KEY)
-		pkc.K, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
-		if err != nil {
-			return nil, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
-		}
-		pkc.KeyType = dns.TypeKEY
-		pkc.Algorithm = rrk.Algorithm
-		pkc.KeyRR = *rrk
-		pkc.PrivateKey = rrk.DNSKEY.PrivateKeyString(pkc.K)
-		fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
-		fmt.Printf("[readkey]PrivateKey: %s\n", pkc.PrivateKey)
-
-	default:
-		return nil, fmt.Errorf("Error: rr is of type %v", "foo")
-	}
-
-	var bpk BindPrivateKey
-	err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
+	_, err = os.Open(privfile)
 	if err != nil {
-		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
+		return nil, fmt.Errorf("Error opening private key file '%s': %v", privfile, err)
 	}
-
-	log.Printf("ReadPrivateKey: pkc.PrivateKey: %s", pkc.PrivateKey)
-	log.Printf("ReadPrivateKey: bpk.PrivateKey: %s", bpk.PrivateKey)
-	pkc.PrivateKey = bpk.PrivateKey
-
-	switch pkc.Algorithm {
-	case dns.RSASHA256, dns.RSASHA512:
-		pkc.CS = pkc.K.(*rsa.PrivateKey)
-	case dns.ED25519:
-		pkc.CS = pkc.K.(ed25519.PrivateKey)
-	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
-		pkc.CS = pkc.K.(*ecdsa.PrivateKey)
-	default:
-		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
+	privkeybytes, err := os.ReadFile(privfile)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading private key file '%s': %v", privfile, err)
 	}
+	privkey := string(privkeybytes)
 
-	return &pkc, err
+	pkc, err := PrepareKeyCache(privkey, pubkey)
+	if err != nil {
+		return nil, fmt.Errorf("Error preparing key cache: %v", err)
+	}
+	return pkc, nil
+
+	// var pkc PrivateKeyCache
+
+	//	switch rr.(type) {
+	//	case *dns.DNSKEY:
+	//		rrk := rr.(*dns.DNSKEY)
+	//		pkc.K, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
+	//		if err != nil {
+	//			return nil, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
+	//		}
+	//		pkc.KeyType = dns.TypeDNSKEY
+	//		pkc.Algorithm = rrk.Algorithm
+	//		pkc.KeyId = rrk.KeyTag()
+	//		pkc.DnskeyRR = *rrk
+	//		pkc.PrivateKey = rrk.PrivateKeyString(pkc.K)
+
+	//	case *dns.KEY:
+	//		rrk := rr.(*dns.KEY)
+	//		pkc.K, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
+	//		if err != nil {
+	//			return nil, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
+	//		}
+	//		pkc.KeyType = dns.TypeKEY
+	//		pkc.Algorithm = rrk.Algorithm
+	//		pkc.KeyId = rrk.KeyTag()
+	//		pkc.KeyRR = *rrk
+	//		pkc.PrivateKey = rrk.PrivateKeyString(pkc.K)
+
+	//	default:
+	//		return nil, fmt.Errorf("Error: rr is of type %v", "foo")
+	//	}
+
+	//	var bpk BindPrivateKey
+	//	err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
+	//	if err != nil {
+	//		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
+	//	}
+
+	//	log.Printf("ReadPrivateKey: pkc.PrivateKey: %s", pkc.PrivateKey)
+	//	log.Printf("ReadPrivateKey: bpk.PrivateKey: %s", bpk.PrivateKey)
+	//	pkc.PrivateKey = bpk.PrivateKey
+
+	//	switch pkc.Algorithm {
+	//	case dns.RSASHA256, dns.RSASHA512:
+	//		pkc.CS = pkc.K.(*rsa.PrivateKey)
+	//	case dns.ED25519:
+	//		pkc.CS = pkc.K.(ed25519.PrivateKey)
+	//	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
+	//		pkc.CS = pkc.K.(*ecdsa.PrivateKey)
+	//	default:
+	//		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
+	//	}
+
+	// return &pkc, err
 }
 
 func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
@@ -170,25 +175,34 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 	return rr, ktype, alg, err
 }
 
-func PrepareKeyCache(privkey, pubkey, algorithm string) (*PrivateKeyCache, error) {
+func PrivKeyToBindFormat(privkey, algorithm string) (string, error) {
+	alg, algexist := dns.StringToAlgorithm[strings.ToUpper(algorithm)]
+	if !algexist {
+		return "", fmt.Errorf("Error: algorithm %s is unknown", algorithm)
+	}
+	foo := fmt.Sprintf(`Private-key-format: v1.3
+	Algorithm: %d (%s)
+	PrivateKey: %s`, alg, algorithm, privkey)
+	return foo, nil
+}
+
+// Note that the private key must be in the "BIND Private-key-format 1.3" format while
+// the pubkey is in a string representation of either a DNS KEY RR or a DNSKEY RR.
+// This function is extremely similar to the latter part of ReadPrivateKey() above, the
+// difference being that here we read the private key from a string, whereas in the
+// ReadPrivateKey() function we read it from a file. Yes, that should be unified.
+func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
 	}
-	//safeprivkey := fmt.Sprintf("%s*****%s", privkey[0:5], privkey[len(privkey)-5:])
-	// log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, privkey: %s, pubkey: %s",
-	// 	rr.Header().Name, algorithm, safeprivkey, pubkey)
-
-	src := fmt.Sprintf(`Private-key-format: v1.3
-Algorithm: %d (%s)
-PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 
 	var pkc PrivateKeyCache
 
 	switch rr.(type) {
 	case *dns.DNSKEY:
 		rrk := rr.(*dns.DNSKEY)
-		pkc.K, err = rrk.NewPrivateKey(src)
+		pkc.K, err = rrk.NewPrivateKey(privkey)
 		if err != nil {
 			return nil, fmt.Errorf("Error reading private key file '%s': %v", "foo", err)
 		}
@@ -199,9 +213,9 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 
 	case *dns.KEY:
 		rrk := rr.(*dns.KEY)
-		pkc.K, err = rrk.NewPrivateKey(src)
+		pkc.K, err = rrk.NewPrivateKey(privkey)
 		if err != nil {
-			return nil, fmt.Errorf("PrepareKey: error parsing KEY private key: %v", err)
+			return nil, fmt.Errorf("PrepareKeyCache: error parsing KEY private key: %v", err)
 		}
 		pkc.KeyType = dns.TypeKEY
 		pkc.Algorithm = rrk.Algorithm
@@ -211,6 +225,15 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 	default:
 		return nil, fmt.Errorf("rr is of type %v", "foo")
 	}
+
+	var bpk BindPrivateKey
+	// err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
+	err = yaml.Unmarshal([]byte(privkey), &bpk)
+	if err != nil {
+		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
+	}
+
+	pkc.PrivateKey = bpk.PrivateKey
 
 	switch pkc.Algorithm {
 	case dns.RSASHA256, dns.RSASHA512:
@@ -222,46 +245,11 @@ PrivateKey: %s`, dns.StringToAlgorithm[algorithm], algorithm, privkey)
 	default:
 		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
 	}
-	// log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d, privkey: %s, pubkey: %s",
-	// 	rr.Header().Name, algorithm, pkc.KeyId, safeprivkey, pubkey)
+
+	//	log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d,\nprivkey: %s,\npubkey: %s\npkc.K: %v",
+	//		rr.Header().Name, dns.AlgorithmToString[pkc.Algorithm], pkc.KeyId, pkc.PrivateKey, pubkey, pkc.K)
 
 	return &pkc, err
-}
-
-// XXX: This is a copy of the PrivateKeyToString() in crypto/x509/x509.go
-func PrivateKeyToString(privkey crypto.PrivateKey) (string, error) {
-	var pemBlock *pem.Block
-
-	switch k := privkey.(type) {
-	case *rsa.PrivateKey:
-		pemBlock = &pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(k),
-		}
-	case *ecdsa.PrivateKey:
-		der, err := x509.MarshalECPrivateKey(k)
-		if err != nil {
-			return "", fmt.Errorf("error marshaling ECDSA private key: %v", err)
-		}
-		pemBlock = &pem.Block{
-			Type:  "EC PRIVATE KEY",
-			Bytes: der,
-		}
-	case ed25519.PrivateKey:
-		der, err := x509.MarshalPKCS8PrivateKey(k)
-		if err != nil {
-			return "", fmt.Errorf("error marshaling Ed25519 private key: %v", err)
-		}
-		pemBlock = &pem.Block{
-			Type:  "PRIVATE KEY",
-			Bytes: der,
-		}
-	default:
-		return "", fmt.Errorf("unsupported private key type")
-	}
-
-	// return string(pem.EncodeToMemory(pemBlock)), nil
-	return string(pemBlock.Bytes), nil
 }
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {

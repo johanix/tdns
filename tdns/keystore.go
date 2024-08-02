@@ -377,7 +377,12 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 			return nil, err
 		}
 		keyfound = true
-		pkc, err := PrepareKeyCache(privatekey, keyrrstr, algorithm)
+		bpk, err := PrivKeyToBindFormat(privatekey, algorithm)
+		if err != nil {
+			log.Printf("Error from tdns.PrivKeyToBindFormat(): %v", err)
+			return nil, err
+		}
+		pkc, err := PrepareKeyCache(bpk, keyrrstr)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
 			return nil, err
@@ -434,7 +439,12 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 			return nil, err
 		}
 
-		pkc, err := PrepareKeyCache(privatekey, keyrrstr, algorithm)
+		bpk, err := PrivKeyToBindFormat(privatekey, algorithm)
+		if err != nil {
+			log.Printf("Error from tdns.PrivkeyToBindFormat(): %v", err)
+			return nil, err
+		}
+		pkc, err := PrepareKeyCache(bpk, keyrrstr)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKey(): %v", err)
 			return nil, err

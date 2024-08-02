@@ -16,6 +16,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var debugQname, debugQtype string
@@ -25,6 +26,49 @@ var debugCmd = &cobra.Command{
 	Short: "A brief description of your command",
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("debug called")
+	},
+}
+
+var debugSig0Cmd = &cobra.Command{
+	Use:   "sig0",
+	Short: "A brief description of your command",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("debug sig0 called")
+	},
+}
+
+var debugSig0GenerateCmd = &cobra.Command{
+	Use: "generate",
+
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		PrepArgs("algorithm")
+		PrepArgs("rrtype")
+
+		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+		if err != nil {
+			fmt.Printf("Error from NewKeyDB(): %v\n", err)
+			os.Exit(1)
+		}
+
+		rrtype := dns.StringToType[strings.ToUpper(tdns.Globals.Rrtype)]
+		algorithm := dns.StringToAlgorithm[strings.ToUpper(tdns.Globals.Algorithm)]
+
+		fmt.Printf("Calling generate sig0 with zone: %s algorithm: %s rrtype: %s\n",
+			tdns.Globals.Zonename, tdns.Globals.Algorithm, tdns.Globals.Rrtype)
+
+		pkc, err := kdb.GenerateKeypair(tdns.Globals.Zonename, "tdns-cli", rrtype, algorithm)
+		if err != nil {
+			fmt.Printf("Error: %s\n", err)
+			os.Exit(1)
+		}
+
+		var rr dns.RR
+		rr = &pkc.KeyRR
+		if rrtype == dns.TypeDNSKEY {
+			rr = &pkc.DnskeyRR
+		}
+		fmt.Printf("Generated keypair:\n* Private key: %s\n* Public key: %s\n* KeyID: %d\n", pkc.PrivateKey, rr.String(), pkc.KeyId)
 	},
 }
 
@@ -187,9 +231,15 @@ func init() {
 	rootCmd.AddCommand(stopCmd, debugCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
+	debugCmd.AddCommand(debugSig0Cmd)
+	debugSig0Cmd.AddCommand(debugSig0GenerateCmd)
 
 	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
 	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
+
+	defalg := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", defalg, "algorithm to use for SIG(0)")
+	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Rrtype, "rrtype", "r", "", "rrtype to use for SIG(0)")
 
 	// ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
 	// ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")

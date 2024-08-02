@@ -71,7 +71,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 					log.Printf("DelegationSyncher: Unknown keygen algorithm: \"%s\"", algstr)
 					continue
 				}
-				pkc, err := kdb.GenerateKeypair(zd.ZoneName, dns.TypeKEY, alg) //
+				pkc, err := kdb.GenerateKeypair(zd.ZoneName, "del-sync", dns.TypeKEY, alg) //
 				if err != nil {
 					zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 					continue

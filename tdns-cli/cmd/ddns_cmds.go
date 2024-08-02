@@ -296,6 +296,32 @@ func PrepArgs(required ...string) {
 				os.Exit(1)
 			}
 
+		case "algorithm":
+			if tdns.Globals.Algorithm == "" {
+				fmt.Printf("Error: algorithm not specified\n")
+				os.Exit(1)
+			}
+			_, exist := dns.StringToAlgorithm[strings.ToUpper(tdns.Globals.Algorithm)]
+			if !exist {
+				fmt.Printf("Error: algorithm \"%s\" is not known\n", tdns.Globals.Algorithm)
+				os.Exit(1)
+			}
+
+		case "rrtype":
+			if tdns.Globals.Rrtype == "" {
+				fmt.Printf("Error: rrtype not specified\n")
+				os.Exit(1)
+			}
+			rrtype, exist := dns.StringToType[strings.ToUpper(tdns.Globals.Rrtype)]
+			if !exist {
+				fmt.Printf("Error: rrtype \"%s\" is not known\n", tdns.Globals.Rrtype)
+				os.Exit(1)
+			}
+			if rrtype != dns.TypeKEY && rrtype != dns.TypeDNSKEY {
+				fmt.Printf("Error: rrtype \"%s\" is not KEY or DNSKEY\n", tdns.Globals.Rrtype)
+				os.Exit(1)
+			}
+
 		default:
 			fmt.Printf("Unknown required argument: \"%s\"\n", arg)
 			os.Exit(1)

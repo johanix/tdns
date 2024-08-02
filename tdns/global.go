@@ -17,6 +17,8 @@ type GlobalStuff struct {
 	Api         *ApiClient
 	PingCount   int
 	Slurp       bool
+	Algorithm   string
+	Rrtype      string
 }
 
 var Globals = GlobalStuff{
