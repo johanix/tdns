@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -40,6 +42,34 @@ type TmpSig0Key struct {
 	Key  string
 }
 
+func GenKeyLifetime(lifetime, sigvalidity string) tdns.KeyLifetime {
+	var lifetime_secs, sigvalidity_secs time.Duration
+	var err error
+
+	switch lifetime {
+	case "forever":
+		lifetime_secs = time.Duration(10000) * time.Hour
+
+	case "none":
+		lifetime_secs = time.Duration(0)
+
+	default:
+		lifetime_secs, err = time.ParseDuration(lifetime)
+		if err != nil {
+			log.Fatalf("Error from ParseDuration: %v", err)
+		}
+	}
+
+	sigvalidity_secs, err = time.ParseDuration(sigvalidity)
+	if err != nil {
+		log.Fatalf("Error from ParseDuration: %v", err)
+	}
+	return tdns.KeyLifetime{
+		Lifetime:    uint32(lifetime_secs.Seconds()),
+		SigValidity: uint32(sigvalidity_secs.Seconds()),
+	}
+}
+
 func ParseConfig(conf *Config) error {
 	log.Printf("Enter ParseConfig")
 	viper.SetConfigFile(tdns.DefaultCfgFile)
@@ -65,6 +95,27 @@ func ParseConfig(conf *Config) error {
 	if err != nil {
 		log.Fatalf("Error unmarshalling config into struct: %v", err)
 	}
+
+	dump.P(conf.DnssecPolicies)
+
+	conf.Internal.DnssecPolicies = make(map[string]tdns.DnssecPolicy)
+
+	for name, dp := range conf.DnssecPolicies {
+		tmp := tdns.DnssecPolicy{
+			Name:      name,
+			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
+			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
+			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
+			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+		}
+		if tmp.Algorithm == 0 {
+			log.Printf("Error: DnssecPolicy %s has unknown algorithm: %s. Policy ignored.", name, dp.Algorithm)
+			continue
+		}
+		conf.Internal.DnssecPolicies[name] = tmp
+	}
+
+	dump.P(conf.Internal.DnssecPolicies)
 
 	// If a zone config file is found, read it in.
 	cfgdata, err := os.ReadFile(tdns.ZonesCfgFile)
@@ -192,6 +243,14 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 			delete(zones, zname)
 		}
 
+		dump.P(zconf)
+
+		_, exist = conf.DnssecPolicies[zconf.DnssecPolicy]
+		if !exist {
+			log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Ignored.", zname, zconf.DnssecPolicy)
+			zconf.DnssecPolicy = ""
+		}
+
 		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
 			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
 
@@ -254,13 +313,6 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 			}
 		}
 
-		//			switch rrt {
-		//			case "A", "AAAA", "MX", "TXT", "NS", "DS", "KEY":
-		//				rrtypes[dns.StringToType[rrt]] = true
-		//			default:
-		//				log.Fatalf("Zone %s: Unsupported RRtype in update policy: \"%s\"", zname, rrt)
-		//			}
-
 		policy := tdns.UpdatePolicy{
 			Child: tdns.UpdatePolicyDetail{
 				Type:         zconf.UpdatePolicy.Child.Type,
@@ -284,6 +336,7 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 			Zonefile:     zconf.Zonefile,
 			Options:      options,
 			UpdatePolicy: policy,
+			DnssecPolicy: zconf.DnssecPolicy,
 		}
 	}
 
@@ -322,6 +375,10 @@ func ExpandTemplate(zconf tdns.ZoneConf, tmpl tdns.TemplateConf) (tdns.ZoneConf,
 	if (tmpl.UpdatePolicy.Child.Type != "" && len(tmpl.UpdatePolicy.Child.RRtypes) > 0) ||
 		(tmpl.UpdatePolicy.Zone.Type != "" && len(tmpl.UpdatePolicy.Zone.RRtypes) > 0) {
 		zconf.UpdatePolicy = tmpl.UpdatePolicy
+	}
+
+	if tmpl.DnssecPolicy != "" {
+		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
 	return zconf, nil

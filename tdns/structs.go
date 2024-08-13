@@ -4,6 +4,8 @@
 package tdns
 
 import (
+	"crypto"
+	"database/sql"
 	"log"
 	"net/http"
 	"sync"
@@ -67,6 +69,7 @@ type ZoneData struct {
 	Children         map[string]*ChildDelegationData
 	Options          map[string]bool
 	UpdatePolicy     UpdatePolicy
+	DnssecPolicy     *DnssecPolicy
 	KeyDB            *KeyDB
 }
 
@@ -82,6 +85,7 @@ type ZoneConf struct {
 	Frozen       bool // true if zone is frozen; not a config param
 	Dirty        bool // true if zone has been modified; not a config param
 	UpdatePolicy UpdatePolicyConf
+	DnssecPolicy string
 	Template     string
 }
 
@@ -94,6 +98,7 @@ type TemplateConf struct {
 	Notify       []string
 	Options      []string
 	UpdatePolicy UpdatePolicyConf
+	DnssecPolicy string
 }
 
 type UpdatePolicyConf struct {
@@ -120,6 +125,40 @@ type UpdatePolicyDetail struct {
 	RRtypes      map[uint16]bool
 	KeyBootstrap []string
 	KeyUpload    string
+}
+
+// DnssecPolicyConf should match the configuration
+type DnssecPolicyConf struct {
+	Name      string
+	Algorithm string
+
+	KSK struct {
+		Lifetime    string
+		SigValidity string
+	}
+	ZSK struct {
+		Lifetime    string
+		SigValidity string
+	}
+	CSK struct {
+		Lifetime    string
+		SigValidity string
+	}
+}
+
+type KeyLifetime struct {
+	Lifetime    uint32
+	SigValidity uint32
+}
+
+// DnssecPolicy is what is actually used; it is created from the corresponding DnssecPolicyConf
+type DnssecPolicy struct {
+	Name      string
+	Algorithm uint8
+
+	KSK KeyLifetime
+	ZSK KeyLifetime
+	CSK KeyLifetime
 }
 
 type Ixfr struct {
@@ -167,6 +206,7 @@ type KeystorePost struct {
 	Keyname         string
 	Keyid           uint16
 	Flags           uint16
+	KeyType         string
 	Algorithm       uint8 // RSASHA256 | ED25519 | etc.
 	PrivateKey      string
 	KeyRR           string
@@ -326,6 +366,7 @@ type ZoneRefresher struct {
 	Zonefile     string
 	Options      map[string]bool
 	UpdatePolicy UpdatePolicy
+	DnssecPolicy string
 	Force        bool // force refresh, ignoring SOA serial
 	Response     chan RefresherResponse
 }
@@ -482,4 +523,42 @@ type NotifyStatus struct {
 	Error         bool
 	ErrorMsg      string
 	Status        bool
+}
+
+// Migrating all DB access to own interface to be able to have local receiver functions.
+type PrivateKeyCache struct {
+	K          crypto.PrivateKey
+	PrivateKey string // This is only used when reading from file with ReadKeyNG()
+	CS         crypto.Signer
+	RR         dns.RR
+	KeyType    uint16
+	Algorithm  uint8
+	KeyId      uint16
+	KeyRR      dns.KEY
+	DnskeyRR   dns.DNSKEY
+}
+
+type Sig0ActiveKeys struct {
+	Keys []*PrivateKeyCache
+}
+
+type DnssecActiveKeys struct {
+	KSKs []*PrivateKeyCache
+	ZSKs []*PrivateKeyCache
+}
+
+type KeyDB struct {
+	DB *sql.DB
+	mu sync.Mutex
+	// Sig0Cache   map[string]*Sig0KeyCache
+	Sig0Cache   map[string]*Sig0ActiveKeys
+	DnssecCache map[string]*DnssecActiveKeys // map[zonename]*DnssecActiveKeys
+	Ctx         string
+	UpdateQ     chan UpdateRequest
+}
+
+type Tx struct {
+	*sql.Tx
+	KeyDB   *KeyDB
+	context string
 }

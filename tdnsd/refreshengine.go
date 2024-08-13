@@ -98,6 +98,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
 					// XXX: We want to do this in parallel
 					// go func() {
+					dp, _ := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					zd := &tdns.ZoneData{
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,
@@ -108,11 +109,12 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,
 						UpdatePolicy:     zr.UpdatePolicy,
+						DnssecPolicy:     &dp,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[tdns.OwnerData](),
 						KeyDB:            conf.Internal.KeyDB,
 						// XXX: I think this is going away:
-						Children: map[string]*tdns.ChildDelegationData{},
+						// Children: map[string]*tdns.ChildDelegationData{},
 					}
 					updated, err = zd.Refresh(zr.Force)
 					if err != nil {
@@ -147,6 +149,11 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Upstream:    upstream,
 						Downstreams: downstreams,
 					})
+
+					err = zd.SetupZoneSigning(conf.Internal.ResignQ)
+					if err != nil {
+						log.Printf("Error from SetupZoneSigning(%s): %v", zone, err)
+					}
 
 					// This is a new zone being added to the server. Let's see if the zone
 					// config should cause any specific changes to the zone data to be made.

@@ -90,19 +90,6 @@ func initConfig() {
 	}
 
 	ValidateConfig(nil, cfgFileUsed) // will terminate on error
-
-	err := tdns.RegisterNotifyRR()
-	if err != nil {
-		fmt.Printf("Error registering NOTIFY RR type: %v\n", err)
-	}
-	err = tdns.RegisterDsyncRR()
-	if err != nil {
-		fmt.Printf("Error registering DSYNC RR type: %v\n", err)
-	}
-	err = tdns.RegisterDelegRR()
-	if err != nil {
-		fmt.Printf("Error registering DELEG RR type: %v\n", err)
-	}
 }
 
 func initApi() {

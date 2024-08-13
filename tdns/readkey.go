@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"log"
 
 	"fmt"
 	"os"
@@ -180,9 +181,11 @@ func PrivKeyToBindFormat(privkey, algorithm string) (string, error) {
 	if !algexist {
 		return "", fmt.Errorf("Error: algorithm %s is unknown", algorithm)
 	}
-	foo := fmt.Sprintf(`Private-key-format: v1.3
-	Algorithm: %d (%s)
-	PrivateKey: %s`, alg, algorithm, privkey)
+	foo := fmt.Sprintf(
+		`Private-key-format: v1.3
+Algorithm: %d (%s)
+PrivateKey: %s`,
+		alg, algorithm, privkey)
 	return foo, nil
 }
 
@@ -204,6 +207,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		rrk := rr.(*dns.DNSKEY)
 		pkc.K, err = rrk.NewPrivateKey(privkey)
 		if err != nil {
+			log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
 			return nil, fmt.Errorf("Error reading private key file '%s': %v", "foo", err)
 		}
 		pkc.KeyType = dns.TypeDNSKEY

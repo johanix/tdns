@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"fmt"
 	"log"
@@ -44,13 +45,11 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 	var adds, removes []dns.RR
 
 	if gennewkey {
-		newpkc, err := kdb.GenerateKeypair(Globals.Zonename, "tdnsd", dns.TypeKEY, pkc.Algorithm)
+		newpkc, msg, err := kdb.GenerateKeypair(Globals.Zonename, "tdnsd", "active", dns.TypeKEY, pkc.Algorithm, "", nil) // nil = no tx
 		if err != nil {
 			return fmt.Errorf("Error from GenerateSigningKey: %v", err)
 		}
-		// _ = newcs // XXX: should store the cs and new private key in the KeyDB.
-		// _ = newpriv
-		fmt.Printf("new key: %s\n", newpkc.KeyRR.String())
+		log.Printf(msg)
 
 		adds = []dns.RR{&newpkc.KeyRR}
 		removes = []dns.RR{&pkc.KeyRR}
@@ -98,16 +97,28 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 // XXX: FIXME: This is not yet ready to generate DNSSEC keys, because in the DNSSEC case we also need the
 //
 //	flags field, which is not yet set here.
-func (kdb *KeyDB) GenerateKeypair(owner, creator string, rrtype uint16, alg uint8) (*PrivateKeyCache, error) {
+func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *Tx) (*PrivateKeyCache, string, error) {
+	if _, exist := dns.AlgorithmToString[alg]; !exist {
+		return nil, "", fmt.Errorf("GenerateKeypair: Error: unknown algorithm: %d", alg)
+	}
+
+	if rrtype == dns.TypeDNSKEY && !slices.Contains([]string{"ZSK", "KSK", "CSK"}, keytype) {
+		return nil, "", fmt.Errorf("GenerateKeypair: Error: unknown key type: %s", keytype)
+	}
+
 	var privkey crypto.PrivateKey
 	var err error
 
 	if rrtype != dns.TypeKEY && rrtype != dns.TypeDNSKEY {
-		return nil, fmt.Errorf("Error: rrtype must be KEY or DNSKEY")
+		return nil, "", fmt.Errorf("Error: rrtype must be KEY or DNSKEY")
 	}
 
 	var pkc *PrivateKeyCache
 	mode := viper.GetString("delegationsync.child.update.keygen.mode")
+	if rrtype == dns.TypeDNSKEY {
+		mode = viper.GetString("resignerengine.keygen.mode")
+	}
+	mode = strings.ToLower(mode)
 
 	var bits int
 	switch alg {
@@ -121,23 +132,43 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator string, rrtype uint16, alg uint
 
 	switch mode {
 	case "internal":
-		nkey := new(dns.KEY)
-		nkey.Hdr.Name = owner
-		nkey.Hdr.Rrtype = dns.TypeKEY
-		nkey.Hdr.Class = dns.ClassINET
-		nkey.Algorithm = alg
-		nkey.Flags = 256 // XXX: FIXME: This is hardcoded.
-		nkey.Protocol = 3
-		nkey.Hdr.Ttl = 3600
-		privkey, err = nkey.Generate(bits)
+		var nkey dns.RR
+
+		switch rrtype {
+		case dns.TypeKEY:
+			nkey = new(dns.KEY)
+			nkey.(*dns.KEY).Algorithm = alg
+			nkey.(*dns.KEY).Flags = 256
+			nkey.(*dns.KEY).Protocol = 3
+		case dns.TypeDNSKEY:
+			nkey = new(dns.DNSKEY)
+			nkey.(*dns.DNSKEY).Algorithm = alg
+			nkey.(*dns.DNSKEY).Flags = 256
+			if keytype == "KSK" || keytype == "CSK" {
+				nkey.(*dns.DNSKEY).Flags = 257
+			}
+			nkey.(*dns.DNSKEY).Protocol = 3
+		default:
+			return nil, "", fmt.Errorf("Error: rrtype must be KEY or DNSKEY")
+		}
+
+		nkey.Header().Name = owner
+		nkey.Header().Rrtype = rrtype
+		nkey.Header().Class = dns.ClassINET
+		nkey.Header().Ttl = 3600
+
+		switch rrtype {
+		case dns.TypeKEY:
+			privkey, err = nkey.(*dns.KEY).Generate(bits)
+		case dns.TypeDNSKEY:
+			privkey, err = nkey.(*dns.DNSKEY).Generate(bits)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("Error from nkey.Generate: %v", err)
+			return nil, "", fmt.Errorf("Error from nkey.Generate: %v", err)
 		}
 
 		// kbasename := fmt.Sprintf("K%s+%03d+%03d", owner, nkey.Algorithm, nkey.KeyTag())
 		// log.Printf("Key basename: %s", kbasename)
-
-		nkey.Hdr.Rrtype = rrtype
 
 		var pk crypto.PrivateKey
 		switch privkey.(type) {
@@ -148,21 +179,28 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator string, rrtype uint16, alg uint
 		case *ecdsa.PrivateKey:
 			pk = privkey.(*ecdsa.PrivateKey)
 		default:
-			return nil, fmt.Errorf("Error: unknown private key type: %T", privkey)
+			return nil, "", fmt.Errorf("Error: unknown private key type: %T", privkey)
 		}
-		privkeystr := nkey.PrivateKeyString(pk) // Convert to BIND private key format
+
+		var privkeystr string
+
+		switch rrtype {
+		case dns.TypeKEY:
+			privkeystr = nkey.(*dns.KEY).PrivateKeyString(pk) // Convert to BIND private key format
+		case dns.TypeDNSKEY:
+			privkeystr = nkey.(*dns.DNSKEY).PrivateKeyString(pk) // Convert to BIND private key format
+		}
 		fmt.Printf("privkeystr: %s\n", privkeystr)
 
 		pkc, err = PrepareKeyCache(privkeystr, nkey.String())
 		if err != nil {
-			return nil, fmt.Errorf("Error from PrepareKeyCache: %v", err)
+			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
 		}
 
 	case "external":
-		// keygenprog := viper.GetString("roll.keygen.generator")
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
 		if keygenprog == "" {
-			return nil, fmt.Errorf("Error: key generator program not specified.")
+			return nil, "", fmt.Errorf("Error: key generator program not specified.")
 		}
 
 		algstr := dns.AlgorithmToString[alg]
@@ -172,7 +210,12 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator string, rrtype uint16, alg uint
 		if rrtype == dns.TypeDNSKEY {
 			keytype = ""
 		}
-		cmdline := fmt.Sprintf("%s -K %s -a %s %s -n ZONE %s", keygenprog, keydir, algstr, keytype, owner)
+
+		flags := ""
+		if keytype != "ZSK" {
+			flags = "-f KSK"
+		}
+		cmdline := fmt.Sprintf("%s -K %s -a %s %s %s -n ZONE %s", keygenprog, keydir, algstr, keytype, flags, owner)
 		// fmt.Printf("cmd: %s\n", cmdline)
 		cmdsl := strings.Fields(cmdline)
 		command := exec.Command(cmdsl[0], cmdsl[1:]...)
@@ -198,7 +241,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator string, rrtype uint16, alg uint
 
 		pkc, err = ReadPrivateKey(keyfile)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		} else {
 			// log.Printf("Generated %s key files %s/%s.{key,private} successfully imported. May be deleted.", dns.TypeToString[rrtype], keydir, keyname)
 			// Delete the generated key files
@@ -213,40 +256,58 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator string, rrtype uint16, alg uint
 		}
 
 	default:
-		return nil, fmt.Errorf("Error: unknown keygen mode: \"%s\".", mode)
+		return nil, "", fmt.Errorf("Error: unknown keygen mode: \"%s\".", mode)
 	}
 
 	const (
 		addSig0KeySql = `
 INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		addDnssecKeySql = `
-INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, type, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	)
 
-	tx, err := kdb.Begin("GenerateKeypair")
-	defer func() {
+	localtx := false
+	if tx == nil {
+		tx, err = kdb.Begin("GenerateKeypair")
 		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
+			return nil, "", err
+		}
+		localtx = true
+	}
+	defer func() {
+		if localtx {
+			if err != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
 		}
 	}()
 
+	if state == "" {
+		state = "active"
+	}
+
 	switch rrtype {
 	case dns.TypeKEY:
-		_, err = tx.Exec(addSig0KeySql, owner, "active", pkc.KeyId,
+		_, err = tx.Exec(addSig0KeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], creator, pkc.PrivateKey, pkc.KeyRR.String())
 	case dns.TypeDNSKEY:
-		_, err = tx.Exec(addDnssecKeySql, owner, "active", pkc.KeyId,
-			dns.AlgorithmToString[pkc.Algorithm], 257, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
+		flags := 257
+		if keytype == "ZSK" {
+			flags = 256
+		}
+		_, err = tx.Exec(addDnssecKeySql, owner, state, pkc.KeyId,
+			dns.AlgorithmToString[pkc.Algorithm], flags, creator, "local", pkc.PrivateKey, pkc.DnskeyRR.String())
 	}
 	if err != nil {
 		log.Printf("Error storing generated SIG(0) key in keystore: %v", err)
-		return nil, err
+		return nil, "", err
 	}
+
 	// log.Printf("Success storing generated SIG(0) key in keystore.")
 
-	return pkc, nil
+	return pkc, fmt.Sprintf("Generated new %s %s with keyid %d (initial state: %s)", owner, dns.TypeToString[rrtype], pkc.KeyId, state), nil
 }
 
 func LoadSig0SigningKey(keyfile string) (*PrivateKeyCache, error) {

@@ -39,6 +39,7 @@ require (
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.0.0-20220525230936-793ad666bf5e // indirect
+	golang.org/x/exp v0.0.0-20220909182711-5c715a9e8561 // indirect
 	golang.org/x/mod v0.8.0 // indirect
 	golang.org/x/net v0.6.0 // indirect
 	golang.org/x/sys v0.15.0 // indirect

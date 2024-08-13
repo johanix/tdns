@@ -37,27 +37,32 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 		// }
 		var resp *KeystoreResponse
 
+		tx, err := kdb.Begin("APIkeystore")
+
 		defer func() {
+			if tx != nil {
+				if err != nil {
+					tx.Rollback()
+				} else {
+					tx.Commit()
+				}
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 		}()
 
-		switch kp.Command {
-		// 		case "list-dnskey":
-		// 			log.Printf("tdnsd keystore list-sig0 inquiry")
-		// 			tmp1 := map[string]TrustAnchor{}
-		// 			for _, key := range TAStore.Map.Keys() {
-		// 			    val, _ := TAStore.Map.Get(key)
-		// 			    tmp1[key] = TrustAnchor{
-		// 						Name:		val.Name,
-		// 						Validated:	val.Validated,
-		// 						Dnskey:		val.Dnskey,
-		// 					}
-		// 			}
-		// 			resp.ChildDnskeys = tmp1
+		if err != nil {
+			log.Printf("Error from kdb.Begin(): %v", err)
+			resp = &KeystoreResponse{
+				Error:    true,
+				ErrorMsg: err.Error(),
+			}
+			return
+		}
 
+		switch kp.Command {
 		case "sig0-mgmt":
-			resp, err = kdb.Sig0KeyMgmt(kp)
+			resp, err = kdb.Sig0KeyMgmt(tx, kp)
 			if err != nil {
 				log.Printf("Error from Sig0Mgmt(): %v", err)
 				resp = &KeystoreResponse{
@@ -69,7 +74,7 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 		case "dnssec-mgmt":
 			// log.Printf("APIkeystore: received /keystore request (cmd: %s subcommand: %s)\n",
 			//	kp.Command, kp.SubCommand)
-			resp, err = kdb.DnssecKeyMgmt(kp)
+			resp, err = kdb.DnssecKeyMgmt(tx, kp)
 			if err != nil {
 				log.Printf("Error from DnssecKeyMgmt(): %v", err)
 				resp = &KeystoreResponse{
@@ -108,10 +113,28 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		// resp := TruststoreResponse{}
 		var resp *TruststoreResponse
 
+		tx, err := kdb.Begin("APItruststore")
+
 		defer func() {
+			if tx != nil {
+				if err != nil {
+					tx.Rollback()
+				} else {
+					tx.Commit()
+				}
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 		}()
+
+		if err != nil {
+			log.Printf("Error from kdb.Begin(): %v", err)
+			resp = &TruststoreResponse{
+				Error:    true,
+				ErrorMsg: err.Error(),
+			}
+			return
+		}
 
 		switch tp.Command {
 		case "list-dnskey":
@@ -130,7 +153,7 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "child-sig0-mgmt":
-			resp, err = kdb.Sig0TrustMgmt(tp)
+			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
 				log.Printf("Error from Sig0TrustMgmt(): %v", err)
 				resp = &TruststoreResponse{

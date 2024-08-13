@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package main
 
@@ -39,19 +39,19 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = "We're happy, but send more cookies"
 
-		case "reload":
-			zd, exist := tdns.Zones.Get(cp.Zone)
-			if !exist {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
-			} else {
-				log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
-				resp.Msg, err = zd.ReloadZone(nil, cp.Force)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = err.Error()
-				}
-			}
+			//		case "reload":
+			//			zd, exist := tdns.Zones.Get(cp.Zone)
+			//			if !exist {
+			//				resp.Error = true
+			//				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
+			//			} else {
+			//				log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
+			//				resp.Msg, err = zd.ReloadZone(nil, cp.Force)
+			//				if err != nil {
+			//					resp.Error = true
+			//					resp.ErrorMsg = err.Error()
+			//				}
+			//			}
 
 		case "stop":
 			log.Printf("Daemon instructed to stop\n")
@@ -64,22 +64,22 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(500 * time.Millisecond)
 			conf.Internal.APIStopCh <- struct{}{}
 
-		case "list-zones":
-			for zname, zconf := range conf.Zones {
-				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
-				zd, ok := tdns.Zones.Get(zname)
-				if !ok {
-					//	log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
-				} else {
-					//	log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
-					zconf.Dirty = zd.Options["dirty"]
-					zconf.Frozen = zd.Options["frozen"]
-					conf.Zones[zname] = zconf
-				}
-			}
-			resp.Zones = conf.Zones
+			//		case "list-zones":
+			//			for zname, zconf := range conf.Zones {
+			//				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
+			//				zd, ok := tdns.Zones.Get(zname)
+			//				if !ok {
+			//					//	log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
+			//					resp.Error = true
+			//					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
+			//				} else {
+			//					//	log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
+			//					zconf.Dirty = zd.Options["dirty"]
+			//					zconf.Frozen = zd.Options["frozen"]
+			//					conf.Zones[zname] = zconf
+			//				}
+			//			}
+			//			resp.Zones = conf.Zones
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)

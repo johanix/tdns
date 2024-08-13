@@ -193,13 +193,6 @@ func Sig0TrustMgmt(subcommand string) error {
 		}
 	}
 
-	//	tr, err = SendTruststore(api, tdns.TruststorePost{
-	//		Command:    "child-sig0-mgmt",
-	//		SubCommand: subcommand,
-	//		Keyname:    tdns.Globals.Zonename,
-	//		Keyid:      childSig0Keyid,
-	//	})
-
 	tr, err = SendTruststore(tdns.Globals.Api, tsp)
 
 	if err != nil {

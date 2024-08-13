@@ -21,7 +21,7 @@ import (
 
 // var filename string
 var keyid int
-var NewState, filename string
+var NewState, filename, keytype string
 
 var keystoreCmd = &cobra.Command{
 	Use:   "keystore",
@@ -62,6 +62,18 @@ var keystoreSig0ImportCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "childzone")
 		err := Sig0KeyMgmt("import")
+		if err != nil {
+			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
+		}
+	},
+}
+
+var keystoreSig0GenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Generate a new SIG(0) key pair and add it to the keystore",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename", "algorithm", "state")
+		err := Sig0KeyMgmt("generate")
 		if err != nil {
 			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
 		}
@@ -119,10 +131,10 @@ var keystoreDnssecAddCmd = &cobra.Command{
 	Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
 containing either the private or the public SIG(0) key and the name of the zone.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("filename", "childzone")
+		PrepArgs("filename", "zonename")
 		err := DnssecKeyMgmt("add")
 		if err != nil {
-			fmt.Printf("Error from KeystoreImportKey(): %v\n", err)
+			fmt.Printf("Error from DnssecKeyMgmt(): %v\n", err)
 		}
 	},
 }
@@ -131,10 +143,22 @@ var keystoreDnssecImportCmd = &cobra.Command{
 	Use:   "import",
 	Short: "Add a new DNSSEC key pair to the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("filename", "childzone")
+		PrepArgs("filename", "zonename")
 		err := DnssecKeyMgmt("import")
 		if err != nil {
-			fmt.Printf("Error from KeystoreImportKey(): %v\n", err)
+			fmt.Printf("Error from DnssecKeyMgmt(): %v\n", err)
+		}
+	},
+}
+
+var keystoreDnssecGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Generate a new DNSSEC key pair and add it to the keystore",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename", "algorithm", "keytype", "state")
+		err := DnssecKeyMgmt("generate")
+		if err != nil {
+			fmt.Printf("Error from DnssecKeyMgmt(): %v\n", err)
 		}
 	},
 }
@@ -154,7 +178,7 @@ var keystoreDnssecDeleteCmd = &cobra.Command{
 	Use:   "delete",
 	Short: "Delete DNSSEC key pair from TDNSD keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "childzone")
+		PrepArgs("keyid", "zonename")
 
 		err := DnssecKeyMgmt("delete")
 		if err != nil {
@@ -180,10 +204,10 @@ func init() {
 	rootCmd.AddCommand(keystoreCmd)
 	keystoreCmd.AddCommand(keystoreSig0Cmd, keystoreDnssecCmd)
 
-	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd)
+	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd, keystoreSig0GenerateCmd)
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
-	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd)
+	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
 	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
 
 	keystoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
@@ -196,7 +220,10 @@ func init() {
 	keystoreSig0ImportCmd.MarkFlagRequired("zone")
 	keystoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	keystoreSig0SetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
-	keystoreSig0SetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
+	keystoreSig0SetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
+	keystoreSig0GenerateCmd.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
+	keystoreSig0GenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for key generation (default: ED25519)")
+	keystoreSig0GenerateCmd.MarkFlagRequired("state")
 
 	keystoreDnssecAddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreDnssecImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
@@ -207,6 +234,12 @@ func init() {
 	keystoreDnssecDeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	keystoreDnssecSetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	keystoreDnssecSetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
+	keystoreDnssecGenerateCmd.Flags().StringVarP(&keytype, "keytype", "", "", "Key type to generate (KSK|ZSK|CSK)")
+	keystoreDnssecGenerateCmd.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
+	keystoreDnssecGenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for key generation (default: ED25519)")
+	keystoreDnssecGenerateCmd.MarkFlagRequired("keytype")
+	keystoreDnssecGenerateCmd.MarkFlagRequired("state")
+	// keystoreDnssecGenerateCmd.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
 }
 
 func Sig0KeyMgmt(cmd string) error {
@@ -246,10 +279,16 @@ func Sig0KeyMgmt(cmd string) error {
 			}
 		}
 
+	case "generate":
+		data.Zone = tdns.Globals.Zonename
+		data.Algorithm = dns.StringToAlgorithm[tdns.Globals.Algorithm]
+		data.State = NewState
+
 	case "delete", "setstate":
 		data.Keyid = uint16(keyid)
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
+
 	default:
 		fmt.Printf("Unknown keystore command: \"%s\"\n", cmd)
 		os.Exit(1)
@@ -294,7 +333,7 @@ func Sig0KeyMgmt(cmd string) error {
 			fmt.Printf("No SIG(0) key pairs found\n")
 		}
 
-	case "add", "import", "delete", "setstate":
+	case "add", "import", "delete", "setstate", "generate":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}
@@ -337,6 +376,12 @@ func DnssecKeyMgmt(cmd string) error {
 			}
 		}
 
+	case "generate":
+		data.Zone = tdns.Globals.Zonename
+		data.Algorithm = dns.StringToAlgorithm[tdns.Globals.Algorithm]
+		data.KeyType = keytype // "KSK|ZSK|CSK"
+		data.State = NewState
+
 	case "delete", "setstate":
 		data.Keyid = uint16(keyid)
 		data.Zone = tdns.Globals.Zonename
@@ -364,9 +409,6 @@ func DnssecKeyMgmt(cmd string) error {
 	switch cmd {
 	case "list":
 		var out []string
-		if showhdr {
-			out = append(out, "Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record")
-		}
 		if len(tr.Dnskeys) > 0 {
 			fmt.Printf("Known DNSSEC key pairs:\n")
 			for k, v := range tr.Dnskeys {
@@ -374,12 +416,17 @@ func DnssecKeyMgmt(cmd string) error {
 				out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s|%s|%.50s...\n",
 					tmp[0], v.State, tmp[1], v.Flags, v.Algorithm, v.PrivateKey, v.Keystr))
 			}
+			sort.Strings(out)
+			if showhdr {
+				out = append([]string{"Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record"}, out...)
+			}
+
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		} else {
 			fmt.Printf("No DNSSEC key pairs found\n")
 		}
 
-	case "add", "import", "delete", "setstate":
+	case "add", "import", "generate", "delete", "setstate":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}

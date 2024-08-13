@@ -10,11 +10,12 @@ import (
 
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 )
 
-func (kdb *KeyDB) Sig0KeyMgmt(kp KeystorePost) (*KeystoreResponse, error) {
+func (kdb *KeyDB) Sig0KeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
 
 	const (
 		addSig0KeySql = `
@@ -29,26 +30,27 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	var resp = KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
-	tx, err := kdb.Begin("Sig0KeyMgmt")
-	if err != nil {
-		return &resp, err
-	}
+	var err error
+	// 	tx, err := kdb.Begin("Sig0KeyMgmt")
+	// 	if err != nil {
+	// 		return &resp, err
+	// 	}
 
 	defer func() {
 		if err == nil {
-			err1 := tx.Commit()
-			log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok, err1=%v", err, err1)
-			if err1 != nil {
-				resp.Error = true
-				resp.ErrorMsg = err1.Error()
-			}
+			// err1 := tx.Commit()
+			log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok", err)
+			// if err1 != nil {
+			// 	resp.Error = true
+			// 	resp.ErrorMsg = err1.Error()
+			// }
 		} else {
 			log.Printf("Error: %v. Rollback.", err)
-			err1 := tx.Rollback()
-			if err1 != nil {
-				resp.Error = true
-				resp.ErrorMsg = err1.Error()
-			}
+			// err1 := tx.Rollback()
+			// if err1 != nil {
+			// 	resp.Error = true
+			// 	resp.ErrorMsg = err1.Error()
+			// }
 			// log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
 		}
 	}()
@@ -115,11 +117,21 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			Src:        "keystore",
 			KeyRR:      pkc.KeyRR.String(),
 		}
-		tsresp, err := kdb.Sig0TrustMgmt(tspost)
+		tsresp, err := kdb.Sig0TrustMgmt(tx, tspost)
 		if err != nil {
 			return nil, err
 		}
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
+
+	case "generate":
+		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
+		if err != nil {
+			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		}
+		resp.Msg = msg
+		return &resp, err
 
 	case "setstate":
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
@@ -177,7 +189,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 			Keyname:    kp.Keyname,
 			Keyid:      int(kp.Keyid),
 		}
-		tsresp, err := kdb.Sig0TrustMgmt(tspost)
+		tsresp, err := kdb.Sig0TrustMgmt(tx, tspost)
 		if err != nil {
 			return &resp, err
 		}
@@ -190,7 +202,8 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	return &resp, nil
 }
 
-func (kdb *KeyDB) DnssecKeyMgmt(kp KeystorePost) (*KeystoreResponse, error) {
+func (kdb *KeyDB) DnssecKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+	dump.P(kp)
 
 	const (
 		addDnskeySql = `
@@ -204,29 +217,30 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	var resp = KeystoreResponse{Time: time.Now()}
 	var res sql.Result
+	var err error
 
-	tx, err := kdb.Begin("DnssecKeyMgmt")
-	if err != nil {
-		return &resp, err
-	}
+	//	tx, err := kdb.Begin("DnssecKeyMgmt")
+	//	if err != nil {
+	//		return &resp, err
+	//	}
 
 	defer func() {
 		//		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
 		if err == nil {
-			err1 := tx.Commit()
-			if err1 != nil {
-				log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
-				resp.Error = true
-				resp.ErrorMsg = err1.Error()
-			}
+			// err1 := tx.Commit()
+			// if err1 != nil {
+			// 	log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
+			// 	resp.Error = true
+			// 	resp.ErrorMsg = err1.Error()
+			// }
 		} else {
 			log.Printf("Error: %v. Rollback.", err)
-			err1 := tx.Rollback()
-			if err1 != nil {
-				log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
-				resp.Error = true
-				resp.ErrorMsg = err1.Error()
-			}
+			// err1 := tx.Rollback()
+			// if err1 != nil {
+			// 	log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
+			// 	resp.Error = true
+			// 	resp.ErrorMsg = err1.Error()
+			// }
 		}
 	}()
 
@@ -257,7 +271,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				Flags:      uint16(flags),
 				Algorithm:  algorithm,
 				Creator:    creator,
-				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
+				PrivateKey: fmt.Sprintf("%s***%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
 				Keystr:     keyrrstr,
 			}
 		}
@@ -283,6 +297,16 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
+
+	case "generate":
+		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
+		if err != nil {
+			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		}
+		resp.Msg = msg
+		return &resp, err
 
 	case "setstate":
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
@@ -335,7 +359,10 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp.Msg = fmt.Sprintf("Key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
 
 	default:
-		log.Printf("DnssecKeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
+		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)
+		log.Printf("DnssecKeyMgmt: %s", resp.Msg)
+		resp.Error = true
+		resp.ErrorMsg = resp.Msg
 	}
 
 	return &resp, nil
@@ -347,9 +374,9 @@ func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
 	)
 
-	// if sak, ok := kdb.Sig0Cache[zonename]; ok {
-	// 	return sak, nil
-	// }
+	if sak, ok := kdb.Sig0Cache[zonename]; ok {
+		return sak, nil
+	}
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
 	if err != nil {
@@ -412,9 +439,9 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	)
 
 	// XXX: Should use this once we've found all the bugs in the sqlite code
-	//	if data, ok := kdb.DnssecCache[zonename]; ok {
-	//		return data, nil
-	//	}
+	if dak, ok := kdb.DnssecCache[zonename]; ok {
+		return dak, nil
+	}
 
 	var dak DnssecActiveKeys
 
@@ -428,6 +455,8 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	var algorithm, privatekey, keyrrstr string
 	var flags, keyid int
 
+	var keysfound bool
+
 	for rows.Next() {
 		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 		if err != nil {
@@ -439,6 +468,8 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 			return nil, err
 		}
 
+		keysfound = true
+
 		bpk, err := PrivKeyToBindFormat(privatekey, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrivkeyToBindFormat(): %v", err)
@@ -446,7 +477,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		}
 		pkc, err := PrepareKeyCache(bpk, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrepareKey(): %v", err)
+			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
 			return nil, err
 
 		}
@@ -460,15 +491,16 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		}
 	}
 
-	//	if !kskfound {
-	//		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
-	//		return nil, sql.ErrNoRows
-	//	}
+	// No keys found is not an error
+	if !keysfound {
+		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
+		return &dak, nil
+	}
 
 	// No KSK found is a hard error
 	if len(dak.KSKs) == 0 {
 		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
-		return nil, sql.ErrNoRows
+		return &dak, nil
 	}
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.

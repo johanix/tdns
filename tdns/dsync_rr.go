@@ -12,6 +12,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+func init() {
+	RegisterDsyncRR()
+}
+
 const TypeDSYNC = 0x0F9B
 
 type DSYNC struct {

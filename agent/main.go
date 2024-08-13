@@ -69,13 +69,13 @@ func main() {
 
 	conf.ServerBootTime = time.Now()
 
-	flag.StringVar(&appMode, "mode", "server", "Mode of operation: server | scanner")
+	flag.StringVar(&appMode, "mode", "agent", "Mode of operation: server | agent | scanner")
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
 	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	flag.Parse()
 
 	switch appMode {
-	case "server", "scanner":
+	case "server", "agent", "scanner":
 		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", appMode, tdns.Globals.Verbose, tdns.Globals.Debug)
 	default:
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
@@ -106,21 +106,6 @@ func main() {
 	conf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
 	go tdns.Notifier(conf.Internal.NotifyQ)
 
-	err = tdns.RegisterNotifyRR()
-	if err != nil {
-		log.Fatalf("Error registering new RR types: %v", err)
-	}
-
-	err = tdns.RegisterDsyncRR()
-	if err != nil {
-		log.Fatalf("Error registering new RR types: %v", err)
-	}
-
-	err = tdns.RegisterDelegRR()
-	if err != nil {
-		log.Fatalf("Error registering new RR types: %v", err)
-	}
-
 	// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
 	err = ParseZones(&conf, conf.Internal.RefreshZoneCh)
 	if err != nil {
@@ -144,6 +129,7 @@ func main() {
 	go NotifyHandler(&conf)
 	go DnsEngine(&conf)
 	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+	// go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
 
 	mainloop(&conf)
 }

@@ -13,6 +13,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+func init() {
+	RegisterNotifyRR()
+}
+
 const TypeNOTIFY = 0x0F9A
 
 type NOTIFY struct {

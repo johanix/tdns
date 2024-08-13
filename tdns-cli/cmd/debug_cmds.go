@@ -57,11 +57,13 @@ var debugSig0GenerateCmd = &cobra.Command{
 		fmt.Printf("Calling generate sig0 with zone: %s algorithm: %s rrtype: %s\n",
 			tdns.Globals.Zonename, tdns.Globals.Algorithm, tdns.Globals.Rrtype)
 
-		pkc, err := kdb.GenerateKeypair(tdns.Globals.Zonename, "tdns-cli", rrtype, algorithm)
+		pkc, msg, err := kdb.GenerateKeypair(tdns.Globals.Zonename, "tdns-cli", "active", rrtype, algorithm, "", nil) // nil = no tx
 		if err != nil {
 			fmt.Printf("Error: %s\n", err)
 			os.Exit(1)
 		}
+		fmt.Printf("Generated keypair:\n* Private key: %s\n* Public key: %s\n* KeyID: %d\n", pkc.PrivateKey, pkc.KeyRR.String(), pkc.KeyId)
+		fmt.Printf("Message: %s\n", msg)
 
 		var rr dns.RR
 		rr = &pkc.KeyRR

@@ -13,6 +13,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+func init() {
+	RegisterDelegRR()
+}
+
 // SVCBKey is the type of the keys used in the SVCB RR.
 type DELEGKey uint16
 

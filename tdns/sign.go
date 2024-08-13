@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
+	"golang.org/x/exp/rand"
 )
 
 func sigLifetime(t time.Time, lifetime uint32) (uint32, uint32) {
-	sigJitter := time.Duration(60 * time.Second)
+	sigJitter := time.Duration(time.Duration(rand.Intn(61)) * time.Second)
 	sigValidity := time.Duration(lifetime) * time.Second
 	if lifetime == 0 {
 		sigValidity = time.Duration(5 * time.Minute)
@@ -55,14 +57,14 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) error {
+func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) (bool, error) {
 
 	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
-		return fmt.Errorf("SignRRset: no active DNSSEC keys available")
+		return false, fmt.Errorf("SignRRset: no active DNSSEC keys available")
 	}
 
 	if len(rrset.RRs) == 0 {
-		return fmt.Errorf("SignRRsetNG: rrset has no RRs")
+		return false, fmt.Errorf("SignRRsetNG: rrset has no RRs")
 	}
 
 	var signingkeys []*PrivateKeyCache
@@ -73,16 +75,23 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) err
 		signingkeys = dak.ZSKs
 	}
 
+	resigned := false
+
 	for _, key := range signingkeys {
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {
 			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
 				// Check if the existing RRSIG by the same key is older than one hour
-				inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
-				if (time.Since(inceptionTime) < time.Hour) && !force {
-					log.Printf("SignRRset: keeping existing RRSIG( %s %s ) by the same DNSKEY (less than one hour old)", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
-					shouldSign = false
-				} else {
+				//				inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
+				//				if (time.Since(inceptionTime) < time.Hour) && !force {
+				//					log.Printf("SignRRset: keeping existing RRSIG( %s %s ) by the same DNSKEY (less than one hour old)", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
+				//					shouldSign = false
+				//				} else {
+				//					log.Printf("SignRRset: removing older RRSIG( %s %s ) by the same DNSKEY", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
+				//
+				//				}
+				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG)) || force
+				if shouldSign {
 					log.Printf("SignRRset: removing older RRSIG( %s %s ) by the same DNSKEY", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
 					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
 				}
@@ -105,16 +114,60 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) err
 			err := rrsig.Sign(key.CS, rrset.RRs)
 			if err != nil {
 				log.Printf("Error from rrsig.Sign(%s): %v", name, err)
-				return err
+				return false, err
 			}
 
 			rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
+			resigned = true
 		}
 	}
 
-	return nil
+	return resigned, nil
 }
 
+// XXX: NeedsResigning should check if the RRSIG exists at all, and
+// if so whether it is close to expiration.
+// XXX: Perhaps a working algorithm woul be to test for the remaining signature lifetime to be something like
+//
+//	less than 3 x resigning interval?
+func (rrset *RRset) NeedsResigning(force bool) bool {
+	if len(rrset.RRSIGs) == 0 {
+		return true
+	}
+	// here we should check is enough lifetime is left for the RRSIG
+	// to be valid.
+
+	for _, oldsig := range rrset.RRSIGs {
+		inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
+		expirationTime := time.Unix(int64(oldsig.(*dns.RRSIG).Expiration), 0)
+
+		if time.Until(expirationTime) < 3*time.Duration(viper.GetInt("resignerengine.interval")) {
+			return true
+		}
+		if (time.Since(inceptionTime) < time.Hour) && !force {
+			return false
+		}
+	}
+	return true
+}
+
+func NeedsResigning(rrsig *dns.RRSIG) bool {
+	// here we should check is enough lifetime is left for the RRSIG
+	// to be valid.
+
+	// inceptionTime := time.Unix(int64(rrsig.Inception), 0)
+	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
+
+	if time.Until(expirationTime) < 3*time.Duration(viper.GetInt("resignerengine.interval")) {
+		log.Printf("NeedsResigning: RRSIG for %s %s has less than 3 resigning intervals left; resigning now", rrsig.Header().Name, dns.TypeToString[uint16(rrsig.Header().Rrtype)])
+		return true
+	}
+	return false
+}
+
+// XXX: MaybesignRRset should report on whether it actually signed anything
+// At the end, is anything hass been signed, then we must end by bumping the
+// SOA Serial and resigning the SOA.
 func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 	if !zd.Options["sign-zone"] || !zd.Options["online-signing"] {
 		return fmt.Errorf("Zone %s should not be signed (option sign-zone=false)", zd.ZoneName)
@@ -126,8 +179,36 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 
 	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
-		log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
 		return err
+	}
+	if len(dak.KSKs) == 0 && len(dak.ZSKs) == 0 {
+		log.Printf("SignZone: no active DNSSEC keys available for zone %s. Will generate new keys", zd.ZoneName)
+
+		// generate ZSK:
+		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "signzone", "active", dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil) // nil = no tx
+		if err != nil {
+			return err
+		}
+		log.Printf("SignZone: %s", msg)
+		// generate KSK:
+		_, msg, err = kdb.GenerateKeypair(zd.ZoneName, "signzone", "active", dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil) // nil = no tx
+		if err != nil {
+			return err
+		}
+		log.Printf("SignZone: %s", msg)
+
+		log.Printf("SignZone: New DNSSEC keys generated for zone %s", zd.ZoneName)
+		// Now try to get the DNSSEC active keys again:
+		dak, err = kdb.GetDnssecActiveKeys(zd.ZoneName)
+		if err != nil {
+			log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
+			return err
+		}
+		if len(dak.KSKs) == 0 {
+			// Give up
+			return fmt.Errorf("SignZone: failed to generate active keys for zone %s", zd.ZoneName)
+		}
 	}
 
 	// It's either black lies or we need a traditional NSEC chain
@@ -138,12 +219,17 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		}
 	}
 
-	MaybeSignRRset := func(rrset RRset, zone string) RRset {
-		err := SignRRset(&rrset, zone, dak, force)
+	MaybeSignRRset := func(rrset RRset, zone string) (RRset, bool) {
+		// SignRRset *will* sign, so we must first check whether it is time
+		// to sign.
+		// if rrset.NeedsResigning(force) {
+		resigned, err := SignRRset(&rrset, zone, dak, force)
 		if err != nil {
 			log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 		}
-		return rrset
+		return rrset, resigned
+		//}
+		// return rrset, false
 	}
 
 	names, err := zd.GetOwnerNames()
@@ -178,7 +264,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 
 	log.Printf("SignZone: Zone %s has the delegations: %v", zd.ZoneName, delegations)
 
+	var signed, zoneResigned bool
 	for _, name := range names {
+		log.Printf("SignZone: signing RRsets under name %s", name)
 		owner, err := zd.GetOwner(name)
 		if err != nil {
 			return err
@@ -206,7 +294,21 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 			if wasglue {
 				continue
 			}
-			owner.RRtypes[rrt] = MaybeSignRRset(rrset, zd.ZoneName)
+			owner.RRtypes[rrt], signed = MaybeSignRRset(rrset, zd.ZoneName)
+			if signed {
+				zoneResigned = true
+			}
+		}
+	}
+
+	if zoneResigned {
+		//		zd.CurrentSerial++
+		//		apex, _ := zd.GetOwner(zd.ZoneName)
+		//		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+		_, err := zd.BumpSerial()
+		if err != nil {
+			log.Printf("SignZone: failed to bump SOA serial for zone %s", zd.ZoneName)
+			return err
 		}
 	}
 
@@ -274,7 +376,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 			tmap = append(tmap, int(dns.TypeRRSIG))
 		}
 
-		log.Printf("GenerateNsecChain: name: %s tmap: %v", name, tmap)
+		// log.Printf("GenerateNsecChain: name: %s tmap: %v", name, tmap)
 
 		sort.Ints(tmap) // unfortunately the NSEC TypeBitMap must be in order...
 		var rrts = make([]string, len(tmap))
@@ -282,7 +384,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 			rrts[idx] = dns.TypeToString[uint16(t)]
 		}
 
-		log.Printf("GenerateNsecChain: creating NSEC RR for name %s: %v %v", name, tmap, rrts)
+		// log.Printf("GenerateNsecChain: creating NSEC RR for name %s: %v %v", name, tmap, rrts)
 
 		items := []string{name, "NSEC", nextname}
 		items = append(items, rrts...)

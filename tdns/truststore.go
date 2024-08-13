@@ -31,7 +31,7 @@ type TmpSig0Key struct {
 	Key  string
 }
 
-func (kdb *KeyDB) Sig0TrustMgmt(tp TruststorePost) (*TruststoreResponse, error) {
+func (kdb *KeyDB) Sig0TrustMgmt(tx *Tx, tp TruststorePost) (*TruststoreResponse, error) {
 
 	const (
 		addkeysql = `
@@ -50,24 +50,26 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		Time: time.Now(),
 	}
 	var res sql.Result
+	var err error
 
-	tx, err := kdb.Begin("Sig0TrustStoreMgmt")
-	if err != nil {
-		return &resp, err
-	}
+	//	tx, err := kdb.Begin("Sig0TrustStoreMgmt")
+	// if err != nil {
+	// 	return &resp, err
+	// }
 
 	defer func() {
 		if err == nil {
-			err1 := tx.Commit()
-			if err1 != nil {
-				log.Printf("Sig0TrustStoreMgmt: tx.Commit() error=%v", err1)
-			}
+			//		err1 := tx.Commit()
+			//		if err1 != nil {
+			//			log.Printf("Sig0TrustStoreMgmt: tx.Commit() error=%v", err1)
+			//	}
 		} else {
 			log.Printf("Error: %v. Rollback.", err)
-			err1 := tx.Rollback()
-			if err1 != nil {
-				log.Printf("ChildSig0Mgmt: tx.Rollback() error=%v", err1)
-			}
+			//			err1 := tx.Rollback()
+			//			if err1 != nil {
+			//				log.Printf("ChildSig0Mgmt: tx.Rollback() error=%v", err1)
+			//			}
+			//		}
 		}
 	}()
 

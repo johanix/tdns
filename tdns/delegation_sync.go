@@ -40,6 +40,10 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 	// var err error
 
 	for zname, zd := range Zones.Items() {
+		if !zd.Options["delegation-sync-child"] {
+			log.Printf("DelegationSyncher: Zone %s does not have child-side delegation sync enabled. Skipping.", zname)
+			continue
+		}
 		log.Printf("DelegationSyncher: Checking whether zone %s allows updates and if so has a KEY RRset published.", zname)
 		apex, _ := zd.GetOwner(zd.ZoneName)
 		_, keyrrexist := apex.RRtypes[dns.TypeKEY]
@@ -71,11 +75,12 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 					log.Printf("DelegationSyncher: Unknown keygen algorithm: \"%s\"", algstr)
 					continue
 				}
-				pkc, err := kdb.GenerateKeypair(zd.ZoneName, "del-sync", dns.TypeKEY, alg) //
+				pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "del-sync", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
 				if err != nil {
 					zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 					continue
 				}
+				zd.Logger.Printf("DelegationSyncher: %s", msg)
 				sak = &Sig0ActiveKeys{
 					Keys: []*PrivateKeyCache{pkc},
 				}
@@ -103,7 +108,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 				continue
 			}
 			rrset := apex.RRtypes[dns.TypeKEY]
-			err = SignRRset(&rrset, zd.ZoneName, dak, false)
+			_, err = SignRRset(&rrset, zd.ZoneName, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 			} else {
@@ -357,7 +362,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
 			} else {
 				if len(dak.ZSKs) > 0 {
-					err := SignRRset(&rrset, zd.ZoneName, dak, true) // Let's force signing
+					_, err := SignRRset(&rrset, zd.ZoneName, dak, true) // Let's force signing
 					if err != nil {
 						log.Printf("Error signing %s: %v", zd.ZoneName, err)
 					} else {

@@ -11,31 +11,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (zd *ZoneData) xxxPublishKeyRR(keyrr *dns.KEY) error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("Zone %s does not allow updates. KEY RR publication not possible", zd.ZoneName)
-	}
-
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return err
-	}
-
-	rrset := RRset{
-		Name:   zd.ZoneName,
-		RRs:    []dns.RR{keyrr},
-		RRSIGs: []dns.RR{},
-	}
-
-	zd.mu.Lock()
-	apex.RRtypes[dns.TypeKEY] = rrset
-	zd.Options["dirty"] = true
-	zd.mu.Unlock()
-	zd.BumpSerial()
-
-	return nil
-}
-
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("Zone %s does not allow updates. KEY RR publication not possible", zd.ZoneName)
@@ -107,11 +82,14 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 			return fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
 		}
 		// Generate a new key and store it in the KeyStore
-		pkc, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdnsd", dns.TypeKEY, alg) //
+		pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdnsd", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
 		if err != nil {
 			zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 			return err
 		}
+
+		zd.Logger.Printf(msg)
+
 		sak := &Sig0ActiveKeys{
 			Keys: []*PrivateKeyCache{pkc},
 		}

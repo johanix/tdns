@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/johanix/tdns/tdns"
@@ -217,6 +218,11 @@ func init() {
 }
 
 func PrepArgs(required ...string) {
+
+	DefinedDnskeyStates := []string{"created", "published", "active", "retired", "foreign"}
+	DefinedDnskeyTypes := []string{"KSK", "ZSK", "CSK"}
+	// DefinedAlgorithms := []string{"RSASHA256", "RSASHA512", "ED25519", "ECDSAP256SHA256", "ECDSAP384SHA384"}
+
 	for _, arg := range required {
 		if tdns.Globals.Debug {
 			fmt.Printf("Required: %s\n", arg)
@@ -267,18 +273,6 @@ func PrepArgs(required ...string) {
 				childpri = net.JoinHostPort(childpri, "53")
 			}
 
-		case "state":
-			if NewState == "" {
-				fmt.Printf("Error: new state of key mnot specified \n")
-				os.Exit(1)
-			}
-			switch NewState {
-			case "created", "active", "retired":
-			default:
-				fmt.Printf("Error: key state \"%s\" is not known\n", NewState)
-				os.Exit(1)
-			}
-
 		case "filename":
 			if filename == "" {
 				fmt.Printf("Error: filename not specified\n")
@@ -301,7 +295,9 @@ func PrepArgs(required ...string) {
 				fmt.Printf("Error: algorithm not specified\n")
 				os.Exit(1)
 			}
-			_, exist := dns.StringToAlgorithm[strings.ToUpper(tdns.Globals.Algorithm)]
+
+			tdns.Globals.Algorithm = strings.ToUpper(tdns.Globals.Algorithm)
+			_, exist := dns.StringToAlgorithm[tdns.Globals.Algorithm]
 			if !exist {
 				fmt.Printf("Error: algorithm \"%s\" is not known\n", tdns.Globals.Algorithm)
 				os.Exit(1)
@@ -319,6 +315,28 @@ func PrepArgs(required ...string) {
 			}
 			if rrtype != dns.TypeKEY && rrtype != dns.TypeDNSKEY {
 				fmt.Printf("Error: rrtype \"%s\" is not KEY or DNSKEY\n", tdns.Globals.Rrtype)
+				os.Exit(1)
+			}
+
+		case "keytype":
+			if keytype == "" {
+				fmt.Printf("Error: key type not specified (should be one of %v)\n", DefinedDnskeyTypes)
+				os.Exit(1)
+			}
+			keytype = strings.ToUpper(keytype)
+			if !slices.Contains(DefinedDnskeyTypes, keytype) {
+				fmt.Printf("Error: key type \"%s\" is not known\n", keytype)
+				os.Exit(1)
+			}
+
+		case "state":
+			if NewState == "" {
+				fmt.Printf("Error: key state not specified (should be one of %v)\n", DefinedDnskeyStates)
+				os.Exit(1)
+			}
+			NewState = strings.ToLower(NewState)
+			if !slices.Contains(DefinedDnskeyStates, NewState) {
+				fmt.Printf("Error: key state \"%s\" is not known\n", NewState)
 				os.Exit(1)
 			}
 

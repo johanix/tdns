@@ -21,12 +21,22 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return err
 	}
 
+	var dak *DnssecActiveKeys
+	if zd.Options["sign-zone"] || zd.Options["online-signing"] {
+		dak, err = zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
+		if err != nil {
+			zd.Logger.Printf("Error from GetDnssecActiveKeys(%s): %v", zd.ZoneName, err)
+			return err
+		}
+	}
+
 	rrset := RRset{
 		Name: zd.ZoneName,
 	}
 
 	ttl := 7200
 	addr_rrs := []dns.RR{}
+	dsync_added := false
 
 	MaybeAddAddressRR := func(target, addr string) error {
 		var addrstr string
@@ -69,6 +79,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 					return err
 				}
 				rrset.RRs = append(rrset.RRs, dsyncrr)
+				dsync_added = true
 			}
 
 			for _, addr := range viper.GetStringSlice("delegationsync.parent.notify.addresses") {
@@ -93,6 +104,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 					return err
 				}
 				rrset.RRs = append(rrset.RRs, dsyncrr)
+				dsync_added = true
 			}
 
 			for _, addr := range viper.GetStringSlice("delegationsync.parent.update.addresses") {
@@ -108,7 +120,17 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		}
 	}
 
+	if !dsync_added {
+		return fmt.Errorf("No DSYNC RRs added for zone %s", zd.ZoneName)
+	}
+
+	_, err = SignRRset(&rrset, zd.ZoneName, dak, true)
+	if err != nil {
+		return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
+	}
+
 	for _, addr_rr := range addr_rrs {
+		new_addr := false
 		owner, err := zd.GetOwner(addr_rr.Header().Name)
 		if err != nil {
 			return fmt.Errorf("Error fetching owner for address %s: %v", addr_rr.Header().Name, err)
@@ -129,6 +151,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				RRs:    []dns.RR{addr_rr},
 				RRSIGs: []dns.RR{},
 			}
+			new_addr = true
 		} else {
 			duplicate := false
 			for _, existing_rr := range owner.RRtypes[rrtype].RRs {
@@ -143,7 +166,16 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				tmp.RRs = append(tmp.RRs, addr_rr)
 				owner.RRtypes[rrtype] = tmp
 				zd.mu.Unlock()
+				new_addr = true
 			}
+		}
+		if new_addr {
+			tmp := owner.RRtypes[rrtype]
+			_, err = SignRRset(&tmp, zd.ZoneName, dak, true)
+			if err != nil {
+				return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
+			}
+			owner.RRtypes[rrtype] = tmp
 		}
 	}
 

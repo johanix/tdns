@@ -61,7 +61,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			dnssec_ok = opt.Do()
 		}
 		// log.Printf("DNSSEC OK: %v", dnssec_ok)
-		log.Printf("DnsHandler: qname: %s opcode: %s (%d)", qname, dns.OpcodeToString[r.Opcode], r.Opcode)
+		log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
@@ -207,7 +207,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 			return rrset
 		}
 		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, dak, false)
+			_, err := tdns.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -250,6 +250,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
 		if dnssec_ok {
+			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
 			m.Answer = append(m.Answer, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
 			m.Extra = append(m.Extra, v4glue.RRSIGs...)
@@ -326,7 +327,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			return rrset
 		}
 		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			err := tdns.SignRRset(&rrset, qname, dak, false)
+			_, err := tdns.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {

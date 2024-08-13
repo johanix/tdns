@@ -567,9 +567,28 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 
 	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
 	zd.mu.Lock()
+
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
+	if zd.Options["sign-zone"] || zd.Options["online-signing"] {
+		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
+		if err != nil {
+			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+			zd.mu.Unlock()
+			return resp, err
+		}
+		apex, _ := zd.GetOwner(zd.ZoneName)
+		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+
+		rrset := apex.RRtypes[dns.TypeSOA]
+		_, err = SignRRset(&rrset, zd.ZoneName, dak, true) // true = force signing, as we know the SOA has changed
+		if err != nil {
+			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
+			zd.mu.Unlock()
+			return resp, err
+		}
+	}
 	zd.mu.Unlock()
 
 	zd.NotifyDownstreams()
@@ -678,6 +697,39 @@ func (zd *ZoneData) SetupZoneSync() error {
 			default:
 			}
 		}
+	}
+
+	return nil
+}
+
+func (zd *ZoneData) SetupZoneSigning(resignq chan ZoneRefresher) error {
+	if !(zd.Options["sign-zone"] || zd.Options["online-signing"]) { // XXX: Need to sort out whether to use the sign-zone or online-signing option
+		return nil // this zone should not be signed (at least not by us)
+	}
+
+	if !zd.Options["allow-updates"] {
+		return nil // this zone does not allow any modifications
+	}
+
+	if zd.Options["agent"] {
+		return nil // this zone does not allow any modifications
+	}
+
+	if zd.ZoneType != Primary {
+		return nil // this zone is not a primary zone, it cannot be signed
+	}
+
+	kdb := zd.KeyDB
+	err := zd.SignZone(kdb, false)
+	if err != nil {
+		zd.Logger.Printf("Error from SignZone(%s): %v", zd.ZoneName, err)
+		return err
+	}
+
+	resignq <- ZoneRefresher{
+		Name:     zd.ZoneName,
+		Response: nil,
+		Force:    false,
 	}
 
 	return nil

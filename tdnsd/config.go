@@ -19,6 +19,7 @@ type Config struct {
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
 	Apiserver      ApiserverConf
+	DnssecPolicies map[string]tdns.DnssecPolicyConf
 	Zones          map[string]tdns.ZoneConf
 	Db             DbConf
 	Ddns           struct {
@@ -60,6 +61,7 @@ type DbConf struct {
 
 type InternalConf struct {
 	KeyDB           *tdns.KeyDB
+	DnssecPolicies  map[string]tdns.DnssecPolicy
 	APIStopCh       chan struct{}
 	RefreshZoneCh   chan tdns.ZoneRefresher
 	BumpZoneCh      chan tdns.BumperData
@@ -71,6 +73,7 @@ type InternalConf struct {
 	DelegationSyncQ chan tdns.DelegationSyncRequest
 	NotifyQ         chan tdns.NotifyRequest
 	AuthQueryQ      chan tdns.AuthQueryRequest
+	ResignQ         chan tdns.ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

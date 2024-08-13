@@ -72,6 +72,10 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 
 				case "TRUSTSTORE-UPDATE":
 					log.Printf("Updater: Request for update to SIG(0) TrustStore: %d actions.", len(ur.Actions))
+					tx, err := kdb.Begin("UpdaterEngine")
+					if err != nil {
+						log.Printf("Error from kdb.Begin(): %v", err)
+					}
 					for _, rr := range ur.Actions {
 						if keyrr, ok := rr.(*dns.KEY); ok {
 							tppost := TruststorePost{
@@ -84,11 +88,15 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 								Trusted:    ur.Trusted,
 							}
 
-							_, err := kdb.Sig0TrustMgmt(tppost)
+							_, err := kdb.Sig0TrustMgmt(tx, tppost)
 							if err != nil {
 								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 							}
 						}
+					}
+					err = tx.Commit()
+					if err != nil {
+						log.Printf("Error from tx.Commit(): %v", err)
 					}
 				default:
 					log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)

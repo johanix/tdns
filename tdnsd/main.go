@@ -106,21 +106,6 @@ func main() {
 	conf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
 	go tdns.Notifier(conf.Internal.NotifyQ)
 
-	err = tdns.RegisterNotifyRR()
-	if err != nil {
-		log.Fatalf("Error registering new RR types: %v", err)
-	}
-
-	err = tdns.RegisterDsyncRR()
-	if err != nil {
-		log.Fatalf("Error registering new RR types: %v", err)
-	}
-
-	err = tdns.RegisterDelegRR()
-	if err != nil {
-		log.Fatalf("Error registering new RR types: %v", err)
-	}
-
 	// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
 	err = ParseZones(&conf, conf.Internal.RefreshZoneCh)
 	if err != nil {
@@ -136,6 +121,7 @@ func main() {
 	conf.Internal.DnsUpdateQ = make(chan tdns.DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan tdns.DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
+	conf.Internal.ResignQ = make(chan tdns.ZoneRefresher, 10)
 
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
@@ -144,6 +130,7 @@ func main() {
 	go NotifyHandler(&conf)
 	go DnsEngine(&conf)
 	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+	go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
 
 	mainloop(&conf)
 }
