@@ -19,8 +19,6 @@ import (
 
 var childSig0Name, childSig0Src string
 
-// var childSig0Keyid int
-
 var truststoreCmd = &cobra.Command{
 	Use:   "truststore",
 	Short: "Prefix command to access different features of tdnsd truststore",
@@ -109,7 +107,6 @@ func init() {
 	truststoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	truststoreSig0TrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 	truststoreSig0UntrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
-	//	truststoreSig0Cmd.PersistentFlags().StringVarP(&childSig0Name, "child", "c", "", "Name of child SIG(0) key to change trust for")
 	truststoreSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "child", "c", "", "Name of child SIG(0) key")
 	truststoreSig0AddCmd.PersistentFlags().StringVarP(&childSig0Src, "src", "s", "", "Source for SIG(0) public key, a file name or 'dns'")
 }

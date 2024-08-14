@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Johan Stenstam, johani@johani.org
+ * Copyright (c) Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package tdns
 

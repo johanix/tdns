@@ -489,14 +489,6 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	return err
 }
 
-func xxxRRsetToStringOG(rrs []dns.RR) string {
-	var tmp string
-	for _, rr := range rrs {
-		tmp += rr.String() + "\n"
-	}
-	return tmp
-}
-
 func RRsetToString(rrset *RRset) string {
 	var tmp string
 	for _, rr := range rrset.RRs {

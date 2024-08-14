@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Johan Stenstam, johani@johani.org
+ * Copyright (c) Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package tdns
 
@@ -52,24 +52,10 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 	var res sql.Result
 	var err error
 
-	//	tx, err := kdb.Begin("Sig0TrustStoreMgmt")
-	// if err != nil {
-	// 	return &resp, err
-	// }
-
 	defer func() {
 		if err == nil {
-			//		err1 := tx.Commit()
-			//		if err1 != nil {
-			//			log.Printf("Sig0TrustStoreMgmt: tx.Commit() error=%v", err1)
-			//	}
 		} else {
 			log.Printf("Error: %v. Rollback.", err)
-			//			err1 := tx.Rollback()
-			//			if err1 != nil {
-			//				log.Printf("ChildSig0Mgmt: tx.Rollback() error=%v", err1)
-			//			}
-			//		}
 		}
 	}()
 
@@ -272,11 +258,6 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 	log.Printf("*** Enter LoadChildSig0Keys() ***")
 	// dump.P(kdb)
 
-	// tx, err := kdb.Begin("LoadChildSig0Keys")
-	// if err != nil {
-	//		return err
-	//	}
-
 	rows, err := kdb.Query(loadsig0sql)
 	if err != nil {
 		return fmt.Errorf("Error from kdb.Query(%s): %v", loadsig0sql, err)
@@ -308,10 +289,6 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 			})
 		}
 	}
-	// err1 := tx.Commit()
-	// if err1 != nil {
-	//		log.Printf("LoadChildSig0Keys: tx.Commit() error=%v", err1)
-	// }
 
 	// If a validator trusted key config file is found, read it in.
 	sig0file := viper.GetString("validator.sig0.trusted.file")
@@ -369,15 +346,16 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 	return nil
 }
 
-// XXX: This should not be a method of ZoneData, but rather a function.
+// This is about locating a SIG(0) key that is trusted, i.e. that is present in the TrustStore.
+// It is not about looking in the Keystore, nor looking in the DNS.
 // If key not found *TrustAnchor is nil
 func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, error) {
 	mapkey := fmt.Sprintf("%s::%d", signer, keyid)
 
 	// 1. Try to fetch the key from the Sig0Store cache
-	// if sk, ok := Sig0Store.Map.Get(mapkey); ok {
-	//	return &sk, nil
-	// }
+	if sk, ok := Sig0Store.Map.Get(mapkey); ok {
+		return &sk, nil
+	}
 
 	const (
 		fetchsig0trustanchor = "SELECT validated, dnssecvalidated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
@@ -415,51 +393,6 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 		Sig0Store.Map.Set(mapkey, sk)
 		return &sk, nil
 	}
-
-	// 3. Try to fetch the key from the Sig0KeyStore database.
-	// We no longer do this. Instead we import or delete the public key into/from the TrustStore
-	// when we add/delete it to/from the KeyStore.
-
-	// XXX: Note that if the key is present and active in the KeyStore (because it is for a
-	// zone that we are authoritative for) but not in the TrustStore then we will import it
-	// into the TrustStore automatically.
-
-	// sak, err := zd.KeyDB.GetSig0ActiveKeys(signer)
-	//	if err != nil {
-	//		return nil, err
-	//	}
-
-	//	if len(sak.Keys) > 0 {
-	//		for _, key := range sak.Keys {
-	//			if key.KeyRR.KeyTag() == keyid {
-	//				// This key that is present and active in the KeyStore is not present in the TrustStore
-	//				// Let's add it now.
-	//				tspost := TruststorePost{
-	//					Command:    "truststore",
-	//					SubCommand: "add",
-	//					Keyname:    signer,
-	//					Keyid:      int(keyid),
-	//					Src:        "keystore",
-	//					KeyRR:      key.KeyRR.String(),
-	//				}
-	//				tsresp, err := zd.KeyDB.Sig0TrustMgmt(tspost)
-	//				if err != nil {
-	//					return nil, err
-	//				}
-	//				log.Printf("FindSig0TrustedKey: %s", tsresp.Msg)
-	//				sa := Sig0Key{
-	//					Name:      signer,
-	//					Key:       key.KeyRR,
-	//					Validated: true,
-	//					Trusted:   true,
-	//				}
-	//				return &sa, nil
-	//			}
-	//		}
-	//	}
-
-	// 4. Try to fetch the key by looking up and validating the KEY RRset via DNS
-	// No. That's wrong. This is about finding, *trusted* keys.
 
 	return nil, fmt.Errorf("SIG(0) trusted key %s not found in TrustStore", signer)
 }

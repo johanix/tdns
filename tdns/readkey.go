@@ -195,6 +195,7 @@ PrivateKey: %s`,
 // difference being that here we read the private key from a string, whereas in the
 // ReadPrivateKey() function we read it from a file. Yes, that should be unified.
 func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
+	log.Printf("PrepareKeyCache: privkey:\n%s\npubkey: %s", privkey, pubkey)
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)

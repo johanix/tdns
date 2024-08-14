@@ -200,7 +200,7 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 	}
 
 	zd.mu.Lock()
-	delete(apex.RRtypes, dns.TypeCSYNC)
+	delete(apex.RRtypes, TypeDSYNC)
 	zd.Options["dirty"] = true
 	zd.mu.Unlock()
 

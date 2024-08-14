@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Johan Stenstam, johani@johani.org
+ * Copyright (c) Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package tdns
 
@@ -35,6 +35,27 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	}
 	zd.Options["dirty"] = true
 	zd.mu.Unlock()
+
+	zd.BumpSerial()
+
+	return nil
+}
+
+func (zd *ZoneData) UnpublishKeyRRs() error {
+	if !zd.Options["allow-updates"] {
+		return fmt.Errorf("Zone %s does not allow updates. KEY unpublication not possible", zd.ZoneName)
+	}
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return err
+	}
+
+	zd.mu.Lock()
+	delete(apex.RRtypes, dns.TypeKEY)
+	zd.Options["dirty"] = true
+	zd.mu.Unlock()
+
 	zd.BumpSerial()
 
 	return nil

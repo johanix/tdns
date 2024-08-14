@@ -85,7 +85,6 @@ func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 	return false, nil
 }
 
-// XXX: This should not be a method of ZoneData, but rather a function.
 // If key not found *TrustAnchor is nil
 func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error) {
 	ta := DnskeyCache.Get(signer, keyid)
@@ -167,21 +166,9 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 							continue
 						}
 
-						//dssum := 0
-						//for _, char := range dsrr.Digest {
-						//	dssum += int(char)
-						//}
-						//ksksum := 0
-						//for _, char := range computedDS.Digest {
-						//	ksksum += int(char)
-						//}
-						//log.Printf("ValidateChildDnskeys: len=%d sum=%d parent DS  =%s", len(dsrr.Digest), dssum, dsrr.Digest)
-						//log.Printf("ValidateChildDnskeys: len=%d sum=%d DS from KSK=%s", len(computedDS.Digest), ksksum, computedDS.Digest)
 						// Compare the computed DS with the DS record from the parent zone
 						if strings.ToUpper(computedDS.Digest) == strings.ToUpper(dsrr.Digest) {
-							// if dns.IsDuplicate(computedDS, dsrr) {
 							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY matches DS record. Adding to TAStore.")
-							// DNSKEY is verified against the DS record
 
 							// Store the KSK in the DnskeyCache
 							keyname := dnskey.Header().Name
@@ -260,70 +247,4 @@ func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	ti := int64(inc) + modi*year68
 	te := int64(exp) + mode*year68
 	return ti <= utc && utc <= te
-}
-
-// ValidityPeriod uses RFC1982 serial arithmetic to calculate
-// if a signature period is valid. If t is the zero time, the
-// current time is taken other t is. Returns true if the signature
-// is valid at the given time, otherwise returns false.
-func xxxSIGValidityPeriod(sig *dns.SIG, t time.Time) bool {
-	var utc int64
-	if t.IsZero() {
-		utc = time.Now().UTC().Unix()
-	} else {
-		utc = t.UTC().Unix()
-	}
-	modi := (int64(sig.Inception) - utc) / year68
-	mode := (int64(sig.Expiration) - utc) / year68
-	ti := int64(sig.Inception) + modi*year68
-	te := int64(sig.Expiration) + mode*year68
-	return ti <= utc && utc <= te
-}
-
-func xxxRRSIGValidityPeriod(rrsig *dns.RRSIG, t time.Time) bool {
-	var utc int64
-	if t.IsZero() {
-		utc = time.Now().UTC().Unix()
-	} else {
-		utc = t.UTC().Unix()
-	}
-	modi := (int64(rrsig.Inception) - utc) / year68
-	mode := (int64(rrsig.Expiration) - utc) / year68
-	ti := int64(rrsig.Inception) + modi*year68
-	te := int64(rrsig.Expiration) + mode*year68
-	return ti <= utc && utc <= te
-}
-
-func (zd *ZoneData) xxxFindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
-	zd.Logger.Printf("FindSig0KeyViaDNS: Looking up SIG(0) key %s (keyid %d) in DNS", signer, keyid)
-	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
-	if err != nil {
-		return nil, err
-	}
-	if rrset == nil {
-		return nil, fmt.Errorf("SIG(0) key %s (keyid %d) not found in DNS", signer, keyid)
-	}
-	valid, err := zd.ValidateRRset(rrset, true)
-	if err != nil {
-		return nil, err
-	}
-
-	zd.Logger.Printf("FindSig0KeyViaDNS: Found %s KEY RRset (validated: %v)", signer, valid)
-
-	for _, rr := range rrset.RRs {
-		if keyrr, ok := rr.(*dns.KEY); ok {
-			if keyrr.KeyTag() == keyid {
-				sk := Sig0Key{
-					Name:      signer,
-					Keyid:     keyid,
-					Validated: valid,
-					Source:    "dns",
-					Key:       *keyrr,
-				}
-				// Sig0Store.Map.Set(signer+"::"+string(keyrr.KeyTag()), sk)
-				return &sk, nil
-			}
-		}
-	}
-	return nil, nil
 }
