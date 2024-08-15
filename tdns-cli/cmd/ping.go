@@ -35,13 +35,34 @@ var PingCmd = &cobra.Command{
 		}
 
 		uptime := time.Now().Sub(pr.BootTime).Truncate(time.Second)
-		if tdns.Globals.Verbose {
-			fmt.Printf("%s from %s @ %s (version %s): pings: %d, pongs: %d, uptime: %v time: %s, client: %s\n",
-				pr.Msg, pr.Daemon, pr.ServerHost, pr.Version, pr.Pings,
-				pr.Pongs, uptime, pr.Time.Format(timelayout), pr.Client)
+		weeks := uptime / (7 * 24 * time.Hour)
+		uptime %= 7 * 24 * time.Hour
+		days := uptime / (24 * time.Hour)
+		uptime %= 24 * time.Hour
+		hours := uptime / time.Hour
+		uptime %= time.Hour
+		minutes := uptime / time.Minute
+		uptime %= time.Minute
+		seconds := uptime / time.Second
+
+		var uptimeStr string
+		if weeks > 0 {
+			uptimeStr = fmt.Sprintf("%dw%dd", weeks, days)
+		} else if days > 0 {
+			uptimeStr = fmt.Sprintf("%dd%dh", days, hours)
+		} else if hours > 0 {
+			uptimeStr = fmt.Sprintf("%dh%dm", hours, minutes)
 		} else {
-			fmt.Printf("%s: pings: %d, pongs: %d, uptime: %v, time: %s\n",
-				pr.Msg, pr.Pings, pr.Pongs, uptime, pr.Time.Format(timelayout))
+			uptimeStr = fmt.Sprintf("%dm%ds", minutes, seconds)
+		}
+
+		if tdns.Globals.Verbose {
+			fmt.Printf("%s from %s @ %s (version %s): pings: %d, pongs: %d, uptime: %s, time: %s, client: %s\n",
+				pr.Msg, pr.Daemon, pr.ServerHost, pr.Version, pr.Pings,
+				pr.Pongs, uptimeStr, pr.Time.Format(timelayout), pr.Client)
+		} else {
+			fmt.Printf("%s: pings: %d, pongs: %d, uptime: %s, time: %s\n",
+				pr.Msg, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout))
 		}
 	},
 }
