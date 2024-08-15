@@ -15,7 +15,7 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("Zone %s does not allow updates. KEY RR publication not possible", zd.ZoneName)
 	}
-	if !zd.Options["publish-key"] {
+	if zd.Options["dont-publish-key"] {
 		return fmt.Errorf("Zone %s does not allow KEY RR publication", zd.ZoneName)
 	}
 

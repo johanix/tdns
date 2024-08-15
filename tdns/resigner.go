@@ -5,13 +5,12 @@ package tdns
 
 import (
 	"log"
-	"slices"
 	"time"
 
 	"github.com/spf13/viper"
 )
 
-type RefreshCounter struct {
+type xxxRefreshCounter struct {
 	Name           string
 	SOARefresh     uint32
 	CurRefresh     uint32
@@ -21,7 +20,8 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
-func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
+// func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
+func ResignerEngine(zoneresignch chan *ZoneData, stopch chan struct{}) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
@@ -45,35 +45,39 @@ func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
 		log.Printf("*** ResignerEngine: Starting with interval %d seconds ***", interval)
 	}
 
-	var ZonesToKeepSigned []*ZoneData
-	var zr ZoneRefresher // We're reusing the ZoneRefresher struct also for the resigner
-	var zone string
+	ZonesToKeepSigned := make(map[string]*ZoneData)
+	//	var zr ZoneRefresher // We're reusing the ZoneRefresher struct also for the resigner
+	// var zone string
 
 	for {
 		select {
-		case zr = <-zoneresignch:
-			zone = zr.Name
+		case zd := <-zoneresignch:
 
-			zd, exist := Zones.Get(zone)
-			if !exist {
-				log.Printf("ResignerEngine: Zone %s does not exist, cannot resign", zone)
+			//			zd, exist := Zones.Get(zone)
+			if zd == nil {
+				log.Printf("ResignerEngine: Zone <nil> does not exist, cannot resign")
 				continue
 			}
 
-			if slices.Contains(ZonesToKeepSigned, zd) {
+			//			if slices.Contains(ZonesToKeepSigned, zd) {
+			//				continue
+			//			}
+
+			if _, exist := ZonesToKeepSigned[zd.ZoneName]; exist {
 				continue
 			}
-
-			ZonesToKeepSigned = append(ZonesToKeepSigned, zd)
+			log.Printf("ResignerEngine: Adding zone %s to ZonesToKeepSigned", zd.ZoneName)
+			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
 			// log.Printf("RefEng: ticker. refCounters: %v", refreshCounters)
 			for _, zd := range ZonesToKeepSigned {
 				log.Printf("ResignerEngine: Re-signing zone %s", zd.ZoneName)
-				err := zd.SignZone(zd.KeyDB, false)
+				newrrsigs, err := zd.SignZone(zd.KeyDB, false)
 				if err != nil {
 					log.Printf("ResignerEngine: Error re-signing zone %s: %s", zd.ZoneName, err)
 				}
+				log.Printf("ResignerEngine: zone %s re-signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
 			}
 		}
 	}

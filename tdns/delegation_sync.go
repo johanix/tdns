@@ -58,8 +58,10 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 			continue
 		}
 
+		log.Printf("DelegationSyncher: Zone %s allows updates. KEY RR exist: %v, dont-publish-key: %v", zd.ZoneName, keyrrexist, zd.Options["dont-publish-key"])
+
 		// 2. Updates allowed, but there is no KEY RRset published.
-		if !keyrrexist && zd.Options["publish-key"] {
+		if !keyrrexist && !zd.Options["dont-publish-key"] {
 			log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
 			sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
 			if err != nil {

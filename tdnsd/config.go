@@ -22,19 +22,8 @@ type Config struct {
 	DnssecPolicies map[string]tdns.DnssecPolicyConf
 	Zones          map[string]tdns.ZoneConf
 	Db             DbConf
-	Ddns           struct {
-		KeyDirectory string `validate:"dir,required"`
-		Update_NS    *bool  `validate:"required"`
-		Update_A     *bool  `validate:"required"`
-		Update_AAAA  *bool  `validate:"required"`
-		Policy       struct {
-			Type      string   `validate:"required"`
-			RRtypes   []string `validate:"required"`
-			KeyUpload string   `validate:"required"`
-		}
-	}
-
-	Log struct {
+	Registrars     map[string][]string
+	Log            struct {
 		File string `validate:"required"`
 	}
 	Internal InternalConf
@@ -73,7 +62,8 @@ type InternalConf struct {
 	DelegationSyncQ chan tdns.DelegationSyncRequest
 	NotifyQ         chan tdns.NotifyRequest
 	AuthQueryQ      chan tdns.AuthQueryRequest
-	ResignQ         chan tdns.ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
+	// ResignQ         chan tdns.ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
+	ResignQ chan *tdns.ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

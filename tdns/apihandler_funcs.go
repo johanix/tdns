@@ -264,11 +264,12 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 			}
 
 		case "sign-zone":
-			err := zd.SignZone(kdb, zp.Force)
+			newrrsigs, err := zd.SignZone(kdb, zp.Force)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
+			resp.Msg = fmt.Sprintf("Zone %s: signed with %d new RRSIGs", zd.ZoneName, newrrsigs)
 
 		case "generate-nsec":
 			err := zd.GenerateNsecChain(kdb)

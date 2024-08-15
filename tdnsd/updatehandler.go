@@ -9,16 +9,9 @@ import (
 	"sync"
 
 	"github.com/johanix/tdns/tdns"
-	"github.com/miekg/dns"
 )
 
-type xxxDnsHandlerRequest struct {
-	ResponseWriter dns.ResponseWriter
-	Msg            *dns.Msg
-	Qname          string
-}
-
-func UpdateHandler(conf *Config) error {
+func UpdateHandler(conf *tdns.Config) error {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	updateq := conf.Internal.UpdateQ
 

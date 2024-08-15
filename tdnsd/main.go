@@ -25,7 +25,7 @@ import (
 // var appVersion string
 var appMode string
 
-func mainloop(conf *Config) {
+func mainloop(conf *tdns.Config, appMode string) {
 	exit := make(chan os.Signal, 1)
 	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
 	hupper := make(chan os.Signal, 1)
@@ -46,7 +46,7 @@ func mainloop(conf *Config) {
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				err = ParseZones(conf, conf.Internal.RefreshZoneCh)
+				err = tdns.ParseZones(conf, conf.Internal.RefreshZoneCh, appMode)
 				if err != nil {
 					log.Fatalf("Error parsing zones: %v", err)
 				}
@@ -65,7 +65,7 @@ func mainloop(conf *Config) {
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 func main() {
-	var conf Config
+	var conf tdns.Config
 
 	conf.ServerBootTime = time.Now()
 
@@ -81,7 +81,7 @@ func main() {
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
 	}
 
-	err := ParseConfig(&conf)
+	err := tdns.ParseConfig(&conf, appMode)
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)
 	}
@@ -98,7 +98,7 @@ func main() {
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	conf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
-	go RefreshEngine(&conf, stopch)
+	go tdns.RefreshEngine(&conf, stopch, appMode)
 
 	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
 	go ValidatorEngine(&conf, stopch)
@@ -107,7 +107,7 @@ func main() {
 	go tdns.Notifier(conf.Internal.NotifyQ)
 
 	// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-	err = ParseZones(&conf, conf.Internal.RefreshZoneCh)
+	err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, appMode)
 	if err != nil {
 		log.Fatalf("Error parsing zones: %v", err)
 	}
@@ -121,7 +121,7 @@ func main() {
 	conf.Internal.DnsUpdateQ = make(chan tdns.DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan tdns.DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
-	conf.Internal.ResignQ = make(chan tdns.ZoneRefresher, 10)
+	conf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
 
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
@@ -132,5 +132,5 @@ func main() {
 	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
 	go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
 
-	mainloop(&conf)
+	mainloop(&conf, appMode)
 }

@@ -36,7 +36,7 @@ func NewRRsetCache() *RRsetCache {
 // The common case will be that the RRset is in a child zone, and the delegation is signed. In this case, the
 // validator will check that the delegation is correct, and that the child zone is signed.
 
-func ValidatorEngine(conf *Config, stopch chan struct{}) {
+func ValidatorEngine(conf *tdns.Config, stopch chan struct{}) {
 	var validatorch = conf.Internal.ValidatorCh
 	var vr tdns.ValidatorRequest
 

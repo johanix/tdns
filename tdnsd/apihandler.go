@@ -16,7 +16,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+func APIcommand(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -60,7 +60,7 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func SetupRouter(conf *Config) *mux.Router {
+func SetupRouter(conf *tdns.Config) *mux.Router {
 	kdb := conf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
 
@@ -98,7 +98,7 @@ func walkRoutes(router *mux.Router, address string) {
 
 // In practice APIdispatcher doesn't need a termination signal, as it will
 // just sit inside http.ListenAndServe, but we keep it for symmetry.
-func APIdispatcher(conf *Config, done <-chan struct{}) {
+func APIdispatcher(conf *tdns.Config, done <-chan struct{}) {
 	router := SetupRouter(conf)
 
 	walkRoutes(router, viper.GetString("apiserver.address"))

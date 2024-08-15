@@ -12,21 +12,21 @@ var DefaultTables = map[string]string{
 
 	"ChildDnskeys": `CREATE TABLE IF NOT EXISTS 'ChildDnskeys' (
 id		  INTEGER PRIMARY KEY,
-parent		  TEXT,
-child		  TEXT,
-keyid		  INTEGER,
-trusted		  INTEGER,
-keyrr		  TEXT,
-comment		  TEXT,
+parent	  TEXT,
+child	  TEXT,
+keyid	  INTEGER,
+trusted	  INTEGER,
+keyrr	  TEXT,
+comment	  TEXT,
 UNIQUE (parent, child, keyid)
 )`,
 
 	"ChildDelegationData": `CREATE TABLE IF NOT EXISTS 'ChildDelegationData' (
 id		  INTEGER PRIMARY KEY,
-parent		  TEXT,
-child		  TEXT,
-owner		  TEXT,
-rrtype		  TEXT,
+parent	  TEXT,
+child	  TEXT,
+owner	  TEXT,
+rrtype	  TEXT,
 rr		  TEXT,
 UNIQUE (owner,rr)
 )`,
@@ -34,14 +34,15 @@ UNIQUE (owner,rr)
 	// The Sig0TrustStore contains public SIG(0) keys that we use to validate
 	// signed DNS Updates received (from child zones)
 	"Sig0TrustStore": `CREATE TABLE IF NOT EXISTS 'Sig0TrustStore' (
-id		  INTEGER PRIMARY KEY,
-zonename	  TEXT,
-keyid		  INTEGER,
-validated	  INTEGER,
-trusted		  INTEGER,
-source		  TEXT,
-keyrr		  TEXT,
-comment		  TEXT,
+id		  		  INTEGER PRIMARY KEY,
+zonename	  	  TEXT,
+keyid		      INTEGER,
+validated	      INTEGER DEFAULT 0,
+trusted		      INTEGER DEFAULT 0,
+dnssecvalidated	  INTEGER DEFAULT 0,
+source		      TEXT,
+keyrr		      TEXT,
+comment		      TEXT,
 UNIQUE (zonename, keyid)
 )`,
 
@@ -79,3 +80,6 @@ comment		  TEXT,
 UNIQUE (zonename, keyid)
 )`,
 }
+
+// Note that there is no DNSSEC TrustStore, because whatever DNSSEC keys we have
+// looked up and validated are only cached in memory and not in the database as this data will expire.

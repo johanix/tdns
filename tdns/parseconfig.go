@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package main
+package tdns
 
 import (
 	// "flag"
@@ -13,36 +13,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
-
-	"github.com/johanix/tdns/tdns"
-	// "github.com/orcaman/concurrent-map/v2"
 )
 
 type Zconfig struct {
-	Templates map[string]tdns.TemplateConf
-	Zones     map[string]tdns.ZoneConf
+	Templates map[string]TemplateConf
+	Zones     map[string]ZoneConf
 }
 
-type TAtmp map[string]TmpAnchor
+// type TAtmp map[string]TmpAnchor
 
-type TmpAnchor struct {
-	Name   string
-	Dnskey string
-}
+// type TmpAnchor struct {
+// 	Name   string
+// 	Dnskey string
+// }
 
-type Sig0tmp map[string]TmpSig0Key
+// type Sig0tmp map[string]TmpSig0Key
 
-type TmpSig0Key struct {
-	Name string
-	Key  string
-}
+// type TmpSig0Key struct {
+// 	Name string
+// 	Key  string
+// }
 
-func GenKeyLifetime(lifetime, sigvalidity string) tdns.KeyLifetime {
+func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 	var lifetime_secs, sigvalidity_secs time.Duration
 	var err error
 
@@ -64,15 +60,15 @@ func GenKeyLifetime(lifetime, sigvalidity string) tdns.KeyLifetime {
 	if err != nil {
 		log.Fatalf("Error from ParseDuration: %v", err)
 	}
-	return tdns.KeyLifetime{
+	return KeyLifetime{
 		Lifetime:    uint32(lifetime_secs.Seconds()),
 		SigValidity: uint32(sigvalidity_secs.Seconds()),
 	}
 }
 
-func ParseConfig(conf *Config) error {
+func ParseConfig(conf *Config, appMode string) error {
 	log.Printf("Enter ParseConfig")
-	viper.SetConfigFile(tdns.DefaultCfgFile)
+	viper.SetConfigFile(DefaultCfgFile)
 
 	viper.AutomaticEnv() // read in environment variables that match
 
@@ -80,15 +76,15 @@ func ParseConfig(conf *Config) error {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	} else {
-		log.Fatalf("Could not load config %s: Error: %v", tdns.DefaultCfgFile, err)
+		log.Fatalf("Could not load config %s: Error: %v", DefaultCfgFile, err)
 	}
 
 	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
-	tdns.Globals.IMR = viper.GetString("resolver.address")
-	if tdns.Globals.IMR == "" {
+	Globals.IMR = viper.GetString("resolver.address")
+	if Globals.IMR == "" {
 		log.Fatalf("Error: IMR undefined.")
 	} else {
-		log.Printf("*** Using resolver: %s", tdns.Globals.IMR)
+		log.Printf("*** Using resolver: %s", Globals.IMR)
 	}
 
 	err := viper.Unmarshal(&conf)
@@ -96,29 +92,41 @@ func ParseConfig(conf *Config) error {
 		log.Fatalf("Error unmarshalling config into struct: %v", err)
 	}
 
-	dump.P(conf.DnssecPolicies)
+	if appMode == "server" {
+		// dump.P(conf.DnssecPolicies)
+		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 
-	conf.Internal.DnssecPolicies = make(map[string]tdns.DnssecPolicy)
+		for name, dp := range conf.DnssecPolicies {
+			tmp := DnssecPolicy{
+				Name:      name,
+				Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
+				KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
+				ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
+				CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+			}
+			if tmp.Algorithm == 0 {
+				log.Printf("Error: DnssecPolicy %s has unknown algorithm: %s. Policy ignored.", name, dp.Algorithm)
+				continue
+			}
+			conf.Internal.DnssecPolicies[name] = tmp
+		}
 
-	for name, dp := range conf.DnssecPolicies {
-		tmp := tdns.DnssecPolicy{
-			Name:      name,
-			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
-			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
-		}
-		if tmp.Algorithm == 0 {
-			log.Printf("Error: DnssecPolicy %s has unknown algorithm: %s. Policy ignored.", name, dp.Algorithm)
-			continue
-		}
-		conf.Internal.DnssecPolicies[name] = tmp
+		// dump.P(conf.Internal.DnssecPolicies)
 	}
 
-	dump.P(conf.Internal.DnssecPolicies)
+	// dump.P(conf.Registrars)
+	for reg, regdata := range conf.Registrars {
+		log.Printf("*** ParseConfig: Registrar %s has %d DSYNC records; parsing them for correctness", reg, len(regdata))
+		for _, regdsync := range regdata {
+			_, err := dns.NewRR(regdsync)
+			if err != nil {
+				log.Printf("*** ParseConfig: Error parsing registrar %s DSYNC: %v\nFailed DSYNC RR: \"%s\"", reg, err, regdsync)
+			}
+		}
+	}
 
 	// If a zone config file is found, read it in.
-	cfgdata, err := os.ReadFile(tdns.ZonesCfgFile)
+	cfgdata, err := os.ReadFile(ZonesCfgFile)
 	if err != nil {
 		log.Fatalf("Error from ReadFile: %v", err)
 	}
@@ -140,7 +148,7 @@ func ParseConfig(conf *Config) error {
 	}
 	fmt.Println()
 
-	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+	kdb, err := NewKeyDB(viper.GetString("db.file"), false)
 	if err != nil {
 		log.Fatalf("Error from NewKeyDB: %v", err)
 	}
@@ -155,16 +163,16 @@ func ParseConfig(conf *Config) error {
 		log.Fatalf("Error from LoadSig0ChildKeys(): %v", err)
 	}
 
-	ValidateConfig(nil, tdns.DefaultCfgFile) // will terminate on error
+	ValidateConfig(nil, DefaultCfgFile) // will terminate on error
 	return nil
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
-func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
+func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 	var all_zones []string
 
 	// If a zone config file is found, read it in.
-	zonecfgs, err := os.ReadFile(tdns.ZonesCfgFile)
+	zonecfgs, err := os.ReadFile(ZonesCfgFile)
 	if err != nil {
 		log.Fatalf("Error from ReadFile: %v", err)
 	}
@@ -181,6 +189,7 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 	//	}
 
 	zones := zconfig.Zones
+	primary_zones := []string{}
 
 	for zname, zconf := range zconfig.Zones {
 		if zname != dns.Fqdn(zname) {
@@ -192,14 +201,14 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 
 		all_zones = append(all_zones, zname)
 
-		var tmpl tdns.TemplateConf
+		var tmpl TemplateConf
 		var exist bool
 		var err error
 
 		if zconf.Template != "" {
 			if tmpl, exist = zconfig.Templates[zconf.Template]; exist {
 				fmt.Printf("Zone %s uses the existing template %s\n", zname, zconf.Template)
-				zconf, err = ExpandTemplate(zconf, tmpl)
+				zconf, err = ExpandTemplate(zconf, tmpl, appMode)
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
 					os.Exit(1)
@@ -214,25 +223,26 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 
 		zconf.Store = strings.ToLower(zconf.Store)
 		fmt.Printf("Zone %s uses store \"%s\"\n", zconf.Name, zconf.Store)
-		var zonestore tdns.ZoneStore
+		var zonestore ZoneStore
 		switch zconf.Store {
 		case "xfr":
-			zonestore = tdns.XfrZone
+			zonestore = XfrZone
 		case "map":
-			zonestore = tdns.MapZone
+			zonestore = MapZone
 		case "slice":
-			zonestore = tdns.SliceZone
+			zonestore = SliceZone
 		default:
 			log.Printf("Zone %s: Unknown zone store type: \"%s\". Zone ignored.", zname, zconf.Store)
 		}
 
-		var zonetype tdns.ZoneType
+		var zonetype ZoneType
 
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
-			zonetype = tdns.Primary
+			zonetype = Primary
+			primary_zones = append(primary_zones, zname)
 		case "secondary":
-			zonetype = tdns.Secondary
+			zonetype = Secondary
 			if zconf.Primary == "" {
 				log.Printf("Error: Zone %s is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
 				delete(zones, zname)
@@ -243,7 +253,7 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 			delete(zones, zname)
 		}
 
-		dump.P(zconf)
+		// dump.P(zconf)
 
 		_, exist = conf.DnssecPolicies[zconf.DnssecPolicy]
 		if !exist {
@@ -268,7 +278,7 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 				"fold-case",             // fold case of owner names to lower to make query matching case insensitive
 				"sign-zone",             // keep zone signed
 				"black-lies",            // zone may implement DNSSEC signed negative responses via so-called black lies.
-				"publish-key":           // publish a SIG(0) KEY recordfor the zone
+				"dont-publish-key":      // do not publish a SIG(0) KEY record for the zone (default should be to publish)
 				options[option] = true
 				cleanoptions = append(cleanoptions, option)
 			default:
@@ -313,21 +323,21 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 			}
 		}
 
-		policy := tdns.UpdatePolicy{
-			Child: tdns.UpdatePolicyDetail{
+		policy := UpdatePolicy{
+			Child: UpdatePolicyDetail{
 				Type:         zconf.UpdatePolicy.Child.Type,
 				RRtypes:      childrrtypes,
 				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
 				KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
 			},
-			Zone: tdns.UpdatePolicyDetail{
+			Zone: UpdatePolicyDetail{
 				Type:    zconf.UpdatePolicy.Zone.Type,
 				RRtypes: zonerrtypes,
 			},
 		}
 		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 
-		zrch <- tdns.ZoneRefresher{
+		zrch <- ZoneRefresher{
 			Name:         zname,
 			ZoneType:     zonetype, // primary | secondary
 			Primary:      zconf.Primary,
@@ -340,14 +350,19 @@ func ParseZones(conf *Config, zrch chan tdns.ZoneRefresher) error {
 		}
 	}
 
+	if appMode == "agent" && len(primary_zones) > 0 {
+		fmt.Printf("Error: The TDNS agent does not support primary zones: %v\n", primary_zones)
+		log.Fatalf("Error: The TDNS agent does not support primary zones: %v", primary_zones)
+	}
+
 	conf.Zones = zones
 
-	ValidateZones(conf, tdns.ZonesCfgFile) // will terminate on error
+	ValidateZones(conf, ZonesCfgFile) // will terminate on error
 	log.Printf("All configured zones now refreshing: %v", all_zones)
 	return nil
 }
 
-func ExpandTemplate(zconf tdns.ZoneConf, tmpl tdns.TemplateConf) (tdns.ZoneConf, error) {
+func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf, error) {
 
 	// for each field in tmpl, check whether it contains any data
 	// and if so, then let that data overwrite the same field in zconf
@@ -377,7 +392,8 @@ func ExpandTemplate(zconf tdns.ZoneConf, tmpl tdns.TemplateConf) (tdns.ZoneConf,
 		zconf.UpdatePolicy = tmpl.UpdatePolicy
 	}
 
-	if tmpl.DnssecPolicy != "" {
+	// tdns-agent does not have DNSSEC policies, so we ignore them
+	if appMode != "agent" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 

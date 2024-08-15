@@ -25,7 +25,7 @@ import (
 // var appVersion string
 var appMode string
 
-func mainloop(conf *Config) {
+func mainloop(conf *tdns.Config, appMode string) {
 	exit := make(chan os.Signal, 1)
 	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
 	hupper := make(chan os.Signal, 1)
@@ -46,7 +46,7 @@ func mainloop(conf *Config) {
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				err = ParseZones(conf, conf.Internal.RefreshZoneCh)
+				err = tdns.ParseZones(conf, conf.Internal.RefreshZoneCh, appMode)
 				if err != nil {
 					log.Fatalf("Error parsing zones: %v", err)
 				}
@@ -65,11 +65,14 @@ func mainloop(conf *Config) {
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 func main() {
-	var conf Config
+	var conf tdns.Config
 
 	conf.ServerBootTime = time.Now()
 
-	flag.StringVar(&appMode, "mode", "agent", "Mode of operation: server | agent | scanner")
+	// The agent is not a mode of operation, an agent should not be able to run as a server by just starting it with the wrong arguments.
+	// flag.StringVar(&appMode, "mode", "agent", "Mode of operation: server | agent | scanner")
+	appMode = "agent"
+
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
 	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	flag.Parse()
@@ -81,7 +84,7 @@ func main() {
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
 	}
 
-	err := ParseConfig(&conf)
+	err := tdns.ParseConfig(&conf, appMode)
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)
 	}
@@ -98,7 +101,7 @@ func main() {
 	conf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	conf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
-	go RefreshEngine(&conf, stopch)
+	go tdns.RefreshEngine(&conf, stopch, appMode)
 
 	//	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
 	// 	go ValidatorEngine(&conf, stopch)
@@ -107,7 +110,7 @@ func main() {
 	go tdns.Notifier(conf.Internal.NotifyQ)
 
 	// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-	err = ParseZones(&conf, conf.Internal.RefreshZoneCh)
+	err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, appMode)
 	if err != nil {
 		log.Fatalf("Error parsing zones: %v", err)
 	}
@@ -131,5 +134,5 @@ func main() {
 	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
 	// go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
 
-	mainloop(&conf)
+	mainloop(&conf, appMode)
 }

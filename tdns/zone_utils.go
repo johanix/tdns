@@ -671,7 +671,7 @@ func (zd *ZoneData) SetupZoneSync() error {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
 		} else {
-			zd.Logger.Printf("SetupZoneSync(%s): No DSYNC RRset in zone. Will add.", zd.ZoneName)
+			zd.Logger.Printf("SetupZoneSync: Zone %s: No DSYNC RRset in zone. Will add.", zd.ZoneName)
 			err := zd.PublishDsyncRRs()
 			if err != nil {
 				zd.Logger.Printf("Error from PublishDsyncRRs(%s): %v", zd.ZoneName, err)
@@ -685,10 +685,13 @@ func (zd *ZoneData) SetupZoneSync() error {
 			switch scheme {
 			case "update":
 				// 1. Is there a KEY RRset already?
-				err := zd.VerifyPublishedKeyRRs()
-				if err != nil {
-					zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
-					return err
+				if !zd.Options["dont-publish-keys"] {
+					err := zd.VerifyPublishedKeyRRs()
+					if err != nil {
+						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
+						return err
+					}
+					zd.Logger.Printf("SetupZoneSync: Zone %s: Verified published KEY RRset", zd.ZoneName)
 				}
 
 			case "notify":
@@ -702,7 +705,8 @@ func (zd *ZoneData) SetupZoneSync() error {
 	return nil
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan ZoneRefresher) error {
+// func (zd *ZoneData) SetupZoneSigning(resignq chan ZoneRefresher) error {
+func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
 	if !(zd.Options["sign-zone"] || zd.Options["online-signing"]) { // XXX: Need to sort out whether to use the sign-zone or online-signing option
 		return nil // this zone should not be signed (at least not by us)
 	}
@@ -720,17 +724,15 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan ZoneRefresher) error {
 	}
 
 	kdb := zd.KeyDB
-	err := zd.SignZone(kdb, false)
+	newrrsigs, err := zd.SignZone(kdb, false)
 	if err != nil {
 		zd.Logger.Printf("Error from SignZone(%s): %v", zd.ZoneName, err)
 		return err
 	}
 
-	resignq <- ZoneRefresher{
-		Name:     zd.ZoneName,
-		Response: nil,
-		Force:    false,
-	}
+	log.Printf("SetupZoneSigning: zone %s signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
+
+	resignq <- zd
 
 	return nil
 }

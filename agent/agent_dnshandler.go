@@ -15,7 +15,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-func DnsEngine(conf *Config) error {
+func DnsEngine(conf *tdns.Config) error {
 	addresses := viper.GetStringSlice("dnsengine.addresses")
 
 	// verbose := viper.GetBool("dnsengine.verbose")
@@ -47,7 +47,7 @@ func DnsEngine(conf *Config) error {
 	return nil
 }
 
-func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
+func createHandler(conf *tdns.Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	// kdb := conf.Internal.KeyDB
@@ -81,7 +81,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
-func UpdateHandler(conf *Config) error {
+func UpdateHandler(conf *tdns.Config) error {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	updateq := conf.Internal.UpdateQ
 
@@ -102,7 +102,7 @@ func UpdateHandler(conf *Config) error {
 	return nil
 }
 
-func NotifyHandler(conf *Config) error {
+func NotifyHandler(conf *tdns.Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	scannerq := conf.Internal.ScannerQ

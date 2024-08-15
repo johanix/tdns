@@ -1,16 +1,14 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 
-package main
+package tdns
 
 import (
 	"log"
 	"time"
 
-	// "github.com/orcaman/concurrent-map/v2"
 	"github.com/go-playground/validator/v10"
-	"github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
 )
 
@@ -19,19 +17,21 @@ type Config struct {
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
 	Apiserver      ApiserverConf
-	Zones          map[string]tdns.ZoneConf
+	DnssecPolicies map[string]DnssecPolicyConf
+	Zones          map[string]ZoneConf
 	Db             DbConf
-	Ddns           struct {
-		KeyDirectory string `validate:"dir,required"`
-		Update_NS    *bool  `validate:"required"`
-		Update_A     *bool  `validate:"required"`
-		Update_AAAA  *bool  `validate:"required"`
-		Policy       struct {
-			Type      string   `validate:"required"`
-			RRtypes   []string `validate:"required"`
-			KeyUpload string   `validate:"required"`
-		}
-	}
+	//	Ddns           struct { // XXX: Is this still used?
+	//		KeyDirectory string `validate:"dir,required"`
+	//		Update_NS    *bool  `validate:"required"`
+	//		Update_A     *bool  `validate:"required"`
+	//		Update_AAAA  *bool  `validate:"required"`
+	//		Policy       struct {
+	//			Type      string   `validate:"required"`
+	//			RRtypes   []string `validate:"required"`
+	//			KeyUpload string   `validate:"required"`
+	//		}
+	//	}
+	Registrars map[string][]string
 
 	Log struct {
 		File string `validate:"required"`
@@ -59,18 +59,21 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	KeyDB           *tdns.KeyDB
+	KeyDB           *KeyDB
+	DnssecPolicies  map[string]DnssecPolicy
 	APIStopCh       chan struct{}
-	RefreshZoneCh   chan tdns.ZoneRefresher
-	BumpZoneCh      chan tdns.BumperData
-	ValidatorCh     chan tdns.ValidatorRequest
-	ScannerQ        chan tdns.ScanRequest
-	UpdateQ         chan tdns.UpdateRequest
-	DnsUpdateQ      chan tdns.DnsUpdateRequest
-	DnsNotifyQ      chan tdns.DnsNotifyRequest
-	DelegationSyncQ chan tdns.DelegationSyncRequest
-	NotifyQ         chan tdns.NotifyRequest
-	AuthQueryQ      chan tdns.AuthQueryRequest
+	RefreshZoneCh   chan ZoneRefresher
+	BumpZoneCh      chan BumperData
+	ValidatorCh     chan ValidatorRequest
+	ScannerQ        chan ScanRequest
+	UpdateQ         chan UpdateRequest
+	DnsUpdateQ      chan DnsUpdateRequest
+	DnsNotifyQ      chan DnsNotifyRequest
+	DelegationSyncQ chan DelegationSyncRequest
+	NotifyQ         chan NotifyRequest
+	AuthQueryQ      chan AuthQueryRequest
+	// ResignQ         chan ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
+	ResignQ chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {

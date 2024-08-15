@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 
 package tdns
@@ -38,9 +38,38 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	m := new(dns.Msg)
 	m.SetReply(r)
+	var opt *dns.OPT
 
-	dur.Log("UpdateResponder: Received UPDATE for zone '%s' with %d RRs in the update section",
-		qname, len(r.Ns))
+	dur.Log("UpdateResponder: Received UPDATE for zone '%s' with %d RRs in the update section and %d RRs in the additional section",
+		qname, len(r.Ns), len(r.Extra))
+
+	if len(r.Ns) > 0 {
+		dur.Log("UpdateResponder: Update section contains %d RRs", len(r.Ns))
+		for _, rr := range r.Ns {
+			dur.Log("UpdateResponder: Update RR: %s", rr.String())
+		}
+	}
+	if len(r.Extra) > 0 {
+		dur.Log("UpdateResponder: Additional section contains %d RRs", len(r.Extra))
+		for _, rr := range r.Extra {
+			dur.Log("UpdateResponder: Additional RR: %s", rr.String())
+			if rr.Header().Rrtype == dns.TypeOPT {
+				opt = new(dns.OPT)
+				opt.Hdr.Name = "."
+				opt.Hdr.Rrtype = dns.TypeOPT
+			}
+		}
+	}
+
+	// example of how to populate an OPT RR. This is a DNS Cookie, we're interested in the EDE.
+	//	o := new(dns.OPT)
+	// o.Hdr.Name = "."
+	// o.Hdr.Rrtype = dns.TypeOPT
+	// e := new(dns.EDNS0_COOKIE)
+	// e.Code = dns.EDNS0COOKIE
+	// e.Cookie = "24a5ac.."
+	// o.Option = append(o.Option, e)
+
 	// This is a DNS UPDATE, so the Query Section becomes the Zone Section
 	zone := qname
 
@@ -119,7 +148,6 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// trusted. We always trust SIG(0) keys in the zone we are authoritative for.
 
 	err := zd.ValidateUpdate(r, dur.Status)
-	// err := zd.ValidateAndTrustUpdate(r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		m.SetRcode(m, dns.RcodeServerFailure)
@@ -151,13 +179,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		// Let's not return here, this could be an unvalidated key upload.
 	}
 
-	//	if !dur.Status.Validated {
-	//		dur.Log("DnsEngine: Update NOT validated. Ignored.")
-	//		return nil
-	//	}
-
-	// rcode from validation is input to ApproveUpdate only to enable
-	// the possibility of upload of unvalidated keys
+	// rcode from validation is input to ApproveUpdate only to enable the possibility of upload of unvalidated keys
 	approved, updatezone, err := zd.ApproveUpdate(zone, dur.Status, r)
 	// err := zd.ApproveUpdate(zone, r, dur.Status)
 	dur.Status.Approved = approved
@@ -182,13 +204,6 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		zd.Logger.Printf("DnsEngine: Update NOT validated BUT still approved. Queued for zone update.")
 	}
 
-	//	cmd := "ZONE-UPDATE"
-	//	if isdel {
-	//		cmd = "CHILD-UPDATE"
-	//	}
-	//	if !updatezone {
-	//		cmd = "TRUSTSTORE-UPDATE"
-	//	}
 	var cmd string
 	switch dur.Status.Data {
 	case "auth":

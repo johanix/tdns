@@ -168,19 +168,19 @@ func NeedsResigning(rrsig *dns.RRSIG) bool {
 // XXX: MaybesignRRset should report on whether it actually signed anything
 // At the end, is anything hass been signed, then we must end by bumping the
 // SOA Serial and resigning the SOA.
-func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
+func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	if !zd.Options["sign-zone"] || !zd.Options["online-signing"] {
-		return fmt.Errorf("Zone %s should not be signed (option sign-zone=false)", zd.ZoneName)
+		return 0, fmt.Errorf("Zone %s should not be signed (option sign-zone=false)", zd.ZoneName)
 	}
 
 	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
+		return 0, fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
 
 	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 	if err != nil {
 		log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
-		return err
+		return 0, err
 	}
 	if len(dak.KSKs) == 0 && len(dak.ZSKs) == 0 {
 		log.Printf("SignZone: no active DNSSEC keys available for zone %s. Will generate new keys", zd.ZoneName)
@@ -188,13 +188,13 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		// generate ZSK:
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "signzone", "active", dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil) // nil = no tx
 		if err != nil {
-			return err
+			return 0, err
 		}
 		log.Printf("SignZone: %s", msg)
 		// generate KSK:
 		_, msg, err = kdb.GenerateKeypair(zd.ZoneName, "signzone", "active", dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil) // nil = no tx
 		if err != nil {
-			return err
+			return 0, err
 		}
 		log.Printf("SignZone: %s", msg)
 
@@ -203,19 +203,21 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		dak, err = kdb.GetDnssecActiveKeys(zd.ZoneName)
 		if err != nil {
 			log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
-			return err
+			return 0, err
 		}
 		if len(dak.KSKs) == 0 {
 			// Give up
-			return fmt.Errorf("SignZone: failed to generate active keys for zone %s", zd.ZoneName)
+			return 0, fmt.Errorf("SignZone: failed to generate active keys for zone %s", zd.ZoneName)
 		}
 	}
+
+	newrrsigs := 0
 
 	// It's either black lies or we need a traditional NSEC chain
 	if !zd.Options["black-lies"] {
 		err = zd.GenerateNsecChain(kdb)
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 
@@ -227,6 +229,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		if err != nil {
 			log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 		}
+		if resigned {
+			newrrsigs++
+		}
 		return rrset, resigned
 		//}
 		// return rrset, false
@@ -234,13 +239,13 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 
 	names, err := zd.GetOwnerNames()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	sort.Strings(names)
 
 	err = zd.PublishDnskeyRRs(dak)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// apex, err := zd.GetOwner(zd.ZoneName)
@@ -255,7 +260,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		}
 		owner, err := zd.GetOwner(name)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if _, exist := owner.RRtypes[dns.TypeNS]; exist {
 			delegations = append(delegations, name)
@@ -266,10 +271,10 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 
 	var signed, zoneResigned bool
 	for _, name := range names {
-		log.Printf("SignZone: signing RRsets under name %s", name)
+		// log.Printf("SignZone: signing RRsets under name %s", name)
 		owner, err := zd.GetOwner(name)
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		for rrt, rrset := range owner.RRtypes {
@@ -282,7 +287,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 			// XXX: What is the best way to identify that an RR is a glue record?
 			var wasglue bool
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
-				log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
+				// log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
 				for _, del := range delegations {
 					if strings.HasSuffix(name, del) {
 						log.Printf("SignZone: not signing glue record %s %s for delegation %s", name, dns.TypeToString[uint16(rrt)], del)
@@ -308,11 +313,11 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) error {
 		_, err := zd.BumpSerial()
 		if err != nil {
 			log.Printf("SignZone: failed to bump SOA serial for zone %s", zd.ZoneName)
-			return err
+			return 0, err
 		}
 	}
 
-	return nil
+	return newrrsigs, nil
 }
 
 func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {

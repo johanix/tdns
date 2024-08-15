@@ -11,7 +11,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-func NotifyHandler(conf *Config) error {
+func NotifyHandler(conf *tdns.Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	scannerq := conf.Internal.ScannerQ
