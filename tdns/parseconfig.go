@@ -255,14 +255,13 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 
 		// dump.P(zconf)
 
-		_, exist = conf.DnssecPolicies[zconf.DnssecPolicy]
-		if !exist {
-			log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Ignored.", zname, zconf.DnssecPolicy)
-			zconf.DnssecPolicy = ""
+		if zconf.DnssecPolicy != "" {
+			_, exist = conf.DnssecPolicies[zconf.DnssecPolicy]
+			if !exist {
+				log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Zone will not be signed.", zname, zconf.DnssecPolicy)
+				zconf.DnssecPolicy = ""
+			}
 		}
-
-		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
-			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
 
 		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.Options)
 		options := map[string]bool{}
@@ -271,16 +270,21 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 			option := strings.ToLower(option)
 			switch option {
 			case "delegation-sync-parent", // as a parent, publish supported DSYNC schemes
-				"delegation-sync-child", // as a child, try to sync with parent via DSYNC scheme
-				"online-signing",        // zone may be signed (and re-signed) online as needed
-				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data
+				"delegation-sync-child", // as a child, try to sync with parent via DSYNC scheme				"delegation-sync-child", // as a child, try to sync with parent via DSYNC scheme				"online-signing",        // zone may be signed (and re-signed) online as needed				"online-signing",        // zone may be signed (and re-signed) online as needed				"online-signing",        // zone may be signed (and re-signed) online as needed
+				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data
 				"allow-child-updates",   // zone allows updates to child delegation information
 				"fold-case",             // fold case of owner names to lower to make query matching case insensitive
-				"sign-zone",             // keep zone signed
 				"black-lies",            // zone may implement DNSSEC signed negative responses via so-called black lies.
 				"dont-publish-key":      // do not publish a SIG(0) KEY record for the zone (default should be to publish)
 				options[option] = true
 				cleanoptions = append(cleanoptions, option)
+
+			case "online-signing": // zone may be signed (and re-signed) online as needed; only possible if dnssec policy is set
+				if zconf.DnssecPolicy != "" {
+					options[option] = true
+					cleanoptions = append(cleanoptions, option)
+				}
+
 			default:
 				log.Printf("Error: Zone %s: Unknown option: \"%s\". Zone ignored.", zname, option)
 				delete(zones, zname)
@@ -289,6 +293,9 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 		zconf.Options = cleanoptions
 		zones[zname] = zconf
 		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
+
+		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
+			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
 
 		log.Printf("ParseZones: zone %s incoming update policy: %v", zname, zconf.UpdatePolicy)
 

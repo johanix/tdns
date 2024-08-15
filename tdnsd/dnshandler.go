@@ -196,7 +196,7 @@ func createHandler(conf *tdns.Config) func(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *tdns.KeyDB) error {
-	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, tdns.DnskeyStateActive)
 	if err != nil {
 		log.Printf("ApexResponder: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
@@ -207,7 +207,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 			return rrset
 		}
 		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			_, err := tdns.SignRRset(&rrset, qname, dak, false)
+			_, err := zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
@@ -316,7 +316,7 @@ func ApexResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname st
 
 func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname string, qtype uint16, dnssec_ok bool, kdb *tdns.KeyDB) error {
 
-	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, tdns.DnskeyStateActive)
 	if err != nil {
 		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
@@ -327,7 +327,7 @@ func QueryResponder(w dns.ResponseWriter, r *dns.Msg, zd *tdns.ZoneData, qname s
 			return rrset
 		}
 		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			_, err := tdns.SignRRset(&rrset, qname, dak, false)
+			_, err := zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {

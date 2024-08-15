@@ -139,7 +139,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 	return &KeyDB{
 		DB:          db,
 		Sig0Cache:   make(map[string]*Sig0ActiveKeys),
-		DnssecCache: make(map[string]*DnssecActiveKeys),
+		DnssecCache: make(map[string]*DnssecKeys),
 		UpdateQ:     make(chan UpdateRequest),
 	}, nil
 }

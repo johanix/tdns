@@ -104,13 +104,13 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 		// 3. There is a KEY RRset, question is whether it is signed or not
 		if keyrrexist && zd.Options["online-signing"] {
 			log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
-			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-			if err != nil {
-				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
-				continue
-			}
+			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+			//			if err != nil {
+			//				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+			//				continue
+			//			}
 			rrset := apex.RRtypes[dns.TypeKEY]
-			_, err = SignRRset(&rrset, zd.ZoneName, dak, false)
+			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
 			if err != nil {
 				log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 			} else {
@@ -359,19 +359,19 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 		if zd.Options["online-signing"] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
-			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+			//			if err != nil {
+			//				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
+			//			} else {
+			//			if len(dak.ZSKs) > 0 {
+			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // Let's force signing
 			if err != nil {
-				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
+				log.Printf("Error signing %s: %v", zd.ZoneName, err)
 			} else {
-				if len(dak.ZSKs) > 0 {
-					_, err := SignRRset(&rrset, zd.ZoneName, dak, true) // Let's force signing
-					if err != nil {
-						log.Printf("Error signing %s: %v", zd.ZoneName, err)
-					} else {
-						log.Printf("Signed %s: %v", zd.ZoneName, err)
-					}
-				}
+				log.Printf("Signed %s: %v", zd.ZoneName, err)
 			}
+			//			}
+			//			}
 		}
 	}
 	// 2. Create Notify msg

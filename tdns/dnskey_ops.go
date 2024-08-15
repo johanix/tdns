@@ -10,7 +10,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecActiveKeys) error {
+func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("Zone %s does not allow updates", zd.ZoneName)
 	}

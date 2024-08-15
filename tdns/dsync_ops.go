@@ -21,9 +21,9 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return err
 	}
 
-	var dak *DnssecActiveKeys
-	if zd.Options["sign-zone"] || zd.Options["online-signing"] {
-		dak, err = zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
+	var dak *DnssecKeys
+	if zd.Options["online-signing"] {
+		dak, err = zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
 			zd.Logger.Printf("Error from GetDnssecActiveKeys(%s): %v", zd.ZoneName, err)
 			return err
@@ -124,7 +124,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return fmt.Errorf("No DSYNC RRs added for zone %s", zd.ZoneName)
 	}
 
-	_, err = SignRRset(&rrset, zd.ZoneName, dak, true)
+	_, err = zd.SignRRset(&rrset, zd.ZoneName, dak, true)
 	if err != nil {
 		return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
 	}
@@ -171,7 +171,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		}
 		if new_addr {
 			tmp := owner.RRtypes[rrtype]
-			_, err = SignRRset(&tmp, zd.ZoneName, dak, true)
+			_, err = zd.SignRRset(&tmp, zd.ZoneName, dak, true)
 			if err != nil {
 				return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
 			}

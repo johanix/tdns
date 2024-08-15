@@ -57,7 +57,21 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) (bool, error) {
+func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force bool) (bool, error) {
+
+	if !zd.Options["online-signing"] {
+		return false, fmt.Errorf("SignRRset: zone %s does not allow online signing", zd.ZoneName)
+	}
+
+	var err error
+
+	if dak == nil {
+		dak, err = zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			log.Printf("SignRRset: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
+			return false, err
+		}
+	}
 
 	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
 		return false, fmt.Errorf("SignRRset: no active DNSSEC keys available")
@@ -81,15 +95,6 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) (bo
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {
 			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
-				// Check if the existing RRSIG by the same key is older than one hour
-				//				inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
-				//				if (time.Since(inceptionTime) < time.Hour) && !force {
-				//					log.Printf("SignRRset: keeping existing RRSIG( %s %s ) by the same DNSKEY (less than one hour old)", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
-				//					shouldSign = false
-				//				} else {
-				//					log.Printf("SignRRset: removing older RRSIG( %s %s ) by the same DNSKEY", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
-				//
-				//				}
 				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG)) || force
 				if shouldSign {
 					log.Printf("SignRRset: removing older RRSIG( %s %s ) by the same DNSKEY", oldsig.Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
@@ -125,17 +130,13 @@ func SignRRset(rrset *RRset, name string, dak *DnssecActiveKeys, force bool) (bo
 	return resigned, nil
 }
 
-// XXX: NeedsResigning should check if the RRSIG exists at all, and
-// if so whether it is close to expiration.
 // XXX: Perhaps a working algorithm woul be to test for the remaining signature lifetime to be something like
 //
 //	less than 3 x resigning interval?
-func (rrset *RRset) NeedsResigning(force bool) bool {
+func (rrset *RRset) xxxNeedsResigning(force bool) bool {
 	if len(rrset.RRSIGs) == 0 {
 		return true
 	}
-	// here we should check is enough lifetime is left for the RRSIG
-	// to be valid.
 
 	for _, oldsig := range rrset.RRSIGs {
 		inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
@@ -169,15 +170,15 @@ func NeedsResigning(rrsig *dns.RRSIG) bool {
 // At the end, is anything hass been signed, then we must end by bumping the
 // SOA Serial and resigning the SOA.
 func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
-	if !zd.Options["sign-zone"] || !zd.Options["online-signing"] {
-		return 0, fmt.Errorf("Zone %s should not be signed (option sign-zone=false)", zd.ZoneName)
+	if !zd.Options["online-signing"] {
+		return 0, fmt.Errorf("SignZone: zone %s should not be signed here (option online-signing=false)", zd.ZoneName)
 	}
 
 	if !zd.Options["allow-updates"] {
 		return 0, fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
 
-	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
 		return 0, err
@@ -185,22 +186,70 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	if len(dak.KSKs) == 0 && len(dak.ZSKs) == 0 {
 		log.Printf("SignZone: no active DNSSEC keys available for zone %s. Will generate new keys", zd.ZoneName)
 
+		// XXX: Ok, so there are no active keys for this zone. What to do?
+		// 1. Try to promote published keys to active keys. If ok, then generate new keys from scratch and promote to published.
+		// 2. Generate new active keys from scratch and immediately promote them to active
+
+		dpk, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStatePublished)
+		if err != nil {
+			log.Printf("SignZone: failed to get DNSSEC published keys for zone %s", zd.ZoneName)
+			return 0, err
+		}
+		if len(dpk.KSKs) > 0 || len(dpk.ZSKs) > 0 {
+			log.Printf("SignZone: Zone %s has published DNSSEC keys that could be promoted to active", zd.ZoneName)
+
+			var promotedKskKeyId uint16
+
+			// Promote the first KSK from published to active
+			if len(dpk.KSKs) > 0 {
+				promotedKskKeyId = dpk.KSKs[0].KeyId
+				err = kdb.PromoteDnssecKey(zd.ZoneName, promotedKskKeyId, DnskeyStatePublished, DnskeyStateActive)
+				if err != nil {
+					log.Printf("SignZone: failed to promote published KSK to active for zone %s", zd.ZoneName)
+					return 0, err
+				}
+				log.Printf("SignZone: Zone %s: promoted published KSK with keyid %d from published to active", zd.ZoneName, promotedKskKeyId)
+			}
+
+			// Promote the first ZSK from published to active unless it has the same keyid as the promoted KSK
+			if len(dpk.ZSKs) > 0 && (len(dpk.KSKs) == 0 || dpk.ZSKs[0].KeyId != promotedKskKeyId) {
+				err = kdb.PromoteDnssecKey(zd.ZoneName, dpk.ZSKs[0].KeyId, DnskeyStatePublished, DnskeyStateActive)
+				if err != nil {
+					log.Printf("SignZone: failed to promote published ZSK to active for zone %s", zd.ZoneName)
+					return 0, err
+				}
+				log.Printf("SignZone: Zone %s: promoted published ZSK with keyid %d from published to active", zd.ZoneName, dpk.ZSKs[0].KeyId)
+			}
+		}
+
+		// Now try to get the DNSSEC active keys again:
+		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
+			return 0, err
+		}
+
+		// Bummer, promoting didn't work, let's generate KSK:
+		if len(dak.KSKs) == 0 {
+			_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "signzone", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil) // nil = no tx
+			if err != nil {
+				return 0, err
+			}
+			log.Printf("SignZone: %s", msg)
+		}
 		// generate ZSK:
-		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "signzone", "active", dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil) // nil = no tx
-		if err != nil {
-			return 0, err
+		if len(dak.ZSKs) == 0 {
+			_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "signzone", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil) // nil = no tx
+			if err != nil {
+				return 0, err
+			}
+			log.Printf("SignZone: %s", msg)
 		}
-		log.Printf("SignZone: %s", msg)
-		// generate KSK:
-		_, msg, err = kdb.GenerateKeypair(zd.ZoneName, "signzone", "active", dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil) // nil = no tx
-		if err != nil {
-			return 0, err
-		}
-		log.Printf("SignZone: %s", msg)
 
 		log.Printf("SignZone: New DNSSEC keys generated for zone %s", zd.ZoneName)
+
 		// Now try to get the DNSSEC active keys again:
-		dak, err = kdb.GetDnssecActiveKeys(zd.ZoneName)
+		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
 			log.Printf("SignZone: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
 			return 0, err
@@ -222,10 +271,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	}
 
 	MaybeSignRRset := func(rrset RRset, zone string) (RRset, bool) {
-		// SignRRset *will* sign, so we must first check whether it is time
-		// to sign.
-		// if rrset.NeedsResigning(force) {
-		resigned, err := SignRRset(&rrset, zone, dak, force)
+		resigned, err := zd.SignRRset(&rrset, zone, dak, force)
 		if err != nil {
 			log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)
 		}
@@ -233,8 +279,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			newrrsigs++
 		}
 		return rrset, resigned
-		//}
-		// return rrset, false
 	}
 
 	names, err := zd.GetOwnerNames()
@@ -324,7 +368,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 	if !zd.Options["allow-updates"] {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
-	dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		log.Printf("GenerateNsecChain: failed to get dnssec active keys for zone %s", zd.ZoneName)
 		return err

@@ -432,20 +432,22 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	return &sak, err
 }
 
-func (kdb *KeyDB) GetDnssecActiveKeys(zonename string) (*DnssecActiveKeys, error) {
+func (kdb *KeyDB) GetDnssecKeys(zonename, state string) (*DnssecKeys, error) {
 	const (
 		fetchDnssecPrivKeySql = `
-SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state='active'`
+SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state=?`
 	)
 
 	// XXX: Should use this once we've found all the bugs in the sqlite code
-	if dak, ok := kdb.DnssecCache[zonename]; ok {
-		return dak, nil
+	if state == DnskeyStateActive {
+		if dak, ok := kdb.DnssecCache[zonename+"+"+state]; ok {
+			return dak, nil
+		}
 	}
 
-	var dak DnssecActiveKeys
+	var dk DnssecKeys
 
-	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename)
+	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename, state)
 	if err != nil {
 		log.Printf("Error from kdb.Query(%s, %s): %v", fetchDnssecPrivKeySql, zonename, err)
 		return nil, err
@@ -462,7 +464,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		if err != nil {
 			if err == sql.ErrNoRows {
 				log.Printf("No active DNSSEC key found for zone %s", zonename)
-				return &dak, nil
+				return &dk, nil
 			}
 			log.Printf("Error from rows.Scan(): %v", err)
 			return nil, err
@@ -483,10 +485,10 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		}
 
 		if (flags & 0x0001) != 0 {
-			dak.KSKs = append(dak.KSKs, pkc)
+			dk.KSKs = append(dk.KSKs, pkc)
 			//log.Printf("Adding KSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		} else {
-			dak.ZSKs = append(dak.ZSKs, pkc)
+			dk.ZSKs = append(dk.ZSKs, pkc)
 			// log.Printf("Adding ZSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
 		}
 	}
@@ -494,26 +496,81 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	// No keys found is not an error
 	if !keysfound {
 		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
-		return &dak, nil
+		return &dk, nil
 	}
 
 	// No KSK found is a hard error
-	if len(dak.KSKs) == 0 {
+	if len(dk.KSKs) == 0 {
 		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
-		return &dak, nil
+		return &dk, nil
 	}
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
-	if len(dak.ZSKs) == 0 {
+	if len(dk.ZSKs) == 0 {
 		log.Printf("No active DNSSEC ZSK found for zone %s, reusing KSK", zonename)
-		dak.ZSKs = append(dak.ZSKs, dak.KSKs[0])
+		dk.ZSKs = append(dk.ZSKs, dk.KSKs[0])
 	}
 
 	if Globals.Debug {
-		log.Printf("GetDnssecKey(%s) returned key %v", zonename, dak)
+		log.Printf("GetDnssecKey(%s) returned key %v", zonename, dk)
 	}
 
-	kdb.DnssecCache[zonename] = &dak
+	kdb.DnssecCache[zonename+"+"+state] = &dk
 
-	return &dak, err
+	return &dk, err
+}
+
+func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, newstate string) error {
+	const getDnskeySql = `
+    SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+	const updateDnskeyStateSql = `
+    UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=? AND state=?`
+
+	tx, err := kdb.Begin("PromoteDnssecKey")
+	if err != nil {
+		return fmt.Errorf("error beginning transaction: %v", err)
+	}
+
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	// Look up the key in the DnssecKeyStore table
+	var currentState string
+	err = tx.QueryRow(getDnskeySql, zonename, keyid).Scan(&currentState)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
+		}
+		return fmt.Errorf("error querying DnssecKeyStore: %v", err)
+	}
+
+	// Verify the current state
+	if currentState != oldstate {
+		return fmt.Errorf("key with keyid %d in zone %s is not in state %s", keyid, zonename, oldstate)
+	}
+
+	// Update the state in the DnssecKeyStore table
+	res, err := tx.Exec(updateDnskeyStateSql, newstate, zonename, keyid, oldstate)
+	if err != nil {
+		return fmt.Errorf("error updating DnssecKeyStore: %v", err)
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error getting rows affected: %v", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("no rows updated, key with keyid %d in zone %s might not be in state %s", keyid, zonename, oldstate)
+	}
+
+	// Delete the cached data
+	cacheKey := zonename + "+" + oldstate
+	delete(kdb.DnssecCache, cacheKey)
+
+	return nil
 }

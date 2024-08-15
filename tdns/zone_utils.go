@@ -571,18 +571,18 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
-	if zd.Options["sign-zone"] || zd.Options["online-signing"] {
-		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
-		if err != nil {
-			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
-			zd.mu.Unlock()
-			return resp, err
-		}
+	if zd.Options["online-signing"] {
+		//		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
+		//		if err != nil {
+		//			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		//			zd.mu.Unlock()
+		//			return resp, err
+		//		}
 		apex, _ := zd.GetOwner(zd.ZoneName)
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 
 		rrset := apex.RRtypes[dns.TypeSOA]
-		_, err = SignRRset(&rrset, zd.ZoneName, dak, true) // true = force signing, as we know the SOA has changed
+		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
 		if err != nil {
 			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
 			zd.mu.Unlock()
@@ -707,7 +707,7 @@ func (zd *ZoneData) SetupZoneSync() error {
 
 // func (zd *ZoneData) SetupZoneSigning(resignq chan ZoneRefresher) error {
 func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
-	if !(zd.Options["sign-zone"] || zd.Options["online-signing"]) { // XXX: Need to sort out whether to use the sign-zone or online-signing option
+	if !zd.Options["online-signing"] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
 		return nil // this zone should not be signed (at least not by us)
 	}
 

@@ -41,6 +41,13 @@ var ZoneTypeToString = map[ZoneType]string{
 	Secondary: "secondary",
 }
 
+const (
+	DnskeyStateCreated   string = "created"
+	DnskeyStatePublished string = "published"
+	DnskeyStateActive    string = "active"
+	DnskeyStateRetired   string = "retired"
+)
+
 type ZoneData struct {
 	mu         sync.Mutex
 	ZoneName   string
@@ -542,7 +549,7 @@ type Sig0ActiveKeys struct {
 	Keys []*PrivateKeyCache
 }
 
-type DnssecActiveKeys struct {
+type DnssecKeys struct {
 	KSKs []*PrivateKeyCache
 	ZSKs []*PrivateKeyCache
 }
@@ -552,7 +559,7 @@ type KeyDB struct {
 	mu sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	Sig0Cache   map[string]*Sig0ActiveKeys
-	DnssecCache map[string]*DnssecActiveKeys // map[zonename]*DnssecActiveKeys
+	DnssecCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
 	Ctx         string
 	UpdateQ     chan UpdateRequest
 }
