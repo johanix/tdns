@@ -263,7 +263,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		addSig0KeySql = `
 INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		addDnssecKeySql = `
-INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, type, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	)
 
 	localtx := false
@@ -298,7 +298,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 			flags = 256
 		}
 		_, err = tx.Exec(addDnssecKeySql, owner, state, pkc.KeyId,
-			dns.AlgorithmToString[pkc.Algorithm], flags, creator, "local", pkc.PrivateKey, pkc.DnskeyRR.String())
+			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
 	}
 	if err != nil {
 		log.Printf("Error storing generated SIG(0) key in keystore: %v", err)
