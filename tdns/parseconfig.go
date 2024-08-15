@@ -283,6 +283,8 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 				if zconf.DnssecPolicy != "" {
 					options[option] = true
 					cleanoptions = append(cleanoptions, option)
+				} else {
+					log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
 				}
 
 			default:

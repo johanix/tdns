@@ -7,6 +7,7 @@ package tdns
 import (
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/miekg/dns"
 )
@@ -29,6 +30,27 @@ type DnsNotifyRequest struct {
 	Msg            *dns.Msg
 	Qname          string
 	Status         *NotifyStatus
+}
+
+func UpdateHandler(conf *Config) error {
+	dnsupdateq := conf.Internal.DnsUpdateQ
+	updateq := conf.Internal.UpdateQ
+
+	log.Printf("*** DnsUpdateResponderEngine: starting")
+
+	var dhr DnsUpdateRequest
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for dhr = range dnsupdateq {
+			UpdateResponder(&dhr, updateq)
+		}
+	}()
+	wg.Wait()
+
+	log.Println("DnsUpdateResponderEngine: terminating")
+	return nil
 }
 
 func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {

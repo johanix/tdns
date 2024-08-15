@@ -67,11 +67,12 @@ func mainloop(conf *tdns.Config, appMode string) {
 func main() {
 	var conf tdns.Config
 
+	conf.AppMode = "agent"
 	conf.ServerBootTime = time.Now()
+	conf.AppVersion = appVersion
 
 	// The agent is not a mode of operation, an agent should not be able to run as a server by just starting it with the wrong arguments.
 	// flag.StringVar(&appMode, "mode", "agent", "Mode of operation: server | agent | scanner")
-	appMode = "agent"
 
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
 	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -79,12 +80,12 @@ func main() {
 
 	switch appMode {
 	case "server", "agent", "scanner":
-		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", appMode, tdns.Globals.Verbose, tdns.Globals.Debug)
+		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", conf.AppMode, tdns.Globals.Verbose, tdns.Globals.Debug)
 	default:
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
 	}
 
-	err := tdns.ParseConfig(&conf, appMode)
+	err := tdns.ParseConfig(&conf, conf.AppMode)
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)
 	}
@@ -128,9 +129,9 @@ func main() {
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
 	go kdb.UpdaterEngine(stopch)
-	go UpdateHandler(&conf)
-	go NotifyHandler(&conf)
-	go DnsEngine(&conf)
+	go tdns.UpdateHandler(&conf)
+	go tdns.NotifyHandler(&conf)
+	go tdns.DnsEngine(&conf)
 	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
 	// go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
 

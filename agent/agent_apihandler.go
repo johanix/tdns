@@ -39,20 +39,6 @@ func APIcommand(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) 
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = "We're happy, but send more cookies"
 
-			//		case "reload":
-			//			zd, exist := tdns.Zones.Get(cp.Zone)
-			//			if !exist {
-			//				resp.Error = true
-			//				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
-			//			} else {
-			//				log.Printf("APIhandler: reloading, will check for changes to delegation data\n")
-			//				resp.Msg, err = zd.ReloadZone(nil, cp.Force)
-			//				if err != nil {
-			//					resp.Error = true
-			//					resp.ErrorMsg = err.Error()
-			//				}
-			//			}
-
 		case "stop":
 			log.Printf("Daemon instructed to stop\n")
 			// var done struct{}
@@ -63,23 +49,6 @@ func APIcommand(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) 
 			json.NewEncoder(w).Encode(resp)
 			time.Sleep(500 * time.Millisecond)
 			conf.Internal.APIStopCh <- struct{}{}
-
-			//		case "list-zones":
-			//			for zname, zconf := range conf.Zones {
-			//				log.Printf("APIhandler: finding zone %s (conf: %v) zonedata", zname, zconf)
-			//				zd, ok := tdns.Zones.Get(zname)
-			//				if !ok {
-			//					//	log.Printf("APIhandler: Error: zone %s should exist but there is no ZoneData", zname)
-			//					resp.Error = true
-			//					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
-			//				} else {
-			//					//	log.Printf("APIhandler: zone %s: zd.Dirty: %v zd.Frozen: %v", zname, zd.Options["dirty"], zd.Options["frozen"])
-			//					zconf.Dirty = zd.Options["dirty"]
-			//					zconf.Frozen = zd.Options["frozen"]
-			//					conf.Zones[zname] = zconf
-			//				}
-			//			}
-			//			resp.Zones = conf.Zones
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
@@ -95,9 +64,9 @@ func SetupRouter(conf *tdns.Config) *mux.Router {
 	kdb := conf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key",
-		viper.GetString("apiserver.key")).Subrouter()
-	sr.HandleFunc("/ping", tdns.APIping("tdnsd", conf.ServerBootTime)).Methods("POST")
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.key")).Subrouter()
+
+	sr.HandleFunc("/ping", tdns.APIping("tdnsd", conf.AppVersion, conf.ServerBootTime)).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	// The /command endpoint is the only one not in the tdns lib

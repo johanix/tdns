@@ -64,9 +64,9 @@ func SetupRouter(conf *tdns.Config) *mux.Router {
 	kdb := conf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key",
-		viper.GetString("apiserver.key")).Subrouter()
-	sr.HandleFunc("/ping", tdns.APIping("tdnsd", conf.ServerBootTime)).Methods("POST")
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.key")).Subrouter()
+
+	sr.HandleFunc("/ping", tdns.APIping("tdnsd", conf.AppVersion, conf.ServerBootTime)).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	// The /command endpoint is the only one not in the tdns lib

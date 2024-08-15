@@ -31,7 +31,7 @@ type PingResponse struct {
 
 var pongs int = 0
 
-func APIping(appName string, bootTime time.Time) func(w http.ResponseWriter, r *http.Request) {
+func APIping(appName, appVersion string, bootTime time.Time) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		tls := ""
@@ -52,6 +52,7 @@ func APIping(appName string, bootTime time.Time) func(w http.ResponseWriter, r *
 		response := PingResponse{
 			Time:     time.Now(),
 			BootTime: bootTime,
+			Version:  appVersion,
 			Client:   r.RemoteAddr,
 			Msg:      fmt.Sprintf("%spong from %s @ %s", tls, appName, hostname),
 			Pings:    pp.Pings + 1,

@@ -13,6 +13,8 @@ import (
 )
 
 type Config struct {
+	AppVersion     string
+	AppMode        string
 	ServerBootTime time.Time
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf

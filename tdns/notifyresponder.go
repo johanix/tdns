@@ -1,18 +1,38 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 
 package tdns
 
 import (
 	"log"
+	"sync"
 
 	"github.com/miekg/dns"
 )
 
-// func NotifyResponder(w dns.ResponseWriter, r *dns.Msg, qname string, ntype uint16,
-//
-//	zonech chan tdns.ZoneRefresher) error {
+func NotifyHandler(conf *Config) error {
+	zonech := conf.Internal.RefreshZoneCh
+	dnsnotifyq := conf.Internal.DnsNotifyQ
+	scannerq := conf.Internal.ScannerQ
+
+	log.Printf("*** DnsNotifyResponderEngine: starting")
+
+	var dhr DnsNotifyRequest
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for dhr = range dnsnotifyq {
+			NotifyResponder(&dhr, zonech, scannerq)
+		}
+	}()
+	wg.Wait()
+
+	log.Println("DnsNotifyResponderEngine: terminating")
+	return nil
+}
+
 func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
 
 	qname := dhr.Qname
