@@ -161,6 +161,10 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			resp.ErrorMsg = err.Error()
 			// return &resp, err
 		}
+
+		// Must also delete from the cache
+		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted from TrustStore (%d rows)", tp.Keyname, tp.Keyid, rows)
 
@@ -195,6 +199,8 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
+		// Must also delete from the cache
+		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	default:
 		log.Printf("Sig0TrustStoreMgmt: Unknown SubCommand: %s", tp.SubCommand)

@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/miekg/dns"
@@ -35,14 +36,16 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 	// Iterate over all SIG RRs in the Additional section of the update to find all keys that
 	// signed the update.
-	for _, rr := range r.Extra {
+	// log.Printf("ValidateAndTrustUpdate: There are %d RRs in the Additional section of the update", len(r.Extra))
+	for idx, rr := range r.Extra {
+		log.Printf("ValidateAndTrustUpdate: RR %d in Additional is a %T", idx, rr)
 		var sig0key *Sig0Key
 		if _, ok := rr.(*dns.SIG); !ok {
-			us.Log("ValidateAndTrustUpdate: RR in Additional is not a SIG RR, continuing")
+			log.Printf("ValidateAndTrustUpdate: RR in Additional is not a SIG RR (%T), continuing", rr)
 			continue
 		}
 
-		sig, ok = r.Extra[0].(*dns.SIG)
+		sig, ok = rr.(*dns.SIG)
 		if !ok {
 			// This RR is not a SIG RR (this may be a protocol violation, I don't remember)
 			continue
@@ -50,7 +53,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 		keyid := sig.RRSIG.KeyTag
 		signername := sig.RRSIG.SignerName
-		us.Log("* Update is signed by SIG(0) key \"%s\" (keyid %d).", signername, keyid)
+		log.Printf("* Update is signed by SIG(0) key \"%s\" (keyid %d).", signername, keyid)
 
 		// We have the name and keyid of the key that generated this signature. There are now
 		// four possible alternatives for locating the key:
@@ -64,11 +67,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// 1. Is the key in the TrustStore?
 		sig0key, err = zd.FindSig0TrustedKey(signername, keyid)
 		if err == nil && sig0key != nil {
-			us.Log("* The SIG(0) key \"%s\" (keyid %d) was found in the TrustStore", signername, keyid)
+			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found in the TrustStore", signername, keyid)
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			us.Log("* The SIG(0) key \"%s\" (keyid %d) was NOT found in the TrustStore",
+			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was NOT found in the TrustStore",
 				signername, keyid)
 		}
 
@@ -88,16 +91,16 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// 3. Try to find the key via DNS in the child zone
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
-			us.Log("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)
+			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			us.Log("* The SIG(0) key \"%s\" (keyid %d) was NOT found via DNS lookup", signername, keyid)
+			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was NOT found via DNS lookup", signername, keyid)
 		}
 
 		// Last chance: Is the key in the update?
 		if len(r.Ns) != 1 {
-			us.Log("-- Update does not consist of a single SIG(0) key, so this cannot be a self-signed KEY upload")
+			log.Printf("-- Update does not consist of a single SIG(0) key, so this cannot be a self-signed KEY upload")
 			continue
 		}
 
@@ -111,10 +114,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			}
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			us.Data = "key"
-			us.Log("* The update is a self-signed KEY upload for the SIG(0) key \"%s\" (keyid %d)", signername, keyid)
+			us.Type = "TRUSTSTORE-UPDATE"
+			log.Printf("* The update is a self-signed KEY upload for the SIG(0) key \"%s\" (keyid %d)", signername, keyid)
 			continue
 		default:
-			us.Log("-- Update is not a SIG(0) key, so this cannot be a self-signed KEY upload")
+			log.Printf("-- Update is not a SIG(0) key, so this cannot be a self-signed KEY upload")
 			continue
 		}
 	}
@@ -128,7 +132,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		err = sig.Verify(&keyrr, msgbuf)
 		if err != nil {
 			// This key failed to validate the update. Try the next key.
-			us.Log("-- The signature by the SIG(0) key \"%s\" (keyid %d) failed to verify the update: %v", signer.Name, signer.KeyId, err)
+			log.Printf("-- The signature by the SIG(0) key \"%s\" (keyid %d) failed to verify the update: %v", signer.Name, signer.KeyId, err)
 			continue
 		}
 
@@ -136,14 +140,14 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
 			us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
 		} else {
-			us.Log("-- The signature by the SIG(0) key \"%s\" (keyid %d) is NOT within its validity period", signer.Name, signer.KeyId)
+			log.Printf("-- The signature by the SIG(0) key \"%s\" (keyid %d) is NOT within its validity period", signer.Name, signer.KeyId)
 			us.ValidationRcode = dns.RcodeBadTime
 			// This key validated the signature, but the signature is not within its validity period.
 			// Try the next key.
 			continue
 		}
 
-		us.Log("* Update validated by known and validated key.")
+		log.Printf("* Update validated by known and validated key.")
 		us.ValidationRcode = dns.RcodeSuccess
 		us.Validated = true // Now at least one key has validated the update
 		signer.Validated = true
@@ -157,10 +161,15 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 // Evaluate the keys that signed the update and determine the trust status of the update.
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
+	// dump.P(us)
+	if len(us.Signers) == 0 {
+		return fmt.Errorf("Update is not signed by any key")
+	}
 	for _, key := range us.Signers {
 		if key.Sig0Key.Trusted {
 			zd.Logger.Printf("* Update is signed by trusted SIG(0) key \"%s\" (keyid %d).", key.Name, key.KeyId)
 			us.SignatureType = "by-trusted"
+			us.ValidatedByTrustedKey = true
 			return nil
 		}
 		if key.Sig0Key.DnssecValidated {
@@ -175,7 +184,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// If we get here then the update is not signed by any trusted, or DNSSEC validated key. Nor
 	// is it self-signed.
 	us.ValidationRcode = dns.RcodeBadKey
-	return fmt.Errorf("Update is not signed by a trusted SIG(0) key")
+	return fmt.Errorf("Update is signed by %s (keyid %d) which is neither a trusted SIG(0) key nor a DNSSEC validated key", us.Signers[0].Name, us.Signers[0].KeyId)
 }
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {

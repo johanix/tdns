@@ -114,6 +114,8 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			SubCommand: "add",
 			Keyname:    pkc.KeyRR.Header().Name,
 			Keyid:      int(pkc.KeyRR.KeyTag()),
+			Validated:  true,
+			Trusted:    true, // we implicitly trust keys that we have added ourselves
 			Src:        "keystore",
 			KeyRR:      pkc.KeyRR.String(),
 		}
@@ -124,13 +126,29 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "generate":
-		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
+		pkc, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
 		if err != nil {
 			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
+			return &resp, err
 		}
 		resp.Msg = msg
+		tspost := TruststorePost{
+			Command:    "truststore",
+			SubCommand: "add",
+			Keyname:    pkc.KeyRR.Header().Name,
+			Keyid:      int(pkc.KeyRR.KeyTag()),
+			Validated:  true,
+			Trusted:    true, // we implicitly trust keys that we have generated ourselves
+			Src:        "keystore",
+			KeyRR:      pkc.KeyRR.String(),
+		}
+		tsresp, err := kdb.Sig0TrustMgmt(tx, tspost)
+		if err != nil {
+			return nil, err
+		}
+		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
 		return &resp, err
 
 	case "setstate":
@@ -180,7 +198,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 			return &resp, err
 		}
 		rows, _ := res.RowsAffected()
-		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
+		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted from KeyStore (%d rows)", kp.Keyname, kp.Keyid, rows)
 
 		// Now also delete it from the TrustStore.
 		tspost := TruststorePost{
@@ -193,7 +211,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		if err != nil {
 			return &resp, err
 		}
-		resp.Msg += fmt.Sprintf("\nDeleted public key from TrustStore: %s", tsresp.Msg)
+		resp.Msg += fmt.Sprintf("\nAlso deleted the public key from TrustStore:\n%s", tsresp.Msg)
 
 	default:
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
@@ -403,7 +421,13 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 			log.Printf("Error from rows.Scan(): %v", err)
 			return nil, err
 		}
-		keyfound = true
+
+		if keyfound {
+			log.Printf("Error: multiple active SIG(0) keys found for zone %s", zonename)
+			// XXX: Should we return an error here?
+			continue
+		}
+
 		bpk, err := PrivKeyToBindFormat(privatekey, algorithm)
 		if err != nil {
 			log.Printf("Error from tdns.PrivKeyToBindFormat(): %v", err)
@@ -414,7 +438,9 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
 			return nil, err
 		}
+
 		sak.Keys = append(sak.Keys, pkc)
+		keyfound = true
 	}
 
 	if !keyfound {

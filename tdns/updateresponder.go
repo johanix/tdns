@@ -62,19 +62,19 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	m.SetReply(r)
 	var opt *dns.OPT
 
-	dur.Log("UpdateResponder: Received UPDATE for zone '%s' with %d RRs in the update section and %d RRs in the additional section",
+	log.Printf("UpdateResponder: Received UPDATE for zone '%s' with %d RRs in the update section and %d RRs in the additional section",
 		qname, len(r.Ns), len(r.Extra))
 
 	if len(r.Ns) > 0 {
-		dur.Log("UpdateResponder: Update section contains %d RRs", len(r.Ns))
+		log.Printf("UpdateResponder: Update section contains %d RRs", len(r.Ns))
 		for _, rr := range r.Ns {
-			dur.Log("UpdateResponder: Update RR: %s", rr.String())
+			log.Printf("UpdateResponder: Update RR: %s", rr.String())
 		}
 	}
 	if len(r.Extra) > 0 {
-		dur.Log("UpdateResponder: Additional section contains %d RRs", len(r.Extra))
+		log.Printf("UpdateResponder: Additional section contains %d RRs", len(r.Extra))
 		for _, rr := range r.Extra {
-			dur.Log("UpdateResponder: Additional RR: %s", rr.String())
+			log.Printf("UpdateResponder: Additional RR: %s", rr.String())
 			if rr.Header().Rrtype == dns.TypeOPT {
 				opt = new(dns.OPT)
 				opt.Hdr.Name = "."
@@ -102,7 +102,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// Let's see if we can find the zone
 	zd, _ := FindZone(qname)
 	if zd == nil {
-		dur.Log("UpdateResponder: zone %s not found", qname)
+		log.Printf("UpdateResponder: zone %s not found", qname)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
@@ -112,7 +112,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// dump.P(zd.UpdatePolicy)
 
 	if zd.Options["frozen"] {
-		dur.Log("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update.",
+		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update.",
 			zd.ZoneName, qname)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
@@ -123,10 +123,11 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	// 1. Is qname the apex of this zone?
 	if qname == zd.ZoneName {
+		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the apex of this zone",
 			zd.ZoneName, qname)
 		if !zd.Options["allow-updates"] {
-			dur.Log("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
+			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
 			w.WriteMsg(m)
@@ -134,11 +135,11 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		}
 		// 2. Is qname a zone cut for a child zone?
 	} else if zd.IsChildDelegation(qname) {
-		dur.Status.Type = "child"
+		dur.Status.Type = "CHILD-UPDATE"
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
 		if !zd.Options["allow-child-updates"] {
-			dur.Log("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
+			log.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
 			w.WriteMsg(m)
@@ -146,10 +147,10 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		}
 		// 3. Does qname exist in auth zone?
 	} else if zd.NameExists(qname) {
-		dur.Status.Type = "auth"
+		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
 		if !zd.Options["allow-updates"] {
-			dur.Log("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
+			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
 			w.WriteMsg(m)
@@ -189,15 +190,15 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return err
 	}
 
-	//	dur.Log("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
+	//	log.Printf("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
 	//		isdel, rcode, validated, trusted, signername)
-	dur.Log("UpdateResponder: %v %v %v %v %v", dur.Status.Type, dur.Status.ValidationRcode, dur.Status.Validated, dur.Status.ValidatedByTrustedKey, dur.Status.SignerName)
+	log.Printf("UpdateResponder: %v %v %v %v %v", dur.Status.Type, dur.Status.ValidationRcode, dur.Status.Validated, dur.Status.ValidatedByTrustedKey, dur.Status.SignerName)
 	// send response
 	m = m.SetRcode(m, int(dur.Status.ValidationRcode))
 	w.WriteMsg(m)
 
 	if dur.Status.ValidationRcode != dns.RcodeSuccess {
-		dur.Log("Error verifying DNS UPDATE. Most likely ignoring contents.")
+		log.Printf("Error verifying DNS UPDATE. Most likely ignoring contents.")
 		// Let's not return here, this could be an unvalidated key upload.
 	}
 
@@ -208,15 +209,15 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// XXX: FIXME:
 	// dur.Status.UpdateZone = updatezone
 	if !updatezone {
-		dur.Status.Data = "key"
+		dur.Status.Type = "TRUSTSTORE-UPDATE"
 	}
 	if err != nil {
-		dur.Log("Error from ApproveUpdate: %v. Ignoring update.", err)
+		log.Printf("Error from ApproveUpdate: %v. Ignoring update.", err)
 		return err
 	}
 
 	if !dur.Status.Approved {
-		dur.Log("DnsEngine: ApproveUpdate rejected the update. Ignored.")
+		log.Printf("DnsEngine: ApproveUpdate rejected the update. Ignored.")
 		return nil
 	}
 
@@ -226,22 +227,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		zd.Logger.Printf("DnsEngine: Update NOT validated BUT still approved. Queued for zone update.")
 	}
 
-	var cmd string
-	switch dur.Status.Data {
-	case "auth":
-		cmd = "ZONE-UPDATE"
-	case "delegation":
-		cmd = "CHILD-UPDATE"
-	case "key":
-		cmd = "TRUSTSTORE-UPDATE"
-	}
-
-	// log.Printf("UpdateResponder: cmd=%s zone=%s validated=%v trusted=%v", cmd, zone, validated, trusted)
+	// dump.P(dur.Status)
+	log.Printf("UpdateResponder: cmd=%s zone=%s validated=%v trusted=%v", dur.Status.Type, zone, dur.Status.Validated, dur.Status.ValidatedByTrustedKey)
 
 	// send into suitable channel for pending updates
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
 	updateq <- UpdateRequest{
-		Cmd:       cmd,
+		Cmd:       dur.Status.Type,
 		ZoneName:  zone,
 		Actions:   r.Ns,
 		Validated: dur.Status.Validated,
@@ -318,7 +310,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 				for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
 					if bootstrap == "strict-manual" {
 						us.Approved = false
-						us.Log("ApproveChildUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
+						log.Printf("ApproveChildUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
 						return false, false, nil
 					}
 				}
@@ -331,19 +323,19 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// Past the unvalidated key upload; from here update MUST be validated
 		if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
 			us.Approved = false
-			us.Log("ApproveUpdate: update rejected (signature did not validate)")
+			log.Printf("ApproveUpdate: update rejected (signature did not validate)")
 			return false, false, nil
 		}
 
 		if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
 			us.Approved = false
-			us.Log("ApproveUpdate: update rejected (signature validated but key not trusted)")
+			log.Printf("ApproveUpdate: update rejected (signature validated but key not trusted)")
 			return false, false, nil
 		}
 
 		if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
 			us.Approved = false
-			us.Log("ApproveUpdate: update rejected (unapproved RR type: %s)",
+			log.Printf("ApproveUpdate: update rejected (unapproved RR type: %s)",
 				dns.TypeToString[rr.Header().Rrtype])
 			return false, false, nil
 		}
@@ -352,7 +344,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		case "selfsub":
 			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 				us.Approved = false
-				us.Log("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
+				log.Printf("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
 					rr.Header().Name, us.SignerName)
 				return false, false, nil
 			}
@@ -360,27 +352,27 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		case "self":
 			if rr.Header().Name != us.SignerName {
 				us.Approved = false
-				us.Log("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
+				log.Printf("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
 					rr.Header().Name, us.SignerName)
 				return false, false, nil
 			}
 		default:
 			us.Approved = false
-			us.Log("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Child.Type)
+			log.Printf("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Child.Type)
 			return false, false, nil
 		}
 
 		switch rrclass {
 		case dns.ClassNONE:
-			us.Log("ApproveUpdate: Remove RR: %s", rr.String())
+			log.Printf("ApproveUpdate: Remove RR: %s", rr.String())
 		case dns.ClassANY:
-			us.Log("ApproveUpdate: Remove RRset: %s", rr.String())
+			log.Printf("ApproveUpdate: Remove RRset: %s", rr.String())
 		default:
-			us.Log("ApproveUpdate: Add RR: %s", rr.String())
+			log.Printf("ApproveUpdate: Add RR: %s", rr.String())
 		}
 	}
 	us.Approved = true
-	us.Log("ApproveUpdate: update approved")
+	log.Printf("ApproveUpdate: update approved")
 	updateZone := !unvalidatedKeyUpload
 
 	return true, updateZone, nil
@@ -391,13 +383,13 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 	if us.ValidationRcode != dns.RcodeSuccess || !us.Validated {
 		us.Approved = false
-		us.Log("ApproveUpdate: update rejected (signature did not validate)")
+		log.Printf("ApproveUpdate: update rejected (signature did not validate)")
 		return false, false, nil
 	}
 
 	if !us.ValidatedByTrustedKey {
 		us.Approved = false
-		us.Log("ApproveUpdate: update rejected (signature validated but key not trusted)")
+		log.Printf("ApproveUpdate: update rejected (signature validated but key not trusted)")
 		return false, false, nil
 	}
 
@@ -418,7 +410,7 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 		if !zd.UpdatePolicy.Zone.RRtypes[rrtype] {
 			us.Approved = false
-			us.Log("ApproveUpdate: update rejected (unapproved RR type: %s)",
+			log.Printf("ApproveUpdate: update rejected (unapproved RR type: %s)",
 				dns.TypeToString[rr.Header().Rrtype])
 			return false, false, nil
 		}
@@ -427,7 +419,7 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 		case "selfsub":
 			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 				us.Approved = false
-				us.Log("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
+				log.Printf("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
 					rr.Header().Name, us.SignerName)
 				return false, false, nil
 			}
@@ -435,19 +427,19 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 		case "self":
 			if rr.Header().Name != us.SignerName {
 				us.Approved = false
-				us.Log("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
+				log.Printf("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
 					rr.Header().Name, us.SignerName)
 				return false, false, nil
 			}
 
 		case "none":
 			us.Approved = false
-			us.Log("ApproveUpdate: update rejected (policy type \"none\" disallows all updates)")
+			log.Printf("ApproveUpdate: update rejected (policy type \"none\" disallows all updates)")
 			return false, false, nil
 
 		default:
 			us.Approved = false
-			us.Log("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Zone.Type)
+			log.Printf("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Zone.Type)
 			return false, false, nil
 		}
 

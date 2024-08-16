@@ -190,7 +190,6 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		case dns.TypeDNSKEY:
 			privkeystr = nkey.(*dns.DNSKEY).PrivateKeyString(pk) // Convert to BIND private key format
 		}
-		fmt.Printf("privkeystr: %s\n", privkeystr)
 
 		pkc, err = PrepareKeyCache(privkeystr, nkey.String())
 		if err != nil {
