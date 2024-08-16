@@ -8,7 +8,7 @@
 *.so
 *.dylib
 
-tdnsd/tdnsd
+server/tdns-server
 tdns-cli/tdns-cli
 agent/tdns-agent
 dog/dog
