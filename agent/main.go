@@ -78,11 +78,11 @@ func main() {
 	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	flag.Parse()
 
-	switch appMode {
+	switch conf.AppMode {
 	case "server", "agent", "scanner":
 		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", conf.AppMode, tdns.Globals.Verbose, tdns.Globals.Debug)
 	default:
-		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", appMode)
+		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", conf.AppMode)
 	}
 
 	err := tdns.ParseConfig(&conf, conf.AppMode)

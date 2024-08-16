@@ -1,4 +1,4 @@
-module tdnsd
+module tdns-server
 
 go 1.21
 

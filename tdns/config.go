@@ -13,6 +13,7 @@ import (
 )
 
 type Config struct {
+	AppName        string
 	AppVersion     string
 	AppMode        string
 	ServerBootTime time.Time
@@ -22,20 +23,8 @@ type Config struct {
 	DnssecPolicies map[string]DnssecPolicyConf
 	Zones          map[string]ZoneConf
 	Db             DbConf
-	//	Ddns           struct { // XXX: Is this still used?
-	//		KeyDirectory string `validate:"dir,required"`
-	//		Update_NS    *bool  `validate:"required"`
-	//		Update_A     *bool  `validate:"required"`
-	//		Update_AAAA  *bool  `validate:"required"`
-	//		Policy       struct {
-	//			Type      string   `validate:"required"`
-	//			RRtypes   []string `validate:"required"`
-	//			KeyUpload string   `validate:"required"`
-	//		}
-	//	}
-	Registrars map[string][]string
-
-	Log struct {
+	Registrars     map[string][]string
+	Log            struct {
 		File string `validate:"required"`
 	}
 	Internal InternalConf

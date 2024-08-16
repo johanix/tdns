@@ -1,4 +1,4 @@
-PROG:=tdnsd
+PROG:=tdns-server
 COMMIT:=`git describe --dirty=+WiP --always`
 VERSION=`cat ./VERSION`
 APPDATE=`date +"%Y-%m-%d-%H:%M"`

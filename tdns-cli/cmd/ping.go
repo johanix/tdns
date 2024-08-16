@@ -57,9 +57,8 @@ var PingCmd = &cobra.Command{
 		}
 
 		if tdns.Globals.Verbose {
-			fmt.Printf("%s from %s @ %s (version %s): pings: %d, pongs: %d, uptime: %s, time: %s, client: %s\n",
-				pr.Msg, pr.Daemon, pr.ServerHost, pr.Version, pr.Pings,
-				pr.Pongs, uptimeStr, pr.Time.Format(timelayout), pr.Client)
+			fmt.Printf("%s (version %s): pings: %d, pongs: %d, uptime: %s, time: %s, client: %s\n",
+				pr.Msg, pr.Version, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout), pr.Client)
 		} else {
 			fmt.Printf("%s: pings: %d, pongs: %d, uptime: %s, time: %s\n",
 				pr.Msg, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout))

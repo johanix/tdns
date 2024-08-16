@@ -50,13 +50,15 @@ func APIping(appName, appVersion string, bootTime time.Time) func(w http.Respons
 		pongs += 1
 		hostname, _ := os.Hostname()
 		response := PingResponse{
-			Time:     time.Now(),
-			BootTime: bootTime,
-			Version:  appVersion,
-			Client:   r.RemoteAddr,
-			Msg:      fmt.Sprintf("%spong from %s @ %s", tls, appName, hostname),
-			Pings:    pp.Pings + 1,
-			Pongs:    pongs,
+			Time:       time.Now(),
+			BootTime:   bootTime,
+			Version:    appVersion,
+			Daemon:     appName,
+			ServerHost: hostname,
+			Client:     r.RemoteAddr,
+			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, appName, hostname),
+			Pings:      pp.Pings + 1,
+			Pongs:      pongs,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
