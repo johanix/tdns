@@ -388,6 +388,18 @@ func (zd *ZoneData) AddOwner(owner *OwnerData) {
 	zd.mu.Unlock()
 }
 
+func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*RRset, error) {
+	owner, err := zd.GetOwner(qname)
+	if err != nil {
+		return nil, err
+	}
+	if rrset, exists := owner.RRtypes[rrtype]; exists {
+		return &rrset, nil
+	} else {
+		return nil, nil
+	}
+}
+
 func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 	var names []string
 	switch zd.ZoneStore {

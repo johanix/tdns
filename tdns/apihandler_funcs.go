@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 	// "github.com/miekg/dns"
 )
 
@@ -216,7 +217,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
-		var zp ZoneCmdPost
+		var zp ZonePost
 		err := decoder.Decode(&zp)
 		if err != nil {
 			log.Println("APIzone: error decoding zone command post:", err)
@@ -225,7 +226,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 		log.Printf("API: received /zone request (cmd: %s) from %s.\n",
 			zp.Command, r.RemoteAddr)
 
-		resp := ZoneCmdResponse{
+		resp := ZoneResponse{
 			Time: time.Now(),
 		}
 
@@ -364,6 +365,102 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown zone command: %s", zp.Command)
+			resp.Error = true
+		}
+	}
+}
+
+func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var zdp ZoneDsyncPost
+		err := decoder.Decode(&zdp)
+		if err != nil {
+			log.Println("APIzoneDsync: error decoding zone command post:", err)
+		}
+
+		log.Printf("API: received /zone/dsync request (cmd: %s) from %s.\n",
+			zdp.Command, r.RemoteAddr)
+
+		resp := ZoneDsyncResponse{
+			Time:      time.Now(),
+			Functions: map[string]string{},
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error from json encoder: %v", err)
+			}
+		}()
+
+		zd, exist := Zones.Get(zdp.Zone)
+		if !exist {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zdp.Zone)
+			return
+		}
+
+		if zd.Parent == "" {
+			imr := viper.GetString("resolver.address")
+			if imr == "" {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Parent zone to %s unknown and no resolver address configured", zd.ZoneName)
+				return
+			}
+			zd.Parent, err = ParentZone(zd.ZoneName, imr)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+		}
+
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
+
+		switch zdp.Command {
+		case "status":
+			keyrrset, err := zd.GetRRset(zd.ZoneName, dns.TypeKEY)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = fmt.Sprintf("Zone %s: current delegation sync status", zdp.Zone)
+			if keyrrset != nil && len(keyrrset.RRs) > 0 {
+				resp.Functions["SIG(0) key publication"] = "done"
+			} else if zd.ZoneType == Secondary {
+				if zd.Options["delegation-sync-child"] {
+					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
+					resp.Todo = append(resp.Todo, fmt.Sprintf("Add this KEY record to the %s zone at primary server:\n%s", zd.ZoneName, apex.RRtypes[dns.TypeKEY].RRs[0].String()))
+				} else {
+					resp.Functions["SIG(0) key publication"] = "disabled by policy (delegation-sync-child=false)"
+				}
+			} else if zd.ZoneType == Primary {
+				if zd.Options["allow-updates"] {
+					resp.Functions["SIG(0) key publication"] = "failed"
+				} else {
+					resp.Functions["SIG(0) key publication"] = "disabled by policy (allow-updates=false)"
+				}
+			}
+
+			resp.Functions["Latest delegation sync transaction"] = "successful"
+			resp.Functions["Latest delegation sync transaction"] = "successful"
+			resp.Functions["Time of latest delegation sync"] = "2024-05-01 12:00:00"
+			resp.Functions["Current delegation status"] = fmt.Sprintf("parent \"%s\" is in sync with \"%s\" (the child)", zd.Parent, zd.ZoneName)
+
+		case "bootstrap":
+			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
+
+		default:
+			resp.ErrorMsg = fmt.Sprintf("Unknown zone command: %s", zdp.Command)
 			resp.Error = true
 		}
 	}

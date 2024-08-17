@@ -9,8 +9,8 @@
 *.dylib
 
 server/tdns-server
-tdns-cli/tdns-cli
 agent/tdns-agent
+cli/tdns-cli
 dog/dog
 
 */version.go

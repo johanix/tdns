@@ -275,14 +275,14 @@ type CommandResponse struct {
 	ErrorMsg string
 }
 
-type ZoneCmdPost struct {
+type ZonePost struct {
 	Command    string
 	SubCommand string
 	Zone       string
 	Force      bool
 }
 
-type ZoneCmdResponse struct {
+type ZoneResponse struct {
 	Time     time.Time
 	Status   string
 	Zone     string
@@ -291,6 +291,21 @@ type ZoneCmdResponse struct {
 	Msg      string
 	Error    bool
 	ErrorMsg string
+}
+type ZoneDsyncPost struct {
+	Command string // status | bootstrap | ...
+	Zone    string
+}
+
+type ZoneDsyncResponse struct {
+	Time      time.Time
+	Status    string
+	Zone      string
+	Functions map[string]string
+	Todo      []string
+	Msg       string
+	Error     bool
+	ErrorMsg  string
 }
 type DelegationPost struct {
 	Command string // status | sync | ...
