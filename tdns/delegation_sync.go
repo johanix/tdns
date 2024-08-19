@@ -208,6 +208,21 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 				}
 				continue
 
+			case "SYNC-DNSKEY-RRSET":
+				log.Printf("DelegationSyncher: Zone %s request for DNSKEY RRset sync.", ds.ZoneName)
+				if zd.Options["multisigner"] {
+					log.Printf("DelegationSyncher: Zone %s is a multisigner zone. Notifying multisigner controller.", ds.ZoneName)
+					notifyq <- NotifyRequest{
+						ZoneName: zd.ZoneName,
+						ZoneData: zd,
+						RRtype:   dns.TypeDNSKEY, // this is only about syncing delegation data, not about rolling DNSSEC keys.
+						// Targets:  dsynctarget.Addresses, // already in addr:port format
+						Targets: zd.MultiSigner.Controller.Notify.Targets,
+						Urgent:  true,
+					}
+
+				}
+
 			default:
 				log.Printf("DelegationSyncher: Zone %s: Unknown command: '%s'. Ignoring.", ds.ZoneName, ds.Command)
 			}

@@ -224,10 +224,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 	if zd.Options["delegation-sync-child"] {
 		// Detect whether the delegation data has changed.
 		//zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
+		delchanged, _, _, dss, err := zd.DelegationDataChanged(&zonedata)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
-			return false, err
+			// return false, err
 		}
 		if delchanged {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
@@ -235,12 +235,39 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 				Command:    "SYNC-DELEGATION",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
-				SyncStatus: delsyncstatus,
+				SyncStatus: dss,
 				// Adds:       adds,
 				// Removes:    removes,
 			}
 		} else {
 			// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+		}
+
+		keyschanged, dss, err := zd.DnskeysChanged(&zonedata)
+		if err != nil {
+			zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+			return false, err
+		}
+		if keyschanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			newkeys, err := zonedata.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			zd.DelegationSyncCh <- DelegationSyncRequest{
+				Command:    "SYNC-DNSKEY-RRSET",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				OldDnskeys: oldkeys,
+				NewDnskeys: newkeys,
+				SyncStatus: dss,
+			}
 		}
 	}
 

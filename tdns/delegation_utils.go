@@ -393,3 +393,25 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 
 	return true, adds, removes, resp, nil
 }
+
+func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
+	var dss DelegationSyncStatus
+	var differ bool
+
+	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, dss, err
+	}
+	newkeys, err := newzd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, dss, err
+	}
+
+	differ, dss.DNSKEYAdds, dss.DNSKEYRemoves = RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger)
+	if differ {
+		dss.Time = time.Now()
+		dss.InSync = false
+	}
+
+	return differ, dss, nil
+}

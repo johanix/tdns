@@ -77,6 +77,7 @@ type ZoneData struct {
 	Options          map[string]bool
 	UpdatePolicy     UpdatePolicy
 	DnssecPolicy     *DnssecPolicy
+	MultiSigner      *MultiSignerConf
 	KeyDB            *KeyDB
 }
 
@@ -94,6 +95,7 @@ type ZoneConf struct {
 	UpdatePolicy UpdatePolicyConf
 	DnssecPolicy string
 	Template     string
+	MultiSigner  string
 }
 
 type TemplateConf struct {
@@ -106,6 +108,7 @@ type TemplateConf struct {
 	Options      []string
 	UpdatePolicy UpdatePolicyConf
 	DnssecPolicy string
+	MultiSigner  string
 }
 
 type UpdatePolicyConf struct {
@@ -324,23 +327,25 @@ type DelegationResponse struct {
 }
 
 type DelegationSyncStatus struct {
-	ZoneName    string
-	Parent      string // use zd.Parent instead
-	Time        time.Time
-	InSync      bool
-	Status      string
-	Msg         string
-	Rcode       uint8
-	Adds        []dns.RR
-	Removes     []dns.RR
-	NsAdds      []dns.RR
-	NsRemoves   []dns.RR
-	AAdds       []dns.RR
-	ARemoves    []dns.RR
-	AAAAAdds    []dns.RR
-	AAAARemoves []dns.RR
-	Error       bool
-	ErrorMsg    string
+	ZoneName      string
+	Parent        string // use zd.Parent instead
+	Time          time.Time
+	InSync        bool
+	Status        string
+	Msg           string
+	Rcode         uint8
+	Adds          []dns.RR
+	Removes       []dns.RR
+	NsAdds        []dns.RR
+	NsRemoves     []dns.RR
+	AAdds         []dns.RR
+	ARemoves      []dns.RR
+	AAAAAdds      []dns.RR
+	AAAARemoves   []dns.RR
+	DNSKEYAdds    []dns.RR
+	DNSKEYRemoves []dns.RR
+	Error         bool
+	ErrorMsg      string
 }
 
 type DebugPost struct {
@@ -389,6 +394,7 @@ type ZoneRefresher struct {
 	Options      map[string]bool
 	UpdatePolicy UpdatePolicy
 	DnssecPolicy string
+	MultiSigner  string
 	Force        bool // force refresh, ignoring SOA serial
 	Response     chan RefresherResponse
 }
@@ -480,6 +486,8 @@ type DelegationSyncRequest struct {
 	// Adds       []dns.RR
 	// Removes    []dns.RR
 	SyncStatus DelegationSyncStatus
+	OldDnskeys *RRset
+	NewDnskeys *RRset
 	Response   chan DelegationSyncStatus // used for API-based requests
 }
 
@@ -583,4 +591,28 @@ type Tx struct {
 	*sql.Tx
 	KeyDB   *KeyDB
 	context string
+}
+
+type MultiSignerConf struct {
+	Name       string
+	Controller MultiSignerController
+}
+
+type MultiSignerController struct {
+	Name   string
+	Notify MSCNotifyConf
+	API    MSCAPIConf
+}
+
+type MSCNotifyConf struct {
+	Addresses string `validate:"required"` // XXX: must not be in addr:port format
+	Port      string `validate:"required"`
+	Targets   []string
+}
+
+type MSCAPIConf struct {
+	BaseURL    string
+	ApiKey     string
+	AuthMethod string
+	UseTLS     bool
 }

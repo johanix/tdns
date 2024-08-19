@@ -8,11 +8,13 @@ import (
 	// "flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -113,6 +115,42 @@ func ParseConfig(conf *Config, appMode string) error {
 
 		// dump.P(conf.Internal.DnssecPolicies)
 	}
+
+	var dpn []string
+	for name, _ := range conf.Internal.DnssecPolicies {
+		dpn = append(dpn, name)
+	}
+	log.Printf("*** ParseConfig: DnssecPolicy configs: %v", dpn)
+
+	// conf.Internal.MultiSignerConfigs = make(map[string]MultiSignerConf)
+	for msname, msconf := range conf.MultiSigner {
+		if len(msconf.Controller.Notify.Addresses) == 0 {
+			log.Printf("Error: MultiSigner config %s has no notify addresses specified. MultiSigner config ignored.", msname)
+			delete(conf.MultiSigner, msname)
+			continue
+		}
+		if msconf.Controller.Notify.Port == "" {
+			log.Printf("Error: MultiSigner config %s has no notify port specified. MultiSigner config ignored.", msname)
+			delete(conf.MultiSigner, msname)
+			continue
+		}
+		for _, addr := range msconf.Controller.Notify.Addresses {
+			target := net.JoinHostPort(string(addr), msconf.Controller.Notify.Port)
+			msconf.Controller.Notify.Targets = append(msconf.Controller.Notify.Targets, target)
+		}
+
+		if msconf.Controller.API.BaseURL == "" || msconf.Controller.API.ApiKey == "" {
+			log.Printf("Error: MultiSigner %s has no API base URL or API key. MultiSigner config ignored.", msname)
+			delete(conf.MultiSigner, msname)
+			continue
+		}
+	}
+
+	var msc []string
+	for name, _ := range conf.MultiSigner {
+		msc = append(msc, name)
+	}
+	log.Printf("*** ParseConfig: MultiSigner configs: %v", msc)
 
 	// dump.P(conf.Registrars)
 	for reg, regdata := range conf.Registrars {
@@ -233,6 +271,8 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 			zonestore = SliceZone
 		default:
 			log.Printf("Zone %s: Unknown zone store type: \"%s\". Zone ignored.", zname, zconf.Store)
+			delete(zones, zname)
+			continue
 		}
 
 		var zonetype ZoneType
@@ -246,21 +286,29 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 			if zconf.Primary == "" {
 				log.Printf("Error: Zone %s is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
 				delete(zones, zname)
+				continue
 			}
 
 		default:
 			log.Printf("Error: Zone %s: Unknown zone type: \"%s\". Zone ignored.", zname, zconf.Type)
 			delete(zones, zname)
+			continue
 		}
 
-		// dump.P(zconf)
+		log.Printf("ParseZones: zone %s: checking DNSSEC policy", zname)
+		dump.P(zconf)
 
+		if zconf.DnssecPolicy == "none" {
+			log.Printf("ParseZones: Zone %s: DNSSEC policy is \"none\". Zone will not be signed.", zname)
+			zconf.DnssecPolicy = ""
+		}
 		if zconf.DnssecPolicy != "" {
 			_, exist = conf.DnssecPolicies[zconf.DnssecPolicy]
 			if !exist {
 				log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Zone will not be signed.", zname, zconf.DnssecPolicy)
 				zconf.DnssecPolicy = ""
 			}
+			log.Printf("ParseZones: zone %s: DNSSEC policy \"%s\" accepted", zname, zconf.DnssecPolicy)
 		}
 
 		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.Options)
@@ -286,6 +334,19 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 				} else {
 					log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
 				}
+
+			case "multisigner":
+				if zconf.MultiSigner == "" || zconf.MultiSigner == "none" {
+					log.Printf("Error: Zone %s: Option \"multisigner\" set without a corresponding multisigner config. Option ignored.", zname)
+					continue
+				}
+				if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
+					log.Printf("Error: Zone %s: Option \"multi-signer\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, zconf.MultiSigner)
+					continue
+				}
+				options[option] = true
+				cleanoptions = append(cleanoptions, option)
+				log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, option, zconf.MultiSigner)
 
 			default:
 				log.Printf("Error: Zone %s: Unknown option: \"%s\". Zone ignored.", zname, option)
@@ -405,6 +466,8 @@ func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf
 	if appMode != "agent" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
+
+	zconf.MultiSigner = tmpl.MultiSigner
 
 	return zconf, nil
 }

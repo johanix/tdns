@@ -98,6 +98,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					// XXX: We want to do this in parallel
 					// go func() {
 					dp, _ := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
+					msc, _ := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,
@@ -109,6 +110,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 						Options:          zr.Options,
 						UpdatePolicy:     zr.UpdatePolicy,
 						DnssecPolicy:     &dp,
+						MultiSigner:      &msc,
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[OwnerData](),
 						KeyDB:            conf.Internal.KeyDB,

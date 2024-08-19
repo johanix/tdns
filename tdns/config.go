@@ -21,6 +21,7 @@ type Config struct {
 	DnsEngine      DnsEngineConf
 	Apiserver      ApiserverConf
 	DnssecPolicies map[string]DnssecPolicyConf
+	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
 	Zones          map[string]ZoneConf
 	Db             DbConf
 	Registrars     map[string][]string
