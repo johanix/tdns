@@ -253,7 +253,11 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 		return false, 0, err
 	}
 
-	apex, _ := zd.GetOwner(zd.ZoneName)
+	// apex, err := zd.GetOwner(zd.ZoneName)
+	apex, _ := zd.Data.Get(zd.ZoneName)
+	if err != nil {
+		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
+	}
 	//	dump.P(apex)
 	soa_rrset := apex.RRtypes[dns.TypeSOA]
 	var soa *dns.SOA
@@ -380,7 +384,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	writer := bufio.NewWriter(f)
 
-	apex, _ := zd.GetOwner(zd.ZoneName)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		log.Printf("WriteZoneToFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
+		return err
+	}
 	soa := apex.RRtypes[dns.TypeSOA].RRs[0]
 	soa.(*dns.SOA).Serial = zd.CurrentSerial
 

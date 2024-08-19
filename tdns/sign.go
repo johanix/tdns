@@ -334,7 +334,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 				// log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
 				for _, del := range delegations {
 					if strings.HasSuffix(name, del) {
-						log.Printf("SignZone: not signing glue record %s %s for delegation %s", name, dns.TypeToString[uint16(rrt)], del)
+						log.Printf("SignZone: Zone %s: not signing glue record %s %s for delegation %s", zd.ZoneName, name, dns.TypeToString[uint16(rrt)], del)
 						wasglue = true
 						continue
 					}

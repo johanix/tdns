@@ -11,10 +11,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -68,7 +68,7 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 	}
 }
 
-func ParseConfig(conf *Config, appMode string) error {
+func ParseConfig(conf *Config, reload bool) error {
 	log.Printf("Enter ParseConfig")
 	viper.SetConfigFile(DefaultCfgFile)
 
@@ -94,9 +94,11 @@ func ParseConfig(conf *Config, appMode string) error {
 		log.Fatalf("Error unmarshalling config into struct: %v", err)
 	}
 
-	if appMode == "server" {
+	if conf.AppMode == "server" {
 		// dump.P(conf.DnssecPolicies)
-		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+		if conf.Internal.DnssecPolicies == nil {
+			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+		}
 
 		for name, dp := range conf.DnssecPolicies {
 			tmp := DnssecPolicy{
@@ -108,6 +110,7 @@ func ParseConfig(conf *Config, appMode string) error {
 			}
 			if tmp.Algorithm == 0 {
 				log.Printf("Error: DnssecPolicy %s has unknown algorithm: %s. Policy ignored.", name, dp.Algorithm)
+				// if this is a reload, we ignore the policy from the config, i.e. we keep the old one
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
@@ -186,27 +189,30 @@ func ParseConfig(conf *Config, appMode string) error {
 	}
 	fmt.Println()
 
-	kdb, err := NewKeyDB(viper.GetString("db.file"), false)
-	if err != nil {
-		log.Fatalf("Error from NewKeyDB: %v", err)
+	kdb := conf.Internal.KeyDB
+	if !reload || kdb == nil {
+		kdb, err := NewKeyDB(viper.GetString("db.file"), false)
+		if err != nil {
+			log.Fatalf("Error from NewKeyDB: %v", err)
+		}
+		conf.Internal.KeyDB = kdb
 	}
-	conf.Internal.KeyDB = kdb
 
-	err = kdb.LoadDnskeyTrustAnchors()
-	if err != nil {
-		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
-	}
-	err = kdb.LoadSig0ChildKeys()
-	if err != nil {
-		log.Fatalf("Error from LoadSig0ChildKeys(): %v", err)
-	}
+	// XXX: I don't think we want this anymore.
+	//	if err != nil {
+	//		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
+	//	}
+	//	err = kdb.LoadSig0ChildKeys()
+	//	if err != nil {
+	//		log.Fatalf("Error from LoadSig0ChildKeys(): %v", err)
+	//	}
 
 	ValidateConfig(nil, DefaultCfgFile) // will terminate on error
 	return nil
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
-func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
+func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, error) {
 	var all_zones []string
 
 	// If a zone config file is found, read it in.
@@ -237,8 +243,6 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 			zones[zname] = zconf
 		}
 
-		all_zones = append(all_zones, zname)
-
 		var tmpl TemplateConf
 		var exist bool
 		var err error
@@ -246,7 +250,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 		if zconf.Template != "" {
 			if tmpl, exist = zconfig.Templates[zconf.Template]; exist {
 				fmt.Printf("Zone %s uses the existing template %s\n", zname, zconf.Template)
-				zconf, err = ExpandTemplate(zconf, tmpl, appMode)
+				zconf, err = ExpandTemplate(zconf, tmpl, conf.AppMode)
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
 					os.Exit(1)
@@ -260,7 +264,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 		}
 
 		zconf.Store = strings.ToLower(zconf.Store)
-		fmt.Printf("Zone %s uses store \"%s\"\n", zconf.Name, zconf.Store)
+		// fmt.Printf("Zone %s uses \"%s\" storage\n", zconf.Name, zconf.Store)
 		var zonestore ZoneStore
 		switch zconf.Store {
 		case "xfr":
@@ -296,7 +300,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 		}
 
 		log.Printf("ParseZones: zone %s: checking DNSSEC policy", zname)
-		dump.P(zconf)
+		// dump.P(zconf)
 
 		if zconf.DnssecPolicy == "none" {
 			log.Printf("ParseZones: Zone %s: DNSSEC policy is \"none\". Zone will not be signed.", zname)
@@ -371,7 +375,9 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 				options["allowupdates"] = false
 				options["allowchildupdates"] = false
 			default:
-				log.Fatalf("Error: zone %s has an unknown update policy type: \"%s\". Terminating.", zname, ptype)
+				log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, ptype)
+				delete(zones, zname)
+				continue
 			}
 		}
 
@@ -406,6 +412,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 			},
 		}
 		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
+		all_zones = append(all_zones, zname)
 
 		zrch <- ZoneRefresher{
 			Name:         zname,
@@ -420,7 +427,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 		}
 	}
 
-	if appMode == "agent" && len(primary_zones) > 0 {
+	if conf.AppMode == "agent" && len(primary_zones) > 0 {
 		fmt.Printf("Error: The TDNS agent does not support primary zones: %v\n", primary_zones)
 		log.Fatalf("Error: The TDNS agent does not support primary zones: %v", primary_zones)
 	}
@@ -428,8 +435,8 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, appMode string) error {
 	conf.Zones = zones
 
 	ValidateZones(conf, ZonesCfgFile) // will terminate on error
-	log.Printf("All configured zones now refreshing: %v", all_zones)
-	return nil
+	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)", all_zones, len(zrch))
+	return all_zones, nil
 }
 
 func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf, error) {
@@ -441,7 +448,7 @@ func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf
 		zconf.Type = tmpl.Type
 	}
 	if tmpl.Store != "" {
-		fmt.Printf("ExpandTemplate: zone %s now uses the store \"%s\"\n", zconf.Name, tmpl.Store)
+		// fmt.Printf("ExpandTemplate: zone %s now uses the \"%s\" storage alternative.\n", zconf.Name, tmpl.Store)
 		zconf.Store = tmpl.Store
 	}
 	if tmpl.Primary != "" {
@@ -454,8 +461,14 @@ func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf
 	if len(tmpl.Notify) > 0 {
 		zconf.Notify = tmpl.Notify
 	}
+
+	// template options are appended to existing zone options
 	if len(tmpl.Options) > 0 {
-		zconf.Options = tmpl.Options
+		for _, option := range tmpl.Options {
+			if !slices.Contains(zconf.Options, option) {
+				zconf.Options = append(zconf.Options, option)
+			}
+		}
 	}
 	if (tmpl.UpdatePolicy.Child.Type != "" && len(tmpl.UpdatePolicy.Child.RRtypes) > 0) ||
 		(tmpl.UpdatePolicy.Zone.Type != "" && len(tmpl.UpdatePolicy.Zone.RRtypes) > 0) {

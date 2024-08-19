@@ -5,8 +5,10 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -121,4 +123,44 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 		}
 	}
 	return nil
+}
+
+func (zd *ZoneData) BootstrapSig0KeyWithParent(sak *Sig0ActiveKeys) (string, error) {
+	var err error
+	// 1. Get the parent zone
+	if zd.Parent == "" {
+		zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// 2. Get the parent DSYNC RRset
+	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, TypeDSYNC, SchemeUpdate)
+	if err != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to lookup DSYNC target: %v", zd.ZoneName, err), err
+	}
+
+	log.Printf("BootstrapSig0KeyWithParent(%s): DSYNC target:", zd.ZoneName)
+	dump.P(dsyncTarget)
+
+	// 3. Create the DNS UPDATE message
+	adds := []dns.RR{&sak.Keys[0].KeyRR}
+	msg, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
+	if err != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err), err
+	}
+
+	msg, err = SignMsg(*msg, zd.ZoneName, sak)
+	if err != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err), err
+	}
+
+	// 4. Send the message to the parent
+	rcode, err := SendUpdate(msg, zd.Parent, dsyncTarget.Addresses)
+	if err != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err), err
+	}
+
+	return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), nil
 }

@@ -58,6 +58,7 @@ type ZoneData struct {
 	ApexLen    int
 	//	RRs            RRArray
 	Data             cmap.ConcurrentMap[string, OwnerData]
+	Ready            bool   // true if zd.Data has been populated (from file or upstream)
 	XfrType          string // axfr | ixfr
 	Logger           *log.Logger
 	ZoneFile         string
@@ -310,6 +311,17 @@ type ZoneDsyncResponse struct {
 	Error     bool
 	ErrorMsg  string
 }
+type ConfigPost struct {
+	Command string // status | sync | ...
+}
+
+type ConfigResponse struct {
+	Time     time.Time
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
 type DelegationPost struct {
 	Command string // status | sync | ...
 	Scheme  uint8  // 1=notify | 2=update
@@ -605,8 +617,8 @@ type MultiSignerController struct {
 }
 
 type MSCNotifyConf struct {
-	Addresses string `validate:"required"` // XXX: must not be in addr:port format
-	Port      string `validate:"required"`
+	Addresses []string `validate:"required"` // XXX: must not be in addr:port format
+	Port      string   `validate:"required"`
 	Targets   []string
 }
 

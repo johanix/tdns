@@ -165,7 +165,7 @@ type DsyncTarget struct {
 	Name      string
 	Scheme    DsyncScheme
 	Port      uint16
-	Addresses []string
+	Addresses []string // in addr:port format
 	RR        *DSYNC
 }
 

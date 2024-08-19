@@ -70,7 +70,7 @@ func main() {
 	conf.AppMode = "agent"
 	conf.ServerBootTime = time.Now()
 	conf.AppVersion = appVersion
-
+	conf.AppName = "tdns-agent"
 	// The agent is not a mode of operation, an agent should not be able to run as a server by just starting it with the wrong arguments.
 	// flag.StringVar(&appMode, "mode", "agent", "Mode of operation: server | agent | scanner")
 

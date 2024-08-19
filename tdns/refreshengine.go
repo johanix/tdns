@@ -33,7 +33,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 	ticker := time.NewTicker(1 * time.Second)
 
 	if !viper.GetBool("service.refresh") {
-		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt on Notifies.")
+		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt of Notifies.")
 		for range zonerefch {
 			// ensure that we keep reading to keep the channel open
 			continue
@@ -56,6 +56,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 	for {
 		select {
 		case zr = <-zonerefch:
+			log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
 			zone = zr.Name
 			resp := RefresherResponse{
 				Zone: zr.Name,
@@ -65,7 +66,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					if zd.ZoneType == Primary && zd.Options["dirty"] {
 						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
 						log.Printf(resp.Msg)
-						zr.Response <- resp
+						if zr.Response != nil {
+							zr.Response <- resp
+						}
 						continue
 					}
 					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'",
@@ -93,8 +96,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 						}
 					}(zd)
+
 				} else {
-					log.Printf("RefreshEngine: adding the new zone '%s'", zone)
+					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)
 					// XXX: We want to do this in parallel
 					// go func() {
 					dp, _ := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
@@ -117,6 +121,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 						// XXX: I think this is going away:
 						// Children: map[string]*tdns.ChildDelegationData{},
 					}
+
 					updated, err = zd.Refresh(zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
@@ -124,6 +129,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 						continue // cannot do much else
 						// return // terminate goroutine
 					}
+
 					refresh, err := FindSoaRefresh(zd)
 					if err != nil {
 						log.Printf("Error from FindSoaRefresh(%s): %v", zone, err)
@@ -166,15 +172,6 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					}
 
 					Zones.Set(zone, zd)
-					//					if updated {
-					//						if resetSoaSerial {
-					//							zonedata.CurrentSerial = uint32(time.Now().Unix())
-					//							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-					//								zone, zonedata.CurrentSerial)
-					//						}
-					//						zonedata.NotifyDownstreams()
-					//					}
-					// }()
 
 					if updated {
 						if resetSoaSerial {

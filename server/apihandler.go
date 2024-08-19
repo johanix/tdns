@@ -71,6 +71,7 @@ func SetupRouter(conf *tdns.Config) *mux.Router {
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	// The /command endpoint is the only one not in the tdns lib
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/config", tdns.APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", tdns.APIzone(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/zone/dsync", tdns.APIzoneDsync(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/delegation", tdns.APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")

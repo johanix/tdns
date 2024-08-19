@@ -403,6 +403,12 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			return
 		}
 
+		if !zd.Options["delegation-sync-child"] {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %s does not support delegation sync (option delegation-sync-child=false)", zd.ZoneName)
+			return
+		}
+
 		if zd.Parent == "" {
 			imr := viper.GetString("resolver.address")
 			if imr == "" {
@@ -458,11 +464,72 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 
 		case "bootstrap":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
+			sak, err := zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg, err = zd.BootstrapSig0KeyWithParent(sak)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown zone command: %s", zdp.Command)
 			resp.Error = true
 		}
+	}
+}
+
+func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var cp ConfigPost
+		err := decoder.Decode(&cp)
+		if err != nil {
+			log.Println("APIconfig: error decoding config post:", err)
+		}
+
+		log.Printf("API: received /config request (cmd: %s) from %s.\n",
+			cp.Command, r.RemoteAddr)
+
+		resp := ConfigResponse{
+			Time: time.Now(),
+		}
+
+		switch cp.Command {
+		case "reload":
+			log.Printf("APIconfig: reloading configuration")
+			resp.Msg, err = conf.ReloadConfig()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "reload-zones":
+			log.Printf("APIconfig: reloading zones")
+			resp.Msg, err = conf.ReloadZoneConfig()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "status":
+			log.Printf("APIconfig: config status inquiry")
+			resp.Msg = fmt.Sprintf("Configuration is ok, server boot time: %s, last config reload: %s",
+				conf.ServerBootTime.Format(timelayout), conf.ServerConfigTime.Format(timelayout))
+
+		default:
+			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
+			resp.Error = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
