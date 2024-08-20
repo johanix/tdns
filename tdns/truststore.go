@@ -127,6 +127,9 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			// schedule some sort of DNS fetching exercise.
 		}
 
+		// Must also delete from the cache
+		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+
 	case "delete":
 
 		// 1. Find key, if not --> error
