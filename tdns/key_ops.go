@@ -259,10 +259,11 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8) (string, error) {
 
 	// 8. Change state of the new key from "created" to "active". Change state of the old key from "active" to "retired".
 	kp := KeystorePost{
-		Command: "setstate",
-		Keyname: pkc.KeyRR.Header().Name,
-		Keyid:   uint16(pkc.KeyRR.KeyTag()),
-		State:   "active",
+		Command:    "sig0-mgmt",
+		SubCommand: "setstate",
+		Keyname:    pkc.KeyRR.Header().Name,
+		Keyid:      uint16(pkc.KeyRR.KeyTag()),
+		State:      "active",
 	}
 
 	tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")
@@ -278,10 +279,11 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8) (string, error) {
 	}
 
 	kp = KeystorePost{
-		Command: "setstate",
-		Keyname: sak.Keys[0].KeyRR.Header().Name,
-		Keyid:   uint16(sak.Keys[0].KeyRR.KeyTag()),
-		State:   "retired",
+		Command:    "sig0-mgmt",
+		SubCommand: "setstate",
+		Keyname:    sak.Keys[0].KeyRR.Header().Name,
+		Keyid:      uint16(sak.Keys[0].KeyRR.KeyTag()),
+		State:      "retired",
 	}
 	_, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 	if err != nil {
