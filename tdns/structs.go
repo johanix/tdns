@@ -297,8 +297,9 @@ type ZoneResponse struct {
 	ErrorMsg string
 }
 type ZoneDsyncPost struct {
-	Command string // status | bootstrap | ...
-	Zone    string
+	Command   string // status | bootstrap | ...
+	Zone      string
+	Algorithm uint8
 }
 
 type ZoneDsyncResponse struct {

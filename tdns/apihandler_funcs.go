@@ -464,13 +464,16 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 
 		case "bootstrap":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
-			sak, err := zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+			resp.Msg, err = zd.BootstrapSig0KeyWithParent()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 				return
 			}
-			resp.Msg, err = zd.BootstrapSig0KeyWithParent(sak)
+
+		case "rollover":
+			resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent", zd.ZoneName)
+			resp.Msg, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

@@ -125,7 +125,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	return nil
 }
 
-func (zd *ZoneData) BootstrapSig0KeyWithParent(sak *Sig0ActiveKeys) (string, error) {
+func (zd *ZoneData) BootstrapSig0KeyWithParent() (string, error) {
 	var err error
 	// 1. Get the parent zone
 	if zd.Parent == "" {
@@ -133,6 +133,11 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(sak *Sig0ActiveKeys) (string, err
 		if err != nil {
 			return "", err
 		}
+	}
+
+	sak, err := zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+	if err != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err), err
 	}
 
 	// 2. Get the parent DSYNC RRset
@@ -163,4 +168,59 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(sak *Sig0ActiveKeys) (string, err
 	}
 
 	return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), nil
+}
+
+func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8) (string, error) {
+	var err error
+	// 1. Get the parent zone
+	if zd.Parent == "" {
+		zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	sak, err := zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+	if err != nil {
+		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err), err
+	}
+
+	// 2. Get the parent DSYNC RRset
+	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
+	if err != nil {
+		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to lookup DSYNC target: %v", zd.ZoneName, err), err
+	}
+
+	log.Printf("RolloverSig0KeyWithParent(%s): DSYNC target:", zd.ZoneName)
+
+	// 3. Generate a new key
+	pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "api-request", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
+	if err != nil {
+		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err), err
+	}
+	zd.Logger.Printf(msg)
+
+	// 3. Create the DNS UPDATE message
+	adds := []dns.RR{&pkc.KeyRR}
+	m, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
+	if err != nil {
+		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err), err
+	}
+
+	m, err = SignMsg(*m, zd.ZoneName, sak)
+	if err != nil {
+		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err), err
+	}
+
+	// 4. Send the message to the parent
+	rcode, err := SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
+	if err != nil {
+		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err), err
+	}
+
+	// XXX: Here it is *very important* to update the active key in the keystore
+	// to the new key, but only after we have received a successful response
+	// from the parent.
+
+	return fmt.Sprintf("RolloverSig0KeyWithParent(%s) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), nil
 }

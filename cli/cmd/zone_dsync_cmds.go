@@ -64,7 +64,7 @@ var zoneDsyncStatusCmd = &cobra.Command{
 }
 
 var zoneDsyncBootstrapCmd = &cobra.Command{
-	Use:   "bootstrap",
+	Use:   "bootstrap-sig0-key",
 	Short: "Send dsync bootstrap command to tdns-server",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
@@ -87,13 +87,39 @@ var zoneDsyncBootstrapCmd = &cobra.Command{
 	},
 }
 
+var zoneDsyncRollKeyCmd = &cobra.Command{
+	Use:   "roll-sig0-key",
+	Short: "Send dsync rollover command to tdns-server",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename", "algorithm")
+
+		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			Command:   "rollover",
+			Zone:      dns.Fqdn(tdns.Globals.Zonename),
+			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if resp.Error {
+			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(zoneCmd)
 
 	zoneCmd.AddCommand(zoneDsyncCmd)
-	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd)
+	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd)
 
 	zoneDsyncCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show headers")
+	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
 }
 
 func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDsyncResponse, error) {
