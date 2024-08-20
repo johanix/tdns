@@ -135,18 +135,31 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			w.WriteMsg(m)
 			return nil
 		}
-		// 2. Is qname a zone cut for a child zone?
+		// 2. Is qname a zone cut for a child zone? If so, we classify this as a CHILD-UPDATE
+		// even though it may be a KEY update and hence really a TRUSTSTORE-UPDATE. But we don't know that until
+		// we have validated the contents of update.
 	} else if zd.IsChildDelegation(qname) {
-		dur.Status.Type = "CHILD-UPDATE"
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
-		if !zd.Options["allow-child-updates"] {
-			log.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
-				zd.ZoneName, qname)
-			m.SetRcode(r, dns.RcodeRefused)
-			w.WriteMsg(m)
-			return nil
+		// There are two cases here: update of child delegation data or update of a KEY RR.
+		switch {
+		case len(r.Ns) == 1 && r.Ns[0].Header().Rrtype == dns.TypeKEY:
+			dur.Status.Type = "TRUSTSTORE-UPDATE"
+			// XXX: Do we want a separate option for child trust updates? Or is it sufficient with an
+			// update policy that allows KEY updates (or not?)
+			// For now we just allow it here and catch it in ApproveUpdate()
+
+		default:
+			dur.Status.Type = "CHILD-UPDATE"
+			if !zd.Options["allow-child-updates"] {
+				log.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
+					zd.ZoneName, qname)
+				m.SetRcode(r, dns.RcodeRefused)
+				w.WriteMsg(m)
+				return nil
+			}
 		}
+
 		// 3. Does qname exist in auth zone?
 	} else if zd.NameExists(qname) {
 		dur.Status.Type = "ZONE-UPDATE"

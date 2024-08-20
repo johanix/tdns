@@ -31,29 +31,6 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	var res sql.Result
 
 	var err error
-	// 	tx, err := kdb.Begin("Sig0KeyMgmt")
-	// 	if err != nil {
-	// 		return &resp, err
-	// 	}
-
-	defer func() {
-		if err == nil {
-			// err1 := tx.Commit()
-			log.Printf("Sig0KeyMgmt: err=%v tx.Commit() ok", err)
-			// if err1 != nil {
-			// 	resp.Error = true
-			// 	resp.ErrorMsg = err1.Error()
-			// }
-		} else {
-			log.Printf("Error: %v. Rollback.", err)
-			// err1 := tx.Rollback()
-			// if err1 != nil {
-			// 	resp.Error = true
-			// 	resp.ErrorMsg = err1.Error()
-			// }
-			// log.Printf("Sig0KeyMgmt: tx.Rollback() ok, err1=%v", err1)
-		}
-	}()
 
 	log.Printf("Sig0KeyMgmt: request: %s", kp.SubCommand)
 

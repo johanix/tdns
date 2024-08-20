@@ -38,10 +38,10 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// signed the update.
 	// log.Printf("ValidateAndTrustUpdate: There are %d RRs in the Additional section of the update", len(r.Extra))
 	for idx, rr := range r.Extra {
-		log.Printf("ValidateAndTrustUpdate: RR %d in Additional is a %T", idx, rr)
+		log.Printf("ValidateUpdate: RR %d in Additional is a %T", idx, rr)
 		var sig0key *Sig0Key
 		if _, ok := rr.(*dns.SIG); !ok {
-			log.Printf("ValidateAndTrustUpdate: RR in Additional is not a SIG RR (%T), continuing", rr)
+			log.Printf("ValidateUpdate: RR in Additional is not a SIG RR (%T), continuing", rr)
 			continue
 		}
 

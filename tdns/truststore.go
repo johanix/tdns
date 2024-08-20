@@ -182,6 +182,8 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
+		// Must also delete from the cache
+		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "untrust":
 		// 1. Find key, if not --> error
