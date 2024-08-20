@@ -258,7 +258,9 @@ func (zd *ZoneData) ApproveUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bo
 	case "ZONE-UPDATE":
 		return zd.ApproveAuthUpdate(zone, us, r)
 	case "TRUSTSTORE-UPDATE":
-		return zd.ApproveAuthUpdate(zone, us, r)
+		// XXX: Perhaps there should be a separate function for approval of truststore updates?
+		// XXX: Then the ApproveChildUpdate() could be simplified.
+		return zd.ApproveTrustUpdate(zone, us, r)
 	default:
 		return false, false, fmt.Errorf("ApproveUpdate: unknown update type: %s", us.Type)
 	}
@@ -473,4 +475,137 @@ func (dur *DnsUpdateRequest) Log(fmt string, v ...any) {
 
 func (us *UpdateStatus) Log(fmt string, v ...any) {
 	log.Printf(fmt, v...)
+}
+
+// Trust updates are either validated updates (signed by already trusted key) or unvalidated
+// (selfsigned initial uploads of key). In both cases the update section must only contain a
+// single KEY RR.
+// Returns approved, updatezone, error
+func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
+	log.Printf("ApproveTrustUpdate: zone=%s", zone)
+	un := ""
+	if us.ValidationRcode != dns.RcodeSuccess || !us.Validated {
+		un = "un"
+	}
+	log.Printf("ApproveTrustUpdate: Analysing %svalidated update using policy type %s with allowed RR types %v",
+		un, zd.UpdatePolicy.Child.Type, zd.UpdatePolicy.Child.RRtypes)
+
+	unvalidatedKeyUpload := false
+
+	if len(r.Ns) != 1 {
+		us.Approved = false
+		us.Log("ApproveTrustUpdate: update rejected (only a single KEY record allowed to be added by untrusted key)")
+		return false, false, nil
+	}
+
+	rr := r.Ns[0]
+	// rrname := rr.Header().Name
+	rrtype := rr.Header().Rrtype
+	rrclass := rr.Header().Class
+
+	// Requirement for unvalidated key upload:
+	// 1. Policy has keyupload=unvalidated"
+	// 2. Single RR in Update section, which is a KEY
+	// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
+	// 4. Name of key must be == existing delegation
+	log.Printf("ApproveChildUpdate: rrtype=%s keybootstrap=%s class=%s len(r.Ns)=%d",
+		dns.TypeToString[rrtype], zd.UpdatePolicy.Child.KeyBootstrap,
+		dns.ClassToString[rrclass], len(r.Ns))
+
+	if !us.ValidatedByTrustedKey {
+		// If the update is not trusted (i.e. validated against a trusted key) it should be
+		// rejected, except in the special case of unvalidated key uploads.
+
+		if rrtype != dns.TypeKEY {
+			us.Approved = false
+			us.Log("ApproveChildUpdate: update of %s RRset rejected (signed by an untrusted key)",
+				dns.TypeToString[rrtype])
+			return false, false, nil
+		}
+
+		if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
+			us.Approved = false
+			us.Log("ApproveChildUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)",
+				dns.TypeToString[rrtype])
+			return false, false, nil
+		}
+
+		//		if len(r.Ns) != 1 {
+		//			us.Approved = false
+		//			us.Log("ApproveChildUpdate: update of KEY RRset rejected (only a single KEY record allowed to be added by untrusted key)")
+		//			return false, false, nil
+		//		}
+
+		// This is the special case that we allow for unvalidated key uploads.
+		if zd.UpdatePolicy.Child.KeyUpload == "unvalidated" { // exactly one SIG(0) key
+			for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
+				if bootstrap == "strict-manual" {
+					us.Approved = false
+					log.Printf("ApproveChildUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
+					return false, false, nil
+				}
+			}
+			// XXX: I think we should require that this KEY upload is self-signed.
+			log.Printf("ApproveChildUpdate: update approved (unvalidated KEY upload)")
+			unvalidatedKeyUpload = true
+			us.Approved = true
+			return true, false, nil
+		}
+	}
+
+	// Past the unvalidated key upload; from here update MUST be validated
+	if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
+		us.Approved = false
+		log.Printf("ApproveUpdate: update rejected (signature did not validate)")
+		return false, false, nil
+	}
+
+	if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
+		us.Approved = false
+		log.Printf("ApproveUpdate: update rejected (signature validated but key not trusted)")
+		return false, false, nil
+	}
+
+	if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
+		us.Approved = false
+		log.Printf("ApproveUpdate: update rejected (unapproved RR type: %s)",
+			dns.TypeToString[rr.Header().Rrtype])
+		return false, false, nil
+	}
+
+	switch zd.UpdatePolicy.Child.Type {
+	case "selfsub":
+		if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
+			us.Approved = false
+			log.Printf("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
+				rr.Header().Name, us.SignerName)
+			return false, false, nil
+		}
+
+	case "self":
+		if rr.Header().Name != us.SignerName {
+			us.Approved = false
+			log.Printf("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
+				rr.Header().Name, us.SignerName)
+			return false, false, nil
+		}
+	default:
+		us.Approved = false
+		log.Printf("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Child.Type)
+		return false, false, nil
+	}
+
+	switch rrclass {
+	case dns.ClassNONE:
+		log.Printf("ApproveUpdate: Remove RR: %s", rr.String())
+	case dns.ClassANY:
+		log.Printf("ApproveUpdate: Remove RRset: %s", rr.String())
+	default:
+		log.Printf("ApproveUpdate: Add RR: %s", rr.String())
+	}
+
+	us.Approved = true
+	log.Printf("ApproveUpdate: update approved")
+
+	return true, false, nil
 }
