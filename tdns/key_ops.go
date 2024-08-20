@@ -136,7 +136,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(sak *Sig0ActiveKeys) (string, err
 	}
 
 	// 2. Get the parent DSYNC RRset
-	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, TypeDSYNC, SchemeUpdate)
+	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to lookup DSYNC target: %v", zd.ZoneName, err), err
 	}

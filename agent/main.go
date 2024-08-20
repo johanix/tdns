@@ -32,6 +32,7 @@ func mainloop(conf *tdns.Config, appMode string) {
 	signal.Notify(hupper, syscall.SIGHUP)
 
 	var err error
+	var all_zones []string
 	var wg sync.WaitGroup
 	wg.Add(1)
 
@@ -46,9 +47,11 @@ func mainloop(conf *tdns.Config, appMode string) {
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				err = tdns.ParseZones(conf, conf.Internal.RefreshZoneCh, appMode)
+				all_zones, err = tdns.ParseZones(conf, conf.Internal.RefreshZoneCh, true) // true = reload
 				if err != nil {
 					log.Fatalf("Error parsing zones: %v", err)
+				} else {
+					log.Printf("mainloop: SIGHUP received. Forcing refresh of %d configured zones.", len(all_zones))
 				}
 
 			case <-conf.Internal.APIStopCh:
@@ -85,7 +88,7 @@ func main() {
 		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", conf.AppMode)
 	}
 
-	err := tdns.ParseConfig(&conf, conf.AppMode)
+	err := tdns.ParseConfig(&conf, false) // false = !reload, initial config
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)
 	}
@@ -111,7 +114,7 @@ func main() {
 	go tdns.Notifier(conf.Internal.NotifyQ)
 
 	// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-	err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, appMode)
+	_, err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, false) // false = !reload, initial config
 	if err != nil {
 		log.Fatalf("Error parsing zones: %v", err)
 	}

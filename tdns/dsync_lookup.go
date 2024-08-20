@@ -169,6 +169,8 @@ type DsyncTarget struct {
 	RR        *DSYNC
 }
 
+// dtype = the type of DSYNC RR to look for (dns.TypeCDS, dns.TypeCSYNC, dns.TypeANY, ...)
+// scheme = the DSYNC scheme (SchemeNotify | SchemeUpdate)
 func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) (*DsyncTarget, error) {
 	var addrs []string
 	var dsynctarget DsyncTarget
