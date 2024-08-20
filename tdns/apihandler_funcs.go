@@ -462,7 +462,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			resp.Functions["Time of latest delegation sync"] = "2024-05-01 12:00:00"
 			resp.Functions["Current delegation status"] = fmt.Sprintf("parent \"%s\" is in sync with \"%s\" (the child)", zd.Parent, zd.ZoneName)
 
-		case "bootstrap":
+		case "bootstrap-sig0-key":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
 			resp.Msg, err = zd.BootstrapSig0KeyWithParent()
 			if err != nil {
@@ -471,7 +471,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 				return
 			}
 
-		case "rollover":
+		case "roll-sig0-key":
 			resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent", zd.ZoneName)
 			resp.Msg, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm)
 			if err != nil {

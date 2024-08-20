@@ -70,7 +70,7 @@ var zoneDsyncBootstrapCmd = &cobra.Command{
 		PrepArgs("zonename")
 
 		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command: "bootstrap",
+			Command: "bootstrap-sig0-key",
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		})
 		if err != nil {
@@ -94,7 +94,7 @@ var zoneDsyncRollKeyCmd = &cobra.Command{
 		PrepArgs("zonename", "algorithm")
 
 		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command:   "rollover",
+			Command:   "roll-sig0-key",
 			Zone:      dns.Fqdn(tdns.Globals.Zonename),
 			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
 		})
