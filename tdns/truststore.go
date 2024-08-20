@@ -149,6 +149,8 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			}
 			// return &resp, err
 		}
+
+		log.Printf("DEBUG: truststore sig0 delete: key %s (should be %s) keyid (should be %d)", zone, tp.Keyname, keyid, tp.Keyid)
 		if keyid != tp.Keyid || zone != tp.Keyname {
 			log.Printf("truststore sig0 delete: key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s (keyid %d) not found", tp.Keyname, tp.Keyid)

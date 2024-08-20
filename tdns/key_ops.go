@@ -207,6 +207,9 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8) (string, error) {
 		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err), err
 	}
 
+	log.Printf("RolloverSig0KeyWithParent(%s): signing addition of new key keyid %d with keyid %d:",
+		zd.ZoneName, pkc.KeyRR.KeyTag(), sak.Keys[0].KeyRR.KeyTag())
+
 	m, err = SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
 		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err), err
@@ -233,6 +236,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8) (string, error) {
 	}
 
 	newSak := &Sig0ActiveKeys{Keys: []*PrivateKeyCache{pkc}}
+	log.Printf("RolloverSig0KeyWithParent(%s): signing removal of key keyid %d with keyid %d:",
+		zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), pkc.KeyRR.KeyTag())
 	m, err = SignMsg(*m, zd.ZoneName, newSak)
 	if err != nil {
 		return fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err), err
