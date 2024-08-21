@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
@@ -21,6 +22,23 @@ type UpdateRequest struct {
 	Validated bool     // Signature over update msg is validated
 	Trusted   bool     // Content of update is trusted (via validation or policy)
 	Status    *UpdateStatus
+}
+
+func SprintUpdates(actions []dns.RR) string {
+	var buf string
+	for _, rr := range actions {
+		switch rr.Header().Class {
+		case dns.ClassNONE:
+			buf += fmt.Sprintf("DELETE:       %s\n", rr.String())
+		case dns.ClassANY:
+			buf += fmt.Sprintf("DELETE RRset: %s\n", rr.String())
+		case dns.ClassINET:
+			buf += fmt.Sprintf("ADD:   %s\n", rr.String())
+		default:
+			buf += fmt.Sprintf("UNKNOWN CLASS %s\n", rr.String())
+		}
+	}
+	return buf
 }
 
 func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
@@ -44,7 +62,8 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 					// This is the case where a DNS UPDATE contains updates to child delegation information.
 					// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
 					// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
-					log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
+					log.Printf("Updater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
 					if zd.Options["allow-child-update"] {
 						switch zd.ZoneType {
 						case Primary:
@@ -63,7 +82,8 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 				case "ZONE-UPDATE":
 					// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
 					// (i.e. not child delegation information).
-					log.Printf("Updater: Request for update %d actions.", len(ur.Actions))
+					log.Printf("Updater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
 					if zd.Options["allow-update"] {
 						dss, err := zd.ZoneUpdateChangesDelegationData(ur)
 						if err != nil {
@@ -95,7 +115,8 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 					}
 
 				case "TRUSTSTORE-UPDATE":
-					log.Printf("Updater: Request for update to SIG(0) TrustStore: %d actions.", len(ur.Actions))
+					log.Printf("Updater: Request for update to SIG(0) TrustStore for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
 					tx, err := kdb.Begin("UpdaterEngine")
 					if err != nil {
 						log.Printf("Error from kdb.Begin(): %v", err)
@@ -116,6 +137,8 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 							if err != nil {
 								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 							}
+						} else {
+							log.Printf("Updater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
 						}
 					}
 					err = tx.Commit()
