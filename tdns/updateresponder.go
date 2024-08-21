@@ -530,15 +530,14 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// rejected, except in the special case of unvalidated key uploads.
 
 		if rrtype != dns.TypeKEY {
-			us.Approved = false
-			us.Log("ApproveTrustUpdate: update of %s RRset rejected (signed by an untrusted key)",
+			log.Printf("ApproveTrustUpdate: update of %s RRset rejected (trust update must be for a KEY RR, this is a %s RR)",
 				dns.TypeToString[rrtype])
 			return false, false, nil
 		}
 
 		if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 			us.Approved = false
-			us.Log("ApproveTrustUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)",
+			log.Printf("ApproveTrustUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)",
 				dns.TypeToString[rrtype])
 			return false, false, nil
 		}

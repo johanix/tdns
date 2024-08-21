@@ -73,8 +73,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was NOT found in the TrustStore",
-				signername, keyid)
+			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was NOT found in the TrustStore", signername, keyid)
 		}
 
 		// 2. Is the key in the KeyStore?. I don't think this is correct. If we want to be able
