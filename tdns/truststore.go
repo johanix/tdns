@@ -39,7 +39,7 @@ INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidat
 		getallchildsig0keyssql = `
 SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
-SELECT child, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
+SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		deleteSig0KeySql = `
