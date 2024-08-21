@@ -123,6 +123,7 @@ func init() {
 
 	zoneDsyncCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show headers")
 	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
+	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "Phase of the rollover to perform: complete, add, remove, update-local")
 }
 
 func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDsyncResponse, error) {
