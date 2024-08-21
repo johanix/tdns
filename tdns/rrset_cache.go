@@ -38,14 +38,6 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
 	dkc.Map.Set(lookupKey, *ta)
 }
 
-var Sig0Store = NewSig0StoreT()
-
-func NewSig0StoreT() *Sig0StoreT {
-	return &Sig0StoreT{
-		Map: cmap.New[Sig0Key](),
-	}
-}
-
 var RRsetCache = NewRRsetCache()
 
 func NewRRsetCache() *RRsetCacheT {

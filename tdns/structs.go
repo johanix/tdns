@@ -7,7 +7,6 @@ import (
 	"crypto"
 	"database/sql"
 	"log"
-	"net/http"
 	"sync"
 	"time"
 
@@ -210,135 +209,6 @@ type ChildDelegationData struct {
 	AAAA_rrsets      []*RRset
 }
 
-type KeystorePost struct {
-	Command         string // "sig0"
-	SubCommand      string // "list" | "add" | "delete" | ...
-	Zone            string
-	Keyname         string
-	Keyid           uint16
-	Flags           uint16
-	KeyType         string
-	Algorithm       uint8 // RSASHA256 | ED25519 | etc.
-	PrivateKey      string
-	KeyRR           string
-	DnskeyRR        string
-	PrivateKeyCache *PrivateKeyCache
-	State           string
-}
-
-type KeystoreResponse struct {
-	Time     time.Time
-	Status   string
-	Zone     string
-	Dnskeys  map[string]DnssecKey // TrustAnchor
-	Sig0keys map[string]Sig0Key
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-
-type TruststorePost struct {
-	Command         string // "sig0"
-	SubCommand      string // "list-child-keys" | "trust-child-key" | "untrust-child-key"
-	Zone            string
-	Keyname         string
-	Keyid           int
-	Validated       bool
-	DnssecValidated bool
-	Trusted         bool
-	Src             string // "dns" | "file"
-	KeyRR           string // RR string for key
-}
-
-type TruststoreResponse struct {
-	Time          time.Time
-	Status        string
-	Zone          string
-	ChildDnskeys  map[string]TrustAnchor
-	ChildSig0keys map[string]Sig0Key
-	Msg           string
-	Error         bool
-	ErrorMsg      string
-}
-
-type CommandPost struct {
-	Command    string
-	SubCommand string
-	Zone       string
-	Force      bool
-}
-
-type CommandResponse struct {
-	Time     time.Time
-	Status   string
-	Zone     string
-	Names    []string
-	Zones    map[string]ZoneConf
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-
-type ZonePost struct {
-	Command    string
-	SubCommand string
-	Zone       string
-	Force      bool
-}
-
-type ZoneResponse struct {
-	Time     time.Time
-	Status   string
-	Zone     string
-	Names    []string
-	Zones    map[string]ZoneConf
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-type ZoneDsyncPost struct {
-	Command   string // status | bootstrap | ...
-	Zone      string
-	Algorithm uint8
-}
-
-type ZoneDsyncResponse struct {
-	Time      time.Time
-	Status    string
-	Zone      string
-	Functions map[string]string
-	Todo      []string
-	Msg       string
-	Error     bool
-	ErrorMsg  string
-}
-type ConfigPost struct {
-	Command string // status | sync | ...
-}
-
-type ConfigResponse struct {
-	Time     time.Time
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-
-type DelegationPost struct {
-	Command string // status | sync | ...
-	Scheme  uint8  // 1=notify | 2=update
-	Zone    string
-	Force   bool
-}
-
-type DelegationResponse struct {
-	Time       time.Time
-	Zone       string
-	SyncStatus DelegationSyncStatus
-	Msg        string
-	Error      bool
-	ErrorMsg   string
-}
-
 type DelegationSyncStatus struct {
 	ZoneName      string
 	Parent        string // use zd.Parent instead
@@ -359,42 +229,6 @@ type DelegationSyncStatus struct {
 	DNSKEYRemoves []dns.RR
 	Error         bool
 	ErrorMsg      string
-}
-
-type DebugPost struct {
-	Command string
-	Zone    string
-	Qname   string
-	Qtype   uint16
-	Verbose bool
-}
-
-type DebugResponse struct {
-	Time       time.Time
-	Status     string
-	Zone       string
-	OwnerIndex map[string]int
-	RRset      RRset
-	//	TrustedDnskeys	map[string]dns.DNSKEY
-	//	TrustedSig0keys	map[string]dns.KEY
-	TrustedDnskeys  []TrustAnchor
-	TrustedSig0keys map[string]Sig0Key
-	CachedRRsets    []CachedRRset
-	Validated       bool
-	Msg             string
-	Error           bool
-	ErrorMsg        string
-}
-
-type ApiClient struct {
-	Name       string
-	Client     *http.Client
-	BaseUrl    string
-	apiKey     string
-	AuthMethod string
-	UseTLS     bool
-	Verbose    bool
-	Debug      bool
 }
 
 type ZoneRefresher struct {
@@ -594,10 +428,11 @@ type KeyDB struct {
 	DB *sql.DB
 	mu sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
-	Sig0Cache   map[string]*Sig0ActiveKeys
-	DnssecCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
-	Ctx         string
-	UpdateQ     chan UpdateRequest
+	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
+	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT
+	DnssecCache         map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
+	Ctx                 string
+	UpdateQ             chan UpdateRequest
 }
 
 type Tx struct {

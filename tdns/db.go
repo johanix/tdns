@@ -11,6 +11,7 @@ import (
 	"os"
 
 	_ "github.com/mattn/go-sqlite3"
+	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 func (tx *Tx) Commit() error {
@@ -137,9 +138,16 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 	}
 	dbSetupTables(db)
 	return &KeyDB{
-		DB:          db,
-		Sig0Cache:   make(map[string]*Sig0ActiveKeys),
-		DnssecCache: make(map[string]*DnssecKeys),
-		UpdateQ:     make(chan UpdateRequest),
+		DB:                  db,
+		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
+		TruststoreSig0Cache: NewSig0StoreT(),
+		DnssecCache:         make(map[string]*DnssecKeys),
+		UpdateQ:             make(chan UpdateRequest),
 	}, nil
+}
+
+func NewSig0StoreT() *Sig0StoreT {
+	return &Sig0StoreT{
+		Map: cmap.New[Sig0Key](),
+	}
 }

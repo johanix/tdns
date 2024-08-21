@@ -128,7 +128,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		}
 
 		// Must also delete from the cache
-		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "delete":
 
@@ -168,7 +168,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		}
 
 		// Must also delete from the cache
-		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted from TrustStore (%d rows)", tp.Keyname, tp.Keyid, rows)
@@ -188,7 +188,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 		// Must also delete from the cache
-		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "untrust":
 		// 1. Find key, if not --> error
@@ -207,7 +207,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 		// Must also delete from the cache
-		Sig0Store.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	default:
 		log.Printf("Sig0TrustStoreMgmt: Unknown SubCommand: %s", tp.SubCommand)
@@ -294,7 +294,7 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 
 		if keyrr, ok := rr.(*dns.KEY); ok {
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
-			Sig0Store.Map.Set(mapkey, Sig0Key{
+			kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
 				Name:      keyname,
 				Validated: validated,
 				Trusted:   trusted,
@@ -333,7 +333,7 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 			if keyrr, ok := rr.(*dns.KEY); ok {
 				log.Printf("* LoadChildSig0Keys: loading key %s", k)
 				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
-				Sig0Store.Map.Set(mapkey, Sig0Key{
+				kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
 					Name:      k,
 					Keyid:     keyrr.KeyTag(),
 					Validated: true, // always trust config
@@ -366,7 +366,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	mapkey := fmt.Sprintf("%s::%d", signer, keyid)
 
 	// 1. Try to fetch the key from the Sig0Store cache
-	if sk, ok := Sig0Store.Map.Get(mapkey); ok {
+	if sk, ok := zd.KeyDB.TruststoreSig0Cache.Map.Get(mapkey); ok {
 		return &sk, nil
 	}
 
@@ -403,7 +403,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 			Trusted:         trusted,
 			Key:             *keyrr,
 		}
-		Sig0Store.Map.Set(mapkey, sk)
+		zd.KeyDB.TruststoreSig0Cache.Map.Set(mapkey, sk)
 		return &sk, nil
 	}
 

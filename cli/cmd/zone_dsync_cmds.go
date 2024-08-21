@@ -87,16 +87,19 @@ var zoneDsyncBootstrapCmd = &cobra.Command{
 	},
 }
 
+var rollaction string
+
 var zoneDsyncRollKeyCmd = &cobra.Command{
 	Use:   "roll-sig0-key",
 	Short: "Send dsync rollover command to tdns-server",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm")
+		PrepArgs("zonename", "algorithm", "rollaction")
 
 		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
 			Command:   "roll-sig0-key",
 			Zone:      dns.Fqdn(tdns.Globals.Zonename),
 			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
+			Action:    rollaction,
 		})
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())

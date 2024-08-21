@@ -369,7 +369,7 @@ func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
 	)
 
-	if sak, ok := kdb.Sig0Cache[zonename]; ok {
+	if sak, ok := kdb.KeystoreSig0Cache[zonename]; ok {
 		return sak, nil
 	}
 
@@ -430,7 +430,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		log.Printf("GetSig0ActiveKey(%s) returned keys %v", zonename, sak)
 	}
 
-	kdb.Sig0Cache[zonename] = &sak
+	kdb.KeystoreSig0Cache[zonename] = &sak
 
 	return &sak, err
 }

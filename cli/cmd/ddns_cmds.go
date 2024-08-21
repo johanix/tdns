@@ -340,6 +340,13 @@ func PrepArgs(required ...string) {
 				os.Exit(1)
 			}
 
+		case "rollaction":
+			rollaction = strings.ToLower(rollaction)
+			if rollaction != "complete" && rollaction != "add" && rollaction != "remove" && rollaction != "update-local" {
+				fmt.Printf("Error: roll action \"%s\" is not known\n", rollaction)
+				os.Exit(1)
+			}
+
 		default:
 			fmt.Printf("Unknown required argument: \"%s\"\n", arg)
 			os.Exit(1)

@@ -77,7 +77,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 		// 2. Is the key in the KeyStore?. I don't think this is correct. If we want to be able
 		// to validate against keys in the KeyStore, then those keys should have their public
-		// parts promoted to the TrustStore automatically (and we now do that automatically).
+		// parts promoted to the TrustStore (and we now do that automatically).
 
 		// sig0key, err = zd.Keystore(signername, keyid)
 		// if err == nil && sig0key != nil {
