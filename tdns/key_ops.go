@@ -281,6 +281,18 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	// We now need to update the active key in our own keystore to the new key and also possibly publish the new key.
 
 	if action == "complete" || action == "update-local" {
+		var resp *KeystoreResponse
+		tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")
+		if err != nil {
+			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to begin transaction: %v", zd.ZoneName, err)
+		}
+		defer func() {
+			if err != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
+		}()
 
 		// 8. Change state of the new key from "created" to "active". Change state of the old key from "active" to "retired".
 		kp := KeystorePost{
@@ -291,16 +303,12 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 			State:      "active",
 		}
 
-		tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")
+		resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 		if err != nil {
-			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to begin transaction: %v", zd.ZoneName, err)
-		}
-		defer tx.Rollback()
-
-		resp, err := zd.KeyDB.Sig0KeyMgmt(tx, kp)
-		if err != nil {
-			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
+			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
 				zd.ZoneName, rollover_pkc.KeyRR.KeyTag(), err)
+			log.Printf(msg)
+			return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 		}
 		if resp.Error {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
@@ -317,8 +325,9 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 		}
 		resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 		if err != nil {
-			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v",
-				zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), err)
+			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v", zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), err)
+			log.Printf(msg)
+			return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 		}
 		if resp.Error {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v",
@@ -329,7 +338,9 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 		// 9. Publish the new key
 		err = zd.PublishKeyRRs(rollover_newSak)
 		if err != nil {
-			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to publish new key: %v", zd.ZoneName, err)
+			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to publish new key: %v", zd.ZoneName, err)
+			log.Printf(msg)
+			return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 		}
 	} // end of phase 3
 
