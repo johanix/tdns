@@ -100,6 +100,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			return nil, err
 		}
+		delete(kdb.KeystoreSig0Cache, kp.Keyname)
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "generate":
@@ -125,6 +126,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			return nil, err
 		}
+		delete(kdb.KeystoreSig0Cache, kp.Keyname)
 		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
 		return &resp, err
 
@@ -142,8 +144,8 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
 			}
 		}
+		delete(kdb.KeystoreSig0Cache, kp.Keyname)
 
-	// XXX: FIXME: "delete" should also delete the public key from the TrustStore.
 	case "delete":
 		const getSig0KeySql = `
 SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
@@ -189,6 +191,8 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 			return &resp, err
 		}
 		resp.Msg += fmt.Sprintf("\nAlso deleted the public key from TrustStore:\n%s", tsresp.Msg)
+		// Also delete from the cache
+		delete(kdb.KeystoreSig0Cache, kp.Keyname)
 
 	default:
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)

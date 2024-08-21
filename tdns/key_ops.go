@@ -125,7 +125,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	return nil
 }
 
-func (zd *ZoneData) BootstrapSig0KeyWithParent() (string, error) {
+func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error) {
 	var err error
 	// 1. Get the parent zone
 	if zd.Parent == "" {
@@ -139,6 +139,20 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent() (string, error) {
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err), err
 	}
+	if len(sak.Keys) == 0 {
+	   // XXX: Should we generate new keys or return an error?
+	   log.Printf("No active SIG(0) key found for zone %s. Generating new key with algorithm %s", zd.ZoneName, dns.AlgorithmToString[alg])
+	   pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "bootstrap-sig0", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
+	   if err != nil {
+	      msg := fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
+	      log.Printf(msg)
+	      return msg, err
+	   }
+	   sak.Keys = append(sak.Keys, pkc)
+	   zd.Logger.Printf(msg)
+	}
+
+	pkc := sak.Keys[0]
 
 	// 2. Get the parent DSYNC RRset
 	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
@@ -150,7 +164,8 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent() (string, error) {
 	dump.P(dsyncTarget)
 
 	// 3. Create the DNS UPDATE message
-	adds := []dns.RR{&sak.Keys[0].KeyRR}
+	// adds := []dns.RR{&sak.Keys[0].KeyRR}
+	adds := []dns.RR{&pkc.KeyRR}
 	msg, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err), err
@@ -165,6 +180,42 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent() (string, error) {
 	rcode, err := SendUpdate(msg, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err), err
+	}
+
+	if rcode == dns.RcodeSuccess {
+		tx, err := zd.KeyDB.Begin("BootstrapSig0KeyWithParent")
+		if err != nil {
+			return "", fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to begin transaction: %v", zd.ZoneName, err)
+		}
+		defer func() {
+			if err != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
+		}()
+
+		// 5. Change state of the new key from "created" to "active". 
+		kp := KeystorePost{
+			Command:    "sig0-mgmt",
+			SubCommand: "setstate",
+			Keyname:    pkc.KeyRR.Header().Name,
+			Keyid:      uint16(pkc.KeyRR.KeyTag()),
+			State:      "active",
+		}
+
+		resp, err := zd.KeyDB.Sig0KeyMgmt(tx, kp)
+		if err != nil {
+			str := fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
+				zd.ZoneName, pkc.KeyRR.KeyTag(), err)
+			log.Printf(str)
+			return "", fmt.Errorf(str)
+		}
+		if resp.Error {
+			return "", fmt.Errorf("BootstrapSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
+				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg)
+		}
+		zd.Logger.Printf(resp.Msg)
 	}
 
 	return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), nil

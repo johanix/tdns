@@ -14,6 +14,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
+	"github.com/gookit/goutil/dump"
 )
 
 // XXX: These should die
@@ -39,7 +40,7 @@ INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidat
 		getallchildsig0keyssql = `
 SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
-SELECT child, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
+SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		deleteSig0KeySql = `
@@ -113,6 +114,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d imported from KeyStore to TrustStore", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "child-update" {
+		        dump.P(tp)
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
@@ -132,14 +134,15 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 	case "delete":
 
+	        dump.P(tp)
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getonechildsig0keyssql, tp.Keyname, tp.Keyid)
 
 		var zone, keyrr, source string
 		var keyid int
-		var trusted, validated bool
+		var trusted, validated, dnssecvalidated bool
 
-		err := row.Scan(&zone, &keyid, &trusted, &validated, &source, &keyrr)
+		err := row.Scan(&zone, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrr)
 		if err != nil {
 			log.Printf("Error: %v", err)
 			if err == sql.ErrNoRows {
@@ -150,14 +153,13 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			// return &resp, err
 		}
 
-		log.Printf("DEBUG: truststore sig0 delete: key %s (should be %s) keyid (should be %d)", zone, tp.Keyname, keyid, tp.Keyid)
+		// log.Printf("DEBUG: truststore sig0 delete: key %s (should be %s) keyid %d (should be %d)", zone, tp.Keyname, keyid, tp.Keyid)
 		if keyid != tp.Keyid || zone != tp.Keyname {
 			log.Printf("truststore sig0 delete: key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
 			// return &resp, nil
 		}
 
-		// 3. Return all good, now untrusted
 		res, err = tx.Exec(deleteSig0KeySql, tp.Keyname, tp.Keyid)
 		// log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
