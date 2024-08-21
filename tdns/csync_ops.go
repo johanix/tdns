@@ -50,21 +50,33 @@ func (zd *ZoneData) PublishCsyncRR() error {
 }
 
 func (zd *ZoneData) UnpublishCsyncRR() error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("Zone %s does not allow updates. CSYNC unpublication not possible", zd.ZoneName)
-	}
+	//	if !zd.Options["allow-updates"] {
+	//		return fmt.Errorf("Zone %s does not allow updates. CSYNC unpublication not possible", zd.ZoneName)
+	//	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
+	//	apex, err := zd.GetOwner(zd.ZoneName)
+	//	if err != nil {
+	//		return err
+	//	}
+
+	//	zd.mu.Lock()
+	//	delete(apex.RRtypes, dns.TypeCSYNC)
+	//	zd.Options["dirty"] = true
+	//	zd.mu.Unlock()
+
+	//	zd.BumpSerial()
+
+	anti_csync_rr, err := dns.NewRR(fmt.Sprintf("%s 0 IN CSYNC 0 0 A NS AAAA", zd.ZoneName))
 	if err != nil {
 		return err
 	}
 
-	zd.mu.Lock()
-	delete(apex.RRtypes, dns.TypeCSYNC)
-	zd.Options["dirty"] = true
-	zd.mu.Unlock()
-
-	zd.BumpSerial()
+	zd.KeyDB.UpdateQ <- UpdateRequest{
+		Cmd:            "ZONE-UPDATE",
+		ZoneName:       zd.ZoneName,
+		Actions:        []dns.RR{anti_csync_rr},
+		InternalUpdate: true,
+	}
 
 	return nil
 }

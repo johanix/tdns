@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 type PingPost struct {
@@ -64,4 +66,21 @@ func APIping(appName, appVersion string, bootTime time.Time) func(w http.Respons
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	}
+}
+
+func walkRoutes(router *mux.Router, address string) {
+	log.Printf("Defined API endpoints for router on: %s\n", address)
+
+	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+		path, _ := route.GetPathTemplate()
+		methods, _ := route.GetMethods()
+		for m := range methods {
+			log.Printf("%-6s %s\n", methods[m], path)
+		}
+		return nil
+	}
+	if err := router.Walk(walker); err != nil {
+		log.Panicf("Logging err: %s\n", err.Error())
+	}
+	//	return nil
 }

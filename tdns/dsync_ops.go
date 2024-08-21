@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -12,23 +13,23 @@ import (
 )
 
 func (zd *ZoneData) PublishDsyncRRs() error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("Zone %s does not allow updates. DSYNC publication not possible", zd.ZoneName)
-	}
+	//	if !zd.Options["allow-updates"] {
+	//		return fmt.Errorf("Zone %s does not allow updates. DSYNC publication not possible", zd.ZoneName)
+	//	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return err
-	}
+	//	apex, err := zd.GetOwner(zd.ZoneName)
+	//	if err != nil {
+	//		return err
+	//	}
 
-	var dak *DnssecKeys
-	if zd.Options["online-signing"] {
-		dak, err = zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-		if err != nil {
-			zd.Logger.Printf("Error from GetDnssecActiveKeys(%s): %v", zd.ZoneName, err)
-			return err
-		}
-	}
+	//	var dak *DnssecKeys
+	//	if zd.Options["online-signing"] {
+	//		dak, err = zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	//		if err != nil {
+	//			zd.Logger.Printf("Error from GetDnssecActiveKeys(%s): %v", zd.ZoneName, err)
+	//			return err
+	//		}
+	//	}
 
 	rrset := RRset{
 		Name: zd.ZoneName,
@@ -124,10 +125,17 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return fmt.Errorf("No DSYNC RRs added for zone %s", zd.ZoneName)
 	}
 
-	_, err = zd.SignRRset(&rrset, zd.ZoneName, dak, true)
-	if err != nil {
-		return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
+	ur := UpdateRequest{
+		Cmd:            "ZONE-UPDATE",
+		ZoneName:       zd.ZoneName,
+		Actions:        rrset.RRs, // Add all the DSYNC RRs first.
+		InternalUpdate: true,
 	}
+
+	//	_, err = zd.SignRRset(&rrset, zd.ZoneName, dak, true)
+	//	if err != nil {
+	//		return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
+	//	}
 
 	for _, addr_rr := range addr_rrs {
 		new_addr := false
@@ -141,15 +149,15 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				Name:    addr_rr.Header().Name,
 				RRtypes: make(map[uint16]RRset),
 			}
-			zd.AddOwner(owner)
+			//			zd.AddOwner(owner)
 		}
 
 		rrtype := addr_rr.Header().Rrtype
 		if _, exists := owner.RRtypes[rrtype]; !exists {
 			owner.RRtypes[rrtype] = RRset{
-				Name:   addr_rr.Header().Name,
-				RRs:    []dns.RR{addr_rr},
-				RRSIGs: []dns.RR{},
+				Name: addr_rr.Header().Name,
+				RRs:  []dns.RR{addr_rr},
+				// RRSIGs: []dns.RR{},
 			}
 			new_addr = true
 		} else {
@@ -170,41 +178,59 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			}
 		}
 		if new_addr {
-			tmp := owner.RRtypes[rrtype]
-			_, err = zd.SignRRset(&tmp, zd.ZoneName, dak, true)
-			if err != nil {
-				return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
-			}
-			owner.RRtypes[rrtype] = tmp
+			// tmp := owner.RRtypes[rrtype]
+			//			_, err = zd.SignRRset(&tmp, zd.ZoneName, dak, true)
+			//			if err != nil {
+			//				return fmt.Errorf("Error signing DSYNC RRset for zone %s: %v", zd.ZoneName, err)
+			//			}
+			// owner.RRtypes[rrtype] = tmp
+			ur.Actions = append(ur.Actions, addr_rr)
 		}
 	}
 
-	zd.mu.Lock()
-	apex.RRtypes[TypeDSYNC] = rrset
-	zd.Options["dirty"] = true
-	zd.mu.Unlock()
+	// zd.mu.Lock()
+	// apex.RRtypes[TypeDSYNC] = rrset
+	// zd.Options["dirty"] = true
+	// zd.mu.Unlock()
 
-	zd.BumpSerial()
+	// zd.BumpSerial()
+
+	zd.KeyDB.UpdateQ <- ur
 
 	return nil
 }
 
 func (zd *ZoneData) UnpublishDsyncRRs() error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("Zone %s does not allow updates. DSYNC unpublication not possible", zd.ZoneName)
-	}
+	//	if !zd.Options["allow-updates"] {
+	//		return fmt.Errorf("Zone %s does not allow updates. DSYNC unpublication not possible", zd.ZoneName)
+	//	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
+	//	apex, err := zd.GetOwner(zd.ZoneName)
+	//	if err != nil {
+	//		return err
+	//	}
+
+	//	zd.mu.Lock()
+	//	delete(apex.RRtypes, TypeDSYNC)
+	//	zd.Options["dirty"] = true
+	//	zd.mu.Unlock()
+
+	// zd.BumpSerial()
+
+	anti_dsync_rr, err := dns.NewRR("_dsync." + zd.ZoneName + " 7200 IN DSYNC ANY NOTIFY 53 1.2.3.4")
 	if err != nil {
-		return err
+		return fmt.Errorf("Error from NewRR(%s): %v", "_dsync."+zd.ZoneName+" 7200 ANY DSYNC ANY NOTIFY 53 1.2.3.4", err)
+	}
+	anti_dsync_rr.Header().Class = dns.ClassANY
+	log.Printf("Unpublishing DSYNC RRset: %s", anti_dsync_rr.String())
+
+	ur := UpdateRequest{
+		Cmd:      "ZONE-UPDATE",
+		ZoneName: zd.ZoneName,
+		Actions:  []dns.RR{anti_dsync_rr},
 	}
 
-	zd.mu.Lock()
-	delete(apex.RRtypes, TypeDSYNC)
-	zd.Options["dirty"] = true
-	zd.mu.Unlock()
-
-	zd.BumpSerial()
+	zd.KeyDB.UpdateQ <- ur
 
 	return nil
 }

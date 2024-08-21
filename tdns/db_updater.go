@@ -10,18 +10,20 @@ import (
 	"sync"
 
 	//	"github.com/gookit/goutil/dump"
+
 	"github.com/miekg/dns"
 )
 
 type UpdateRequest struct {
-	Cmd       string
-	ZoneName  string
-	Adds      []dns.RR
-	Removes   []dns.RR
-	Actions   []dns.RR // The Update section from the dns.Msg
-	Validated bool     // Signature over update msg is validated
-	Trusted   bool     // Content of update is trusted (via validation or policy)
-	Status    *UpdateStatus
+	Cmd            string
+	ZoneName       string
+	Adds           []dns.RR
+	Removes        []dns.RR
+	Actions        []dns.RR // The Update section from the dns.Msg
+	Validated      bool     // Signature over update msg is validated
+	Trusted        bool     // Content of update is trusted (via validation or policy)
+	InternalUpdate bool     // Internal update, not a DNS UPDATE from the outside
+	Status         *UpdateStatus
 }
 
 func SprintUpdates(actions []dns.RR) string {
@@ -65,9 +67,12 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 					log.Printf("Updater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
 					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
 					if zd.Options["allow-child-update"] {
+						var updated bool
+						var err error
+
 						switch zd.ZoneType {
 						case Primary:
-							err := zd.ApplyChildUpdateToZoneData(ur)
+							updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
 							if err != nil {
 								log.Printf("Error from ApplyUpdateToZoneData: %v", err)
 							}
@@ -77,18 +82,22 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 								log.Printf("Error from ApplyChildUpdateToDB: %v", err)
 							}
 						}
+						if updated {
+							zd.Options["dirty"] = true
+						}
 					}
 
 				case "ZONE-UPDATE":
 					// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
 					// (i.e. not child delegation information).
 					log.Printf("Updater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
-					if zd.Options["allow-update"] {
+					log.Printf("Updater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+					if zd.Options["allow-updates"] {
 						dss, err := zd.ZoneUpdateChangesDelegationData(ur)
 						if err != nil {
 							log.Printf("Error from ZoneUpdateChangesDelegationData: %v", err)
 						}
+						log.Printf("Updater: dss.InSync: %t", dss.InSync)
 						if zd.Options["delegation-sync-child"] && !dss.InSync {
 							zd.DelegationSyncCh <- DelegationSyncRequest{
 								Command:    "SYNC-DELEGATION",
@@ -99,9 +108,11 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 							}
 						}
 
+						var updated bool
+
 						switch zd.ZoneType {
 						case Primary:
-							_, err := zd.ApplyZoneUpdateToZoneData(ur)
+							updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
 							if err != nil {
 								log.Printf("Error from ApplyUpdateToZoneData: %v", err)
 							}
@@ -111,6 +122,10 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 							if err != nil {
 								log.Printf("Error from ApplyUpdateToDB: %v", err)
 							}
+						}
+						if updated {
+							log.Printf("Updater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
+							zd.Options["dirty"] = true
 						}
 					}
 
@@ -277,13 +292,17 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 	return nil
 }
 
-func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
+func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
+
+	log.Printf("ApplyChildUpdateToZoneData: %v", ur)
 
 	zd.mu.Lock()
 	defer func() {
 		zd.mu.Unlock()
 		zd.BumpSerial()
 	}()
+
+	var updated bool
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -312,7 +331,8 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 				RRtypes: make(map[uint16]RRset),
 			}
 			zd.AddOwner(owner)
-			zd.Options["dirty"] = true
+			updated = true
+			// zd.Options["dirty"] = true
 		}
 
 		rrset, exists := owner.RRtypes[rrtype]
@@ -338,7 +358,8 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			} else {
 				owner.RRtypes[rrtype] = rrset
 			}
-			zd.Options["dirty"] = true
+			updated = true
+			// zd.Options["dirty"] = true
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			continue
 
@@ -346,7 +367,8 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			// ClassANY: Remove RRset
 			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
 			delete(owner.RRtypes, rrtype)
-			zd.Options["dirty"] = true
+			updated = true
+			// zd.Options["dirty"] = true
 			continue
 
 		case dns.ClassINET:
@@ -373,26 +395,42 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest) error {
 			log.Printf("ApplyChildUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
+			updated = true
 			zd.Options["dirty"] = true
 		}
 		owner.RRtypes[rrtype] = rrset
 		// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
 		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
 		// dump.P(owner.RRtypes[rrtype])
-		zd.Options["dirty"] = true
+		updated = true
+		// zd.Options["dirty"] = true
 		continue
 	}
 
-	return nil
+	log.Printf("ApplyChildUpdateToZoneData done: updated=%t", updated)
+
+	return updated, nil
 }
 
-func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) (bool, error) {
+func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
+
+	// dump.P(ur)
 
 	zd.mu.Lock()
 	defer func() {
 		zd.mu.Unlock()
 		zd.BumpSerial()
 	}()
+
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	if err != nil && zd.Options["online-signing"] {
+		return false, err
+	}
+	if len(dak.KSKs) == 0 && zd.Options["online-signing"] {
+		return false, fmt.Errorf("Zone %s has no active KSKs and online-signing is enabled. Zone update is rejected.", zd.ZoneName)
+	}
+
+	var updated bool
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -420,7 +458,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) (bool, error) {
 				RRtypes: make(map[uint16]RRset),
 			}
 			zd.AddOwner(owner)
-			zd.Options["dirty"] = true
+			updated = true
+			// zd.Options["dirty"] = true
 		}
 
 		rrset, exists := owner.RRtypes[rrtype]
@@ -442,16 +481,20 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) (bool, error) {
 			if len(rrset.RRs) == 0 {
 				delete(owner.RRtypes, rrtype)
 			} else {
+				zd.SignRRset(&rrset, ownerName, dak, true)
 				owner.RRtypes[rrtype] = rrset
 			}
-			zd.Options["dirty"] = true
+			updated = true
+			// zd.Options["dirty"] = true
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			continue
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
 			delete(owner.RRtypes, rrtype)
-			zd.Options["dirty"] = true
+			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
+			updated = true
+			// zd.Options["dirty"] = true
 			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
 			continue
 
@@ -460,7 +503,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) (bool, error) {
 			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
 		}
 
-		if _, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]; !ok {
+		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		if !ok && !ur.InternalUpdate {
 			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
 		}
@@ -476,14 +520,20 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest) (bool, error) {
 		if !dup {
 			log.Printf("ApplyUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
-			rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
+			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
+			zd.SignRRset(&rrset, zd.ZoneName, dak, true)
+			updated = true
+			// zd.Options["dirty"] = true
 		}
 		owner.RRtypes[rrtype] = rrset
-		zd.Options["dirty"] = true
+		updated = true
+		// zd.Options["dirty"] = true
 		continue
 	}
 
-	return zd.Options["dirty"], nil
+	log.Printf("ApplyZoneUpdateToZoneData done: updated=%t", updated)
+
+	return updated, nil
 }
 
 func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
@@ -595,7 +645,8 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			log.Printf("UpdateChangesDelegationData: Error: unknown class: %s", rr.String())
 		}
 
-		if _, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]; !ok {
+		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		if !ok && !ur.InternalUpdate {
 			log.Printf("UpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
 		}

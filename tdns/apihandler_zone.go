@@ -197,7 +197,8 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			return
 		}
 
-		if !zd.Options["delegation-sync-child"] {
+		// Most of the dsync commands relate to the child role. The exception is the publish/unpublish commands
+		if !zd.Options["delegation-sync-child"] && zdp.Command != "publish-dsync-rrset" && zdp.Command != "unpublish-dsync-rrset" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s does not support delegation sync (option delegation-sync-child=false)", zd.ZoneName)
 			return
@@ -277,6 +278,24 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: UPDATING LOCAL KEYSTORE", zd.ZoneName)
 			}
 			resp.Msg, resp.OldKeyID, resp.NewKeyID, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action, zdp.OldKeyID, zdp.NewKeyID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+
+		case "publish-dsync-rrset":
+			resp.Msg = fmt.Sprintf("Zone %s: publishing DSYNC RRset", zd.ZoneName)
+			err = zd.PublishDsyncRRs()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+
+		case "unpublish-dsync-rrset":
+			resp.Msg = fmt.Sprintf("Zone %s: unpublishing DSYNC RRset", zd.ZoneName)
+			err = zd.UnpublishDsyncRRs()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

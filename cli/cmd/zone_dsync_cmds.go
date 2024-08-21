@@ -70,8 +70,8 @@ var zoneDsyncBootstrapCmd = &cobra.Command{
 		PrepArgs("zonename", "algorithm")
 
 		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command: "bootstrap-sig0-key",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			Command:   "bootstrap-sig0-key",
+			Zone:      dns.Fqdn(tdns.Globals.Zonename),
 			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
 		})
 		if err != nil {
@@ -116,11 +116,59 @@ var zoneDsyncRollKeyCmd = &cobra.Command{
 	},
 }
 
+var zoneDsyncPublishCmd = &cobra.Command{
+	Use:   "publish",
+	Short: "Send dsync publish-dsync-rrset command to tdns-server",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			Command: "publish-dsync-rrset",
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if resp.Error {
+			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
+var zoneDsyncUnpublishCmd = &cobra.Command{
+	Use:   "unpublish",
+	Short: "Send dsync unpublish-dsync-rrset command to tdns-server",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			Command: "unpublish-dsync-rrset",
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if resp.Error {
+			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(zoneCmd)
 
 	zoneCmd.AddCommand(zoneDsyncCmd)
-	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd)
+	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd, zoneDsyncPublishCmd, zoneDsyncUnpublishCmd)
 
 	zoneDsyncCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show headers")
 	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
