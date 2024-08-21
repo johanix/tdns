@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
-	"github.com/gookit/goutil/dump"
+	// "github.com/gookit/goutil/dump"
 )
 
 // XXX: These should die
@@ -114,7 +114,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d imported from KeyStore to TrustStore", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "child-update" {
-		        dump.P(tp)
+		        // dump.P(tp)
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
@@ -134,7 +134,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 	case "delete":
 
-	        dump.P(tp)
+	        // dump.P(tp)
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getonechildsig0keyssql, tp.Keyname, tp.Keyid)
 

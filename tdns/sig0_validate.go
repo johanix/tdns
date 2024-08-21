@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/gookit/goutil/dump"
+	// "github.com/gookit/goutil/dump"
 )
 
 // The general idea is to iterate over all SIG RRs in the Additional section of the update to find
@@ -162,7 +162,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 // Evaluate the keys that signed the update and determine the trust status of the update.
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
-	dump.P(us)
+	// dump.P(us)
 	if len(us.Signers) == 0 {
 		return fmt.Errorf("Update is not signed by any key")
 	}

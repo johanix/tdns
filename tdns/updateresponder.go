@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gookit/goutil/dump"
+	// "github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
 
@@ -217,7 +217,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		// Let's not return here, this could be an unvalidated key upload.
 	}
 
-	dump.P(dur.Status.Type)
+	// dump.P(dur.Status.Type)
 
 	// rcode from validation is input to ApproveUpdate only to enable the possibility of upload of unvalidated keys
 	approved, updatezone, err := zd.ApproveUpdate(zone, dur.Status, r)
@@ -233,7 +233,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return err
 	}
 
-	dump.P(dur.Status.Type)
+	// dump.P(dur.Status.Type)
 
 	if !dur.Status.Approved {
 		log.Printf("DnsEngine: ApproveUpdate rejected the update. Ignored.")
@@ -264,7 +264,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 // Returns approved, updatezone, error
 func (zd *ZoneData) ApproveUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
-	dump.P(us)
+	// dump.P(us)
 	switch us.Type {
 	case "CHILD-UPDATE":
 		return zd.ApproveChildUpdate(zone, us, r)

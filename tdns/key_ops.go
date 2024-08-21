@@ -222,17 +222,17 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error) {
 }
 
 // DEBUG globals, to be removed
-var rollover_sak *Sig0ActiveKeys
-var rollover_newSak *Sig0ActiveKeys
-var rollover_pkc *PrivateKeyCache
-var rollover_dsyncTarget *DsyncTarget
+// var rollover_sak *Sig0ActiveKeys
+// var rollover_newSak *Sig0ActiveKeys
+// var rollover_pkc *PrivateKeyCache
+// var rollover_dsyncTarget *DsyncTarget
 
 // Returns msg, old keyid, new keyid, error
 func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid, newkeyid uint16) (string, uint16, uint16, error) {
 	var err error
-	//	var sak *Sig0ActiveKeys
-	//	var pkc *PrivateKeyCache
-	//	var dsyncTarget *DsyncTarget
+	var sak, newSak *Sig0ActiveKeys
+	var pkc *PrivateKeyCache
+	var dsyncTarget *DsyncTarget
 	var msg string
 
 	// 1. Get the parent zone
@@ -244,42 +244,42 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	}
 
 	// 2. Get the parent DSYNC RRset
-	rollover_dsyncTarget, err = LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
+	dsyncTarget, err = LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to lookup DSYNC target: %v", zd.ZoneName, err)
 	}
 	log.Printf("RolloverSig0KeyWithParent(%s): DSYNC target:", zd.ZoneName)
 
-	if action == "complete" || action == "add" {
-		rollover_sak, err = zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+//	if action == "complete" || action == "add" {
+		sak, err = zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
 		}
 
 		// 3. Generate a new key
-		rollover_pkc, msg, err = zd.KeyDB.GenerateKeypair(zd.ZoneName, "api-request", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
+		pkc, msg, err = zd.KeyDB.GenerateKeypair(zd.ZoneName, "api-request", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
 		}
 		zd.Logger.Printf(msg)
 
 		// 3. Create the DNS UPDATE message
-		adds := []dns.RR{&rollover_pkc.KeyRR}
+		adds := []dns.RR{&pkc.KeyRR}
 		m, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err)
 		}
 
 		log.Printf("RolloverSig0KeyWithParent(%s): signing addition of new key keyid %d with keyid %d:",
-			zd.ZoneName, rollover_pkc.KeyRR.KeyTag(), rollover_sak.Keys[0].KeyRR.KeyTag())
+			zd.ZoneName, pkc.KeyRR.KeyTag(), sak.Keys[0].KeyRR.KeyTag())
 
-		m, err = SignMsg(*m, zd.ZoneName, rollover_sak)
+		m, err = SignMsg(*m, zd.ZoneName, sak)
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err)
 		}
 
 		// 4. Send the ADD message to the parent
-		rcode, err := SendUpdate(m, zd.Parent, rollover_dsyncTarget.Addresses)
+		rcode, err := SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err)
 		}
@@ -291,33 +291,33 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 			return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) update message failed: %s. Rollover aborted.", zd.ZoneName, dns.RcodeToString[rcode])
 		}
 
-		oldkeyid = rollover_sak.Keys[0].KeyRR.KeyTag()
-		newkeyid = rollover_pkc.KeyRR.KeyTag()
+		oldkeyid = sak.Keys[0].KeyRR.KeyTag()
+		newkeyid = pkc.KeyRR.KeyTag()
 
 		if action == "add" {
 			return fmt.Sprintf("RolloverSig0KeyWithParent(%s) successfully added new key with keyid %d",
 				zd.ZoneName, newkeyid), oldkeyid, newkeyid, nil
 		}
-	} // end of phase 1
+//	} // end of phase 1
 
-	if action == "complete" || action == "remove" {
+//	if action == "complete" || action == "remove" {
 		// 6. Request deletion of the old active key from the parent, signed by the new active key.
-		removes := []dns.RR{&rollover_sak.Keys[0].KeyRR}
-		m, err := CreateUpdate(zd.Parent, []dns.RR{}, removes)
+		removes := []dns.RR{&sak.Keys[0].KeyRR}
+		m, err = CreateUpdate(zd.Parent, []dns.RR{}, removes)
 		if err != nil {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err)
 		}
 
-		rollover_newSak = &Sig0ActiveKeys{Keys: []*PrivateKeyCache{rollover_pkc}}
+		newSak = &Sig0ActiveKeys{Keys: []*PrivateKeyCache{pkc}}
 		log.Printf("RolloverSig0KeyWithParent(%s): signing removal of key keyid %d with keyid %d:",
-			zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), rollover_pkc.KeyRR.KeyTag())
-		m, err = SignMsg(*m, zd.ZoneName, rollover_newSak)
+			zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), pkc.KeyRR.KeyTag())
+		m, err = SignMsg(*m, zd.ZoneName, newSak)
 		if err != nil {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err)
 		}
 
 		// 7. Send the REMOVE message to the parent
-		rcode, err := SendUpdate(m, zd.Parent, rollover_dsyncTarget.Addresses)
+		rcode, err = SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
 		if err != nil {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err)
 		}
@@ -326,12 +326,12 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 			// Delete of the old active key from the parent truststore failed. So we will continue to use the old key.
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) update message failed: %s. Rollover aborted.", zd.ZoneName, dns.RcodeToString[rcode])
 		}
-	} // end of phase 2
+//	} // end of phase 2
 
 	// At this point we have successfully rolled the trusted SIG(0) key in the parent truststore.
 	// We now need to update the active key in our own keystore to the new key and also possibly publish the new key.
 
-	if action == "complete" || action == "update-local" {
+//	if action == "complete" || action == "update-local" {
 		var resp *KeystoreResponse
 		tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")
 		if err != nil {
@@ -349,52 +349,52 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 		kp := KeystorePost{
 			Command:    "sig0-mgmt",
 			SubCommand: "setstate",
-			Keyname:    rollover_pkc.KeyRR.Header().Name,
-			Keyid:      uint16(rollover_pkc.KeyRR.KeyTag()),
+			Keyname:    pkc.KeyRR.Header().Name,
+			Keyid:      uint16(pkc.KeyRR.KeyTag()),
 			State:      "active",
 		}
 
 		resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 		if err != nil {
 			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
-				zd.ZoneName, rollover_pkc.KeyRR.KeyTag(), err)
+				zd.ZoneName, pkc.KeyRR.KeyTag(), err)
 			log.Printf(msg)
 			return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 		}
 		if resp.Error {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
-				zd.ZoneName, rollover_pkc.KeyRR.KeyTag(), resp.ErrorMsg)
+				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg)
 		}
 		zd.Logger.Printf(resp.Msg)
 
 		kp = KeystorePost{
 			Command:    "sig0-mgmt",
 			SubCommand: "setstate",
-			Keyname:    rollover_sak.Keys[0].KeyRR.Header().Name,
-			Keyid:      uint16(rollover_sak.Keys[0].KeyRR.KeyTag()),
+			Keyname:    sak.Keys[0].KeyRR.Header().Name,
+			Keyid:      uint16(sak.Keys[0].KeyRR.KeyTag()),
 			State:      "retired",
 		}
 		resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 		if err != nil {
-			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v", zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), err)
+			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v", zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), err)
 			log.Printf(msg)
 			return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 		}
 		if resp.Error {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v",
-				zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), resp.ErrorMsg)
+				zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), resp.ErrorMsg)
 		}
 		zd.Logger.Printf(resp.Msg)
 
 		// 9. Publish the new key
-		err = zd.PublishKeyRRs(rollover_newSak)
+		err = zd.PublishKeyRRs(newSak)
 		if err != nil {
 			msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to publish new key: %v", zd.ZoneName, err)
 			log.Printf(msg)
 			return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 		}
-	} // end of phase 3
+//	} // end of phase 3
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%s) successfully rolled from SIG(0) key %d to SIG(0) key %d",
-		zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), rollover_pkc.KeyRR.KeyTag()), oldkeyid, newkeyid, nil
+		zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), pkc.KeyRR.KeyTag()), oldkeyid, newkeyid, nil
 }
