@@ -29,15 +29,8 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 		return fmt.Errorf("DelegationSyncEngine: resolver address not specified")
 	}
 
-	// kdb := conf.Internal.KeyDB
-
 	// If we support syncing with parent via DNS UPDATE then we must ensure that a KEY RR for the zone is published.
 	time.Sleep(10 * time.Second) // Allow time for zones to load
-
-	// var cs *crypto.Signer
-	// var keyrr *dns.KEY
-	// var dnskeyrr *dns.DNSKEY
-	// var err error
 
 	for zname, zd := range Zones.Items() {
 		if !zd.Options["delegation-sync-child"] {

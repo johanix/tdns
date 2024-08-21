@@ -10,15 +10,6 @@ import (
 )
 
 func (zd *ZoneData) PublishCsyncRR() error {
-	if !zd.Options["allow-updates"] {
-		return fmt.Errorf("Zone %s does not allow updates. CSYNC publication not possible", zd.ZoneName)
-	}
-
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return err
-	}
-
 	var flags uint16
 	var typebitmap = []uint16{dns.StringToType["A"], dns.StringToType["NS"], dns.StringToType["AAAA"]}
 	var csync = dns.CSYNC{
@@ -33,43 +24,22 @@ func (zd *ZoneData) PublishCsyncRR() error {
 		Ttl:    120,
 	}
 
-	rrset := RRset{
-		Name:   zd.ZoneName,
-		RRs:    []dns.RR{&csync}, // Use a pointer to dns.CSYNC
-		RRSIGs: []dns.RR{},
+	zd.KeyDB.UpdateQ <- UpdateRequest{
+		Cmd:            "ZONE-UPDATE",
+		ZoneName:       zd.ZoneName,
+		Actions:        []dns.RR{&csync},
+		InternalUpdate: true,
 	}
-
-	zd.mu.Lock()
-	apex.RRtypes[dns.TypeCSYNC] = rrset
-	zd.Options["dirty"] = true
-	zd.mu.Unlock()
-
-	zd.BumpSerial()
 
 	return nil
 }
 
 func (zd *ZoneData) UnpublishCsyncRR() error {
-	//	if !zd.Options["allow-updates"] {
-	//		return fmt.Errorf("Zone %s does not allow updates. CSYNC unpublication not possible", zd.ZoneName)
-	//	}
-
-	//	apex, err := zd.GetOwner(zd.ZoneName)
-	//	if err != nil {
-	//		return err
-	//	}
-
-	//	zd.mu.Lock()
-	//	delete(apex.RRtypes, dns.TypeCSYNC)
-	//	zd.Options["dirty"] = true
-	//	zd.mu.Unlock()
-
-	//	zd.BumpSerial()
-
 	anti_csync_rr, err := dns.NewRR(fmt.Sprintf("%s 0 IN CSYNC 0 0 A NS AAAA", zd.ZoneName))
 	if err != nil {
 		return err
 	}
+	anti_csync_rr.Header().Class = dns.ClassANY // XXX: dns.NewRR fails to parse a CLASS ANY CSYNC RRset, so we set the class manually.
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",

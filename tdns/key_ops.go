@@ -14,19 +14,9 @@ import (
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
-	//	if !zd.Options["allow-updates"] {
-	//		return fmt.Errorf("Zone %s does not allow updates. KEY RR publication not possible", zd.ZoneName)
-	//	}
 	if zd.Options["dont-publish-key"] {
 		return fmt.Errorf("Zone %s does not allow KEY RR publication", zd.ZoneName)
 	}
-
-	//	apex, err := zd.GetOwner(zd.ZoneName)
-	//	if err != nil {
-	//		return err
-	//	}
-
-	//	zd.mu.Lock()
 
 	rrset := RRset{
 		Name: zd.ZoneName,
@@ -34,12 +24,8 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 
 	for _, pkc := range sak.Keys {
 		rrset.RRs = append(rrset.RRs, &pkc.KeyRR)
-		// apex.RRtypes[dns.TypeKEY] = rrset
 	}
-	//	zd.Options["dirty"] = true
-	//	zd.mu.Unlock()
 
-	//	zd.BumpSerial()
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
@@ -51,22 +37,6 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 }
 
 func (zd *ZoneData) UnpublishKeyRRs() error {
-	// if !zd.Options["allow-updates"] {
-	// 	return fmt.Errorf("Zone %s does not allow updates. KEY unpublication not possible", zd.ZoneName)
-	// }
-
-	// apex, err := zd.GetOwner(zd.ZoneName)
-	// if err != nil {
-	// 	return err
-	//	}
-
-	//	zd.mu.Lock()
-	//	delete(apex.RRtypes, dns.TypeKEY)
-	//	zd.Options["dirty"] = true
-	//	zd.mu.Unlock()
-
-	// 	zd.BumpSerial()
-
 	anti_key_rr, err := dns.NewRR(fmt.Sprintf("%s 0 ANY KEY 0 0 0 tomtarpaloftet", zd.ZoneName))
 	if err != nil {
 		return err

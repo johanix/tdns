@@ -764,7 +764,6 @@ func (zd *ZoneData) SetupZoneSync() error {
 	return nil
 }
 
-// func (zd *ZoneData) SetupZoneSigning(resignq chan ZoneRefresher) error {
 func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
 	if !zd.Options["online-signing"] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
 		return nil // this zone should not be signed (at least not by us)
