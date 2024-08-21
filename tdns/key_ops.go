@@ -297,11 +297,16 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 		}
 		defer tx.Rollback()
 
-		_, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
+		resp, err := zd.KeyDB.Sig0KeyMgmt(tx, kp)
 		if err != nil {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
 				zd.ZoneName, rollover_pkc.KeyRR.KeyTag(), err)
 		}
+		if resp.Error {
+			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
+				zd.ZoneName, rollover_pkc.KeyRR.KeyTag(), resp.ErrorMsg)
+		}
+		zd.Logger.Printf(resp.Msg)
 
 		kp = KeystorePost{
 			Command:    "sig0-mgmt",
@@ -310,11 +315,16 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 			Keyid:      uint16(rollover_sak.Keys[0].KeyRR.KeyTag()),
 			State:      "retired",
 		}
-		_, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
+		resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 		if err != nil {
 			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v",
 				zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), err)
 		}
+		if resp.Error {
+			return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v",
+				zd.ZoneName, rollover_sak.Keys[0].KeyRR.KeyTag(), resp.ErrorMsg)
+		}
+		zd.Logger.Printf(resp.Msg)
 
 		// 9. Publish the new key
 		err = zd.PublishKeyRRs(rollover_newSak)
