@@ -122,9 +122,23 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 						log.Printf("Error from kdb.Begin(): %v", err)
 					}
 					for _, rr := range ur.Actions {
+						var subcommand string
+						switch rr.Header().Class {
+						case dns.ClassINET:
+							subcommand = "add"
+						case dns.ClassNONE:
+							subcommand = "delete"
+						case dns.ClassANY:
+							log.Printf("Updater: Error: TRUSTSTORE-UPDATE: RR has class ANY. Delete RRset is not supported. Ignored.")
+							continue
+						default:
+							log.Printf("Updater: Error: TRUSTSTORE-UPDATE: RR has unknown class: %s. Ignored.", rr.String())
+							continue
+						}
+
 						if keyrr, ok := rr.(*dns.KEY); ok {
 							tppost := TruststorePost{
-								SubCommand: "add",
+								SubCommand: subcommand,
 								Src:        "child-update",
 								Keyname:    keyrr.Header().Name,
 								Keyid:      int(keyrr.KeyTag()),
