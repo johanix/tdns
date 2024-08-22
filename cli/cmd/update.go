@@ -137,7 +137,7 @@ func CreateUpdate(updateType string) {
 			fmt.Printf("Warning: no SIG(0) signing of update messages possible.\n")
 		}
 	} else {
-		sak, err = kdb.GetSig0ActiveKeys(signer)
+		sak, err = kdb.GetSig0Keys(signer, tdns.Sig0StateActive)
 		if err != nil {
 			fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", signer, err)
 		} else if len(sak.Keys) == 0 {
@@ -285,7 +285,7 @@ cmdloop:
 				msg = m
 			} else {
 				fmt.Printf("No SIG(0) keyfile specified, trying to fetch active key from keystore\n")
-				sak, err := kdb.GetSig0ActiveKeys(signer)
+				sak, err := kdb.GetSig0Keys(signer, tdns.Sig0StateActive)
 				if err != nil {
 					fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", signer, err)
 					os.Exit(1)

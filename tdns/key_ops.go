@@ -67,9 +67,9 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 		}
 		// 1. Get the keys from the keystore
 		zd.Logger.Printf("VerifyPublishedKeyRRs(%s): KEY RRset exists. Checking availability of private key.", zd.ZoneName)
-		sak, err := zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
-			zd.Logger.Printf("Error from GetSig0ActiveKeys(%s): %v", zd.ZoneName, err)
+			zd.Logger.Printf("Error from GetSig0Keys(%s, %s): %v", zd.ZoneName, Sig0StateActive, err)
 			return err
 		}
 		// 2. Iterate through the keys to match against keyid of published keys.
@@ -124,21 +124,43 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error) {
 		}
 	}
 
-	sak, err := zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+	sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err), err
 	}
 	if len(sak.Keys) == 0 {
 		// XXX: Should we generate new keys or return an error?
-		log.Printf("No active SIG(0) key found for zone %s. Generating new key with algorithm %s", zd.ZoneName, dns.AlgorithmToString[alg])
-		pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "bootstrap-sig0", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
-		if err != nil {
-			msg := fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
-			log.Printf(msg)
-			return msg, err
+		//		log.Printf("No active SIG(0) key found for zone %s. Generating new key with algorithm %s", zd.ZoneName, dns.AlgorithmToString[alg])
+		//		pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "bootstrap-sig0", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
+		//		if err != nil {
+		//			msg := fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
+		//			log.Printf(msg)
+		//			return msg, err
+		//		}
+		//		sak.Keys = append(sak.Keys, pkc)
+		//		zd.Logger.Printf(msg)
+
+		kp := KeystorePost{
+			Command:    "sig0-mgmt",
+			SubCommand: "generate",
+			Zone:       zd.ZoneName,
+			Algorithm:  alg,
+			State:      Sig0StateActive,
+			Creator:    "bootstrap-sig0",
 		}
-		sak.Keys = append(sak.Keys, pkc)
-		zd.Logger.Printf(msg)
+		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
+		if err != nil {
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err), err
+		}
+		zd.Logger.Printf(resp.Msg)
+
+		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+		if err != nil {
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%s, after key generation) failed to get SIG(0) active keys: %v", zd.ZoneName, err), err
+		}
+		if len(sak.Keys) == 0 {
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%s, after key generation) failed to get SIG(0) active keys: %v", zd.ZoneName, err), err
+		}
 	}
 
 	pkc := sak.Keys[0]
@@ -190,7 +212,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error) {
 			SubCommand: "setstate",
 			Keyname:    pkc.KeyRR.Header().Name,
 			Keyid:      uint16(pkc.KeyRR.KeyTag()),
-			State:      "active",
+			State:      Sig0StateActive,
 		}
 
 		resp, err := zd.KeyDB.Sig0KeyMgmt(tx, kp)
@@ -223,6 +245,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	var pkc *PrivateKeyCache
 	var dsyncTarget *DsyncTarget
 	var msg string
+	var kpresp *KeystoreResponse
 
 	// 1. Get the parent zone
 	if zd.Parent == "" {
@@ -240,16 +263,52 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	log.Printf("RolloverSig0KeyWithParent(%s): DSYNC target:", zd.ZoneName)
 
 	//	if action == "complete" || action == "add" {
-	sak, err = zd.KeyDB.GetSig0ActiveKeys(zd.ZoneName)
+	sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
 	}
 
+	tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to begin transaction: %v", zd.ZoneName, err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
 	// 3. Generate a new key
-	pkc, msg, err = zd.KeyDB.GenerateKeypair(zd.ZoneName, "api-request", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
+	//	pkc, msg, err = zd.KeyDB.GenerateKeypair(zd.ZoneName, "api-request", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
+	//	if err != nil {
+	//		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
+	//	}
+	kp := KeystorePost{
+		Command:    "sig0-mgmt",
+		SubCommand: "generate",
+		Zone:       zd.ZoneName,
+		Algorithm:  alg,
+		State:      Sig0StateCreated,
+		Creator:    "rollover-sig0",
+	}
+	kpresp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
 	}
+	zd.Logger.Printf(kpresp.Msg)
+
+	// 4. Get the new key from the keystore
+	newSak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateCreated)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to get SIG(0) created keys: %v", zd.ZoneName, err)
+	}
+	if len(newSak.Keys) == 0 {
+		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to get SIG(0) created keys: %v", zd.ZoneName, err)
+	}
+
+	pkc = newSak.Keys[0]
 	zd.Logger.Printf(msg)
 
 	// 3. Create the DNS UPDATE message
@@ -322,8 +381,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	// We now need to update the active key in our own keystore to the new key and also possibly publish the new key.
 
 	//	if action == "complete" || action == "update-local" {
-	var resp *KeystoreResponse
-	tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")
+	// var resp *KeystoreResponse
+	tx, err = zd.KeyDB.Begin("RolloverSig0KeyWithParent")
 	if err != nil {
 		return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to begin transaction: %v", zd.ZoneName, err)
 	}
@@ -336,7 +395,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	}()
 
 	// 8. Change state of the new key from "created" to "active". Change state of the old key from "active" to "retired".
-	kp := KeystorePost{
+	kp = KeystorePost{
 		Command:    "sig0-mgmt",
 		SubCommand: "setstate",
 		Keyname:    pkc.KeyRR.Header().Name,
@@ -344,18 +403,18 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 		State:      "active",
 	}
 
-	resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
+	kpresp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 	if err != nil {
 		msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
 			zd.ZoneName, pkc.KeyRR.KeyTag(), err)
 		log.Printf(msg)
 		return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 	}
-	if resp.Error {
+	if kpresp.Error {
 		return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
-			zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg)
+			zd.ZoneName, pkc.KeyRR.KeyTag(), kpresp.ErrorMsg)
 	}
-	zd.Logger.Printf(resp.Msg)
+	zd.Logger.Printf(kpresp.Msg)
 
 	kp = KeystorePost{
 		Command:    "sig0-mgmt",
@@ -364,17 +423,17 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 		Keyid:      uint16(sak.Keys[0].KeyRR.KeyTag()),
 		State:      "retired",
 	}
-	resp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
+	kpresp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 	if err != nil {
 		msg = fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v", zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), err)
 		log.Printf(msg)
 		return "", oldkeyid, newkeyid, fmt.Errorf(msg)
 	}
-	if resp.Error {
+	if kpresp.Error {
 		return "", oldkeyid, newkeyid, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to change state of key %d to retired: %v",
-			zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), resp.ErrorMsg)
+			zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), kpresp.ErrorMsg)
 	}
-	zd.Logger.Printf(resp.Msg)
+	zd.Logger.Printf(kpresp.Msg)
 
 	// 9. Publish the new key
 	err = zd.PublishKeyRRs(newSak)

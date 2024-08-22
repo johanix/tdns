@@ -41,6 +41,10 @@ var ZoneTypeToString = map[ZoneType]string{
 }
 
 const (
+	Sig0StateCreated     string = "created"
+	Sig0StatePublished   string = "published"
+	Sig0StateActive      string = "active"
+	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
 	DnskeyStatePublished string = "published"
 	DnskeyStateActive    string = "active"
@@ -430,7 +434,7 @@ type KeyDB struct {
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
 	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT
-	DnssecCache         map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
+	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
 }

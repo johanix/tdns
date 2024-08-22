@@ -291,6 +291,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 	case dns.TypeKEY:
 		_, err = tx.Exec(addSig0KeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], creator, pkc.PrivateKey, pkc.KeyRR.String())
+
 	case dns.TypeDNSKEY:
 		flags := 257
 		if keytype == "ZSK" {

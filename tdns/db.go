@@ -141,7 +141,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 		DB:                  db,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
 		TruststoreSig0Cache: NewSig0StoreT(),
-		DnssecCache:         make(map[string]*DnssecKeys),
+		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
 	}, nil
 }

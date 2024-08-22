@@ -56,9 +56,9 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 		// 2. Updates allowed, but there is no KEY RRset published.
 		if !keyrrexist && !zd.Options["dont-publish-key"] {
 			log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
-			sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
+			sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 			if err != nil {
-				log.Printf("DelegationSyncher: Error from kdb.GetSig0ActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+				log.Printf("DelegationSyncher: Error from kdb.GetSig0Keys(%s, %s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, Sig0StateActive, err)
 				continue
 			}
 			if len(sak.Keys) == 0 {
@@ -312,9 +312,9 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 
 	// 3. Fetch the SIG(0) key from the keystore
 	log.Printf("SyncZoneDelegationViaUpdate: Fetching the private key for %s", zd.ZoneName)
-	sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
-		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0ActiveKeys(%s): %v", zd.ZoneName, err)
+		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0Keys(%s, %s): %v", zd.ZoneName, Sig0StateActive, err)
 		return "", 0, err
 	}
 	if len(sak.Keys) == 0 {

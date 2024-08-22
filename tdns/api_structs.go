@@ -22,6 +22,7 @@ type KeystorePost struct {
 	DnskeyRR        string
 	PrivateKeyCache *PrivateKeyCache
 	State           string
+	Creator         string
 }
 
 type KeystoreResponse struct {

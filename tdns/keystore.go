@@ -100,11 +100,11 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			return nil, err
 		}
-		delete(kdb.KeystoreSig0Cache, kp.Keyname)
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "generate":
-		pkc, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
+		pkc, msg, err := kdb.GenerateKeypair(kp.Zone, kp.Creator, kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
 		if err != nil {
 			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
 			resp.Error = true
@@ -126,7 +126,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			return nil, err
 		}
-		delete(kdb.KeystoreSig0Cache, kp.Keyname)
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
 		return &resp, err
 
@@ -144,7 +144,12 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
 			}
 		}
-		delete(kdb.KeystoreSig0Cache, kp.Keyname)
+
+		// We don't know the old state, so we delete all entries for this key.
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateCreated)
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StatePublished)
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateActive)
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateRetired)
 
 	case "delete":
 		const getSig0KeySql = `
@@ -192,7 +197,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		}
 		resp.Msg += fmt.Sprintf("\nAlso deleted the public key from TrustStore:\n%s", tsresp.Msg)
 		// Also delete from the cache
-		delete(kdb.KeystoreSig0Cache, kp.Keyname)
+		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+state)
 
 	default:
 		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
@@ -296,6 +301,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
+		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
 
 	case "generate":
 		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
@@ -305,6 +311,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.ErrorMsg = err.Error()
 		}
 		resp.Msg = msg
+		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
 		return &resp, err
 
 	case "setstate":
@@ -321,6 +328,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
 			}
 		}
+		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
 
 	case "delete":
 		const getDnskeySql = `
@@ -356,6 +364,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		}
 		rows, _ := res.RowsAffected()
 		resp.Msg = fmt.Sprintf("Key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
+		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+state)
 
 	default:
 		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)
@@ -367,17 +376,17 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	return &resp, nil
 }
 
-func (kdb *KeyDB) GetSig0ActiveKeys(zonename string) (*Sig0ActiveKeys, error) {
+func (kdb *KeyDB) GetSig0Keys(zonename, state string) (*Sig0ActiveKeys, error) {
 	const (
 		fetchSig0PrivKeySql = `
-SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state='active'`
+SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state=?`
 	)
 
-	if sak, ok := kdb.KeystoreSig0Cache[zonename]; ok {
+	if sak, ok := kdb.KeystoreSig0Cache[zonename+"+"+state]; ok {
 		return sak, nil
 	}
 
-	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename)
+	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename, state)
 	if err != nil {
 		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
 		return nil, err
@@ -396,7 +405,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		if err != nil {
 			if err == sql.ErrNoRows {
 				// This is not an error, so lets just return an empty Sig0ActiveKeys
-				log.Printf("No active SIG(0) key found for zone %s", zonename)
+				log.Printf("No SIG(0) key in state %s found for zone %s", state, zonename)
 				return &sak, nil
 			}
 			log.Printf("Error from rows.Scan(): %v", err)
@@ -404,7 +413,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		}
 
 		if keyfound {
-			log.Printf("Error: multiple active SIG(0) keys found for zone %s", zonename)
+			log.Printf("Error: multiple SIG(0) keys in state %s found for zone %s", state, zonename)
 			// XXX: Should we return an error here?
 			continue
 		}
@@ -426,15 +435,15 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	if !keyfound {
 		// This is not an error, so lets just return an empty Sig0ActiveKeys
-		log.Printf("No active SIG(0) key found for zone %s", zonename)
+		log.Printf("No SIG(0) key in state %s found for zone %s", state, zonename)
 		return &sak, nil
 	}
 
 	if Globals.Debug {
-		log.Printf("GetSig0ActiveKey(%s) returned keys %v", zonename, sak)
+		log.Printf("GetSig0Keys(%s, %s) returned keys %v", zonename, state, sak)
 	}
 
-	kdb.KeystoreSig0Cache[zonename] = &sak
+	kdb.KeystoreSig0Cache[zonename+"+"+state] = &sak
 
 	return &sak, err
 }
@@ -447,7 +456,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	// XXX: Should use this once we've found all the bugs in the sqlite code
 	if state == DnskeyStateActive {
-		if dak, ok := kdb.DnssecCache[zonename+"+"+state]; ok {
+		if dak, ok := kdb.KeystoreDnskeyCache[zonename+"+"+state]; ok {
 			return dak, nil
 		}
 	}
@@ -522,7 +531,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		log.Printf("GetDnssecKey(%s) returned key %v", zonename, dk)
 	}
 
-	kdb.DnssecCache[zonename+"+"+state] = &dk
+	kdb.KeystoreDnskeyCache[zonename+"+"+state] = &dk
 
 	return &dk, err
 }
@@ -576,8 +585,7 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 	}
 
 	// Delete the cached data
-	cacheKey := zonename + "+" + oldstate
-	delete(kdb.DnssecCache, cacheKey)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
 
 	return nil
 }
