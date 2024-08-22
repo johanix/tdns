@@ -21,7 +21,7 @@ func sigLifetime(t time.Time, lifetime uint32) (uint32, uint32) {
 	if lifetime == 0 {
 		sigValidity = time.Duration(5 * time.Minute)
 	}
-	incep := uint32(t.Add(-sigJitter).Unix())
+	incep := uint32(t.Add(-sigJitter).Add(-60 * time.Second).Unix()) // inception == now -60s -jitter to allow for 60s clock skew
 	expir := uint32(t.Add(sigValidity).Add(sigJitter).Unix())
 	return incep, expir
 }

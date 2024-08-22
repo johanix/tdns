@@ -1,12 +1,10 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 
 package tdns
 
 import (
-	//        "fmt"
-
 	"fmt"
 	"log"
 	"strings"
@@ -16,7 +14,6 @@ import (
 	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	// "github.com/johanix/tdns/tdns"
 )
 
 func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest) error {

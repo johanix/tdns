@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
-	//	"github.com/gookit/goutil/dump"
+	"github.com/gookit/goutil/dump"
 
 	"github.com/miekg/dns"
 )
@@ -66,7 +67,7 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 					// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
 					log.Printf("Updater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
 					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
-					if zd.Options["allow-child-update"] {
+					if zd.Options["allow-child-updates"] {
 						var updated bool
 						var err error
 
@@ -549,8 +550,10 @@ func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
 // But it's a start.
 
 func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (DelegationSyncStatus, error) {
+     	log.Printf("*** Enter ZoneUpdateChangesDelegationData(). ur:\n%+v", ur)
 	var dss = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
+		Time:	  time.Now(),
 		InSync:   true,
 	}
 
@@ -564,6 +567,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 	}
 
 	for _, rr := range ur.Actions {
+	        log.Printf("ZoneUpdateChangesDelegationData: checking action: %s", rr.String)
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
@@ -593,13 +597,13 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 
 		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
 			dss.InSync = false
-			return dss, nil
+			// return dss, nil
 		}
 
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			log.Printf("UpdateChangesDelegationData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+			log.Printf("ZoneUpdateChangesDelegationData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 
 			// Is this a change to the NS RRset?
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
@@ -622,7 +626,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			log.Printf("UpdateChangesDelegationData: Remove RRset: %s", rr.String())
+			log.Printf("ZoneUpdateChangesDelegationData: Remove RRset: %s", rr.String())
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
 				dss.InSync = false
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
@@ -641,13 +645,14 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			continue
 
 		case dns.ClassINET:
+			log.Printf("ZoneUpdateChangesDelegationData: Class is INET, this is an ADD: %s", rr.String())
 		default:
-			log.Printf("UpdateChangesDelegationData: Error: unknown class: %s", rr.String())
+			log.Printf("ZoneUpdateChangesDelegationData: Error: unknown class: %s", rr.String())
 		}
 
 		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
 		if !ok && !ur.InternalUpdate {
-			log.Printf("UpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			log.Printf("ZoneUpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
 		}
 
@@ -655,7 +660,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		if rrset, exists := owner.RRtypes[rrtype]; exists {
 			for _, oldrr := range rrset.RRs {
 				if dns.IsDuplicate(oldrr, rrcopy) {
-					log.Printf("UpdateChangesDelegationData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+					log.Printf("ZoneUpdateChangesDelegationData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
 					dup = true
 					break
 				}
@@ -663,7 +668,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		}
 
 		if !dup {
-			log.Printf("UpdateChangesDelegationData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
+			log.Printf("ZoneUpdateChangesDelegationData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			// Is this a change to the NS RRset?
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
 				dss.InSync = false
@@ -671,6 +676,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			}
 			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
 			for _, nsname := range bns {
+			        log.Printf("ZoneUpdateChangesDelegationData: checking %s", nsname)
 				if nsname == ownerName {
 					if rrtype == dns.TypeA {
 						dss.InSync = false
@@ -684,5 +690,6 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		}
 	}
 
+	dump.P(dss)
 	return dss, nil
 }

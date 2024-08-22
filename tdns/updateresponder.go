@@ -69,9 +69,10 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	if len(r.Ns) > 0 {
 		log.Printf("UpdateResponder: Update section contains %d RRs", len(r.Ns))
-		for _, rr := range r.Ns {
-			log.Printf("UpdateResponder: Update RR: %s", rr.String())
-		}
+//		for _, rr := range r.Ns {
+//			log.Printf("UpdateResponder: Update RR: %s", rr.String())
+//		}
+		log.Printf("Update contains:\n%s", SprintUpdates(r.Ns))
 	}
 	if len(r.Extra) > 0 {
 		log.Printf("UpdateResponder: Additional section contains %d RRs", len(r.Extra))

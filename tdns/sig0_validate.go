@@ -134,6 +134,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		if err != nil {
 			// This key failed to validate the update. Try the next key.
 			log.Printf("-- The signature by the SIG(0) key \"%s\" (keyid %d) failed to verify the update: %v", signer.Name, signer.KeyId, err)
+			log.Printf("Current time: %v, inception: %v, expiration: %v", time.Now(), sig.Inception, sig.Expiration)
 			continue
 		}
 
