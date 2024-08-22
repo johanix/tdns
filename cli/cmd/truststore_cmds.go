@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/johanix/tdns/tdns"
@@ -137,8 +138,9 @@ func Sig0TrustMgmt(subcommand string) error {
 			// fmt.Printf("Known child SIG(0) keys:\n")
 			for k, v := range tr.ChildSig0keys {
 				tmp := strings.Split(k, "::")
-				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%v|%v|%s|%.70s...\n",
-					tmp[0], tmp[1], v.Validated, v.Trusted, v.Source, v.Keystr))
+				keyid, _ := strconv.Atoi(tmp[1])
+				tmplist = append(tmplist, fmt.Sprintf("%s|%d|%v|%v|%s|%.55s...\n",
+					tmp[0], keyid, v.Validated, v.Trusted, v.Source, v.Keystr))
 			}
 			sort.Strings(tmplist)
 			out = append(out, tmplist...)
