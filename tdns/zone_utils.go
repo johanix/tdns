@@ -375,6 +375,7 @@ func (zd *ZoneData) NameExists(qname string) bool {
 }
 
 // XXX: FIXME: SliceZones do not yet have support for adding new owner names.
+
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	if !zd.Ready {
 		return nil, fmt.Errorf("GetOwner: Zone %s: zone data is not yet ready", zd.ZoneName)
@@ -398,7 +399,10 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 				Name:    qname,
 				RRtypes: make(map[uint16]RRset),
 			}
-			zd.Data.Set(qname, owner)
+			// XXX: Hmm. This seems wrong. We create an ownername where there wasn't one
+			//      based on a request for it?
+			// zd.Data.Set(qname, owner)
+			return nil, nil // Seems better
 		}
 		return &owner, nil
 
@@ -826,4 +830,65 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zd.ZoneName)
 	}
 	return resp.Msg, nil
+}
+
+type DelegationData struct {
+     CurrentNS	    *RRset
+     AddedNS	    *RRset
+     RemovedNS	    *RRset     
+     
+     BailiwickNS    []string
+     A_glue	    map[string]*RRset	// map[nsname]
+     AAAA_glue	    map[string]*RRset	// map[nsname]
+     Actions	    []dns.RR		// actions are DNS UPDATE actions that modify delegation data
+     Time	    time.Time
+}
+
+func (zd *ZoneData) DelegationData() (*DelegationData, error) {
+     dd := DelegationData{
+		Time:		time.Now(),
+		A_glue:		map[string]*RRset{},
+		AAAA_glue:	map[string]*RRset{},
+     }
+
+     rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeNS)
+     if err != nil {
+     	return nil, err
+     }
+     if len(rrset.RRs) == 0 {
+     	return nil, err
+     }
+
+     dd.CurrentNS = rrset
+
+     // Get the in-bailiwick nameserver names
+     dd.BailiwickNS, err = BailiwickNS(zd.ZoneName, CurrentNS.RRs)
+     if err != nil {
+	return nil, err
+     }
+
+     for _, nsname := range dd.BailiwickNS {
+     	 owner, err := zd.GetOwner(nsname)
+	 if err != nil {
+	    return nil, err
+	 }
+	 // XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
+	 //      I.e. a broken config with an in-bailiwick NS w/o any address.
+	 if owner == nil {
+	    zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName)
+	    continue
+	 }
+
+	 if rrset, exist := owner.RRtypes[dns.TypeA]; exist {
+	    if len(rrset.RRs) > 0 {
+	       dd.A_glue[nsname] = &rrset
+	    }
+	 }
+	 if rrset, exist := owner.RRtypes[dns.TypeAAAA]; exist {
+	    if len(rrset.RRs) > 0 {
+	       dd.AAAA_glue[nsname] = &rrset
+	    }
+	 }
+     }
+     return &dd, nil
 }

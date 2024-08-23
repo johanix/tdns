@@ -315,6 +315,12 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		rrcopy.Header().Ttl = 3600
 		rrcopy.Header().Class = dns.ClassINET
 
+		// First check whether this update is allowed by the update-policy.
+		if _, ok := zd.UpdatePolicy.Child.RRtypes[rrtype]; !ok {
+			log.Printf("ApplyChildUpdateToZoneData: Error: request to add %s RR, which is denied in policy", rrtypestr)
+			continue
+		}
+
 		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
 		// If it is an add then it is not ok, and then the owner must be created.
 
@@ -379,11 +385,6 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			continue
 		}
 
-		if _, ok := zd.UpdatePolicy.Child.RRtypes[rrtype]; !ok {
-			log.Printf("ApplyChildUpdateToZoneData: Error: request to add %s RR, which is denied in policy", rrtypestr)
-			continue
-		}
-
 		dup := false
 		for _, oldrr := range rrset.RRs {
 			if dns.IsDuplicate(oldrr, rrcopy) {
@@ -442,6 +443,13 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		rrcopy := dns.Copy(rr)
 		rrcopy.Header().Ttl = 3600
 		rrcopy.Header().Class = dns.ClassINET
+
+		// First check whether this update is allowed by the update-policy.
+		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		if !ok && !ur.InternalUpdate {
+			log.Printf("ZoneUpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			continue
+		}
 
 		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
 		// If it is an add then it is not ok, and then the owner must be created.
@@ -502,12 +510,6 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		case dns.ClassINET:
 		default:
 			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
-		}
-
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate {
-			log.Printf("ApplyUpdateToZoneData: Error: request to add %s RR, which is denied by policy", rrtypestr)
-			continue
 		}
 
 		dup := false
@@ -576,6 +578,13 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		rrcopy := dns.Copy(rr)
 		rrcopy.Header().Ttl = 3600
 		rrcopy.Header().Class = dns.ClassINET
+
+		// First check whether this update is allowed by the update-policy.
+		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		if !ok && !ur.InternalUpdate {
+			log.Printf("ZoneUpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			continue
+		}
 
 		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
 		// If it is an add then it is not ok, and then the owner must be created.
@@ -650,12 +659,6 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			log.Printf("ZoneUpdateChangesDelegationData: Error: unknown class: %s", rr.String())
 		}
 
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate {
-			log.Printf("ZoneUpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
-			continue
-		}
-
 		dup := false
 		if rrset, exists := owner.RRtypes[rrtype]; exists {
 			for _, oldrr := range rrset.RRs {
@@ -677,6 +680,222 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
 			for _, nsname := range bns {
 			        log.Printf("ZoneUpdateChangesDelegationData: checking %s", nsname)
+				if nsname == ownerName {
+					if rrtype == dns.TypeA {
+						dss.InSync = false
+						dss.AAdds = append(dss.AAdds, rrcopy)
+					} else if rrtype == dns.TypeAAAA {
+						dss.InSync = false
+						dss.AAAAAdds = append(dss.AAAAAdds, rrcopy)
+					}
+				}
+			}
+		}
+	}
+
+	dump.P(dss)
+	return dss, nil
+}
+
+// New attempt at this elusive function.
+// Method: create a map[name][type][]dns.RR for the existing delegation data. Then clone that map and apply the
+//         changes in the update to the clone. Finally compare the two.
+func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (DelegationSyncStatus, error) {
+     	log.Printf("*** Enter ZUCDDNGNG(). ur:\n%+v", ur)
+	var dss = DelegationSyncStatus{
+		ZoneName: zd.ZoneName,
+		Time:	  time.Now(),
+		InSync:   true,
+	}
+
+	ddata, err := zd.DelegationData()
+	dump.P(ddata)
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return dss, err
+	}
+	bns, err := BailiwickNS(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs)
+	if err != nil {
+		return dss, err
+	}
+
+	// We must sort the ur.Actions to ensure that any NS actions come first (so that possible glue actions
+	// have an NS to refer to.
+
+	var actions []dns.RR
+	for _, rr := range ur.Actions {
+	    if rr.Header().Rrtype == dns.TypeNS {
+	       actions = append(actions, rr)
+	    }
+	}
+	for _, rr := range ur.Actions {
+	    if rr.Header().Rrtype != dns.TypeNS {
+	       actions = append(actions, rr)
+	    }
+	}
+
+	for _, rr := range actions {
+	        log.Printf("ZUCDDNG: checking action: %s", rr.String)
+		class := rr.Header().Class
+		ownerName := rr.Header().Name
+		rrtype := rr.Header().Rrtype
+		rrtypestr := dns.TypeToString[rrtype]
+
+		rrcopy := dns.Copy(rr)
+		rrcopy.Header().Ttl = 3600
+		rrcopy.Header().Class = dns.ClassINET
+
+		// XXX: This is the wrong place for this check. These things should be already sorted out during the approval phase.
+		// XXX: But we keep it here until the approval code is updated.
+		// First check whether this update is allowed by the update-policy.
+		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		if !ok && !ur.InternalUpdate {
+			log.Printf("ZUCDDNG: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			continue
+		}
+
+		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
+		// If it is an add then it is not ok, and then the owner must be created.
+
+		owner, err := zd.GetOwner(ownerName)
+		if err != nil {
+			log.Printf("Warning: ZUCDDNG: owner name %s is unknown", ownerName)
+			if class == dns.ClassNONE || class == dns.ClassANY {
+				continue
+			}
+		}
+		if owner == nil && class == dns.ClassINET {
+			owner = &OwnerData{
+				Name:    ownerName,
+				RRtypes: make(map[uint16]RRset),
+			}
+			zd.AddOwner(owner)
+		}
+
+		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+			dss.InSync = false
+			// return dss, nil
+		}
+
+		switch class {
+		case dns.ClassNONE:
+			// ClassNONE: Remove exact RR
+			log.Printf("ZUCDDNG: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+
+			// Is this a change to the NS RRset?
+			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+				dss.InSync = false
+				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
+				ddata.Actions = append(ddata.Actions, rrcopy)
+				ddata.RemovedNS = append(ddata.RemovedNS, rrcopy)
+			}
+			// Is this a change to glue for a nameserver?
+			for _, nsname := range ddata.BailiwickNS {
+				if nsname == ownerName {
+					if rrtype == dns.TypeA {
+						dss.InSync = false
+						dss.ARemoves = append(dss.ARemoves, rrcopy)
+						ddata.Actions = append(ddata.Actions, rrcopy)
+					} else if rrtype == dns.TypeAAAA {
+						dss.InSync = false
+						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
+						ddata.Actions = append(ddata.Actions, rrcopy)
+					}
+				}
+			}
+			continue
+
+		case dns.ClassANY:
+			// ClassANY: Remove RRset.
+			log.Printf("ZUCDDNG: Remove RRset: %s", rr.String())
+			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+			   	// XXX: It must not be allowed to remove the *entire* NS RRset for a zone.
+				// XXX: This should have been caught during approval. But here we are and we
+				// XXX: will complain, but ignore this update
+				// dss.InSync = false
+				// dss.NsRemoves = append(dss.NsRemoves, rrcopy)
+				// ddata.Actions = append(ddata.Actions, rrcopy)
+				log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
+				continue
+			}
+			for _, nsname := range bns {
+				if nsname == ownerName {
+					if rrtype == dns.TypeA {
+						dss.InSync = false
+						dss.ARemoves = append(dss.ARemoves, rrcopy)
+						ddata.Actions = append(ddata.Actions, rrcopy)
+					} else if rrtype == dns.TypeAAAA {
+						dss.InSync = false
+						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
+						ddata.Actions = append(ddata.Actions, rrcopy)
+					}
+				}
+			}
+			continue
+
+		case dns.ClassINET:
+		default:
+			log.Printf("ZUCDDNG: Error: unknown class: %s", rr.String())
+		}
+
+		// Here we know that the actions has class == ClassINET
+		log.Printf("ZUCDDNG: Class is INET, this is an ADD: %s", rr.String())
+
+		dup := false
+		switch rrtype {
+		case *dns.TypeNS:
+		     if ownerName == zd.ZoneName {
+		     	for _, nsrr := range ddata.NS.CurrentRRs {
+			    if dns.IsDuplicate(nsrr, rrcopy) {
+					log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+					dup = true
+					break
+			    }
+			}
+			if !dup {
+			   dss.InSync = false
+			   dss.NsAdds = append(dss.NsAdds, rrcopy)
+			   ddata.AddedNS = append(ddata.AddedNS, rrcopy)
+			}
+		     } else {
+		       log.Printf("ZUCDDNG: Error: zone update tries to modify child delegation.")
+		     }
+
+		case *dns.TypeA:
+		     // XXX: There are two cases: adding a new A to a current or new NS and adding an A to an NS
+		     // that is being removed. Only the first case modifies the delegation.
+		     if oldglue, exist := ddata.A_glue[ownerName]; exist {
+		     	for _, arr := range oldglue.RRs {
+		     	    if dns.IsDuplicate(arr, rrcopy) {
+					log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+					dup = true
+					break
+			    }
+		     }
+		}
+
+		// if rrset, exists := owner.RRtypes[rrtype]; exists {
+		if rrset, exists := ddata.owner.RRtypes[rrtype]; exists {
+			for _, oldrr := range rrset.RRs {
+				if dns.IsDuplicate(oldrr, rrcopy) {
+					log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+					dup = true
+					break
+				}
+			}
+		}
+
+		if !dup {
+			log.Printf("ZUCDDNG: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
+			// Is this a change to the NS RRset?
+//			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+//				dss.InSync = false
+//				dss.NsAdds = append(dss.NsAdds, rrcopy)
+//			}
+			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
+			for _, nsname := range bns {
+			        log.Printf("ZUCDDNG: checking %s", nsname)
 				if nsname == ownerName {
 					if rrtype == dns.TypeA {
 						dss.InSync = false
