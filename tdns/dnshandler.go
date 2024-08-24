@@ -59,16 +59,17 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			dnssec_ok = opt.Do()
 		}
 		// log.Printf("DNSSEC OK: %v", dnssec_ok)
-		log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsnotifyq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok, len(dnsnotifyq))
 			// A DNS NOTIFY may trigger time consuming outbound queries
 			dnsnotifyq <- DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeUpdate:
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok, len(dnsupdateq))
 			// A DNS Update may trigger time consuming outbound queries
 			dnsupdateq <- DnsUpdateRequest{
 				ResponseWriter: w,
@@ -80,6 +81,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			return
 
 		case dns.OpcodeQuery:
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok)
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
 

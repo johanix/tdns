@@ -334,11 +334,12 @@ func (rrset *RRset) RemoveRR(rr dns.RR) {
 }
 
 func (rrset *RRset) Copy() *RRset {
-     new_rrset := RRset{
-			Name: rrset.Name,
-			RRs:  []dns.RR,
-			RRSIGs: []dns.RR,
-     		  }
-     new_rrset.RRs = append(new_rrset.RRs, rrset.RRs...)
-     new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
+	new_rrset := RRset{
+		Name:   rrset.Name,
+		RRs:    []dns.RR{},
+		RRSIGs: []dns.RR{},
+	}
+	new_rrset.RRs = append(new_rrset.RRs, rrset.RRs...)
+	new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
+	return &new_rrset
 }

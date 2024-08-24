@@ -415,8 +415,9 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	return &owner, nil
 }
 
+// XXX: This MUST ONLY be called from the ZoneUpdater, due to locking issues
 func (zd *ZoneData) AddOwner(owner *OwnerData) {
-	zd.mu.Lock()
+	//	zd.mu.Lock()
 	switch zd.ZoneStore {
 	case SliceZone:
 		zd.Owners = append(zd.Owners, *owner)
@@ -425,7 +426,7 @@ func (zd *ZoneData) AddOwner(owner *OwnerData) {
 	case MapZone:
 		zd.Data.Set(owner.Name, *owner)
 	}
-	zd.mu.Unlock()
+	// zd.mu.Unlock()
 }
 
 func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*RRset, error) {
@@ -833,62 +834,64 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 }
 
 type DelegationData struct {
-     CurrentNS	    *RRset
-     AddedNS	    *RRset
-     RemovedNS	    *RRset     
-     
-     BailiwickNS    []string
-     A_glue	    map[string]*RRset	// map[nsname]
-     AAAA_glue	    map[string]*RRset	// map[nsname]
-     Actions	    []dns.RR		// actions are DNS UPDATE actions that modify delegation data
-     Time	    time.Time
+	CurrentNS *RRset
+	AddedNS   *RRset
+	RemovedNS *RRset
+
+	BailiwickNS []string
+	A_glue      map[string]*RRset // map[nsname]
+	AAAA_glue   map[string]*RRset // map[nsname]
+	Actions     []dns.RR          // actions are DNS UPDATE actions that modify delegation data
+	Time        time.Time
 }
 
 func (zd *ZoneData) DelegationData() (*DelegationData, error) {
-     dd := DelegationData{
-		Time:		time.Now(),
-		A_glue:		map[string]*RRset{},
-		AAAA_glue:	map[string]*RRset{},
-     }
+	dd := DelegationData{
+		Time:      time.Now(),
+		AddedNS:   &RRset{},
+		RemovedNS: &RRset{},
+		A_glue:    map[string]*RRset{},
+		AAAA_glue: map[string]*RRset{},
+	}
 
-     rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeNS)
-     if err != nil {
-     	return nil, err
-     }
-     if len(rrset.RRs) == 0 {
-     	return nil, err
-     }
+	rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeNS)
+	if err != nil {
+		return nil, err
+	}
+	if len(rrset.RRs) == 0 {
+		return nil, err
+	}
 
-     dd.CurrentNS = rrset
+	dd.CurrentNS = rrset
 
-     // Get the in-bailiwick nameserver names
-     dd.BailiwickNS, err = BailiwickNS(zd.ZoneName, CurrentNS.RRs)
-     if err != nil {
-	return nil, err
-     }
+	// Get the in-bailiwick nameserver names
+	dd.BailiwickNS, err = BailiwickNS(zd.ZoneName, dd.CurrentNS.RRs)
+	if err != nil {
+		return nil, err
+	}
 
-     for _, nsname := range dd.BailiwickNS {
-     	 owner, err := zd.GetOwner(nsname)
-	 if err != nil {
-	    return nil, err
-	 }
-	 // XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
-	 //      I.e. a broken config with an in-bailiwick NS w/o any address.
-	 if owner == nil {
-	    zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName)
-	    continue
-	 }
+	for _, nsname := range dd.BailiwickNS {
+		owner, err := zd.GetOwner(nsname)
+		if err != nil {
+			return nil, err
+		}
+		// XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
+		//      I.e. a broken config with an in-bailiwick NS w/o any address.
+		if owner == nil {
+			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName)
+			continue
+		}
 
-	 if rrset, exist := owner.RRtypes[dns.TypeA]; exist {
-	    if len(rrset.RRs) > 0 {
-	       dd.A_glue[nsname] = &rrset
-	    }
-	 }
-	 if rrset, exist := owner.RRtypes[dns.TypeAAAA]; exist {
-	    if len(rrset.RRs) > 0 {
-	       dd.AAAA_glue[nsname] = &rrset
-	    }
-	 }
-     }
-     return &dd, nil
+		if rrset, exist := owner.RRtypes[dns.TypeA]; exist {
+			if len(rrset.RRs) > 0 {
+				dd.A_glue[nsname] = &rrset
+			}
+		}
+		if rrset, exist := owner.RRtypes[dns.TypeAAAA]; exist {
+			if len(rrset.RRs) > 0 {
+				dd.AAAA_glue[nsname] = &rrset
+			}
+		}
+	}
+	return &dd, nil
 }

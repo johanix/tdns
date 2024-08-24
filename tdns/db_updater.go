@@ -7,6 +7,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
@@ -44,20 +45,24 @@ func SprintUpdates(actions []dns.RR) string {
 	return buf
 }
 
-func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
+func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 	updateq := kdb.UpdateQ
 	var ur UpdateRequest
 
-	log.Printf("Updater: starting")
+	log.Printf("ZoneUpdater: starting")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		for {
 			select {
 			case ur = <-updateq:
+				if ur.Cmd == "PING" {
+					log.Printf("ZoneUpdater: PING received. PONG!")
+					continue
+				}
 				zd, ok := Zones.Get(ur.ZoneName)
 				if !ok {
-					log.Printf("Updater: Request for update is missing a zonename. Ignored.")
+					log.Printf("ZoneUpdater: Zone name \"%s\" in request for update is unknown. Ignored.", ur.ZoneName)
 					continue
 				}
 				switch ur.Cmd {
@@ -65,8 +70,8 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 					// This is the case where a DNS UPDATE contains updates to child delegation information.
 					// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
 					// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
-					log.Printf("Updater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
+					log.Printf("ZoneUpdater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+					log.Printf("ZoneUpdater: CHILD-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
 					if zd.Options["allow-child-updates"] {
 						var updated bool
 						var err error
@@ -75,12 +80,12 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 						case Primary:
 							updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
 							if err != nil {
-								log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+								log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
 							}
 						case Secondary:
 							err := kdb.ApplyChildUpdateToDB(ur)
 							if err != nil {
-								log.Printf("Error from ApplyChildUpdateToDB: %v", err)
+								log.Printf("ZoneUpdater: Error from ApplyChildUpdateToDB: %v", err)
 							}
 						}
 						if updated {
@@ -91,15 +96,17 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 				case "ZONE-UPDATE":
 					// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
 					// (i.e. not child delegation information).
-					log.Printf("Updater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("Updater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+					log.Printf("ZoneUpdater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+					log.Printf("ZoneUpdater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
 					if zd.Options["allow-updates"] {
-						dss, err := zd.ZoneUpdateChangesDelegationData(ur)
+						dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
 						if err != nil {
 							log.Printf("Error from ZoneUpdateChangesDelegationData: %v", err)
 						}
-						log.Printf("Updater: dss.InSync: %t", dss.InSync)
+						log.Printf("ZoneUpdater: dss.InSync: %t", dss.InSync)
+
 						if zd.Options["delegation-sync-child"] && !dss.InSync {
+							log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncCh): %d", zd.ZoneName, len(zd.DelegationSyncCh))
 							zd.DelegationSyncCh <- DelegationSyncRequest{
 								Command:    "SYNC-DELEGATION",
 								ZoneName:   zd.ZoneName,
@@ -115,24 +122,27 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 						case Primary:
 							updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
 							if err != nil {
-								log.Printf("Error from ApplyUpdateToZoneData: %v", err)
+								log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
 							}
 
 						case Secondary:
 							err := kdb.ApplyZoneUpdateToDB(ur)
 							if err != nil {
-								log.Printf("Error from ApplyUpdateToDB: %v", err)
+								log.Printf("ZoneUpdater: Error from ApplyUpdateToDB: %v", err)
 							}
 						}
 						if updated {
-							log.Printf("Updater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
+							log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
 							zd.Options["dirty"] = true
 						}
+					} else {
+						log.Printf("ZoneUpdater: Zone %s has updates disallowed", zd.ZoneName)
 					}
+					log.Printf("ZoneUpdater: ZONE-UPDATE done")
 
 				case "TRUSTSTORE-UPDATE":
-					log.Printf("Updater: Request for update to SIG(0) TrustStore for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("Updater: Actions:\n%s", SprintUpdates(ur.Actions))
+					log.Printf("ZoneUpdater: Request for update to SIG(0) TrustStore for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+					log.Printf("ZoneUpdater: TRUSTSTORE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
 					tx, err := kdb.Begin("UpdaterEngine")
 					if err != nil {
 						log.Printf("Error from kdb.Begin(): %v", err)
@@ -145,10 +155,10 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 						case dns.ClassNONE:
 							subcommand = "delete"
 						case dns.ClassANY:
-							log.Printf("Updater: Error: TRUSTSTORE-UPDATE: RR has class ANY. Delete RRset is not supported. Ignored.")
+							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has class ANY. Delete RRset is not supported. Ignored.")
 							continue
 						default:
-							log.Printf("Updater: Error: TRUSTSTORE-UPDATE: RR has unknown class: %s. Ignored.", rr.String())
+							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has unknown class: %s. Ignored.", rr.String())
 							continue
 						}
 
@@ -168,7 +178,7 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 							}
 						} else {
-							log.Printf("Updater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
+							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
 						}
 					}
 					err = tx.Commit()
@@ -178,12 +188,13 @@ func (kdb *KeyDB) UpdaterEngine(stopchan chan struct{}) error {
 				default:
 					log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)
 				}
+				log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
 			}
 		}
 	}()
 	wg.Wait()
 
-	log.Println("Updater: terminating")
+	log.Println("ZoneUpdater: terminating")
 	return nil
 }
 
@@ -417,6 +428,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
 
 	// dump.P(ur)
+	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
 	zd.mu.Lock()
 	defer func() {
@@ -461,6 +473,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				continue
 			}
 		}
+
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
@@ -520,6 +533,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				break
 			}
 		}
+
 		if !dup {
 			log.Printf("ApplyUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
@@ -528,13 +542,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			updated = true
 			// zd.Options["dirty"] = true
 		}
+
 		owner.RRtypes[rrtype] = rrset
 		updated = true
 		// zd.Options["dirty"] = true
 		continue
 	}
 
-	log.Printf("ApplyZoneUpdateToZoneData done: updated=%t", updated)
+	log.Printf("**** ApplyZoneUpdateToZoneData done: updated=%t", updated)
 
 	return updated, nil
 }
@@ -552,10 +567,10 @@ func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
 // But it's a start.
 
 func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (DelegationSyncStatus, error) {
-     	log.Printf("*** Enter ZoneUpdateChangesDelegationData(). ur:\n%+v", ur)
+	log.Printf("*** Enter ZoneUpdateChangesDelegationData(). ur:\n%+v", ur)
 	var dss = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
-		Time:	  time.Now(),
+		Time:     time.Now(),
 		InSync:   true,
 	}
 
@@ -569,7 +584,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 	}
 
 	for _, rr := range ur.Actions {
-	        log.Printf("ZoneUpdateChangesDelegationData: checking action: %s", rr.String)
+		log.Printf("ZoneUpdateChangesDelegationData: checking action: %s", rr.String)
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
@@ -601,7 +616,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 				Name:    ownerName,
 				RRtypes: make(map[uint16]RRset),
 			}
-			zd.AddOwner(owner)
+			zd.AddOwner(owner) // XXX: This is not ok, as we're not holding the lock here. But this function should die.
 		}
 
 		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
@@ -679,7 +694,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			}
 			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
 			for _, nsname := range bns {
-			        log.Printf("ZoneUpdateChangesDelegationData: checking %s", nsname)
+				log.Printf("ZoneUpdateChangesDelegationData: checking %s", nsname)
 				if nsname == ownerName {
 					if rrtype == dns.TypeA {
 						dss.InSync = false
@@ -697,19 +712,22 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 	return dss, nil
 }
 
-// New attempt at this elusive function.
-// Method: create a map[name][type][]dns.RR for the existing delegation data. Then clone that map and apply the
-//         changes in the update to the clone. Finally compare the two.
+// New attempt at this elusive function. This may actually be correct now. I.e. the list of action in ddata.Actions
+// is the complete set of actions that should be sent to the parent.
+
 func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (DelegationSyncStatus, error) {
-     	log.Printf("*** Enter ZUCDDNGNG(). ur:\n%+v", ur)
+	log.Printf("*** Enter ZUCDDNGNG(). ur:\n%+v", ur)
 	var dss = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
-		Time:	  time.Now(),
+		Time:     time.Now(),
 		InSync:   true,
 	}
 
+	defer func() {
+		log.Printf("********* ZUCDDNGNG: returning")
+	}()
+
 	ddata, err := zd.DelegationData()
-	dump.P(ddata)
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
@@ -723,28 +741,39 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	// We must sort the ur.Actions to ensure that any NS actions come first (so that possible glue actions
 	// have an NS to refer to.
 
+	var new_bns []string
+
 	var actions []dns.RR
 	for _, rr := range ur.Actions {
-	    if rr.Header().Rrtype == dns.TypeNS {
-	       actions = append(actions, rr)
-	    }
+		if rr.Header().Rrtype == dns.TypeNS {
+			actions = append(actions, rr)
+			if rr.Header().Name == zd.ZoneName {
+				new_bns = append(new_bns, rr.Header().Name)
+			}
+		}
 	}
 	for _, rr := range ur.Actions {
-	    if rr.Header().Rrtype != dns.TypeNS {
-	       actions = append(actions, rr)
-	    }
+		if rr.Header().Rrtype != dns.TypeNS {
+			actions = append(actions, rr)
+		}
 	}
 
 	for _, rr := range actions {
-	        log.Printf("ZUCDDNG: checking action: %s", rr.String)
+		log.Printf("ZUCDDNG: checking action: %s", rr.String())
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
 		rrtypestr := dns.TypeToString[rrtype]
 
+		if rrtype != dns.TypeNS && rrtype != dns.TypeA && rrtype != dns.TypeAAAA {
+			log.Printf("ZUCDDNG: Update does not affect delegation data: %s", rrtypestr)
+			continue
+		}
+
 		rrcopy := dns.Copy(rr)
 		rrcopy.Header().Ttl = 3600
-		rrcopy.Header().Class = dns.ClassINET
+		// Why did we modify the class here?
+		// rrcopy.Header().Class = dns.ClassINET
 
 		// XXX: This is the wrong place for this check. These things should be already sorted out during the approval phase.
 		// XXX: But we keep it here until the approval code is updated.
@@ -753,24 +782,6 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		if !ok && !ur.InternalUpdate {
 			log.Printf("ZUCDDNG: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
-		}
-
-		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
-		// If it is an add then it is not ok, and then the owner must be created.
-
-		owner, err := zd.GetOwner(ownerName)
-		if err != nil {
-			log.Printf("Warning: ZUCDDNG: owner name %s is unknown", ownerName)
-			if class == dns.ClassNONE || class == dns.ClassANY {
-				continue
-			}
-		}
-		if owner == nil && class == dns.ClassINET {
-			owner = &OwnerData{
-				Name:    ownerName,
-				RRtypes: make(map[uint16]RRset),
-			}
-			zd.AddOwner(owner)
 		}
 
 		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
@@ -788,7 +799,29 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				dss.InSync = false
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
 				ddata.Actions = append(ddata.Actions, rrcopy)
-				ddata.RemovedNS = append(ddata.RemovedNS, rrcopy)
+				ddata.RemovedNS.RRs = append(ddata.RemovedNS.RRs, rrcopy)
+				log.Printf("ZUCDDNG: Removed NS: %s; now we need to remove any glue", rrcopy.String())
+				if nsrr, ok := rr.(*dns.NS); ok {
+					nsowner, err := zd.GetOwner(nsrr.Ns)
+					if err != nil {
+						log.Printf("ZUCDDNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+					} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
+						if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
+							for _, rr := range a_rrset.RRs {
+								rr.Header().Class = dns.ClassNONE
+								dss.ARemoves = append(dss.ARemoves, rr)
+								ddata.Actions = append(ddata.Actions, rr)
+							}
+						}
+						if aaaa_rrset, exists := nsowner.RRtypes[dns.TypeAAAA]; exists {
+							for _, rr := range aaaa_rrset.RRs {
+								rr.Header().Class = dns.ClassNONE
+								dss.AAAARemoves = append(dss.AAAARemoves, rr)
+								ddata.Actions = append(ddata.Actions, rr)
+							}
+						}
+					}
+				}
 			}
 			// Is this a change to glue for a nameserver?
 			for _, nsname := range ddata.BailiwickNS {
@@ -809,23 +842,27 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		case dns.ClassANY:
 			// ClassANY: Remove RRset.
 			log.Printf("ZUCDDNG: Remove RRset: %s", rr.String())
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
-			   	// XXX: It must not be allowed to remove the *entire* NS RRset for a zone.
-				// XXX: This should have been caught during approval. But here we are and we
-				// XXX: will complain, but ignore this update
-				// dss.InSync = false
-				// dss.NsRemoves = append(dss.NsRemoves, rrcopy)
-				// ddata.Actions = append(ddata.Actions, rrcopy)
-				log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
-				continue
-			}
-			for _, nsname := range bns {
-				if nsname == ownerName {
-					if rrtype == dns.TypeA {
+			switch rrtype {
+			case dns.TypeNS:
+				if ownerName == zd.ZoneName {
+					// XXX: It must not be allowed to remove the *entire* NS RRset for a zone.
+					// XXX: This should have been caught during approval. But here we are and we
+					// XXX: will complain, but ignore this update
+					log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
+				}
+
+			case dns.TypeA:
+				for _, nsname := range bns {
+					if nsname == ownerName {
 						dss.InSync = false
 						dss.ARemoves = append(dss.ARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
-					} else if rrtype == dns.TypeAAAA {
+					}
+				}
+
+			case dns.TypeAAAA:
+				for _, nsname := range bns {
+					if nsname == ownerName {
 						dss.InSync = false
 						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
@@ -837,6 +874,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		case dns.ClassINET:
 		default:
 			log.Printf("ZUCDDNG: Error: unknown class: %s", rr.String())
+			continue
 		}
 
 		// Here we know that the actions has class == ClassINET
@@ -844,71 +882,101 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 		dup := false
 		switch rrtype {
-		case *dns.TypeNS:
-		     if ownerName == zd.ZoneName {
-		     	for _, nsrr := range ddata.NS.CurrentRRs {
-			    if dns.IsDuplicate(nsrr, rrcopy) {
-					log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
-					dup = true
-					break
-			    }
-			}
-			if !dup {
-			   dss.InSync = false
-			   dss.NsAdds = append(dss.NsAdds, rrcopy)
-			   ddata.AddedNS = append(ddata.AddedNS, rrcopy)
-			}
-		     } else {
-		       log.Printf("ZUCDDNG: Error: zone update tries to modify child delegation.")
-		     }
-
-		case *dns.TypeA:
-		     // XXX: There are two cases: adding a new A to a current or new NS and adding an A to an NS
-		     // that is being removed. Only the first case modifies the delegation.
-		     if oldglue, exist := ddata.A_glue[ownerName]; exist {
-		     	for _, arr := range oldglue.RRs {
-		     	    if dns.IsDuplicate(arr, rrcopy) {
-					log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
-					dup = true
-					break
-			    }
-		     }
-		}
-
-		// if rrset, exists := owner.RRtypes[rrtype]; exists {
-		if rrset, exists := ddata.owner.RRtypes[rrtype]; exists {
-			for _, oldrr := range rrset.RRs {
-				if dns.IsDuplicate(oldrr, rrcopy) {
-					log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
-					dup = true
-					break
-				}
-			}
-		}
-
-		if !dup {
-			log.Printf("ZUCDDNG: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
-			// Is this a change to the NS RRset?
-//			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
-//				dss.InSync = false
-//				dss.NsAdds = append(dss.NsAdds, rrcopy)
-//			}
-			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
-			for _, nsname := range bns {
-			        log.Printf("ZUCDDNG: checking %s", nsname)
-				if nsname == ownerName {
-					if rrtype == dns.TypeA {
-						dss.InSync = false
-						dss.AAdds = append(dss.AAdds, rrcopy)
-					} else if rrtype == dns.TypeAAAA {
-						dss.InSync = false
-						dss.AAAAAdds = append(dss.AAAAAdds, rrcopy)
+		case dns.TypeNS:
+			if ownerName == zd.ZoneName {
+				for _, rr := range ddata.CurrentNS.RRs {
+					if dns.IsDuplicate(rr, rrcopy) {
+						log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+						dup = true
+						break
 					}
 				}
+				if !dup {
+					dss.InSync = false
+					dss.NsAdds = append(dss.NsAdds, rrcopy)
+					ddata.AddedNS.RRs = append(ddata.AddedNS.RRs, rrcopy)
+					ddata.Actions = append(ddata.Actions, rrcopy)
+					// XXX: This is a new NS. Now we must locate any existing address RRs for this name.
+					if nsrr, ok := rr.(*dns.NS); ok {
+						nsowner, err := zd.GetOwner(nsrr.Ns)
+						if err != nil {
+							log.Printf("ZUCDDNG: Error: owner %s of NS %s is unknown", nsrr.Ns, nsrr.String())
+						} else {
+							if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
+								for _, rr := range a_rrset.RRs {
+									dss.AAdds = append(dss.AAdds, rr)
+									ddata.Actions = append(ddata.Actions, rr)
+								}
+							}
+							if aaaa_rrset, exists := nsowner.RRtypes[dns.TypeAAAA]; exists {
+								for _, rr := range aaaa_rrset.RRs {
+									dss.AAAAAdds = append(dss.AAAAAdds, rr)
+									ddata.Actions = append(ddata.Actions, rr)
+								}
+							}
+						}
+					}
+				}
+			} else {
+				log.Printf("ZUCDDNG: Error: zone update tries to modify child delegation.")
 			}
+
+		case dns.TypeA:
+			// XXX: There are two cases: adding a new A to a current or new NS and adding an A to an NS
+			// that is being removed. Only the first case modifies the delegation.
+			if oldglue, exist := ddata.A_glue[ownerName]; exist {
+				for _, arr := range oldglue.RRs {
+					if dns.IsDuplicate(arr, rrcopy) {
+						log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					dss.InSync = false
+					dss.AAdds = append(dss.AAdds, rrcopy)
+					ddata.Actions = append(ddata.Actions, rrcopy)
+				}
+			} else if slices.Contains(new_bns, ownerName) {
+				// This is glue for a new NS that is being added.
+				dss.InSync = false
+				dss.AAdds = append(dss.AAdds, rrcopy)
+				ddata.Actions = append(ddata.Actions, rrcopy)
+			}
+
+		case dns.TypeAAAA:
+			// XXX: There are two cases: adding a new A to a current or new NS and adding an A to an NS
+			// that is being removed. Only the first case modifies the delegation.
+			if oldglue, exist := ddata.AAAA_glue[ownerName]; exist {
+				for _, aaaa_rr := range oldglue.RRs {
+					if dns.IsDuplicate(aaaa_rr, rrcopy) {
+						log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					dss.InSync = false
+					dss.AAAAAdds = append(dss.AAAAAdds, rrcopy)
+					ddata.Actions = append(ddata.Actions, rrcopy)
+				}
+			} else if slices.Contains(new_bns, ownerName) {
+				// This is glue for a new NS that is being added.
+				dss.InSync = false
+				dss.AAAAAdds = append(dss.AAAAAdds, rrcopy)
+				ddata.Actions = append(ddata.Actions, rrcopy)
+			}
+
+		default:
+			log.Printf("ZUCDDNG: Error: RR type: %s should not get here: %s", rrtypestr, rr.String())
 		}
 	}
 
-	dump.P(dss)
+	if zd.ZoneName == "child.test.net." {
+		log.Printf("ZUCDDNG: ddata:\n%+v", ddata)
+		log.Printf("ZUCDDNG: ddata.Actions:\n%s", SprintUpdates(ddata.Actions))
+	}
+	// dump.P(ddata)
+	// dump.P(dss)
 	return dss, nil
 }

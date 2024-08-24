@@ -27,8 +27,8 @@ import (
 // Return insync (bool), adds, removes ([]dns.RR) and error
 func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
-	    ZoneName: zd.ZoneName,
-	    Time: time.Now(),
+		ZoneName: zd.ZoneName,
+		Time:     time.Now(),
 	}
 
 	err := zd.FetchParentData()
@@ -153,7 +153,7 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 //      the tdns-cli tool is to interact with tdnsd, it really should leverage from that rather
 //      than just do everything in the CLI.
 
-func xxxChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
+func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
 
 	var differ bool
 	var adds, removes []dns.RR

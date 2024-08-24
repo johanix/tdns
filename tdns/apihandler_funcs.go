@@ -278,6 +278,11 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 			Zone: dp.Zone,
 		}
 
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}()
+
 		var zd *ZoneData
 		var exist bool
 		if zd, exist = Zones.Get(dp.Zone); !exist {
@@ -332,9 +337,6 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 			resp.ErrorMsg = fmt.Sprintf("Unknown delegation command: %s", dp.Command)
 			resp.Error = true
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
 	}
 }
 

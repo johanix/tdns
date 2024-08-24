@@ -69,9 +69,9 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	if len(r.Ns) > 0 {
 		log.Printf("UpdateResponder: Update section contains %d RRs", len(r.Ns))
-//		for _, rr := range r.Ns {
-//			log.Printf("UpdateResponder: Update RR: %s", rr.String())
-//		}
+		//		for _, rr := range r.Ns {
+		//			log.Printf("UpdateResponder: Update RR: %s", rr.String())
+		//		}
 		log.Printf("Update contains:\n%s", SprintUpdates(r.Ns))
 	}
 	if len(r.Extra) > 0 {
@@ -124,6 +124,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	// isdel := false
 
+	log.Printf("UpdateResponder: zone %s: qname %s. Setting update type.", zd.ZoneName, qname)
 	// 1. Is qname the apex of this zone?
 	if qname == zd.ZoneName {
 		dur.Status.Type = "ZONE-UPDATE"
@@ -162,7 +163,8 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		}
 
 		// 3. Does qname exist in auth zone?
-	} else if zd.NameExists(qname) {
+		// XXX: It doesn't have to exist!
+	} else {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
 		if !zd.Options["allow-updates"] {
@@ -208,7 +210,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	//	log.Printf("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
 	//		isdel, rcode, validated, trusted, signername)
-	log.Printf("UpdateResponder: %v %v %v %v %v", dur.Status.Type, dur.Status.ValidationRcode, dur.Status.Validated, dur.Status.ValidatedByTrustedKey, dur.Status.SignerName)
+	log.Printf("UpdateResponder: %+v %+v %+v %+v %+v", dur.Status.Type, dur.Status.ValidationRcode, dur.Status.Validated, dur.Status.ValidatedByTrustedKey, dur.Status.SignerName)
 	// send response
 	m = m.SetRcode(m, int(dur.Status.ValidationRcode))
 	w.WriteMsg(m)

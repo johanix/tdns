@@ -359,12 +359,12 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 		}
 		zconf.Options = cleanoptions
 		zones[zname] = zconf
-		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
+		log.Printf("ParseZones: zone %s outgoing options: %+v", zname, options)
 
 		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
 			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
 
-		log.Printf("ParseZones: zone %s incoming update policy: %v", zname, zconf.UpdatePolicy)
+		log.Printf("ParseZones: zone %s incoming update policy: %+v", zname, zconf.UpdatePolicy)
 
 		for _, ptype := range []string{zconf.UpdatePolicy.Child.Type, zconf.UpdatePolicy.Zone.Type} {
 			switch ptype {

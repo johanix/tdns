@@ -131,7 +131,7 @@ func main() {
 
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
-	go kdb.UpdaterEngine(stopch)
+	go kdb.ZoneUpdaterEngine(stopch)
 	go tdns.UpdateHandler(&conf)
 	go tdns.NotifyHandler(&conf)
 	go tdns.DnsEngine(&conf)

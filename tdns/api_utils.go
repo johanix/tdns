@@ -33,7 +33,7 @@ type PingResponse struct {
 
 var pongs int = 0
 
-func APIping(appName, appVersion string, bootTime time.Time) func(w http.ResponseWriter, r *http.Request) {
+func APIping(conf *Config, appName, appVersion string, bootTime time.Time) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		tls := ""
@@ -62,6 +62,8 @@ func APIping(appName, appVersion string, bootTime time.Time) func(w http.Respons
 			Pings:      pp.Pings + 1,
 			Pongs:      pongs,
 		}
+
+		conf.Internal.KeyDB.UpdateQ <- UpdateRequest{Cmd: "PING", ZoneName: "whatever."}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)

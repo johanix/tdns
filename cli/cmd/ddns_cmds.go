@@ -107,67 +107,7 @@ var delSyncCmd = &cobra.Command{
 	},
 }
 
-var ddnsOldSyncCmd = &cobra.Command{
-	Use:   "oldsync",
-	Short: "Send a DDNS update to sync parent delegation info with child data",
-	Run: func(cmd *cobra.Command, args []string) {
-		if tdns.Globals.Zonename == "" {
-			log.Fatalf("Error: child zone name not specified.")
-		}
-		PrepArgs("parentzone", "parentprimary", "childzone", "childprimary")
-		// 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
-
-		tdns.SetupIMR()
-
-		// 		if tdns.Globals.ParentZone == "" {
-		// 		   log.Fatalf("Error: parent zone name not specified.")
-		// 		}
-		// 		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
-		//
-		// 		if childpri == "" {
-		// 		   log.Fatalf("Error: child primary nameserver not specified.")
-		// 		}
-		// 		if parpri == "" {
-		// 		   log.Fatalf("Error: parent primary nameserver not specified.")
-		// 		}
-
-		// 1. Is the delegation in sync or not?
-		fmt.Printf("Is delegation for %s in sync or not?\n", tdns.Globals.Zonename)
-		unsynched, adds, removes, err := tdns.ChildDelegationDataUnsynched(
-			tdns.Globals.Zonename, tdns.Globals.ParentZone, childpri, parpri)
-		if err != nil {
-			log.Fatalf("Error from ChildSyncDelegationData(): %v", err)
-		}
-		if !unsynched {
-			fmt.Printf("No change to delegation data. No need to update.\n")
-			os.Exit(0)
-		} else {
-			fmt.Printf("Delegation for %s is not in sync. Needs fixing.\n",
-				tdns.Globals.Zonename)
-		}
-
-		// 2. Ok, sync needed. Is DNS UPDATE a supported scheme?
-		// [figure out if yes, and all target details]
-		const update_scheme = 2
-		dsynctarget, err := tdns.LookupDSYNCTarget(tdns.Globals.ParentZone,
-			parpri, dns.StringToType["ANY"], update_scheme)
-		if err != nil {
-			log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v",
-				tdns.Globals.ParentZone, parpri, err)
-		}
-
-		// 3. Create UPDATE msg
-
-		// 4. Sign UPDATE msg
-
-		// 5. Send UPDATE msg to target
-		err = tdns.ChildSendDdnsSync(tdns.Globals.ParentZone, dsynctarget, adds, removes)
-		if err != nil {
-			log.Fatalf("Error from ChildSendDdnsSync(): %v", err)
-		}
-	},
-}
-
+// Send a SIG(0) key rollover request to parent directly from CLI (not via tdns-server). This is mostly a debug command.
 var ddnsRollCmd = &cobra.Command{
 	Use:   "roll",
 	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
@@ -185,6 +125,7 @@ var ddnsRollCmd = &cobra.Command{
 	},
 }
 
+// Send a SIG(0) key upload request to parent directly from CLI (not via tdns-server). This is mostly a debug command.
 var ddnsUploadCmd = &cobra.Command{
 	Use:   "upload",
 	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",
@@ -209,7 +150,6 @@ func init() {
 
 	delSyncCmd.MarkFlagRequired("zone")
 
-	ddnsCmd.AddCommand(ddnsOldSyncCmd)
 	ddnsCmd.AddCommand(ddnsRollCmd, ddnsUploadCmd)
 
 	ddnsCmd.PersistentFlags().StringVarP(&tdns.Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
