@@ -3,7 +3,7 @@ COMMIT:=`git describe --dirty=+WiP --always`
 VERSION=`cat ./VERSION`
 APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
-GOFLAGS:=-ldflags "-X app.version=$(VERSION)-$(COMMIT)"
+GOFLAGS:=-v -ldflags "-X app.version=$(VERSION)-$(COMMIT)"
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 # GOARCH:=amd64
