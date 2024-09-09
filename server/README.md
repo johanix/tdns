@@ -1,6 +1,6 @@
-# "TDNSD" AND "DOG"
+# TDNS-SERVER
 
-**TDNSD-SERVER** is small authoritative DNS name server with support for a baseline
+**TDNS-SERVER** is small authoritative DNS name server with support for a baseline
 feature set:
 
 0. Load zones from text files on disk.

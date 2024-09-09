@@ -1,3 +1,12 @@
+# TDNS-AGENT
+
+**TDNS-AGENT** is a slightly more limited version of **TDNS-SERVER**.
+Primarily the limitation is that it is only able to operate as a
+secondary, not a primary. The intent is to enable zones that have a
+well-working zone production pipeline to easily attach the
+*tdns-agent* as an additional secondary and thereby gain access to the
+TDNS features without the need to modify the zone production.
+
 Design constraints for the TDNS Agent:
 
 1. Essentially all configuration errors should be fatal. There is no
