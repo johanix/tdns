@@ -141,6 +141,8 @@ func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
 	m.Remove(removes)
 	m.Insert(adds)
 
+	m.SetEdns0(1232, true) // UPDsize + DO-bit, the important thing is to have an OPT RR, to enable the return of EDE.
+
 	if Globals.Debug {
 		fmt.Printf("Creating update msg:\n%s\n", m.String())
 	}

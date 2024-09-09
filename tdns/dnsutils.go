@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -211,163 +210,6 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	return total_sent, nil
 }
 
-func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string) error {
-	msg := new(dns.Msg)
-	if ttype == dns.TypeIXFR {
-		// msg.SetIxfr(zname, serial, soa.Ns, soa.Mbox)
-		msg.SetIxfr(zname, serial, "", "")
-	} else {
-		msg.SetAxfr(zname)
-	}
-
-	maxlen := 35
-	rightmargin := 72
-
-	printKeyRR := func(rr dns.RR, rrtype, ktype string, keyid uint16, maxlen int) {
-		p := strings.Fields(rr.String())
-		// rhp := strings.Fields(parts[1])
-		namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
-		if len(namepad) < 1 {
-			namepad = " "
-		}
-		fmt.Printf("%s%s%s %s %s %s %s %s (\n", p[0], namepad, p[1], p[2], p[3], p[4], p[5], p[6])
-		spaces := strings.Repeat(" ", maxlen)
-		var keyparts []string
-		keystr := p[7]
-		for len(keystr) > 72-len(spaces) {
-			keyparts = append(keyparts, keystr[:rightmargin-len(spaces)])
-			keystr = keystr[72-len(spaces):]
-		}
-		keyparts = append(keyparts, keystr)
-		for idx, part := range keyparts {
-			if idx == len(keyparts)-1 {
-				fmt.Printf("%s %s )\n", spaces, part)
-			} else {
-				fmt.Printf("%s %s\n", spaces, part)
-			}
-		}
-		alg, _ := strconv.Atoi(p[6])
-		algstr := dns.AlgorithmToString[uint8(alg)]
-		fmt.Printf("%s ; %s alg = %s ; key id = %d\n", spaces, ktype, algstr, keyid)
-	}
-
-	transfer := new(dns.Transfer)
-	answerChan, err := transfer.In(msg, upstream)
-	if err != nil {
-		fmt.Printf("Error from transfer.In: %v\n", err)
-		return err
-	}
-
-	for envelope := range answerChan {
-		if envelope.Error != nil {
-			fmt.Printf("Oops. Zone transfer envelope signals an error:\n")
-			errstr := envelope.Error.Error()
-			if strings.Contains(errstr, "bad xfr rcode: 9") {
-				fmt.Printf("Error: %s: Not authoritative for zone %s\n",
-					upstream, zname)
-			} else {
-				fmt.Printf("Error: zone %s error: %v\n", zname, errstr)
-			}
-			if !Globals.Debug {
-				fmt.Printf("Xfr error: breaking off\n")
-				break
-			} else {
-				fmt.Printf("DEBUG: envelope: %v\n", envelope)
-			}
-		}
-
-		if Globals.Debug {
-			fmt.Printf("Printing %d RRs in envelope\n", len(envelope.RR))
-		}
-
-		for _, rr := range envelope.RR {
-			if options["multi"] == "true" {
-				switch rr.(type) {
-				case *dns.KEY:
-					keyid := rr.(*dns.KEY).KeyTag()
-					t := ""
-					printKeyRR(rr, "KEY", t, keyid, maxlen)
-				case *dns.DNSKEY:
-					keyid := rr.(*dns.DNSKEY).KeyTag()
-					t := " ZSK ;"
-					if rr.(*dns.DNSKEY).Flags == 257 {
-						t = " KSK ;"
-					}
-					printKeyRR(rr, "DNSKEY", t, keyid, maxlen)
-
-				case *dns.RRSIG:
-					p := strings.Fields(rr.String())
-					// rhp := strings.Fields(p[1])
-					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
-					if len(namepad) < 1 {
-						namepad = " "
-					}
-					fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:8], " "))
-					// spaces := strings.Repeat(" ", len(parts[0])+1)
-					spaces := strings.Repeat(" ", maxlen)
-					fmt.Printf("%s %s %s %s %s\n", spaces, p[8], p[9], p[10], p[11])
-					var rrsigparts []string
-					part := p[12]
-					for len(part) > rightmargin-len(spaces) {
-						rrsigparts = append(rrsigparts, part[:rightmargin-len(spaces)])
-						part = part[rightmargin-len(spaces):]
-					}
-					rrsigparts = append(rrsigparts, part)
-					for idx, part := range rrsigparts {
-						if idx == len(rrsigparts)-1 {
-							fmt.Printf("%s %s )\n", spaces, part)
-						} else {
-							fmt.Printf("%s %s\n", spaces, part)
-						}
-					}
-
-				case *dns.SVCB:
-					p := strings.Fields(rr.String())
-					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
-					if len(namepad) < 1 {
-						namepad = " "
-					}
-					spaces := strings.Repeat(" ", maxlen)
-					fmt.Printf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
-					if len(p) > 6 {
-						fmt.Printf(" (\n")
-						fmt.Printf("%s %s )\n", spaces, strings.Join(p[6:], " "))
-					} else {
-						fmt.Printf("\n")
-					}
-
-				case *dns.SOA:
-					p := strings.Fields(rr.String())
-					// rhp := strings.Fields(p[1])
-					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
-					if len(namepad) < 1 {
-						namepad = " "
-					}
-					fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:6], " "))
-					spaces := strings.Repeat(" ", maxlen)
-					fmt.Printf("%s %s%s ; SOA serial\n", spaces, p[6], strings.Repeat(" ", 10-len(p[6])))
-					fmt.Printf("%s %s%s ; Refresh\n", spaces, p[7], strings.Repeat(" ", 10-len(p[7])))
-					fmt.Printf("%s %s%s ; Retry\n", spaces, p[8], strings.Repeat(" ", 10-len(p[8])))
-					fmt.Printf("%s %s%s ; Expire\n", spaces, p[9], strings.Repeat(" ", 10-len(p[9])))
-					fmt.Printf("%s %s )%s ; Ncache TTL\n", spaces, p[10], strings.Repeat(" ", 10-len(p[10])-2))
-
-				default:
-					p := strings.Fields(rr.String())
-					namepad := strings.Repeat(" ", maxlen-len(p[0])-len(p[1]))
-					// fmt.Printf("len(qname)=%d, len(ttl)=%d, namepad=%d\n", len(p[0]), len(p[1]), len(namepad))
-					fmt.Printf("%s%s%s\n", p[0], namepad, strings.Join(p[1:], " "))
-				}
-			} else {
-				fmt.Printf("%s\n", rr.String())
-			}
-		}
-		if Globals.Debug {
-			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))
-		}
-	}
-	return nil
-}
-
 // If the zone is completely loaded, return true otherwise false
 func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, error) {
 	zd.Logger.Printf("ReadZoneFile: zone: %s filename: %s", zd.ZoneName, filename)
@@ -411,7 +253,11 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 		return false, 0, err
 	}
 
-	apex, _ := zd.GetOwner(zd.ZoneName)
+	// apex, err := zd.GetOwner(zd.ZoneName)
+	apex, _ := zd.Data.Get(zd.ZoneName)
+	if err != nil {
+		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
+	}
 	//	dump.P(apex)
 	soa_rrset := apex.RRtypes[dns.TypeSOA]
 	var soa *dns.SOA
@@ -538,7 +384,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	writer := bufio.NewWriter(f)
 
-	apex, _ := zd.GetOwner(zd.ZoneName)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		log.Printf("WriteZoneToFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
+		return err
+	}
 	soa := apex.RRtypes[dns.TypeSOA].RRs[0]
 	soa.(*dns.SOA).Serial = zd.CurrentSerial
 
@@ -645,14 +495,6 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	totalbytes += bytes
 	writer.Flush()
 	return err
-}
-
-func xxxRRsetToStringOG(rrs []dns.RR) string {
-	var tmp string
-	for _, rr := range rrs {
-		tmp += rr.String() + "\n"
-	}
-	return tmp
 }
 
 func RRsetToString(rrset *RRset) string {

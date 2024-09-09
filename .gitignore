@@ -8,8 +8,9 @@
 *.so
 *.dylib
 
-tdnsd/tdnsd
-tdns-cli/tdns-cli
+server/tdns-server
+agent/tdns-agent
+cli/tdns-cli
 dog/dog
 
 */version.go

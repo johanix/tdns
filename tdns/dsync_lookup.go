@@ -165,10 +165,12 @@ type DsyncTarget struct {
 	Name      string
 	Scheme    DsyncScheme
 	Port      uint16
-	Addresses []string
+	Addresses []string // in addr:port format
 	RR        *DSYNC
 }
 
+// dtype = the type of DSYNC RR to look for (dns.TypeCDS, dns.TypeCSYNC, dns.TypeANY, ...)
+// scheme = the DSYNC scheme (SchemeNotify | SchemeUpdate)
 func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) (*DsyncTarget, error) {
 	var addrs []string
 	var dsynctarget DsyncTarget

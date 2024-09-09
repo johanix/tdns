@@ -26,7 +26,10 @@ import (
 
 // Return insync (bool), adds, removes ([]dns.RR) and error
 func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
-	var resp = DelegationSyncStatus{Time: time.Now(), ZoneName: zd.ZoneName}
+	var resp = DelegationSyncStatus{
+		ZoneName: zd.ZoneName,
+		Time:     time.Now(),
+	}
 
 	err := zd.FetchParentData()
 	if err != nil {
@@ -220,6 +223,8 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 
 // DelegationDataChanged() compares the delegation data in the old vs new *ZoneData structs.
 // Returns unsynched bool, adds, removes []dns.RR, error
+
+// XXX: FIXME: This is old code that no longer works. At least the viper.Get* things are broken.
 func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
 		Time:     time.Now(),
@@ -392,4 +397,26 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 	}
 
 	return true, adds, removes, resp, nil
+}
+
+func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
+	var dss DelegationSyncStatus
+	var differ bool
+
+	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, dss, err
+	}
+	newkeys, err := newzd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, dss, err
+	}
+
+	differ, dss.DNSKEYAdds, dss.DNSKEYRemoves = RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger)
+	if differ {
+		dss.Time = time.Now()
+		dss.InSync = false
+	}
+
+	return differ, dss, nil
 }

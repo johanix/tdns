@@ -114,7 +114,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
 
-	zonedata := ZoneData{
+	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
 		ZoneStore:      zd.ZoneStore,
 		ZoneType:       zd.ZoneType,
@@ -127,7 +127,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
-	updated, _, err := zonedata.ReadZoneFile(zd.Zonefile, force)
+	updated, _, err := new_zd.ReadZoneFile(zd.Zonefile, force)
 	if err != nil {
 		log.Printf("Error from ReadZoneFile(%s): %v", zd.ZoneName, err)
 		return false, err
@@ -139,10 +139,25 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
+	new_zd.Ready = true
+
+	zd.mu.Lock()
+	zd.Owners = new_zd.Owners
+	zd.OwnerIndex = new_zd.OwnerIndex
+	zd.IncomingSerial = new_zd.IncomingSerial
+	zd.CurrentSerial = new_zd.CurrentSerial
+	zd.ApexLen = new_zd.ApexLen
+	zd.XfrType = new_zd.XfrType
+	zd.ZoneStore = new_zd.ZoneStore
+	zd.ZoneType = new_zd.ZoneType
+	zd.Data = new_zd.Data
+	zd.Ready = true
+	zd.mu.Unlock()
+
 	if zd.Options["delegation-sync-child"] {
 		// Detect whether the delegation data has changed.
 		// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
+		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 			return false, err
@@ -167,7 +182,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		if err != nil {
 			zd.Logger.Printf("Error from ZoneFileName(%s): %v", zd.ZoneName, err)
 		} else {
-			_, err := zonedata.WriteFile(fname)
+			_, err := new_zd.WriteFile(fname)
 			if err != nil {
 				zd.Logger.Printf("Error from WriteFile(%s): %v", zd.ZoneName, err)
 			} else {
@@ -175,18 +190,6 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 			}
 		}
 	}
-
-	zd.mu.Lock()
-	zd.Owners = zonedata.Owners
-	zd.OwnerIndex = zonedata.OwnerIndex
-	zd.IncomingSerial = zonedata.IncomingSerial
-	zd.CurrentSerial = zonedata.CurrentSerial
-	zd.ApexLen = zonedata.ApexLen
-	zd.XfrType = zonedata.XfrType
-	zd.ZoneStore = zonedata.ZoneStore
-	zd.ZoneType = zonedata.ZoneType
-	zd.Data = zonedata.Data
-	zd.mu.Unlock()
 
 	return true, nil
 }
@@ -196,7 +199,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 
 	log.Printf("Transferring zone %s via AXFR from %s\n", zd.ZoneName, zd.Upstream)
 
-	zonedata := ZoneData{
+	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
 		ZoneType:       zd.ZoneType,
 		ZoneStore:      zd.ZoneStore,
@@ -209,25 +212,41 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
-	_, err := zonedata.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
+	_, err := new_zd.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
 	if err != nil {
 		zd.Logger.Printf("Error from ZoneTransfer(%s): %v", zd.ZoneName, err)
 		return false, err
 	}
 
-	if zonedata.CurrentSerial == zd.CurrentSerial {
+	if new_zd.CurrentSerial == zd.CurrentSerial {
 		zd.Logger.Printf("FetchFromUpstream: zone %s: SOA serial is unchanged (%d)",
 			zd.ZoneName, zd.CurrentSerial)
 		return false, nil
 	}
 
-	if zd.Options["delegation-sync-child"] {
+	new_zd.Ready = true
+
+	zd.mu.Lock()
+	zd.Owners = new_zd.Owners
+	zd.OwnerIndex = new_zd.OwnerIndex
+	zd.IncomingSerial = new_zd.IncomingSerial
+	zd.CurrentSerial = new_zd.CurrentSerial
+	zd.ApexLen = new_zd.ApexLen
+	zd.XfrType = new_zd.XfrType
+	zd.ZoneStore = new_zd.ZoneStore
+	zd.ZoneType = new_zd.ZoneType
+	zd.Data = new_zd.Data
+	zd.Ready = true
+	zd.mu.Unlock()
+
+	// Can only test for differences between old and new zone data if the zone data is ready.
+	if zd.Options["delegation-sync-child"] && zd.Ready {
 		// Detect whether the delegation data has changed.
 		//zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&zonedata)
+		delchanged, _, _, dss, err := zd.DelegationDataChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
-			return false, err
+			// return false, err
 		}
 		if delchanged {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
@@ -235,12 +254,39 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 				Command:    "SYNC-DELEGATION",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
-				SyncStatus: delsyncstatus,
+				SyncStatus: dss,
 				// Adds:       adds,
 				// Removes:    removes,
 			}
 		} else {
 			// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+		}
+
+		keyschanged, dss, err := zd.DnskeysChanged(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+			// return false, err
+		}
+		if keyschanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			zd.DelegationSyncCh <- DelegationSyncRequest{
+				Command:    "SYNC-DNSKEY-RRSET",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				OldDnskeys: oldkeys,
+				NewDnskeys: newkeys,
+				SyncStatus: dss,
+			}
 		}
 	}
 
@@ -249,7 +295,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		if err != nil {
 			zd.Logger.Printf("Error from ZoneFileName(%s): %v", zd.ZoneName, err)
 		} else {
-			_, err := zonedata.WriteFile(fname)
+			_, err := new_zd.WriteFile(fname)
 			if err != nil {
 				zd.Logger.Printf("Error from WriteFile(%s): %v", zd.ZoneName, err)
 			} else {
@@ -257,19 +303,6 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 			}
 		}
 	}
-
-	zd.mu.Lock()
-	//	zd.RRs = zonedata.RRs
-	zd.Owners = zonedata.Owners
-	zd.OwnerIndex = zonedata.OwnerIndex
-	zd.IncomingSerial = zonedata.IncomingSerial
-	zd.CurrentSerial = zonedata.CurrentSerial
-	zd.ApexLen = zonedata.ApexLen
-	zd.XfrType = zonedata.XfrType
-	zd.ZoneStore = zonedata.ZoneStore
-	zd.ZoneType = zonedata.ZoneType
-	zd.Data = zonedata.Data
-	zd.mu.Unlock()
 
 	return true, nil
 }
@@ -342,7 +375,11 @@ func (zd *ZoneData) NameExists(qname string) bool {
 }
 
 // XXX: FIXME: SliceZones do not yet have support for adding new owner names.
+
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
+	if !zd.Ready {
+		return nil, fmt.Errorf("GetOwner: Zone %s: zone data is not yet ready", zd.ZoneName)
+	}
 	var owner OwnerData
 	var ok bool
 	switch zd.ZoneStore {
@@ -362,7 +399,10 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 				Name:    qname,
 				RRtypes: make(map[uint16]RRset),
 			}
-			zd.Data.Set(qname, owner)
+			// XXX: Hmm. This seems wrong. We create an ownername where there wasn't one
+			//      based on a request for it?
+			// zd.Data.Set(qname, owner)
+			return nil, nil // Seems better
 		}
 		return &owner, nil
 
@@ -375,8 +415,9 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	return &owner, nil
 }
 
+// XXX: This MUST ONLY be called from the ZoneUpdater, due to locking issues
 func (zd *ZoneData) AddOwner(owner *OwnerData) {
-	zd.mu.Lock()
+	//	zd.mu.Lock()
 	switch zd.ZoneStore {
 	case SliceZone:
 		zd.Owners = append(zd.Owners, *owner)
@@ -385,7 +426,30 @@ func (zd *ZoneData) AddOwner(owner *OwnerData) {
 	case MapZone:
 		zd.Data.Set(owner.Name, *owner)
 	}
-	zd.mu.Unlock()
+	// zd.mu.Unlock()
+}
+
+func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*RRset, error) {
+	if zd == nil {
+		return nil, fmt.Errorf("GetRRset: zone data is nil. This should not happen")
+	}
+	owner, err := zd.GetOwner(qname)
+	if err != nil {
+		return nil, err
+	}
+	if owner == nil && zd.ZoneName != qname {
+		return nil, nil // this can happen if qname does not exist in the zone
+	}
+	if owner == nil {
+		// XXX: This can not happen, as there should always be data at the zone apez
+		panic(fmt.Sprintf("GetRRset: owner data is nil for zone apex %s. This should not happen", zd.ZoneName))
+	}
+	// dump.P(owner)
+	if rrset, exists := owner.RRtypes[rrtype]; exists {
+		return &rrset, nil
+	} else {
+		return nil, nil
+	}
 }
 
 func (zd *ZoneData) GetOwnerNames() ([]string, error) {
@@ -567,9 +631,28 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 
 	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
 	zd.mu.Lock()
+
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
+	if zd.Options["online-signing"] {
+		//		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
+		//		if err != nil {
+		//			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
+		//			zd.mu.Unlock()
+		//			return resp, err
+		//		}
+		apex, _ := zd.GetOwner(zd.ZoneName)
+		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+
+		rrset := apex.RRtypes[dns.TypeSOA]
+		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
+		if err != nil {
+			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
+			zd.mu.Unlock()
+			return resp, err
+		}
+	}
 	zd.mu.Unlock()
 
 	zd.NotifyDownstreams()
@@ -632,15 +715,13 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync() error {
-	kdb := zd.KeyDB
-
-	if !zd.Options["allow-updates"] {
+	if !zd.Options["allow-updates"] || zd.Options["agent"] {
 		return nil // this zone does not allow any modifications
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		zd.Logger.Printf("Error durng SetupZone(%s): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
 		return err
 	}
 
@@ -652,19 +733,13 @@ func (zd *ZoneData) SetupZoneSync() error {
 		dsync_rrset, exist := apex.RRtypes[TypeDSYNC]
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
-			zd.Logger.Printf("SetupZone(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
+			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
 		} else {
-			zd.Logger.Printf("SetupZone(%s): No DSYNC RRset in zone. Will add.", zd.ZoneName)
-			for _, scheme := range viper.GetStringSlice("delegationsync.parent.schemes") {
-				dsync_rrset = RRset{
-					RRtype: TypeDSYNC,
-				}
-				switch scheme {
-				case "notify":
-				case "update":
-				default:
-					zd.Logger.Printf("Error parsing key delegationsync.parent.schemes: unknown scheme: \"%s\". Ignored.", scheme)
-				}
+			zd.Logger.Printf("SetupZoneSync: Zone %s: No DSYNC RRset in zone. Will add.", zd.ZoneName)
+			err := zd.PublishDsyncRRs()
+			if err != nil {
+				zd.Logger.Printf("Error from PublishDsyncRRs(%s): %v", zd.ZoneName, err)
+				return err
 			}
 		}
 	}
@@ -674,58 +749,18 @@ func (zd *ZoneData) SetupZoneSync() error {
 			switch scheme {
 			case "update":
 				// 1. Is there a KEY RRset already?
-				key_rrset, exist := apex.RRtypes[dns.TypeKEY]
-				numpubkeys := len(key_rrset.RRs)
-				if exist && numpubkeys > 0 {
-					// If there is already a KEY RRset, we must ensure that we have access to the
-					// private key to be able to sign updates.
-					if numpubkeys > 1 {
-						zd.Logger.Printf("Warning: Zone %s has %d KEY records published. This is likely a mistake.", zd.ZoneName, numpubkeys)
-					}
-					// 1. Get the keys from the keystore
-					zd.Logger.Printf("SetupZone(%s, child-side): KEY RRset exists. Checking availability of private key.", zd.ZoneName)
-					sak, err := kdb.GetSig0ActiveKeys(zd.ZoneName)
+				if !zd.Options["dont-publish-keys"] {
+					err := zd.VerifyPublishedKeyRRs()
 					if err != nil {
-						zd.Logger.Printf("Error from GetSig0ActiveKeys(%s): %v", zd.ZoneName, err)
+						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
 						return err
 					}
-					// 2. Iterate through the keys to match against keyid of published keys.
-					for _, pkey := range key_rrset.RRs {
-						found := false
-						pkeyid := pkey.(*dns.KEY).KeyTag()
-						for _, key := range sak.Keys {
-							if key.KeyRR.KeyTag() == pkeyid {
-								found = true
-								break
-							}
-						}
-						if !found {
-							zd.Logger.Printf("Warning: Zone %s: no active private key for the published KEY with keyid=%d. This key should be removed.", zd.ZoneName, pkeyid)
-						}
-					}
-				} else {
-					// XXX: We must generate a new key pair, store it in the keystore and publish the public key.
-					algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-					alg := dns.StringToAlgorithm[strings.ToLower(algstr)]
-					if alg == 0 {
-						return fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
-					}
-					pkc, err := kdb.GeneratePrivateKey(zd.ZoneName, dns.TypeKEY, alg) //
-					if err != nil {
-						zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-						return err
-					}
-					sak := &Sig0ActiveKeys{
-						Keys: []*PrivateKeyCache{pkc},
-					}
-					err = zd.PublishKeyRRs(sak)
-					if err != nil {
-						zd.Logger.Printf("Error from PublishKeyRRs(%s): %v", zd.ZoneName, err)
-						return err
-					}
+					zd.Logger.Printf("SetupZoneSync: Zone %s: Verified published KEY RRset", zd.ZoneName)
 				}
-			case "notify":
 
+			case "notify":
+				// Nothing to do here as CSYNC and CDS will only be published when
+				// the zone is modified, not proactively.
 			default:
 			}
 		}
@@ -734,27 +769,35 @@ func (zd *ZoneData) SetupZoneSync() error {
 	return nil
 }
 
-// XXX: FIXME: Use the algorithm from the config instead of hardoding ED25519
-func (kdb *KeyDB) GenerateNewSig0ActiveKey(zd *ZoneData) (*Sig0ActiveKeys, error) {
-	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		return nil, fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
+func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
+	if !zd.Options["online-signing"] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
+		return nil // this zone should not be signed (at least not by us)
 	}
-	pkc, err := kdb.GeneratePrivateKey(zd.ZoneName, dns.TypeKEY, alg) //
+
+	if !zd.Options["allow-updates"] {
+		return nil // this zone does not allow any modifications
+	}
+
+	if zd.Options["agent"] {
+		return nil // this zone does not allow any modifications
+	}
+
+	if zd.ZoneType != Primary {
+		return nil // this zone is not a primary zone, it cannot be signed
+	}
+
+	kdb := zd.KeyDB
+	newrrsigs, err := zd.SignZone(kdb, false)
 	if err != nil {
-		zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-		return nil, err
+		zd.Logger.Printf("Error from SignZone(%s): %v", zd.ZoneName, err)
+		return err
 	}
-	sak := &Sig0ActiveKeys{
-		Keys: []*PrivateKeyCache{pkc},
-	}
-	//	err = zd.PublishKeyRRs(sak)
-	//	if err != nil {
-	//		zd.Logger.Printf("Error from PublishKeyRRs(%s): %v", zd.ZoneName, err)
-	//		return nil, err
-	//	}
-	return sak, nil
+
+	log.Printf("SetupZoneSigning: zone %s signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
+
+	resignq <- zd
+
+	return nil
 }
 
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
@@ -762,6 +805,7 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
 		return msg, fmt.Errorf(msg)
 	}
+
 	var respch = make(chan RefresherResponse, 1)
 	refreshCh <- ZoneRefresher{
 		Name:     zd.ZoneName,
@@ -787,4 +831,67 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 		resp.Msg = fmt.Sprintf("Zone %s: reloaded", zd.ZoneName)
 	}
 	return resp.Msg, nil
+}
+
+type DelegationData struct {
+	CurrentNS *RRset
+	AddedNS   *RRset
+	RemovedNS *RRset
+
+	BailiwickNS []string
+	A_glue      map[string]*RRset // map[nsname]
+	AAAA_glue   map[string]*RRset // map[nsname]
+	Actions     []dns.RR          // actions are DNS UPDATE actions that modify delegation data
+	Time        time.Time
+}
+
+func (zd *ZoneData) DelegationData() (*DelegationData, error) {
+	dd := DelegationData{
+		Time:      time.Now(),
+		AddedNS:   &RRset{},
+		RemovedNS: &RRset{},
+		A_glue:    map[string]*RRset{},
+		AAAA_glue: map[string]*RRset{},
+	}
+
+	rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeNS)
+	if err != nil {
+		return nil, err
+	}
+	if len(rrset.RRs) == 0 {
+		return nil, err
+	}
+
+	dd.CurrentNS = rrset
+
+	// Get the in-bailiwick nameserver names
+	dd.BailiwickNS, err = BailiwickNS(zd.ZoneName, dd.CurrentNS.RRs)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, nsname := range dd.BailiwickNS {
+		owner, err := zd.GetOwner(nsname)
+		if err != nil {
+			return nil, err
+		}
+		// XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
+		//      I.e. a broken config with an in-bailiwick NS w/o any address.
+		if owner == nil {
+			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName)
+			continue
+		}
+
+		if rrset, exist := owner.RRtypes[dns.TypeA]; exist {
+			if len(rrset.RRs) > 0 {
+				dd.A_glue[nsname] = &rrset
+			}
+		}
+		if rrset, exist := owner.RRtypes[dns.TypeAAAA]; exist {
+			if len(rrset.RRs) > 0 {
+				dd.AAAA_glue[nsname] = &rrset
+			}
+		}
+	}
+	return &dd, nil
 }

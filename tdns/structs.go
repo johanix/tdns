@@ -4,8 +4,9 @@
 package tdns
 
 import (
+	"crypto"
+	"database/sql"
 	"log"
-	"net/http"
 	"sync"
 	"time"
 
@@ -39,6 +40,17 @@ var ZoneTypeToString = map[ZoneType]string{
 	Secondary: "secondary",
 }
 
+const (
+	Sig0StateCreated     string = "created"
+	Sig0StatePublished   string = "published"
+	Sig0StateActive      string = "active"
+	Sig0StateRetired     string = "retired"
+	DnskeyStateCreated   string = "created"
+	DnskeyStatePublished string = "published"
+	DnskeyStateActive    string = "active"
+	DnskeyStateRetired   string = "retired"
+)
+
 type ZoneData struct {
 	mu         sync.Mutex
 	ZoneName   string
@@ -49,6 +61,7 @@ type ZoneData struct {
 	ApexLen    int
 	//	RRs            RRArray
 	Data             cmap.ConcurrentMap[string, OwnerData]
+	Ready            bool   // true if zd.Data has been populated (from file or upstream)
 	XfrType          string // axfr | ixfr
 	Logger           *log.Logger
 	ZoneFile         string
@@ -67,6 +80,8 @@ type ZoneData struct {
 	Children         map[string]*ChildDelegationData
 	Options          map[string]bool
 	UpdatePolicy     UpdatePolicy
+	DnssecPolicy     *DnssecPolicy
+	MultiSigner      *MultiSignerConf
 	KeyDB            *KeyDB
 }
 
@@ -82,7 +97,9 @@ type ZoneConf struct {
 	Frozen       bool // true if zone is frozen; not a config param
 	Dirty        bool // true if zone has been modified; not a config param
 	UpdatePolicy UpdatePolicyConf
+	DnssecPolicy string
 	Template     string
+	MultiSigner  string
 }
 
 type TemplateConf struct {
@@ -94,6 +111,8 @@ type TemplateConf struct {
 	Notify       []string
 	Options      []string
 	UpdatePolicy UpdatePolicyConf
+	DnssecPolicy string
+	MultiSigner  string
 }
 
 type UpdatePolicyConf struct {
@@ -122,6 +141,40 @@ type UpdatePolicyDetail struct {
 	KeyUpload    string
 }
 
+// DnssecPolicyConf should match the configuration
+type DnssecPolicyConf struct {
+	Name      string
+	Algorithm string
+
+	KSK struct {
+		Lifetime    string
+		SigValidity string
+	}
+	ZSK struct {
+		Lifetime    string
+		SigValidity string
+	}
+	CSK struct {
+		Lifetime    string
+		SigValidity string
+	}
+}
+
+type KeyLifetime struct {
+	Lifetime    uint32
+	SigValidity uint32
+}
+
+// DnssecPolicy is what is actually used; it is created from the corresponding DnssecPolicyConf
+type DnssecPolicy struct {
+	Name      string
+	Algorithm uint8
+
+	KSK KeyLifetime
+	ZSK KeyLifetime
+	CSK KeyLifetime
+}
+
 type Ixfr struct {
 	FromSerial uint32
 	ToSerial   uint32
@@ -144,156 +197,42 @@ type RRset struct {
 }
 
 type ChildDelegationData struct {
-	DelHasChanged bool      // When returned from a scanner, this indicates that a change has been detected
-	ParentSerial  uint32    // The parent serial that this data was correct for
-	Timestamp     time.Time // Time at which this data was fetched
-	ChildName     string
-	RRsets        map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
-	NS_rrs        []dns.RR
-	A_glue        []dns.RR
-	AAAA_glue     []dns.RR
-	NS_rrset      *RRset
-	DS_rrset      *RRset
-	A_rrsets      []*RRset
-	AAAA_rrsets   []*RRset
-}
-
-type KeystorePost struct {
-	Command         string // "sig0"
-	SubCommand      string // "list" | "add" | "delete" | ...
-	Zone            string
-	Keyname         string
-	Keyid           uint16
-	Flags           uint16
-	Algorithm       uint8 // RSASHA256 | ED25519 | etc.
-	PrivateKey      string
-	KeyRR           string
-	DnskeyRR        string
-	PrivateKeyCache *PrivateKeyCache
-	State           string
-}
-
-type KeystoreResponse struct {
-	Time     time.Time
-	Status   string
-	Zone     string
-	Dnskeys  map[string]DnssecKey // TrustAnchor
-	Sig0keys map[string]Sig0Key
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-
-type TruststorePost struct {
-	Command    string // "sig0"
-	SubCommand string // "list-child-keys" | "trust-child-key" | "untrust-child-key"
-	Zone       string
-	Keyname    string
-	Keyid      int
-	Trusted    bool
-	Validated  bool
-	Src        string // "dns" | "file"
-	KeyRR      string // RR string for key
-}
-
-type TruststoreResponse struct {
-	Time          time.Time
-	Status        string
-	Zone          string
-	ChildDnskeys  map[string]TrustAnchor
-	ChildSig0keys map[string]Sig0Key
-	Msg           string
-	Error         bool
-	ErrorMsg      string
-}
-
-type CommandPost struct {
-	Command    string
-	SubCommand string
-	Zone       string
-	Force      bool
-}
-
-type CommandResponse struct {
-	Time     time.Time
-	Status   string
-	Zone     string
-	Names    []string
-	Zones    map[string]ZoneConf
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-
-type DelegationPost struct {
-	Command string // status | sync | ...
-	Scheme  uint8  // 1=notify | 2=update
-	Zone    string
-	Force   bool
-}
-
-type DelegationResponse struct {
-	Time       time.Time
-	Zone       string
-	SyncStatus DelegationSyncStatus
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	DelHasChanged    bool      // When returned from a scanner, this indicates that a change has been detected
+	ParentSerial     uint32    // The parent serial that this data was correct for
+	Timestamp        time.Time // Time at which this data was fetched
+	ChildName        string
+	RRsets           map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
+	NS_rrs           []dns.RR
+	A_glue           []dns.RR
+	A_glue_rrsigs    []dns.RR
+	AAAA_glue        []dns.RR
+	AAAA_glue_rrsigs []dns.RR
+	NS_rrset         *RRset
+	DS_rrset         *RRset
+	A_rrsets         []*RRset
+	AAAA_rrsets      []*RRset
 }
 
 type DelegationSyncStatus struct {
-	ZoneName    string
-	Parent      string // use zd.Parent instead
-	Time        time.Time
-	InSync      bool
-	Status      string
-	Msg         string
-	Rcode       uint8
-	Adds        []dns.RR
-	Removes     []dns.RR
-	NsAdds      []dns.RR
-	NsRemoves   []dns.RR
-	AAdds       []dns.RR
-	ARemoves    []dns.RR
-	AAAAAdds    []dns.RR
-	AAAARemoves []dns.RR
-	Error       bool
-	ErrorMsg    string
-}
-
-type DebugPost struct {
-	Command string
-	Zone    string
-	Qname   string
-	Qtype   uint16
-	Verbose bool
-}
-
-type DebugResponse struct {
-	Time       time.Time
-	Status     string
-	Zone       string
-	OwnerIndex map[string]int
-	RRset      RRset
-	//	TrustedDnskeys	map[string]dns.DNSKEY
-	//	TrustedSig0keys	map[string]dns.KEY
-	TrustedDnskeys  map[string]TrustAnchor
-	TrustedSig0keys map[string]Sig0Key
-	Validated       bool
-	Msg             string
-	Error           bool
-	ErrorMsg        string
-}
-
-type ApiClient struct {
-	Name       string
-	Client     *http.Client
-	BaseUrl    string
-	apiKey     string
-	AuthMethod string
-	UseTLS     bool
-	Verbose    bool
-	Debug      bool
+	ZoneName      string
+	Parent        string // use zd.Parent instead
+	Time          time.Time
+	InSync        bool
+	Status        string
+	Msg           string
+	Rcode         uint8
+	Adds          []dns.RR
+	Removes       []dns.RR
+	NsAdds        []dns.RR
+	NsRemoves     []dns.RR
+	AAdds         []dns.RR
+	ARemoves      []dns.RR
+	AAAAAdds      []dns.RR
+	AAAARemoves   []dns.RR
+	DNSKEYAdds    []dns.RR
+	DNSKEYRemoves []dns.RR
+	Error         bool
+	ErrorMsg      string
 }
 
 type ZoneRefresher struct {
@@ -305,6 +244,8 @@ type ZoneRefresher struct {
 	Zonefile     string
 	Options      map[string]bool
 	UpdatePolicy UpdatePolicy
+	DnssecPolicy string
+	MultiSigner  string
 	Force        bool // force refresh, ignoring SOA serial
 	Response     chan RefresherResponse
 }
@@ -329,15 +270,17 @@ type ValidatorResponse struct {
 }
 
 // type TAStore map[string]map[uint16]TrustAnchor
-type TAStoreT struct {
+type DnskeyCacheT struct {
 	Map cmap.ConcurrentMap[string, TrustAnchor]
 }
 
 type TrustAnchor struct {
 	Name       string
+	Keyid      uint16
 	Validated  bool
 	Trusted    bool
-	Dnskey     dns.DNSKEY
+	Dnskey     dns.DNSKEY // just this key
+	RRset      *RRset     // complete RRset
 	Expiration time.Time
 }
 
@@ -346,17 +289,18 @@ type Sig0StoreT struct {
 }
 
 type Sig0Key struct {
-	Name       string
-	State      string
-	Keyid      uint16
-	Algorithm  string
-	Creator    string
-	Validated  bool   // has this key been DNSSEC validated
-	Trusted    bool   // is this key trusted
-	Source     string // "dns" | "file" | "keystore" | "child-update"
-	PrivateKey string //
-	Key        dns.KEY
-	Keystr     string
+	Name            string
+	State           string
+	Keyid           uint16
+	Algorithm       string
+	Creator         string
+	Validated       bool   // has this key been validated
+	DnssecValidated bool   // has this key been DNSSEC validated
+	Trusted         bool   // is this key trusted
+	Source          string // "dns" | "file" | "keystore" | "child-update"
+	PrivateKey      string //
+	Key             dns.KEY
+	Keystr          string
 }
 
 type DnssecKey struct {
@@ -373,6 +317,19 @@ type DnssecKey struct {
 	Keystr     string
 }
 
+type CachedRRset struct {
+	Name       string
+	RRtype     uint16
+	Rcode      uint8
+	RRset      *RRset
+	Validated  bool
+	Expiration time.Time
+}
+
+type RRsetCacheT struct {
+	Map cmap.ConcurrentMap[string, CachedRRset]
+}
+
 type DelegationSyncRequest struct {
 	Command  string
 	ZoneName string
@@ -380,6 +337,8 @@ type DelegationSyncRequest struct {
 	// Adds       []dns.RR
 	// Removes    []dns.RR
 	SyncStatus DelegationSyncStatus
+	OldDnskeys *RRset
+	NewDnskeys *RRset
 	Response   chan DelegationSyncStatus // used for API-based requests
 }
 
@@ -401,10 +360,11 @@ type BumperResponse struct {
 
 // A Signer is a struct where we keep track of the signer name and keyid
 // for a DNS UPDATE message.
-type Sig0Signer struct {
-	Name    string   // from the SIG
-	KeyId   uint16   // from the SIG
-	Sig0Key *Sig0Key // a key that matches the signer name and keyid
+type Sig0UpdateSigner struct {
+	Name      string   // from the SIG
+	KeyId     uint16   // from the SIG
+	Sig0Key   *Sig0Key // a key that matches the signer name and keyid
+	Validated bool     // true if this key validated the update
 }
 
 // The UpdateStatus is used to track the evolving status of
@@ -412,20 +372,20 @@ type Sig0Signer struct {
 // and approval processes.
 
 type UpdateStatus struct {
-	Zone                  string       // zone that the update applies to
-	ChildZone             string       // zone that the update applies to
-	Type                  string       // auth | child
-	Data                  string       // auth | delegation | key
-	ValidatorKey          *Sig0Key     // key that validated the update
-	Signers               []Sig0Signer // possible validators
-	SignerName            string       // name of the key that signed the update
-	SignatureType         string       // by-trusted | by-known | by-self
-	ValidationRcode       uint8        // Rcode from the validation process
-	Validated             bool         // true if the update has passed validation
-	ValidatedByTrustedKey bool         // true if the update has passed validation by a trusted key
-	SafetyChecked         bool         // true if the update has been safety checked
-	PolicyChecked         bool         // true if the update has been policy checked
-	Approved              bool         // true if the update has been approved
+	Zone                  string             // zone that the update applies to
+	ChildZone             string             // zone that the update applies to
+	Type                  string             // auth | child
+	Data                  string             // auth | delegation | key
+	ValidatorKey          *Sig0Key           // key that validated the update
+	Signers               []Sig0UpdateSigner // possible validators
+	SignerName            string             // name of the key that signed the update
+	SignatureType         string             // by-trusted | by-known | self-signed
+	ValidationRcode       uint8              // Rcode from the validation process
+	Validated             bool               // true if the update has passed validation
+	ValidatedByTrustedKey bool               // true if the update has passed validation by a trusted key
+	SafetyChecked         bool               // true if the update has been safety checked
+	PolicyChecked         bool               // true if the update has been policy checked
+	Approved              bool               // true if the update has been approved
 	Msg                   string
 	Error                 bool
 	ErrorMsg              string
@@ -438,9 +398,73 @@ type NotifyStatus struct {
 	Type          uint16 // CDS | CSYNC | DNSKEY | DELEG
 	ScanStatus    string // "ok" | "changed" | "failed"
 	SafetyChecked bool   // true if the update has been safety checked
+	PolicyChecked bool   // true if the update has been policy checked
 	Approved      bool   // true if the update has been approved
 	Msg           string
 	Error         bool
 	ErrorMsg      string
 	Status        bool
+}
+
+// Migrating all DB access to own interface to be able to have local receiver functions.
+type PrivateKeyCache struct {
+	K          crypto.PrivateKey
+	PrivateKey string // This is only used when reading from file with ReadKeyNG()
+	CS         crypto.Signer
+	RR         dns.RR
+	KeyType    uint16
+	Algorithm  uint8
+	KeyId      uint16
+	KeyRR      dns.KEY
+	DnskeyRR   dns.DNSKEY
+}
+
+type Sig0ActiveKeys struct {
+	Keys []*PrivateKeyCache
+}
+
+type DnssecKeys struct {
+	KSKs []*PrivateKeyCache
+	ZSKs []*PrivateKeyCache
+}
+
+type KeyDB struct {
+	DB *sql.DB
+	mu sync.Mutex
+	// Sig0Cache   map[string]*Sig0KeyCache
+	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
+	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT
+	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
+	Ctx                 string
+	UpdateQ             chan UpdateRequest
+}
+
+type Tx struct {
+	*sql.Tx
+	KeyDB   *KeyDB
+	context string
+}
+
+type MultiSignerConf struct {
+	Name       string
+	Controller MultiSignerController
+}
+
+type MultiSignerController struct {
+	Name   string
+	Notify MSCNotifyConf
+	API    MSCAPIConf
+}
+
+type MSCNotifyConf struct {
+	Addresses []string `validate:"required"` // XXX: must not be in addr:port format
+	Port      string   `validate:"required"`
+	Targets   []string
+}
+
+type MSCAPIConf struct {
+	BaseURL    string
+	ApiKey     string
+	AuthMethod string
+	UseTLS     bool
 }

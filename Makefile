@@ -1,14 +1,17 @@
 all:
-	$(MAKE) -C ./tdnsd/
-	$(MAKE) -C ./tdns-cli/
+	$(MAKE) -C ./server/
+	$(MAKE) -C ./cli/
+	$(MAKE) -C ./agent/
 	$(MAKE) -C ./dog/
 
 clean:
-	$(MAKE) -C ./tdnsd/ clean
-	$(MAKE) -C ./tdns-cli/ clean
+	$(MAKE) -C ./server/ clean
+	$(MAKE) -C ./cli/ clean
+	$(MAKE) -C ./agent/ clean
 	$(MAKE) -C ./dog/ clean
 
 install:
-	$(MAKE) -C ./tdnsd/ install
-	$(MAKE) -C ./tdns-cli/ install
+	$(MAKE) -C ./server/ install
+	$(MAKE) -C ./cli/ install
+	$(MAKE) -C ./agent/ install
 	$(MAKE) -C ./dog/ install

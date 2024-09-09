@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package tdns
 
@@ -331,4 +331,15 @@ func (rrset *RRset) RemoveRR(rr dns.RR) {
 			return
 		}
 	}
+}
+
+func (rrset *RRset) Copy() *RRset {
+	new_rrset := RRset{
+		Name:   rrset.Name,
+		RRs:    []dns.RR{},
+		RRSIGs: []dns.RR{},
+	}
+	new_rrset.RRs = append(new_rrset.RRs, rrset.RRs...)
+	new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
+	return &new_rrset
 }
