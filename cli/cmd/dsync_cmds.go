@@ -47,7 +47,7 @@ func init() {
 // 	if tdns.Globals.IMR == "" {
 // 		tdns.Globals.IMR = viper.GetString("resolver.address")
 // 	}
-// 
+//
 // 	if tdns.Globals.Verbose {
 // 		fmt.Printf("Using resolver \"%s\"\n", tdns.Globals.IMR)
 // 	}

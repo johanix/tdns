@@ -73,7 +73,8 @@ func main() {
 	conf.AppMode = "agent"
 	conf.ServerBootTime = time.Now()
 	conf.AppVersion = appVersion
-	conf.AppName = "tdns-agent"
+	conf.AppName = appName
+	conf.AppDate = appDate
 	// The agent is not a mode of operation, an agent should not be able to run as a server by just starting it with the wrong arguments.
 	// flag.StringVar(&appMode, "mode", "agent", "Mode of operation: server | agent | scanner")
 
@@ -95,7 +96,10 @@ func main() {
 	kdb := conf.Internal.KeyDB
 
 	logfile := viper.GetString("log.file")
-	tdns.SetupLogging(logfile)
+	err = tdns.SetupLogging(logfile)
+	if err != nil {
+		log.Fatalf("Error setting up logging: %v", err)
+	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
 	fmt.Printf("TDNSD Agent version %s starting.\n", appVersion)

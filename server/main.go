@@ -70,7 +70,8 @@ func main() {
 	conf.ServerBootTime = time.Now()
 	conf.ServerConfigTime = time.Now()
 	conf.AppVersion = appVersion
-	conf.AppName = "tdns-server"
+	conf.AppName = appName
+	conf.AppDate = appDate
 
 	flag.StringVar(&conf.AppMode, "mode", "server", "Mode of operation: server | scanner")
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
@@ -91,7 +92,10 @@ func main() {
 	kdb := conf.Internal.KeyDB
 
 	logfile := viper.GetString("log.file")
-	tdns.SetupLogging(logfile)
+	err = tdns.SetupLogging(logfile)
+	if err != nil {
+		log.Fatalf("Error setting up logging: %v", err)
+	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
 	fmt.Printf("TDNSD version %s starting.\n", appVersion)

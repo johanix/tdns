@@ -221,7 +221,7 @@ var debugShowRRsetCacheCmd = &cobra.Command{
 			for _, crrset := range dr.CachedRRsets {
 				for _, rr := range crrset.RRset.RRs {
 					out = append(out, fmt.Sprintf("%s|%s|%v|%v",
-						crrset.Name, crrset.RRtype, time.Until(crrset.Expiration).Seconds(), rr.String()))
+						crrset.Name, dns.TypeToString[crrset.RRtype], time.Until(crrset.Expiration).Seconds(), rr.String()))
 				}
 			}
 		}

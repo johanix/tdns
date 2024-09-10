@@ -74,7 +74,7 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
 		}
 
-	case TypeDSYNC, TypeNOTIFY, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
+	case TypeDSYNC, TypeNOTIFY, TypeMSIGNER, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
 		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD, dns.TypeKEY,
 		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
 		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
