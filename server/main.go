@@ -70,8 +70,8 @@ func main() {
 	conf.ServerBootTime = time.Now()
 	conf.ServerConfigTime = time.Now()
 	conf.AppVersion = appVersion
-	conf.AppName = appName
-	conf.AppDate = appDate
+	conf.AppName, tdns.Globals.AppName = appName, appName
+	conf.AppDate, tdns.Globals.AppDate = appDate, appDate
 
 	flag.StringVar(&conf.AppMode, "mode", "server", "Mode of operation: server | scanner")
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")

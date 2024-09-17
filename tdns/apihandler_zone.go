@@ -29,7 +29,8 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 			zp.Command, r.RemoteAddr)
 
 		resp := ZoneResponse{
-			Time: time.Now(),
+			Time:    time.Now(),
+			AppName: Globals.AppName,
 		}
 
 		defer func() {
@@ -113,7 +114,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 			}
 
 		case "thaw":
-			if !zd.Options["allow-updates"] || !zd.Options["allow-child-updates"] {
+			if !zd.Options["allow-updates"] && !zd.Options["allow-child-updates"] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
 			}
@@ -121,7 +122,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s is not frozen", zd.ZoneName)
 			}
-			zd.Options["frozen"] = false
+			zd.SetOption("frozen", false)
 			resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
 
 		case "reload":

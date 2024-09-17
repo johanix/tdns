@@ -801,7 +801,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
 }
 
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
-	if !zd.Options["dirty"] {
+	if zd.Options["dirty"] {
 		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
 		return msg, fmt.Errorf(msg)
 	}
