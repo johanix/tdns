@@ -72,7 +72,7 @@ func (rd *DSYNC) Parse(txt []string) error {
 
 	tgt := dns.Fqdn(txt[3])
 	if _, ok := dns.IsDomainName(tgt); !ok {
-		return fmt.Errorf("invalid DSYNC target: %s. Error: %v", txt[3], err)
+		return fmt.Errorf("invalid DSYNC target: %s.", txt[3])
 	}
 
 	rd.Type = t

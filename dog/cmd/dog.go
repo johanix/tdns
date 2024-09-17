@@ -22,7 +22,9 @@ var short bool
 var rrtype uint16
 
 var port = "53"
-var server = "8.8.8.8"
+
+var server string
+var cfgFile string
 
 var options = make(map[string]string, 2)
 
@@ -66,6 +68,31 @@ var rootCmd = &cobra.Command{
 			}
 
 			cleanArgs = append(cleanArgs, arg)
+		}
+
+		if server == "" {
+			// Read /etc/resolv.conf to get the default nameserver
+			content, err := os.ReadFile("/etc/resolv.conf")
+			if err != nil {
+				fmt.Println("Error: Unable to read /etc/resolv.conf and no nameserver specified")
+				os.Exit(1)
+			}
+			lines := strings.Split(string(content), "\n")
+			foundNameserver := false
+			for _, line := range lines {
+				if strings.HasPrefix(strings.TrimSpace(line), "nameserver") {
+					fields := strings.Fields(line)
+					if len(fields) == 2 {
+						server = fields[1]
+						foundNameserver = true
+						break
+					}
+				}
+			}
+			if !foundNameserver {
+				fmt.Println("Error: No nameserver entry found in /etc/resolv.conf and no nameserver specified")
+				os.Exit(1)
+			}
 		}
 
 		if rrtype == 0 {
