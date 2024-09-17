@@ -898,10 +898,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					ddata.Actions = append(ddata.Actions, rrcopy)
 					// XXX: This is a new NS. Now we must locate any existing address RRs for this name.
 					if nsrr, ok := rr.(*dns.NS); ok {
+						log.Printf("ZUCDDNG: fetching owner for NS: %+v", nsrr.Ns)
 						nsowner, err := zd.GetOwner(nsrr.Ns)
-						if err != nil {
+						if err != nil || nsowner == nil {
 							log.Printf("ZUCDDNG: Error: owner %s of NS %s is unknown", nsrr.Ns, nsrr.String())
 						} else {
+							log.Printf("ZUCDDNG: nsowner: %+v", nsowner)
 							if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
 								for _, rr := range a_rrset.RRs {
 									dss.AAdds = append(dss.AAdds, rr)
