@@ -85,8 +85,16 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 				zd.Logger.Printf("Warning: Zone %s: no active private key for the published KEY with keyid=%d. This key should be removed.", zd.ZoneName, pkeyid)
 			}
 		}
-	} else {
-		// XXX: We must generate a new key pair, store it in the keystore and publish the public key.
+		return nil
+	}
+
+	// No KEY RRset found, try to find an active key in the keystore
+	sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+	if err != nil {
+		return fmt.Errorf("VerifyPublishedKeyRRs(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
+	}
+	if len(sak.Keys) == 0 {
+		// Ok, no active key found, try to generate a new one
 		algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
 		alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 		if alg == 0 {
@@ -101,14 +109,15 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 
 		zd.Logger.Printf(msg)
 
-		sak := &Sig0ActiveKeys{
+		sak = &Sig0ActiveKeys{
 			Keys: []*PrivateKeyCache{pkc},
 		}
-		err = zd.PublishKeyRRs(sak)
-		if err != nil {
-			zd.Logger.Printf("Error from PublishKeyRRs(%s): %v", zd.ZoneName, err)
-			return err
-		}
+	}
+
+	err = zd.PublishKeyRRs(sak)
+	if err != nil {
+		zd.Logger.Printf("Error from PublishKeyRRs(%s): %v", zd.ZoneName, err)
+		return err
 	}
 	return nil
 }

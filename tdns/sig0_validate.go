@@ -8,7 +8,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )
@@ -180,7 +179,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 		return fmt.Errorf("Update is not signed by any key")
 	}
 	for _, key := range us.Signers {
-		dump.P(key)
+		// dump.P(key)
 		if key.Sig0Key.Trusted {
 			zd.Logger.Printf("* Update is signed by trusted SIG(0) key \"%s\" (keyid %d).", key.Name, key.KeyId)
 			us.SignatureType = "by-trusted"
