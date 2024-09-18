@@ -13,6 +13,7 @@ import (
 )
 
 func (zd *ZoneData) PublishDsyncRRs() error {
+	zd.Logger.Printf("PublishDsyncRRs: zone: %s", zd.ZoneName)
 	rrset := RRset{
 		Name: zd.ZoneName,
 	}
@@ -45,14 +46,14 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return nil
 	}
 
-	if zd.Debug {
-		zd.Logger.Printf("PublishDsyncRRs: zone: %s defined DSYNC schemes: %v", zd.ZoneName, viper.GetStringSlice("delegationsync.parent.schemes"))
-	}
+	// if zd.Debug {
+	zd.Logger.Printf("PublishDsyncRRs: zone: %s defined DSYNC schemes: %v", zd.ZoneName, viper.GetStringSlice("delegationsync.parent.schemes"))
+	// }
 
 	for _, scheme := range viper.GetStringSlice("delegationsync.parent.schemes") {
-		if zd.Debug {
-			zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
-		}
+		// if zd.Debug {
+		zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
+		// }
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
 			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", zd.ZoneName, 1))
