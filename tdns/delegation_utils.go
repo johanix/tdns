@@ -408,17 +408,6 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		InSync:   true,
 	}
 
-	// Globals.Zonename = zd.ZoneName
-	// ddata, err := zd.DelegationData()
-	// if err != nil {
-	// 	return false, []dns.RR{}, []dns.RR{}, dss, err
-	// }
-
-	// new_ddata, err := newzd.DelegationData()
-	// if err != nil {
-	// 	return false, []dns.RR{}, []dns.RR{}, dss, err
-	// }
-
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
@@ -428,6 +417,11 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	if err != nil {
 		return false, dss, fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
+
+	log.Printf("*** oldapex.RRtypes[dns.TypeNS]:")
+	dump.P(oldapex.RRtypes[dns.TypeNS])
+	log.Printf("*** newapex.RRtypes[dns.TypeNS]:")
+	dump.P(newapex.RRtypes[dns.TypeNS])
 
 	var nsdiff bool
 
