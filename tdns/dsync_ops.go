@@ -45,6 +45,10 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return nil
 	}
 
+	if zd.Debug {
+		zd.Logger.Printf("PublishDsyncRRs: zone: %s defined DSYNC schemes: %v", zd.ZoneName, viper.GetStringSlice("delegationsync.parent.schemes"))
+	}
+
 	for _, scheme := range viper.GetStringSlice("delegationsync.parent.schemes") {
 		if zd.Debug {
 			zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
