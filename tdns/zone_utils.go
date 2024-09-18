@@ -141,6 +141,18 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 
 	new_zd.Ready = true
 
+	// Detect whether the delegation data has changed.
+	// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
+	var delchanged bool
+	var dss DelegationSyncStatus
+	if zd.Options["delegation-sync-child"] {
+		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
+			return false, err
+		}
+	}
+
 	zd.mu.Lock()
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
@@ -154,24 +166,14 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	zd.Ready = true
 	zd.mu.Unlock()
 
-	if zd.Options["delegation-sync-child"] {
-		// Detect whether the delegation data has changed.
-		// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, dss, err := zd.DelegationDataChangedNG(&new_zd)
-		if err != nil {
-			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
-			return false, err
-		}
-		if delchanged {
-			zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-			zd.DelegationSyncCh <- DelegationSyncRequest{
-				Command:    "SYNC-DELEGATION",
-				ZoneName:   zd.ZoneName,
-				ZoneData:   zd,
-				SyncStatus: dss,
-			}
-		} else {
-			// zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
+	// If the delegation has changed, send an update to the DelegationSyncEngine
+	if zd.Options["delegation-sync-child"] && delchanged {
+		zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+		zd.DelegationSyncCh <- DelegationSyncRequest{
+			Command:    "SYNC-DELEGATION",
+			ZoneName:   zd.ZoneName,
+			ZoneData:   zd,
+			SyncStatus: dss,
 		}
 	}
 
@@ -225,6 +227,18 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	new_zd.Ready = true
 
+	// Detect whether the delegation data has changed.
+	// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
+	var delchanged bool
+	var dss DelegationSyncStatus
+	if zd.Options["delegation-sync-child"] {
+		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
+			// return false, err
+		}
+	}
+
 	zd.mu.Lock()
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
@@ -239,51 +253,40 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	zd.mu.Unlock()
 
 	// Can only test for differences between old and new zone data if the zone data is ready.
-	if zd.Options["delegation-sync-child"] && zd.Ready {
-		// Detect whether the delegation data has changed.
-		//zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, dss, err := zd.DelegationDataChangedNG(&new_zd)
-		if err != nil {
-			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
-			// return false, err
+	if zd.Options["delegation-sync-child"] && delchanged {
+		zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+		zd.DelegationSyncCh <- DelegationSyncRequest{
+			Command:    "SYNC-DELEGATION",
+			ZoneName:   zd.ZoneName,
+			ZoneData:   zd,
+			SyncStatus: dss,
 		}
-		if delchanged {
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-			zd.DelegationSyncCh <- DelegationSyncRequest{
-				Command:    "SYNC-DELEGATION",
-				ZoneName:   zd.ZoneName,
-				ZoneData:   zd,
-				SyncStatus: dss,
-			}
-		} else {
-			// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
-		}
+	}
 
-		keyschanged, dss, err := zd.DnskeysChanged(&new_zd)
+	keyschanged, dss, err := zd.DnskeysChanged(&new_zd)
+	if err != nil {
+		zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+		// return false, err
+	}
+	if keyschanged {
+		zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+		oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
 		if err != nil {
-			zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+			zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 			// return false, err
 		}
-		if keyschanged {
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-			if err != nil {
-				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-				// return false, err
-			}
-			newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-			if err != nil {
-				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-				// return false, err
-			}
-			zd.DelegationSyncCh <- DelegationSyncRequest{
-				Command:    "SYNC-DNSKEY-RRSET",
-				ZoneName:   zd.ZoneName,
-				ZoneData:   zd,
-				OldDnskeys: oldkeys,
-				NewDnskeys: newkeys,
-				SyncStatus: dss,
-			}
+		newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+		if err != nil {
+			zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+			// return false, err
+		}
+		zd.DelegationSyncCh <- DelegationSyncRequest{
+			Command:    "SYNC-DNSKEY-RRSET",
+			ZoneName:   zd.ZoneName,
+			ZoneData:   zd,
+			OldDnskeys: oldkeys,
+			NewDnskeys: newkeys,
+			SyncStatus: dss,
 		}
 	}
 
