@@ -489,13 +489,13 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	for _, ns := range oldapex.RRtypes[dns.TypeNS].RRs {
 		if nsrr, ok := ns.(*dns.NS); ok {
 			oldowner, err := zd.GetOwner(nsrr.Ns)
-			if err != nil {
+			if err != nil || oldowner == nil {
 				log.Printf("DDCNG: Error: Nameserver %s has no address records in old zone", nsrr.Ns)
 				// TODO: We should add all address records found in the new version of the zone.
 				continue
 			}
 			newowner, err := newzd.GetOwner(nsrr.Ns)
-			if err != nil {
+			if err != nil || newowner == nil {
 				log.Printf("DDCNG: Error: Nameserver %s has no address records in new zone", nsrr.Ns)
 				for _, rr := range oldowner.RRtypes[dns.TypeA].RRs {
 					rr.Header().Class = dns.ClassNONE
