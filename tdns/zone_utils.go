@@ -370,7 +370,10 @@ func (zd *ZoneData) NameExists(qname string) bool {
 			ZoneStoreToString[zd.ZoneStore])
 		return false
 	}
-	zd.Logger.Printf("NameExists: returning %v for qname %s", ok, qname)
+
+	if zd.Debug {
+		zd.Logger.Printf("NameExists: returning %v for qname %s", ok, qname)
+	}
 	return ok
 }
 
