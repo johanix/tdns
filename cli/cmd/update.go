@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -151,7 +152,27 @@ func CreateUpdate(updateType string) {
 	var ops = []string{"zone", "add", "del", "show", "send", "sign", "set-ttl", "server", "quit"}
 	fmt.Printf("Defined operations are: %v\n", ops)
 
+	var msgSigned bool = false
+
 	SignUpdate := func(msg *dns.Msg, zone string) (*dns.Msg, error) {
+		if server == "" {
+			fmt.Println("Target server not set, please set it first")
+			return nil, fmt.Errorf("target server not set")
+		}
+		if zone == "" {
+			fmt.Println("Target zone not set, please set it first")
+			return nil, fmt.Errorf("target zone not set")
+		}
+		if len(adds) == 0 && len(removes) == 0 {
+			fmt.Println("No records to send, please add or delete some records first")
+			return nil, fmt.Errorf("no records to send")
+		}
+		msg, err = tdns.CreateUpdate(zone, adds, removes)
+		if err != nil {
+			fmt.Printf("Error creating update: %v\n", err)
+			return nil, fmt.Errorf("error creating update: %v", err)
+		}
+
 		if keyfile != "" {
 			pkc, err := tdns.ReadPrivateKey(keyfile)
 			if err != nil {
@@ -293,29 +314,17 @@ cmdloop:
 			}
 
 		case "sign":
-			if server == "" {
-				fmt.Println("Target server not set, please set it first")
-				continue
-			}
-			if zone == "" {
-				fmt.Println("Target zone not set, please set it first")
-				continue
-			}
-			if len(adds) == 0 && len(removes) == 0 {
-				fmt.Println("No records to send, please add or delete some records first")
+			if msgSigned {
+				fmt.Println("Message already signed, please create a new message first")
 				continue
 			}
 
-			msg, err = tdns.CreateUpdate(zone, adds, removes)
-			if err != nil {
-				fmt.Printf("Error creating update: %v\n", err)
-				continue
-			}
 			msg, err = SignUpdate(msg, zone)
 			if err != nil {
 				fmt.Printf("Error signing message: %v\n", err)
 				continue
 			}
+			msgSigned = true
 
 		case "server":
 			server = tdns.TtyQuestion("Server", "localhost", false)
@@ -323,24 +332,8 @@ cmdloop:
 			server = net.JoinHostPort(server, port)
 
 		case "send":
-			if msg == nil {
-				if server == "" {
-					fmt.Println("Target server not set, please set it first")
-					continue
-				}
-				if zone == "" {
-					fmt.Println("Target zone not set, please set it first")
-					continue
-				}
-				if len(adds) == 0 && len(removes) == 0 {
-					fmt.Println("No records to send, please add or delete some records first")
-					continue
-				}
-				msg, err := tdns.CreateUpdate(zone, adds, removes)
-				if err != nil {
-					fmt.Printf("Error creating update: %v\n", err)
-					continue
-				}
+			if !msgSigned {
+
 				msg, err = SignUpdate(msg, zone)
 				if err != nil {
 					fmt.Printf("Error signing message: %v\n", err)
@@ -349,6 +342,7 @@ cmdloop:
 			}
 
 			fmt.Printf("Sending update to %s\n", server)
+			dump.P(msg)
 			rcode, err := tdns.SendUpdate(msg, zone, []string{server})
 			if err != nil {
 				fmt.Printf("Error sending update: %v\n", err)
@@ -359,6 +353,7 @@ cmdloop:
 			adds = []dns.RR{}
 			removes = []dns.RR{}
 			msg = nil
+			msgSigned = false
 		}
 	}
 
