@@ -15,8 +15,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (zd *ZoneData) Refresh(force bool) (bool, error) {
-	verbose := true
+func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
 	var updated bool
 
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
@@ -32,7 +31,7 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 	case Primary:
 		// zd.Logger.Printf("zd.Refresh(): Should reload zone %s from file %s", zd.ZoneName, zd.ZoneFile)
 
-		updated, err := zd.FetchFromFile(verbose, force)
+		updated, err := zd.FetchFromFile(verbose, debug, force)
 		if err != nil {
 			return false, err
 		}
@@ -52,7 +51,7 @@ func (zd *ZoneData) Refresh(force bool) (bool, error) {
 			} else if force {
 				zd.Logger.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose)
+			updated, err = zd.FetchFromUpstream(verbose, debug)
 			if err != nil {
 				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
 				return false, err
@@ -110,7 +109,7 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 }
 
 // Return updated, error
-func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
+func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
 
@@ -123,6 +122,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
+		Debug:          zd.Debug,
 		Options:        zd.Options,
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
@@ -195,7 +195,7 @@ func (zd *ZoneData) FetchFromFile(verbose, force bool) (bool, error) {
 }
 
 // Return updated, err
-func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
+func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	log.Printf("Transferring zone %s via AXFR from %s\n", zd.ZoneName, zd.Upstream)
 
@@ -208,6 +208,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose bool) (bool, error) {
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
+		Debug:          zd.Debug,
 		Options:        zd.Options,
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}

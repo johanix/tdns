@@ -80,9 +80,9 @@ func main() {
 
 	switch conf.AppMode {
 	case "server", "scanner":
-		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", conf.AppMode, tdns.Globals.Verbose, tdns.Globals.Debug)
+		fmt.Printf("*** TDNS-SERVER mode of operation: %s (verbose: %t, debug: %t)\n", conf.AppMode, tdns.Globals.Verbose, tdns.Globals.Debug)
 	default:
-		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", conf.AppMode)
+		log.Fatalf("*** TDNS-SERVER: Error: unknown mode of operation: %s", conf.AppMode)
 	}
 
 	err := tdns.ParseConfig(&conf, false) // false: not reload, initial parsing
