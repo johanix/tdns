@@ -94,6 +94,24 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
 			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)
+			// ok, great that we found the key. but if this is a self-signed key upload then we still need to
+			// signal it as such. so lets check if the update is a KEY RR for the same zone
+			if len(r.Ns) == 1 {
+				if key, ok := r.Ns[0].(*dns.KEY); ok {
+					if key.KeyTag() == keyid && key.Algorithm == sig.RRSIG.Algorithm {
+						log.Printf("* The update is a self-signed KEY upload for the SIG(0) key \"%s\" (keyid %d)", signername, keyid)
+						sig0key.Key = *key
+						sig0key.PublishedInDNS = true
+						sig0key.Source = "child-key-upload"
+						us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+						us.Data = "key"
+						us.Type = "TRUSTSTORE-UPDATE"
+						continue // key found
+					}
+				}
+			}
+
+			sig0key.PublishedInDNS = true
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
