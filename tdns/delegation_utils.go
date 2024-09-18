@@ -412,6 +412,10 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	if err != nil {
 		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
+	if oldapex == nil {
+		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		return false, dss, nil
+	}
 
 	newapex, err := newzd.GetOwner(zd.ZoneName)
 	if err != nil {
