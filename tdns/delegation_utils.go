@@ -495,7 +495,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 				continue
 			}
 			newowner, err := newzd.GetOwner(nsrr.Ns)
-			if err == nil {
+			if err != nil {
 				log.Printf("DDCNG: Error: Nameserver %s has no address records in new zone", nsrr.Ns)
 				for _, rr := range oldowner.RRtypes[dns.TypeA].RRs {
 					rr.Header().Class = dns.ClassNONE
