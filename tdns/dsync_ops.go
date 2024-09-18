@@ -46,6 +46,9 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	}
 
 	for _, scheme := range viper.GetStringSlice("delegationsync.parent.schemes") {
+		if zd.Debug {
+			zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
+		}
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
 			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", zd.ZoneName, 1))
