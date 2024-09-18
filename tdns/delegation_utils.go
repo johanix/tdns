@@ -399,6 +399,134 @@ func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dn
 	return true, adds, removes, resp, nil
 }
 
+// Let's try to modernize this.
+func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
+	log.Printf("*** Enter DDCNG(%s)", newzd.ZoneName)
+	var dss = DelegationSyncStatus{
+		Time:     time.Now(),
+		ZoneName: zd.ZoneName,
+		InSync:   true,
+	}
+
+	// Globals.Zonename = zd.ZoneName
+	// ddata, err := zd.DelegationData()
+	// if err != nil {
+	// 	return false, []dns.RR{}, []dns.RR{}, dss, err
+	// }
+
+	// new_ddata, err := newzd.DelegationData()
+	// if err != nil {
+	// 	return false, []dns.RR{}, []dns.RR{}, dss, err
+	// }
+
+	oldapex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+	}
+
+	newapex, err := newzd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, dss, fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
+	}
+
+	var nsdiff bool
+
+	nsdiff, dss.NsAdds, dss.NsRemoves = RRsetDiffer(zd.ZoneName, newapex.RRtypes[dns.TypeNS].RRs,
+		oldapex.RRtypes[dns.TypeNS].RRs, dns.TypeNS, zd.Logger)
+
+	dss.InSync = !nsdiff
+
+	for _, ns := range dss.NsRemoves {
+		log.Printf("DDCNG: Removed NS: %s", ns.String())
+		if nsrr, ok := ns.(*dns.NS); ok {
+			nsowner, err := zd.GetOwner(nsrr.Ns)
+			if err != nil {
+				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+			} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
+				if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
+					for _, rr := range a_rrset.RRs {
+						rr.Header().Class = dns.ClassNONE
+						dss.ARemoves = append(dss.ARemoves, rr)
+						dss.InSync = false
+					}
+				}
+				if aaaa_rrset, exists := nsowner.RRtypes[dns.TypeAAAA]; exists {
+					for _, rr := range aaaa_rrset.RRs {
+						rr.Header().Class = dns.ClassNONE
+						dss.AAAARemoves = append(dss.AAAARemoves, rr)
+						dss.InSync = false
+					}
+				}
+			}
+		}
+	}
+
+	for _, ns := range dss.NsAdds {
+		log.Printf("DDCNG: Added NS: %s", ns.String())
+		if nsrr, ok := ns.(*dns.NS); ok {
+			nsowner, err := newzd.GetOwner(nsrr.Ns)
+			if err != nil {
+				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+			} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
+				if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
+					for _, rr := range a_rrset.RRs {
+						dss.AAdds = append(dss.AAdds, rr)
+						dss.InSync = false
+					}
+				}
+				if aaaa_rrset, exists := nsowner.RRtypes[dns.TypeAAAA]; exists {
+					for _, rr := range aaaa_rrset.RRs {
+						dss.AAAAAdds = append(dss.AAAAAdds, rr)
+						dss.InSync = false
+					}
+				}
+			}
+		}
+	}
+
+	// we need a third loop to check for changes in the glue records themselves.
+
+	for _, ns := range oldapex.RRtypes[dns.TypeNS].RRs {
+		if nsrr, ok := ns.(*dns.NS); ok {
+			oldowner, err := zd.GetOwner(nsrr.Ns)
+			if err != nil {
+				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+			}
+			newowner, err := newzd.GetOwner(nsrr.Ns)
+			if err != nil {
+				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+			}
+			diff, adds, removes := RRsetDiffer(nsrr.Ns, newowner.RRtypes[dns.TypeA].RRs, oldowner.RRtypes[dns.TypeA].RRs, dns.TypeA, zd.Logger)
+			if diff {
+				for _, rr := range adds {
+					dss.AAdds = append(dss.AAdds, rr)
+				}
+				for _, rr := range removes {
+					dss.ARemoves = append(dss.ARemoves, rr)
+				}
+				dss.InSync = false
+			}
+			diff, adds, removes = RRsetDiffer(nsrr.Ns, newowner.RRtypes[dns.TypeAAAA].RRs, oldowner.RRtypes[dns.TypeAAAA].RRs, dns.TypeAAAA, zd.Logger)
+			if diff {
+				for _, rr := range adds {
+					dss.AAAAAdds = append(dss.AAAAAdds, rr)
+				}
+				for _, rr := range removes {
+					dss.AAAARemoves = append(dss.AAAARemoves, rr)
+				}
+				dss.InSync = false
+			}
+		}
+	}
+
+	if dss.InSync {
+		fmt.Printf("Old delegation data is identical to new. No update needed.\n")
+		return false, dss, nil
+	}
+
+	return true, dss, nil
+}
+
 func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
 	var dss DelegationSyncStatus
 	var differ bool

@@ -157,7 +157,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	if zd.Options["delegation-sync-child"] {
 		// Detect whether the delegation data has changed.
 		// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, _, _, delsyncstatus, err := zd.DelegationDataChanged(&new_zd)
+		delchanged, dss, err := zd.DelegationDataChangedNG(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 			return false, err
@@ -165,12 +165,10 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		if delchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			zd.DelegationSyncCh <- DelegationSyncRequest{
-				Command:  "SYNC-DELEGATION",
-				ZoneName: zd.ZoneName,
-				ZoneData: zd,
-				// Adds:       adds,
-				// Removes:    removes,
-				SyncStatus: delsyncstatus,
+				Command:    "SYNC-DELEGATION",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				SyncStatus: dss,
 			}
 		} else {
 			// zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has NOT changed:", zd.ZoneName)
@@ -244,7 +242,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	if zd.Options["delegation-sync-child"] && zd.Ready {
 		// Detect whether the delegation data has changed.
 		//zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
-		delchanged, _, _, dss, err := zd.DelegationDataChanged(&new_zd)
+		delchanged, dss, err := zd.DelegationDataChangedNG(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
 			// return false, err
@@ -256,8 +254,6 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
 				SyncStatus: dss,
-				// Adds:       adds,
-				// Removes:    removes,
 			}
 		} else {
 			// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has NOT changed:", zd.ZoneName)
