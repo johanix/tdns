@@ -68,7 +68,7 @@ func MsgAcceptFunc(dh dns.Header) dns.MsgAcceptAction {
 	// Don't allow dynamic updates, because then the sections can contain a whole bunch of RRs.
 	opcode := int(dh.Bits>>11) & 0xF
 	if opcode != dns.OpcodeQuery && opcode != dns.OpcodeNotify && opcode != dns.OpcodeUpdate {
-		log.Printf("johani: NOTIMP")
+		log.Printf("johani: NOTIMP: %d (%s)", opcode, dns.OpcodeToString[opcode])
 		return MsgRejectNotImplemented
 	}
 

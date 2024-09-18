@@ -18,6 +18,7 @@ import (
 
 type UpdateRequest struct {
 	Cmd            string
+	UpdateType     string // "DSYNC", "KEY", ...
 	ZoneName       string
 	Adds           []dns.RR
 	Removes        []dns.RR
@@ -65,6 +66,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 					log.Printf("ZoneUpdater: Zone name \"%s\" in request for update is unknown. Ignored.", ur.ZoneName)
 					continue
 				}
+
 				switch ur.Cmd {
 				case "CHILD-UPDATE":
 					// This is the case where a DNS UPDATE contains updates to child delegation information.
@@ -112,7 +114,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 								ZoneName:   zd.ZoneName,
 								ZoneData:   zd,
 								SyncStatus: dss,
-								// XXX: *NOT* pupulating the Adds and Removes here, using the dss data
+								// XXX: *NOT* populating the Adds and Removes here, using the dss data
 							}
 						}
 
@@ -131,7 +133,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 								log.Printf("ZoneUpdater: Error from ApplyUpdateToDB: %v", err)
 							}
 						}
-						if updated {
+						if updated && !ur.InternalUpdate {
 							log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
 							zd.Options["dirty"] = true
 						}

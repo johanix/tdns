@@ -372,8 +372,8 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				// all ok, we know these
 			case "none", "":
 				// these are also ok, but imply that no updates are allowed
-				options["allowupdates"] = false
-				options["allowchildupdates"] = false
+				options["allow-updates"] = false
+				options["allow-child-updates"] = false
 			default:
 				log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, ptype)
 				delete(zones, zname)
@@ -416,6 +416,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 
 		zrch <- ZoneRefresher{
 			Name:         zname,
+			Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
 			ZoneType:     zonetype, // primary | secondary
 			Primary:      zconf.Primary,
 			ZoneStore:    zonestore,

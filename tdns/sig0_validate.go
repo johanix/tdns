@@ -60,7 +60,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// We have the name and keyid of the key that generated this signature. There are now
 		// four possible alternatives for locating the key:
 		// 1. The key is in the TrustStore (either as a child key or a key for an auth zone)
-		// 2. The key is in the KeyStore (as a key for an auth zone). This should only happen if (1) is true.
+		// 2. OBE: The key is in the KeyStore (as a key for an auth zone). This should only happen if (1) is true.
 		// 3. The key is published in the child zone and we can look it up via DNS (and hopefully validate it)
 		// 4. The key is not to be found anywhere, but the update is a self-signed upload of a SIG(0)
 		//    key for the same zone (i.e. the key is in the update as a KEY RR).
@@ -81,16 +81,9 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// to validate against keys in the KeyStore, then those keys should have their public
 		// parts promoted to the TrustStore (and we now do that automatically).
 
-		// sig0key, err = zd.Keystore(signername, keyid)
-		// if err == nil && sig0key != nil {
-		//		us.Signers = append(us.Signers, Sig0Signer{Name: signername, KeyId: keyid, Sig0Key: sig0key})
-		//		continue // key found
-		//	} else {
-		//		us.Log("* Failed to find a SIG(0) key for \"%s\" (keyid %d) in the KeyStore",
-		//			signername, keyid)
-		//	}
-
 		// 3. Try to find the key via DNS in the child zone
+		// XXX: This is not ideal. In the future keys that are not in the TrustStore should be promoted to
+		// trusted via some sort of TrustBootstrapper a la RFC8078.
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
 			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)

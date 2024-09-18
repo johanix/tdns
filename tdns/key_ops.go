@@ -8,7 +8,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -172,7 +171,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error) {
 	}
 
 	log.Printf("BootstrapSig0KeyWithParent(%s): DSYNC target:", zd.ZoneName)
-	dump.P(dsyncTarget)
+	// dump.P(dsyncTarget)
 
 	// 3. Create the DNS UPDATE message
 	// adds := []dns.RR{&sak.Keys[0].KeyRR}
