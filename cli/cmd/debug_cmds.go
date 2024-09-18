@@ -230,7 +230,7 @@ var debugShowRRsetCacheCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(stopCmd, debugCmd)
+	rootCmd.AddCommand(debugCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
 	debugCmd.AddCommand(debugSig0Cmd)

@@ -165,8 +165,6 @@ var zoneDsyncUnpublishCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(zoneCmd)
-
 	zoneCmd.AddCommand(zoneDsyncCmd)
 	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd, zoneDsyncPublishCmd, zoneDsyncUnpublishCmd)
 

@@ -331,11 +331,9 @@ type RRsetCacheT struct {
 }
 
 type DelegationSyncRequest struct {
-	Command  string
-	ZoneName string
-	ZoneData *ZoneData
-	// Adds       []dns.RR
-	// Removes    []dns.RR
+	Command    string
+	ZoneName   string
+	ZoneData   *ZoneData
 	SyncStatus DelegationSyncStatus
 	OldDnskeys *RRset
 	NewDnskeys *RRset

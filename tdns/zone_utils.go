@@ -721,7 +721,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync() error {
-	if !zd.Options["allow-updates"] || zd.Options["agent"] {
+	if zd.Options["agent"] {
 		return nil // this zone does not allow any modifications
 	}
 

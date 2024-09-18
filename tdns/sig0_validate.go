@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )
@@ -69,7 +70,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		sig0key, err = zd.FindSig0TrustedKey(signername, keyid)
 		if err == nil && sig0key != nil {
 			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found in the TrustStore (validated: %v trusted: %v)",
-				      signername, keyid, sig0key.Validated, sig0key.Trusted)
+				signername, keyid, sig0key.Validated, sig0key.Trusted)
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
@@ -168,6 +169,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 		return fmt.Errorf("Update is not signed by any key")
 	}
 	for _, key := range us.Signers {
+		dump.P(key)
 		if key.Sig0Key.Trusted {
 			zd.Logger.Printf("* Update is signed by trusted SIG(0) key \"%s\" (keyid %d).", key.Name, key.KeyId)
 			us.SignatureType = "by-trusted"

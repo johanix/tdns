@@ -124,6 +124,18 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 			dss := ds.SyncStatus
 
 			switch ds.Command {
+
+			case "INITIAL-KEY-UPLOAD":
+				// This case is not yet used, intended for automating the initial key upload to parent
+				log.Printf("DelegationSyncher: Zone %s request for initial key upload.", zd.ZoneName)
+				// err := zd.UploadKeyToParent(kdb)
+				// if err != nil {
+				// 	log.Printf("DelegationSyncher: Zone %s: Error from UploadKeyToParent(): %v. Ignoring sync request.", ds.ZoneName, err)
+				// 	continue
+				// }
+				log.Printf("DelegationSyncher: Zone %s: Initial key upload complete.", ds.ZoneName)
+				continue
+
 			case "DELEGATION-STATUS":
 				log.Printf("DelegationSyncher: Zone %s request for delegation status.", zd.ZoneName)
 
