@@ -139,6 +139,9 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
+	zd.mu.Lock()
+	zd.Ready = true // this is a lie
+	zd.mu.Unlock()
 	new_zd.Ready = true
 
 	// Detect whether the delegation data has changed.
