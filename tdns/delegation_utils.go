@@ -490,11 +490,22 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		if nsrr, ok := ns.(*dns.NS); ok {
 			oldowner, err := zd.GetOwner(nsrr.Ns)
 			if err != nil {
-				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+				log.Printf("DDCNG: Error: Nameserver %s has no address records in old zone", nsrr.Ns)
+				// TODO: We should add all address records found in the new version of the zone.
+				continue
 			}
 			newowner, err := newzd.GetOwner(nsrr.Ns)
-			if err != nil {
-				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+			if err == nil {
+				log.Printf("DDCNG: Error: Nameserver %s has no address records in new zone", nsrr.Ns)
+				for _, rr := range oldowner.RRtypes[dns.TypeA].RRs {
+					rr.Header().Class = dns.ClassNONE
+					dss.ARemoves = append(dss.ARemoves, rr)
+				}
+				for _, rr := range oldowner.RRtypes[dns.TypeAAAA].RRs {
+					rr.Header().Class = dns.ClassNONE
+					dss.AAAARemoves = append(dss.AAAARemoves, rr)
+				}
+				continue
 			}
 			diff, adds, removes := RRsetDiffer(nsrr.Ns, newowner.RRtypes[dns.TypeA].RRs, oldowner.RRtypes[dns.TypeA].RRs, dns.TypeA, zd.Logger)
 			if diff {
