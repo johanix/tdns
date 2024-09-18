@@ -917,6 +917,20 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 								}
 							}
 						}
+						// It is also possible that glue for the new NS is present later in the update.
+						for _, action := range actions {
+							if action.Header().Name == nsrr.Ns {
+								if action.Header().Rrtype == dns.TypeA {
+									log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
+									dss.AAdds = append(dss.AAdds, action)
+									ddata.Actions = append(ddata.Actions, action)
+								} else if action.Header().Rrtype == dns.TypeAAAA {
+									log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
+									dss.AAAAAdds = append(dss.AAAAAdds, action)
+									ddata.Actions = append(ddata.Actions, action)
+								}
+							}
+						}
 					}
 				}
 			} else {
