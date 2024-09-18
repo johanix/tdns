@@ -88,7 +88,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	} else {
 		// XXX: We must generate a new key pair, store it in the keystore and publish the public key.
 		algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-		alg := dns.StringToAlgorithm[strings.ToLower(algstr)]
+		alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 		if alg == 0 {
 			return fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
 		}
