@@ -507,6 +507,8 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 				}
 				continue
 			}
+			dump.P(newowner.RRtypes[dns.TypeA])
+			dump.P(oldowner.RRtypes[dns.TypeA])
 			diff, adds, removes := RRsetDiffer(nsrr.Ns, newowner.RRtypes[dns.TypeA].RRs, oldowner.RRtypes[dns.TypeA].RRs, dns.TypeA, zd.Logger)
 			if diff {
 				for _, rr := range adds {
