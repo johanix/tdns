@@ -328,7 +328,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
 	syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
 
-	dump.P(syncstate)
+	// dump.P(syncstate)
 	m, err := CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
 	if err != nil {
 		return "", 0, err

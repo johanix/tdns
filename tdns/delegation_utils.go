@@ -225,7 +225,7 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 // Returns unsynched bool, adds, removes []dns.RR, error
 
 // XXX: FIXME: This is old code that no longer works. At least the viper.Get* things are broken.
-func (zd *ZoneData) DelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, DelegationSyncStatus, error) {
+func (zd *ZoneData) xxxDelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
 		Time:     time.Now(),
 		ZoneName: zd.ZoneName,
@@ -423,9 +423,9 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	}
 
 	log.Printf("*** oldapex.RRtypes[dns.TypeNS]:")
-	dump.P(oldapex.RRtypes[dns.TypeNS])
+	// dump.P(oldapex.RRtypes[dns.TypeNS])
 	log.Printf("*** newapex.RRtypes[dns.TypeNS]:")
-	dump.P(newapex.RRtypes[dns.TypeNS])
+	// dump.P(newapex.RRtypes[dns.TypeNS])
 
 	var nsdiff bool
 
@@ -505,8 +505,8 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 				}
 				continue
 			}
-			dump.P(newowner.RRtypes[dns.TypeA])
-			dump.P(oldowner.RRtypes[dns.TypeA])
+			// dump.P(newowner.RRtypes[dns.TypeA])
+			// dump.P(oldowner.RRtypes[dns.TypeA])
 			diff, adds, removes := RRsetDiffer(nsrr.Ns, newowner.RRtypes[dns.TypeA].RRs, oldowner.RRtypes[dns.TypeA].RRs, dns.TypeA, zd.Logger)
 			if diff {
 				for _, rr := range adds {
