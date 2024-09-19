@@ -101,16 +101,34 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 			return fmt.Errorf("Unknown keygen algorithm: \"%s\"", algstr)
 		}
 		// Generate a new key and store it in the KeyStore
-		pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdnsd", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
-		if err != nil {
-			zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-			return err
+		// pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdnsd", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
+		// if err != nil {
+		// 	zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
+		// 	return err
+		// }
+
+		// zd.Logger.Printf(msg)
+
+		kp := KeystorePost{
+			Command:    "sig0-mgmt",
+			SubCommand: "generate",
+			Zone:       zd.ZoneName,
+			Algorithm:  alg,
+			State:      Sig0StateActive,
+			Creator:    "bootstrap-sig0",
 		}
+		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
+		if err != nil {
+			return fmt.Errorf("VerifyPublishedKeyRRs(%s) failed to generate keypair: %v", zd.ZoneName, err)
+		}
+		zd.Logger.Printf(resp.Msg)
 
-		zd.Logger.Printf(msg)
-
-		sak = &Sig0ActiveKeys{
-			Keys: []*PrivateKeyCache{pkc},
+		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+		if err != nil {
+			return fmt.Errorf("VerifyPublishedKeyRRs(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
+		}
+		if len(sak.Keys) == 0 {
+			return fmt.Errorf("VerifyPublishedKeyRRs(%s) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
 		}
 	}
 

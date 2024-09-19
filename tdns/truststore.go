@@ -47,18 +47,30 @@ UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 	)
 
+	var localtx = false
+	var err error
+
+	if tx == nil {
+		tx, err = kdb.Begin("Sig0TrustMgmt")
+		if err != nil {
+			return nil, err
+		}
+		localtx = true
+	}
+	defer func() {
+		if localtx {
+			if err != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
+		}
+	}()
+
 	var resp = TruststoreResponse{
 		Time: time.Now(),
 	}
 	var res sql.Result
-	var err error
-
-	defer func() {
-		if err == nil {
-		} else {
-			log.Printf("Error: %v. Rollback.", err)
-		}
-	}()
 
 	switch tp.SubCommand {
 	case "list":
@@ -114,7 +126,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d imported from KeyStore to TrustStore", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "child-update" {
-		        // dump.P(tp)
+			// dump.P(tp)
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
@@ -134,7 +146,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 	case "delete":
 
-	        // dump.P(tp)
+		// dump.P(tp)
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getonechildsig0keyssql, tp.Keyname, tp.Keyid)
 
