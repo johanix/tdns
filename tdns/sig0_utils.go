@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -157,6 +158,8 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		nkey.Header().Class = dns.ClassINET
 		nkey.Header().Ttl = 3600
 
+		log.Printf("Generated DNSKEY flags: %d", nkey.(*dns.DNSKEY).Flags)
+
 		switch rrtype {
 		case dns.TypeKEY:
 			privkey, err = nkey.(*dns.KEY).Generate(bits)
@@ -205,17 +208,17 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		algstr := dns.AlgorithmToString[alg]
 		keydir := "/tmp"
 
-		keytype := "-T KEY"
+		keytypearg := "-T KEY"
 		if rrtype == dns.TypeDNSKEY {
-			keytype = ""
+			keytypearg = ""
 		}
 
 		flags := ""
 		if keytype != "ZSK" {
 			flags = "-f KSK"
 		}
-		cmdline := fmt.Sprintf("%s -K %s -a %s %s %s -n ZONE %s", keygenprog, keydir, algstr, keytype, flags, owner)
-		// fmt.Printf("cmd: %s\n", cmdline)
+		cmdline := fmt.Sprintf("%s -K %s -a %s %s %s -n ZONE %s", keygenprog, keydir, algstr, keytypearg, flags, owner)
+		dump.P(cmdline)
 		cmdsl := strings.Fields(cmdline)
 		command := exec.Command(cmdsl[0], cmdsl[1:]...)
 		out, err := command.CombinedOutput()
