@@ -109,17 +109,18 @@ type ZoneDsyncPost struct {
 }
 
 type ZoneDsyncResponse struct {
-	AppName   string
-	Time      time.Time
-	Status    string
-	Zone      string
-	Functions map[string]string
-	Todo      []string
-	Msg       string
-	OldKeyID  uint16
-	NewKeyID  uint16
-	Error     bool
-	ErrorMsg  string
+	AppName      string
+	Time         time.Time
+	Status       string
+	Zone         string
+	Functions    map[string]string
+	Todo         []string
+	Msg          string
+	OldKeyID     uint16
+	NewKeyID     uint16
+	Error        bool
+	ErrorMsg     string
+	UpdateResult UpdateResult
 }
 type ConfigPost struct {
 	Command string // status | sync | ...

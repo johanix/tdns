@@ -233,6 +233,7 @@ type DelegationSyncStatus struct {
 	DNSKEYRemoves []dns.RR
 	Error         bool
 	ErrorMsg      string
+	UpdateResult  UpdateResult // Experimental
 }
 
 type ZoneRefresher struct {

@@ -343,7 +343,8 @@ cmdloop:
 
 			fmt.Printf("Sending update to %s\n", server)
 			dump.P(msg)
-			rcode, err := tdns.SendUpdate(msg, zone, []string{server})
+			rcode, err, ur := tdns.SendUpdate(msg, zone, []string{server})
+			PrintUpdateResult(ur)
 			if err != nil {
 				fmt.Printf("Error sending update: %v\n", err)
 				continue

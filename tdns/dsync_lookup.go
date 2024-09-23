@@ -220,6 +220,7 @@ func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) 
 
 	dsynctarget.Port = dsync.Port
 	dsynctarget.Name = dsync.Target
+	dsynctarget.RR = dsync
 
 	return &dsynctarget, nil
 }

@@ -25,15 +25,20 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	// be part of the DNSKEY RRset. We just include all active DNSKEYs.
 	var publishkeys []dns.RR
 	for _, ksk := range dak.KSKs {
+		zd.Logger.Printf("PublishDnskeyRRs: ksk: %v", ksk.DnskeyRR.String())
 		publishkeys = append(publishkeys, dns.RR(&ksk.DnskeyRR))
 	}
 	for _, zsk := range dak.ZSKs {
+		zd.Logger.Printf("PublishDnskeyRRs: zsk: %v", zsk.DnskeyRR.String())
 		// If a ZSK has flags = 257 then it is a clone of a KSK and should not be included twice
 		if zsk.DnskeyRR.Flags == 257 {
 			continue
 		}
 		publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
 	}
+
+	zd.Logger.Printf("PublishDnskeyRRs: there are %d active KSKs and %d active ZSKs", len(dak.KSKs), len(dak.ZSKs))
+	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (active): %v", publishkeys)
 
 	const (
 		fetchZoneDnskeysSql = `
@@ -63,6 +68,9 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		}
 		publishkeys = append(publishkeys, rr)
 	}
+
+	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (all): %v", publishkeys)
+
 	//	for _, k := range dak.KSKs {
 	//		dump.P(k.DnskeyRR.String())
 	//	}

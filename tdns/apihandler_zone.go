@@ -179,6 +179,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			zdp.Command, r.RemoteAddr)
 
 		resp := ZoneDsyncResponse{
+			AppName:   "tdns-server",
 			Time:      time.Now(),
 			Functions: map[string]string{},
 		}
@@ -260,7 +261,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 
 		case "bootstrap-sig0-key":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
-			resp.Msg, err = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
+			resp.Msg, err, resp.UpdateResult = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -278,7 +279,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			case "update-local":
 				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: UPDATING LOCAL KEYSTORE", zd.ZoneName)
 			}
-			resp.Msg, resp.OldKeyID, resp.NewKeyID, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action, zdp.OldKeyID, zdp.NewKeyID)
+			resp.Msg, resp.OldKeyID, resp.NewKeyID, err, resp.UpdateResult = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action, zdp.OldKeyID, zdp.NewKeyID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

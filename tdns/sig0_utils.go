@@ -22,11 +22,9 @@ import (
 	"github.com/spf13/viper"
 )
 
-// XXX: FIXME: This is only used from the CLI. It should change into code used by TDNSD and
+// XXX: FIXME: This is only used from the CLI. It should change into code used by TDNS-SERVER and
 //
-//	     accessed via API.
-//
-//		The code should store the newly generated key in the keystore.
+//	accessed via API. The code should store the newly generated key in the keystore.
 func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
@@ -83,7 +81,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
 	}
 
-	rcode, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
+	rcode, err, _ := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
 	} else {

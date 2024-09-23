@@ -4,6 +4,9 @@
 package tdns
 
 import (
+	"fmt"
+	"log"
+
 	"github.com/miekg/dns"
 )
 
@@ -49,4 +52,21 @@ func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
 	ede.ExtraText = EDECodeToMsg[edeCode]
 
 	opt.Option = append(opt.Option, ede)
+}
+
+func ExtractEDEFromMsg(msg *dns.Msg) (bool, uint16, string) {
+	log.Printf("ExtractEDEFromMsg: msg.Extra: %+v", msg.Extra)
+	for _, extra := range msg.Extra {
+		if opt, ok := extra.(*dns.OPT); ok {
+			log.Printf("ExtractEDEFromMsg: opt.Option: %+v", opt.Option)
+			for _, option := range opt.Option {
+				if ede, ok := option.(*dns.EDNS0_EDE); ok {
+					edemsg := fmt.Sprintf("%s (%s)", EDECodeToMsg[ede.InfoCode], ede.ExtraText)
+					log.Printf("EDE Code: %d, EDE Message: %s EDE local code2msg: %s", ede.InfoCode, ede.ExtraText, edemsg)
+					return true, ede.InfoCode, edemsg
+				}
+			}
+		}
+	}
+	return false, 0, ""
 }

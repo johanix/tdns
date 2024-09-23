@@ -195,6 +195,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		m.SetRcode(m, dns.RcodeServerFailure)
+		AttachEDEToResponse(m, EDESig0KeyNotKnown)
 		// XXX: Here it would be nice to also return an extended error code, but let's save that for later.
 		w.WriteMsg(m)
 		return err
@@ -207,6 +208,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		zd.Logger.Printf("Error from TrustUpdate(): %v", err)
 		m.SetRcode(m, int(dur.Status.ValidationRcode))
+		AttachEDEToResponse(m, EDESig0KeyKnownButNotTrusted)
 		w.WriteMsg(m)
 		return err
 	}
