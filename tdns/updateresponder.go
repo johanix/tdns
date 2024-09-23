@@ -174,6 +174,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
+			AttachEDEToResponse(m, EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -196,7 +197,6 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		m.SetRcode(m, dns.RcodeServerFailure)
 		AttachEDEToResponse(m, EDESig0KeyNotKnown)
-		// XXX: Here it would be nice to also return an extended error code, but let's save that for later.
 		w.WriteMsg(m)
 		return err
 	}

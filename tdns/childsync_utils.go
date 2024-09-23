@@ -109,6 +109,7 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, Upda
 				EDEMessage: edeMessage,
 				Sender:     dst,
 			}
+			log.Printf("Error msg: %s", res.String())
 			continue
 		}
 

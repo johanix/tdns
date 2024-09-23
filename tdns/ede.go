@@ -41,7 +41,7 @@ func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 
 	ede := new(dns.EDNS0_EDE)
 	ede.InfoCode = edeCode
-	ede.ExtraText = EDECodeToMsg[edeCode]
+	// ede.ExtraText = EDECodeToMsg[edeCode]
 
 	opt.Option = append(opt.Option, ede)
 }
