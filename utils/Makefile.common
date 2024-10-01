@@ -25,8 +25,8 @@ test:
 clean:
 	@rm -f $(PROG)
 
-install:
-	install -s -b -c ${PROG} /usr/local/bin/
+# install:
+# 	install -s -b -c ${PROG} /usr/local/bin/
 
 lint:
 	go fmt ./...
