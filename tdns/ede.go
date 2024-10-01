@@ -20,7 +20,7 @@ const (
 	EDEZoneUpdatesNotAllowed      uint16 = 518
 )
 
-var EDECodeToMsg = map[uint16]string{
+var EDECodeToString = map[uint16]string{
 	EDESig0KeyNotKnown:            "SIG(0) key not known",
 	EDESig0KeyKnownButNotTrusted:  "SIG(0) key known, but not yet trusted",
 	EDEDelegationSyncNotSupported: "Delegation sync via DNS UPDATE is not supported",
@@ -49,19 +49,32 @@ func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
 	ede := new(dns.EDNS0_EDE)
 	ede.InfoCode = edeCode
-	ede.ExtraText = EDECodeToMsg[edeCode]
+	ede.ExtraText = EDECodeToString[edeCode]
 
 	opt.Option = append(opt.Option, ede)
 }
 
 func ExtractEDEFromMsg(msg *dns.Msg) (bool, uint16, string) {
 	log.Printf("ExtractEDEFromMsg: msg.Extra: %+v", msg.Extra)
+	var edemsg string
 	for _, extra := range msg.Extra {
 		if opt, ok := extra.(*dns.OPT); ok {
 			log.Printf("ExtractEDEFromMsg: opt.Option: %+v", opt.Option)
 			for _, option := range opt.Option {
 				if ede, ok := option.(*dns.EDNS0_EDE); ok {
-					edemsg := fmt.Sprintf("%s (%s)", EDECodeToMsg[ede.InfoCode], ede.ExtraText)
+					privede, privexist := EDECodeToString[ede.InfoCode]
+					stdede, stdexist := dns.ExtendedErrorCodeToString[ede.InfoCode]
+					switch {
+					case ede.ExtraText != "":
+						edemsg = ede.ExtraText
+					case privexist:
+						edemsg = privede
+					case stdexist:
+						edemsg = stdede
+
+					default:
+						edemsg = fmt.Sprintf("Unknown EDE code: %d", ede.InfoCode)
+					}
 					log.Printf("EDE Code: %d, EDE Message: %s EDE local code2msg: %s", ede.InfoCode, ede.ExtraText, edemsg)
 					return true, ede.InfoCode, edemsg
 				}
