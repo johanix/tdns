@@ -179,7 +179,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			zdp.Command, r.RemoteAddr)
 
 		resp := ZoneDsyncResponse{
-			AppName:   "tdns-server",
+			AppName:   Globals.AppName,
 			Time:      time.Now(),
 			Functions: map[string]string{},
 		}

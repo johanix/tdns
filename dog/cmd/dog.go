@@ -36,7 +36,7 @@ var rootCmd = &cobra.Command{
 
 		var cleanArgs []string
 		var do_bit = false
-		//		var err error
+		var err error
 		var serial uint32
 
 		for _, arg := range args {
@@ -71,26 +71,9 @@ var rootCmd = &cobra.Command{
 		}
 
 		if server == "" {
-			// Read /etc/resolv.conf to get the default nameserver
-			content, err := os.ReadFile("/etc/resolv.conf")
+			server, err = ParseResolvConf()
 			if err != nil {
-				fmt.Println("Error: Unable to read /etc/resolv.conf and no nameserver specified")
-				os.Exit(1)
-			}
-			lines := strings.Split(string(content), "\n")
-			foundNameserver := false
-			for _, line := range lines {
-				if strings.HasPrefix(strings.TrimSpace(line), "nameserver") {
-					fields := strings.Fields(line)
-					if len(fields) == 2 {
-						server = fields[1]
-						foundNameserver = true
-						break
-					}
-				}
-			}
-			if !foundNameserver {
-				fmt.Println("Error: No nameserver entry found in /etc/resolv.conf and no nameserver specified")
+				fmt.Println(err)
 				os.Exit(1)
 			}
 		}
@@ -200,4 +183,29 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 	}
 
 	return options
+}
+
+func ParseResolvConf() (string, error) {
+	// Read /etc/resolv.conf to get the default nameserver
+	content, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		fmt.Println("Error: Unable to read /etc/resolv.conf and no nameserver specified")
+		os.Exit(1)
+	}
+	lines := strings.Split(string(content), "\n")
+	foundNameserver := false
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "nameserver") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 {
+				server = fields[1]
+				foundNameserver = true
+				break
+			}
+		}
+	}
+	if !foundNameserver {
+		return "", fmt.Errorf("Error: No nameserver entry found in /etc/resolv.conf and no nameserver specified")
+	}
+	return server, nil
 }
