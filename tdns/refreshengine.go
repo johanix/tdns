@@ -63,7 +63,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 			}
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
-					if zd.ZoneType == Primary && zd.Options["dirty"] {
+					if zd.ZoneType == Primary && zd.Options[OptDirty] {
 						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
 						log.Printf(resp.Msg)
 						if zr.Response != nil {

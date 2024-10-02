@@ -253,6 +253,10 @@ var zoneListCmd = &cobra.Command{
 			out = append(out, hdr)
 		}
 		for zname, zconf := range cr.Zones {
+			opts := []string{}
+			for _, opt := range zconf.Options {
+				opts = append(opts, tdns.ZoneOptionToString[opt])
+			}
 			line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
 			if showprimary {
 				line += fmt.Sprintf("%s|", zconf.Primary)
@@ -263,7 +267,7 @@ var zoneListCmd = &cobra.Command{
 			if showfile {
 				line += fmt.Sprintf("%s|", zconf.Zonefile)
 			}
-			line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, zconf.Options)
+			line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, opts)
 			out = append(out, line)
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))

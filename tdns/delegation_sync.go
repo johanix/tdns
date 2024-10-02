@@ -30,7 +30,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 	time.Sleep(5 * time.Second) // Allow time for zones to load
 
 	for zname, zd := range Zones.Items() {
-		if !zd.Options["delegation-sync-child"] {
+		if !zd.Options[OptDelSyncChild] {
 			log.Printf("DelegationSyncher: Zone %s does not have child-side delegation sync enabled. Skipping.", zname)
 			continue
 		}
@@ -39,7 +39,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 		_, keyrrexist := apex.RRtypes[dns.TypeKEY]
 
 		// 1. Are updates to the zone data allowed?
-		if !zd.Options["allow-updates"] {
+		if !zd.Options[OptAllowUpdates] {
 			if keyrrexist {
 				log.Printf("DelegationSyncher: Zone %s does not allow updates, but a KEY RRset is already published in the zone.", zd.ZoneName)
 			} else {
@@ -48,10 +48,10 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 			continue
 		}
 
-		log.Printf("DelegationSyncher: Zone %s allows updates. KEY RR exist: %v, dont-publish-key: %v", zd.ZoneName, keyrrexist, zd.Options["dont-publish-key"])
+		log.Printf("DelegationSyncher: Zone %s allows updates. KEY RR exist: %v, dont-publish-key: %v", zd.ZoneName, keyrrexist, zd.Options[OptDontPublishKey])
 
 		// 2. Updates allowed, but there is no KEY RRset published.
-		if !keyrrexist && !zd.Options["dont-publish-key"] {
+		if !keyrrexist && !zd.Options[OptDontPublishKey] {
 			log.Printf("DelegationSyncher: Fetching the private SIG(0) key for %s", zd.ZoneName)
 			sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 			if err != nil {
@@ -92,7 +92,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 		}
 
 		// 3. There is a KEY RRset, question is whether it is signed or not
-		if keyrrexist && zd.Options["online-signing"] {
+		if keyrrexist && zd.Options[OptOnlineSigning] {
 			log.Printf("DelegationSyncher: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
 			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 			//			if err != nil {
@@ -230,7 +230,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 
 			case "SYNC-DNSKEY-RRSET":
 				log.Printf("DelegationSyncher: Zone %s request for DNSKEY RRset sync.", ds.ZoneName)
-				if zd.Options["multisigner"] {
+				if zd.Options[OptMultiSigner] {
 					log.Printf("DelegationSyncher: Zone %s is a multisigner zone. Notifying multisigner controller.", ds.ZoneName)
 					notifyq <- NotifyRequest{
 						ZoneName: zd.ZoneName,
@@ -386,7 +386,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus,
 	dsynctarget *DsyncTarget) (string, uint8, error) {
 
-	if zd.Options["allow-updates"] {
+	if zd.Options[OptAllowUpdates] {
 		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
 		err := zd.PublishCsyncRR()
 		if err != nil {
@@ -395,7 +395,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 		}
 
 		// Try to sign the CSYNC RRset
-		if zd.Options["online-signing"] {
+		if zd.Options[OptOnlineSigning] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset := apex.RRtypes[dns.TypeCSYNC]
 			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)

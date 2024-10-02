@@ -78,7 +78,7 @@ type ZoneData struct {
 	ParentNS         []string // names of parent nameservers
 	ParentServers    []string // addresses of parent nameservers
 	Children         map[string]*ChildDelegationData
-	Options          map[string]bool
+	Options          map[ZoneOption]bool
 	UpdatePolicy     UpdatePolicy
 	DnssecPolicy     *DnssecPolicy
 	MultiSigner      *MultiSignerConf
@@ -93,9 +93,10 @@ type ZoneConf struct {
 	Store        string `validate:"required"` // xfr | map | slice | reg
 	Primary      string // upstream, for secondary zones
 	Notify       []string
-	Options      []string
-	Frozen       bool // true if zone is frozen; not a config param
-	Dirty        bool // true if zone has been modified; not a config param
+	OptionsStrs  []string     `yaml:"options"`
+	Options      []ZoneOption `yaml:"-"` // not used by yaml, but by code
+	Frozen       bool         // true if zone is frozen; not a config param
+	Dirty        bool         // true if zone has been modified; not a config param
 	UpdatePolicy UpdatePolicyConf
 	DnssecPolicy string
 	Template     string
@@ -109,7 +110,7 @@ type TemplateConf struct {
 	Store        string
 	Primary      string // upstream, for secondary zones
 	Notify       []string
-	Options      []string
+	OptionsStrs  []string `yaml:"options"`
 	UpdatePolicy UpdatePolicyConf
 	DnssecPolicy string
 	MultiSigner  string
@@ -243,7 +244,7 @@ type ZoneRefresher struct {
 	Notify       []string
 	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile     string
-	Options      map[string]bool
+	Options      map[ZoneOption]bool
 	UpdatePolicy UpdatePolicy
 	DnssecPolicy string
 	MultiSigner  string
