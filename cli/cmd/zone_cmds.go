@@ -201,7 +201,7 @@ var zoneThawCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from tdns-server: %s\n", cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -229,7 +229,7 @@ var zoneListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from tdns-server: %s\n", cr.ErrorMsg)
 			os.Exit(1)
 		}
 

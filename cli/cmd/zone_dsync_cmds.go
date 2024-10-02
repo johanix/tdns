@@ -74,6 +74,7 @@ var zoneDsyncBootstrapCmd = &cobra.Command{
 			Zone:      dns.Fqdn(tdns.Globals.Zonename),
 			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
 		})
+		PrintUpdateResult(resp.UpdateResult)
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
 			os.Exit(1)
@@ -102,6 +103,7 @@ var zoneDsyncRollKeyCmd = &cobra.Command{
 			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
 			Action:    rollaction,
 		})
+		PrintUpdateResult(resp.UpdateResult)
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
 			os.Exit(1)
@@ -165,8 +167,6 @@ var zoneDsyncUnpublishCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(zoneCmd)
-
 	zoneCmd.AddCommand(zoneDsyncCmd)
 	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd, zoneDsyncPublishCmd, zoneDsyncUnpublishCmd)
 
@@ -201,4 +201,20 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 	}
 
 	return cr, nil
+}
+
+func PrintUpdateResult(ur tdns.UpdateResult) {
+	if len(ur.TargetStatus) > 0 {
+		fmt.Printf("Update result:\n")
+		var out = []string{"Sender|Rcode|EDE code|Message"}
+		for _, tes := range ur.TargetStatus {
+			if tes.Error {
+				out = append(out, fmt.Sprintf("%s|%s|%s|%s", tes.Sender, "ERROR", "---", tes.ErrorMsg))
+			} else {
+				out = append(out, fmt.Sprintf("%s|%s|%d|%s", tes.Sender, dns.RcodeToString[tes.Rcode],
+					tes.EDECode, tes.EDEMessage))
+			}
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	}
 }

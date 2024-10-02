@@ -233,6 +233,7 @@ type DelegationSyncStatus struct {
 	DNSKEYRemoves []dns.RR
 	Error         bool
 	ErrorMsg      string
+	UpdateResult  UpdateResult // Experimental
 }
 
 type ZoneRefresher struct {
@@ -295,6 +296,7 @@ type Sig0Key struct {
 	Algorithm       string
 	Creator         string
 	Validated       bool   // has this key been validated
+	PublishedInDNS  bool   // is this key published in DNS (as a KEY RR)
 	DnssecValidated bool   // has this key been DNSSEC validated
 	Trusted         bool   // is this key trusted
 	Source          string // "dns" | "file" | "keystore" | "child-update"
@@ -331,11 +333,9 @@ type RRsetCacheT struct {
 }
 
 type DelegationSyncRequest struct {
-	Command  string
-	ZoneName string
-	ZoneData *ZoneData
-	// Adds       []dns.RR
-	// Removes    []dns.RR
+	Command    string
+	ZoneName   string
+	ZoneData   *ZoneData
 	SyncStatus DelegationSyncStatus
 	OldDnskeys *RRset
 	NewDnskeys *RRset

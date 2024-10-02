@@ -221,7 +221,7 @@ var debugShowRRsetCacheCmd = &cobra.Command{
 			for _, crrset := range dr.CachedRRsets {
 				for _, rr := range crrset.RRset.RRs {
 					out = append(out, fmt.Sprintf("%s|%s|%v|%v",
-						crrset.Name, crrset.RRtype, time.Until(crrset.Expiration).Seconds(), rr.String()))
+						crrset.Name, dns.TypeToString[crrset.RRtype], time.Until(crrset.Expiration).Seconds(), rr.String()))
 				}
 			}
 		}
@@ -230,7 +230,7 @@ var debugShowRRsetCacheCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(stopCmd, debugCmd)
+	rootCmd.AddCommand(debugCmd)
 
 	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
 	debugCmd.AddCommand(debugSig0Cmd)

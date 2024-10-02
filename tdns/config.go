@@ -19,6 +19,7 @@ type Config struct {
 	AppName          string
 	AppVersion       string
 	AppMode          string
+	AppDate		 string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
 	Service          ServiceConf

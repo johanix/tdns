@@ -87,7 +87,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					}
 					// XXX: Should do refresh in parallel
 					go func(zd *ZoneData) {
-						updated, err := zd.Refresh(zr.Force)
+						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
 								zone, err)
@@ -118,11 +118,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 						DelegationSyncCh: conf.Internal.DelegationSyncQ,
 						Data:             cmap.New[OwnerData](),
 						KeyDB:            conf.Internal.KeyDB,
-						// XXX: I think this is going away:
-						// Children: map[string]*tdns.ChildDelegationData{},
 					}
 
-					updated, err = zd.Refresh(zr.Force)
+					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
 							zone, err)
@@ -202,7 +200,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					log.Printf("RefreshEngine: will refresh zone %s due to refresh counter", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)
-					updated, err := zd.Refresh(false)
+					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zd.Refresh(%s): %v", zone, err)

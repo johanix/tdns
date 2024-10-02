@@ -19,6 +19,9 @@ type GlobalStuff struct {
 	Slurp       bool
 	Algorithm   string
 	Rrtype      string
+	AppName     string
+	AppVersion  string
+	AppDate     string
 }
 
 var Globals = GlobalStuff{

@@ -26,6 +26,7 @@ type KeystorePost struct {
 }
 
 type KeystoreResponse struct {
+	AppName  string
 	Time     time.Time
 	Status   string
 	Zone     string
@@ -50,6 +51,7 @@ type TruststorePost struct {
 }
 
 type TruststoreResponse struct {
+	AppName       string
 	Time          time.Time
 	Status        string
 	Zone          string
@@ -68,6 +70,7 @@ type CommandPost struct {
 }
 
 type CommandResponse struct {
+	AppName  string
 	Time     time.Time
 	Status   string
 	Zone     string
@@ -86,6 +89,7 @@ type ZonePost struct {
 }
 
 type ZoneResponse struct {
+	AppName  string
 	Time     time.Time
 	Status   string
 	Zone     string
@@ -105,22 +109,25 @@ type ZoneDsyncPost struct {
 }
 
 type ZoneDsyncResponse struct {
-	Time      time.Time
-	Status    string
-	Zone      string
-	Functions map[string]string
-	Todo      []string
-	Msg       string
-	OldKeyID  uint16
-	NewKeyID  uint16
-	Error     bool
-	ErrorMsg  string
+	AppName      string
+	Time         time.Time
+	Status       string
+	Zone         string
+	Functions    map[string]string
+	Todo         []string
+	Msg          string
+	OldKeyID     uint16
+	NewKeyID     uint16
+	Error        bool
+	ErrorMsg     string
+	UpdateResult UpdateResult
 }
 type ConfigPost struct {
 	Command string // status | sync | ...
 }
 
 type ConfigResponse struct {
+	AppName  string
 	Time     time.Time
 	Msg      string
 	Error    bool
@@ -135,6 +142,7 @@ type DelegationPost struct {
 }
 
 type DelegationResponse struct {
+	AppName    string
 	Time       time.Time
 	Zone       string
 	SyncStatus DelegationSyncStatus
@@ -152,6 +160,7 @@ type DebugPost struct {
 }
 
 type DebugResponse struct {
+	AppName    string
 	Time       time.Time
 	Status     string
 	Zone       string
@@ -187,6 +196,7 @@ type MultiSignerPost struct {
 }
 
 type MultiSignerResponse struct {
+	AppName  string
 	Time     time.Time
 	RRset    RRset
 	Msg      string

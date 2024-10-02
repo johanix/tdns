@@ -14,17 +14,17 @@ import (
 )
 
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
-// command line rather than the one in the keystore. Not to be used by TDNSD.
-func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) error {
+// command line rather than the one in the keystore. Not to be used by TDNS-SERVER.
+func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) (error, UpdateResult) {
 	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		return fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err)
+		return fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err), UpdateResult{}
 	}
 
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
-		return err
+		return err, UpdateResult{}
 	}
 	var smsg *dns.Msg
 	sak := &Sig0ActiveKeys{
@@ -36,31 +36,59 @@ func ChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR
 		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
 			log.Printf("Error from SignMsgNG2(%s): %v", Globals.Zonename, err)
-			return err
+			return err, UpdateResult{}
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")
 	}
 
-	rcode, err := SendUpdate(smsg, pzone, target.Addresses)
+	rcode, err, ur := SendUpdate(smsg, pzone, target.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", target, err)
-		return err
+		return err, ur
 	} else {
 		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", pzone, target, dns.RcodeToString[rcode])
 	}
-	return nil
+	return nil, ur
+}
+
+type UpdateResult struct {
+	EDEFound     bool
+	EDECode      uint16
+	EDEMessage   string
+	EDESender    string
+	Rcode        int
+	TargetStatus map[string]TargetUpdateStatus
+}
+
+type TargetUpdateStatus struct {
+	Sender     string
+	Rcode      int
+	Error      bool
+	ErrorMsg   string
+	EDEFound   bool
+	EDECode    uint16
+	EDEMessage string
 }
 
 // Note: the target.Addresses must already be in addr:port format.
 // func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
-func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
+// func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
+func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
 	if zonename == "." {
 		log.Printf("Error: zone name not specified. Terminating.\n")
-		return 0, fmt.Errorf("zone name not specified")
+		return 0, fmt.Errorf("zone name not specified"), UpdateResult{}
 	}
 
 	log.Printf("SendUpdate(%s) target has %d addresses: %v", zonename, len(addrs), addrs)
+
+	var ur = UpdateResult{
+		TargetStatus: make(map[string]TargetUpdateStatus),
+	}
+
+	var edeFound bool
+	var edeCode uint16
+	var edeMessage, edeSender string
 
 	for _, dst := range addrs {
 		if Globals.Verbose {
@@ -74,24 +102,48 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
 		res, err := dns.Exchange(msg, dst)
 		if err != nil {
 			log.Printf("Error from dns.Exchange(%s, UPDATE): %v. Trying next address", dst, err)
+			ur.TargetStatus[dst] = TargetUpdateStatus{
+				Error:      true,
+				ErrorMsg:   err.Error(),
+				EDEFound:   false,
+				EDEMessage: edeMessage,
+				Sender:     dst,
+			}
+			log.Printf("Error msg: %s", res.String())
 			continue
+		}
+
+		edeFound, edeCode, edeMessage = ExtractEDEFromMsg(res)
+		log.Printf("after ExtractEDEFromMsg: EDE found: %t, code: %d, message: %s", edeFound, edeCode, edeMessage)
+		if edeFound {
+			edeSender = dst
+			log.Printf("EDE Code: %d, EDE Message: %s", edeCode, edeMessage)
+		}
+		ur.TargetStatus[dst] = TargetUpdateStatus{
+			Rcode:      res.Rcode,
+			EDEFound:   edeFound,
+			EDECode:    edeCode,
+			EDEMessage: edeMessage,
+			Sender:     edeSender,
 		}
 
 		if res.Rcode != dns.RcodeSuccess {
 			if Globals.Verbose {
 				log.Printf("... and got rcode %s back (bad)\n", dns.RcodeToString[res.Rcode])
+				log.Printf("Response:\n%s\n", res.String())
 			}
 			log.Printf("Error from %s: Rcode: %s. Trying next address", dst, dns.RcodeToString[res.Rcode])
-			// return res.Rcode, fmt.Errorf("Rcode: %s", dns.RcodeToString[res.Rcode])
 			continue
 		} else {
 			if Globals.Verbose {
 				log.Printf("... and got rcode NOERROR back (good)\n")
+				log.Printf("Response:\n%s\n", res.String())
 			}
-			return res.Rcode, nil
+			return res.Rcode, nil, ur
 		}
 	}
-	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were unreachable", addrs)
+
+	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were unreachable", addrs), ur
 }
 
 // Parent is the zone to apply the update to.

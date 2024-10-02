@@ -107,6 +107,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if zd == nil {
 		log.Printf("UpdateResponder: zone %s not found", qname)
 		m.SetRcode(r, dns.RcodeRefused)
+		AttachEDEToResponse(m, EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
@@ -118,6 +119,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update.",
 			zd.ZoneName, qname)
 		m.SetRcode(r, dns.RcodeRefused)
+		AttachEDEToResponse(m, EDEZoneFrozen)
 		w.WriteMsg(m)
 		return nil
 	}
@@ -134,6 +136,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
+			AttachEDEToResponse(m, EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -171,6 +174,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
+			AttachEDEToResponse(m, EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -192,7 +196,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		m.SetRcode(m, dns.RcodeServerFailure)
-		// XXX: Here it would be nice to also return an extended error code, but let's save that for later.
+		AttachEDEToResponse(m, EDESig0KeyNotKnown)
 		w.WriteMsg(m)
 		return err
 	}
@@ -204,6 +208,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		zd.Logger.Printf("Error from TrustUpdate(): %v", err)
 		m.SetRcode(m, int(dur.Status.ValidationRcode))
+		AttachEDEToResponse(m, EDESig0KeyKnownButNotTrusted)
 		w.WriteMsg(m)
 		return err
 	}

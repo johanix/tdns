@@ -10,7 +10,6 @@ import (
 
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 )
@@ -207,7 +206,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 }
 
 func (kdb *KeyDB) DnssecKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
-	dump.P(kp)
+	// dump.P(kp)
 
 	const (
 		addDnskeySql = `
@@ -219,34 +218,29 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm,
 SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	)
 
-	var resp = KeystoreResponse{Time: time.Now()}
-	var res sql.Result
+	var localtx = false
 	var err error
 
-	//	tx, err := kdb.Begin("DnssecKeyMgmt")
-	//	if err != nil {
-	//		return &resp, err
-	//	}
-
+	if tx == nil {
+		tx, err = kdb.Begin("DnssecKeyMgmt")
+		if err != nil {
+			return nil, err
+		}
+		localtx = true
+	}
 	defer func() {
-		//		log.Printf("DnssecKeyMgmt: deferred tx.Commit()/tx.Rollback()")
-		if err == nil {
-			// err1 := tx.Commit()
-			// if err1 != nil {
-			// 	log.Printf("DnssecKeyMgmt: tx.Commit() ok, err1=%v", err1)
-			// 	resp.Error = true
-			// 	resp.ErrorMsg = err1.Error()
-			// }
-		} else {
-			log.Printf("Error: %v. Rollback.", err)
-			// err1 := tx.Rollback()
-			// if err1 != nil {
-			// 	log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err1)
-			// 	resp.Error = true
-			// 	resp.ErrorMsg = err1.Error()
-			// }
+		if localtx {
+			if err != nil {
+				log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err)
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
 		}
 	}()
+
+	var resp = KeystoreResponse{Time: time.Now()}
+	var res sql.Result
 
 	switch kp.SubCommand {
 	case "list":

@@ -18,6 +18,7 @@ import (
 
 type UpdateRequest struct {
 	Cmd            string
+	UpdateType     string // "DSYNC", "KEY", ...
 	ZoneName       string
 	Adds           []dns.RR
 	Removes        []dns.RR
@@ -65,6 +66,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 					log.Printf("ZoneUpdater: Zone name \"%s\" in request for update is unknown. Ignored.", ur.ZoneName)
 					continue
 				}
+
 				switch ur.Cmd {
 				case "CHILD-UPDATE":
 					// This is the case where a DNS UPDATE contains updates to child delegation information.
@@ -112,7 +114,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 								ZoneName:   zd.ZoneName,
 								ZoneData:   zd,
 								SyncStatus: dss,
-								// XXX: *NOT* pupulating the Adds and Removes here, using the dss data
+								// XXX: *NOT* populating the Adds and Removes here, using the dss data
 							}
 						}
 
@@ -131,7 +133,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 								log.Printf("ZoneUpdater: Error from ApplyUpdateToDB: %v", err)
 							}
 						}
-						if updated {
+						if updated && !ur.InternalUpdate {
 							log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
 							zd.Options["dirty"] = true
 						}
@@ -898,10 +900,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					ddata.Actions = append(ddata.Actions, rrcopy)
 					// XXX: This is a new NS. Now we must locate any existing address RRs for this name.
 					if nsrr, ok := rr.(*dns.NS); ok {
+						log.Printf("ZUCDDNG: fetching owner for NS: %+v", nsrr.Ns)
 						nsowner, err := zd.GetOwner(nsrr.Ns)
-						if err != nil {
+						if err != nil || nsowner == nil {
 							log.Printf("ZUCDDNG: Error: owner %s of NS %s is unknown", nsrr.Ns, nsrr.String())
 						} else {
+							log.Printf("ZUCDDNG: nsowner: %+v", nsowner)
 							if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
 								for _, rr := range a_rrset.RRs {
 									dss.AAdds = append(dss.AAdds, rr)
@@ -912,6 +916,20 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 								for _, rr := range aaaa_rrset.RRs {
 									dss.AAAAAdds = append(dss.AAAAAdds, rr)
 									ddata.Actions = append(ddata.Actions, rr)
+								}
+							}
+						}
+						// It is also possible that glue for the new NS is present later in the update.
+						for _, action := range actions {
+							if action.Header().Name == nsrr.Ns {
+								if action.Header().Rrtype == dns.TypeA {
+									log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
+									dss.AAdds = append(dss.AAdds, action)
+									ddata.Actions = append(ddata.Actions, action)
+								} else if action.Header().Rrtype == dns.TypeAAAA {
+									log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
+									dss.AAAAAdds = append(dss.AAAAAdds, action)
+									ddata.Actions = append(ddata.Actions, action)
 								}
 							}
 						}

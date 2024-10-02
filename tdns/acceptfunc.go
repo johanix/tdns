@@ -68,26 +68,26 @@ func MsgAcceptFunc(dh dns.Header) dns.MsgAcceptAction {
 	// Don't allow dynamic updates, because then the sections can contain a whole bunch of RRs.
 	opcode := int(dh.Bits>>11) & 0xF
 	if opcode != dns.OpcodeQuery && opcode != dns.OpcodeNotify && opcode != dns.OpcodeUpdate {
-		log.Printf("johani: NOTIMP")
+		log.Printf("TDNS: NOTIMP: %d (%s)", opcode, dns.OpcodeToString[opcode])
 		return MsgRejectNotImplemented
 	}
 
 	if dh.Qdcount != 1 {
-		log.Printf("dh.Qdcount != 1")
+		log.Printf("TDNS: dh.Qdcount != 1")
 		return MsgReject
 	}
 	// NOTIFY requests can have a SOA in the ANSWER section. See RFC 1996 Section 3.7 and 3.11.
 	if dh.Ancount > 1 && opcode != dns.OpcodeUpdate {
-		log.Printf("dh.Ancount > 1")
+		log.Printf("TDNS: dh.Ancount > 1")
 		return MsgReject
 	}
 	// IXFR request could have one SOA RR in the NS section. See RFC 1995, section 3.
 	if dh.Nscount > 1 && opcode != dns.OpcodeUpdate {
-		log.Printf("dh.Nscount > 1")
+		log.Printf("TDNS: dh.Nscount > 1")
 		return MsgReject
 	}
 	if dh.Arcount > 2 && opcode != dns.OpcodeUpdate {
-		log.Printf("dh.Arcount > 2")
+		log.Printf("TDNS: dh.Arcount > 2")
 		return MsgReject
 	}
 	return MsgAccept

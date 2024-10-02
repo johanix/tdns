@@ -57,7 +57,9 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 	for _, rr := range nsrrs.RRs {
 		if nsrr, ok := rr.(*dns.NS); ok {
 			nsname = nsrr.Ns
-			zd.Logger.Printf("FindGlue: zone '%s' has a nameserver '%s'", zone, nsname)
+			if zd.Debug {
+				zd.Logger.Printf("FindGlue: zone '%s' has a nameserver '%s'", zone, nsname)
+			}
 			// nsnidx, exist := zd.OwnerIndex[nsname]
 			if !zd.NameExists(nsname) {
 				continue // no match for nsname in zd.OwnerIndex (i.e nameserver is out of bailiwick)
@@ -75,8 +77,9 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 				maybe_6glue.RRSIGs = append(maybe_6glue.RRSIGs, ns_AAAA_rrs.RRSIGs...)
 			}
 		} else {
-			zd.Logger.Printf("FindGlue: in the NS RRset I found this RRSIG: %s",
-				rr.String())
+			if zd.Debug {
+				zd.Logger.Printf("FindGlue: in the NS RRset I found this RRSIG: %s", rr.String())
+			}
 		}
 	}
 

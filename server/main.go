@@ -70,7 +70,8 @@ func main() {
 	conf.ServerBootTime = time.Now()
 	conf.ServerConfigTime = time.Now()
 	conf.AppVersion = appVersion
-	conf.AppName = "tdns-server"
+	conf.AppName, tdns.Globals.AppName = appName, appName
+	conf.AppDate, tdns.Globals.AppDate = appDate, appDate
 
 	flag.StringVar(&conf.AppMode, "mode", "server", "Mode of operation: server | scanner")
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
@@ -79,9 +80,9 @@ func main() {
 
 	switch conf.AppMode {
 	case "server", "scanner":
-		fmt.Printf("*** TDNSD mode of operation: %s (verbose: %t, debug: %t)\n", conf.AppMode, tdns.Globals.Verbose, tdns.Globals.Debug)
+		fmt.Printf("*** TDNS-SERVER mode of operation: %s (verbose: %t, debug: %t)\n", conf.AppMode, tdns.Globals.Verbose, tdns.Globals.Debug)
 	default:
-		log.Fatalf("*** TDNSD: Error: unknown mode of operation: %s", conf.AppMode)
+		log.Fatalf("*** TDNS-SERVER: Error: unknown mode of operation: %s", conf.AppMode)
 	}
 
 	err := tdns.ParseConfig(&conf, false) // false: not reload, initial parsing
@@ -91,7 +92,10 @@ func main() {
 	kdb := conf.Internal.KeyDB
 
 	logfile := viper.GetString("log.file")
-	tdns.SetupLogging(logfile)
+	err = tdns.SetupLogging(logfile)
+	if err != nil {
+		log.Fatalf("Error setting up logging: %v", err)
+	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
 	fmt.Printf("TDNSD version %s starting.\n", appVersion)

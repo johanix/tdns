@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -148,8 +149,76 @@ func CreateUpdate(updateType string) {
 		fmt.Printf("Update will be sent to zone %s\n", zone)
 	}
 
-	var ops = []string{"zone", "add", "del", "show", "send", "set-ttl", "server", "quit"}
+	var ops = []string{"zone", "add", "del", "show", "send", "sign", "set-ttl", "server", "quit"}
 	fmt.Printf("Defined operations are: %v\n", ops)
+
+	var msgSigned bool = false
+
+	SignUpdate := func(msg *dns.Msg, zone string) (*dns.Msg, error) {
+		if server == "" {
+			fmt.Println("Target server not set, please set it first")
+			return nil, fmt.Errorf("target server not set")
+		}
+		if zone == "" {
+			fmt.Println("Target zone not set, please set it first")
+			return nil, fmt.Errorf("target zone not set")
+		}
+		if len(adds) == 0 && len(removes) == 0 {
+			fmt.Println("No records to send, please add or delete some records first")
+			return nil, fmt.Errorf("no records to send")
+		}
+		msg, err = tdns.CreateUpdate(zone, adds, removes)
+		if err != nil {
+			fmt.Printf("Error creating update: %v\n", err)
+			return nil, fmt.Errorf("error creating update: %v", err)
+		}
+
+		if keyfile != "" {
+			pkc, err := tdns.ReadPrivateKey(keyfile)
+			if err != nil {
+				fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
+				os.Exit(1)
+			}
+			if pkc.KeyType != dns.TypeKEY {
+				fmt.Printf("Keyfile did not contain a SIG(0) key\n")
+				os.Exit(1)
+			}
+
+			sak.Keys = append(sak.Keys, pkc)
+
+			m, err := tdns.SignMsg(*msg, zone, sak)
+			if err != nil {
+				fmt.Printf("Error signing message: %v\n", err)
+				os.Exit(1)
+			}
+			return m, nil
+		} else {
+			fmt.Printf("No SIG(0) keyfile specified, trying to fetch active key from keystore\n")
+			sak, err := kdb.GetSig0Keys(signer, tdns.Sig0StateActive)
+			if err != nil {
+				fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", signer, err)
+				os.Exit(1)
+			}
+			if len(sak.Keys) == 0 {
+				fmt.Printf("No SIG(0) private key for zone %s found in keystore. Signing not possible.\n", signer)
+			}
+			// if tdns.Globals.Verbose {
+			fmt.Printf("Will sign update with SIG(0) key for %s with keyid %d\n",
+				signer, sak.Keys[0].KeyId)
+			// }
+			if len(sak.Keys) > 0 {
+				m, err := tdns.SignMsg(*msg, signer, sak)
+				if err != nil {
+					fmt.Printf("Error signing message: %v\n", err)
+					os.Exit(1)
+				}
+				return m, nil
+			}
+			return nil, fmt.Errorf("no SIG(0) private key for zone %s found in keystore. Signing not possible.", signer)
+		}
+	}
+
+	var msg *dns.Msg
 
 cmdloop:
 	for {
@@ -223,22 +292,39 @@ cmdloop:
 				fmt.Println("Target zone not set, please set it first")
 				continue
 			}
-			var out = []string{"Operation|Record"}
-			for _, rr := range adds {
-				out = append(out, fmt.Sprintf("ADD|%s", rr.String()))
-			}
-			for _, rr := range removes {
-				out = append(out, fmt.Sprintf("DEL|%s", rr.String()))
-			}
-			fmt.Println(columnize.SimpleFormat(out))
+			if msg == nil {
+				var out = []string{"Operation|Record"}
+				for _, rr := range adds {
+					out = append(out, fmt.Sprintf("ADD|%s", rr.String()))
+				}
+				for _, rr := range removes {
+					out = append(out, fmt.Sprintf("DEL|%s", rr.String()))
+				}
+				fmt.Println(columnize.SimpleFormat(out))
 
-			tdns.Globals.Debug = true
-			_, err := tdns.CreateUpdate(zone, adds, removes)
-			if err != nil {
-				fmt.Printf("Error creating update: %v\n", err)
+				tdns.Globals.Debug = true
+				_, err := tdns.CreateUpdate(zone, adds, removes)
+				if err != nil {
+					fmt.Printf("Error creating update: %v\n", err)
+					continue
+				}
+				tdns.Globals.Debug = false
+			} else {
+				fmt.Printf("Update message:\n%s\n", msg.String())
+			}
+
+		case "sign":
+			if msgSigned {
+				fmt.Println("Message already signed, please create a new message first")
 				continue
 			}
-			tdns.Globals.Debug = false
+
+			msg, err = SignUpdate(msg, zone)
+			if err != nil {
+				fmt.Printf("Error signing message: %v\n", err)
+				continue
+			}
+			msgSigned = true
 
 		case "server":
 			server = tdns.TtyQuestion("Server", "localhost", false)
@@ -246,69 +332,19 @@ cmdloop:
 			server = net.JoinHostPort(server, port)
 
 		case "send":
-			if server == "" {
-				fmt.Println("Target server not set, please set it first")
-				continue
-			}
-			if zone == "" {
-				fmt.Println("Target zone not set, please set it first")
-				continue
-			}
-			if len(adds) == 0 && len(removes) == 0 {
-				fmt.Println("No records to send, please add or delete some records first")
-				continue
-			}
-			msg, err := tdns.CreateUpdate(zone, adds, removes)
-			if err != nil {
-				fmt.Printf("Error creating update: %v\n", err)
-				continue
-			}
+			if !msgSigned {
 
-			if keyfile != "" {
-				pkc, err := tdns.ReadPrivateKey(keyfile)
-				if err != nil {
-					fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
-					os.Exit(1)
-				}
-				if pkc.KeyType != dns.TypeKEY {
-					fmt.Printf("Keyfile did not contain a SIG(0) key\n")
-					os.Exit(1)
-				}
-
-				sak.Keys = append(sak.Keys, pkc)
-
-				m, err := tdns.SignMsg(*msg, zone, sak)
+				msg, err = SignUpdate(msg, zone)
 				if err != nil {
 					fmt.Printf("Error signing message: %v\n", err)
-					os.Exit(1)
+					continue
 				}
-				msg = m
-			} else {
-				fmt.Printf("No SIG(0) keyfile specified, trying to fetch active key from keystore\n")
-				sak, err := kdb.GetSig0Keys(signer, tdns.Sig0StateActive)
-				if err != nil {
-					fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", signer, err)
-					os.Exit(1)
-				}
-				if len(sak.Keys) == 0 {
-					fmt.Printf("No SIG(0) private key for zone %s found in keystore. Signing not possible.\n", signer)
-				}
-				// if tdns.Globals.Verbose {
-				fmt.Printf("Will sign update with SIG(0) key for %s with keyid %d\n",
-					signer, sak.Keys[0].KeyId)
-				// }
-				if len(sak.Keys) > 0 {
-					msg, err = tdns.SignMsg(*msg, signer, sak)
-					if err != nil {
-						fmt.Printf("Error signing message: %v\n", err)
-						os.Exit(1)
-					}
-				}
-				// msg = m
 			}
 
 			fmt.Printf("Sending update to %s\n", server)
-			rcode, err := tdns.SendUpdate(msg, zone, []string{server})
+			dump.P(msg)
+			rcode, err, ur := tdns.SendUpdate(msg, zone, []string{server})
+			PrintUpdateResult(ur)
 			if err != nil {
 				fmt.Printf("Error sending update: %v\n", err)
 				continue
@@ -317,6 +353,8 @@ cmdloop:
 
 			adds = []dns.RR{}
 			removes = []dns.RR{}
+			msg = nil
+			msgSigned = false
 		}
 	}
 
