@@ -108,8 +108,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 						log.Printf("ZoneUpdater: dss.InSync: %t", dss.InSync)
 
 						if zd.Options[OptDelSyncChild] && !dss.InSync {
-							log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncCh): %d", zd.ZoneName, len(zd.DelegationSyncCh))
-							zd.DelegationSyncCh <- DelegationSyncRequest{
+							log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncQ): %d", zd.ZoneName, len(zd.DelegationSyncQ))
+							zd.DelegationSyncQ <- DelegationSyncRequest{
 								Command:    "SYNC-DELEGATION",
 								ZoneName:   zd.ZoneName,
 								ZoneData:   zd,

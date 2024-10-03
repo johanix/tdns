@@ -104,20 +104,20 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					dp, _ := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					msc, _ := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
-						ZoneName:         zone,
-						ZoneStore:        zr.ZoneStore,
-						Logger:           log.Default(),
-						Upstream:         zr.Primary,
-						Downstreams:      zr.Notify,
-						Zonefile:         zr.Zonefile,
-						ZoneType:         zr.ZoneType,
-						Options:          zr.Options,
-						UpdatePolicy:     zr.UpdatePolicy,
-						DnssecPolicy:     &dp,
-						MultiSigner:      &msc,
-						DelegationSyncCh: conf.Internal.DelegationSyncQ,
-						Data:             cmap.New[OwnerData](),
-						KeyDB:            conf.Internal.KeyDB,
+						ZoneName:        zone,
+						ZoneStore:       zr.ZoneStore,
+						Logger:          log.Default(),
+						Upstream:        zr.Primary,
+						Downstreams:     zr.Notify,
+						Zonefile:        zr.Zonefile,
+						ZoneType:        zr.ZoneType,
+						Options:         zr.Options,
+						UpdatePolicy:    zr.UpdatePolicy,
+						DnssecPolicy:    &dp,
+						MultiSigner:     &msc,
+						DelegationSyncQ: conf.Internal.DelegationSyncQ,
+						Data:            cmap.New[OwnerData](),
+						KeyDB:           conf.Internal.KeyDB,
 					}
 
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
@@ -164,7 +164,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 
 					// This is a new zone being added to the server. Let's see if the zone
 					// config should cause any specific changes to the zone data to be made.
-					err = zd.SetupZoneSync()
+					err = zd.SetupZoneSync(conf.Internal.DelegationSyncQ)
 					if err != nil {
 						log.Printf("Error from SetupZoneSync(%s): %v", zone, err)
 					}
