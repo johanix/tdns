@@ -115,7 +115,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// dump.P(zd.Options)
 	// dump.P(zd.UpdatePolicy)
 
-	if zd.Options["frozen"] {
+	if zd.Options[OptFrozen] {
 		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update.",
 			zd.ZoneName, qname)
 		m.SetRcode(r, dns.RcodeRefused)
@@ -132,7 +132,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the apex of this zone",
 			zd.ZoneName, qname)
-		if !zd.Options["allow-updates"] {
+		if !zd.Options[OptAllowUpdates] {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
@@ -156,7 +156,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 		default:
 			dur.Status.Type = "CHILD-UPDATE"
-			if !zd.Options["allow-child-updates"] {
+			if !zd.Options[OptAllowChildUpdates] {
 				log.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
 					zd.ZoneName, qname)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -170,7 +170,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	} else {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
-		if !zd.Options["allow-updates"] {
+		if !zd.Options[OptAllowUpdates] {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)

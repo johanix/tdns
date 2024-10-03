@@ -22,7 +22,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
 	// 	ZoneTypeToString[zd.ZoneType], force)
 
 	// if zd.FoldCase {
-	if zd.Options["fold-case"] {
+	if zd.Options[OptFoldCase] {
 		zd.Logger.Printf("zd.Refresh(): folding case for zone %s", zd.ZoneName)
 		zd.ZoneName = strings.ToLower(zd.ZoneName)
 	}
@@ -148,7 +148,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
 	var delchanged bool
 	var dss DelegationSyncStatus
-	if zd.Options["delegation-sync-child"] {
+	if zd.Options[OptDelSyncChild] {
 		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
@@ -170,7 +170,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	zd.mu.Unlock()
 
 	// If the delegation has changed, send an update to the DelegationSyncEngine
-	if zd.Options["delegation-sync-child"] && delchanged {
+	if zd.Options[OptDelSyncChild] && delchanged {
 		zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 		zd.DelegationSyncCh <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
@@ -234,7 +234,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
 	var delchanged bool
 	var dss DelegationSyncStatus
-	if zd.Options["delegation-sync-child"] {
+	if zd.Options[OptDelSyncChild] {
 		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
@@ -256,7 +256,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	zd.mu.Unlock()
 
 	// Can only test for differences between old and new zone data if the zone data is ready.
-	if zd.Options["delegation-sync-child"] && delchanged {
+	if zd.Options[OptDelSyncChild] && delchanged {
 		zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 		zd.DelegationSyncCh <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
@@ -341,21 +341,21 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 			return err.Error(), err
 		}
 	}
-	if !zd.Options["dirty"] && !force {
+	if !zd.Options[OptDirty] && !force {
 		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
 	}
 	_, err = zd.WriteFile(fname)
 	if err == nil {
 		zd.mu.Lock()
-		zd.Options["dirty"] = false
+		zd.Options[OptDirty] = false
 		zd.mu.Unlock()
 	}
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
 }
 
-func (zd *ZoneData) SetOption(name string, value bool) {
+func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 	zd.mu.Lock()
-	zd.Options[name] = value
+	zd.Options[option] = value
 	zd.mu.Unlock()
 }
 
@@ -641,7 +641,7 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
-	if zd.Options["online-signing"] {
+	if zd.Options[OptOnlineSigning] {
 		//		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
 		//		if err != nil {
 		//			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
@@ -721,7 +721,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync() error {
-	if zd.Options["agent"] {
+	if zd.Options[OptAgent] {
 		return nil // this zone does not allow any modifications
 	}
 
@@ -732,7 +732,7 @@ func (zd *ZoneData) SetupZoneSync() error {
 	}
 
 	// Is this a parent zone and should we then publish a DSYNC RRset?
-	if zd.Options["delegation-sync-parent"] {
+	if zd.Options[OptDelSyncParent] {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
@@ -750,12 +750,12 @@ func (zd *ZoneData) SetupZoneSync() error {
 		}
 	}
 
-	if zd.Options["delegation-sync-child"] {
+	if zd.Options[OptDelSyncChild] {
 		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
 			switch scheme {
 			case "update":
 				// 1. Is there a KEY RRset already?
-				if !zd.Options["dont-publish-keys"] {
+				if !zd.Options[OptDontPublishKey] {
 					err := zd.VerifyPublishedKeyRRs()
 					if err != nil {
 						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
@@ -776,15 +776,15 @@ func (zd *ZoneData) SetupZoneSync() error {
 }
 
 func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
-	if !zd.Options["online-signing"] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
+	if !zd.Options[OptOnlineSigning] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
 		return nil // this zone should not be signed (at least not by us)
 	}
 
-	if !zd.Options["allow-updates"] {
+	if !zd.Options[OptAllowUpdates] {
 		return nil // this zone does not allow any modifications
 	}
 
-	if zd.Options["agent"] {
+	if zd.Options[OptAgent] {
 		return nil // this zone does not allow any modifications
 	}
 
@@ -807,7 +807,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
 }
 
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
-	if zd.Options["dirty"] {
+	if zd.Options[OptDirty] {
 		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
 		return msg, fmt.Errorf(msg)
 	}

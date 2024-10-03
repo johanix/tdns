@@ -92,20 +92,20 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 		case "freeze":
 			// If a zone has modifications, freezing implies that the updated
 			// zone data should be written out to disk.
-			if !zd.Options["allow-updates"] && !zd.Options["allow-child-updates"] {
+			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 			}
 
-			if zd.Options["frozen"] {
+			if zd.Options[OptFrozen] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s is already frozen", zd.ZoneName)
 			}
 
 			// zd.mu.Lock()
-			zd.SetOption("frozen", true)
+			zd.SetOption(OptFrozen, true)
 			//zd.mu.Unlock()
-			if zd.Options["dirty"] {
+			if zd.Options[OptDirty] {
 				tosource := true
 				zd.WriteZone(tosource, false)
 				resp.Msg = fmt.Sprintf("Zone %s is now frozen, modifications will be written to disk", zd.ZoneName)
@@ -114,15 +114,15 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 			}
 
 		case "thaw":
-			if !zd.Options["allow-updates"] && !zd.Options["allow-child-updates"] {
+			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
 			}
-			if !zd.Options["frozen"] {
+			if !zd.Options[OptFrozen] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s is not frozen", zd.ZoneName)
 			}
-			zd.SetOption("frozen", false)
+			zd.SetOption(OptFrozen, false)
 			resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
 
 		case "reload":
@@ -141,7 +141,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 				zname := item.Key
 				zd := item.Val
 
-				options := []string{}
+				options := []ZoneOption{}
 				for opt, val := range zd.Options {
 					if val {
 						options = append(options, opt)
@@ -150,8 +150,8 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 
 				zconf := ZoneConf{
 					Name:    zname,
-					Dirty:   zd.Options["dirty"],
-					Frozen:  zd.Options["frozen"],
+					Dirty:   zd.Options[OptDirty],
+					Frozen:  zd.Options[OptFrozen],
 					Options: options,
 				}
 				zones[zname] = zconf
@@ -200,7 +200,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 		}
 
 		// Most of the dsync commands relate to the child role. The exception is the publish/unpublish commands
-		if !zd.Options["delegation-sync-child"] && zdp.Command != "publish-dsync-rrset" && zdp.Command != "unpublish-dsync-rrset" {
+		if !zd.Options[OptDelSyncChild] && zdp.Command != "publish-dsync-rrset" && zdp.Command != "unpublish-dsync-rrset" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s does not support delegation sync (option delegation-sync-child=false)", zd.ZoneName)
 			return
@@ -240,17 +240,18 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			if keyrrset != nil && len(keyrrset.RRs) > 0 {
 				resp.Functions["SIG(0) key publication"] = "done"
 			} else if zd.ZoneType == Secondary {
-				if zd.Options["delegation-sync-child"] {
+				if zd.Options[OptDelSyncChild] {
 					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
 					resp.Todo = append(resp.Todo, fmt.Sprintf("Add this KEY record to the %s zone at primary server:\n%s", zd.ZoneName, apex.RRtypes[dns.TypeKEY].RRs[0].String()))
 				} else {
 					resp.Functions["SIG(0) key publication"] = "disabled by policy (delegation-sync-child=false)"
 				}
 			} else if zd.ZoneType == Primary {
-				if zd.Options["allow-updates"] {
+				if zd.Options[OptAllowUpdates] {
 					resp.Functions["SIG(0) key publication"] = "failed"
 				} else {
 					resp.Functions["SIG(0) key publication"] = "disabled by policy (allow-updates=false)"
+
 				}
 			}
 
