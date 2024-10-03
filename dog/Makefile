@@ -1,7 +1,8 @@
 PROG:=dog
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
-GO:=GOOS=$(GOOS) CGO_ENABLED=0 go
+# GO:=GOOS=$(GOOS) CGO_ENABLED=0 go
+GO:=CGO_ENABLED=0 go
 include ../utils/Makefile.common
 
 install:
