@@ -179,6 +179,19 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 							if err != nil {
 								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 							}
+
+							if ur.Validated && !ur.Trusted {
+								utr := UpdateTrustRequest{
+									Cmd:      "VERIFY",
+									KeyName:  keyrr.Header().Name,
+									ZoneName: ur.ZoneName,
+									Key:      keyrr.String(),
+									Keyid:    int(keyrr.KeyTag()),
+									ZoneData: zd,
+								}
+								go func() { kdb.UpdateTrustQ <- utr }()
+							}
+
 						} else {
 							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
 						}

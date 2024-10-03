@@ -437,6 +437,7 @@ type KeyDB struct {
 	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
+	UpdateTrustQ        chan UpdateTrustRequest
 }
 
 type Tx struct {
@@ -467,4 +468,25 @@ type MSCAPIConf struct {
 	ApiKey     string
 	AuthMethod string
 	UseTLS     bool
+}
+
+type VerificationInfo struct {
+	KeyName        string
+	Key            string
+	ZoneName       string
+	AttemptsLeft   int
+	NextCheckTime  time.Time
+	ZoneData       *ZoneData
+	Keyid          int
+	FailedAttempts int
+}
+
+type UpdateTrustRequest struct {
+	Cmd      string
+	KeyName  string
+	ZoneName string
+	ZoneData *ZoneData
+	Key      string
+	Verified bool
+	Keyid    int
 }

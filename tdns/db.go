@@ -143,6 +143,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 		TruststoreSig0Cache: NewSig0StoreT(),
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
+		UpdateTrustQ:        make(chan UpdateTrustRequest),
 	}, nil
 }
 

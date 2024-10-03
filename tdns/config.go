@@ -19,7 +19,7 @@ type Config struct {
 	AppName          string
 	AppVersion       string
 	AppMode          string
-	AppDate		 string
+	AppDate          string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
 	Service          ServiceConf
@@ -64,6 +64,7 @@ type InternalConf struct {
 	ValidatorCh     chan ValidatorRequest
 	ScannerQ        chan ScanRequest
 	UpdateQ         chan UpdateRequest
+	UpdateTrustQ    chan UpdateTrustRequest
 	DnsUpdateQ      chan DnsUpdateRequest
 	DnsNotifyQ      chan DnsNotifyRequest
 	DelegationSyncQ chan DelegationSyncRequest

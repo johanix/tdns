@@ -124,6 +124,7 @@ func main() {
 
 	conf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
 	conf.Internal.UpdateQ = kdb.UpdateQ
+	conf.Internal.UpdateTrustQ = kdb.UpdateTrustQ
 	conf.Internal.DnsUpdateQ = make(chan tdns.DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan tdns.DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
@@ -132,6 +133,7 @@ func main() {
 	go tdns.AuthQueryEngine(conf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
 	go kdb.ZoneUpdaterEngine(stopch)
+	go kdb.VerifyTrustEngine(stopch)
 	go tdns.UpdateHandler(&conf)
 	go tdns.NotifyHandler(&conf)
 	go tdns.DnsEngine(&conf)
