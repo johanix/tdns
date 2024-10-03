@@ -172,7 +172,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	// If the delegation has changed, send an update to the DelegationSyncEngine
 	if zd.Options[OptDelSyncChild] && delchanged {
 		zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-		zd.DelegationSyncCh <- DelegationSyncRequest{
+		zd.DelegationSyncQ <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
 			ZoneName:   zd.ZoneName,
 			ZoneData:   zd,
@@ -258,7 +258,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	// Can only test for differences between old and new zone data if the zone data is ready.
 	if zd.Options[OptDelSyncChild] && delchanged {
 		zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-		zd.DelegationSyncCh <- DelegationSyncRequest{
+		zd.DelegationSyncQ <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
 			ZoneName:   zd.ZoneName,
 			ZoneData:   zd,
@@ -283,7 +283,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 			zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 			// return false, err
 		}
-		zd.DelegationSyncCh <- DelegationSyncRequest{
+		zd.DelegationSyncQ <- DelegationSyncRequest{
 			Command:    "SYNC-DNSKEY-RRSET",
 			ZoneName:   zd.ZoneName,
 			ZoneData:   zd,
@@ -720,11 +720,8 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 	return &cdd, nil
 }
 
-func (zd *ZoneData) SetupZoneSync() error {
-	if zd.Options[OptAgent] {
-		return nil // this zone does not allow any modifications
-	}
-
+func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
+	zd.Logger.Printf("SetupZoneSync(%s)", zd.ZoneName)
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
@@ -750,18 +747,27 @@ func (zd *ZoneData) SetupZoneSync() error {
 		}
 	}
 
+	// If this is a child zone and we have the delegation-sync-child option set, we need to
+	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
+	// XXX: There is an option for dont-publish-key, but at present we do not support that.
 	if zd.Options[OptDelSyncChild] {
 		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
 			switch scheme {
 			case "update":
 				// 1. Is there a KEY RRset already?
-				if !zd.Options[OptDontPublishKey] {
-					err := zd.VerifyPublishedKeyRRs()
-					if err != nil {
-						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
-						return err
-					}
-					zd.Logger.Printf("SetupZoneSync: Zone %s: Verified published KEY RRset", zd.ZoneName)
+				//				if !zd.Options[OptDontPublishKey] {
+				//					err := zd.VerifyPublishedKeyRRs()
+				//					if err != nil {
+				//						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
+				//						return err
+				//					}
+				//					zd.Logger.Printf("SetupZoneSync: Zone %s: Verified published KEY RRset", zd.ZoneName)
+				//				}
+				delsyncq <- DelegationSyncRequest{
+					Command:  "DELEGATION-SYNC-SETUP",
+					ZoneName: zd.ZoneName,
+					ZoneData: zd,
+					// Response:   make(chan DelegationSyncStatus),
 				}
 
 			case "notify":

@@ -315,7 +315,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			log.Printf("ParseZones: zone %s: DNSSEC policy \"%s\" accepted", zname, zconf.DnssecPolicy)
 		}
 
-		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.Options)
+		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
 		options := map[ZoneOption]bool{}
 		var cleanoptions []ZoneOption
 		for _, option := range zconf.OptionsStrs {
@@ -366,7 +366,13 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 		}
 		zconf.Options = cleanoptions
 		zones[zname] = zconf
-		log.Printf("ParseZones: zone %s outgoing options: %+v", zname, options)
+		var outopts []string
+		for o, val := range options {
+			if val {
+				outopts = append(outopts, ZoneOptionToString[o])
+			}
+		}
+		log.Printf("ParseZones: zone %s outgoing options: %+v", zname, outopts)
 
 		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
 			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
@@ -425,7 +431,6 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				RRtypes: zonerrtypes,
 			},
 		}
-		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 		all_zones = append(all_zones, zname)
 
 		zrch <- ZoneRefresher{
