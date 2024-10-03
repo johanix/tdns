@@ -19,6 +19,10 @@ dnsengine:
       filedir:		/etc/axfr.net/zones
       filetmpl:		"%s/%s.zone"		# zonename.zone
 
+verifyengine:
+   retry_interval:	20
+   attempts:		6
+
 apiserver:
    address:     	127.0.0.1:8989
    key:         	winter-is-coming-santa-stuck-in-chimney
