@@ -153,6 +153,37 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		}
 		return rrset
 	}
+	// AddCDEResponse adds a compact-denial-of-existence response to the message
+	AddCDEResponse := func(m *dns.Msg, qname string, apex *OwnerData) {
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+
+		var soaMinTTL uint32 = 3600
+
+		if soaRR, ok := apex.RRtypes[dns.TypeSOA]; ok && len(soaRR.RRs) > 0 {
+			if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
+				soaMinTTL = soa.Minttl
+				log.Printf("Negativ TTL för zonen %s: %d", zd.ZoneName, soaMinTTL)
+			}
+		}
+
+		nsecRR := &dns.NSEC{
+			Hdr: dns.RR_Header{
+				Name:   qname,
+				Rrtype: dns.TypeNSEC,
+				Class:  dns.ClassINET,
+				Ttl:    soaMinTTL,
+			},
+			NextDomain: "\000." + qname,
+			TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNXNAME},
+		}
+		m.Ns = append(m.Ns, nsecRR)
+		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+
+		nsecRRset := RRset{RRs: []dns.RR{nsecRR}}
+		signedNsecRRset := MaybeSignRRset(nsecRRset, zd.ZoneName)
+		m.Ns = append(m.Ns, signedNsecRRset.RRSIGs...)
+
+	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
@@ -202,9 +233,9 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 			if dnssec_ok {
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-				// XXX: Here we need to also add the proof of non-existence via NSEC+RRSIG(NSEC) or NSEC3+RRSIG(NSEC3)... at some point
-				// covering NSEC+RRSIG(that NSEC) + // apex NSEC + RRSIG(apex NSEC)
+
+				AddCDEResponse(m, qname, apex)
+
 			}
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
 			w.WriteMsg(m)
@@ -228,9 +259,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 		if dnssec_ok {
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-			// XXX: Here we need to also add the proof of non-existence via NSEC+RRSIG(NSEC) or NSEC3+RRSIG(NSEC3)... at some point
-			// covering NSEC+RRSIG(that NSEC) + // apex NSEC + RRSIG(apex NSEC)
+			AddCDEResponse(m, qname, apex)
 		}
 		w.WriteMsg(m)
 		return nil
@@ -337,7 +366,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs[0])
 			if dnssec_ok {
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+				AddCDEResponse(m, qname, apex)
 			}
 		}
 		w.WriteMsg(m)
