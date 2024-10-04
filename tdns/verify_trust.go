@@ -10,13 +10,13 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (kdb *KeyDB) VerifyTrustEngine(stopchan chan struct{}) error {
+func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 	updatetrustq := kdb.UpdateTrustQ
 	var utr UpdateTrustRequest
 
 	verifications := make(map[string]*VerificationInfo)
 
-	log.Printf("VerifyTrustEngine: starting")
+	log.Printf("KeyBootstrapper: starting")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -26,14 +26,14 @@ func (kdb *KeyDB) VerifyTrustEngine(stopchan chan struct{}) error {
 		for {
 			select {
 			case <-stopchan:
-				log.Println("VerifyTrustEngine: Received stop signal")
+				log.Println("KeyBootstrapper: Received stop signal")
 				return
 			case utr = <-updatetrustq:
 				switch utr.Cmd {
 				case "PING":
-					log.Printf("VerifyTrustEngine: PING received. PONG!")
+					log.Printf("KeyBootstrapper: PING received. PONG!")
 				case "VERIFY": //Start the verification process
-					log.Printf("VerifyTrustEngine: Received verification request for domain %s", utr.ZoneName)
+					log.Printf("KeyBootstrapper: Received verification request for domain %s", utr.ZoneName)
 
 					// Hämta antalet försök från konfigurationen
 					attempts := viper.GetInt("verifyengine.attempts")
@@ -51,11 +51,11 @@ func (kdb *KeyDB) VerifyTrustEngine(stopchan chan struct{}) error {
 						Keyid:          utr.Keyid,
 						FailedAttempts: 0,
 					}
-					go kdb.VerifyKey(utr.KeyName, utr.Key, utr.ZoneData, updatetrustq)
+					go VerifyKey(utr.KeyName, utr.Key, utr.ZoneData, updatetrustq)
 				case "VERIFIED":
-					log.Printf("VerifyTrustEngine: Received verification result for domain %s", utr.KeyName)
+					log.Printf("KeyBootstrapper: Received verification result for domain %s", utr.KeyName)
 					if info, exists := verifications[utr.KeyName]; exists {
-						log.Printf("VerifyTrustEngine: Verification info for domain %s: %v", utr.KeyName, info)
+						log.Printf("KeyBootstrapper: Verification info for domain %s: %v", utr.KeyName, info)
 						info.AttemptsLeft--
 						retryInterval := viper.GetInt("verifyengine.retry_interval")
 						if retryInterval == 0 {
@@ -63,7 +63,7 @@ func (kdb *KeyDB) VerifyTrustEngine(stopchan chan struct{}) error {
 						}
 						info.NextCheckTime = time.Now().Add(time.Duration(retryInterval) * time.Second)
 						if info.AttemptsLeft <= 0 {
-							log.Printf("VerifyTrustEngine: Verification for %s completed. Verified: %v", utr.KeyName, utr.Verified)
+							log.Printf("KeyBootstrapper: Verification for %s completed. Verified: %v", utr.KeyName, utr.Verified)
 							delete(verifications, utr.KeyName)
 							utr.Verified = true
 							// Uppdatera motsvarande nyckel i TrustStore och sätt trusted till true
@@ -136,13 +136,13 @@ func (kdb *KeyDB) VerifyTrustEngine(stopchan chan struct{}) error {
 
 					}
 				default:
-					log.Printf("VerifyTrustEngine: Unknown command: '%s'. Ignoring.", utr.Cmd)
+					log.Printf("KeyBootstrapper: Unknown command: '%s'. Ignoring.", utr.Cmd)
 				}
 			case <-ticker.C:
 				now := time.Now()
 				for _, info := range verifications {
 					if now.After(info.NextCheckTime) {
-						go kdb.VerifyKey(info.KeyName, info.Key, info.ZoneData, updatetrustq)
+						go VerifyKey(info.KeyName, info.Key, info.ZoneData, updatetrustq)
 					}
 				}
 			}
@@ -150,14 +150,14 @@ func (kdb *KeyDB) VerifyTrustEngine(stopchan chan struct{}) error {
 	}()
 	wg.Wait()
 
-	log.Println("VerifyTrustEngine: terminating")
+	log.Println("KeyBootstrapper: terminating")
 	return nil
 }
 
-func (kdb *KeyDB) VerifyKey(KeyName string, key string, zd *ZoneData, updatetrustq chan<- UpdateTrustRequest) {
+func VerifyKey(KeyName string, key string, zd *ZoneData, updatetrustq chan<- UpdateTrustRequest) {
 	log.Printf("Verifying key for domain %s", KeyName)
 
-	nameservers, err := getNameservers(KeyName, zd)
+	nameservers, err := GetNameservers(KeyName, zd)
 	if err != nil {
 		log.Printf("Error getting nameservers for %s: %v", KeyName, err)
 		updatetrustq <- UpdateTrustRequest{Cmd: "DELETE", KeyName: KeyName}
@@ -204,11 +204,11 @@ func (kdb *KeyDB) VerifyKey(KeyName string, key string, zd *ZoneData, updatetrus
 	if allVerified {
 		updatetrustq <- UpdateTrustRequest{Cmd: "VERIFIED", KeyName: KeyName}
 	} else {
-		updatetrustq <- UpdateTrustRequest{Cmd: "DELETE", KeyName: KeyName}
+		updatetrustq <- UpdateTrustRequest{Cmd: "RESTART", KeyName: KeyName}
 	}
 }
 
-func getNameservers(KeyName string, zd *ZoneData) ([]string, error) {
+func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 
 	cdd := zd.FindDelegation(KeyName, true)
 	if cdd == nil || cdd.NS_rrset == nil {
