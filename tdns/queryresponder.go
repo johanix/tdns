@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"log"
+	"sort"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -154,7 +155,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		return rrset
 	}
 	// AddCDEResponse adds a compact-denial-of-existence response to the message
-	AddCDEResponse := func(m *dns.Msg, qname string, apex *OwnerData) {
+	AddCDEResponse := func(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16) {
 		m.MsgHdr.Rcode = dns.RcodeSuccess
 
 		var soaMinTTL uint32 = 3600
@@ -174,7 +175,17 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 				Ttl:    soaMinTTL,
 			},
 			NextDomain: "\000." + qname,
-			TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNXNAME},
+			TypeBitMap: func() []uint16 {
+				baseBitMap := []uint16{dns.TypeNSEC, dns.TypeRRSIG}
+				if rrtypeList == nil {
+					return append(baseBitMap, dns.TypeNXNAME)
+				}
+				allTypes := append(baseBitMap, rrtypeList...)
+				sort.Slice(allTypes, func(i, j int) bool {
+					return allTypes[i] < allTypes[j]
+				})
+				return allTypes
+			}(),
 		}
 		m.Ns = append(m.Ns, nsecRR)
 		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
@@ -233,9 +244,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 			if dnssec_ok {
-
-				AddCDEResponse(m, qname, apex)
-
+				AddCDEResponse(m, qname, apex, nil)
 			}
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
 			w.WriteMsg(m)
@@ -259,7 +268,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 		if dnssec_ok {
-			AddCDEResponse(m, qname, apex)
+			AddCDEResponse(m, origqname, apex, nil)
 		}
 		w.WriteMsg(m)
 		return nil
@@ -366,7 +375,12 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs[0])
 			if dnssec_ok {
-				AddCDEResponse(m, qname, apex)
+				rrtypeList := []uint16{}
+				for rrtype := range owner.RRtypes {
+					rrtypeList = append(rrtypeList, rrtype)
+				}
+
+				AddCDEResponse(m, origqname, apex, rrtypeList)
 			}
 		}
 		w.WriteMsg(m)
