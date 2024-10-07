@@ -109,7 +109,7 @@ func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force 
 				Name:   key.DnskeyRR.Header().Name,
 				Rrtype: dns.TypeRRSIG,
 				Class:  dns.ClassINET,
-				Ttl:    604800, // one week in seconds
+				Ttl:    rrset.RRs[0].Header().Ttl,
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
