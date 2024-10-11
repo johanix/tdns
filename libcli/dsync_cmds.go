@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"fmt"
@@ -10,7 +10,6 @@ import (
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
-	// "github.com/spf13/viper"
 )
 
 var DsyncDiscoveryCmd = &cobra.Command{
@@ -38,8 +37,5 @@ var DsyncDiscoveryCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(DsyncDiscoveryCmd)
-	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&tdns.Globals.IMR, "imr", "i", "",
-		"IMR to send the query to")
+	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&tdns.Globals.IMR, "imr", "i", "", "IMR to send the query to")
 }
-

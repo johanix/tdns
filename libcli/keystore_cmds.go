@@ -1,6 +1,6 @@
 /*
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -23,7 +23,7 @@ import (
 var keyid int
 var NewState, filename, keytype string
 
-var keystoreCmd = &cobra.Command{
+var KeystoreCmd = &cobra.Command{
 	Use:   "keystore",
 	Short: "A brief description of your command",
 	Long: `The TDNSD keystore is where SIG(0) key pairs for zones are kept.
@@ -201,16 +201,17 @@ var keystoreDnssecSetStateCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(keystoreCmd)
-	keystoreCmd.AddCommand(keystoreSig0Cmd, keystoreDnssecCmd)
+	// rootCmd.AddCommand(KeystoreCmd)
+	KeystoreCmd.AddCommand(keystoreSig0Cmd, keystoreDnssecCmd)
 
 	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd, keystoreSig0GenerateCmd)
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
-	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
 
-	keystoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+	KeystoreCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
+
+	KeystoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
@@ -449,7 +450,7 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 		log.Println("Error from Api Post:", err)
 		return kr, fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

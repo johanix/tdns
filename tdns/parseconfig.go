@@ -70,7 +70,11 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 
 func ParseConfig(conf *Config, reload bool) error {
 	log.Printf("Enter ParseConfig")
-	viper.SetConfigFile(DefaultCfgFile)
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		cfgfile = DefaultCfgFile
+	}
+	viper.SetConfigFile(cfgfile)
 
 	viper.AutomaticEnv() // read in environment variables that match
 
@@ -78,7 +82,7 @@ func ParseConfig(conf *Config, reload bool) error {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	} else {
-		log.Fatalf("Could not load config %s: Error: %v", DefaultCfgFile, err)
+		log.Fatalf("Could not load config %s: Error: %v", cfgfile, err)
 	}
 
 	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
@@ -215,8 +219,13 @@ func ParseConfig(conf *Config, reload bool) error {
 func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, error) {
 	var all_zones []string
 
+	zonescfgfile := conf.Internal.ZonesCfgFile
+	if zonescfgfile == "" {
+		zonescfgfile = ZonesCfgFile
+	}
+
 	// If a zone config file is found, read it in.
-	zonecfgs, err := os.ReadFile(ZonesCfgFile)
+	zonecfgs, err := os.ReadFile(zonescfgfile)
 	if err != nil {
 		log.Fatalf("Error from ReadFile: %v", err)
 	}

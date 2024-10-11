@@ -19,7 +19,7 @@ type Config struct {
 	AppName          string
 	AppVersion       string
 	AppMode          string
-	AppDate		 string
+	AppDate          string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
 	Service          ServiceConf
@@ -48,7 +48,7 @@ type DnsEngineConf struct {
 
 type ApiserverConf struct {
 	Address string `validate:"required"`
-	Key     string `validate:"required"`
+	ApiKey  string `validate:"required"`
 }
 
 type DbConf struct {
@@ -56,6 +56,8 @@ type DbConf struct {
 }
 
 type InternalConf struct {
+	CfgFile         string //
+	ZonesCfgFile    string //
 	KeyDB           *KeyDB
 	DnssecPolicies  map[string]DnssecPolicy
 	APIStopCh       chan struct{}
@@ -140,6 +142,7 @@ func (conf *Config) ReloadConfig() (string, error) {
 func (conf *Config) ReloadZoneConfig() (string, error) {
 	prezones := Zones.Keys()
 	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
+	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
 	zonelist, err := ParseZones(conf, conf.Internal.RefreshZoneCh, true) // true: reload, not initial parsing
 	if err != nil {
 		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)

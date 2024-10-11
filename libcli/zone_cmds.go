@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -211,7 +211,7 @@ var zoneThawCmd = &cobra.Command{
 	},
 }
 
-var zoneCmd = &cobra.Command{
+var ZoneCmd = &cobra.Command{
 	Use:   "zone",
 	Short: "Prefix command, not useable by itself",
 }
@@ -246,7 +246,6 @@ var zoneListCmd = &cobra.Command{
 		if showfile {
 			hdr += "Zonefile|"
 		}
-		// hdr += "DelegationSync|OnlineSigning|AllowUpdates|Frozen|Dirty"
 		hdr += "Frozen|Dirty|Options"
 		out := []string{}
 		if showhdr {
@@ -301,14 +300,12 @@ var zoneSerialBumpCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(zoneCmd)
-
-	zoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
-	zoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
+	ZoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
+	ZoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
 
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
-	zoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
+	ZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
 
 	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
 	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
@@ -326,7 +323,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

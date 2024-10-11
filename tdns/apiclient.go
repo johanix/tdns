@@ -208,6 +208,10 @@ func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {
 }
 
 func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
+	if api == nil {
+		log.Printf("api.RequestNG: api client is nil. Returning.")
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
 	bytebuf := new(bytes.Buffer)
 	err := json.NewEncoder(bytebuf).Encode(data)
 	if err != nil {

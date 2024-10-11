@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -167,7 +167,7 @@ var zoneDsyncUnpublishCmd = &cobra.Command{
 }
 
 func init() {
-	zoneCmd.AddCommand(zoneDsyncCmd)
+	ZoneCmd.AddCommand(zoneDsyncCmd)
 	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd, zoneDsyncPublishCmd, zoneDsyncUnpublishCmd)
 
 	zoneDsyncCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show headers")
@@ -187,7 +187,7 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

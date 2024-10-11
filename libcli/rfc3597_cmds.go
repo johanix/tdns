@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"fmt"
@@ -34,7 +34,7 @@ var ToRFC3597Cmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(ToRFC3597Cmd)
+	// rootCmd.AddCommand(ToRFC3597Cmd)
 	//	rootCmd.AddCommand(sendCmd)
 	//	sendCmd.AddCommand(sendCdsCmd, sendCsyncCmd, sendDnskeyCmd, sendSoaCmd)
 	//	rootCmd.AddCommand(torfc3597Cmd)
