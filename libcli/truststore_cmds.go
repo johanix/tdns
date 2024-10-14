@@ -1,6 +1,6 @@
 /*
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -20,7 +20,7 @@ import (
 
 var childSig0Name, childSig0Src string
 
-var truststoreCmd = &cobra.Command{
+var TruststoreCmd = &cobra.Command{
 	Use:   "truststore",
 	Short: "Prefix command to access different features of tdnsd truststore",
 	Long: `The TDNSD truststore is where SIG(0) public keys for child zones are kept.
@@ -98,13 +98,13 @@ var truststoreSig0UntrustCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(truststoreCmd)
-	truststoreCmd.AddCommand(truststoreSig0Cmd)
+	TruststoreCmd.AddCommand(truststoreSig0Cmd)
 
 	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd, truststoreSig0DeleteCmd, truststoreSig0ListCmd,
 		truststoreSig0TrustCmd, truststoreSig0UntrustCmd)
 
-	truststoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+	TruststoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+
 	truststoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	truststoreSig0TrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 	truststoreSig0UntrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
@@ -218,7 +218,7 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 		log.Println("Error from Api Post:", err)
 		return tr, fmt.Errorf("Error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

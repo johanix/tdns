@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var configCmd = &cobra.Command{
+var ConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Prefix command, not useable by itself",
 }
@@ -89,9 +89,7 @@ var configStatusCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(configCmd)
-
-	configCmd.AddCommand(configReloadCmd, configReloadZonesCmd, configStatusCmd)
+	ConfigCmd.AddCommand(configReloadCmd, configReloadZonesCmd, configStatusCmd)
 }
 
 func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigResponse, error) {
@@ -104,7 +102,7 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

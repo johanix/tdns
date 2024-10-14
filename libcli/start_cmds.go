@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"fmt"
@@ -161,8 +161,6 @@ and prints that out in a (hopefully) comprehensible fashion.`,
 }
 
 func init() {
-	rootCmd.AddCommand(PingCmd)
-	rootCmd.AddCommand(DaemonCmd)
 	DaemonCmd.AddCommand(DaemonStatusCmd, DaemonReloadCmd)
 	DaemonCmd.AddCommand(DaemonStartCmd, DaemonStopCmd, DaemonRestartCmd)
 	DaemonCmd.AddCommand(DaemonApiCmd)

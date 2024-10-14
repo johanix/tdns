@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ import (
 
 var debugQname, debugQtype string
 
-var debugCmd = &cobra.Command{
+var DebugCmd = &cobra.Command{
 	Use:   "debug",
 	Short: "A brief description of your command",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -230,22 +230,17 @@ var debugShowRRsetCacheCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(debugCmd)
+	DebugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
 
-	debugCmd.AddCommand(debugRRsetCmd, debugValidateRRsetCmd, debugLAVCmd, debugShowTACmd, debugShowRRsetCacheCmd)
-	debugCmd.AddCommand(debugSig0Cmd)
+	DebugCmd.AddCommand(debugSig0Cmd)
 	debugSig0Cmd.AddCommand(debugSig0GenerateCmd)
 
-	debugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
-	debugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
+	DebugCmd.PersistentFlags().StringVarP(&debugQname, "qname", "", "", "qname of rrset to examine")
+	DebugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
 
 	defalg := viper.GetString("delegationsync.child.update.keygen.algorithm")
 	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", defalg, "algorithm to use for SIG(0)")
 	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Rrtype, "rrtype", "r", "", "rrtype to use for SIG(0)")
-
-	// ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
-	// ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-	// ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
 func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
@@ -258,7 +253,7 @@ func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
 		log.Fatalf("error from api post: %v", err)
 
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 
