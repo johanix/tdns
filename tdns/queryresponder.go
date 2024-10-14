@@ -163,7 +163,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		if soaRR, ok := apex.RRtypes[dns.TypeSOA]; ok && len(soaRR.RRs) > 0 {
 			if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
 				soaMinTTL = soa.Minttl
-				log.Printf("Negativ TTL för zonen %s: %d", zd.ZoneName, soaMinTTL)
+				log.Printf("Negative TTL for zone %s: %d", zd.ZoneName, soaMinTTL)
 			}
 		}
 
@@ -190,10 +190,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		m.Ns = append(m.Ns, nsecRR)
 		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 
-		nsecRRset := RRset{RRs: []dns.RR{nsecRR}}
-		signedNsecRRset := MaybeSignRRset(nsecRRset, zd.ZoneName)
-		m.Ns = append(m.Ns, signedNsecRRset.RRSIGs...)
-
+		nsecRRset := MaybeSignRRset(RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
+		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
