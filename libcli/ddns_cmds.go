@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -20,12 +20,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-var ddnsCmd = &cobra.Command{
+var DdnsCmd = &cobra.Command{
 	Use:   "ddns",
 	Short: "Send a DDNS update. Only usable via sub-commands.",
 }
 
-var delCmd = &cobra.Command{
+var DelCmd = &cobra.Command{
 	Use:   "del",
 	Short: "Delegation prefix command. Only usable via sub-commands.",
 }
@@ -144,17 +144,16 @@ var ddnsUploadCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(ddnsCmd, delCmd)
-	delCmd.AddCommand(delStatusCmd, delSyncCmd)
+	DelCmd.AddCommand(delStatusCmd, delSyncCmd)
 	delSyncCmd.Flags().StringVarP(&schemestr, "scheme", "S", "", "Scheme to use for synchronization of delegation")
 
 	delSyncCmd.MarkFlagRequired("zone")
 
-	ddnsCmd.AddCommand(ddnsRollCmd, ddnsUploadCmd)
+	DdnsCmd.AddCommand(ddnsRollCmd, ddnsUploadCmd)
 
-	ddnsCmd.PersistentFlags().StringVarP(&tdns.Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
-	ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-	ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
+	DdnsCmd.PersistentFlags().StringVarP(&tdns.Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
+	DdnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
+	DdnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
 func PrepArgs(required ...string) {
@@ -305,7 +304,7 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 		log.Println("Error from Api Post:", err)
 		return dr, fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

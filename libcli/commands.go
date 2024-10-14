@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"bytes"
@@ -15,9 +15,9 @@ import (
 
 var force bool
 
-var stopCmd = &cobra.Command{
+var StopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Send stop command to tdnsd",
+	Short: "Send stop command to tdns-server / tdns-agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		SendCommand("stop", ".")
 	},
@@ -26,11 +26,6 @@ var stopCmd = &cobra.Command{
 var showhdr, showfile, shownotify, showprimary bool
 
 func init() {
-	rootCmd.AddCommand(stopCmd)
-
-	// ddnsCmd.PersistentFlags().StringVarP(&Globals.Sig0Keyfile, "keyfile", "k", "", "name of file with private SIG(0) key")
-	// ddnsCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-	// ddnsCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
 func SendCommand(cmd, zone string) (string, error) {
@@ -48,7 +43,7 @@ func SendCommand(cmd, zone string) (string, error) {
 
 		return "", fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 
@@ -76,7 +71,7 @@ func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResp
 		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
-	if verbose {
+	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

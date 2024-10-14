@@ -11,13 +11,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	cli "github.com/johanix/tdns/libcli"
 	"github.com/johanix/tdns/tdns"
 )
 
 var cfgFile, cfgFileUsed string
-var verbose bool
-
-// var GlobalReportCh, ResultCh chan tdns.CheckReport
 var StopCh chan struct{}
 var LocalConfig string
 
@@ -61,7 +59,7 @@ func initConfig() {
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
-		if verbose {
+		if tdns.Globals.Verbose {
 			fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 		}
 		cfgFileUsed = viper.ConfigFileUsed()
@@ -81,7 +79,7 @@ func initConfig() {
 			if err := viper.MergeInConfig(); err != nil {
 				log.Fatalf("Error merging in local config from '%s'", LocalConfig)
 			} else {
-				if verbose {
+				if tdns.Globals.Verbose {
 					fmt.Printf("Merging in local config from '%s'\n", LocalConfig)
 				}
 			}
@@ -89,7 +87,7 @@ func initConfig() {
 		viper.SetConfigFile(LocalConfig)
 	}
 
-	ValidateConfig(nil, cfgFileUsed) // will terminate on error
+	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
 }
 
 func initApi() {
@@ -98,4 +96,7 @@ func initApi() {
 	authmethod := viper.GetString("cli.tdnsd.authmethod")
 
 	tdns.Globals.Api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
+	if tdns.Globals.Api == nil {
+		log.Fatalf("initApi: tdns.Globals.Api is nil. Exiting.")
+	}
 }
