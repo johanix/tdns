@@ -81,7 +81,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 	var dnskeys RRset
 	var exist bool
 
-	if dnskeys, exist = apex.RRtypes[dns.TypeDNSKEY]; exist {
+	if dnskeys, exist = apex.RRtypes.Get(dns.TypeDNSKEY); exist {
 		for _, k := range publishkeys {
 			present := false
 			for _, dnskey := range dnskeys.RRs {
@@ -100,7 +100,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		}
 	}
 
-	apex.RRtypes[dns.TypeDNSKEY] = dnskeys
+	apex.RRtypes.Set(dns.TypeDNSKEY, dnskeys)
 
 	return nil
 }

@@ -83,6 +83,8 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// 3. Try to find the key via DNS in the child zone
 		// XXX: This is not ideal. In the future keys that are not in the TrustStore should be promoted to
 		// trusted via some sort of TrustBootstrapper a la RFC8078.
+
+		// BERRA TODO flytta
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
 			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)
@@ -172,6 +174,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	return nil
 }
 
+// BERRA TODO kolla om man kan förbättra detta, så man kan skicka en EDE
 // Evaluate the keys that signed the update and determine the trust status of the update.
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// dump.P(us)

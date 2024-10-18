@@ -242,7 +242,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			} else if zd.ZoneType == Secondary {
 				if zd.Options[OptDelSyncChild] {
 					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
-					resp.Todo = append(resp.Todo, fmt.Sprintf("Add this KEY record to the %s zone at primary server:\n%s", zd.ZoneName, apex.RRtypes[dns.TypeKEY].RRs[0].String()))
+					resp.Todo = append(resp.Todo, fmt.Sprintf("Add this KEY record to the %s zone at primary server:\n%s", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs[0].String()))
 				} else {
 					resp.Functions["SIG(0) key publication"] = "disabled by policy (delegation-sync-child=false)"
 				}

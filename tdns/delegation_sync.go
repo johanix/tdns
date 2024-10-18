@@ -165,7 +165,7 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 
 	log.Printf("DelegationSyncSetup: Checking whether zone %s allows updates and if so has a KEY RRset published.", zd.ZoneName)
 	apex, _ := zd.GetOwner(zd.ZoneName)
-	_, keyrrexist := apex.RRtypes[dns.TypeKEY]
+	_, keyrrexist := apex.RRtypes.Get(dns.TypeKEY)
 
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
 		err := zd.VerifyPublishedKeyRRs()
@@ -264,12 +264,12 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 		//				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 		//				continue
 		//			}
-		rrset := apex.RRtypes[dns.TypeKEY]
+		rrset, _ := apex.RRtypes.Get(dns.TypeKEY)
 		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
 		if err != nil {
 			log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
 		} else {
-			apex.RRtypes[dns.TypeKEY] = rrset
+			apex.RRtypes.Set(dns.TypeKEY, rrset)
 			log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
 		}
 	} else {
@@ -434,7 +434,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 		// Try to sign the CSYNC RRset
 		if zd.Options[OptOnlineSigning] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
-			rrset := apex.RRtypes[dns.TypeCSYNC]
+			rrset, _ := apex.RRtypes.Get(dns.TypeCSYNC)
 			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 			//			if err != nil {
 			//				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)

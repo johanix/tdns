@@ -41,8 +41,8 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 	}
 
 	if dnssec_ok {
-		apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
-		apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+		apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
 	}
 
 	m := new(dns.Msg)
@@ -59,18 +59,24 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 
 	case dns.TypeSOA:
 		// zd.Logger.Printf("apex: %v", apex)
-		zd.Logger.Printf("There are %d SOA RRs in %s. rrset: %v", len(apex.RRtypes[dns.TypeSOA].RRs),
-			zd.ZoneName, apex.RRtypes[dns.TypeSOA])
-		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-		m.Answer = append(m.Answer, apex.RRtypes[dns.TypeSOA].RRs[0])
-		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-		v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
+		zd.Logger.Printf("There are %d SOA RRs in %s. rrset: %v", len(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs),
+			zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
+
+		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+
+		//apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+
+		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
 		if dnssec_ok {
 			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
-			m.Answer = append(m.Answer, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
+			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 			m.Extra = append(m.Extra, v4glue.RRSIGs...)
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
 		}
@@ -79,34 +85,34 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD, dns.TypeKEY,
 		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
 		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
-		if rrset, ok := apex.RRtypes[qtype]; ok {
+		if rrset, ok := apex.RRtypes.Get(qtype); ok {
 			if len(rrset.RRs) > 0 {
 				m.Answer = append(m.Answer, rrset.RRs...)
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-				v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
+				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+				v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 				m.Extra = append(m.Extra, v4glue.RRs...)
 				m.Extra = append(m.Extra, v6glue.RRs...)
 				if dnssec_ok {
-					apex.RRtypes[qtype] = MaybeSignRRset(apex.RRtypes[qtype], zd.ZoneName)
-					apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+					apex.RRtypes.Set(qtype, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(qtype), zd.ZoneName))
+					apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
 
-					m.Answer = append(m.Answer, apex.RRtypes[qtype].RRSIGs...)
-					m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
+					m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
+					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 					m.Extra = append(m.Extra, v4glue.RRSIGs...)
 					m.Extra = append(m.Extra, v6glue.RRSIGs...)
 				}
 			} else {
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
+				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 				if dnssec_ok {
-					apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
-					m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+					apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 				}
 			}
 		} else {
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 			if dnssec_ok {
-				apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+				apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 			}
 		}
 		// Anything special?
@@ -118,8 +124,8 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 	default:
 		// every apex query we don't want to deal with
 		m.MsgHdr.Rcode = dns.RcodeRefused
-		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 	}
 	w.WriteMsg(m)
 	return nil
@@ -160,7 +166,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 		var soaMinTTL uint32 = 3600
 
-		if soaRR, ok := apex.RRtypes[dns.TypeSOA]; ok && len(soaRR.RRs) > 0 {
+		if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 			if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
 				soaMinTTL = soa.Minttl
 				log.Printf("Negative TTL for zone %s: %d", zd.ZoneName, soaMinTTL)
@@ -188,7 +194,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			}(),
 		}
 		m.Ns = append(m.Ns, nsecRR)
-		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 
 		nsecRRset := MaybeSignRRset(RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
@@ -200,8 +206,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	}
 
 	if dnssec_ok {
-		apex.RRtypes[dns.TypeSOA] = MaybeSignRRset(apex.RRtypes[dns.TypeSOA], zd.ZoneName)
-		apex.RRtypes[dns.TypeNS] = MaybeSignRRset(apex.RRtypes[dns.TypeNS], zd.ZoneName)
+		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+		apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
 	}
 
 	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
@@ -239,8 +245,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			// return NXDOMAIN
 			m.MsgHdr.Rcode = dns.RcodeNameError
 			// ensure correct serial
-			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
+			soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+			soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 			if dnssec_ok {
 				AddCDEResponse(m, qname, apex, nil)
 			}
@@ -260,11 +269,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	// 0. Check for *any* existence of qname in zone
 	// log.Printf("---> Checking for any existence of qname %s", qname)
-	if len(owner.RRtypes) == 0 {
+	if owner.RRtypes.Count() == 0 {
 		m.MsgHdr.Rcode = dns.RcodeNameError
 		// ensure correct serial
-		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
+		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 		if dnssec_ok {
 			AddCDEResponse(m, origqname, apex, nil)
 		}
@@ -274,8 +283,9 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	// 2. Check for qname + CNAME
 	log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
-	if len(owner.RRtypes) == 1 {
-		for k, v := range owner.RRtypes {
+	if owner.RRtypes.Count() == 1 {
+		for _, k := range owner.RRtypes.Keys() {
+			v := owner.RRtypes.GetOnlyRRSet(k)
 			if k == dns.TypeCNAME {
 				if len(v.RRs) > 1 {
 					// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
@@ -283,23 +293,23 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 				}
 				m.Answer = append(m.Answer, v.RRs...)
 				if dnssec_ok {
-					owner.RRtypes[k] = MaybeSignRRset(owner.RRtypes[k], qname)
-					m.Answer = append(m.Answer, owner.RRtypes[k].RRSIGs...)
+					owner.RRtypes.Set(k, MaybeSignRRset(v, qname))
+					m.Answer = append(m.Answer, v.RRSIGs...)
 				}
 				tgt := v.RRs[0].(*dns.CNAME).Target
 				if strings.HasSuffix(tgt, zd.ZoneName) {
 					tgtowner, _ := zd.GetOwner(tgt)
-					if tgtrrset, ok := tgtowner.RRtypes[qtype]; ok {
+					if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
 						m.Answer = append(m.Answer, tgtrrset.RRs...)
-						m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-						v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
+						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+						v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 						m.Extra = append(m.Extra, v4glue.RRs...)
 						m.Extra = append(m.Extra, v6glue.RRs...)
 						if dnssec_ok {
-							tgtowner.RRtypes[qtype] = MaybeSignRRset(tgtowner.RRtypes[qtype], qname)
-							m.Answer = append(m.Answer, tgtowner.RRtypes[qtype].RRSIGs...)
+							tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
+							m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
 
-							m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
+							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 
 							m.Extra = append(m.Extra, v4glue.RRSIGs...)
 							m.Extra = append(m.Extra, v6glue.RRSIGs...)
@@ -334,17 +344,17 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	switch qtype {
 	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, TypeNOTIFY, TypeDSYNC,
 		TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
-		if _, ok := owner.RRtypes[qtype]; ok && len(owner.RRtypes[qtype].RRs) > 0 {
+		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(owner.RRtypes.GetOnlyRRSet(qtype).RRs) > 0 {
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
-				m.Answer = append(m.Answer, owner.RRtypes[qtype].RRs...)
+				m.Answer = append(m.Answer, rrset.RRs...)
 			} else {
 				// zd.Logger.Printf("Wildcard match qname %s %s", qname, origqname)
-				tmp := WildcardReplace(owner.RRtypes[qtype].RRs, qname, origqname)
+				tmp := WildcardReplace(rrset.RRs, qname, origqname)
 				m.Answer = append(m.Answer, tmp...)
 			}
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-			v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
 			if dnssec_ok {
@@ -353,28 +363,30 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 				// if zd.OnlineSigning && cs != nil {
 				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
-						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
+						owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
 					}
 				}
 
 				if qname == origqname {
-					m.Answer = append(m.Answer, owner.RRtypes[qtype].RRSIGs...)
+					m.Answer = append(m.Answer, rrset.RRSIGs...)
 				} else {
-					tmp := WildcardReplace(owner.RRtypes[qtype].RRSIGs, qname, origqname)
+					tmp := WildcardReplace(rrset.RRSIGs, qname, origqname)
 					m.Answer = append(m.Answer, tmp...)
 				}
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRSIGs...)
+				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 				m.Extra = append(m.Extra, v4glue.RRSIGs...)
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
 			}
 		} else {
 			log.Printf("---> No exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
 			// ensure correct serial
-			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs[0])
+			soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+			soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 			if dnssec_ok {
 				rrtypeList := []uint16{}
-				for rrtype := range owner.RRtypes {
+				for _, rrtype := range owner.RRtypes.Keys() {
 					rrtypeList = append(rrtypeList, rrtype)
 				}
 
@@ -387,8 +399,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	// Final catcheverything we don't want to deal with
 	m.MsgHdr.Rcode = dns.RcodeRefused
-	m.Ns = append(m.Ns, apex.RRtypes[dns.TypeNS].RRs...)
-	v4glue, v6glue = zd.FindGlue(apex.RRtypes[dns.TypeNS], dnssec_ok)
+	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 	m.Extra = append(m.Extra, v4glue.RRs...)
 	m.Extra = append(m.Extra, v6glue.RRs...)
 	if dnssec_ok {

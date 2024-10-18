@@ -306,7 +306,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if _, exist := owner.RRtypes[dns.TypeNS]; exist {
+		if _, exist := owner.RRtypes.Get(dns.TypeNS); exist {
 			delegations = append(delegations, name)
 		}
 	}
@@ -321,7 +321,8 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			return 0, err
 		}
 
-		for rrt, rrset := range owner.RRtypes {
+		for _, rrt := range owner.RRtypes.Keys() {
+			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
 			if rrt == dns.TypeRRSIG {
 				continue // should not happen
 			}
@@ -343,7 +344,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if wasglue {
 				continue
 			}
-			owner.RRtypes[rrt], signed = MaybeSignRRset(rrset, zd.ZoneName)
+			rrset, signed = MaybeSignRRset(rrset, zd.ZoneName)
+			owner.RRtypes.Set(rrt, rrset)
+
 			if signed {
 				zoneResigned = true
 			}
@@ -409,7 +412,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		}
 		nextname = names[nextidx]
 		var tmap = []int{int(dns.TypeNSEC)}
-		for rrt := range owner.RRtypes {
+		for _, rrt := range owner.RRtypes.Keys() {
 			if rrt == dns.TypeRRSIG {
 				hasRRSIG = true
 				continue
@@ -441,7 +444,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		if err != nil {
 			return err
 		}
-		tmp := owner.RRtypes[dns.TypeNSEC]
+		tmp := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC)
 		tmp.RRs = []dns.RR{nsecrr}
 		//		owner.RRtypes[dns.TypeNSEC] = MaybeSignRRset(tmp, zd.ZoneName, kdb)
 
@@ -464,7 +467,7 @@ func (zd *ZoneData) ShowNsecChain() ([]string, error) {
 			return nsecrrs, err
 		}
 		if name != zd.ZoneName {
-			rrs := owner.RRtypes[dns.TypeNSEC].RRs
+			rrs := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC).RRs
 			if len(rrs) == 1 {
 				nsecrrs = append(nsecrrs, rrs[0].String())
 			}

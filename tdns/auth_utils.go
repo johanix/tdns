@@ -22,8 +22,8 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 		if zd.NameExists(child) {
 			childrrs, _ := zd.GetOwner(child)
 			zd.Logger.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
-			if childns, ok := childrrs.RRtypes[dns.TypeNS]; ok {
-				childds := childrrs.RRtypes[dns.TypeDS]
+			if childns, ok := childrrs.RRtypes.Get(dns.TypeNS); ok {
+				childds := childrrs.RRtypes.GetOnlyRRSet(dns.TypeDS)
 				cdd := ChildDelegationData{
 					ChildName: child,
 					NS_rrset:  &childns,
@@ -66,12 +66,12 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 			}
 			nsnamerrs, _ := zd.GetOwner(nsname)
 
-			if ns_A_rrs, ok := nsnamerrs.RRtypes[dns.TypeA]; ok {
+			if ns_A_rrs, ok := nsnamerrs.RRtypes.Get(dns.TypeA); ok {
 				// Ok, we found an A RR
 				maybe_4glue.RRs = append(maybe_4glue.RRs, ns_A_rrs.RRs...)
 				maybe_4glue.RRSIGs = append(maybe_4glue.RRSIGs, ns_A_rrs.RRSIGs...)
 			}
-			if ns_AAAA_rrs, ok := nsnamerrs.RRtypes[dns.TypeAAAA]; ok {
+			if ns_AAAA_rrs, ok := nsnamerrs.RRtypes.Get(dns.TypeAAAA); ok {
 				// Ok, we found an AAAA RR
 				maybe_6glue.RRs = append(maybe_6glue.RRs, ns_AAAA_rrs.RRs...)
 				maybe_6glue.RRSIGs = append(maybe_6glue.RRSIGs, ns_AAAA_rrs.RRSIGs...)
@@ -124,12 +124,12 @@ func (zd *ZoneData) FindGlueSimple(nsrrs RRset, dnssec_ok bool) ([]dns.RR, []dns
 			}
 			nsnamerrs, _ := zd.GetOwner(nsname)
 
-			if ns_A_rrs, ok := nsnamerrs.RRtypes[dns.TypeA]; ok {
+			if ns_A_rrs, ok := nsnamerrs.RRtypes.Get(dns.TypeA); ok {
 				// Ok, we found an A RR
 				v4glue = append(v4glue, ns_A_rrs.RRs...)
 				v4glue_rrsigs = append(v4glue_rrsigs, ns_A_rrs.RRSIGs...)
 			}
-			if ns_AAAA_rrs, ok := nsnamerrs.RRtypes[dns.TypeAAAA]; ok {
+			if ns_AAAA_rrs, ok := nsnamerrs.RRtypes.Get(dns.TypeAAAA); ok {
 				// Ok, we found an AAAA RR
 				v6glue = append(v6glue, ns_AAAA_rrs.RRs...)
 				v6glue_rrsigs = append(v6glue_rrsigs, ns_AAAA_rrs.RRSIGs...)
