@@ -1,11 +1,9 @@
 /*
- * Copyright (c) DNS TAPIR
+ * Copyright (c) Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
-package cmd
+package cli
 
 import (
-
-	//	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -21,7 +19,7 @@ import (
 
 var zone, server, keyfile, signer string
 
-var childCmd = &cobra.Command{
+var ChildCmd = &cobra.Command{
 	Use:   "child",
 	Short: "Prefix, only useable via the 'child update create' subcommand",
 }
@@ -46,7 +44,7 @@ The zone to update is mandatory to specify on the command line with the --zone f
 	},
 }
 
-var updateCmd = &cobra.Command{
+var UpdateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "[OBE] Create and ultimately send a DNS UPDATE msg for zone auth data",
 }
@@ -81,17 +79,16 @@ The zone to update is mandatory to specify on the command line with the --zone f
 }
 
 func init() {
-	rootCmd.AddCommand(updateCmd, childCmd)
-	childCmd.AddCommand(childUpdateCmd)
+	ChildCmd.AddCommand(childUpdateCmd)
 	childUpdateCmd.AddCommand(childUpdateCreateCmd)
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.ParentZone, "parent", "P", "", "Parent zone to send update to")
 
-	zoneCmd.AddCommand(zoneUpdateCmd)
+	ZoneCmd.AddCommand(zoneUpdateCmd)
 	zoneUpdateCmd.AddCommand(zoneUpdateCreateCmd)
 	zoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 
-	updateCmd.AddCommand(updateCreateCmd)
+	UpdateCmd.AddCommand(updateCreateCmd)
 	updateCreateCmd.Flags().StringVarP(&signer, "signer", "", "", "Name of signer (i.e. key used to sign update)")
 	updateCreateCmd.Flags().StringVarP(&server, "server", "S", "", "Server to send update to (in addr:port format)")
 	updateCreateCmd.Flags().StringVarP(&keyfile, "key", "K", "", "SIG(0) keyfile to use for signing the update")
@@ -232,8 +229,6 @@ cmdloop:
 		case "zone":
 			fmt.Printf("Zone must be specified on the command line\n")
 			os.Exit(1)
-			// zone = tdns.TtyQuestion("Zone", "foo.com", false)
-			// zone = dns.Fqdn(zone)
 
 		case "set-ttl":
 			ttl = tdns.TtyIntQuestion("TTL (in seconds)", 60, false)

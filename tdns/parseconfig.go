@@ -70,7 +70,11 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 
 func ParseConfig(conf *Config, reload bool) error {
 	log.Printf("Enter ParseConfig")
-	viper.SetConfigFile(DefaultCfgFile)
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		cfgfile = DefaultCfgFile
+	}
+	viper.SetConfigFile(cfgfile)
 
 	viper.AutomaticEnv() // read in environment variables that match
 
@@ -78,7 +82,7 @@ func ParseConfig(conf *Config, reload bool) error {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	} else {
-		log.Fatalf("Could not load config %s: Error: %v", DefaultCfgFile, err)
+		log.Fatalf("Could not load config %s: Error: %v", cfgfile, err)
 	}
 
 	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
@@ -215,8 +219,13 @@ func ParseConfig(conf *Config, reload bool) error {
 func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, error) {
 	var all_zones []string
 
+	zonescfgfile := conf.Internal.ZonesCfgFile
+	if zonescfgfile == "" {
+		zonescfgfile = ZonesCfgFile
+	}
+
 	// If a zone config file is found, read it in.
-	zonecfgs, err := os.ReadFile(ZonesCfgFile)
+	zonecfgs, err := os.ReadFile(zonescfgfile)
 	if err != nil {
 		log.Fatalf("Error from ReadFile: %v", err)
 	}
@@ -315,51 +324,64 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			log.Printf("ParseZones: zone %s: DNSSEC policy \"%s\" accepted", zname, zconf.DnssecPolicy)
 		}
 
-		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.Options)
-		options := map[string]bool{}
-		var cleanoptions []string
-		for _, option := range zconf.Options {
-			option := strings.ToLower(option)
-			switch option {
-			case "delegation-sync-parent", // as a parent, publish supported DSYNC schemes
-				"delegation-sync-child", // as a child, try to sync with parent via DSYNC scheme				"delegation-sync-child", // as a child, try to sync with parent via DSYNC scheme				"online-signing",        // zone may be signed (and re-signed) online as needed				"online-signing",        // zone may be signed (and re-signed) online as needed				"online-signing",        // zone may be signed (and re-signed) online as needed
-				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data				"allow-updates",         // zone allows DNS UPDATEs to authoritiative data
-				"allow-child-updates",   // zone allows updates to child delegation information
-				"fold-case",             // fold case of owner names to lower to make query matching case insensitive
-				"black-lies",            // zone may implement DNSSEC signed negative responses via so-called black lies.
-				"dont-publish-key":      // do not publish a SIG(0) KEY record for the zone (default should be to publish)
-				options[option] = true
-				cleanoptions = append(cleanoptions, option)
+		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
+		options := map[ZoneOption]bool{}
+		var cleanoptions []ZoneOption
+		for _, option := range zconf.OptionsStrs {
+			option = strings.ToLower(option)
+			opt, exist := StringToZoneOption[option]
+			if !exist {
+				log.Printf("ParseZones: Zone %s: Unknown option: \"%s\". Ignored.", zname, option)
+				continue
+			}
 
-			case "online-signing": // zone may be signed (and re-signed) online as needed; only possible if dnssec policy is set
+			switch opt {
+			case OptDelSyncParent, // as a parent, publish supported DSYNC schemes
+				OptDelSyncChild,      // as a child, try to sync with parent via DSYNC scheme
+				OptAllowUpdates,      // zone allows DNS UPDATEs to authoritiative data
+				OptAllowChildUpdates, // zone allows updates to child delegation information
+				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
+				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
+				OptDontPublishKey:    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				options[opt] = true
+				cleanoptions = append(cleanoptions, opt)
+
+			case OptOnlineSigning: // zone may be signed (and re-signed) online as needed; only possible if dnssec policy is set
 				if zconf.DnssecPolicy != "" {
-					options[option] = true
-					cleanoptions = append(cleanoptions, option)
+					options[opt] = true
+					cleanoptions = append(cleanoptions, opt)
 				} else {
 					log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
 				}
 
-			case "multisigner":
+			case OptMultiSigner:
 				if zconf.MultiSigner == "" || zconf.MultiSigner == "none" {
-					log.Printf("Error: Zone %s: Option \"multisigner\" set without a corresponding multisigner config. Option ignored.", zname)
+					log.Printf("Error: Zone %s: Option \"%s\" set without a corresponding multisigner config. Option ignored.", zname, ZoneOptionToString[opt])
 					continue
 				}
 				if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
-					log.Printf("Error: Zone %s: Option \"multi-signer\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, zconf.MultiSigner)
+					log.Printf("Error: Zone %s: Option \"%s\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, ZoneOptionToString[opt], zconf.MultiSigner)
 					continue
 				}
-				options[option] = true
-				cleanoptions = append(cleanoptions, option)
-				log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, option, zconf.MultiSigner)
+				options[opt] = true
+				cleanoptions = append(cleanoptions, opt)
+				log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, ZoneOptionToString[opt], zconf.MultiSigner)
 
 			default:
-				log.Printf("Error: Zone %s: Unknown option: \"%s\". Zone ignored.", zname, option)
+				// Should not happen
+				log.Printf("Error: Zone %s: Unknown option: \"%s\". Zone ignored.", zname, ZoneOptionToString[opt])
 				delete(zones, zname)
 			}
 		}
 		zconf.Options = cleanoptions
 		zones[zname] = zconf
-		log.Printf("ParseZones: zone %s outgoing options: %+v", zname, options)
+		var outopts []string
+		for o, val := range options {
+			if val {
+				outopts = append(outopts, ZoneOptionToString[o])
+			}
+		}
+		log.Printf("ParseZones: zone %s outgoing options: %+v", zname, outopts)
 
 		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
 			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
@@ -371,7 +393,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			// all ok, we know these
 		case "none", "":
 			// these are also ok, but imply that no updates are allowed
-			options["allow-child-updates"] = false
+			options[OptAllowChildUpdates] = false
 		default:
 			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Child.Type)
 			delete(zones, zname)
@@ -382,7 +404,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			// all ok, we know these
 		case "none", "":
 			// these are also ok, but imply that no updates are allowed
-			options["allow-updates"] = false
+			options[OptAllowUpdates] = false
 		default:
 			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Zone.Type)
 			delete(zones, zname)
@@ -418,7 +440,6 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				RRtypes: zonerrtypes,
 			},
 		}
-		log.Printf("ParseZones: zone %s outgoing options: %v", zname, options)
 		all_zones = append(all_zones, zname)
 
 		zrch <- ZoneRefresher{
@@ -471,10 +492,10 @@ func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf
 	}
 
 	// template options are appended to existing zone options
-	if len(tmpl.Options) > 0 {
-		for _, option := range tmpl.Options {
-			if !slices.Contains(zconf.Options, option) {
-				zconf.Options = append(zconf.Options, option)
+	if len(tmpl.OptionsStrs) > 0 {
+		for _, option := range tmpl.OptionsStrs {
+			if !slices.Contains(zconf.OptionsStrs, option) {
+				zconf.OptionsStrs = append(zconf.OptionsStrs, option)
 			}
 		}
 	}

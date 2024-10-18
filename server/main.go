@@ -85,6 +85,10 @@ func main() {
 		log.Fatalf("*** TDNS-SERVER: Error: unknown mode of operation: %s", conf.AppMode)
 	}
 
+	// These are the defaults, but they are defined here to make it possible for eg. MUSIC to use a different defaul
+	conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
+	conf.Internal.CfgFile = tdns.DefaultCfgFile
+
 	err := tdns.ParseConfig(&conf, false) // false: not reload, initial parsing
 	if err != nil {
 		log.Fatalf("Error parsing config: %v", err)

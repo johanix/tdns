@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"log"
+	"sort"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -23,7 +24,7 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 			log.Printf("ApexResponder: MaybeSignRRset: Warning: dak is nil")
 			return rrset
 		}
-		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			_, err := zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
@@ -143,7 +144,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
 			return rrset
 		}
-		if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			_, err := zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
@@ -152,6 +153,45 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			}
 		}
 		return rrset
+	}
+	// AddCDEResponse adds a compact-denial-of-existence response to the message
+	AddCDEResponse := func(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16) {
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+
+		var soaMinTTL uint32 = 3600
+
+		if soaRR, ok := apex.RRtypes[dns.TypeSOA]; ok && len(soaRR.RRs) > 0 {
+			if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
+				soaMinTTL = soa.Minttl
+				log.Printf("Negative TTL for zone %s: %d", zd.ZoneName, soaMinTTL)
+			}
+		}
+
+		nsecRR := &dns.NSEC{
+			Hdr: dns.RR_Header{
+				Name:   qname,
+				Rrtype: dns.TypeNSEC,
+				Class:  dns.ClassINET,
+				Ttl:    soaMinTTL,
+			},
+			NextDomain: "\000." + qname,
+			TypeBitMap: func() []uint16 {
+				baseBitMap := []uint16{dns.TypeNSEC, dns.TypeRRSIG}
+				if rrtypeList == nil {
+					return append(baseBitMap, dns.TypeNXNAME)
+				}
+				allTypes := append(baseBitMap, rrtypeList...)
+				sort.Slice(allTypes, func(i, j int) bool {
+					return allTypes[i] < allTypes[j]
+				})
+				return allTypes
+			}(),
+		}
+		m.Ns = append(m.Ns, nsecRR)
+		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+
+		nsecRRset := MaybeSignRRset(RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
+		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -202,9 +242,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 			if dnssec_ok {
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-				// XXX: Here we need to also add the proof of non-existence via NSEC+RRSIG(NSEC) or NSEC3+RRSIG(NSEC3)... at some point
-				// covering NSEC+RRSIG(that NSEC) + // apex NSEC + RRSIG(apex NSEC)
+				AddCDEResponse(m, qname, apex, nil)
 			}
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
 			w.WriteMsg(m)
@@ -228,9 +266,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs...)
 		if dnssec_ok {
-			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-			// XXX: Here we need to also add the proof of non-existence via NSEC+RRSIG(NSEC) or NSEC3+RRSIG(NSEC3)... at some point
-			// covering NSEC+RRSIG(that NSEC) + // apex NSEC + RRSIG(apex NSEC)
+			AddCDEResponse(m, origqname, apex, nil)
 		}
 		w.WriteMsg(m)
 		return nil
@@ -315,7 +351,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				// if zd.OnlineSigning && cs != nil {
-				if zd.Options["online-signing"] && dak != nil && len(dak.ZSKs) > 0 {
+				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes[qtype] = MaybeSignRRset(owner.RRtypes[qtype], qname)
 					}
@@ -337,7 +373,12 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRs[0])
 			if dnssec_ok {
-				m.Ns = append(m.Ns, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+				rrtypeList := []uint16{}
+				for rrtype := range owner.RRtypes {
+					rrtypeList = append(rrtypeList, rrtype)
+				}
+
+				AddCDEResponse(m, origqname, apex, rrtypeList)
 			}
 		}
 		w.WriteMsg(m)

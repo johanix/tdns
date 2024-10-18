@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"fmt"
@@ -15,7 +15,7 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-var notifyCmd = &cobra.Command{
+var NotifyCmd = &cobra.Command{
 	Use:   "notify",
 	Short: "The 'notify' command is only usable via defined sub-commands",
 }
@@ -58,14 +58,12 @@ var notifySendSoaCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(notifyCmd)
-	notifyCmd.AddCommand(notifySendCmd)
+	NotifyCmd.AddCommand(notifySendCmd)
 	notifySendCmd.AddCommand(notifySendCdsCmd, notifySendCsyncCmd, notifySendDnskeyCmd,
 		notifySendSoaCmd)
 
-	//	notifyCmd.PersistentFlags().StringVarP(&pzone, "pzone", "Z", "", "Parent zone to sync via DDNS")
-	notifyCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
-	notifyCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
+	notifySendCmd.PersistentFlags().StringVarP(&childpri, "primary", "p", "", "Address:port of child primary namserver")
+	notifySendCmd.PersistentFlags().StringVarP(&parpri, "pprimary", "P", "", "Address:port of parent primary nameserver")
 }
 
 var childpri, parpri string

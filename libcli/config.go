@@ -1,12 +1,13 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"log"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
 )
 
@@ -64,7 +65,7 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 	validate := validator.New()
 
 	for k, data := range configsections {
-		if verbose {
+		if tdns.Globals.Verbose {
 			log.Printf("Validating config for %s section", k)
 		}
 		if err := validate.Struct(data); err != nil {
