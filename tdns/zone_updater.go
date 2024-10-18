@@ -74,7 +74,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 					// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
 					log.Printf("ZoneUpdater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
 					log.Printf("ZoneUpdater: CHILD-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
-					if zd.Options["allow-child-updates"] {
+					if zd.Options[OptAllowChildUpdates] {
 						var updated bool
 						var err error
 
@@ -91,7 +91,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 							}
 						}
 						if updated {
-							zd.Options["dirty"] = true
+							zd.Options[OptDirty] = true
 						}
 					}
 
@@ -100,16 +100,16 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 					// (i.e. not child delegation information).
 					log.Printf("ZoneUpdater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
 					log.Printf("ZoneUpdater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
-					if zd.Options["allow-updates"] {
+					if zd.Options[OptAllowUpdates] {
 						dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
 						if err != nil {
 							log.Printf("Error from ZoneUpdateChangesDelegationData: %v", err)
 						}
 						log.Printf("ZoneUpdater: dss.InSync: %t", dss.InSync)
 
-						if zd.Options["delegation-sync-child"] && !dss.InSync {
-							log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncCh): %d", zd.ZoneName, len(zd.DelegationSyncCh))
-							zd.DelegationSyncCh <- DelegationSyncRequest{
+						if zd.Options[OptDelSyncChild] && !dss.InSync {
+							log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncQ): %d", zd.ZoneName, len(zd.DelegationSyncQ))
+							zd.DelegationSyncQ <- DelegationSyncRequest{
 								Command:    "SYNC-DELEGATION",
 								ZoneName:   zd.ZoneName,
 								ZoneData:   zd,
@@ -135,7 +135,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 						}
 						if updated && !ur.InternalUpdate {
 							log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
-							zd.Options["dirty"] = true
+							zd.Options[OptDirty] = true
 						}
 					} else {
 						log.Printf("ZoneUpdater: Zone %s has updates disallowed", zd.ZoneName)
@@ -424,7 +424,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
 			updated = true
-			zd.Options["dirty"] = true
+			zd.Options[OptDirty] = true
 		}
 		owner.RRtypes[rrtype] = rrset
 		// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
@@ -452,10 +452,10 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	}()
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil && zd.Options["online-signing"] {
+	if err != nil && zd.Options[OptOnlineSigning] {
 		return false, err
 	}
-	if len(dak.KSKs) == 0 && zd.Options["online-signing"] {
+	if len(dak.KSKs) == 0 && zd.Options[OptOnlineSigning] {
 		return false, fmt.Errorf("Zone %s has no active KSKs and online-signing is enabled. Zone update is rejected.", zd.ZoneName)
 	}
 

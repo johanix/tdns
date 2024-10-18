@@ -14,7 +14,7 @@ import (
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
-	if zd.Options["dont-publish-key"] {
+	if zd.Options[OptDontPublishKey] {
 		return fmt.Errorf("Zone %s does not allow KEY RR publication", zd.ZoneName)
 	}
 

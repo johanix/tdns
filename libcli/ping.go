@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
-package cmd
+package cli
 
 import (
 	"fmt"

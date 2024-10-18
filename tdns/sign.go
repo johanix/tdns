@@ -59,7 +59,7 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 
 func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force bool) (bool, error) {
 
-	if !zd.Options["online-signing"] {
+	if !zd.Options[OptOnlineSigning] {
 		return false, fmt.Errorf("SignRRset: zone %s does not allow online signing", zd.ZoneName)
 	}
 
@@ -109,7 +109,7 @@ func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force 
 				Name:   key.DnskeyRR.Header().Name,
 				Rrtype: dns.TypeRRSIG,
 				Class:  dns.ClassINET,
-				Ttl:    604800, // one week in seconds
+				Ttl:    rrset.RRs[0].Header().Ttl,
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
@@ -170,11 +170,11 @@ func NeedsResigning(rrsig *dns.RRSIG) bool {
 // At the end, is anything hass been signed, then we must end by bumping the
 // SOA Serial and resigning the SOA.
 func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
-	if !zd.Options["online-signing"] {
+	if !zd.Options[OptOnlineSigning] {
 		return 0, fmt.Errorf("SignZone: zone %s should not be signed here (option online-signing=false)", zd.ZoneName)
 	}
 
-	if !zd.Options["allow-updates"] {
+	if !zd.Options[OptAllowUpdates] {
 		return 0, fmt.Errorf("SignZone: zone %s is not allowed to be updated", zd.ZoneName)
 	}
 
@@ -263,7 +263,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	newrrsigs := 0
 
 	// It's either black lies or we need a traditional NSEC chain
-	if !zd.Options["black-lies"] {
+	if !zd.Options[OptBlackLies] {
 		err = zd.GenerateNsecChain(kdb)
 		if err != nil {
 			return 0, err
@@ -365,7 +365,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 }
 
 func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
-	if !zd.Options["allow-updates"] {
+	if !zd.Options[OptAllowUpdates] {
 		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated", zd.ZoneName)
 	}
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
@@ -421,7 +421,7 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 				tmap = append(tmap, int(rrt))
 			}
 		}
-		if hasRRSIG || (zd.Options["online-signing"] && len(dak.KSKs) > 0) {
+		if hasRRSIG || (zd.Options[OptOnlineSigning] && len(dak.KSKs) > 0) {
 			tmap = append(tmap, int(dns.TypeRRSIG))
 		}
 

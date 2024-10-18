@@ -11,7 +11,7 @@ import (
 )
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
-	if !zd.Options["allow-updates"] {
+	if !zd.Options[OptAllowUpdates] {
 		return fmt.Errorf("Zone %s does not allow updates", zd.ZoneName)
 	}
 
