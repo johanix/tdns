@@ -403,7 +403,7 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		if owner, ok = zd.Data.Get(qname); !ok {
 			owner = OwnerData{
 				Name:    qname,
-				RRtypes: make(map[uint16]RRset),
+				RRtypes: NewConcurrentRRTypeStore(),
 			}
 			// XXX: Hmm. This seems wrong. We create an ownername where there wasn't one
 			//      based on a request for it?
@@ -451,7 +451,7 @@ func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*RRset, error) {
 		panic(fmt.Sprintf("GetRRset: owner data is nil for zone apex %s. This should not happen", zd.ZoneName))
 	}
 	// dump.P(owner)
-	if rrset, exists := owner.RRtypes[rrtype]; exists {
+	if rrset, exists := owner.RRtypes.Get(rrtype); exists {
 		return &rrset, nil
 	} else {
 		return nil, nil
@@ -489,10 +489,10 @@ func (zd *ZoneData) IsChildDelegation(qname string) bool {
 	if err != nil || owner == nil || qname == zd.ZoneName {
 		return false
 	}
-	if _, exists := owner.RRtypes[dns.TypeNS]; !exists {
+	if _, exists := owner.RRtypes.Get(dns.TypeNS); !exists {
 		return false
 	}
-	if len(owner.RRtypes[dns.TypeNS].RRs) == 0 {
+	if len(owner.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs) == 0 {
 		return false
 	}
 	// zd.Logger.Printf("IsChildDelegation: %s is an existing child of %s",
@@ -505,7 +505,7 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 	if err != nil || owner == nil {
 		return nil, err
 	}
-	soa := owner.RRtypes[dns.TypeSOA].RRs[0]
+	soa := owner.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0]
 	return soa.(*dns.SOA), nil
 }
 
@@ -515,7 +515,7 @@ func (zd *ZoneData) PrintOwners() {
 		fmt.Printf("owner name\tindex\n")
 		for i, v := range zd.Owners {
 			rrtypes := []string{}
-			for t, _ := range v.RRtypes {
+			for _, t := range v.RRtypes.Keys() {
 				rrtypes = append(rrtypes, dns.TypeToString[t])
 			}
 			fmt.Printf("%d\t%s\t%s\n", i, v.Name, strings.Join(rrtypes, ", "))
@@ -649,9 +649,11 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 		//			return resp, err
 		//		}
 		apex, _ := zd.GetOwner(zd.ZoneName)
-		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
-		rrset := apex.RRtypes[dns.TypeSOA]
+		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
 		if err != nil {
 			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
@@ -692,13 +694,13 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 	}
 
 	cdd.RRsets[childname] = map[uint16]RRset{
-		dns.TypeNS: owner.RRtypes[dns.TypeNS],
-		dns.TypeDS: owner.RRtypes[dns.TypeDS],
+		dns.TypeNS: owner.RRtypes.GetOnlyRRSet(dns.TypeNS),
+		dns.TypeDS: owner.RRtypes.GetOnlyRRSet(dns.TypeDS),
 	}
 
-	cdd.NS_rrs = owner.RRtypes[dns.TypeNS].RRs
+	cdd.NS_rrs = owner.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs
 
-	bns, err := BailiwickNS(childname, owner.RRtypes[dns.TypeNS].RRs)
+	bns, err := BailiwickNS(childname, owner.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
 	if err != nil {
 		return nil, fmt.Errorf("FetchChildDelegationData: error getting in bailiwick NS for %s: %v", childname, err)
 	}
@@ -709,11 +711,11 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 			return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", ns, err)
 		}
 		cdd.RRsets[ns] = map[uint16]RRset{
-			dns.TypeA:    nsowner.RRtypes[dns.TypeA],
-			dns.TypeAAAA: nsowner.RRtypes[dns.TypeAAAA],
+			dns.TypeA:    nsowner.RRtypes.GetOnlyRRSet(dns.TypeA),
+			dns.TypeAAAA: nsowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA),
 		}
-		cdd.A_glue = append(cdd.A_glue, nsowner.RRtypes[dns.TypeA].RRs...)
-		cdd.AAAA_glue = append(cdd.AAAA_glue, nsowner.RRtypes[dns.TypeAAAA].RRs...)
+		cdd.A_glue = append(cdd.A_glue, nsowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs...)
+		cdd.AAAA_glue = append(cdd.AAAA_glue, nsowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs...)
 	}
 
 	zd.Children[childname] = &cdd
@@ -733,7 +735,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
-		dsync_rrset, exist := apex.RRtypes[TypeDSYNC]
+		dsync_rrset, exist := apex.RRtypes.Get(TypeDSYNC)
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
@@ -894,12 +896,12 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 			continue
 		}
 
-		if rrset, exist := owner.RRtypes[dns.TypeA]; exist {
+		if rrset, exist := owner.RRtypes.Get(dns.TypeA); exist {
 			if len(rrset.RRs) > 0 {
 				dd.A_glue[nsname] = &rrset
 			}
 		}
-		if rrset, exist := owner.RRtypes[dns.TypeAAAA]; exist {
+		if rrset, exist := owner.RRtypes.Get(dns.TypeAAAA); exist {
 			if len(rrset.RRs) > 0 {
 				dd.AAAA_glue[nsname] = &rrset
 			}
