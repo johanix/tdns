@@ -69,7 +69,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 
 	// apex, _ := zd.Data[zd.ZoneName]
 	apex, _ := zd.Data.Get(zd.ZoneName)
-	soa := apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA)
+	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
 
@@ -104,8 +104,8 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	}()
 
 	apex, _ := zd.GetOwner(zd.ZoneName)
-	soa := apex.RRtypes[dns.TypeSOA].RRs[0]
-	soa.(*dns.SOA).Serial = zd.CurrentSerial
+	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
+	soa.Serial = zd.CurrentSerial
 
 	total_sent := 0
 	count := 0
@@ -116,21 +116,21 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// env.RR = append(env.RR, soa)
 	// XXX: If we change the SOA serial we must also recompute the RRSIG.
 	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-	rrs = append(rrs, apex.RRtypes[dns.TypeSOA].RRSIGs...)
+	rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 	if Globals.Debug {
 		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
 	}
 
 	// Rest of apex
-	for rrt, _ := range apex.RRtypes {
+	for _, rrt := range apex.RRtypes.Keys() {
 		if rrt != dns.TypeSOA {
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-			rrs = append(rrs, apex.RRtypes[rrt].RRs...)
+			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRs...)
 			if Globals.Debug {
-				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes[rrt].RRs)
+				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
 			}
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			rrs = append(rrs, apex.RRtypes[rrt].RRSIGs...)
+			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRSIGs...)
 		}
 	}
 	count = len(rrs)
@@ -142,7 +142,8 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			if owner.Name == zd.ZoneName {
 				continue
 			}
-			for _, rrl := range owner.RRtypes {
+			for _, rrt := range owner.RRtypes.Keys() {
+				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
 					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
@@ -167,7 +168,8 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			if owner == zd.ZoneName {
 				continue
 			}
-			for _, rrl := range omap.RRtypes {
+			for _, rrt := range omap.RRtypes.Keys() {
+				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
 					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
@@ -235,7 +237,7 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true
 			apex, _ := zd.Data.Get(zd.ZoneName)
-			soa := apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA)
+			soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 			zd.Logger.Printf("ReadZoneFile: %s: old incoming serial: %d new SOA serial: %d",
 				zd.ZoneName, zd.IncomingSerial, soa.Serial)
 			if soa.Serial == zd.IncomingSerial {
@@ -259,7 +261,7 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
 	}
 	//	dump.P(apex)
-	soa_rrset := apex.RRtypes[dns.TypeSOA]
+	soa_rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 	var soa *dns.SOA
 	if len(soa_rrset.RRs) > 0 {
 		soa = soa_rrset.RRs[0].(*dns.SOA)
@@ -307,7 +309,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 			// if omap.RRtypes == nil {
 			omap.Name = owner
-			omap.RRtypes = map[uint16]RRset{}
+			omap.RRtypes = NewConcurrentRRTypeStore()
 		}
 		ztype = MapZone
 	}
@@ -321,9 +323,9 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			firstSoaSeen = true
 			zd.ApexLen++
 			if ztype == MapZone {
-				tmp = omap.RRtypes[rrtype]
+				tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 				tmp.RRs = append(tmp.RRs, rr)
-				omap.RRtypes[rrtype] = tmp
+				omap.RRtypes.Set(rrtype, tmp)
 			}
 		}
 
@@ -331,17 +333,17 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 		rrt := v.TypeCovered
 		switch ztype {
 		case MapZone:
-			tmp = omap.RRtypes[rrt]
+			tmp = omap.RRtypes.GetOnlyRRSet(rrt)
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
-			omap.RRtypes[rrt] = tmp
+			omap.RRtypes.Set(rrt, tmp)
 		}
 
 	default:
 		switch ztype {
 		case MapZone:
-			tmp = omap.RRtypes[rrtype]
+			tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 			tmp.RRs = append(tmp.RRs, rr)
-			omap.RRtypes[rrtype] = tmp
+			omap.RRtypes.Set(rrtype, tmp)
 		}
 	}
 	if ztype == MapZone {
@@ -389,8 +391,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 		log.Printf("WriteZoneToFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
 		return err
 	}
-	soa := apex.RRtypes[dns.TypeSOA].RRs[0]
-	soa.(*dns.SOA).Serial = zd.CurrentSerial
+	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	soa.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 
 	//	zonedata += soa.String() + "\n"
 	count := 0
@@ -399,13 +401,14 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	switch zd.ZoneStore {
 	case SliceZone:
 		// SOA
-		soa := apex.RRtypes[dns.TypeSOA]
+		soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		zonedata += RRsetToString(&soa)
 		count += len(soa.RRs) + len(soa.RRSIGs)
 
 		// Rest of apex
-		for rrt, rrset := range apex.RRtypes {
+		for _, rrt := range apex.RRtypes.Keys() {
 			if rrt != dns.TypeSOA {
+				rrset := apex.RRtypes.GetOnlyRRSet(rrt)
 				zonedata += RRsetToString(&rrset)
 				count += len(rrset.RRs) + len(rrset.RRSIGs)
 			}
@@ -416,7 +419,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 			if owner.Name == zd.ZoneName {
 				continue
 			}
-			for _, rrl := range owner.RRtypes {
+			for _, rrt := range owner.RRtypes.Keys() {
+				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
 				zonedata += RRsetToString(&rrl)
 				count += len(rrl.RRs) + len(rrl.RRSIGs)
 
@@ -435,13 +439,14 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	case MapZone:
 		// SOA
-		soa := apex.RRtypes[dns.TypeSOA]
+		soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		zonedata += RRsetToString(&soa)
 		count += len(soa.RRs) + len(soa.RRSIGs)
 
 		// Rest of apex
-		for rrt, rrset := range apex.RRtypes {
+		for _, rrt := range apex.RRtypes.Keys() {
 			if rrt != dns.TypeSOA {
+				rrset := apex.RRtypes.GetOnlyRRSet(rrt)
 				zonedata += RRsetToString(&rrset)
 				count += len(rrset.RRs) + len(rrset.RRSIGs)
 			}
@@ -453,7 +458,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 			if owner == zd.ZoneName {
 				continue
 			}
-			for _, rrl := range omap.RRtypes {
+			for _, rrt := range omap.RRtypes.Keys() {
+				rrl := omap.RRtypes.GetOnlyRRSet(rrt)
 				zonedata += RRsetToString(&rrl)
 				count += len(rrl.RRs) + len(rrl.RRSIGs)
 
@@ -529,9 +535,9 @@ func (zd *ZoneData) ComputeIndices() {
 			zd.OwnerIndex.Set(od.Name, i)
 		}
 		idx, _ := zd.OwnerIndex.Get(zd.ZoneName)
-		soas := zd.Owners[idx].RRtypes[dns.TypeSOA]
+		soas := zd.Owners[idx].RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		soas.RRs = soas.RRs[:1]
-		zd.Owners[idx].RRtypes[dns.TypeSOA] = soas
+		zd.Owners[idx].RRtypes.Set(dns.TypeSOA, soas)
 	}
 	if zd.Verbose {
 		zd.PrintOwners()
