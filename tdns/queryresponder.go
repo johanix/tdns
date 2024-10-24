@@ -184,7 +184,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			TypeBitMap: func() []uint16 {
 				baseBitMap := []uint16{dns.TypeNSEC, dns.TypeRRSIG}
 				if rrtypeList == nil {
-					return append(baseBitMap, uint16(128))
+					return append(baseBitMap, dns.TypeNXNAME)
 				}
 				allTypes := append(baseBitMap, rrtypeList...)
 				sort.Slice(allTypes, func(i, j int) bool {
