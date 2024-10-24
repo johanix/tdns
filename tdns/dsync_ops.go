@@ -163,7 +163,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    addr_rr.Header().Name,
-				RRtypes: NewConcurrentRRTypeStore(),
+				RRtypes: NewRRTypeStore(),
 			}
 		}
 

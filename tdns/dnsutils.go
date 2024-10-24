@@ -309,7 +309,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 			// if omap.RRtypes == nil {
 			omap.Name = owner
-			omap.RRtypes = NewConcurrentRRTypeStore()
+			omap.RRtypes = NewRRTypeStore()
 		}
 		ztype = MapZone
 	}

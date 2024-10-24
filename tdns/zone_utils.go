@@ -403,7 +403,7 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		if owner, ok = zd.Data.Get(qname); !ok {
 			owner = OwnerData{
 				Name:    qname,
-				RRtypes: NewConcurrentRRTypeStore(),
+				RRtypes: NewRRTypeStore(),
 			}
 			// XXX: Hmm. This seems wrong. We create an ownername where there wasn't one
 			//      based on a request for it?

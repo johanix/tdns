@@ -348,7 +348,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
-				RRtypes: NewConcurrentRRTypeStore(),
+				RRtypes: NewRRTypeStore(),
 			}
 			zd.AddOwner(owner)
 			updated = true
@@ -479,7 +479,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
-				RRtypes: NewConcurrentRRTypeStore(),
+				RRtypes: NewRRTypeStore(),
 			}
 			zd.AddOwner(owner)
 			updated = true
@@ -616,7 +616,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
-				RRtypes: NewConcurrentRRTypeStore(),
+				RRtypes: NewRRTypeStore(),
 			}
 			zd.AddOwner(owner) // XXX: This is not ok, as we're not holding the lock here. But this function should die.
 		}

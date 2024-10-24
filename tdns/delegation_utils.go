@@ -253,7 +253,7 @@ func (zd *ZoneData) xxxDelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, [
 		fakeolddata = true
 		oldapex = &OwnerData{
 			Name:    zd.ZoneName,
-			RRtypes: NewConcurrentRRTypeStore(),
+			RRtypes: NewRRTypeStore(),
 		}
 		oldapex.RRtypes.Set(dns.TypeNS, RRset{})
 		oldapex.RRtypes.Set(dns.TypeA, RRset{})

@@ -160,7 +160,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 	}
 
 	zd.Logger.Printf("*** Current data for owner name=%s: RRtypes: ", owner.Name)
-	for _, k := range owner.RRtypes.(*ConcurrentRRTypeStore).data.Keys() {
+	for _, k := range owner.RRtypes.Keys() {
 		v, _ := owner.RRtypes.Get(uint16(k))
 		zd.Logger.Printf("%s: %d RRs ", dns.TypeToString[uint16(k)], len(v.RRs))
 	}
