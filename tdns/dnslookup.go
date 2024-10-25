@@ -130,7 +130,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 
 	owner, err := zd.GetOwner(qname)
 
-	if len(owner.RRtypes) == 0 {
+	if owner.RRtypes.Count() == 0 {
 		// No, nothing.
 		zd.Logger.Printf("*** No data for %s in %s", qname, zd.ZoneName)
 		return nil, nil // nothing found, but this is not an error
@@ -160,8 +160,9 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 	}
 
 	zd.Logger.Printf("*** Current data for owner name=%s: RRtypes: ", owner.Name)
-	for k, v := range owner.RRtypes {
-		zd.Logger.Printf("%s: %d RRs ", dns.TypeToString[k], len(v.RRs))
+	for _, k := range owner.RRtypes.Keys() {
+		v, _ := owner.RRtypes.Get(uint16(k))
+		zd.Logger.Printf("%s: %d RRs ", dns.TypeToString[uint16(k)], len(v.RRs))
 	}
 
 	// Must instantiate the rrset if not found above
@@ -170,16 +171,16 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 	}
 
 	// Check for exact match qname + qtype
-	if _, ok := owner.RRtypes[qtype]; ok && len(owner.RRtypes[qtype].RRs) > 0 {
-		zd.Logger.Printf("*** %d RRs: %v", len(owner.RRtypes[qtype].RRs), owner.RRtypes[qtype].RRs)
+	if _, ok := owner.RRtypes.Get(qtype); ok && len(owner.RRtypes.GetOnlyRRSet(qtype).RRs) > 0 {
+		zd.Logger.Printf("*** %d RRs: %v", len(owner.RRtypes.GetOnlyRRSet(qtype).RRs), owner.RRtypes.GetOnlyRRSet(qtype).RRs)
 		// XXX: Dont forget that we also need to deal with CNAMEs in here
 		if qname == origqname {
-			rrset.RRs = owner.RRtypes[qtype].RRs
-			rrset.RRSIGs = owner.RRtypes[qtype].RRSIGs
+			rrset.RRs = owner.RRtypes.GetOnlyRRSet(qtype).RRs
+			rrset.RRSIGs = owner.RRtypes.GetOnlyRRSet(qtype).RRSIGs
 		} else {
-			tmp := WildcardReplace(owner.RRtypes[qtype].RRs, qname, origqname)
+			tmp := WildcardReplace(owner.RRtypes.GetOnlyRRSet(qtype).RRs, qname, origqname)
 			rrset.RRs = tmp
-			tmp = WildcardReplace(owner.RRtypes[qtype].RRSIGs, qname, origqname)
+			tmp = WildcardReplace(owner.RRtypes.GetOnlyRRSet(qtype).RRSIGs, qname, origqname)
 			rrset.RRSIGs = tmp
 		}
 	}
