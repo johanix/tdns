@@ -163,16 +163,16 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    addr_rr.Header().Name,
-				RRtypes: make(map[uint16]RRset),
+				RRtypes: NewRRTypeStore(),
 			}
 		}
 
 		rrtype := addr_rr.Header().Rrtype
-		if _, exists := owner.RRtypes[rrtype]; !exists {
+		if _, exists := owner.RRtypes.Get(rrtype); !exists {
 			new_addr = true
 		} else {
 			duplicate := false
-			for _, existing_rr := range owner.RRtypes[rrtype].RRs {
+			for _, existing_rr := range owner.RRtypes.GetOnlyRRSet(rrtype).RRs {
 				if dns.IsDuplicate(existing_rr, addr_rr) {
 					duplicate = true
 					break

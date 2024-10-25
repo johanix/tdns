@@ -187,7 +187,7 @@ type Owners []OwnerData
 
 type OwnerData struct {
 	Name    string
-	RRtypes map[uint16]RRset
+	RRtypes *RRTypeStore
 }
 
 type RRset struct {

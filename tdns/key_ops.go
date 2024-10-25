@@ -57,7 +57,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	if err != nil {
 		return err
 	}
-	key_rrset, exist := apex.RRtypes[dns.TypeKEY]
+	key_rrset, exist := apex.RRtypes.Get(dns.TypeKEY)
 	numpubkeys := len(key_rrset.RRs)
 	if exist && numpubkeys > 0 {
 		// If there is already a KEY RRset, we must ensure that we have access to the
