@@ -348,14 +348,14 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
-				RRtypes: make(map[uint16]RRset),
+				RRtypes: NewRRTypeStore(),
 			}
 			zd.AddOwner(owner)
 			updated = true
 			// zd.Options["dirty"] = true
 		}
 
-		rrset, exists := owner.RRtypes[rrtype]
+		rrset, exists := owner.RRtypes.Get(rrtype)
 		if !exists {
 			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
 			if class == dns.ClassNONE || class == dns.ClassANY {
@@ -374,9 +374,9 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
-				delete(owner.RRtypes, rrtype)
+				owner.RRtypes.Delete(rrtype)
 			} else {
-				owner.RRtypes[rrtype] = rrset
+				owner.RRtypes.Set(rrtype, rrset)
 			}
 			updated = true
 			// zd.Options["dirty"] = true
@@ -386,7 +386,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
 			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
-			delete(owner.RRtypes, rrtype)
+			owner.RRtypes.Delete(rrtype)
 			updated = true
 			// zd.Options["dirty"] = true
 			continue
@@ -413,7 +413,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			updated = true
 			zd.Options[OptDirty] = true
 		}
-		owner.RRtypes[rrtype] = rrset
+		owner.RRtypes.Set(rrtype, rrset)
 		// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
 		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
 		// dump.P(owner.RRtypes[rrtype])
@@ -479,14 +479,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
-				RRtypes: make(map[uint16]RRset),
+				RRtypes: NewRRTypeStore(),
 			}
 			zd.AddOwner(owner)
 			updated = true
 			// zd.Options["dirty"] = true
 		}
 
-		rrset, exists := owner.RRtypes[rrtype]
+		rrset, exists := owner.RRtypes.Get(rrtype)
 		if !exists {
 			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
 			if class == dns.ClassNONE || class == dns.ClassANY {
@@ -503,10 +503,10 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			// ClassNONE: Remove exact RR
 			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
-				delete(owner.RRtypes, rrtype)
+				owner.RRtypes.Delete(rrtype)
 			} else {
 				zd.SignRRset(&rrset, ownerName, dak, true)
-				owner.RRtypes[rrtype] = rrset
+				owner.RRtypes.Set(rrtype, rrset)
 			}
 			updated = true
 			// zd.Options["dirty"] = true
@@ -515,7 +515,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			delete(owner.RRtypes, rrtype)
+			owner.RRtypes.Delete(rrtype)
 			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
 			updated = true
 			// zd.Options["dirty"] = true
@@ -545,7 +545,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			// zd.Options["dirty"] = true
 		}
 
-		owner.RRtypes[rrtype] = rrset
+		owner.RRtypes.Set(rrtype, rrset)
 		updated = true
 		// zd.Options["dirty"] = true
 		continue
@@ -580,7 +580,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 	if err != nil {
 		return dss, err
 	}
-	bns, err := BailiwickNS(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs)
+	bns, err := BailiwickNS(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
 	if err != nil {
 		return dss, err
 	}
@@ -616,7 +616,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		if owner == nil {
 			owner = &OwnerData{
 				Name:    ownerName,
-				RRtypes: make(map[uint16]RRset),
+				RRtypes: NewRRTypeStore(),
 			}
 			zd.AddOwner(owner) // XXX: This is not ok, as we're not holding the lock here. But this function should die.
 		}
@@ -677,7 +677,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		}
 
 		dup := false
-		if rrset, exists := owner.RRtypes[rrtype]; exists {
+		if rrset, exists := owner.RRtypes.Get(rrtype); exists {
 			for _, oldrr := range rrset.RRs {
 				if dns.IsDuplicate(oldrr, rrcopy) {
 					log.Printf("ZoneUpdateChangesDelegationData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
@@ -735,7 +735,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	if err != nil {
 		return dss, err
 	}
-	bns, err := BailiwickNS(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs)
+	bns, err := BailiwickNS(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
 	if err != nil {
 		return dss, err
 	}
@@ -808,14 +808,14 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					if err != nil {
 						log.Printf("ZUCDDNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
 					} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
-						if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
+						if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 							for _, rr := range a_rrset.RRs {
 								rr.Header().Class = dns.ClassNONE
 								dss.ARemoves = append(dss.ARemoves, rr)
 								ddata.Actions = append(ddata.Actions, rr)
 							}
 						}
-						if aaaa_rrset, exists := nsowner.RRtypes[dns.TypeAAAA]; exists {
+						if aaaa_rrset, exists := nsowner.RRtypes.Get(dns.TypeAAAA); exists {
 							for _, rr := range aaaa_rrset.RRs {
 								rr.Header().Class = dns.ClassNONE
 								dss.AAAARemoves = append(dss.AAAARemoves, rr)
@@ -906,13 +906,13 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 							log.Printf("ZUCDDNG: Error: owner %s of NS %s is unknown", nsrr.Ns, nsrr.String())
 						} else {
 							log.Printf("ZUCDDNG: nsowner: %+v", nsowner)
-							if a_rrset, exists := nsowner.RRtypes[dns.TypeA]; exists {
+							if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 								for _, rr := range a_rrset.RRs {
 									dss.AAdds = append(dss.AAdds, rr)
 									ddata.Actions = append(ddata.Actions, rr)
 								}
 							}
-							if aaaa_rrset, exists := nsowner.RRtypes[dns.TypeAAAA]; exists {
+							if aaaa_rrset, exists := nsowner.RRtypes.Get(dns.TypeAAAA); exists {
 								for _, rr := range aaaa_rrset.RRs {
 									dss.AAAAAdds = append(dss.AAAAAdds, rr)
 									ddata.Actions = append(ddata.Actions, rr)

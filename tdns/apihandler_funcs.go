@@ -378,7 +378,7 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 					resp.ErrorMsg = err.Error()
 				}
 
-				if rrset, ok := owner.RRtypes[dp.Qtype]; ok {
+				if rrset, ok := owner.RRtypes.Get(dp.Qtype); ok {
 					resp.RRset = rrset
 				}
 				log.Printf("tdnsd debug rrset: owner: %v", owner)
