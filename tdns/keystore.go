@@ -505,19 +505,19 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	// No keys found is not an error
 	if !keysfound {
-		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
+		log.Printf("No %s DNSSEC keys found for zone %s", state, zonename)
 		return &dk, nil
 	}
 
 	// No KSK found is a hard error
 	if len(dk.KSKs) == 0 {
-		log.Printf("No active DNSSEC KSK found for zone %s", zonename)
+		log.Printf("No %s DNSSEC KSK found for zone %s", state, zonename)
 		return &dk, nil
 	}
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
 	if len(dk.ZSKs) == 0 {
-		log.Printf("No active DNSSEC ZSK found for zone %s, reusing KSK", zonename)
+		log.Printf("No %s DNSSEC ZSK found for zone %s, reusing KSK", state, zonename)
 		dk.ZSKs = append(dk.ZSKs, dk.KSKs[0])
 	}
 

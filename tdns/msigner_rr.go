@@ -7,6 +7,7 @@ package tdns
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/miekg/dns"
 )
@@ -23,6 +24,7 @@ const TypeMSIGNER = 0x0F9C
 type MSIGNER struct {
 	State  uint8         // 0=OFF, 1=ON
 	Scheme MsignerScheme // 1=DNS, 2=API
+	Port   uint16
 	Target string
 }
 
@@ -58,12 +60,12 @@ var StringToMsignerScheme = map[string]MsignerScheme{
 func NewMSIGNER() dns.PrivateRdata { return new(MSIGNER) }
 
 func (rd MSIGNER) String() string {
-	return fmt.Sprintf("%s\t%s %s", StateToString[rd.State], MsignerSchemeToString[rd.Scheme], rd.Target)
+	return fmt.Sprintf("%s\t%s %d %s", StateToString[rd.State], MsignerSchemeToString[rd.Scheme], rd.Port, rd.Target)
 }
 
 func (rd *MSIGNER) Parse(txt []string) error {
-	if len(txt) != 3 {
-		return errors.New("MSIGNER requires a state, a scheme and a target")
+	if len(txt) != 4 {
+		return errors.New("MSIGNER requires a state, a scheme, a port and a target")
 	}
 	state, exist := StringToState[txt[0]]
 	if !exist {
@@ -75,13 +77,19 @@ func (rd *MSIGNER) Parse(txt []string) error {
 		return fmt.Errorf("invalid MSIGNER scheme: %s.", txt[1])
 	}
 
-	tgt := dns.Fqdn(txt[2])
+	port, err := strconv.Atoi(txt[2])
+	if err != nil {
+		return fmt.Errorf("invalid MSIGNER port: %s. Error: %v", txt[2], err)
+	}
+
+	tgt := dns.Fqdn(txt[3])
 	if _, ok := dns.IsDomainName(tgt); !ok {
 		return fmt.Errorf("invalid MSIGNER target: %s.", txt[2])
 	}
 
 	rd.State = state
 	rd.Scheme = scheme
+	rd.Port = uint16(port)
 	rd.Target = tgt
 
 	return nil
@@ -95,6 +103,11 @@ func (rd *MSIGNER) Pack(buf []byte) (int, error) {
 	}
 
 	off, err = packUint8(uint8(rd.Scheme), buf, off)
+	if err != nil {
+		return off, err
+	}
+
+	off, err = packUint16(rd.Port, buf, off)
 	if err != nil {
 		return off, err
 	}
@@ -129,6 +142,14 @@ func (rd *MSIGNER) Unpack(buf []byte) (int, error) {
 		return off, nil
 	}
 
+	rd.Port, off, err = unpackUint16(buf, off)
+	if err != nil {
+		return off, err
+	}
+	if off == len(buf) {
+		return off, nil
+	}
+
 	rd.Target, off, err = dns.UnpackDomainName(buf, off)
 	if err != nil {
 		return off, err
@@ -146,12 +167,13 @@ func (rd *MSIGNER) Copy(dest dns.PrivateRdata) error {
 	d := dest.(*MSIGNER)
 	d.State = rd.State
 	d.Scheme = rd.Scheme
+	d.Port = rd.Port
 	d.Target = rd.Target
 	return nil
 }
 
 func (rd *MSIGNER) Len() int {
-	return 1 + 1 + len(rd.Target) + 1 // add 1 for terminating 0
+	return 1 + 1 + 2 + len(rd.Target) + 1 // add 1 for terminating 0
 }
 
 func RegisterMsignerRR() error {

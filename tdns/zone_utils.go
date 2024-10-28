@@ -156,6 +156,21 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		}
 	}
 
+	var msignerchanged, keyschanged bool
+	var mss *RRset
+	if zd.Options[OptMultiSigner] {
+		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from MsignerChanged(%s): %v", zd.ZoneName, err)
+			// return false, err
+		}
+		keyschanged, err = zd.DnskeysChangedNG(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+			// return false, err
+		}
+	}
+
 	zd.mu.Lock()
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
@@ -177,6 +192,41 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 			ZoneName:   zd.ZoneName,
 			ZoneData:   zd,
 			SyncStatus: dss,
+		}
+	}
+
+	// If this is a multi-signer zone, check for changes to the MSIGNER and DNSKEY RRsets; notify MultiSignerSyncEngine if needed
+	if zd.Options[OptMultiSigner] {
+		if keyschanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSKEY RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
+			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+				Command:    "SYNC-DNSKEY-RRSET",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				OldDnskeys: oldkeys,
+				NewDnskeys: newkeys,
+			}
+		}
+
+		if msignerchanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
+
+			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+				Command:      "RESET-MSIGNER-GROUP",
+				ZoneName:     zd.ZoneName,
+				ZoneData:     zd,
+				MsignerGroup: mss,
+			}
 		}
 	}
 
@@ -242,6 +292,21 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 		}
 	}
 
+	var msignerchanged, keyschanged bool
+	var mss *RRset
+	if zd.Options[OptMultiSigner] {
+		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from MsignerChanged(%s): %v", zd.ZoneName, err)
+			// return false, err
+		}
+		keyschanged, err = zd.DnskeysChangedNG(&new_zd)
+		if err != nil {
+			zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+			// return false, err
+		}
+	}
+
 	zd.mu.Lock()
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
@@ -266,30 +331,37 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 		}
 	}
 
-	keyschanged, dss, err := zd.DnskeysChanged(&new_zd)
-	if err != nil {
-		zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
-		// return false, err
-	}
-	if keyschanged {
-		zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-		oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-		if err != nil {
-			zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-			// return false, err
+	if zd.Options[OptMultiSigner] {
+		if keyschanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+			if err != nil {
+				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
+				// return false, err
+			}
+			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+				Command:    "SYNC-DNSKEY-RRSET",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				OldDnskeys: oldkeys,
+				NewDnskeys: newkeys,
+			}
 		}
-		newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-		if err != nil {
-			zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-			// return false, err
-		}
-		zd.DelegationSyncQ <- DelegationSyncRequest{
-			Command:    "SYNC-DNSKEY-RRSET",
-			ZoneName:   zd.ZoneName,
-			ZoneData:   zd,
-			OldDnskeys: oldkeys,
-			NewDnskeys: newkeys,
-			SyncStatus: dss,
+
+		if msignerchanged {
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
+
+			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+				Command:      "RESET-MSIGNER-GROUP",
+				ZoneName:     zd.ZoneName,
+				ZoneData:     zd,
+				MsignerGroup: mss,
+			}
 		}
 	}
 

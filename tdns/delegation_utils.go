@@ -539,8 +539,21 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 }
 
 func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
-	var dss DelegationSyncStatus
+	var dss = DelegationSyncStatus{
+		Time:     time.Now(),
+		ZoneName: zd.ZoneName,
+		InSync:   true,
+	}
 	var differ bool
+
+	oldapex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+	}
+	if oldapex == nil {
+		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		return false, dss, nil // on initial load, we always return false, nil, nil as we don't know that the DNSKEYs have changed
+	}
 
 	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
@@ -558,4 +571,55 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 	}
 
 	return differ, dss, nil
+}
+
+func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
+	var differ bool
+
+	oldapex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+	}
+
+	if oldapex == nil {
+		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		return true, nil // on initial load, we always return false, nil, nil as we don't know that the DNSKEYs have changed
+	}
+
+	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, err
+	}
+	newkeys, err := newzd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	if err != nil {
+		return false, err
+	}
+
+	differ, _, _ = RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger)
+	return differ, nil
+}
+
+func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *RRset, error) {
+	var differ bool
+
+	oldapex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, nil, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+	}
+	if oldapex == nil {
+		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		return true, nil, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
+	}
+
+	oldmsigner, err := zd.GetRRset(zd.ZoneName, TypeMSIGNER)
+	if err != nil {
+		return false, nil, err
+	}
+	newmsigner, err := newzd.GetRRset(zd.ZoneName, TypeMSIGNER)
+	if err != nil {
+		return false, nil, err
+	}
+
+	differ, _, _ = RRsetDiffer(zd.ZoneName, newmsigner.RRs, oldmsigner.RRs, TypeMSIGNER, zd.Logger)
+	return differ, newmsigner, nil
 }
