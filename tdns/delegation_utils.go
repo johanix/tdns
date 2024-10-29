@@ -599,27 +599,49 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *RRset, error) {
+type MultiSignerSyncStatus struct {
+	ZoneName       string
+	MsignerAdds    []dns.RR
+	MsignerRemoves []dns.RR
+	DnskeyAdds     []dns.RR
+	DnskeyRemoves  []dns.RR
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	Status         bool
+}
+
+func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MultiSignerSyncStatus, error) {
+	var mss = MultiSignerSyncStatus{
+		ZoneName: zd.ZoneName,
+		Msg:      "No change",
+		Error:    false,
+		ErrorMsg: "",
+		Status:   true,
+	}
 	var differ bool
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		return false, nil, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
+
+	newmsigner, err := newzd.GetRRset(zd.ZoneName, TypeMSIGNER)
+	if err != nil {
+		return false, nil, err
+	}
+
 	if oldapex == nil {
 		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		return true, nil, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
+		mss.MsignerAdds = newmsigner.RRs
+		return true, &mss, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
 	}
 
 	oldmsigner, err := zd.GetRRset(zd.ZoneName, TypeMSIGNER)
 	if err != nil {
 		return false, nil, err
 	}
-	newmsigner, err := newzd.GetRRset(zd.ZoneName, TypeMSIGNER)
-	if err != nil {
-		return false, nil, err
-	}
 
-	differ, _, _ = RRsetDiffer(zd.ZoneName, newmsigner.RRs, oldmsigner.RRs, TypeMSIGNER, zd.Logger)
-	return differ, newmsigner, nil
+	differ, mss.MsignerAdds, mss.MsignerRemoves = RRsetDiffer(zd.ZoneName, newmsigner.RRs, oldmsigner.RRs, TypeMSIGNER, zd.Logger)
+	return differ, &mss, nil
 }

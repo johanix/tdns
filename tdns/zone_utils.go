@@ -157,7 +157,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	}
 
 	var msignerchanged, keyschanged bool
-	var mss *RRset
+	var mss *MultiSignerSyncStatus
 	if zd.Options[OptMultiSigner] {
 		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
 		if err != nil {
@@ -222,10 +222,10 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
 			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
-				Command:      "RESET-MSIGNER-GROUP",
-				ZoneName:     zd.ZoneName,
-				ZoneData:     zd,
-				MsignerGroup: mss,
+				Command:           "RESET-MSIGNER-GROUP",
+				ZoneName:          zd.ZoneName,
+				ZoneData:          zd,
+				MsignerSyncStatus: mss,
 			}
 		}
 	}
@@ -293,7 +293,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	var msignerchanged, keyschanged bool
-	var mss *RRset
+	var mss *MultiSignerSyncStatus
 	if zd.Options[OptMultiSigner] {
 		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
 		if err != nil {
@@ -357,10 +357,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
 			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
-				Command:      "RESET-MSIGNER-GROUP",
-				ZoneName:     zd.ZoneName,
-				ZoneData:     zd,
-				MsignerGroup: mss,
+				Command:           "RESET-MSIGNER-GROUP",
+				ZoneName:          zd.ZoneName,
+				ZoneData:          zd,
+				MsignerSyncStatus: mss,
 			}
 		}
 	}

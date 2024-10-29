@@ -346,21 +346,13 @@ type DelegationSyncRequest struct {
 }
 
 type MultiSignerSyncRequest struct {
-	Command      string
-	ZoneName     string
-	ZoneData     *ZoneData
-	OldDnskeys   *RRset
-	NewDnskeys   *RRset
-	MsignerGroup *RRset
-	Response     chan MultiSignerSyncStatus // used for API-based requests
-}
-
-type MultiSignerSyncStatus struct {
-	ZoneName string
-	Msg      string
-	Error    bool
-	ErrorMsg string
-	Status   bool
+	Command           string
+	ZoneName          string
+	ZoneData          *ZoneData
+	OldDnskeys        *RRset
+	NewDnskeys        *RRset
+	MsignerSyncStatus *MultiSignerSyncStatus
+	Response          chan MultiSignerSyncStatus // used for API-based requests
 }
 
 type BumperData struct {
