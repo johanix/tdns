@@ -340,12 +340,10 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 			// This is the special case that we allow for unvalidated key uploads.
 			if zd.UpdatePolicy.Child.KeyUpload == "unvalidated" { // exactly one SIG(0) key
-				for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
-					if bootstrap == "strict-manual" {
-						us.Approved = false
-						log.Printf("ApproveChildUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
-						return false, false, nil
-					}
+				if zd.UpdatePolicy.Child.KeyBootstrap == "strict-manual" {
+					us.Approved = false
+					log.Printf("ApproveChildUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
+					return false, false, nil
 				}
 				// XXX: I think we should require that this KEY upload is self-signed.
 				log.Printf("ApproveChildUpdate: update approved (unvalidated KEY upload)")
@@ -558,12 +556,10 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 		// This is the special case that we allow for unvalidated key uploads.
 		if zd.UpdatePolicy.Child.KeyUpload == "unvalidated" { // exactly one SIG(0) key
-			for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
-				if bootstrap == "strict-manual" {
-					us.Approved = false
-					log.Printf("ApproveTrustUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
-					return false, false, nil
-				}
+			if zd.UpdatePolicy.Child.KeyBootstrap == "strict-manual" {
+				us.Approved = false
+				log.Printf("ApproveTrustUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
+				return false, false, nil
 			}
 			// XXX: I think we should require that this KEY upload is self-signed.
 			log.Printf("ApproveTrustUpdate: update approved (unvalidated KEY upload)")

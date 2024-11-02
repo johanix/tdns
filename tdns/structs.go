@@ -121,7 +121,7 @@ type UpdatePolicyConf struct {
 	Child struct {
 		Type         string // selfsub | self | sub | none
 		RRtypes      []string
-		KeyBootstrap []string // manual | dnssec-validated | consistent-lookup
+		KeyBootstrap string // none | manual | dnssec-validated | consistent-lookup
 		KeyUpload    string
 	}
 	Zone struct {
@@ -139,7 +139,7 @@ type UpdatePolicy struct {
 type UpdatePolicyDetail struct {
 	Type         string // "selfsub" | "self"
 	RRtypes      map[uint16]bool
-	KeyBootstrap []string
+	KeyBootstrap string
 	KeyUpload    string
 }
 
