@@ -10,7 +10,7 @@ templates:
          child:		
             type:		selfsub
             rrtypes:		[ A, AAAA, NS, DS, KEY ]
-            keybootstrap:	none
+            keybootstrap:	[ none ]
          zone:
             type:		selfsub
             rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
@@ -52,7 +52,7 @@ zones:
          child:		
             type:		selfsub
             rrtypes:		[ A, AAAA, NS, DS, KEY ]
-            keybootstrap:	none
+            keybootstrap:	[ none ]
          zone:
             type:		selfsub
             rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
@@ -66,7 +66,7 @@ zones:
          child:		
             type:		selfsub
             rrtypes:		[ A, AAAA, NS, DS, KEY ]
-            keybootstrap:	none
+            keybootstrap:	[ none ]
          zone:
             type:		selfsub
             rrtypes:		[ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
