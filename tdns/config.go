@@ -56,21 +56,22 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	CfgFile         string //
-	ZonesCfgFile    string //
-	KeyDB           *KeyDB
-	DnssecPolicies  map[string]DnssecPolicy
-	APIStopCh       chan struct{}
-	RefreshZoneCh   chan ZoneRefresher
-	BumpZoneCh      chan BumperData
-	ValidatorCh     chan ValidatorRequest
-	ScannerQ        chan ScanRequest
-	UpdateQ         chan UpdateRequest
-	DnsUpdateQ      chan DnsUpdateRequest
-	DnsNotifyQ      chan DnsNotifyRequest
-	DelegationSyncQ chan DelegationSyncRequest
-	NotifyQ         chan NotifyRequest
-	AuthQueryQ      chan AuthQueryRequest
+	CfgFile          string //
+	ZonesCfgFile     string //
+	KeyDB            *KeyDB
+	DnssecPolicies   map[string]DnssecPolicy
+	APIStopCh        chan struct{}
+	RefreshZoneCh    chan ZoneRefresher
+	BumpZoneCh       chan BumperData
+	ValidatorCh      chan ValidatorRequest
+	ScannerQ         chan ScanRequest
+	UpdateQ          chan UpdateRequest
+	DnsUpdateQ       chan DnsUpdateRequest
+	DnsNotifyQ       chan DnsNotifyRequest
+	DelegationSyncQ  chan DelegationSyncRequest
+	MultiSignerSyncQ chan MultiSignerSyncRequest
+	NotifyQ          chan NotifyRequest
+	AuthQueryQ       chan AuthQueryRequest
 	// ResignQ         chan ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
 	ResignQ chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 }

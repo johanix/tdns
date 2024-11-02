@@ -223,6 +223,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 	if zonescfgfile == "" {
 		zonescfgfile = ZonesCfgFile
 	}
+	log.Printf("ParseZones: using zone configs from file: %s\n", zonescfgfile)
 
 	// If a zone config file is found, read it in.
 	zonecfgs, err := os.ReadFile(zonescfgfile)
@@ -347,6 +348,14 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				cleanoptions = append(cleanoptions, opt)
 
 			case OptOnlineSigning: // zone may be signed (and re-signed) online as needed; only possible if dnssec policy is set
+				if conf.AppMode == "agent" {
+					log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
+					continue
+				}
+				if conf.AppMode == "sidecar" {
+					log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-SIDECAR does not allow online signing.", zname, ZoneOptionToString[opt])
+					continue
+				}
 				if zconf.DnssecPolicy != "" {
 					options[opt] = true
 					cleanoptions = append(cleanoptions, opt)
@@ -362,6 +371,10 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
 					log.Printf("Error: Zone %s: Option \"%s\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, ZoneOptionToString[opt], zconf.MultiSigner)
 					continue
+				}
+				if conf.Internal.MultiSignerSyncQ == nil {
+					log.Printf("Error: Zone %s: Option \"%s\" set but no multi-signer sync channel configured. This is a fatal error.", zname, ZoneOptionToString[opt])
+					os.Exit(1)
 				}
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
