@@ -167,8 +167,10 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Request) {
+// func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Request) {
+func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		stopCh := conf.Internal.APIStopCh
 
 		decoder := json.NewDecoder(r.Body)
 		var cp CommandPost
@@ -177,11 +179,12 @@ func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Reques
 			log.Println("APICommand: error decoding command post:", err)
 		}
 
-		log.Printf("API: received /command request (cmd: %s) from %s.\n",
-			cp.Command, r.RemoteAddr)
+		log.Printf("API: received /command request (cmd: %s) from %s. AppName: %s\n",
+			cp.Command, r.RemoteAddr, Globals.AppName)
 
 		resp := CommandResponse{
-			Time: time.Now(),
+			Time:    time.Now(),
+			AppName: Globals.AppName,
 		}
 
 		switch cp.Command {
@@ -196,10 +199,15 @@ func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Reques
 			resp.Status = "stopping"
 			resp.Msg = "Daemon was happy, but now winding down"
 
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			time.Sleep(500 * time.Millisecond)
-			stopCh <- struct{}{}
+			// w.Header().Set("Content-Type", "application/json")
+			// err := json.NewEncoder(w).Encode(resp)
+			// if err != nil {
+			//		log.Printf("Error from json encoder: %v", err)
+			// }
+			go func() {
+				time.Sleep(5000 * time.Millisecond)
+				stopCh <- struct{}{}
+			}()
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
@@ -207,7 +215,10 @@ func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Reques
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		err = json.NewEncoder(w).Encode(resp)
+		if err != nil {
+			log.Printf("Error from json encoder: %v", err)
+		}
 	}
 }
 

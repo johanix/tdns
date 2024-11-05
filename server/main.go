@@ -73,6 +73,8 @@ func main() {
 	conf.AppName, tdns.Globals.AppName = appName, appName
 	conf.AppDate, tdns.Globals.AppDate = appDate, appDate
 
+	fmt.Printf("TDNS %s version %s starting.\n", tdns.Globals.AppName, tdns.Globals.AppVersion)
+
 	flag.StringVar(&conf.AppMode, "mode", "server", "Mode of operation: server | scanner")
 	flag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debug mode")
 	flag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")

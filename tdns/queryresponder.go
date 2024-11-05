@@ -37,7 +37,11 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
-		log.Fatalf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
+		if err != nil {
+			log.Printf("ApexResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
+		} else {
+			log.Printf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
+		}
 	}
 
 	if dnssec_ok {
