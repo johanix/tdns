@@ -56,7 +56,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 	for {
 		select {
 		case zr = <-zonerefch:
-			log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
+			// log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
 			zone = zr.Name
 			resp := RefresherResponse{
 				Zone: zr.Name,

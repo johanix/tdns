@@ -198,7 +198,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	// If this is a multi-signer zone, check for changes to the MSIGNER and DNSKEY RRsets; notify MultiSignerSyncEngine if needed
 	if zd.Options[OptMultiSigner] {
 		if keyschanged {
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSKEY RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
+			zd.Logger.Printf("FetchFromFile: Zone %s: DNSKEY RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
 			if err != nil {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
@@ -219,7 +219,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		}
 
 		if msignerchanged {
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
+			zd.Logger.Printf("FetchFromFile: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
 			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
 				Command:           "RESET-MSIGNER-GROUP",
