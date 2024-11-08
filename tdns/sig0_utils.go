@@ -7,6 +7,9 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
 	"crypto/rsa"
 	"os"
 	"path/filepath"
@@ -21,6 +24,43 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
+
+//----------------------------------------------------------------------
+// Functions to encode keys as PEM blobs
+
+
+
+func encodePEM(key []byte, pemType string) ([]byte, error) {
+    var pemBlock = &pem.Block{
+        Type:  pemType,
+        Bytes: key,
+    }
+
+    var pemBuffer []byte
+    pemBuffer = pem.EncodeToMemory(pemBlock)
+    if pemBuffer == nil {
+        return nil, errors.New("failed to encode PEM")
+    }
+    return pemBuffer, nil
+}
+
+func base64toPEM(keyB64 string) (string) {
+	binaryKey := make(
+		[]byte,
+		base64.StdEncoding.DecodedLen(len(keyB64)))
+	n, err := base64.StdEncoding.Decode(binaryKey, []byte(keyB64))
+	if err != nil {
+		log.Fatalf("base64toPEM: decode Base64 error: %v\n", err)
+	}
+	binaryKey = binaryKey[:n]
+
+	pemKey, err := encodePEM(binaryKey, "PRIVATE KEY")
+	if err != nil {
+		log.Fatalf("Error encoding to PEM: %v", err)
+	}
+	return string(pemKey)
+}
+
 
 // XXX: FIXME: This is only used from the CLI. It should change into code used by TDNS-SERVER and
 //
@@ -290,8 +330,9 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 
 	switch rrtype {
 	case dns.TypeKEY:
+		pemKey := base64toPEM(pkc.PrivateKey)
 		_, err = tx.Exec(addSig0KeySql, owner, state, pkc.KeyId,
-			dns.AlgorithmToString[pkc.Algorithm], creator, pkc.PrivateKey, pkc.KeyRR.String())
+			dns.AlgorithmToString[pkc.Algorithm], creator, pemKey, pkc.KeyRR.String())
 
 	case dns.TypeDNSKEY:
 		flags := 257
