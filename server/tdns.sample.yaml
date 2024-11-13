@@ -21,7 +21,7 @@ dnsengine:
 
 apiserver:
    address:     	127.0.0.1:8989
-   key:         	winter-is-coming-santa-stuck-in-chimney
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
 
 server:
    id:			ooga booga boo
