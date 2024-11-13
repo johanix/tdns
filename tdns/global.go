@@ -20,6 +20,7 @@ type GlobalStuff struct {
 	Algorithm   string
 	Rrtype      string
 	AppName     string
+	AppMode     string
 	AppVersion  string
 	AppDate     string
 }

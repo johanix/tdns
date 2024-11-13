@@ -16,7 +16,8 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-func APIcommand(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
+// No longer used.
+func xxxAPIcommand(conf *tdns.Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -76,7 +77,7 @@ func SetupRouter(conf *tdns.Config) *mux.Router {
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	// The /command endpoint is the only one not in the tdns lib
-	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/command", tdns.APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/config", tdns.APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", tdns.APIzone(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/zone/dsync", tdns.APIzoneDsync(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")

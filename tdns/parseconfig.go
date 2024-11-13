@@ -171,7 +171,7 @@ func ParseConfig(conf *Config, reload bool) error {
 	}
 
 	// If a zone config file is found, read it in.
-	cfgdata, err := os.ReadFile(ZonesCfgFile)
+	cfgdata, err := os.ReadFile(conf.Internal.ZonesCfgFile)
 	if err != nil {
 		log.Fatalf("Error from ReadFile: %v", err)
 	}
