@@ -20,6 +20,7 @@ var zoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send reload zone command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("Reloading zone: %v\n", args)
 		if tdns.Globals.Zonename == "" {
 			fmt.Printf("Error: zone name not specified. Terminating.\n")
 			os.Exit(1)
