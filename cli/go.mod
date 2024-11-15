@@ -4,16 +4,14 @@ go 1.22.0
 
 toolchain go1.22.5
 
-// toolchain go1.22.1
-
 replace (
-	github.com/johanix/tdns/libcli => ../libcli
 	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cli => ../tdns/cli
 )
 
 require (
-	github.com/johanix/tdns/libcli v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.14.0
 )
