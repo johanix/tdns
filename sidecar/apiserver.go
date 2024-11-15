@@ -9,8 +9,8 @@ import (
 	"log"
 	"net/http"
 
-	tdns "github.com/johanix/tdns/tdns"
 	"github.com/johanix/tdns/music"
+	tdns "github.com/johanix/tdns/tdns"
 
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
@@ -108,7 +108,7 @@ func MusicAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan str
 	log.Printf("MusicAPIdispatcher: starting with sidecar ID %s", mconf.Internal.SidecarId)
 
 	router := MusicSetupRouter(tconf, mconf)
-	addresses := viper.GetString("music.sidecar.syncapi.addresses")
+	addresses := viper.GetStringSlice("music.sidecar.syncapi.addresses")
 	certFile := viper.GetString("apiserver.certFile")
 	keyFile := viper.GetString("apiserver.keyFile")
 	if len(addresses) == 0 {

@@ -59,7 +59,7 @@ func TestJoinSyncDnskeys(t *testing.T) {
 
 	// Set up mock updater
 	music.Updaters["mock"] = &mocks.MockUpdater{
-		FetchRRsetFunc: func(signer *music.Signer, zoneName, owner string, rrtype uint16) (error, []dns.RR) {
+		FetchRRset: func(signer *music.Signer, zoneName, owner string, rrtype uint16) (error, []dns.RR) {
 			if signer.Name == "signer1" {
 				return nil, []dns.RR{dnskey1}
 			}
@@ -68,7 +68,7 @@ func TestJoinSyncDnskeys(t *testing.T) {
 			}
 			return nil, nil
 		},
-		UpdateFunc: func(signer *music.Signer, zoneName, owner string, inserts, removes *[][]dns.RR) error {
+		Update: func(signer *music.Signer, zoneName, owner string, inserts, removes *[][]dns.RR) error {
 			// Simulate successful update
 			return nil
 		},

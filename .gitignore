@@ -12,6 +12,8 @@ server/tdns-server
 agent/tdns-agent
 cli/tdns-cli
 dog/dog
+sidecar/music-sidecar
+sidecar-cli/sidecar-cli
 
 */version.go
 

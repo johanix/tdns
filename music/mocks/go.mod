@@ -1,17 +1,17 @@
-module fsm
+module mocks
 
 go 1.23.2
 
 replace (
 	github.com/johanix/tdns/music => ../
-	github.com/johanix/tdns/music/mocks => ../mocks
+	github.com/johanix/tdns/music/fsm => ../fsm
 	github.com/johanix/tdns/tdns => ../../tdns
 )
 
 require (
 	github.com/johanix/tdns/music v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/music/mocks v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.62
+	github.com/stretchr/testify v1.9.0
 )
 
 require (
@@ -40,7 +40,6 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/spf13/viper v1.14.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/stretchr/testify v1.9.0 // indirect
 	github.com/subosito/gotenv v1.4.1 // indirect
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
