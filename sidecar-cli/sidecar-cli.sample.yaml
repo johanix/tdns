@@ -1,0 +1,12 @@
+login:
+   email:	johan.stenstam@internetstiftelsen.se
+   password:	Blurg99,123
+
+api:
+   baseurl:	https://desec.io/api/v1
+
+musicd:
+   baseurl:	https://127.0.0.1:8080/api/v1
+   apikey:	you-have-stolen-my-frotzblinger
+   authmethod: X-API-Key
+   rootCApem: ../etc/certs/RootCA.pem
