@@ -1,4 +1,4 @@
-module github.com/johanix/tdns
+module github.com/johanix/tdns/tdns
 
 go 1.22.0
 

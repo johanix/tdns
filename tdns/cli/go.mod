@@ -1,8 +1,8 @@
-module cli
+module github.com/johanix/tdns/tdns/cli
 
 go 1.21
 
-replace github.com/johanix/tdns/tdns => ../tdns
+replace github.com/johanix/tdns/tdns => ../
 
 require (
 	github.com/go-playground/validator/v10 v10.22.1
