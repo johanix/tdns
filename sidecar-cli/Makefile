@@ -12,4 +12,8 @@ install:
 #	install -s -b ${PROG} ../sbin/
 	if [ ! -e ../etc/${CONFIG} ] ; then install -c ${CONFIG}.sample ../etc/${CONFIG}; fi
 
+clean:
+	rm -f $(PROG)
+	rm -f *~ */*~
+
 

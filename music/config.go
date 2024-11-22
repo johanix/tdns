@@ -87,7 +87,7 @@ type TsigConf struct {
 }
 
 type DbConf struct {
-	File string `validate:"file,required"`
+	File string // `validate:"file"` // not required, will be checked later
 	Mode string `validate:"required"`
 }
 
@@ -161,6 +161,15 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 			}
 		}
 		// fmt.Printf("config: %v\n", config)
+	}
+
+	if appMode != "sidecar-cli" && appMode != "tdns-cli" {
+		// Verify that we have a MUSIC DB file.
+		if _, err := os.Stat(config.Db.File); os.IsNotExist(err) {
+			log.Printf("ValidateConfig: MUSIC DB file '%s' does not exist.", config.Db.File)
+			log.Printf("Please initialize MUSIC DB using 'sidecar-cli music db init -f %s'.", config.Db.File)
+			return errors.New("ValidateConfig: MUSIC DB file does not exist")
+		}
 	}
 	return nil
 }
