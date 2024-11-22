@@ -16,8 +16,8 @@ import (
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
-	"github.com/johanix/tdns/music/fsm"
 	"github.com/johanix/tdns/music"
+	"github.com/johanix/tdns/music/fsm"
 	tdns "github.com/johanix/tdns/tdns"
 )
 

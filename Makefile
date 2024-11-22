@@ -1,3 +1,4 @@
+
 all:
 	$(MAKE) -C ./server/
 	$(MAKE) -C ./cli/
@@ -22,3 +23,5 @@ install:
 	$(MAKE) -C ./dog/ install
 	$(MAKE) -C ./sidecar/ install
 	$(MAKE) -C ./sidecar-cli/ install
+
+include utils/Makefile.common
