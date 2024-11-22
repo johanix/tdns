@@ -19,10 +19,13 @@ build:	version.go
 netbsd:	version.go
 	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
+# johaniaws: Sync local tdns source to remote AWS environment.
+# Requires: sshfs mount at ~/sshfs/msigner1
+TDNS_SRC ?= ~/src/git/tdns
+TDNS_AWS_DIR ?= ~/sshfs/msigner1/src/tdns
+
 johaniaws:
-	TDNSAWSDIR=~/sshfs/msigner1/src/tdns
-	TDNSSRC=~/src/git/tdns
-	rsync --exclude=.git --exclude-from=${TDNSSRC}/.gitignore -avx ${TDNSSRC}/ ${TDNSAWSDIR}/
+	rsync --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
 
 test:
 	$(GO) test -v -cover
