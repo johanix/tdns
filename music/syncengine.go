@@ -23,6 +23,7 @@ import (
 
 type Sidecar struct {
 	Identity   string
+	Mechanism  tdns.MsignerMechanism // either API or DNS
 	Addresses  []string
 	Port       uint16
 	LastHB     time.Time
@@ -53,16 +54,25 @@ type SidecarBeatResponse struct {
 }
 
 func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
-	sidecarId := mconf.Sidecar.Identity
+	sidecarId := map[tdns.MsignerMechanism]string{
+		tdns.MSignMechanismAPI: mconf.Sidecar.Api.Identity,
+		tdns.MSignMechanismDNS: mconf.Sidecar.Dns.Identity,
+	}
 
 	// sidecars is a map of known "remote" sidecars that we
 	// have received HELLO messages from.
-	sidecars := map[string]*Sidecar{}
+	sidecars := map[tdns.MsignerMechanism]map[string]*Sidecar{
+		tdns.MSignMechanismAPI: map[string]*Sidecar{},
+		tdns.MSignMechanismDNS: map[string]*Sidecar{},
+	}
 
 	// wannabe_sidecars is a map of sidecars that we have received
 	// a HELLO message from, but have not yet verified that they are
 	// correct
-	wannabe_sidecars := map[string]*Sidecar{}
+	wannabe_sidecars := map[tdns.MsignerMechanism]map[string]*Sidecar{
+		tdns.MSignMechanismAPI: map[string]*Sidecar{},
+		tdns.MSignMechanismDNS: map[string]*Sidecar{},
+	}
 
 	// zones is a map of zones and the remote sidecars that share them with us
 	zones := map[string][]*Sidecar{}
@@ -127,9 +137,9 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	ReportProgress := func() {
 		allok := true
 		if allok {
-			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %v (the expected result)", sidecars)
+			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %+v (the expected result)", sidecars)
 		} else {
-			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %v (missing some sidecars: %v)",
+			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %+v (missing some sidecars: %+v)",
 				sidecars, missing)
 		}
 	}
@@ -141,7 +151,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 			zonename = syncitem.ZoneName
 			switch cmd {
 			case "RESET-MSIGNER-GROUP":
-				log.Printf("MusicSyncEngine: Zone %s MSIGNER RRset has changed. Resetting MSIGNER group.", zonename)
+				log.Printf("MusicSyncEngine: Zone %s MSIGNER RRset has changed. Resetting MSIGNER group. Removed MSIGNER RRs:\n", zonename)
 				// log.Printf("MusicSyncEngine: Removed MSIGNER RRs:\n")
 				for _, rr := range syncitem.MsignerSyncStatus.MsignerRemoves {
 					log.Printf("  %s", rr.String())
@@ -203,23 +213,26 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	}
 }
 
-func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[string]*Sidecar, syncitem tdns.MultiSignerSyncRequest, zones map[string][]*Sidecar, zonename string) error {
+func MaybeSendHello(sidecarId map[tdns.MsignerMechanism]string, sidecars, wannabe_sidecars map[tdns.MsignerMechanism]map[string]*Sidecar, syncitem tdns.MultiSignerSyncRequest, zones map[string][]*Sidecar, zonename string) error {
 
 	for _, remoteSidecarRR := range syncitem.MsignerSyncStatus.MsignerAdds {
 		if prr, ok := remoteSidecarRR.(*dns.PrivateRR); ok {
 			if msrr, ok := prr.Data.(*tdns.MSIGNER); ok {
+				remoteMechanism := msrr.Mechanism
 				remoteSidecar := msrr.Target
-				if remoteSidecar == sidecarId {
+				if remoteSidecar == sidecarId[remoteMechanism] {
 					// we don't need to send a hello to ourselves
 					continue
 				}
-				if _, exists := sidecars[remoteSidecar]; !exists {
-					sidecars[remoteSidecar] = &Sidecar{
-						Identity: remoteSidecar,
+				if _, exists := sidecars[remoteMechanism][remoteSidecar]; !exists {
+					sidecars[remoteMechanism][remoteSidecar] = &Sidecar{
+						Identity:  remoteSidecar,
+						Mechanism: remoteMechanism, // Here we should also look up the SVCB to get the port and addresses
 					}
 				}
 				// Schedule sending an HELLO message to the new sidecar
-				log.Printf("MaybeSendHello: Scheduling HELLO message to sidecar %s", remoteSidecar)
+				log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
+					tdns.MsignerMechanismToString[remoteMechanism], remoteSidecar)
 				// Add code to send HELLO message here
 				continue
 			}
@@ -230,16 +243,22 @@ func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[string]*Sid
 	return nil
 }
 
-func EvaluateSidecarHello(sidecars, wannabe_sidecars map[string]*Sidecar, zones map[string][]*Sidecar) error {
+func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMechanism]map[string]*Sidecar, zones map[string][]*Sidecar) error {
 
 	// for each sidecar in wannabe_sidecars, check if it is already in sidecars
 	// if it is, add it to sidecars and remove it from wannabe_sidecars
 	// if it is not, check whether it should be
 
-	for _, sidecar := range wannabe_sidecars {
-		if _, ok := sidecars[sidecar.Identity]; ok {
-			// already in sidecars
-			delete(wannabe_sidecars, sidecar.Identity)
+	for _, ws := range wannabe_sidecars {
+		for _, s := range ws {
+			if _, ok := sidecars[s.Mechanism][s.Identity]; ok {
+				// already in sidecars
+				delete(wannabe_sidecars[s.Mechanism], s.Identity)
+			} else {
+				// check if it should be in the set of known sidecars
+				log.Printf("EvaluateSidecarHello: Sidecar %s (%s) is not in sidecars, but claims to share zones with us.",
+					s.Identity, tdns.MsignerMechanismToString[s.Mechanism])
+			}
 		}
 	}
 
@@ -247,68 +266,76 @@ func EvaluateSidecarHello(sidecars, wannabe_sidecars map[string]*Sidecar, zones 
 }
 
 func (s *Sidecar) SendHello() error {
-	// Create the SidecarHelloPost struct
-	helloPost := SidecarHelloPost{
-		SidecarId: s.Identity,
-		Addresses: s.Addresses,
-		Port:      s.Port,
-	}
 
-	// Encode the struct as JSON
-	jsonData, err := json.Marshal(helloPost)
-	if err != nil {
-		return fmt.Errorf("failed to marshal SidecarHelloPost: %v", err)
-	}
+	switch s.Mechanism {
+	case tdns.MSignMechanismAPI:
+		// Create the SidecarHelloPost struct
+		helloPost := SidecarHelloPost{
+			SidecarId: s.Identity,
+			Addresses: s.Addresses,
+			Port:      s.Port,
+		}
 
-	// Lookup the TLSA record for the target sidecar
-	tlsarrset, err := tdns.LookupTLSA(s.Identity)
-	if err != nil {
-		return fmt.Errorf("failed to lookup TLSA record: %v", err)
-	}
+		// Encode the struct as JSON
+		jsonData, err := json.Marshal(helloPost)
+		if err != nil {
+			return fmt.Errorf("failed to marshal SidecarHelloPost: %v", err)
+		}
 
-	// Use the TLSA record to authenticate the remote end securely
-	// (This is a simplified example, in a real implementation you would need to configure the TLS client with the TLSA record)
-	tlsConfig := &tls.Config{
-		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			for _, rawCert := range rawCerts {
-				cert, err := x509.ParseCertificate(rawCert)
-				if err != nil {
-					return fmt.Errorf("failed to parse certificate: %v", err)
+		// Lookup the TLSA record for the target sidecar
+		tlsarrset, err := tdns.LookupTLSA(s.Identity)
+		if err != nil {
+			return fmt.Errorf("failed to lookup TLSA record: %v", err)
+		}
+
+		// Use the TLSA record to authenticate the remote end securely
+		// (This is a simplified example, in a real implementation you would need to configure the TLS client with the TLSA record)
+		tlsConfig := &tls.Config{
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				for _, rawCert := range rawCerts {
+					cert, err := x509.ParseCertificate(rawCert)
+					if err != nil {
+						return fmt.Errorf("failed to parse certificate: %v", err)
+					}
+					if cert.Subject.CommonName != s.Identity {
+						return fmt.Errorf("unexpected certificate common name (should have been %s)", s.Identity)
+					}
+
+					err = tdns.VerifyCertAgainstTLSA(tlsarrset, rawCert)
+					if err != nil {
+						return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
+					}
 				}
-				if cert.Subject.CommonName != s.Identity {
-					return fmt.Errorf("unexpected certificate common name (should have been %s)", s.Identity)
-				}
+				return nil
+			},
+		}
 
-				err = tdns.VerifyCertAgainstTLSA(tlsarrset, rawCert)
-				if err != nil {
-					return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
-				}
-			}
-			return nil
-		},
-	}
+		// Create the HTTPS client
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: tlsConfig,
+			},
+		}
 
-	// Create the HTTPS client
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-		},
-	}
+		// Send the HTTPS POST request
+		url := fmt.Sprintf("https://%s:%d/hello", s.Identity, s.Port)
+		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("failed to send HTTPS POST request: %v", err)
+		}
+		defer resp.Body.Close()
 
-	// Send the HTTPS POST request
-	url := fmt.Sprintf("https://%s:%d/hello", s.Identity, s.Port)
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to send HTTPS POST request: %v", err)
-	}
-	defer resp.Body.Close()
+		// Print the response to stdout
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %v", err)
+		}
+		fmt.Printf("Received response: %s\n", string(body))
 
-	// Print the response to stdout
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %v", err)
+	case tdns.MSignMechanismDNS:
+		// TODO: implement DNS-based hello
+		return fmt.Errorf("DNS-based hello not implemented")
 	}
-	fmt.Printf("Received response: %s\n", string(body))
 
 	return nil
 }

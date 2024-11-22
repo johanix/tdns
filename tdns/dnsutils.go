@@ -337,8 +337,6 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	var err error
 
-	// log.Printf("ReadZoneData: all RRs parsed")
-
 	if err = zp.Err(); err != nil {
 		zd.Logger.Printf("ParseZoneFromReader: Error from ZoneParser: %v", err)
 		return false, 0, err
