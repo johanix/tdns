@@ -14,7 +14,7 @@ type MockUpdater struct {
 	mock.Mock
 }
 
-// Verify that MockUpdater implements music.Updater
+// Verify that MockUpdater implements music.Updater (from CodeRabbit)
 var _ music.Updater = (*MockUpdater)(nil)
 
 func (m *MockUpdater) FetchRRset(signer *music.Signer, zoneName, owner string, rrtype uint16) (error, []dns.RR) {
