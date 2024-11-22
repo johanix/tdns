@@ -19,7 +19,11 @@ var _ music.Updater = (*MockUpdater)(nil)
 
 func (m *MockUpdater) FetchRRset(signer *music.Signer, zoneName, owner string, rrtype uint16) (error, []dns.RR) {
 	args := m.Called(signer, zoneName, owner, rrtype)
-	return args.Error(0), args.Get(1).([]dns.RR)
+	var rrs []dns.RR
+	if rr := args.Get(1); rr != nil {
+		rrs = rr.([]dns.RR)
+	}
+	return args.Error(0), rrs
 }
 
 func (m *MockUpdater) RemoveRRset(signer *music.Signer, zoneName, owner string, rrsets [][]dns.RR) error {
@@ -41,5 +45,8 @@ func (m *MockUpdater) SetApi(api music.Api) {
 }
 
 func (m *MockUpdater) GetApi() music.Api {
-	return m.Called().Get(0).(music.Api)
+	if api := m.Called().Get(0); api != nil {
+		return api.(music.Api)
+	}
+	return nil
 }
