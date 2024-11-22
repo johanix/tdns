@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"log"
 
-	//	"net/http"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	// "github.com/DNSSEC-Provisioning/music/music"
 )
 
 // According to https://desec.readthedocs.io/en/latest/rate-limits.html
@@ -26,6 +24,24 @@ func DeSECmgr(mconf *Config, done <-chan struct{}) {
 
 	desecfetch := mconf.Internal.DesecFetch
 	desecupdate := mconf.Internal.DesecUpdate
+
+	desecActive := viper.GetBool("signers.desec.active")
+	if !desecActive {
+		log.Println("deSEC Manager: deSEC is not active. Will just poll the queues to avoid blocking the client.")
+		go func() {
+			for {
+				select {
+				case <-desecfetch:
+					log.Println("deSEC Manager: fetch request received. Ignoring.")
+				case <-desecupdate:
+					log.Println("deSEC Manager: update request received. Ignoring.")
+				case <-done:
+					return
+				}
+			}
+		}()
+		return
+	}
 
 	// we use the limit per minute
 	var fetch_limit = viper.GetInt("signers.desec.limits.fetch")   // per second

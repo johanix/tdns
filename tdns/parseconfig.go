@@ -6,6 +6,7 @@ package tdns
 
 import (
 	// "flag"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -194,8 +195,21 @@ func ParseConfig(conf *Config, reload bool) error {
 	fmt.Println()
 
 	kdb := conf.Internal.KeyDB
+	// fmt.Printf("DEBUG: conf.AppName: %s AppMode: %s\n", conf.AppName, conf.AppMode)
 	if !reload || kdb == nil {
-		kdb, err := NewKeyDB(viper.GetString("db.file"), false)
+
+		dbFile := viper.GetString("db.file")
+		if conf.AppName != "sidecar-cli" && conf.AppName != "tdns-cli" {
+			// Verify that we have a MUSIC DB file.
+			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+			if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+				log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
+				log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
+				return errors.New("ParseConfig: TDNS DB file does not exist")
+			}
+		}
+
+		kdb, err := NewKeyDB(dbFile, false)
 		if err != nil {
 			log.Fatalf("Error from NewKeyDB: %v", err)
 		}
