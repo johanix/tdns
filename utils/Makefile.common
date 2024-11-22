@@ -19,6 +19,11 @@ build:	version.go
 netbsd:	version.go
 	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
+johaniaws:
+	TDNSAWSDIR=~/sshfs/msigner1/src/tdns
+	TDNSSRC=~/src/git/tdns
+	rsync --exclude=.git --exclude-from=${TDNSSRC}/.gitignore -avx ${TDNSSRC}/ ${TDNSAWSDIR}/
+
 test:
 	$(GO) test -v -cover
 
