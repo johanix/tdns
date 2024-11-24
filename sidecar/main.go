@@ -126,7 +126,8 @@ func main() {
 
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
 	music.LoadMusicConfig(&mconf, tconf.AppMode, false) // on initial startup a config error should cause an abort.
-	//	mconf.Internal = music.InternalConf{}
+
+	// dump.P(mconf.Sidecar)
 
 	logfile := viper.GetString("log.file")
 	err = tdns.SetupLogging(logfile)

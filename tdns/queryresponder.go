@@ -39,6 +39,7 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 	if err != nil || apex == nil {
 		if err != nil {
 			log.Printf("ApexResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
+			return err
 		} else {
 			log.Printf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
 		}

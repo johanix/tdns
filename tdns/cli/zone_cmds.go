@@ -249,7 +249,7 @@ var zoneListCmd = &cobra.Command{
 		}
 		hdr += "Frozen|Dirty|Options"
 		out := []string{}
-		if showhdr {
+		if tdns.Globals.ShowHeaders {
 			out = append(out, hdr)
 		}
 		for zname, zconf := range cr.Zones {
@@ -308,7 +308,7 @@ func init() {
 
 	ZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
 
-	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
+	// zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
 	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
 	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
 	zoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")

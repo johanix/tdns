@@ -338,13 +338,13 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	var err error
 
 	if err = zp.Err(); err != nil {
-		zd.Logger.Printf("ParseZoneFromReader: Error from ZoneParser: %v", err)
+		zd.Logger.Printf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
 		return false, 0, err
 	}
 
 	apex, _ := zd.Data.Get(zd.ZoneName)
 	if err != nil {
-		return false, 0, fmt.Errorf("ReadZoneData: Error: failed to get zone apex %s", zd.ZoneName)
+		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: failed to get zone apex %s", zd.ZoneName, err)
 	}
 
 	soa_rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
@@ -352,17 +352,16 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	if len(soa_rrset.RRs) > 0 {
 		soa = soa_rrset.RRs[0].(*dns.SOA)
 	} else {
-		log.Printf("ReadZoneData: Error: SOA: %v", soa_rrset)
-		return false, 0, fmt.Errorf("Error loading zone %s from data", zd.ZoneName)
+		log.Printf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
+		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
 	}
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
 
 	if err := zp.Err(); err != nil {
-		zd.Logger.Printf("ReadZoneData: Error from ZoneParser(%s): %v",
-			zd.ZoneName, err)
-		return false, soa.Serial, fmt.Errorf("Error from ZoneParser: %v", err)
+		zd.Logger.Printf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
+		return false, soa.Serial, fmt.Errorf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
 	}
 
 	zd.ComputeIndices()

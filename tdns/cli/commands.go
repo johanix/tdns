@@ -23,7 +23,7 @@ var StopCmd = &cobra.Command{
 	},
 }
 
-var showhdr, showfile, shownotify, showprimary bool
+var showfile, shownotify, showprimary bool
 
 func init() {
 }

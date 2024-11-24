@@ -50,7 +50,7 @@ var zoneDsyncStatusCmd = &cobra.Command{
 			out = append(out, fmt.Sprintf("%s|%s", key, status))
 		}
 		sort.Strings(out)
-		if showhdr {
+		if tdns.Globals.ShowHeaders {
 			out = append([]string{"Function|Status"}, out...)
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
@@ -170,7 +170,7 @@ func init() {
 	ZoneCmd.AddCommand(zoneDsyncCmd)
 	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd, zoneDsyncPublishCmd, zoneDsyncUnpublishCmd)
 
-	zoneDsyncCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show headers")
+	// zoneDsyncCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show headers")
 	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
 	zoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
 	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")

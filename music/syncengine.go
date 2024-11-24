@@ -220,8 +220,11 @@ func MaybeSendHello(sidecarId map[tdns.MsignerMechanism]string, sidecars, wannab
 			if msrr, ok := prr.Data.(*tdns.MSIGNER); ok {
 				remoteMechanism := msrr.Mechanism
 				remoteSidecar := msrr.Target
+				// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMechanismToString[remoteMechanism], sidecarId[remoteMechanism])
 				if remoteSidecar == sidecarId[remoteMechanism] {
 					// we don't need to send a hello to ourselves
+					log.Printf("MaybeSendHello: remoteSidecar [%s][%s] is ourselves (%s), no need to talk to ourselves",
+						tdns.MsignerMechanismToString[remoteMechanism], remoteSidecar, sidecarId[remoteMechanism])
 					continue
 				}
 				if _, exists := sidecars[remoteMechanism][remoteSidecar]; !exists {
