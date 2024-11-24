@@ -106,8 +106,8 @@ func MusicSetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 }
 
 // This is the sidecar-to-sidecar sync API dispatcher.
-func MusicAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan struct{}) error {
-	log.Printf("MusicAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Api.Identity)
+func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan struct{}) error {
+	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Api.Identity)
 
 	router := MusicSetupRouter(tconf, mconf)
 	addresses := mconf.Sidecar.Api.Addresses
@@ -115,22 +115,22 @@ func MusicAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan str
 	certFile := mconf.Sidecar.Api.Cert
 	keyFile := mconf.Sidecar.Api.Key
 	if len(addresses) == 0 {
-		log.Println("MusicAPIdispatcher: no addresses to listen on. Not starting.")
+		log.Println("MusicSyncAPIdispatcher: no addresses to listen on. Not starting.")
 		return nil
 	}
 	if certFile == "" || keyFile == "" {
-		log.Println("MusicAPIdispatcher: certFile or keyFile not set. Not starting.")
+		log.Println("MusicSyncAPIdispatcher: certFile or keyFile not set. Not starting.")
 		return nil
 	}
 
 	for idx, address := range addresses {
-		log.Printf("Starting API dispatcher #%d. Listening on %s\n", idx, address)
+		log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on %s\n", idx, address)
 		go func(address string) {
 			addr := net.JoinHostPort(address, fmt.Sprintf("%d", port))
 			log.Fatal(http.ListenAndServeTLS(addr, certFile, keyFile, router))
 		}(string(address))
 
-		log.Println("API dispatcher: unclear how to stop the http server nicely.")
+		log.Println("MusicSyncAPI dispatcher: unclear how to stop the http server nicely.")
 	}
 	return nil
 }

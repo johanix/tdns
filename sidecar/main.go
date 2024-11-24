@@ -167,7 +167,7 @@ func main() {
 
 	//	go func() {
 	//		time.Sleep(5 * time.Second)
-	err = music.LoadSidecarConfig(&mconf, all_zones)
+	err = music.LoadSidecarConfig(&mconf, &tconf, all_zones)
 	if err != nil {
 		fmt.Printf("Error loading sidecar config: %v", err)
 		log.Fatalf("Error loading sidecar config: %v", err)
@@ -176,16 +176,15 @@ func main() {
 
 	apistopper := make(chan struct{}) //
 	tconf.Internal.APIStopCh = apistopper
-	// sidecar mgmt API:
-	go APIdispatcher(&tconf, &mconf, apistopper)
-	// sidecar-to-sidecar sync API:
 
-	go MusicAPIdispatcher(&tconf, &mconf, apistopper)
+	go APIdispatcher(&tconf, &mconf, apistopper)          // sidecar mgmt API:
+	go MusicSyncAPIdispatcher(&tconf, &mconf, apistopper) // sidecar-to-sidecar sync API:
 
 	tconf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
 	tconf.Internal.DnsUpdateQ = make(chan tdns.DnsUpdateRequest, 100)
 	tconf.Internal.DnsNotifyQ = make(chan tdns.DnsNotifyRequest, 100)
 	tconf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
+	tconf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
 
 	go tdns.AuthQueryEngine(tconf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(tconf.Internal.ScannerQ, tconf.Internal.AuthQueryQ)
@@ -194,7 +193,9 @@ func main() {
 	go tdns.NotifyHandler(&tconf)
 	go tdns.DnsEngine(&tconf)
 	go kdb.DelegationSyncher(tconf.Internal.DelegationSyncQ, tconf.Internal.NotifyQ)
-	// go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
+
+	// The ResignerEngine is needed only for the sidecar auto zones.
+	go tdns.ResignerEngine(tconf.Internal.ResignQ, make(chan struct{}))
 
 	mconf.Internal.EngineCheck = make(chan music.EngineCheck, 100)
 

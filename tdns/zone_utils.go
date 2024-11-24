@@ -860,7 +860,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
 	return nil
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
+func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	if !zd.Options[OptOnlineSigning] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
 		return nil // this zone should not be signed (at least not by us)
 	}
@@ -886,7 +886,11 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
 
 	log.Printf("SetupZoneSigning: zone %s signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
 
-	resignq <- zd
+	select {
+	case resignq <- zd:
+	case <-time.After(2 * time.Second):
+		log.Printf("SetupZoneSigning: timeout while sending zone %s to resign queue", zd.ZoneName)
+	}
 
 	return nil
 }
@@ -1014,7 +1018,7 @@ ns1.%s IN A   192.0.2.1
 		ZoneStore: MapZone,
 		Logger:    log.Default(),
 		ZoneType:  Primary,
-		Options:   map[ZoneOption]bool{OptAllowUpdates: true},
+		Options:   map[ZoneOption]bool{OptAllowUpdates: true, OptOnlineSigning: true},
 		KeyDB:     kdb,
 	}
 
