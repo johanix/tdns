@@ -121,7 +121,7 @@ var keystoreDnssecCmd = &cobra.Command{
 	Use:   "dnssec",
 	Short: "Prefix command, only usable via sub-commands",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore dnssec called (but NYI)")
+		fmt.Println("keystore dnssec called (this is an empty prefix command)")
 	},
 }
 
@@ -208,8 +208,7 @@ func init() {
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
-
-	KeystoreCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
+	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")

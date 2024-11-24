@@ -99,7 +99,7 @@ func ParseConfig(conf *Config, reload bool) error {
 		log.Fatalf("Error unmarshalling config into struct: %v", err)
 	}
 
-	if conf.AppMode == "server" {
+	if conf.AppMode == "server" || conf.AppMode == "sidecar" {
 		// dump.P(conf.DnssecPolicies)
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
@@ -119,6 +119,11 @@ func ParseConfig(conf *Config, reload bool) error {
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
+		}
+
+		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
+			log.Fatalf("Error: DnssecPolicy 'default' not defined. Default policy is required.")
+			// return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required.")
 		}
 
 		// dump.P(conf.Internal.DnssecPolicies)

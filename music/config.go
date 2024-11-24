@@ -303,7 +303,7 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 	return nil
 }
 
-func LoadSidecarConfig(mconf *Config, all_zones []string) error {
+func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) error {
 	log.Printf("loadSidecarConfig: enter")
 	mconf.Sidecar.Api.Identity = dns.Fqdn(mconf.Sidecar.Api.Identity)
 	mconf.Sidecar.Dns.Identity = dns.Fqdn(mconf.Sidecar.Dns.Identity)
@@ -317,12 +317,10 @@ func LoadSidecarConfig(mconf *Config, all_zones []string) error {
 
 	if mconf.Sidecar.Api.Identity != "." {
 		if !slices.Contains(all_zones, mconf.Sidecar.Api.Identity) {
-			log.Printf("LoadSidecarConfig: Zone %s not found, creating a minimal auto zone", mconf.Sidecar.Api.Identity)
-			zd, err := mconf.Internal.KeyDB.CreateAutoZone(mconf.Sidecar.Api.Identity)
+			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Api.Identity, tconf)
 			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar DNS identity '%s': %v", mconf.Sidecar.Dns.Identity, err)
+				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar API identity '%s': %v", mconf.Sidecar.Api.Identity, err)
 			}
-			zd.MultiSignerSyncQ = mconf.Internal.MultiSignerSyncQ
 		}
 
 		if certFile == "" || keyFile == "" {
@@ -447,12 +445,10 @@ func LoadSidecarConfig(mconf *Config, all_zones []string) error {
 	if mconf.Sidecar.Dns.Identity != "." {
 
 		if !slices.Contains(all_zones, mconf.Sidecar.Dns.Identity) {
-			log.Printf("LoadSidecarConfig: Zone %s not found, creating a minimal auto zone", mconf.Sidecar.Dns.Identity)
-			zd, err := mconf.Internal.KeyDB.CreateAutoZone(mconf.Sidecar.Dns.Identity)
+			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Dns.Identity, tconf)
 			if err != nil {
 				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar DNS identity '%s': %v", mconf.Sidecar.Dns.Identity, err)
 			}
-			zd.MultiSignerSyncQ = mconf.Internal.MultiSignerSyncQ
 		}
 
 		ur := tdns.UpdateRequest{
@@ -536,4 +532,26 @@ func LoadSidecarConfig(mconf *Config, all_zones []string) error {
 	}
 
 	return nil
+}
+
+func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (*tdns.ZoneData, error) {
+	log.Printf("SetupSidecarAutoZone: Zone %s not found, creating a minimal auto zone", zonename)
+	zd, err := mconf.Internal.KeyDB.CreateAutoZone(zonename)
+	if err != nil {
+		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to create minimal auto zone for sidecar DNS identity '%s': %v", zonename, err)
+	}
+	zd.Options[tdns.OptAllowUpdates] = true
+	zd.MultiSignerSyncQ = mconf.Internal.MultiSignerSyncQ
+
+	// A sidecar auto zone needs to be signed by the sidecar.
+	if tmp, exists := tconf.Internal.DnssecPolicies["default"]; !exists {
+		log.Fatalf("SetupSidecarAutoZone: DnssecPolicy 'default' not defined. Default policy is required for sidecar auto zones.")
+	} else {
+		zd.DnssecPolicy = &tmp
+	}
+
+	zd.Options[tdns.OptOnlineSigning] = true
+	zd.SetupZoneSigning(tconf.Internal.ResignQ)
+
+	return zd, nil
 }
