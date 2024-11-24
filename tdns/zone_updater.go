@@ -61,7 +61,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 
 	var deferredUpdates []DeferredUpdate
 
-	var runQueueTicker = time.NewTicker(60 * time.Second)
+	var runQueueTicker = time.NewTicker(10 * time.Second)
 
 	var ur UpdateRequest
 
@@ -77,8 +77,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 					continue
 				}
 				zd, ok := Zones.Get(ur.ZoneName)
-				if !ok {
-					log.Printf("ZoneUpdater: Zone name \"%s\" in request for update is unknown. Ignored.", ur.ZoneName)
+				if !ok && ur.Cmd != "DEFERRED-UPDATE" {
+					log.Printf("ZoneUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored.", ur.Cmd, ur.ZoneName)
 					continue
 				}
 
@@ -91,6 +91,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 						AddTime:      time.Now(),
 					}
 					deferredUpdates = append(deferredUpdates, du)
+					continue
+
 				case "CHILD-UPDATE":
 					// This is the case where a DNS UPDATE contains updates to child delegation information.
 					// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
@@ -216,16 +218,27 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 				log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
 
 			case <-runQueueTicker.C:
+				if len(deferredUpdates) == 0 {
+					continue
+				}
+
 				log.Printf("ZoneUpdater: running deferred updates queue (%d items).", len(deferredUpdates))
-				for _, du := range deferredUpdates {
+				for i := 0; i < len(deferredUpdates); {
+					du := deferredUpdates[i]
+					log.Printf("ZoneUpdater: running deferred update \"%s\"", du.Description)
 					ok := du.PreCondition()
 					if ok {
 						err := du.Action()
 						if err != nil {
 							log.Printf("ZoneUpdater: Error from deferred update action: %v", err)
+							i++
+						} else {
+							// Remove the item from deferredUpdates queue
+							deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
 						}
 					} else {
 						log.Printf("ZoneUpdater: Deferred update \"%s\" not executed because precondition failed.", du.Description)
+						i++
 					}
 				}
 			}

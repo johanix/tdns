@@ -6,7 +6,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 
 	"github.com/johanix/tdns/music"
@@ -105,12 +107,13 @@ func MusicSetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 
 // This is the sidecar-to-sidecar sync API dispatcher.
 func MusicAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan struct{}) error {
-	log.Printf("MusicAPIdispatcher: starting with sidecar ID %s", mconf.Internal.SidecarId)
+	log.Printf("MusicAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Api.Identity)
 
 	router := MusicSetupRouter(tconf, mconf)
-	addresses := viper.GetStringSlice("music.sidecar.syncapi.addresses")
-	certFile := viper.GetString("apiserver.certFile")
-	keyFile := viper.GetString("apiserver.keyFile")
+	addresses := mconf.Sidecar.Api.Addresses
+	port := mconf.Sidecar.Api.Port
+	certFile := mconf.Sidecar.Api.Cert
+	keyFile := mconf.Sidecar.Api.Key
 	if len(addresses) == 0 {
 		log.Println("MusicAPIdispatcher: no addresses to listen on. Not starting.")
 		return nil
@@ -123,7 +126,8 @@ func MusicAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan str
 	for idx, address := range addresses {
 		log.Printf("Starting API dispatcher #%d. Listening on %s\n", idx, address)
 		go func(address string) {
-			log.Fatal(http.ListenAndServeTLS(address, certFile, keyFile, router))
+			addr := net.JoinHostPort(address, fmt.Sprintf("%d", port))
+			log.Fatal(http.ListenAndServeTLS(addr, certFile, keyFile, router))
 		}(string(address))
 
 		log.Println("API dispatcher: unclear how to stop the http server nicely.")

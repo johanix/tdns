@@ -795,7 +795,12 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
-	zd.Logger.Printf("SetupZoneSync(%s)", zd.ZoneName)
+	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
+	if !wantsSync {
+		zd.Logger.Printf("SetupZoneSync: Zone %s does not require delegation sync", zd.ZoneName)
+		return nil
+	}
+	zd.Logger.Printf("SetupZoneSync: Zone %s requires delegation sync", zd.ZoneName)
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
@@ -980,4 +985,60 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 		}
 	}
 	return &dd, nil
+}
+
+func (kdb *KeyDB) CreateAutoZone(zonename string) (*ZoneData, error) {
+	log.Printf("CreateAutoZone: Zone %s enter", zonename)
+
+	// Create a fake zone for the sidecar identity just to be able to
+	// to use to generate the TLSA.
+	tmpl := `
+$ORIGIN %s
+$TTL 86400
+%s    IN SOA ns1.%s hostmaster.%s (
+          2021010101 ; serial
+          3600       ; refresh (1 hour)
+          1800       ; retry (30 minutes)
+          1209600    ; expire (2 weeks)
+          86400      ; minimum (1 day)
+          )
+%s     IN NS  ns1.%s
+ns1.%s IN A   192.0.2.1
+`
+	zonedatastr := strings.ReplaceAll(tmpl, "%s", zonename)
+
+	log.Printf("CreateAutoZone: template zone data:\n%s\n", zonedatastr)
+
+	zd := &ZoneData{
+		ZoneName:  zonename,
+		ZoneStore: MapZone,
+		Logger:    log.Default(),
+		ZoneType:  Primary,
+		Options:   map[ZoneOption]bool{OptAllowUpdates: true},
+		KeyDB:     kdb,
+	}
+
+	log.Printf("CreateAutoZone: reading zone data for zone '%s'", zonename)
+	_, _, err := zd.ReadZoneData(zonedatastr, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read zone data: %v", err)
+	}
+
+	zd.Ready = true
+
+	// log.Printf("CreateAutoZone: zone data for zone '%s':", zonename)
+	// for ownerName, ownerData := range zd.Owners {
+	// 	fmt.Printf("Owner: %s\n", ownerName)
+	// 	for _, rrType := range ownerData.RRtypes.Keys() {
+	// 		rrset, _ := ownerData.RRtypes.Get(rrType)
+	// 		fmt.Printf("  RR Type: %s\n", dns.TypeToString[rrType])
+	// 		for _, rr := range rrset.RRs {
+	// 			fmt.Printf("    %s\n", rr.String())
+	// 		}
+	// 	}
+	// }
+
+	Zones.Set(zonename, zd)
+
+	return zd, nil
 }
