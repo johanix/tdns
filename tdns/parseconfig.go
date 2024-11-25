@@ -70,7 +70,9 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 }
 
 func ParseConfig(conf *Config, reload bool) error {
-	log.Printf("Enter ParseConfig")
+	if Globals.Debug {
+		log.Printf("Enter ParseConfig")
+	}
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
 		cfgfile = DefaultCfgFile
@@ -231,11 +233,18 @@ func ParseConfig(conf *Config, reload bool) error {
 	//	}
 
 	ValidateConfig(nil, DefaultCfgFile) // will terminate on error
+
+	if Globals.Debug {
+		log.Printf("ParseConfig: exit")
+	}
 	return nil
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, error) {
+	if Globals.Debug {
+		log.Printf("ParseZones: enter")
+	}
 	var all_zones []string
 
 	zonescfgfile := conf.Internal.ZonesCfgFile
@@ -497,6 +506,10 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 
 	ValidateZones(conf, ZonesCfgFile) // will terminate on error
 	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)", all_zones, len(zrch))
+
+	if Globals.Debug {
+		log.Printf("ParseConfig: exit")
+	}
 	return all_zones, nil
 }
 

@@ -110,7 +110,7 @@ func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan
 	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Api.Identity)
 
 	router := MusicSetupRouter(tconf, mconf)
-	addresses := mconf.Sidecar.Api.Addresses
+	addresses := mconf.Sidecar.Api.Addresses.Listen
 	port := mconf.Sidecar.Api.Port
 	certFile := mconf.Sidecar.Api.Cert
 	keyFile := mconf.Sidecar.Api.Key
@@ -124,9 +124,9 @@ func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan
 	}
 
 	for idx, address := range addresses {
-		log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on %s\n", idx, address)
 		go func(address string) {
 			addr := net.JoinHostPort(address, fmt.Sprintf("%d", port))
+			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, addr)
 			log.Fatal(http.ListenAndServeTLS(addr, certFile, keyFile, router))
 		}(string(address))
 

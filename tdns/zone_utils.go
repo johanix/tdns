@@ -794,13 +794,13 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 	return &cdd, nil
 }
 
-func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
+func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
 	if !wantsSync {
 		zd.Logger.Printf("SetupZoneSync: Zone %s does not require delegation sync", zd.ZoneName)
 		return nil
 	}
-	zd.Logger.Printf("SetupZoneSync: Zone %s requires delegation sync", zd.ZoneName)
+	zd.Logger.Printf("SetupZoneSync: Zone %s requests delegation sync", zd.ZoneName)
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)

@@ -156,12 +156,12 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		nkey.Header().Class = dns.ClassINET
 		nkey.Header().Ttl = 3600
 
-		log.Printf("Generated DNSKEY flags: %d", nkey.(*dns.DNSKEY).Flags)
-
 		switch rrtype {
 		case dns.TypeKEY:
+			log.Printf("Generated KEY flags: %d", nkey.(*dns.KEY).Flags)
 			privkey, err = nkey.(*dns.KEY).Generate(bits)
 		case dns.TypeDNSKEY:
+			log.Printf("Generated DNSKEY flags: %d", nkey.(*dns.DNSKEY).Flags)
 			privkey, err = nkey.(*dns.DNSKEY).Generate(bits)
 		}
 		if err != nil {
