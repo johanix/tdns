@@ -8,3 +8,6 @@ include ../utils/Makefile.common
 install:
 	install -s -b -c ${PROG} /usr/local/bin/
 
+clean:
+	rm -f $(PROG)
+	rm -f *~ */*~

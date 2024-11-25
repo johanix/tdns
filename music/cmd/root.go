@@ -5,6 +5,8 @@
 package mcmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -66,6 +68,25 @@ func InitApi() {
 	tdns.Globals.Api = tdns.NewClient("sidecar-cli", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
 
 	if tdns.Globals.Debug {
-		fmt.Printf("initApi: api connection to %s initialized (%s)\n:\napi: %+v\n", baseurl, apikey, tdns.Globals.Api)
+		tmpapi := tdns.ApiClient{
+			Name:       tdns.Globals.Api.Name,
+			BaseUrl:    tdns.Globals.Api.BaseUrl,
+			AuthMethod: tdns.Globals.Api.AuthMethod,
+			Client:     nil,
+			Verbose:    tdns.Globals.Verbose,
+			Debug:      tdns.Globals.Debug,
+			UseTLS:     tdns.Globals.Api.UseTLS,
+		}
+		bytebuf := new(bytes.Buffer)
+		err := json.NewEncoder(bytebuf).Encode(tmpapi)
+		if err != nil {
+			log.Fatalf("Error from json.NewEncoder: %v", err)
+		}
+		var prettyJSON bytes.Buffer
+		error := json.Indent(&prettyJSON, bytebuf.Bytes(), "", "  ")
+		if error != nil {
+			log.Println("JSON parse error: ", error)
+		}
+		fmt.Printf("initApi: api connection to %s initialized (%s)\n:\napi: %s\n", baseurl, apikey, prettyJSON.String())
 	}
 }

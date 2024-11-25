@@ -6,6 +6,7 @@ package tdns
 
 import (
 	// "flag"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -69,7 +70,9 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 }
 
 func ParseConfig(conf *Config, reload bool) error {
-	log.Printf("Enter ParseConfig")
+	if Globals.Debug {
+		log.Printf("Enter ParseConfig")
+	}
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
 		cfgfile = DefaultCfgFile
@@ -98,7 +101,7 @@ func ParseConfig(conf *Config, reload bool) error {
 		log.Fatalf("Error unmarshalling config into struct: %v", err)
 	}
 
-	if conf.AppMode == "server" {
+	if conf.AppMode == "server" || conf.AppMode == "sidecar" {
 		// dump.P(conf.DnssecPolicies)
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
@@ -118,6 +121,11 @@ func ParseConfig(conf *Config, reload bool) error {
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
+		}
+
+		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
+			log.Fatalf("Error: DnssecPolicy 'default' not defined. Default policy is required.")
+			// return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required.")
 		}
 
 		// dump.P(conf.Internal.DnssecPolicies)
@@ -194,8 +202,21 @@ func ParseConfig(conf *Config, reload bool) error {
 	fmt.Println()
 
 	kdb := conf.Internal.KeyDB
+	// fmt.Printf("DEBUG: conf.AppName: %s AppMode: %s\n", conf.AppName, conf.AppMode)
 	if !reload || kdb == nil {
-		kdb, err := NewKeyDB(viper.GetString("db.file"), false)
+
+		dbFile := viper.GetString("db.file")
+		if conf.AppName != "sidecar-cli" && conf.AppName != "tdns-cli" {
+			// Verify that we have a MUSIC DB file.
+			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+			if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+				log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
+				log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
+				return errors.New("ParseConfig: TDNS DB file does not exist")
+			}
+		}
+
+		kdb, err := NewKeyDB(dbFile, false)
 		if err != nil {
 			log.Fatalf("Error from NewKeyDB: %v", err)
 		}
@@ -212,11 +233,18 @@ func ParseConfig(conf *Config, reload bool) error {
 	//	}
 
 	ValidateConfig(nil, DefaultCfgFile) // will terminate on error
+
+	if Globals.Debug {
+		log.Printf("ParseConfig: exit")
+	}
 	return nil
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, error) {
+	if Globals.Debug {
+		log.Printf("ParseZones: enter")
+	}
 	var all_zones []string
 
 	zonescfgfile := conf.Internal.ZonesCfgFile
@@ -478,6 +506,10 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 
 	ValidateZones(conf, ZonesCfgFile) // will terminate on error
 	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)", all_zones, len(zrch))
+
+	if Globals.Debug {
+		log.Printf("ParseConfig: exit")
+	}
 	return all_zones, nil
 }
 

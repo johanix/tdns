@@ -123,8 +123,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
 					if err != nil {
-						log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
-							zone, err)
+						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 						continue // cannot do much else
 						// return // terminate goroutine
 					}
