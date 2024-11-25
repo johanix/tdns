@@ -54,10 +54,11 @@ type SidecarBeatResponse struct {
 }
 
 func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
-	sidecarId := map[tdns.MsignerMechanism]string{
-		tdns.MSignMechanismAPI: mconf.Sidecar.Api.Identity,
-		tdns.MSignMechanismDNS: mconf.Sidecar.Dns.Identity,
-	}
+	//	sidecarId := map[tdns.MsignerMechanism]string{
+	//		tdns.MSignMechanismAPI: mconf.Sidecar.Api.Identity,
+	//		tdns.MSignMechanismDNS: mconf.Sidecar.Dns.Identity,
+	//	}
+	sidecarId := mconf.Sidecar.Identity
 
 	// sidecars is a map of known "remote" sidecars that we
 	// have received HELLO messages from.
@@ -213,18 +214,18 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	}
 }
 
-func MaybeSendHello(sidecarId map[tdns.MsignerMechanism]string, sidecars, wannabe_sidecars map[tdns.MsignerMechanism]map[string]*Sidecar, syncitem tdns.MultiSignerSyncRequest, zones map[string][]*Sidecar, zonename string) error {
+func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[tdns.MsignerMechanism]map[string]*Sidecar, syncitem tdns.MultiSignerSyncRequest, zones map[string][]*Sidecar, zonename string) error {
 
 	for _, remoteSidecarRR := range syncitem.MsignerSyncStatus.MsignerAdds {
 		if prr, ok := remoteSidecarRR.(*dns.PrivateRR); ok {
 			if msrr, ok := prr.Data.(*tdns.MSIGNER); ok {
 				remoteMechanism := msrr.Mechanism
 				remoteSidecar := msrr.Target
-				// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMechanismToString[remoteMechanism], sidecarId[remoteMechanism])
-				if remoteSidecar == sidecarId[remoteMechanism] {
+				// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMechanismToString[remoteMechanism], sidecarId)
+				if remoteSidecar == sidecarId {
 					// we don't need to send a hello to ourselves
 					log.Printf("MaybeSendHello: remoteSidecar [%s][%s] is ourselves (%s), no need to talk to ourselves",
-						tdns.MsignerMechanismToString[remoteMechanism], remoteSidecar, sidecarId[remoteMechanism])
+						tdns.MsignerMechanismToString[remoteMechanism], remoteSidecar, sidecarId)
 					continue
 				}
 				if _, exists := sidecars[remoteMechanism][remoteSidecar]; !exists {
@@ -286,7 +287,7 @@ func (s *Sidecar) SendHello() error {
 		}
 
 		// Lookup the TLSA record for the target sidecar
-		tlsarrset, err := tdns.LookupTLSA(s.Identity)
+		tlsarrset, err := tdns.LookupTlsaRR(s.Identity)
 		if err != nil {
 			return fmt.Errorf("failed to lookup TLSA record: %v", err)
 		}
@@ -304,7 +305,7 @@ func (s *Sidecar) SendHello() error {
 						return fmt.Errorf("unexpected certificate common name (should have been %s)", s.Identity)
 					}
 
-					err = tdns.VerifyCertAgainstTLSA(tlsarrset, rawCert)
+					err = tdns.VerifyCertAgainstTlsaRR(tlsarrset, rawCert)
 					if err != nil {
 						return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 					}

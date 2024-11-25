@@ -279,6 +279,7 @@ func Sig0KeyMgmt(cmd string) error {
 
 	case "generate":
 		data.Zone = tdns.Globals.Zonename
+		data.Keyname = tdns.Globals.Zonename // It should be possible to generate SIG(0) keys for other names than zone names.
 		data.Algorithm = dns.StringToAlgorithm[tdns.Globals.Algorithm]
 		data.State = NewState
 

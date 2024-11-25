@@ -38,12 +38,13 @@ type Config struct {
 }
 
 type SidecarConf struct {
-	Api SidecarApiConf
-	Dns SidecarDnsConf
+	Identity string
+	Api      SidecarApiConf
+	Dns      SidecarDnsConf
 }
 
 type SidecarApiConf struct {
-	Identity  string
+	//	Identity  string
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -56,7 +57,7 @@ type SidecarApiConf struct {
 }
 
 type SidecarDnsConf struct {
-	Identity  string
+	//	Identity  string
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -260,12 +261,6 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 		if tdns.Globals.Debug {
 			fmt.Printf("*** LoadMusicConfig: sidecar config merged from \"%s\"\n", cfgfile)
 		}
-		// This should be loaded later, when zones are available.
-		//		err = LoadSidecarConfig(mconf)
-		//		if err != nil {
-		//			log.Printf("Error loading sidecar config: %v", err)
-		//			return err
-		//		}
 	case "sidecar-cli":
 		err = viper.MergeInConfig()
 		if tdns.Globals.Debug {
@@ -283,7 +278,6 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 		return err
 	}
 
-	log.Printf("LoadMusicConfig: unmarshalling MUSIC config into struct")
 	err = viper.Unmarshal(&mconf)
 	if err != nil {
 		log.Fatalf("Error unmarshalling MUSIC config into struct: %v", err)
@@ -321,20 +315,20 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 	}
 
 	if len(mconf.Sidecar.Api.Addresses.Listen) == 0 && len(mconf.Sidecar.Dns.Addresses.Listen) == 0 {
-		// dump.P(mconf.Sidecar)
+		dump.P(mconf.Sidecar)
 		return errors.New("LoadSidecarConfig: neither sidecar syncapi nor syncdns addresses set in config file")
 	}
 
 	certFile := viper.GetString("sidecar.api.cert")
 	keyFile := viper.GetString("sidecar.api.key")
 
-	if mconf.Sidecar.Api.Identity != "" {
-		mconf.Sidecar.Api.Identity = dns.Fqdn(mconf.Sidecar.Api.Identity)
+	if mconf.Sidecar.Identity != "" {
+		mconf.Sidecar.Identity = dns.Fqdn(mconf.Sidecar.Identity)
 
-		if !slices.Contains(all_zones, mconf.Sidecar.Api.Identity) {
-			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Api.Identity, tconf)
+		if !slices.Contains(all_zones, mconf.Sidecar.Identity) {
+			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
 			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar API identity '%s': %v", mconf.Sidecar.Api.Identity, err)
+				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar API identity '%s': %v", mconf.Sidecar.Identity, err)
 			}
 		}
 
@@ -370,47 +364,71 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 		certCN := cert.Subject.CommonName
 
 		// Compare the CN with the expected CN
-		if certCN != mconf.Sidecar.Api.Identity {
-			log.Printf("LoadSidecarConfig: Error: mconf.Sidecar.Api.Identity: %s viper: %v", mconf.Sidecar.Api.Identity, viper.GetString("sidecar.api.identity"))
+		if certCN != "api."+mconf.Sidecar.Identity {
+			log.Printf("LoadSidecarConfig: Error: mconf.Sidecar.Identity: %s viper: %v", mconf.Sidecar.Identity, viper.GetString("sidecar.identity"))
 			dump.P(mconf.Sidecar)
-			return fmt.Errorf("LoadSidecarConfig: Error: Sidecar certificate CN '%s' does not match sidecar identity '%s'", certCN, mconf.Sidecar.Api.Identity)
+			return fmt.Errorf("LoadSidecarConfig: Error: Sidecar certificate CN '%s' does not match sidecar API identity 'api.%s'", certCN, mconf.Sidecar.Identity)
 		}
 
-		log.Printf("LoadSidecarConfig: cert CN '%s' matches sidecar identity '%s'", certCN, mconf.Sidecar.Api.Identity)
+		log.Printf("LoadSidecarConfig: cert CN '%s' matches sidecar API identity 'api.%s'", certCN, mconf.Sidecar.Identity)
+		apiname := "api." + mconf.Sidecar.Identity
+		dnsname := "dns." + mconf.Sidecar.Identity
 
 		ur := tdns.UpdateRequest{
 			Cmd:         "DEFERRED-UPDATE",
-			ZoneName:    mconf.Sidecar.Api.Identity,
-			Description: fmt.Sprintf("Publish TLSA+SVCB RRs for sidecar API identity '%s'", mconf.Sidecar.Api.Identity),
+			ZoneName:    mconf.Sidecar.Identity,
+			Description: fmt.Sprintf("Publish TLSA RR for sidecar API identity '%s'", apiname),
 			PreCondition: func() bool {
-				_, ok := tdns.Zones.Get(mconf.Sidecar.Api.Identity)
+				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
 				if !ok {
-					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Api.Identity)
+					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
 				}
 				return ok
 			},
 			Action: func() error {
-				zd, ok := tdns.Zones.Get(mconf.Sidecar.Api.Identity)
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
 				if !ok {
-					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Api.Identity)
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
 				}
-				zd.Options[tdns.OptAllowUpdates] = true
 
-				log.Printf("LoadSidecarConfig: sending PING command to sidecar '%s'", mconf.Sidecar.Api.Identity)
+				log.Printf("LoadSidecarConfig: sending PING command to sidecar '%s'", mconf.Sidecar.Identity)
 				zd.KeyDB.UpdateQ <- tdns.UpdateRequest{
 					Cmd: "PING",
 				}
 
-				log.Printf("LoadSidecarConfig: publishing TLSA RR for sidecar identity '%s'", mconf.Sidecar.Api.Identity)
+				// sidecar API identity
+				log.Printf("LoadSidecarConfig: publishing TLSA RR for sidecar API identity '%s'", apiname)
 
-				err = zd.PublishTLSARR(string(certPEM), mconf.Sidecar.Api.Port)
+				err = zd.PublishTlsaRR(apiname, mconf.Sidecar.Api.Port, string(certPEM))
 				if err != nil {
 					return fmt.Errorf("LoadSidecarConfig: failed to publish TLSA RR: %v", err)
 				}
 
-				log.Printf("LoadSidecarConfig: Successfully published TLSA RR for sidecar identity '%s'\n", mconf.Sidecar.Api.Identity)
+				log.Printf("LoadSidecarConfig: Successfully published TLSA RR for sidecar API identity '%s'\n", apiname)
+				return nil
+			},
+		}
+		mconf.Internal.UpdateQ <- ur
+
+		ur = tdns.UpdateRequest{
+			Cmd:         "DEFERRED-UPDATE",
+			ZoneName:    mconf.Sidecar.Identity,
+			Description: fmt.Sprintf("Publish SVCB RR for sidecar API identity '%s'", apiname),
+			PreCondition: func() bool {
+				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
+				return ok
+			},
+			Action: func() error {
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
 
 				var ipv4hint, ipv6hint []net.IP
+				var value []dns.SVCBKeyValue
 				if len(mconf.Sidecar.Api.Addresses.Publish) > 0 {
 					for _, addr := range mconf.Sidecar.Api.Addresses.Publish {
 						ip := net.ParseIP(addr)
@@ -425,7 +443,6 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 						}
 					}
 				}
-				var value []dns.SVCBKeyValue
 
 				if mconf.Sidecar.Api.Port != 0 {
 					value = append(value, &dns.SVCBPort{Port: mconf.Sidecar.Api.Port})
@@ -439,72 +456,94 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 					value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 				}
 
-				err = zd.PublishSvcbRR(mconf.Sidecar.Api.Identity, mconf.Sidecar.Api.Port, value)
+				err = zd.PublishSvcbRR(apiname, mconf.Sidecar.Api.Port, value)
 				if err != nil {
-					return fmt.Errorf("LoadSidecarConfig: failed to publish SVCB RR: %v", err)
+					return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar APISVCB RR: %v", err)
 				}
 
-				log.Printf("LoadSidecarConfig: Successfully published SVCB RR for sidecar API identity '%s'\n", mconf.Sidecar.Api.Identity)
-
-				for _, addr := range mconf.Sidecar.Api.Addresses.Publish {
-					err = zd.PublishAddrRR(mconf.Sidecar.Api.Identity, addr)
-					if err != nil {
-						return fmt.Errorf("LoadSidecarConfig: failed to publish address RR: %v", err)
-					}
-				}
-				log.Printf("LoadSidecarConfig: Successfully published address RRs for sidecar API identity '%s'\n", mconf.Sidecar.Api.Identity)
+				log.Printf("LoadSidecarConfig: Successfully published sidecar API SVCB RR '%s'\n", apiname)
 				return nil
 			},
 		}
-
 		mconf.Internal.UpdateQ <- ur
 
-	}
-
-	if mconf.Sidecar.Dns.Identity != "" {
-		mconf.Sidecar.Dns.Identity = dns.Fqdn(mconf.Sidecar.Dns.Identity)
-
-		if !slices.Contains(all_zones, mconf.Sidecar.Dns.Identity) {
-			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Dns.Identity, tconf)
-			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar DNS identity '%s': %v", mconf.Sidecar.Dns.Identity, err)
-			}
-		}
-
-		ur := tdns.UpdateRequest{
+		ur = tdns.UpdateRequest{
 			Cmd:         "DEFERRED-UPDATE",
-			ZoneName:    mconf.Sidecar.Dns.Identity,
-			Description: fmt.Sprintf("Publish SVCB + SIG(0) KEY RR for sidecar DNS identity '%s'", mconf.Sidecar.Dns.Identity),
+			ZoneName:    mconf.Sidecar.Identity,
+			Description: fmt.Sprintf("Publish ADDR RRs for sidecar API identity '%s'", apiname),
 			PreCondition: func() bool {
-				_, ok := tdns.Zones.Get(mconf.Sidecar.Dns.Identity)
+				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
 				if !ok {
-					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Dns.Identity)
+					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
 				}
 				return ok
 			},
 			Action: func() error {
-				var err error
-				zd, ok := tdns.Zones.Get(mconf.Sidecar.Dns.Identity)
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
 				if !ok {
-					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Dns.Identity)
-				}
-				zd.Options[tdns.OptAllowUpdates] = true
-
-				log.Printf("LoadSidecarConfig: sending PING command to sidecar '%s'", mconf.Sidecar.Dns.Identity)
-				zd.KeyDB.UpdateQ <- tdns.UpdateRequest{
-					Cmd: "PING",
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
 				}
 
-				log.Printf("LoadSidecarConfig: publishing KEY RR for sidecar identity '%s' SIG(0) public key", mconf.Sidecar.Dns.Identity)
+				for _, addr := range mconf.Sidecar.Api.Addresses.Publish {
+					err = zd.PublishAddrRR(apiname, addr)
+					if err != nil {
+						return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar API address RRs: %v", err)
+					}
+				}
+				log.Printf("LoadSidecarConfig: Successfully published sidecar API address RRs '%s'\n", apiname)
+				return nil
+			},
+		}
+		mconf.Internal.UpdateQ <- ur
 
-				err = zd.MusicSig0KeyPrep(mconf.Sidecar.Dns.Identity, zd.KeyDB)
+		ur = tdns.UpdateRequest{
+			Cmd:         "DEFERRED-UPDATE",
+			ZoneName:    mconf.Sidecar.Identity,
+			Description: fmt.Sprintf("Publish KEY RR for sidecar DNS identity '%s' SIG(0) public key", dnsname),
+			PreCondition: func() bool {
+				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
+				return ok
+			},
+			Action: func() error {
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
+
+				err = zd.MusicSig0KeyPrep(dnsname, zd.KeyDB)
 				if err != nil {
-					return fmt.Errorf("LoadSidecarConfig: failed to publish KEY RR for sidecar DNS identity '%s' SIG(0) public key: %v", mconf.Sidecar.Dns.Identity, err)
+					return fmt.Errorf("LoadSidecarConfig: failed to publish KEY RR for sidecar DNS identity '%s' SIG(0) public key: %v", dnsname, err)
 				}
 
-				log.Printf("LoadSidecarConfig: Successfully published KEY RR for sidecar DNS identity '%s' SIG(0) public key\n", mconf.Sidecar.Dns.Identity)
+				log.Printf("LoadSidecarConfig: Successfully published KEY RR for sidecar DNS identity '%s' SIG(0) public key\n", dnsname)
+				return nil
+			},
+		}
+		mconf.Internal.UpdateQ <- ur
+
+		ur = tdns.UpdateRequest{
+			Cmd:         "DEFERRED-UPDATE",
+			ZoneName:    mconf.Sidecar.Identity,
+			Description: fmt.Sprintf("Publish SVCB RRs for sidecar DNS identity '%s'", dnsname),
+			PreCondition: func() bool {
+				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
+				return ok
+			},
+			Action: func() error {
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
 
 				var ipv4hint, ipv6hint []net.IP
+				var value []dns.SVCBKeyValue
+
 				if len(mconf.Sidecar.Dns.Addresses.Publish) > 0 {
 					for _, addr := range mconf.Sidecar.Dns.Addresses.Publish {
 						ip := net.ParseIP(addr)
@@ -519,7 +558,6 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 						}
 					}
 				}
-				var value []dns.SVCBKeyValue
 
 				if mconf.Sidecar.Dns.Port != 0 {
 					value = append(value, &dns.SVCBPort{Port: mconf.Sidecar.Dns.Port})
@@ -533,25 +571,45 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 					value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 				}
 
-				log.Printf("LoadSidecarConfig: publishing SVCB RR for sidecar DNS identity '%s'", mconf.Sidecar.Dns.Identity)
-				err = zd.PublishSvcbRR(mconf.Sidecar.Dns.Identity, mconf.Sidecar.Dns.Port, value)
+				log.Printf("LoadSidecarConfig: publishing SVCB RR for sidecar DNS identity '%s'", dnsname)
+				err = zd.PublishSvcbRR(dnsname, mconf.Sidecar.Dns.Port, value)
 				if err != nil {
-					return fmt.Errorf("LoadSidecarConfig: failed to publish SVCB RR: %v", err)
+					return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar DNS SVCB RR: %v", err)
 				}
-				log.Printf("LoadSidecarConfig: Successfully published SVCB RR for sidecar identity '%s'\n", mconf.Sidecar.Dns.Identity)
+				log.Printf("LoadSidecarConfig: Successfully published sidecar DNS SVCB RR '%s'\n", dnsname)
+				return nil
+			},
+		}
+		mconf.Internal.UpdateQ <- ur
+
+		ur = tdns.UpdateRequest{
+			Cmd:         "DEFERRED-UPDATE",
+			ZoneName:    mconf.Sidecar.Identity,
+			Description: fmt.Sprintf("Publish ADDR RRs for sidecar DNS identity '%s'", dnsname),
+			PreCondition: func() bool {
+				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
+				return ok
+			},
+			Action: func() error {
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
 
 				for _, addr := range mconf.Sidecar.Dns.Addresses.Publish {
-					err = zd.PublishAddrRR(mconf.Sidecar.Dns.Identity, addr)
+					err = zd.PublishAddrRR(dnsname, addr)
 					if err != nil {
-						return fmt.Errorf("LoadSidecarConfig: failed to publish address RR: %v", err)
+						return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar DNS address RRs: %v", err)
 					}
 				}
-				log.Printf("LoadSidecarConfig: Successfully published address RRs for sidecar DNS identity '%s'\n", mconf.Sidecar.Dns.Identity)
+				log.Printf("LoadSidecarConfig: Successfully published sidecar DNS address RRs '%s'\n", dnsname)
 
 				return nil
 			},
 		}
-
 		mconf.Internal.UpdateQ <- ur
 	}
 
