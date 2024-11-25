@@ -622,7 +622,13 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 
 func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (*tdns.ZoneData, error) {
 	log.Printf("SetupSidecarAutoZone: Zone %s not found, creating a minimal auto zone", zonename)
-	zd, err := mconf.Internal.KeyDB.CreateAutoZone(zonename)
+
+	addrs, err := tconf.FindNameserverAddrs()
+	if err != nil {
+		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to find nameserver addresses: %v", err)
+	}
+
+	zd, err := mconf.Internal.KeyDB.CreateAutoZone(zonename, addrs)
 	if err != nil {
 		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to create minimal auto zone for sidecar DNS identity '%s': %v", zonename, err)
 	}
@@ -641,7 +647,7 @@ func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (
 		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to set up zone signing for sidecar auto zone '%s': %v", zonename, err)
 	}
 
-	// A sidecare auto zone will try to set up delegation syncing with the parent.
+	// A sidecar auto zone will try to set up delegation syncing with the parent.
 	zd.Options[tdns.OptDelSyncChild] = true
 	err = zd.SetupZoneSync(tconf.Internal.DelegationSyncQ)
 	if err != nil {
