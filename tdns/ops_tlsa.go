@@ -16,7 +16,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (zd *ZoneData) PublishTLSARR(certPEM string, port uint16) error {
+func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {
 	certData, err := parseCertificate(certPEM)
 	if err != nil {
 		return err
@@ -29,16 +29,16 @@ func (zd *ZoneData) PublishTLSARR(certPEM string, port uint16) error {
 		Certificate:  certData,
 	}
 	tlsa.Hdr = dns.RR_Header{
-		Name:   fmt.Sprintf("_%d._tcp.%s", port, zd.ZoneName),
+		Name:   fmt.Sprintf("_%d._tcp.%s", port, name),
 		Rrtype: dns.TypeTLSA,
 		Class:  dns.ClassINET,
 		Ttl:    120,
 	}
 
-	log.Printf("PublishTLSARR: publishing TLSA RR: %s", tlsa.String())
+	log.Printf("PublishTlsaRR: publishing TLSA RR: %s", tlsa.String())
 
 	if zd.KeyDB.UpdateQ == nil {
-		return fmt.Errorf("PublishTLSARR: KeyDB.UpdateQ is nil")
+		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
@@ -71,7 +71,7 @@ func parseCertificate(certPEM string) (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
-func (zd *ZoneData) UnpublishTLSARR() error {
+func (zd *ZoneData) UnpublishTlsaRR() error {
 	anti_tlsa_rr, err := dns.NewRR(fmt.Sprintf("_443._tcp.%s 0 IN TLSA 3 1 1 %s", zd.ZoneName, "example_certificate_data"))
 	if err != nil {
 		return err
@@ -88,7 +88,7 @@ func (zd *ZoneData) UnpublishTLSARR() error {
 	return nil
 }
 
-func LookupTLSA(name string) (*RRset, error) {
+func LookupTlsaRR(name string) (*RRset, error) {
 	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
@@ -122,7 +122,7 @@ func LookupTLSA(name string) (*RRset, error) {
 	return &rrset, nil
 }
 
-func VerifyCertAgainstTLSA(tlsarrset *RRset, rawcert []byte) error {
+func VerifyCertAgainstTlsaRR(tlsarrset *RRset, rawcert []byte) error {
 	for _, rr := range tlsarrset.RRs {
 		tlsarr, ok := rr.(*dns.TLSA)
 		if !ok {

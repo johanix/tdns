@@ -107,7 +107,7 @@ func MusicSetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 
 // This is the sidecar-to-sidecar sync API dispatcher.
 func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan struct{}) error {
-	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Api.Identity)
+	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Identity)
 
 	router := MusicSetupRouter(tconf, mconf)
 	addresses := mconf.Sidecar.Api.Addresses.Listen

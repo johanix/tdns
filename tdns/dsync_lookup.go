@@ -25,7 +25,7 @@ type DsyncResult struct {
 func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 	var dr DsyncResult
 	//     if verbose {
-	log.Printf("Discovering DSYNC for %s ...\n", child)
+	log.Printf("Discovering DSYNC for parent of child zone %s ...\n", child)
 	//	}
 
 	// Step 1: One level up
@@ -68,7 +68,7 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 			return dr, err
 		}
 		if len(prrs) > 0 {
-			return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, err
+			return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
 		}
 	}
 
@@ -86,7 +86,7 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 		return dr, err
 	}
 
-	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, err
+	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
 }
 
 func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
@@ -182,7 +182,7 @@ func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) 
 	}
 
 	if Globals.Debug {
-		fmt.Printf("Found %d DSYNC RRs\n", len(dsync_res.Rdata))
+		fmt.Printf("Zone %s: Found %d DSYNC RRs in parent zone %s\n", childzone, len(dsync_res.Rdata), dsync_res.Parent)
 	}
 
 	found := false

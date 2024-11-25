@@ -103,7 +103,11 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "generate":
-		pkc, msg, err := kdb.GenerateKeypair(kp.Zone, kp.Creator, kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
+		log.Printf("Sig0KeyMgmt: request to generate new keypair for name: %s", kp.Keyname)
+		if kp.Keyname == "" {
+			kp.Keyname = kp.Zone
+		}
+		pkc, msg, err := kdb.GenerateKeypair(kp.Keyname, kp.Creator, kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
 		if err != nil {
 			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
 			resp.Error = true

@@ -202,11 +202,16 @@ func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error {
-	log.Printf("Sig0KeyPreparation: setting up SIG(0) key pair for zone %s", name)
+	log.Printf("Sig0KeyPreparation: Zone %s: setting up SIG(0) key pair for name %s", zd.ZoneName, name)
 
-	log.Printf("Sig0KeyPreparation: Checking whether zone %s allows updates and if so has a KEY RRset published.", name)
-	apex, _ := zd.GetOwner(zd.ZoneName)
-	_, keyrrexist := apex.RRtypes.Get(dns.TypeKEY)
+	log.Printf("Sig0KeyPreparation: Checking whether zone %s allows updates and if so has a '%s KEY' RRset published.", zd.ZoneName, name)
+	owner, err := zd.GetOwner(name)
+	log.Printf("Sig0KeyPreparation: name: %s, owner: %v, err: %v", name, owner, err)
+	if err != nil || owner == nil {
+		return fmt.Errorf("Sig0KeyPreparation(%s) failed to get owner: %v", name, err)
+	}
+	// dump.P(owner)
+	_, keyrrexist := owner.RRtypes.Get(dns.TypeKEY)
 
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
 		err := zd.VerifyPublishedKeyRRs()
@@ -220,19 +225,19 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	// 1. Are updates to the zone data allowed?
 	if !zd.Options[OptAllowUpdates] {
 		if keyrrexist {
-			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates, but a KEY RRset is already published in the zone.", name)
+			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates, but a '%s' KEY RRset is already published in the zone.", name, owner)
 		} else {
-			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates. Cannot publish a KEY RRset.", name)
+			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates. Cannot publish a '%s KEY' RRset.", name, owner)
 		}
 		return nil
 	}
 
-	log.Printf("Sig0KeyPreparation: Zone %s allows updates. KEY RR exist: %v, dont-publish-key: %v", name, keyrrexist, zd.Options[OptDontPublishKey])
+	log.Printf("Sig0KeyPreparation: Zone %s allows updates. '%s' KEY RR exist: %v, dont-publish-key: %v", zd.ZoneName, name, keyrrexist, zd.Options[OptDontPublishKey])
 
 	// 2. Updates allowed, but there is no KEY RRset published.
 	if !keyrrexist && !zd.Options[OptDontPublishKey] {
 		log.Printf("Sig0KeyPreparation: Fetching the private SIG(0) key for %s", name)
-		sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+		sak, err := kdb.GetSig0Keys(name, Sig0StateActive)
 		if err != nil {
 			log.Printf("Sig0KeyPreparation: Error from kdb.GetSig0Keys(%s, %s): %v. Parent sync via UPDATE not possible.", name, Sig0StateActive, err)
 			return err
@@ -244,6 +249,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 				Command:    "sig0-mgmt",
 				SubCommand: "generate",
 				Zone:       zd.ZoneName,
+				Keyname:    name,
 				Algorithm:  alg,
 				State:      Sig0StateActive,
 				Creator:    "del-sync-setup",
@@ -254,20 +260,20 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 			}
 			zd.Logger.Printf(resp.Msg)
 
-			sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+			sak, err = zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 			if err != nil {
 				return fmt.Errorf("Sig0KeyPreparation(%s, after key generation) failed to get SIG(0) active keys: %v", name, err)
 			}
 		}
 
 		if len(sak.Keys) == 0 {
-			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", name)
-			return fmt.Errorf("no active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", name)
+			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible.", name, zd.ZoneName)
+			return fmt.Errorf("no active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible.", name, zd.ZoneName)
 		}
-		log.Printf("Sig0KeyPreparation: Publishing KEY RR for zone %s", name)
+		log.Printf("Sig0KeyPreparation: Publishing '%s KEY' RR in zone %s", name, zd.ZoneName)
 		err = zd.PublishKeyRRs(sak)
 		if err != nil {
-			log.Printf("DelegationSyncSetup: Error from PublishKeyRRs(): %s", err)
+			log.Printf("Sig0KeyPreparation: Error from PublishKeyRRs() publishing '%s KEY' RR in zone %s: %v", name, zd.ZoneName, err)
 			return err
 		} else {
 			keyrrexist = true
@@ -276,38 +282,24 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 
 	// 3. There is a KEY RRset, question is whether it is signed or not
 	if keyrrexist && zd.Options[OptOnlineSigning] {
-		log.Printf("Sig0KeyPreparation: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", name)
+		log.Printf("Sig0KeyPreparation: Fetching the private DNSSEC key for %s in prep for signing '%s KEY' RRset", zd.ZoneName, name)
 		//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
 		//			if err != nil {
 		//				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
 		//				continue
 		//			}
-		rrset, _ := apex.RRtypes.Get(dns.TypeKEY)
+		rrset, _ := owner.RRtypes.Get(dns.TypeKEY)
 		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
 		if err != nil {
-			log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
+			log.Printf("Sig0KeyPreparation: Error signing '%s KEY' RRset: %v", name, err)
 		} else {
-			apex.RRtypes.Set(dns.TypeKEY, rrset)
-			log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
+			owner.RRtypes.Set(dns.TypeKEY, rrset)
+			log.Printf("Sig0KeyPreparation: Successfully signed '%s KEY' RRset", name)
 		}
 	} else {
 		log.Printf("Sig0KeyPreparation: Zone %s does not allow online signing, KEY RRset cannot be re-signed", name)
 	}
 
-	// This moved to DelegationSyncSetup() above:
-
-	// 4. There is a KEY RRset, we have tried to sign it if possible. But has it been uploaded to the parent?
-	// XXX: This is a bit of a hack, but we need to bootstrap the parent with the child's SIG(0) key. In the future
-	// we should keep state of whether successful key bootstrapping has been done or not in the keystore.
-	//	msg, err, ur := zd.BootstrapSig0KeyWithParent(alg)
-	//	if err != nil {
-	//		log.Printf("DelegationSyncSetup: Zone %s: Error from BootstrapSig0KeyWithParent(): %v.", zd.ZoneName, err)
-	//		for _, tes := range ur.TargetStatus {
-	//			log.Printf("DelegationSyncSetup: Zone %s: TargetUpdateStatus: %v", zd.ZoneName, tes)
-	//		}
-	//		return err
-	//	}
-	//	log.Printf("DelegationSyncSetup: Zone %s: SIG(0) key bootstrap: %s", zd.ZoneName, msg)
 	return nil
 }
 
