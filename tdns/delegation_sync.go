@@ -190,6 +190,19 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 	return nil
 }
 
+func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
+	algstr := viper.GetString("delegationsync.parent.update.keygen.algorithm")
+	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+	if alg == 0 {
+		log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
+		alg = dns.ED25519
+	}
+
+	return zd.Sig0KeyPreparation(name, alg, kdb)
+}
+
+// MusicSig0KeyPrep and ParentSig0KeyPrep are identical except for the source of the keygen algorithm
+// which is specified in the relevant section of the configuration file.
 func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
@@ -211,7 +224,10 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		return fmt.Errorf("Sig0KeyPreparation(%s) failed to get owner: %v", name, err)
 	}
 	// dump.P(owner)
-	_, keyrrexist := owner.RRtypes.Get(dns.TypeKEY)
+	var keyrrexist bool
+	if owner != nil {
+		_, keyrrexist = owner.RRtypes.Get(dns.TypeKEY)
+	}
 
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
 		err := zd.VerifyPublishedKeyRRs()
@@ -225,9 +241,9 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	// 1. Are updates to the zone data allowed?
 	if !zd.Options[OptAllowUpdates] {
 		if keyrrexist {
-			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates, but a '%s' KEY RRset is already published in the zone.", name, owner)
+			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates, but a '%s' KEY RRset is already published in the zone.", zd.ZoneName, name)
 		} else {
-			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates. Cannot publish a '%s KEY' RRset.", name, owner)
+			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates. Cannot publish a '%s KEY' RRset.", zd.ZoneName, name)
 		}
 		return nil
 	}
@@ -281,24 +297,19 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	}
 
 	// 3. There is a KEY RRset, question is whether it is signed or not
-	if keyrrexist && zd.Options[OptOnlineSigning] {
-		log.Printf("Sig0KeyPreparation: Fetching the private DNSSEC key for %s in prep for signing '%s KEY' RRset", zd.ZoneName, name)
-		//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-		//			if err != nil {
-		//				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
-		//				continue
-		//			}
-		rrset, _ := owner.RRtypes.Get(dns.TypeKEY)
-		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
-		if err != nil {
-			log.Printf("Sig0KeyPreparation: Error signing '%s KEY' RRset: %v", name, err)
-		} else {
-			owner.RRtypes.Set(dns.TypeKEY, rrset)
-			log.Printf("Sig0KeyPreparation: Successfully signed '%s KEY' RRset", name)
-		}
-	} else {
-		log.Printf("Sig0KeyPreparation: Zone %s does not allow online signing, KEY RRset cannot be re-signed", name)
-	}
+	//	if keyrrexist && zd.Options[OptOnlineSigning] {
+	//		log.Printf("Sig0KeyPreparation: Fetching the private DNSSEC key for %s in prep for signing '%s KEY' RRset", zd.ZoneName, name)
+	//		rrset, _ := owner.RRtypes.Get(dns.TypeKEY)
+	//		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
+	//		if err != nil {
+	//			log.Printf("Sig0KeyPreparation: Error signing '%s KEY' RRset: %v", name, err)
+	//		} else {
+	//			owner.RRtypes.Set(dns.TypeKEY, rrset)
+	//			log.Printf("Sig0KeyPreparation: Successfully signed '%s KEY' RRset", name)
+	//		}
+	//	} else {
+	//		log.Printf("Sig0KeyPreparation: Zone %s does not allow online signing, KEY RRset cannot be re-signed", name)
+	//	}
 
 	return nil
 }

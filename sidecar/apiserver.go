@@ -35,8 +35,8 @@ func SetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 	sr.HandleFunc("/delegation", tdns.APIdelegation(tconf.Internal.DelegationSyncQ)).Methods("POST")
 	sr.HandleFunc("/debug", tdns.APIdebug()).Methods("POST")
 
-	// The /command endpoint is the only one not in the tdns lib
 	sr.HandleFunc("/command", tdns.APIcommand(tconf)).Methods("POST")
+	sr.HandleFunc("/config", tdns.APIconfig(tconf)).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
 	// MUSIC stuff

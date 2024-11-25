@@ -44,8 +44,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 			log.Fatalf("reading cert failed : %v", err)
 		}
 		if debug {
-			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
-				name, rootcafile)
+			log.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
 		}
 
 		rootCAPool.AppendCertsFromPEM(rootCA)
@@ -64,8 +63,8 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 	// log.Printf("client is a: %T\n", api.Client)
 
 	if debug {
-		fmt.Printf("Setting up %s API client:\n", name)
-		fmt.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
+		log.Printf("Setting up %s API client:\n", name)
+		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
 			api.BaseUrl, api.apiKey, api.AuthMethod)
 	}
 
@@ -90,8 +89,7 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	}
 
 	if api.Debug {
-		fmt.Println()
-		fmt.Printf("requestHelper: about to send request using auth method '%s' and key '%s'\n",
+		log.Printf("\nrequestHelper: about to send request using auth method '%s' and key '%s'\n",
 			api.AuthMethod, api.apiKey)
 	}
 

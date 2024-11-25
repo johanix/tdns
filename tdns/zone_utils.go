@@ -6,11 +6,13 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -824,6 +826,20 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 				return err
 			}
 		}
+
+		// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
+		// we generate a SIG(0) key pair for the target and publish the public key in the zone.
+		updateTarget := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
+		if _, ok := dns.IsDomainName(updateTarget); !ok {
+			zd.Logger.Printf("SetupZoneSync(%s, parent-side): Invalid DSYNC update target: %s", zd.ZoneName, updateTarget)
+		} else {
+			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC update target: %s", zd.ZoneName, updateTarget)
+			err := zd.ParentSig0KeyPrep(updateTarget, zd.KeyDB)
+			if err != nil {
+				zd.Logger.Printf("Error from ParentSig0KeyPrep(%s): %v", updateTarget, err)
+				return err
+			}
+		}
 	}
 
 	// If this is a child zone and we have the delegation-sync-child option set, we need to
@@ -833,15 +849,6 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
 			switch scheme {
 			case "update":
-				// 1. Is there a KEY RRset already?
-				//				if !zd.Options[OptDontPublishKey] {
-				//					err := zd.VerifyPublishedKeyRRs()
-				//					if err != nil {
-				//						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
-				//						return err
-				//					}
-				//					zd.Logger.Printf("SetupZoneSync: Zone %s: Verified published KEY RRset", zd.ZoneName)
-				//				}
 				delsyncq <- DelegationSyncRequest{
 					Command:  "DELEGATION-SYNC-SETUP",
 					ZoneName: zd.ZoneName,
@@ -991,25 +998,39 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 	return &dd, nil
 }
 
-func (kdb *KeyDB) CreateAutoZone(zonename string) (*ZoneData, error) {
+func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
 	log.Printf("CreateAutoZone: Zone %s enter", zonename)
 
 	// Create a fake zone for the sidecar identity just to be able to
 	// to use to generate the TLSA.
 	tmpl := `
-$ORIGIN %s
+$ORIGIN {ZONENAME}
 $TTL 86400
-%s    IN SOA ns1.%s hostmaster.%s (
+{ZONENAME}    IN SOA ns1.{ZONENAME} hostmaster.{ZONENAME} (
           2021010101 ; serial
           3600       ; refresh (1 hour)
           1800       ; retry (30 minutes)
           1209600    ; expire (2 weeks)
           86400      ; minimum (1 day)
           )
-%s     IN NS  ns1.%s
-ns1.%s IN A   192.0.2.1
+{ZONENAME}     IN NS  ns.{ZONENAME}
 `
-	zonedatastr := strings.ReplaceAll(tmpl, "%s", zonename)
+	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
+
+	if len(addrs) == 0 {
+		addrs = []string{"192.0.2.1"} // fake it till you make it
+	}
+
+	log.Printf("CreateAutoZone: adding NS RRs for addresses: %v", addrs)
+	for _, addr := range addrs {
+		if strings.Contains(addr, ":") {
+			// IPv6 address
+			zonedatastr += fmt.Sprintf("ns.%s IN AAAA %s\n", zonename, addr)
+		} else {
+			// IPv4 address
+			zonedatastr += fmt.Sprintf("ns.%s IN A %s\n", zonename, addr)
+		}
+	}
 
 	log.Printf("CreateAutoZone: template zone data:\n%s\n", zonedatastr)
 
@@ -1018,7 +1039,7 @@ ns1.%s IN A   192.0.2.1
 		ZoneStore: MapZone,
 		Logger:    log.Default(),
 		ZoneType:  Primary,
-		Options:   map[ZoneOption]bool{OptAllowUpdates: true, OptOnlineSigning: true},
+		Options:   map[ZoneOption]bool{OptAutomaticZone: true},
 		KeyDB:     kdb,
 	}
 
@@ -1029,20 +1050,31 @@ ns1.%s IN A   192.0.2.1
 	}
 
 	zd.Ready = true
-
-	// log.Printf("CreateAutoZone: zone data for zone '%s':", zonename)
-	// for ownerName, ownerData := range zd.Owners {
-	// 	fmt.Printf("Owner: %s\n", ownerName)
-	// 	for _, rrType := range ownerData.RRtypes.Keys() {
-	// 		rrset, _ := ownerData.RRtypes.Get(rrType)
-	// 		fmt.Printf("  RR Type: %s\n", dns.TypeToString[rrType])
-	// 		for _, rr := range rrset.RRs {
-	// 			fmt.Printf("    %s\n", rr.String())
-	// 		}
-	// 	}
-	// }
-
 	Zones.Set(zonename, zd)
 
 	return zd, nil
+}
+
+// Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
+func (tconf *Config) FindNameserverAddrs() ([]string, error) {
+	addrs := []string{}
+	log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
+	dump.P(tconf.DnsEngine)
+	for _, ns := range tconf.DnsEngine.Addresses {
+		addr, port, err := net.SplitHostPort(ns)
+		if err != nil {
+			return nil, fmt.Errorf("FindNameserverAddrs: failed to split host and port from address '%s': %v", ns, err)
+		}
+		if port != "53" {
+			continue
+		}
+		if addr == "127.0.0.1" || addr == "::1" {
+			continue
+		}
+		if addr == "" {
+			continue
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, nil
 }

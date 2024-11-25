@@ -151,6 +151,14 @@ func (conf *Config) ReloadZoneConfig() (string, error) {
 
 	for _, zname := range prezones {
 		if !slices.Contains(zonelist, zname) {
+			zd, exists := Zones.Get(zname)
+			if !exists {
+				log.Printf("ReloadZoneConfig: Zone %s not in config and also not in zone list.", zname)
+			}
+			if zd.Options[OptAutomaticZone] {
+				log.Printf("ReloadZoneConfig: Zone %s is an automatic zone. Not removing from zone list.", zname)
+				continue
+			}
 			log.Printf("ReloadZoneConfig: Zone %s no longer in config. Removing from zone list.", zname)
 			Zones.Remove(zname)
 		}
