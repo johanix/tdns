@@ -27,7 +27,7 @@ TDNS_SRC ?= /Users/johani/src/git/tdns
 TDNS_AWS_DIR ?= /Users/johani/sshfs/msigner1/src/tdns
 
 johaniaws:
-	rsync --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
+	rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
 
 test:
 	$(GO) test -v -cover

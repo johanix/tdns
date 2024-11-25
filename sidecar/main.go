@@ -169,7 +169,7 @@ func main() {
 	//		time.Sleep(5 * time.Second)
 	err = music.LoadSidecarConfig(&mconf, &tconf, all_zones)
 	if err != nil {
-		fmt.Printf("Error loading sidecar config: %v", err)
+		fmt.Printf("Error loading sidecar config: %v\n", err)
 		log.Fatalf("Error loading sidecar config: %v", err)
 	}
 	//	}()
