@@ -7,13 +7,11 @@ GO:=CGO_ENABLED=1 go
 
 include ../utils/Makefile.common
 
+.PHONY: clean install
+
 install:
-	@mkdir -p ../etc ../sbin
-#	install -s -b ${PROG} ../sbin/
-	if [ ! -e ../etc/${CONFIG} ] ; then install -c ${CONFIG}.sample ../etc/${CONFIG}; fi
+	install -s -b -c ${PROG} /usr/local/bin/
 
 clean:
 	rm -f $(PROG)
-	rm -f *~ */*~
-
-
+	find . -type f -name '*~' -delete

@@ -159,7 +159,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	}
 
 	var msignerchanged, keyschanged bool
-	var mss *MultiSignerSyncStatus
+	var mss *MusicSyncStatus
 	if zd.Options[OptMultiSigner] {
 		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
 		if err != nil {
@@ -211,7 +211,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 				// return false, err
 			}
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+			zd.MusicSyncQ <- MusicSyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
@@ -223,11 +223,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		if msignerchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
-				Command:           "RESET-MSIGNER-GROUP",
-				ZoneName:          zd.ZoneName,
-				ZoneData:          zd,
-				MsignerSyncStatus: mss,
+			zd.MusicSyncQ <- MusicSyncRequest{
+				Command:         "RESET-MSIGNER-GROUP",
+				ZoneName:        zd.ZoneName,
+				ZoneData:        zd,
+				MusicSyncStatus: mss,
 			}
 		}
 	}
@@ -295,7 +295,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	var msignerchanged, keyschanged bool
-	var mss *MultiSignerSyncStatus
+	var mss *MusicSyncStatus
 	if zd.Options[OptMultiSigner] {
 		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
 		if err != nil {
@@ -346,7 +346,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 				// return false, err
 			}
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+			zd.MusicSyncQ <- MusicSyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
@@ -358,11 +358,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 		if msignerchanged {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
-				Command:           "RESET-MSIGNER-GROUP",
-				ZoneName:          zd.ZoneName,
-				ZoneData:          zd,
-				MsignerSyncStatus: mss,
+			zd.MusicSyncQ <- MusicSyncRequest{
+				Command:         "RESET-MSIGNER-GROUP",
+				ZoneName:        zd.ZoneName,
+				ZoneData:        zd,
+				MusicSyncStatus: mss,
 			}
 		}
 	}

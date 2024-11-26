@@ -583,20 +583,8 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-type MultiSignerSyncStatus struct {
-	ZoneName       string
-	MsignerAdds    []dns.RR
-	MsignerRemoves []dns.RR
-	DnskeyAdds     []dns.RR
-	DnskeyRemoves  []dns.RR
-	Msg            string
-	Error          bool
-	ErrorMsg       string
-	Status         bool
-}
-
-func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MultiSignerSyncStatus, error) {
-	var mss = MultiSignerSyncStatus{
+func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error) {
+	var mss = MusicSyncStatus{
 		ZoneName: zd.ZoneName,
 		Msg:      "No change",
 		Error:    false,
