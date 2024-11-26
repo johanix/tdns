@@ -3,7 +3,9 @@
  */
 package tdns
 
-import "github.com/miekg/dns"
+import (
+	"github.com/miekg/dns"
+)
 
 type MusicSyncRequest struct {
 	Command         string

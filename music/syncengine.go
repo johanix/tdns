@@ -21,40 +21,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-type Sidecar struct {
-	Identity   string
-	Method     tdns.MsignerMethod // either API or DNS
-	Addresses  []string
-	Port       uint16
-	TlsaRR     *dns.TLSA
-	KeyRR      *dns.KEY
-	LastHB     time.Time
-	LastFullHB time.Time
-	HBCount    int
-	Zones      []string
-}
-
-type SidecarHelloPost struct {
-	SidecarId string
-	Addresses []string
-	Port      uint16
-	TLSA      dns.TLSA
-}
-
-type SidecarHelloResponse struct {
-	Status string
-}
-
-type SidecarBeatPost struct {
-	Name        string
-	Type        string
-	SharedZones []string
-}
-
-type SidecarBeatResponse struct {
-	Status string
-}
-
 func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	//	sidecarId := map[tdns.MsignerMechanism]string{
 	//		tdns.MSignMechanismAPI: mconf.Sidecar.Api.Identity,
@@ -279,8 +245,8 @@ func (s *Sidecar) SendHello() error {
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
 			SidecarId: s.Identity,
-			Addresses: s.Addresses,
-			Port:      s.Port,
+			Addresses: s.ApiAddrs,
+			Port:      s.ApiPort,
 		}
 
 		// Encode the struct as JSON
@@ -325,7 +291,7 @@ func (s *Sidecar) SendHello() error {
 		}
 
 		// Send the HTTPS POST request
-		url := fmt.Sprintf("https://%s:%d/hello", s.Identity, s.Port)
+		url := fmt.Sprintf("https://%s:%d/hello", s.Identity, s.ApiPort)
 		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 		if err != nil {
 			return fmt.Errorf("failed to send HTTPS POST request: %v", err)
