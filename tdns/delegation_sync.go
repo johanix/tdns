@@ -220,7 +220,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	log.Printf("Sig0KeyPreparation: Checking whether zone %s allows updates and if so has a '%s KEY' RRset published.", zd.ZoneName, name)
 	owner, err := zd.GetOwner(name)
 	log.Printf("Sig0KeyPreparation: name: %s, owner: %v, err: %v", name, owner, err)
-	if err != nil || owner == nil {
+	if err != nil {
 		return fmt.Errorf("Sig0KeyPreparation(%s) failed to get owner: %v", name, err)
 	}
 	// dump.P(owner)

@@ -119,7 +119,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 	rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 	if Globals.Debug {
-		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
 	}
 
 	// Rest of apex
@@ -128,7 +128,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
 			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRs...)
 			if Globals.Debug {
-				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
+				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
 			}
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
 			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRSIGs...)
@@ -147,7 +147,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
-					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				}
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
@@ -173,7 +173,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
-					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				}
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
@@ -196,7 +196,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// env.RR = append(env.RR, soa) // trailing SOA
 	rrs = append(rrs, soa)
 	if Globals.Debug {
-		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
+		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
 	}
 
 	total_sent += len(rrs)

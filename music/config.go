@@ -583,19 +583,12 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 		mconf.Internal.UpdateQ <- ur
 
 		ur = tdns.UpdateRequest{
-			Cmd:         "DEFERRED-UPDATE",
-			ZoneName:    mconf.Sidecar.Identity,
-			Description: fmt.Sprintf("Publish ADDR RRs for sidecar DNS identity '%s'", dnsname),
-			PreCondition: func() bool {
-				_, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
-				if !ok {
-					log.Printf("LoadSidecarConfig: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
-				}
-				return ok
-			},
+			Cmd:          "DEFERRED-UPDATE",
+			ZoneName:     mconf.Sidecar.Identity,
+			Description:  fmt.Sprintf("Publish ADDR RRs for sidecar DNS identity '%s'", dnsname),
+			PreCondition: tdns.ZoneIsReady(mconf.Sidecar.Identity),
 			Action: func() error {
-				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
-				if !ok {
+				if !tdns.ZoneIsReady(mconf.Sidecar.Identity) {
 					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
 				}
 
