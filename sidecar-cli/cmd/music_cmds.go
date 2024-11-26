@@ -32,6 +32,9 @@ func init() {
 	// from ../music/cmd/show.go:
 	MusicCmd.AddCommand(mcmd.ShowCmd)
 
+	// from ../music/cmd/sidecar.go:
+	MusicCmd.AddCommand(mcmd.SidecarCmd)
+
 	// from ../music/cmd/signer.go:
 	MusicCmd.AddCommand(mcmd.SignerCmd)
 

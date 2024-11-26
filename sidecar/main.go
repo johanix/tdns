@@ -36,19 +36,23 @@ func mainloop(conf *tdns.Config, mconf *music.Config, appMode string) {
 	hupper := make(chan os.Signal, 1)
 	signal.Notify(hupper, syscall.SIGHUP)
 
+	defer signal.Stop(exit)
+	defer signal.Stop(hupper)
+
 	var err error
 	var all_zones []string
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		for {
 			// log.Println("mainloop: signal dispatcher")
 			select {
 			case <-exit:
 				log.Println("mainloop: Exit signal received. Cleaning up.")
 				// do whatever we need to do to wrap up nicely
-				wg.Done()
+				return
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
@@ -61,7 +65,7 @@ func mainloop(conf *tdns.Config, mconf *music.Config, appMode string) {
 
 			case <-conf.Internal.APIStopCh:
 				log.Println("mainloop: Stop command received. Cleaning up.")
-				wg.Done()
+				return
 			}
 		}
 	}()
@@ -70,8 +74,6 @@ func mainloop(conf *tdns.Config, mconf *music.Config, appMode string) {
 	// XXX: From musicd.
 	mconf.Internal.TokViper.WriteConfig()
 	fmt.Printf("mainloop: saved state of API tokens to disk\n")
-	fmt.Println("mainloop: leaving signal dispatcher")
-
 	fmt.Println("mainloop: leaving signal dispatcher")
 }
 
@@ -144,7 +146,7 @@ func main() {
 	tconf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	tconf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	tconf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
-	tconf.Internal.MultiSignerSyncQ = make(chan tdns.MultiSignerSyncRequest, 10)
+	tconf.Internal.MusicSyncQ = make(chan tdns.MusicSyncRequest, 10)
 
 	mconf.Internal.HeartbeatQ = make(chan music.Heartbeat, 10)
 	go tdns.RefreshEngine(&tconf, stopch, appMode)
@@ -155,7 +157,7 @@ func main() {
 	tconf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
 	go tdns.Notifier(tconf.Internal.NotifyQ)
 
-	mconf.Internal.MultiSignerSyncQ = tconf.Internal.MultiSignerSyncQ
+	mconf.Internal.MusicSyncQ = tconf.Internal.MusicSyncQ
 	// The MusicSyncEngine is started here to ensure that it is running before we start parsing zones.
 	go music.MusicSyncEngine(&mconf, stopch)
 

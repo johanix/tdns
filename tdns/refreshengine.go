@@ -104,21 +104,21 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					dp, _ := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					msc, _ := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
-						ZoneName:         zone,
-						ZoneStore:        zr.ZoneStore,
-						Logger:           log.Default(),
-						Upstream:         zr.Primary,
-						Downstreams:      zr.Notify,
-						Zonefile:         zr.Zonefile,
-						ZoneType:         zr.ZoneType,
-						Options:          zr.Options,
-						UpdatePolicy:     zr.UpdatePolicy,
-						DnssecPolicy:     &dp,
-						MultiSigner:      &msc,
-						DelegationSyncQ:  conf.Internal.DelegationSyncQ,
-						MultiSignerSyncQ: conf.Internal.MultiSignerSyncQ,
-						Data:             cmap.New[OwnerData](),
-						KeyDB:            conf.Internal.KeyDB,
+						ZoneName:        zone,
+						ZoneStore:       zr.ZoneStore,
+						Logger:          log.Default(),
+						Upstream:        zr.Primary,
+						Downstreams:     zr.Notify,
+						Zonefile:        zr.Zonefile,
+						ZoneType:        zr.ZoneType,
+						Options:         zr.Options,
+						UpdatePolicy:    zr.UpdatePolicy,
+						DnssecPolicy:    &dp,
+						MultiSigner:     &msc,
+						DelegationSyncQ: conf.Internal.DelegationSyncQ,
+						MusicSyncQ:      conf.Internal.MusicSyncQ,
+						Data:            cmap.New[OwnerData](),
+						KeyDB:           conf.Internal.KeyDB,
 					}
 
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)

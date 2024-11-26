@@ -23,9 +23,11 @@ import (
 
 type Sidecar struct {
 	Identity   string
-	Mechanism  tdns.MsignerMechanism // either API or DNS
+	Method     tdns.MsignerMethod // either API or DNS
 	Addresses  []string
 	Port       uint16
+	TlsaRR     *dns.TLSA
+	KeyRR      *dns.KEY
 	LastHB     time.Time
 	LastFullHB time.Time
 	HBCount    int
@@ -62,17 +64,17 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 	// sidecars is a map of known "remote" sidecars that we
 	// have received HELLO messages from.
-	sidecars := map[tdns.MsignerMechanism]map[string]*Sidecar{
-		tdns.MSignMechanismAPI: map[string]*Sidecar{},
-		tdns.MSignMechanismDNS: map[string]*Sidecar{},
+	sidecars := map[tdns.MsignerMethod]map[string]*Sidecar{
+		tdns.MsignerMethodAPI: map[string]*Sidecar{},
+		tdns.MsignerMethodDNS: map[string]*Sidecar{},
 	}
 
 	// wannabe_sidecars is a map of sidecars that we have received
 	// a HELLO message from, but have not yet verified that they are
 	// correct
-	wannabe_sidecars := map[tdns.MsignerMechanism]map[string]*Sidecar{
-		tdns.MSignMechanismAPI: map[string]*Sidecar{},
-		tdns.MSignMechanismDNS: map[string]*Sidecar{},
+	wannabe_sidecars := map[tdns.MsignerMethod]map[string]*Sidecar{
+		tdns.MsignerMethodAPI: map[string]*Sidecar{},
+		tdns.MsignerMethodDNS: map[string]*Sidecar{},
 	}
 
 	// zones is a map of zones and the remote sidecars that share them with us
@@ -80,8 +82,8 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 	var missing []string
 	var zonename string
-	var syncitem tdns.MultiSignerSyncRequest
-	syncQ := mconf.Internal.MultiSignerSyncQ
+	var syncitem tdns.MusicSyncRequest
+	syncQ := mconf.Internal.MusicSyncQ
 
 	var beatitem Heartbeat
 	beatQ := mconf.Internal.HeartbeatQ
@@ -154,7 +156,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 			case "RESET-MSIGNER-GROUP":
 				log.Printf("MusicSyncEngine: Zone %s MSIGNER RRset has changed. Resetting MSIGNER group. Removed MSIGNER RRs:\n", zonename)
 				// log.Printf("MusicSyncEngine: Removed MSIGNER RRs:\n")
-				for _, rr := range syncitem.MsignerSyncStatus.MsignerRemoves {
+				for _, rr := range syncitem.MusicSyncStatus.MsignerRemoves {
 					log.Printf("  %s", rr.String())
 				}
 
@@ -164,7 +166,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 				}
 
 				log.Printf("MusicSyncEngine: Added MSIGNER RRs:\n")
-				for _, rr := range syncitem.MsignerSyncStatus.MsignerAdds {
+				for _, rr := range syncitem.MusicSyncStatus.MsignerAdds {
 					log.Printf("  %s", rr.String())
 				}
 
@@ -214,29 +216,30 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	}
 }
 
-func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[tdns.MsignerMechanism]map[string]*Sidecar, syncitem tdns.MultiSignerSyncRequest, zones map[string][]*Sidecar, zonename string) error {
+func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[tdns.MsignerMethod]map[string]*Sidecar,
+	syncitem tdns.MusicSyncRequest, zones map[string][]*Sidecar, zonename string) error {
 
-	for _, remoteSidecarRR := range syncitem.MsignerSyncStatus.MsignerAdds {
+	for _, remoteSidecarRR := range syncitem.MusicSyncStatus.MsignerAdds {
 		if prr, ok := remoteSidecarRR.(*dns.PrivateRR); ok {
 			if msrr, ok := prr.Data.(*tdns.MSIGNER); ok {
-				remoteMechanism := msrr.Mechanism
+				remoteMethod := msrr.Method
 				remoteSidecar := msrr.Target
-				// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMechanismToString[remoteMechanism], sidecarId)
+				// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMethodToString[remoteMethod], sidecarId)
 				if remoteSidecar == sidecarId {
 					// we don't need to send a hello to ourselves
 					log.Printf("MaybeSendHello: remoteSidecar [%s][%s] is ourselves (%s), no need to talk to ourselves",
-						tdns.MsignerMechanismToString[remoteMechanism], remoteSidecar, sidecarId)
+						tdns.MsignerMethodToString[remoteMethod], remoteSidecar, sidecarId)
 					continue
 				}
-				if _, exists := sidecars[remoteMechanism][remoteSidecar]; !exists {
-					sidecars[remoteMechanism][remoteSidecar] = &Sidecar{
-						Identity:  remoteSidecar,
-						Mechanism: remoteMechanism, // Here we should also look up the SVCB to get the port and addresses
+				if _, exists := sidecars[remoteMethod][remoteSidecar]; !exists {
+					sidecars[remoteMethod][remoteSidecar] = &Sidecar{
+						Identity: remoteSidecar,
+						Method:   remoteMethod, // Here we should also look up the SVCB to get the port and addresses
 					}
 				}
 				// Schedule sending an HELLO message to the new sidecar
 				log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
-					tdns.MsignerMechanismToString[remoteMechanism], remoteSidecar)
+					tdns.MsignerMethodToString[remoteMethod], remoteSidecar)
 				// Add code to send HELLO message here
 				continue
 			}
@@ -247,7 +250,7 @@ func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[tdns.Msigne
 	return nil
 }
 
-func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMechanism]map[string]*Sidecar, zones map[string][]*Sidecar) error {
+func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMethod]map[string]*Sidecar, zones map[string][]*Sidecar) error {
 
 	// for each sidecar in wannabe_sidecars, check if it is already in sidecars
 	// if it is, add it to sidecars and remove it from wannabe_sidecars
@@ -255,13 +258,13 @@ func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMechanism]m
 
 	for _, ws := range wannabe_sidecars {
 		for _, s := range ws {
-			if _, ok := sidecars[s.Mechanism][s.Identity]; ok {
+			if _, ok := sidecars[s.Method][s.Identity]; ok {
 				// already in sidecars
-				delete(wannabe_sidecars[s.Mechanism], s.Identity)
+				delete(wannabe_sidecars[s.Method], s.Identity)
 			} else {
 				// check if it should be in the set of known sidecars
 				log.Printf("EvaluateSidecarHello: Sidecar %s (%s) is not in sidecars, but claims to share zones with us.",
-					s.Identity, tdns.MsignerMechanismToString[s.Mechanism])
+					s.Identity, tdns.MsignerMethodToString[s.Method])
 			}
 		}
 	}
@@ -271,8 +274,8 @@ func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMechanism]m
 
 func (s *Sidecar) SendHello() error {
 
-	switch s.Mechanism {
-	case tdns.MSignMechanismAPI:
+	switch s.Method {
+	case tdns.MsignerMethodAPI:
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
 			SidecarId: s.Identity,
@@ -336,7 +339,7 @@ func (s *Sidecar) SendHello() error {
 		}
 		fmt.Printf("Received response: %s\n", string(body))
 
-	case tdns.MSignMechanismDNS:
+	case tdns.MsignerMethodDNS:
 		// TODO: implement DNS-based hello
 		return fmt.Errorf("DNS-based hello not implemented")
 	}

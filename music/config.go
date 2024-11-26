@@ -124,20 +124,20 @@ type CommonConf struct {
 // Internal stuff that we want to be able to reach via the Config struct, but are not
 // represented in the yaml config file.
 type InternalConf struct {
-	APIStopCh        chan struct{}
-	EngineCheck      chan EngineCheck
-	MusicDB          *MusicDB
-	TokViper         *viper.Viper
-	DesecFetch       chan SignerOp
-	DesecUpdate      chan SignerOp
-	DdnsFetch        chan SignerOp
-	DdnsUpdate       chan SignerOp
-	Processes        map[string]FSM
-	MultiSignerSyncQ chan tdns.MultiSignerSyncRequest
-	HeartbeatQ       chan Heartbeat
-	SidecarId        string
-	UpdateQ          chan tdns.UpdateRequest
-	KeyDB            *tdns.KeyDB
+	APIStopCh   chan struct{}
+	EngineCheck chan EngineCheck
+	MusicDB     *MusicDB
+	TokViper    *viper.Viper
+	DesecFetch  chan SignerOp
+	DesecUpdate chan SignerOp
+	DdnsFetch   chan SignerOp
+	DdnsUpdate  chan SignerOp
+	Processes   map[string]FSM
+	MusicSyncQ  chan tdns.MusicSyncRequest
+	HeartbeatQ  chan Heartbeat
+	SidecarId   string
+	UpdateQ     chan tdns.UpdateRequest
+	KeyDB       *tdns.KeyDB
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) error {
@@ -597,7 +597,7 @@ func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (
 		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to create minimal auto zone for sidecar DNS identity '%s': %v", zonename, err)
 	}
 	zd.Options[tdns.OptAllowUpdates] = true
-	zd.MultiSignerSyncQ = mconf.Internal.MultiSignerSyncQ
+	zd.MusicSyncQ = mconf.Internal.MusicSyncQ
 
 	// A sidecar auto zone needs to be signed by the sidecar.
 	zd.Options[tdns.OptOnlineSigning] = true

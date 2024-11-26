@@ -347,7 +347,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	// 2. Check for exact match qname+qtype
 	log.Printf("---> Checking for exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
 	switch qtype {
-	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, TypeNOTIFY, TypeDSYNC,
+	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, TypeNOTIFY, TypeDSYNC, dns.TypeKEY,
 		TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG, dns.TypeSVCB, dns.TypeHTTPS, dns.TypeTLSA, dns.TypeCAA,
 		dns.TypeCDS, dns.TypeCSYNC, dns.TypeCDNSKEY:
 		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(owner.RRtypes.GetOnlyRRSet(qtype).RRs) > 0 {
