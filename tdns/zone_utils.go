@@ -820,6 +820,14 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
 		} else {
 			zd.Logger.Printf("SetupZoneSync: Zone %s: No DSYNC RRset in zone. Will add.", zd.ZoneName)
+			//			ur := UpdateRequest{
+			//				Cmd:          "DEFERRED-UPDATE",
+			//				ZoneName:     zd.ZoneName,
+			//				Description:  fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
+			//				PreCondition: ZoneIsReady(zd.ZoneName),
+			//				Action:       zd.PublishDsyncRRs,
+			//			}
+			//			zd.KeyDB.UpdateQ <- ur
 			err := zd.PublishDsyncRRs()
 			if err != nil {
 				zd.Logger.Printf("Error from PublishDsyncRRs(%s): %v", zd.ZoneName, err)

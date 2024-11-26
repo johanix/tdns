@@ -468,7 +468,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	}
 	defer rows.Close()
 
-	var algorithm, privatekey, keyrrstr string
+	var algorithm, privatekey, keyrrstr, logmsg string
 	var flags, keyid int
 
 	var keysfound bool
@@ -501,9 +501,11 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		if (flags & 0x0001) != 0 {
 			dk.KSKs = append(dk.KSKs, pkc)
 			//log.Printf("Adding KSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
+			logmsg += fmt.Sprintf("%d (KSK) ", keyid)
 		} else {
 			dk.ZSKs = append(dk.ZSKs, pkc)
 			// log.Printf("Adding ZSK to DAK: flags: %d key: %s", flags, pkc.DnskeyRR.String())
+			logmsg += fmt.Sprintf("%d (ZSK) ", keyid)
 		}
 	}
 
@@ -526,7 +528,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	}
 
 	if Globals.Debug {
-		log.Printf("GetDnssecKey(%s) returned key %v", zonename, dk)
+		log.Printf("GetDnssecKey(%s, %s) returned keys: %s", zonename, state, logmsg)
 	}
 
 	kdb.KeystoreDnskeyCache[zonename+"+"+state] = &dk

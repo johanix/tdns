@@ -56,7 +56,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		// }
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
-			zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
+			// zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
 			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", zd.ZoneName, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("Zone %s: Invalid DSYNC notify target: %s", zd.ZoneName, target)
@@ -149,6 +149,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	ur := UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
+		Description:    fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
 		Actions:        rrset.RRs, // Add all the DSYNC RRs first.
 		InternalUpdate: true,
 	}
@@ -190,6 +191,15 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	zd.KeyDB.UpdateQ <- ur
 
 	return nil
+}
+
+// ZoneIsReady returns a function that can be used as a PreCondition for a DeferredUpdate.
+// The returned function will return true if the zone exists and is ready, otherwise false.
+func ZoneIsReady(zonename string) func() bool {
+	return func() bool {
+		_, ok := Zones.Get(zonename)
+		return ok
+	}
 }
 
 func (zd *ZoneData) UnpublishDsyncRRs() error {

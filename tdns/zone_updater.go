@@ -72,25 +72,34 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 		for {
 			select {
 			case ur = <-updateq:
+				log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
 				if ur.Cmd == "PING" {
 					log.Printf("ZoneUpdater: PING received. PONG!")
 					continue
 				}
 				zd, ok := Zones.Get(ur.ZoneName)
 				if !ok && ur.Cmd != "DEFERRED-UPDATE" {
-					log.Printf("ZoneUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored.", ur.Cmd, ur.ZoneName)
+					log.Printf("ZoneUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", ur.Cmd, ur.ZoneName, ur)
+					log.Printf("ZoneUpdater: Current list of known zones: %v", Zones.Keys())
 					continue
 				}
 
 				switch ur.Cmd {
 				case "DEFERRED-UPDATE":
-					du := DeferredUpdate{
-						Description:  ur.Description,
-						PreCondition: ur.PreCondition,
-						Action:       ur.Action,
-						AddTime:      time.Now(),
+					// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
+					if ur.PreCondition() {
+						log.Printf("ZoneUpdater: PreCondition is true for deferred update \"%s\". Executing immediately.", ur.Description)
+						ur.Action()
+					} else {
+						log.Printf("ZoneUpdater: PreCondition is false for deferred update \"%s\". Deferring execution.", ur.Description)
+						du := DeferredUpdate{
+							Description:  ur.Description,
+							PreCondition: ur.PreCondition,
+							Action:       ur.Action,
+							AddTime:      time.Now(),
+						}
+						deferredUpdates = append(deferredUpdates, du)
 					}
-					deferredUpdates = append(deferredUpdates, du)
 					continue
 
 				case "CHILD-UPDATE":
@@ -228,11 +237,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 					log.Printf("ZoneUpdater: running deferred update \"%s\"", du.Description)
 					ok := du.PreCondition()
 					if ok {
+						log.Printf("ZoneUpdater: PreCondition is true. Executing deferred update \"%s\"", du.Description)
 						err := du.Action()
 						if err != nil {
 							log.Printf("ZoneUpdater: Error from deferred update action: %v", err)
 							i++
 						} else {
+							log.Printf("ZoneUpdater: Deferred update \"%s\" executed successfully.", du.Description)
 							// Remove the item from deferredUpdates queue
 							deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
 						}

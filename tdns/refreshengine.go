@@ -155,6 +155,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 						Downstreams: downstreams,
 					})
 
+					Zones.Set(zone, zd)
+
 					if appMode != "agent" {
 						err = zd.SetupZoneSigning(conf.Internal.ResignQ)
 						if err != nil {
@@ -168,8 +170,6 @@ func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
 					if err != nil {
 						log.Printf("Error from SetupZoneSync(%s): %v", zone, err)
 					}
-
-					Zones.Set(zone, zd)
 
 					if updated {
 						if resetSoaSerial {
