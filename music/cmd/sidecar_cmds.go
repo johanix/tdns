@@ -51,17 +51,23 @@ var sidecarIdentifyCmd = &cobra.Command{
 		fmt.Printf("Sidecars:\n")
 		out := []string{}
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "IDENTITY|METHOD|ADDRESSES|TLSA or KEY")
+			out = append(out, "IDENTITY|METHOD|ADDRESSES|PORT|TLSA or KEY")
 		}
 		for _, sidecar := range sidecars {
 			extra := ""
+			addrs := ""
+			var port uint16 = 0
 			if sidecar.Method == tdns.MsignerMethodAPI {
 				extra = sidecar.TlsaRR.String()
+				addrs = strings.Join(sidecar.ApiAddrs, ",")
+				port = sidecar.ApiPort
 			} else if sidecar.Method == tdns.MsignerMethodDNS {
 				extra = sidecar.KeyRR.String()
+				addrs = strings.Join(sidecar.DnsAddrs, ",")
+				port = sidecar.DnsPort
 			}
-			out = append(out, fmt.Sprintf("%s|%s|%s|%s", sidecar.Identity, tdns.MsignerMethodToString[sidecar.Method],
-				strings.Join(sidecar.Addresses, ","), extra))
+			out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s", sidecar.Identity, tdns.MsignerMethodToString[sidecar.Method],
+				addrs, port, extra))
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 	},

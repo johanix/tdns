@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"time"
 
+	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -131,4 +132,40 @@ type Heartbeat struct {
 	Type  string
 	Time  time.Time
 	Zones []string
+}
+
+type Sidecar struct {
+	Identity   string
+	Method     tdns.MsignerMethod // either API or DNS
+	DnsAddrs   []string
+	ApiAddrs   []string
+	ApiPort    uint16
+	DnsPort    uint16
+	TlsaRR     *dns.TLSA
+	KeyRR      *dns.KEY
+	LastHB     time.Time
+	LastFullHB time.Time
+	HBCount    int
+	Zones      []string
+}
+
+type SidecarHelloPost struct {
+	SidecarId string
+	Addresses []string
+	Port      uint16
+	TLSA      dns.TLSA
+}
+
+type SidecarHelloResponse struct {
+	Status string
+}
+
+type SidecarBeatPost struct {
+	Name        string
+	Type        string
+	SharedZones []string
+}
+
+type SidecarBeatResponse struct {
+	Status string
 }

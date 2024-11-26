@@ -44,18 +44,17 @@ func LocateSidecar(identity string, method tdns.MsignerMethod) (*Sidecar, error)
 			switch kv.Key() {
 			case dns.SVCB_IPV4HINT:
 				ipv4Hints := kv.(*dns.SVCBIPv4Hint)
-				//				for _, ip := range ipv4Hints.Hint {
-				//					sidecar.Addresses = append(sidecar.Addresses, ip.String())
-				//				}
-				log.Printf("SVCB_IPV4HINT: %v", ipv4Hints)
+				for _, ip := range ipv4Hints.Hint {
+					sidecar.DnsAddrs = append(sidecar.DnsAddrs, ip.String())
+				}
 			case dns.SVCB_IPV6HINT:
 				ipv6Hints := kv.(*dns.SVCBIPv6Hint)
 				for _, ip := range ipv6Hints.Hint {
-					sidecar.Addresses = append(sidecar.Addresses, ip.String())
+					sidecar.DnsAddrs = append(sidecar.DnsAddrs, ip.String())
 				}
 			case dns.SVCB_PORT:
 				port := kv.(*dns.SVCBPort)
-				sidecar.Port = uint16(port.Port)
+				sidecar.DnsPort = uint16(port.Port)
 			}
 		}
 
@@ -87,21 +86,21 @@ func LocateSidecar(identity string, method tdns.MsignerMethod) (*Sidecar, error)
 			case dns.SVCB_IPV4HINT:
 				ipv4Hints := kv.(*dns.SVCBIPv4Hint)
 				for _, ip := range ipv4Hints.Hint {
-					sidecar.Addresses = append(sidecar.Addresses, ip.String())
+					sidecar.ApiAddrs = append(sidecar.ApiAddrs, ip.String())
 				}
 			case dns.SVCB_IPV6HINT:
 				ipv6Hints := kv.(*dns.SVCBIPv6Hint)
 				for _, ip := range ipv6Hints.Hint {
-					sidecar.Addresses = append(sidecar.Addresses, ip.String())
+					sidecar.ApiAddrs = append(sidecar.ApiAddrs, ip.String())
 				}
 			case dns.SVCB_PORT:
 				port := kv.(*dns.SVCBPort)
-				sidecar.Port = uint16(port.Port)
+				sidecar.ApiPort = uint16(port.Port)
 			}
 		}
 
-		tlsaQname := fmt.Sprintf("_%d._tcp.api.%s", sidecar.Port, identity)
-		log.Printf("SVCB indicates port=%d, TLSA should be located at %s", sidecar.Port, tlsaQname)
+		tlsaQname := fmt.Sprintf("_%d._tcp.api.%s", sidecar.ApiPort, identity)
+		log.Printf("SVCB indicates port=%d, TLSA should be located at %s", sidecar.ApiPort, tlsaQname)
 
 		// Look up "api.{identity}" TLSA to verify the cert
 		m := new(dns.Msg)
