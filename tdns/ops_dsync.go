@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -203,18 +202,19 @@ func ZoneIsReady(zonename string) func() bool {
 }
 
 func (zd *ZoneData) UnpublishDsyncRRs() error {
-	anti_dsync_rr, err := dns.NewRR("_dsync." + zd.ZoneName + " 7200 IN DSYNC ANY NOTIFY 53 1.2.3.4")
+	// Create a string representation of an empty DSYNC record for deletion
+	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC \"NOTIFY\" 53 1.2.3.4", zd.ZoneName)
+
+	anti_dsync, err := dns.NewRR(dsync_str)
 	if err != nil {
-		return fmt.Errorf("Error from NewRR(%s): %v", "_dsync."+zd.ZoneName+" 7200 ANY DSYNC ANY NOTIFY 53 1.2.3.4", err)
+		return fmt.Errorf("failed to create DSYNC RR: %v", err)
 	}
-	// ClassANY == remove RRset
-	anti_dsync_rr.Header().Class = dns.ClassANY // XXX: dns.NewRR fails to parse a CLASS ANY DSYNC RRset, so we set the class manually.
-	log.Printf("Unpublishing DSYNC RRset: %s", anti_dsync_rr.String())
+	anti_dsync.Header().Class = dns.ClassANY // Delete DSYNC RRset
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{anti_dsync_rr},
+		Actions:        []dns.RR{anti_dsync},
 		InternalUpdate: true,
 	}
 

@@ -49,6 +49,7 @@ type SidecarApiConf struct {
 		Publish []string
 		Listen  []string
 	}
+	BaseUrl  string
 	Port     uint16
 	Cert     string
 	Key      string
@@ -328,7 +329,7 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 		if !slices.Contains(all_zones, mconf.Sidecar.Identity) {
 			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
 			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar API identity '%s': %v", mconf.Sidecar.Identity, err)
+				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar identity '%s': %v", mconf.Sidecar.Identity, err)
 			}
 		}
 
@@ -396,6 +397,36 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 				err = zd.PublishTlsaRR(apiname, mconf.Sidecar.Api.Port, string(certPEM))
 				if err != nil {
 					return fmt.Errorf("LoadSidecarConfig: failed to publish TLSA RR: %v", err)
+				}
+
+				log.Printf("LoadSidecarConfig: Successfully published TLSA RR for sidecar API identity '%s'\n", apiname)
+				return nil
+			},
+		}
+		mconf.Internal.UpdateQ <- ur
+
+		ur = tdns.UpdateRequest{
+			Cmd:          "DEFERRED-UPDATE",
+			ZoneName:     mconf.Sidecar.Identity,
+			Description:  fmt.Sprintf("Publish URI RR for sidecar API identity '%s'", apiname),
+			PreCondition: tdns.ZoneIsReady(mconf.Sidecar.Identity),
+			Action: func() error {
+				zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+				if !ok {
+					return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity '%s' still not found", mconf.Sidecar.Identity)
+				}
+
+				log.Printf("LoadSidecarConfig: sending PING command to sidecar '%s'", mconf.Sidecar.Identity)
+				zd.KeyDB.UpdateQ <- tdns.UpdateRequest{
+					Cmd: "PING",
+				}
+
+				// sidecar API identity
+				log.Printf("LoadSidecarConfig: publishing URI RR for sidecar API identity '%s'", apiname)
+
+				err = zd.PublishUriRR(apiname, mconf.Sidecar.Api.BaseUrl, mconf.Sidecar.Api.Port)
+				if err != nil {
+					return fmt.Errorf("LoadSidecarConfig: failed to publish URI RR: %v", err)
 				}
 
 				log.Printf("LoadSidecarConfig: Successfully published TLSA RR for sidecar API identity '%s'\n", apiname)

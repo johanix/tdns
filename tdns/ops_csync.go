@@ -4,8 +4,6 @@
 package tdns
 
 import (
-	"fmt"
-
 	"github.com/miekg/dns"
 )
 
@@ -35,16 +33,23 @@ func (zd *ZoneData) PublishCsyncRR() error {
 }
 
 func (zd *ZoneData) UnpublishCsyncRR() error {
-	anti_csync_rr, err := dns.NewRR(fmt.Sprintf("%s 0 IN CSYNC 0 0 A NS AAAA", zd.ZoneName))
-	if err != nil {
-		return err
+	var typebitmap = []uint16{dns.StringToType["A"], dns.StringToType["NS"], dns.StringToType["AAAA"]}
+	var anti_csync = dns.CSYNC{
+		Serial:     0,
+		Flags:      0,
+		TypeBitMap: typebitmap,
 	}
-	anti_csync_rr.Header().Class = dns.ClassANY // XXX: dns.NewRR fails to parse a CLASS ANY CSYNC RRset, so we set the class manually.
+	anti_csync.Hdr = dns.RR_Header{
+		Name:   zd.ZoneName,
+		Rrtype: dns.TypeCSYNC,
+		Class:  dns.ClassANY, // Delete CSYNC RRset
+		Ttl:    0,
+	}
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{anti_csync_rr},
+		Actions:        []dns.RR{&anti_csync},
 		InternalUpdate: true,
 	}
 
