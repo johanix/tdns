@@ -136,17 +136,23 @@ type Heartbeat struct {
 
 type Sidecar struct {
 	Identity   string
-	Method     tdns.MsignerMethod // either API or DNS
-	DnsAddrs   []string
-	ApiAddrs   []string
-	ApiPort    uint16
-	DnsPort    uint16
-	TlsaRR     *dns.TLSA
-	KeyRR      *dns.KEY
+	ApiMethod  bool // API supported
+	DnsMethod  bool // DNS supported
+	Details    map[tdns.MsignerMethod]SidecarDetails
 	LastHB     time.Time
 	LastFullHB time.Time
 	HBCount    int
 	Zones      []string
+}
+
+type SidecarDetails struct {
+	Addrs      []string
+	Port       uint16
+	TlsaRR     *dns.TLSA
+	UriRR      *dns.URI
+	KeyRR      *dns.KEY
+	BaseUri    string
+	LastUpdate time.Time
 }
 
 type SidecarHelloPost struct {

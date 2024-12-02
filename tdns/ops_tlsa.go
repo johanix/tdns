@@ -122,26 +122,20 @@ func LookupTlsaRR(name string) (*RRset, error) {
 	return &rrset, nil
 }
 
-func VerifyCertAgainstTlsaRR(tlsarrset *RRset, rawcert []byte) error {
-	for _, rr := range tlsarrset.RRs {
-		tlsarr, ok := rr.(*dns.TLSA)
-		if !ok {
-			continue
-		}
-		if tlsarr.Usage == 3 {
-			switch tlsarr.MatchingType {
-			case 1: // SHA-256
-				hash := sha256.Sum256(rawcert)
-				if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
-					return nil
-				}
-			case 2: // SHA-512
-				hash := sha512.Sum512(rawcert)
-				if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
-					return nil
-				}
+func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
+	if tlsarr.Usage == 3 {
+		switch tlsarr.MatchingType {
+		case 1: // SHA-256
+			hash := sha256.Sum256(rawcert)
+			if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
+				return nil
+			}
+		case 2: // SHA-512
+			hash := sha512.Sum512(rawcert)
+			if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
+				return nil
 			}
 		}
 	}
-	return nil
+	return fmt.Errorf("no matching TLSA record found")
 }

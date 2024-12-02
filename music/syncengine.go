@@ -13,35 +13,38 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	//	"github.com/DNSSEC-Provisioning/music/music"
 	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 )
 
+type Sidecars struct {
+	S cmap.ConcurrentMap[string, *Sidecar]
+}
+
 func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
-	//	sidecarId := map[tdns.MsignerMechanism]string{
-	//		tdns.MSignMechanismAPI: mconf.Sidecar.Api.Identity,
-	//		tdns.MSignMechanismDNS: mconf.Sidecar.Dns.Identity,
-	//	}
-	sidecarId := mconf.Sidecar.Identity
+	ourSidecarId := mconf.Sidecar.Identity
 
 	// sidecars is a map of known "remote" sidecars that we
 	// have received HELLO messages from.
-	sidecars := map[tdns.MsignerMethod]map[string]*Sidecar{
-		tdns.MsignerMethodAPI: map[string]*Sidecar{},
-		tdns.MsignerMethodDNS: map[string]*Sidecar{},
+	//	sidecars := map[tdns.MsignerMethod]map[string]*Sidecar{
+	//		tdns.MsignerMethodAPI: map[string]*Sidecar{},
+	//		tdns.MsignerMethodDNS: map[string]*Sidecar{},
+	//	}
+
+	sidecars := &Sidecars{
+		S: cmap.New[*Sidecar](),
 	}
 
 	// wannabe_sidecars is a map of sidecars that we have received
 	// a HELLO message from, but have not yet verified that they are
 	// correct
-	wannabe_sidecars := map[tdns.MsignerMethod]map[string]*Sidecar{
-		tdns.MsignerMethodAPI: map[string]*Sidecar{},
-		tdns.MsignerMethodDNS: map[string]*Sidecar{},
-	}
+	wannabe_sidecars := map[string]*Sidecar{}
 
 	// zones is a map of zones and the remote sidecars that share them with us
 	zones := map[string][]*Sidecar{}
@@ -105,8 +108,12 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 	ReportProgress := func() {
 		allok := true
+		sidecarids := []string{}
+		for _, s := range sidecars.S.Items() {
+			sidecarids = append(sidecarids, s.Identity)
+		}
 		if allok {
-			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %+v (the expected result)", sidecars)
+			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %s (the expected result)", strings.Join(sidecarids, ", "))
 		} else {
 			log.Printf("MusicSyncEngine: received heartbeats from these sidecars: %+v (missing some sidecars: %+v)",
 				sidecars, missing)
@@ -126,7 +133,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 					log.Printf("  %s", rr.String())
 				}
 
-				err := MaybeSendHello(sidecarId, sidecars, wannabe_sidecars, syncitem, zones, zonename)
+				err := sidecars.UpdateSidecars(ourSidecarId, wannabe_sidecars, syncitem, zones, zonename)
 				if err != nil {
 					log.Printf("MusicSyncEngine: Error sending HELLO message: %v", err)
 				}
@@ -182,56 +189,64 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	}
 }
 
-func MaybeSendHello(sidecarId string, sidecars, wannabe_sidecars map[tdns.MsignerMethod]map[string]*Sidecar,
+func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[string]*Sidecar,
 	syncitem tdns.MusicSyncRequest, zones map[string][]*Sidecar, zonename string) error {
 
 	for _, remoteSidecarRR := range syncitem.MusicSyncStatus.MsignerAdds {
 		if prr, ok := remoteSidecarRR.(*dns.PrivateRR); ok {
-			if msrr, ok := prr.Data.(*tdns.MSIGNER); ok {
-				remoteMethod := msrr.Method
-				remoteSidecar := msrr.Target
-				// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMethodToString[remoteMethod], sidecarId)
-				if remoteSidecar == sidecarId {
-					// we don't need to send a hello to ourselves
-					log.Printf("MaybeSendHello: remoteSidecar [%s][%s] is ourselves (%s), no need to talk to ourselves",
-						tdns.MsignerMethodToString[remoteMethod], remoteSidecar, sidecarId)
-					continue
-				}
-				if _, exists := sidecars[remoteMethod][remoteSidecar]; !exists {
-					sidecars[remoteMethod][remoteSidecar] = &Sidecar{
-						Identity: remoteSidecar,
-						Method:   remoteMethod, // Here we should also look up the SVCB to get the port and addresses
-					}
-				}
+			if prr.Header().Rrtype != tdns.TypeMSIGNER {
+				log.Printf("UpdateSidecars: Unknown RR type in MSIGNER RRset: %s", remoteSidecarRR.String())
+				continue
+			}
+			msrr := prr.Data.(*tdns.MSIGNER)
+			remoteMethod := msrr.Method
+			remoteSidecar := msrr.Target
+			// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMethodToString[remoteMethod], sidecarId)
+			if remoteSidecar == ourSidecarId {
+				// we don't need to send a hello to ourselves
+				log.Printf("UpdateSidecars: remoteSidecar [%s][%s] is ourselves (%s), no need to talk to ourselves",
+					tdns.MsignerMethodToString[remoteMethod], remoteSidecar, ourSidecarId)
+				continue
+			}
+
+			// is this a new sidecar
+			new, s, err := ss.LocateSidecar(remoteSidecar, remoteMethod)
+			if err != nil {
+				log.Printf("UpdateSidecars: Error locating sidecar %s: %v", remoteSidecar, err)
+				continue
+			}
+
+			if new {
 				// Schedule sending an HELLO message to the new sidecar
 				log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
 					tdns.MsignerMethodToString[remoteMethod], remoteSidecar)
 				// Add code to send HELLO message here
-				continue
+				err = s.SendHello()
+				if err != nil {
+					log.Printf("UpdateSidecars: Error sending HELLO message to %s: %v", remoteSidecar, err)
+				}
 			}
-			log.Printf("MaybeSendHello: Unknown RR type in MSIGNER RRset: %s", remoteSidecarRR.String())
+
 		}
 	}
 
 	return nil
 }
 
-func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMethod]map[string]*Sidecar, zones map[string][]*Sidecar) error {
+func EvaluateSidecarHello(sidecars *Sidecars, wannabe_sidecars map[string]*Sidecar, zones map[string][]*Sidecar) error {
 
 	// for each sidecar in wannabe_sidecars, check if it is already in sidecars
 	// if it is, add it to sidecars and remove it from wannabe_sidecars
 	// if it is not, check whether it should be
 
 	for _, ws := range wannabe_sidecars {
-		for _, s := range ws {
-			if _, ok := sidecars[s.Method][s.Identity]; ok {
-				// already in sidecars
-				delete(wannabe_sidecars[s.Method], s.Identity)
-			} else {
-				// check if it should be in the set of known sidecars
-				log.Printf("EvaluateSidecarHello: Sidecar %s (%s) is not in sidecars, but claims to share zones with us.",
-					s.Identity, tdns.MsignerMethodToString[s.Method])
-			}
+		if _, ok := sidecars.S.Get(ws.Identity); ok {
+			// already in sidecars
+			delete(wannabe_sidecars, ws.Identity)
+		} else {
+			// check if it should be in the set of known sidecars
+			log.Printf("EvaluateSidecarHello: Sidecar %s is not in sidecars, but claims to share zones with us.",
+				ws.Identity)
 		}
 	}
 
@@ -240,13 +255,12 @@ func EvaluateSidecarHello(sidecars, wannabe_sidecars map[tdns.MsignerMethod]map[
 
 func (s *Sidecar) SendHello() error {
 
-	switch s.Method {
-	case tdns.MsignerMethodAPI:
+	if s.ApiMethod {
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
 			SidecarId: s.Identity,
-			Addresses: s.ApiAddrs,
-			Port:      s.ApiPort,
+			Addresses: s.Details[tdns.MsignerMethodAPI].Addrs,
+			Port:      s.Details[tdns.MsignerMethodAPI].Port,
 		}
 
 		// Encode the struct as JSON
@@ -256,10 +270,7 @@ func (s *Sidecar) SendHello() error {
 		}
 
 		// Lookup the TLSA record for the target sidecar
-		tlsarrset, err := tdns.LookupTlsaRR(s.Identity)
-		if err != nil {
-			return fmt.Errorf("failed to lookup TLSA record: %v", err)
-		}
+		tlsarrset := s.Details[tdns.MsignerMethodAPI].TlsaRR
 
 		// Use the TLSA record to authenticate the remote end securely
 		// (This is a simplified example, in a real implementation you would need to configure the TLS client with the TLSA record)
@@ -291,7 +302,7 @@ func (s *Sidecar) SendHello() error {
 		}
 
 		// Send the HTTPS POST request
-		url := fmt.Sprintf("https://%s:%d/hello", s.Identity, s.ApiPort)
+		url := s.Details[tdns.MsignerMethodAPI].BaseUri + "/hello"
 		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 		if err != nil {
 			return fmt.Errorf("failed to send HTTPS POST request: %v", err)
@@ -304,8 +315,9 @@ func (s *Sidecar) SendHello() error {
 			return fmt.Errorf("failed to read response body: %v", err)
 		}
 		fmt.Printf("Received response: %s\n", string(body))
+	}
 
-	case tdns.MsignerMethodDNS:
+	if s.DnsMethod {
 		// TODO: implement DNS-based hello
 		return fmt.Errorf("DNS-based hello not implemented")
 	}

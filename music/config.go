@@ -311,6 +311,7 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 }
 
 func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) error {
+	var err error
 	if tdns.Globals.Debug {
 		log.Printf("loadSidecarConfig: enter")
 	}
@@ -323,11 +324,22 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 	certFile := viper.GetString("sidecar.api.cert")
 	keyFile := viper.GetString("sidecar.api.key")
 
-	if mconf.Sidecar.Identity != "" {
-		mconf.Sidecar.Identity = dns.Fqdn(mconf.Sidecar.Identity)
+	var apiMethod, dnsMethod bool
 
+	if len(mconf.Sidecar.Api.Addresses.Publish) > 0 {
+		apiMethod = true
+	}
+	if len(mconf.Sidecar.Dns.Addresses.Publish) > 0 {
+		dnsMethod = true
+	}
+
+	mconf.Sidecar.Identity = dns.Fqdn(mconf.Sidecar.Identity)
+	apiname := "api." + mconf.Sidecar.Identity
+	dnsname := "dns." + mconf.Sidecar.Identity
+
+	if apiMethod {
 		if !slices.Contains(all_zones, mconf.Sidecar.Identity) {
-			_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
+			_, err = mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
 			if err != nil {
 				return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar identity '%s': %v", mconf.Sidecar.Identity, err)
 			}
@@ -372,8 +384,6 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 		}
 
 		log.Printf("LoadSidecarConfig: cert CN '%s' matches sidecar API identity 'api.%s'", certCN, mconf.Sidecar.Identity)
-		apiname := "api." + mconf.Sidecar.Identity
-		dnsname := "dns." + mconf.Sidecar.Identity
 
 		ur := tdns.UpdateRequest{
 			Cmd:          "DEFERRED-UPDATE",
@@ -508,8 +518,10 @@ func LoadSidecarConfig(mconf *Config, tconf *tdns.Config, all_zones []string) er
 			},
 		}
 		mconf.Internal.UpdateQ <- ur
+	}
 
-		ur = tdns.UpdateRequest{
+	if dnsMethod {
+		ur := tdns.UpdateRequest{
 			Cmd:          "DEFERRED-UPDATE",
 			ZoneName:     mconf.Sidecar.Identity,
 			Description:  fmt.Sprintf("Publish KEY RR for sidecar DNS identity '%s' SIG(0) public key", dnsname),
