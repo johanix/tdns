@@ -9,13 +9,19 @@ import (
 	"log"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/music"
 	tdns "github.com/johanix/tdns/tdns"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
 var sidecarId, sidecarMethod string
+
+var ss = &music.Sidecars{
+	S: cmap.New[*music.Sidecar](),
+}
 
 var SidecarCmd = &cobra.Command{
 	Use:   "sidecar",
@@ -27,11 +33,15 @@ var sidecarLocateCmd = &cobra.Command{
 	Short: "Locate a sidecar, given its identity and method",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("identity", "method")
-		sidecar, err := music.LocateSidecar(sidecarId, tdns.StringToMsignerMethod[sidecarMethod])
+		new, sidecar, err := ss.LocateSidecar(sidecarId, tdns.StringToMsignerMethod[sidecarMethod])
 		if err != nil {
 			log.Fatalf("Error locating sidecar: %v", err)
 		}
-		fmt.Printf("Sidecar: %+v\n", sidecar)
+		if new {
+			fmt.Printf("New sidecar: %+v\n", sidecar)
+		} else {
+			fmt.Printf("Sidecar already known: %+v\n", sidecar)
+		}
 	},
 }
 
@@ -40,7 +50,7 @@ var sidecarIdentifyCmd = &cobra.Command{
 	Short: "Identify multi-signer sidecars for a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		msigners, sidecars, err := music.IdentifySidecars(tdns.Globals.Zonename)
+		msigners, sidecars, err := ss.IdentifySidecars(tdns.Globals.Zonename)
 		if err != nil {
 			log.Fatalf("Error identifying sidecars: %v", err)
 		}
@@ -48,26 +58,78 @@ var sidecarIdentifyCmd = &cobra.Command{
 		for _, msigner := range msigners {
 			fmt.Printf("%s\n", msigner.String())
 		}
-		fmt.Printf("Sidecars:\n")
+		var ids []string
+		for _, s := range sidecars {
+			ids = append(ids, s.Identity)
+		}
+		fmt.Printf("Sidecars: There are %d sidecars, with identities: %s\n", len(sidecars), strings.Join(ids, ", "))
+		dump.P(sidecars)
+
 		out := []string{}
 		if tdns.Globals.ShowHeaders {
 			out = append(out, "IDENTITY|METHOD|ADDRESSES|PORT|TLSA or KEY")
 		}
-		for _, sidecar := range sidecars {
+		for _, sidecar := range ss.S.Items() {
+			// fmt.Printf("Sidecar: %v\n", sidecar)
 			extra := ""
 			addrs := ""
 			var port uint16 = 0
-			if sidecar.Method == tdns.MsignerMethodAPI {
-				extra = sidecar.TlsaRR.String()
-				addrs = strings.Join(sidecar.ApiAddrs, ",")
-				port = sidecar.ApiPort
-			} else if sidecar.Method == tdns.MsignerMethodDNS {
-				extra = sidecar.KeyRR.String()
-				addrs = strings.Join(sidecar.DnsAddrs, ",")
-				port = sidecar.DnsPort
+			if sidecar.ApiMethod {
+				extra = sidecar.Details[tdns.MsignerMethodAPI].TlsaRR.String()
+				addrs = strings.Join(sidecar.Details[tdns.MsignerMethodAPI].Addrs, ",")
+				port = sidecar.Details[tdns.MsignerMethodAPI].Port
+				out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s", sidecar.Identity, "API",
+					addrs, port, extra))
 			}
-			out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s", sidecar.Identity, tdns.MsignerMethodToString[sidecar.Method],
-				addrs, port, extra))
+
+			if sidecar.DnsMethod {
+				extra = sidecar.Details[tdns.MsignerMethodDNS].KeyRR.String()
+				addrs = strings.Join(sidecar.Details[tdns.MsignerMethodDNS].Addrs, ",")
+				port = sidecar.Details[tdns.MsignerMethodDNS].Port
+				out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s", sidecar.Identity, "DNS",
+					addrs, port, extra))
+			}
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	},
+}
+
+var sidecarHelloCmd = &cobra.Command{
+	Use:   "hello",
+	Short: "Send a hello message to all sidecars for a zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		msigners, sidecars, err := ss.IdentifySidecars(tdns.Globals.Zonename)
+		if err != nil {
+			log.Fatalf("Error identifying sidecars: %v", err)
+		}
+		fmt.Printf("MSIGNER records:\n")
+		for _, msigner := range msigners {
+			fmt.Printf("%s\n", msigner.String())
+		}
+		var ids []string
+		for _, s := range sidecars {
+			ids = append(ids, s.Identity)
+		}
+		fmt.Printf("Sidecars: There are %d sidecars, with identities: %s\n", len(sidecars), strings.Join(ids, ", "))
+
+		out := []string{}
+		if tdns.Globals.ShowHeaders {
+			out = append(out, "IDENTITY|METHOD|RESPONSE")
+		}
+		for _, sidecar := range ss.S.Items() {
+			// fmt.Printf("Sidecar: %v\n", sidecar)
+			err := sidecar.SendHello()
+			if err != nil {
+				log.Printf("Error sending hello to sidecar %s: %v", sidecar.Identity, err)
+			}
+			if sidecar.ApiMethod {
+				out = append(out, fmt.Sprintf("%s|%s|%s", sidecar.Identity, "API", err))
+			}
+
+			if sidecar.DnsMethod {
+				out = append(out, fmt.Sprintf("%s|%s|%s", sidecar.Identity, "DNS", err))
+			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 	},
@@ -75,7 +137,7 @@ var sidecarIdentifyCmd = &cobra.Command{
 
 func init() {
 	//	rootCmd.AddCommand(showCmd)
-	SidecarCmd.AddCommand(sidecarLocateCmd, sidecarIdentifyCmd)
+	SidecarCmd.AddCommand(sidecarLocateCmd, sidecarIdentifyCmd, sidecarHelloCmd)
 
 	SidecarCmd.PersistentFlags().StringVarP(&sidecarId, "id", "i", "", "Identity of sidecar")
 	SidecarCmd.PersistentFlags().StringVarP(&sidecarMethod, "method", "m", "", "Sidecar sync method")
