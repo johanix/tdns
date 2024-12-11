@@ -10,78 +10,36 @@ import (
 	"log"
 	"time"
 
-	"github.com/go-playground/validator/v10"
+	//	"github.com/go-playground/validator/v10"
+	tdns "github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
 )
 
 // available throughout package music
-var validate = validator.New()
+// var validate = validator.New()
 
-func xxDesecLogin(cc *CliConfig, tokvip *viper.Viper) (DesecLResponse, error) {
-	apiurl := viper.GetString("signers.desec.baseurl") + "/auth/login/"
-	if err := validate.Var(apiurl, "required,url"); err != nil {
-		log.Fatalf("deSEC base URL configured as signers.desec.baseurl required: %v", err)
-	}
+// XXX: This should change into a func (desec *Desec) Login() that encapsulates the tdns.ApiClient
 
-	email := viper.GetString("signers.desec.email")
-	password := viper.GetString("signers.desec.password")
-	if err := validate.Var(email, "required,email"); err != nil {
-		log.Fatalf("Email address configured as signers.desec.email required: %v", err)
-	}
-
-	if err := validate.Var(password, "required,ascii"); err != nil {
-		log.Fatalf("Password configured as signers.desec.password required: %v", err)
-	}
-
-	dlp := DesecLPost{
-		Email:    email,
-		Password: password,
-	}
-
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(dlp)
-
-	_, buf, err := GenericAPIpost(apiurl, "", "none", bytebuf.Bytes(),
-		true, cc.Verbose, cc.Debug, nil)
-	if err != nil {
-		log.Println("Error from GenericAPIpost:", err)
-	}
-	// fmt.Printf("Status: %d\n", status)
-
-	var dlr DesecLResponse
-	err = json.Unmarshal(buf, &dlr)
-	if err != nil {
-		log.Fatalf("Error from unmarshal: %v\n", err)
-	}
-
-	// fmt.Printf("Response from Desec login: %v\n", dlr)
-	dlr.MaxUnused = ParseDesecDuration(dlr.MaxUnusedRaw)
-	dlr.MaxAge = ParseDesecDuration(dlr.MaxAgeRaw)
-
-	tokvip.Set("desec.token", dlr.Token)
-	tokvip.Set("desec.created", dlr.Created)
-	tokvip.Set("desec.maxunused", dlr.MaxUnused)
-	tokvip.Set("desec.maxage", dlr.MaxAge)
-	tokvip.WriteConfig()
-	return dlr, nil
+type Desec struct {
+	Api *tdns.ApiClient
 }
 
-func (api *Api) DesecLogin() (DesecLResponse, error) {
+func (desec *Desec) Login() (DesecLResponse, error) {
 	endpoint := "/auth/login/"
 
 	dlp := DesecLPost{
-		Email:    api.Email,
-		Password: api.Password,
+		Email:    desec.Api.Email,
+		Password: desec.Api.Password,
 	}
 
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(dlp)
 
-	status, buf, err := api.NoAuthPost(endpoint, bytebuf.Bytes())
+	status, buf, err := desec.Api.NoAuthPost(endpoint, bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from api.Post:", err)
 	}
-	if api.Verbose {
+	if desec.Api.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 
@@ -95,9 +53,9 @@ func (api *Api) DesecLogin() (DesecLResponse, error) {
 	dlr.MaxUnused = ParseDesecDuration(dlr.MaxUnusedRaw)
 	dlr.MaxAge = ParseDesecDuration(dlr.MaxAgeRaw)
 
-	api.apiKey = dlr.Token // store this token inside the api object
+	desec.Api.apiKey = dlr.Token // store this token inside the api object
 
-	tokvip := api.TokViper
+	tokvip := desec.Api.TokViper
 	if tokvip == nil {
 		log.Fatalf("DesecLogin: Error: tokvip unset.\n")
 	}
@@ -109,64 +67,40 @@ func (api *Api) DesecLogin() (DesecLResponse, error) {
 	return dlr, nil
 }
 
-func DesecSetupClient(rootcafile string, verbose, debug bool) (*Api, error) {
+func (desec *Desec) SetupClient(rootcafile string, verbose, debug bool) (*tdns.ApiClient, error) {
 	baseurl := viper.GetString("signers.desec.baseurl")
 	email := viper.GetString("signers.desec.email")
 	password := viper.GetString("signers.desec.password")
 
-	if err := validate.Var(baseurl, "required,url"); err != nil {
+	if err := Validate.Var(baseurl, "required,url"); err != nil {
 		log.Fatalf("deSEC base URL configured as signers.desec.baseurl required: %v", err)
 	}
 
-	desecapi := NewClient("deSEC", baseurl,
+	desec.Api = tdns.NewClient("deSEC", baseurl,
 		"",                          // deSEC uses a dynamic token rather than a static key
 		"Authorization", rootcafile, // XXX: should use real CA cert
 		verbose, debug)
 
-	if err := validate.Var(email, "required,email"); err != nil {
+	if err := Validate.Var(email, "required,email"); err != nil {
 		log.Fatalf("Email address configured as signers.desec.email required: %v", err)
 	}
 
-	if err := validate.Var(password, "required,ascii"); err != nil {
+	if err := Validate.Var(password, "required,ascii"); err != nil {
 		log.Fatalf("Password configured as signers.desec.password required: %v", err)
 	}
-	desecapi.Email = email
-	desecapi.Password = password
+	desec.Api.Email = email
+	desec.Api.Password = password
 
-	return desecapi, nil
+	return desec.Api, nil
 }
 
-func xxDesecTokenRefreshIfNeeded(tokvip *viper.Viper) bool {
-	maxdur, _ := time.ParseDuration(tokvip.GetString("desec.maxunused"))
-	lasttouch, _ := time.Parse(layout, tokvip.GetString("desec.touched"))
-	remaining := time.Until(lasttouch.Add(maxdur))
-
-	fmt.Printf("Time remaining before this token expires: %v\n", remaining)
-
-	if remaining.Minutes() < 2 {
-		fmt.Printf("DesecTokenRefresh: Less than 2 minutes remain. Need to login again.\n")
-		cc := CliConfig{
-			Verbose: true,
-			Debug:   false,
-		}
-		_, err := xxDesecLogin(&cc, tokvip)
-		if err != nil {
-			fmt.Printf("DesecTokenStillOk: deSEC login failed. Error: %v\n", err)
-		} else {
-			fmt.Printf("DesecTokenStillOk: deSEC login suceeded.\n")
-		}
-		// fmt.Printf("Response data from deSEC login: %v\n", dlr)
-	}
-	return true
-}
-
-func (api *Api) DesecTokenRefresh() bool {
-	tokvip := api.TokViper
-	apikey := api.apiKey
+func (desec *Desec) TokenRefresh() bool {
+	tokvip := desec.Api.TokViper
+	apikey := desec.Api.apiKey
 	// perhaps the token is only on disk (due to restart), if so store it in api again
 	if apikey == "" {
-	   apikey = tokvip.GetString("desec.token")
-	   api.apiKey = apikey
+		apikey = tokvip.GetString("desec.token")
+		desec.Api.apiKey = apikey
 	}
 	maxdur, _ := time.ParseDuration(tokvip.GetString("desec.maxunused"))
 	lasttouch, _ := time.Parse(layout, tokvip.GetString("desec.touched"))
@@ -177,7 +111,7 @@ func (api *Api) DesecTokenRefresh() bool {
 	if remaining.Minutes() < 2 {
 		fmt.Printf("api.DesecTokenRefresh: Less than 2 minutes remain. Need to login again.\n")
 
-		_, err := api.DesecLogin()
+		_, err := desec.Login()
 		if err != nil {
 			fmt.Printf("DesecTokenRefresh: deSEC login failed. Error: %v\n", err)
 		} else {
@@ -189,7 +123,7 @@ func (api *Api) DesecTokenRefresh() bool {
 	return true
 }
 
-func DesecLogout(cc *CliConfig, tokvip *viper.Viper) error {
+func (desec *Desec) Logout(cc *CliConfig, tokvip *viper.Viper) error {
 	token := tokvip.GetString("desec.token")
 	apiurl := viper.GetString("signers.desec.baseurl") + "/auth/logout/"
 

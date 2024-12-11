@@ -440,6 +440,7 @@ type KeyDB struct {
 	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
+	DeferredUpdateQ     chan DeferredUpdate
 }
 
 type Tx struct {

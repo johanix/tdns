@@ -8,11 +8,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/johanix/tdns/music"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
 
-func PrepArgs(required ...string) {
+func PrepArgs(required ...string) error {
 
 	for _, arg := range required {
 		if tdns.Globals.Debug {
@@ -40,11 +41,38 @@ func PrepArgs(required ...string) {
 			}
 
 		case "zonename":
-			if tdns.Globals.Zonename == "" {
+			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+			if tdns.Globals.Zonename == "." {
 				fmt.Printf("Error: zone name not specified using --zone flag\n")
 				os.Exit(1)
 			}
-			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+
+		case "signergroupname":
+			if music.Globals.Sgroupname == "" {
+				fmt.Printf("Error: signer group not specified. Terminating.\n")
+				os.Exit(1)
+			}
+
+		case "signername":
+			if music.Globals.Signername == "" {
+				fmt.Printf("Error: signer not specified. Terminating.\n")
+				os.Exit(1)
+			}
+
+		case "fsmname":
+			if music.Globals.FSMname == "" {
+				fmt.Printf("Error: FSM not specified. Terminating.\n")
+				os.Exit(1)
+			}
+
+		case "fsmmode":
+			switch music.Globals.FSMmode {
+			case "auto", "manual", "":
+				break
+			default:
+				fmt.Printf("Error: FSM mode \"%s\" is unknown\n", music.Globals.FSMmode)
+				os.Exit(1)
+			}
 
 		case "rrtype":
 			if tdns.Globals.Rrtype == "" {
@@ -66,4 +94,5 @@ func PrepArgs(required ...string) {
 			os.Exit(1)
 		}
 	}
+	return nil
 }

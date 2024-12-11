@@ -28,38 +28,75 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 		AuthMethod: authmethod,
 	}
 
+	tlsconfig := &tls.Config{}
+
 	if rootcafile == "insecure" {
-		api.Client = &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
-			},
-		}
+		tlsconfig.InsecureSkipVerify = true
+	} else if rootcafile == "tlsa" {
+		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the MUSIC side afterwards.
+
+		// use TLSA RR for verification
+		//		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		//			for _, rawCert := range rawCerts {
+		//				cert, err := x509.ParseCertificate(rawCert)
+		//				if err != nil {
+		//					return fmt.Errorf("failed to parse certificate: %v", err)
+		//				}
+		//				if cert.Subject.CommonName != sc.Identity {
+		//					return fmt.Errorf("unexpected certificate common name (should have been %s)", sc.Identity)
+		//				}
+		//
+		//				err = tdns.VerifyCertAgainstTlsaRR(sc.Details[tdns.MsignerMethodDNS].TlsaRR, rawCert)
+		//				if err != nil {
+		//					return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
+		//				}
+		//			}
+		//			return nil
+		//		}
 	} else {
 		rootCAPool := x509.NewCertPool()
 		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
-		rootCA, err := ioutil.ReadFile(rootcafile)
+		rootCA, err := os.ReadFile(rootcafile)
 		if err != nil {
 			log.Fatalf("reading cert failed : %v", err)
 		}
-		if debug {
-			log.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
+		if Globals.Debug {
+			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
+				name, rootcafile)
 		}
 
 		rootCAPool.AppendCertsFromPEM(rootCA)
-
-		api.Client = &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					RootCAs: rootCAPool,
-				},
-			},
-		}
+		tlsconfig.RootCAs = rootCAPool
 	}
-	// api.Client = &http.Client{}
-	api.Debug = debug
-	api.Verbose = verbose
+
+	//	} else {
+	//		rootCAPool := x509.NewCertPool()
+	//		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
+	//		rootCA, err := ioutil.ReadFile(rootcafile)
+	//		if err != nil {
+	//			log.Fatalf("reading cert failed : %v", err)
+	//		}
+	//		if debug {
+	//			log.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
+	//		}
+	//
+	//		rootCAPool.AppendCertsFromPEM(rootCA)
+
+	//		api.Client = &http.Client{
+	//			Transport: &http.Transport{
+	//				TLSClientConfig: &tls.Config{
+	//					RootCAs: rootCAPool,
+	//				},
+	//			},
+	//		}
+	//	}
+	api.Client = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsconfig,
+		},
+	}
+	api.Debug = Globals.Debug
+	api.Verbose = Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
 
 	if debug {

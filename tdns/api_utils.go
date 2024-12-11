@@ -63,7 +63,12 @@ func APIping(conf *Config, appName, appVersion string, bootTime time.Time) func(
 			Pongs:      pongs,
 		}
 
-		conf.Internal.KeyDB.UpdateQ <- UpdateRequest{Cmd: "PING", ZoneName: "whatever."}
+		select {
+		case conf.Internal.KeyDB.UpdateQ <- UpdateRequest{Cmd: "PING", ZoneName: "whatever."}:
+			log.Printf("APIping: sent PING to update queue")
+		case <-time.After(5 * time.Second):
+			log.Printf("APIping: timeout sending PING to update queue")
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)

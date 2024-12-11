@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -140,7 +141,22 @@ type SignerGroupResponse struct {
 	SignerGroups map[string]SignerGroup
 }
 
-type Api struct {
+// type Api struct {
+// 	Name       string
+// 	Client     *http.Client
+// 	BaseUrl    string
+// 	apiKey     string
+// 	Authmethod string
+// 	Verbose    bool
+// 	Debug      bool
+
+// 	// deSEC stuff
+// 	Email    string
+// 	Password string
+// 	TokViper *viper.Viper
+// }
+
+type MusicApi struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string
@@ -148,6 +164,9 @@ type Api struct {
 	Authmethod string
 	Verbose    bool
 	Debug      bool
+
+	// tdns API client, we're using most of the tdns API client,
+	ApiClient *tdns.ApiClient
 
 	// deSEC stuff
 	Email    string

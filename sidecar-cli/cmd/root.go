@@ -6,6 +6,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/johanix/tdns/music"
 	mcmd "github.com/johanix/tdns/music/cmd"
 	tdns "github.com/johanix/tdns/tdns"
 
@@ -27,13 +28,13 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(mcmd.InitConfig, mcmd.InitApi)
 
-	rootCmd.PersistentFlags().StringVar(&mcmd.CfgFile, "config", "",
+	rootCmd.PersistentFlags().StringVar(&music.Globals.CfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s)", mcmd.DefaultCfgFile))
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H", false, "Show column headers on output")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "name of zone")
-	rootCmd.PersistentFlags().StringVarP(&mcmd.Signername, "signer", "s", "", "name of signer")
-	rootCmd.PersistentFlags().StringVarP(&mcmd.Sgroupname, "group", "g", "", "name of signer group")
+	rootCmd.PersistentFlags().StringVarP(&music.Globals.Signername, "signer", "s", "", "name of signer")
+	rootCmd.PersistentFlags().StringVarP(&music.Globals.Sgroupname, "group", "g", "", "name of signer group")
 }

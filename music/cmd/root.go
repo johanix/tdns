@@ -49,8 +49,8 @@ func InitConfig() {
 		log.Fatalf("Error loading MUSIC config: %v", err)
 	}
 
-	validate = validator.New()
-	if err := validate.Struct(&mconf); err != nil {
+	music.Validate = validator.New()
+	if err := music.Validate.Struct(&mconf); err != nil {
 		log.Fatalf("Config '%s' is missing required attributes:\n%v\n", music.DefaultSidecarCfgFile, err)
 	}
 }

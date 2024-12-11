@@ -477,8 +477,8 @@ func (mdb *MusicDB) ListSigners(tx *sql.Tx) (map[string]Signer, error) {
 // XXX: how is login to API-based signers done w/o this?
 func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig,
 	tokvip *viper.Viper) (error, string) {
-	var err error
-	var dlr DesecLResponse
+	// var err error
+	// var dlr DesecLResponse
 	var msg string
 
 	switch dbsigner.Method {
@@ -486,21 +486,21 @@ func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig,
 		return fmt.Errorf("Signer %s has method=ddns: No login required.",
 			dbsigner.Name), ""
 
-	case "desec-api":
-		api := GetUpdater("desec-api").GetApi()
-		dlr, err = api.DesecLogin()
-		if err != nil {
-			return fmt.Errorf("SignerLogin: error from DesecLogin: %v",
-				err), ""
-		}
+		//	case "desec-api":
+		//		api := GetUpdater("desec-api").GetApi()
+		//		dlr, err = api.DesecLogin()
+		//		if err != nil {
+		//			return fmt.Errorf("SignerLogin: error from DesecLogin: %v",
+		//				err), ""
+		//		}
 
-		if dlr.Token != "" {
-			endtime := dlr.Created.Add(dlr.MaxUnused)
-			msg = fmt.Sprintf("New token received and stored. It is valid until %v",
-				endtime.Format("2006-01-02 15:04:05"))
-		} else {
-			msg = "Something happened. No token received. Hmm?"
-		}
+		//		if dlr.Token != "" {
+		//			endtime := dlr.Created.Add(dlr.MaxUnused)
+		//			msg = fmt.Sprintf("New token received and stored. It is valid until %v",
+		//				endtime.Format("2006-01-02 15:04:05"))
+		//		} else {
+		//			msg = "Something happened. No token received. Hmm?"
+		//		}
 	default:
 		return fmt.Errorf("Signer %s has method=%s, which is unknown.",
 			dbsigner.Name, dbsigner.Method), ""
@@ -512,7 +512,7 @@ func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig,
 // XXX: how is login to API-based signers done w/o this?
 func (mdb *MusicDB) SignerLogout(dbsigner *Signer, cliconf *CliConfig,
 	tokvip *viper.Viper) (error, string) {
-	var err error
+	// var err error
 	var msg string
 
 	switch dbsigner.Method {
@@ -520,13 +520,13 @@ func (mdb *MusicDB) SignerLogout(dbsigner *Signer, cliconf *CliConfig,
 		return fmt.Errorf("Signer %s has method=ddns: No logout required.",
 			dbsigner.Name), ""
 
-	case "desec":
-		err = DesecLogout(cliconf, tokvip)
-		if err != nil {
-			return fmt.Errorf("SignerLogout: error from DesecLogout: %v",
-				err), ""
-		}
-		msg = "Logout from deSEC complete."
+		//	case "desec":
+		//		err = DesecLogout(cliconf, tokvip)
+		//		if err != nil {
+		//			return fmt.Errorf("SignerLogout: error from DesecLogout: %v",
+		//				err), ""
+		//		}
+		//		msg = "Logout from deSEC complete."
 	}
 	return nil, msg
 }

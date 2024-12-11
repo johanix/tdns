@@ -6,6 +6,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -95,13 +96,56 @@ func MusicSetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/", music.HomeLink)
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.apikey")).Subrouter()
+	// Create base subrouter without auth header requirement
+	sr := r.PathPrefix("/api/v1").Subrouter()
 
-	sr.HandleFunc("/ping", tdns.APIping(tconf, tconf.AppName, tconf.AppVersion, tconf.ServerBootTime)).Methods("POST")
-	sr.HandleFunc("/beat", music.APIbeat(mconf)).Methods("POST")
+	// Special case for /hello endpoint which validates against TLSA in payload
 	sr.HandleFunc("/hello", music.APIhello(mconf)).Methods("POST")
-	// TODO: send NOTIFY(DNSKEY) here:
-	// sr.HandleFunc("/notify", music.APInotify(mconf, r)).Methods("POST")
+
+	// All other endpoints require valid client cert matching TLSA record
+	secureRouter := r.PathPrefix("/api/v1").Subrouter()
+	secureRouter.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip validation for /hello endpoint
+			if r.URL.Path == "/api/v1/hello" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Get peer certificate from TLS connection
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				http.Error(w, "Client certificate required", http.StatusUnauthorized)
+				return
+			}
+			clientCert := r.TLS.PeerCertificates[0]
+
+			// Get TLSA record for the client's identity and verify
+			clientId := clientCert.Subject.CommonName
+			sidecar, ok := music.Globals.Sidecars.S.Get(clientId)
+			if !ok {
+				http.Error(w, "Unknown client identity", http.StatusUnauthorized)
+				return
+			}
+
+			tlsaRR := sidecar.Details[tdns.MsignerMethodAPI].TlsaRR
+			if tlsaRR == nil {
+				http.Error(w, "No TLSA record available for client", http.StatusUnauthorized)
+				return
+			}
+
+			err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw)
+			if err != nil {
+				http.Error(w, "Certificate verification failed", http.StatusUnauthorized)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	secureRouter.HandleFunc("/ping", tdns.APIping(tconf, tconf.AppName, tconf.AppVersion, tconf.ServerBootTime)).Methods("POST")
+	secureRouter.HandleFunc("/beat", music.APIbeat(mconf)).Methods("POST")
+
 	return r
 }
 
@@ -123,11 +167,24 @@ func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan
 		return nil
 	}
 
+	// Configure TLS settings
+	tlsConfig := &tls.Config{
+		ClientAuth: tls.RequestClientCert, // Request but don't require - we'll handle verification in middleware
+		MinVersion: tls.VersionTLS12,
+		// Remove VerifyPeerCertificate as we now handle this in middleware per-endpoint
+	}
+
+	server := &http.Server{
+		Handler:   router,
+		TLSConfig: tlsConfig,
+	}
+
 	for idx, address := range addresses {
 		go func(address string) {
 			addr := net.JoinHostPort(address, fmt.Sprintf("%d", port))
 			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, addr)
-			log.Fatal(http.ListenAndServeTLS(addr, certFile, keyFile, router))
+			server.Addr = addr
+			log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
 		}(string(address))
 
 		log.Println("MusicSyncAPI dispatcher: unclear how to stop the http server nicely.")

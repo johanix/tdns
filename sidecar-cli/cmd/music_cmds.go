@@ -24,7 +24,7 @@ func init() {
 	MusicCmd.AddCommand(mcmd.StatusCmd)
 
 	// from ../music/cmd/deseclogin.go:
-	MusicCmd.AddCommand(mcmd.DesecCmd)
+	// MusicCmd.AddCommand(mcmd.DesecCmd)
 
 	// from ../music/cmd/process.go:
 	MusicCmd.AddCommand(mcmd.ProcessCmd)

@@ -5,18 +5,14 @@
 package music
 
 import (
-	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 
 	//	"github.com/DNSSEC-Provisioning/music/music"
+
 	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -217,6 +213,11 @@ func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[str
 			}
 
 			if new {
+				err := s.NewMusicSyncApiClient(remoteSidecar, s.Details[remoteMethod].BaseUri, "", "", "tlsa")
+				if err != nil {
+					log.Printf("UpdateSidecars: Error creating MUSIC SyncAPI client for remote sidecar %s: %v", remoteSidecar, err)
+					continue
+				}
 				// Schedule sending an HELLO message to the new sidecar
 				log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
 					tdns.MsignerMethodToString[remoteMethod], remoteSidecar)
@@ -255,7 +256,11 @@ func EvaluateSidecarHello(sidecars *Sidecars, wannabe_sidecars map[string]*Sidec
 
 func (s *Sidecar) SendHello() error {
 
-	if s.ApiMethod {
+	log.Printf("Sending HELLO message to sidecar %s", SidecarToString(s))
+
+	// dump.P(s)
+	if s.Methods["API"] {
+		log.Printf("Sending HELLO message to sidecar %s via API method (baseuri: %s)", s.Identity, s.Details[tdns.MsignerMethodAPI].BaseUri)
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
 			SidecarId: s.Identity,
@@ -264,62 +269,68 @@ func (s *Sidecar) SendHello() error {
 		}
 
 		// Encode the struct as JSON
-		jsonData, err := json.Marshal(helloPost)
-		if err != nil {
-			return fmt.Errorf("failed to marshal SidecarHelloPost: %v", err)
-		}
+		//	jsonData, err := json.Marshal(helloPost)
+		//	if err != nil {
+		//		return fmt.Errorf("failed to marshal SidecarHelloPost: %v", err)
+		//	}
 
 		// Lookup the TLSA record for the target sidecar
-		tlsarrset := s.Details[tdns.MsignerMethodAPI].TlsaRR
+		// tlsarrset := s.Details[tdns.MsignerMethodAPI].TlsaRR
 
 		// Use the TLSA record to authenticate the remote end securely
 		// (This is a simplified example, in a real implementation you would need to configure the TLS client with the TLSA record)
-		tlsConfig := &tls.Config{
-			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-				for _, rawCert := range rawCerts {
-					cert, err := x509.ParseCertificate(rawCert)
-					if err != nil {
-						return fmt.Errorf("failed to parse certificate: %v", err)
-					}
-					if cert.Subject.CommonName != s.Identity {
-						return fmt.Errorf("unexpected certificate common name (should have been %s)", s.Identity)
-					}
-
-					err = tdns.VerifyCertAgainstTlsaRR(tlsarrset, rawCert)
-					if err != nil {
-						return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
-					}
-				}
-				return nil
-			},
-		}
+		// tlsConfig := &tls.Config{
+		// 	VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		// 		for _, rawCert := range rawCerts {
+		// 			cert, err := x509.ParseCertificate(rawCert)
+		// 			if err != nil {
+		// 				return fmt.Errorf("failed to parse certificate: %v", err)
+		// 			}
+		// 			if cert.Subject.CommonName != s.Identity {
+		// 				return fmt.Errorf("unexpected certificate common name (should have been %s)", s.Identity)
+		// 			}
+		//
+		// 		err = tdns.VerifyCertAgainstTlsaRR(tlsarrset, rawCert)
+		// 		if err != nil {
+		// 			return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
+		// 		}
+		// 		return nil
+		// 	},
+		//}
 
 		// Create the HTTPS client
-		client := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: tlsConfig,
-			},
-		}
+		// client := &http.Client{
+		// 	Transport: &http.Transport{
+		// 		TLSClientConfig: tlsConfig,
+		// 	},
+		// }
 
 		// Send the HTTPS POST request
-		url := s.Details[tdns.MsignerMethodAPI].BaseUri + "/hello"
-		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		// resp, err := s.Api.Client.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		status, resp, err := s.Api.RequestNG("POST", "/hello", helloPost, false)
 		if err != nil {
 			return fmt.Errorf("failed to send HTTPS POST request: %v", err)
 		}
-		defer resp.Body.Close()
+		// defer resp.Body.Close()
+
+		var hr HelloResponse
+		err = json.Unmarshal(resp, &hr)
+		if err != nil {
+			return fmt.Errorf("failed to unmarshal response: %v", err)
+		}
 
 		// Print the response to stdout
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %v", err)
-		}
-		fmt.Printf("Received response: %s\n", string(body))
+		// body, err := io.ReadAll(resp.Body)
+		// if err != nil {
+		//	return fmt.Errorf("failed to read response body: %v", err)
+		// }
+		fmt.Printf("Received response (status %d): %s\n", status, string(resp))
 	}
 
-	if s.DnsMethod {
+	if s.Methods["DNS"] {
+		log.Printf("Sending HELLO message to sidecar %s via DNS method", s.Identity)
 		// TODO: implement DNS-based hello
-		return fmt.Errorf("DNS-based hello not implemented")
+		log.Printf("Warning: DNS-based hello not implemented")
 	}
 
 	return nil
