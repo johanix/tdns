@@ -121,9 +121,12 @@ func main() {
 	}
 	kdb := tconf.Internal.KeyDB
 	kdb.UpdateQ = make(chan tdns.UpdateRequest, 10)
+	kdb.DeferredUpdateQ = make(chan tdns.DeferredUpdate, 10)
 
 	tconf.Internal.UpdateQ = kdb.UpdateQ
 	mconf.Internal.UpdateQ = kdb.UpdateQ
+	tconf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+	mconf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
 	mconf.Internal.KeyDB = kdb
 
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
@@ -191,6 +194,7 @@ func main() {
 	go tdns.AuthQueryEngine(tconf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(tconf.Internal.ScannerQ, tconf.Internal.AuthQueryQ)
 	go kdb.ZoneUpdaterEngine(stopch)
+	go kdb.DeferredUpdaterEngine(stopch)
 	go tdns.UpdateHandler(&tconf)
 	go tdns.NotifyHandler(&tconf)
 	go tdns.DnsEngine(&tconf)
@@ -218,18 +222,22 @@ func main() {
 	mconf.Internal.DdnsFetch = make(chan music.SignerOp, 100)
 	mconf.Internal.DdnsUpdate = make(chan music.SignerOp, 100)
 
-	rootcafile := viper.GetString("common.rootCA")
-	desecapi, err := music.DesecSetupClient(rootcafile, music.CliConf.Verbose, music.CliConf.Debug)
-	if err != nil {
-		log.Fatalf("Error from DesecSetupClient: %v\n", err)
-	}
-	desecapi.TokViper = music.TokVip
+	// XXX: Why don't we need this anymore?
+	// rootcafile := viper.GetString("common.rootCA")
 
-	rldu := music.Updaters["rldesec-api"]
-	rldu.SetChannels(mconf.Internal.DesecFetch, mconf.Internal.DesecUpdate)
-	rldu.SetApi(*desecapi)
-	du := music.Updaters["desec-api"]
-	du.SetApi(*desecapi) // it is ok to reuse the same object here
+	// XXX: Let's put deSEC support on hold until we've sorted out the distributed multi-signer issues.
+	//	desecapi, err := music.DesecSetupClient(rootcafile, music.CliConf.Verbose, music.CliConf.Debug)
+	//	if err != nil {
+	//		log.Fatalf("Error from DesecSetupClient: %v\n", err)
+	//	}
+	//	desecapi := music.GetUpdater("desec-api").GetApi()
+	//	desecapi.TokViper = music.TokVip
+
+	//	rldu := music.Updaters["rldesec-api"]
+	//	rldu.SetChannels(mconf.Internal.DesecFetch, mconf.Internal.DesecUpdate)
+	//	rldu.SetApi(*desecapi)
+	//	du := music.Updaters["desec-api"]
+	//	du.SetApi(*desecapi) // it is ok to reuse the same object here
 
 	rlddu := music.Updaters["rlddns"]
 	rlddu.SetChannels(mconf.Internal.DdnsFetch, mconf.Internal.DdnsUpdate)
@@ -238,7 +246,7 @@ func main() {
 
 	// XXX: From musicd.
 	go music.DbUpdater(&mconf)
-	go music.DeSECmgr(&mconf, done)
+	// 	go music.DeSECmgr(&mconf, done)
 	go music.DdnsMgr(&mconf, done)
 	go music.FSMEngine(&mconf, done)
 

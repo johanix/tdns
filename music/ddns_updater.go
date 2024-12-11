@@ -9,6 +9,7 @@ import (
 	"log"
 	"time"
 
+	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -24,13 +25,13 @@ func (u *DdnsUpdater) SetChannels(fetch, update chan SignerOp) {
 	// no-op
 }
 
-func (u *DdnsUpdater) SetApi(api Api) {
+func (u *DdnsUpdater) SetApi(api *tdns.ApiClient) {
 	// no-op
 }
 
-func (u *DdnsUpdater) GetApi() Api {
+func (u *DdnsUpdater) GetApi() *tdns.ApiClient {
 	// no-op
-	return Api{}
+	return &tdns.ApiClient{}
 }
 
 func (signer *Signer) NewDnsClient() dns.Client {

@@ -17,17 +17,39 @@ import (
 
 // var Sidecars = cmap.New[*Sidecar]()
 
+func SidecarToString(sidecar *Sidecar) string {
+	return fmt.Sprintf("* Sidecar %s (API: %v, DNS: %v): last update %s", sidecar.Identity,
+		sidecar.Methods["API"], sidecar.Methods["DNS"], sidecar.Details[tdns.MsignerMethodDNS].LastUpdate.Format(time.RFC3339))
+}
+
 // Returns true if the sidecar is new (not previously known)
 func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (bool, *Sidecar, error) {
 	log.Printf("LocateSidecar: identity: %s, method: %s", identity, tdns.MsignerMethodToString[method])
 
+	var knownSidecars string
+	for _, sidecar := range ss.S.Items() {
+		knownSidecars += SidecarToString(sidecar) + "\n"
+	}
+	log.Printf("LocateSidecar: known sidecars:\n%v", knownSidecars)
+
 	newSidecar := false
 	sidecar, ok := ss.S.Get(identity)
 	if !ok {
-		sidecar = &Sidecar{Identity: identity, Details: map[tdns.MsignerMethod]SidecarDetails{}}
+		log.Printf("LocateSidecar: Sidecar %s not found, creating new", identity)
+		sidecar = &Sidecar{
+			Identity: identity,
+			Details:  map[tdns.MsignerMethod]SidecarDetails{},
+			Methods:  map[string]bool{},
+		}
 		ss.S.Set(identity, sidecar)
 		newSidecar = true
 	}
+
+	knownSidecars = ""
+	for _, sidecar := range ss.S.Items() {
+		knownSidecars += SidecarToString(sidecar) + "\n"
+	}
+	log.Printf("LocateSidecar: known sidecars (post check):\n%v", knownSidecars)
 
 	if !newSidecar && sidecar.Details[method].LastUpdate.After(time.Now().Add(-1*time.Hour)) {
 		log.Printf("LocateSidecar: Sidecar %s method %s was updated less than an hour ago, not updating again", identity, tdns.MsignerMethodToString[method])
@@ -55,7 +77,7 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 		return r.Answer[0].(*dns.SVCB), nil
 	}
 
-	tmp := sidecar.Details[method]
+	details := sidecar.Details[method]
 	switch method {
 	case tdns.MsignerMethodDNS:
 		svcbRR, err := lookupSVCB("dns", identity)
@@ -67,16 +89,16 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 			case dns.SVCB_IPV4HINT:
 				ipv4Hints := kv.(*dns.SVCBIPv4Hint)
 				for _, ip := range ipv4Hints.Hint {
-					tmp.Addrs = append(tmp.Addrs, ip.String())
+					details.Addrs = append(details.Addrs, ip.String())
 				}
 			case dns.SVCB_IPV6HINT:
 				ipv6Hints := kv.(*dns.SVCBIPv6Hint)
 				for _, ip := range ipv6Hints.Hint {
-					tmp.Addrs = append(tmp.Addrs, ip.String())
+					details.Addrs = append(details.Addrs, ip.String())
 				}
 			case dns.SVCB_PORT:
 				port := kv.(*dns.SVCBPort)
-				tmp.Port = uint16(port.Port)
+				details.Port = uint16(port.Port)
 			}
 		}
 
@@ -90,14 +112,16 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 
 		for _, ans := range r.Answer {
 			if k, ok := ans.(*dns.KEY); ok {
-				tmp.KeyRR = k
+				details.KeyRR = k
 				break
 			}
 		}
-		if tmp.KeyRR == nil {
+		if details.KeyRR == nil {
 			return false, nil, fmt.Errorf("no valid KEY record found for %s", "dns."+identity)
 		}
-		sidecar.DnsMethod = true
+		sidecar.Methods["DNS"] = true
+		details.LastUpdate = time.Now()
+		sidecar.Details[method] = details
 
 	case tdns.MsignerMethodAPI:
 		svcbRR, err := lookupSVCB("api", identity)
@@ -109,21 +133,21 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 			case dns.SVCB_IPV4HINT:
 				ipv4Hints := kv.(*dns.SVCBIPv4Hint)
 				for _, ip := range ipv4Hints.Hint {
-					tmp.Addrs = append(tmp.Addrs, ip.String())
+					details.Addrs = append(details.Addrs, ip.String())
 				}
 			case dns.SVCB_IPV6HINT:
 				ipv6Hints := kv.(*dns.SVCBIPv6Hint)
 				for _, ip := range ipv6Hints.Hint {
-					tmp.Addrs = append(tmp.Addrs, ip.String())
+					details.Addrs = append(details.Addrs, ip.String())
 				}
 			case dns.SVCB_PORT:
 				port := kv.(*dns.SVCBPort)
-				tmp.Port = uint16(port.Port)
+				details.Port = uint16(port.Port)
 			}
 		}
 
-		tlsaQname := fmt.Sprintf("_%d._tcp.api.%s", tmp.Port, identity)
-		log.Printf("SVCB indicates port=%d, TLSA should be located at %s", tmp.Port, tlsaQname)
+		tlsaQname := fmt.Sprintf("_%d._tcp.api.%s", details.Port, identity)
+		log.Printf("SVCB indicates port=%d, TLSA should be located at %s", details.Port, tlsaQname)
 
 		// Look up "api.{identity}" TLSA to verify the cert
 		m := new(dns.Msg)
@@ -138,14 +162,15 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 
 		for _, ans := range r.Answer {
 			if t, ok := ans.(*dns.TLSA); ok {
-				tmp.TlsaRR = t
+				details.TlsaRR = t
 				break
 			}
 		}
-		if tmp.TlsaRR == nil {
+		if details.TlsaRR == nil {
 			return false, nil, fmt.Errorf("no valid TLSA record found for %s", tlsaQname)
 		}
 
+		log.Printf("TLSA record found for %s: %s", tlsaQname, details.TlsaRR.String())
 		// Look up "api.{identity}" URI record
 		m = new(dns.Msg)
 		m.SetQuestion(dns.Fqdn("api."+identity), dns.TypeURI)
@@ -159,23 +184,29 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 
 		for _, ans := range r.Answer {
 			if u, ok := ans.(*dns.URI); ok {
-				tmp.UriRR = u
+				details.UriRR = u
 				break
 			}
 		}
-		if tmp.UriRR == nil {
+		if details.UriRR == nil {
 			return false, nil, fmt.Errorf("no valid URI record found for %s", "api."+identity)
 		}
-		tmp.BaseUri = strings.Replace(tmp.UriRR.Target, "{TARGET}", identity, 1)
-		tmp.BaseUri = strings.Replace(tmp.BaseUri, "{PORT}", fmt.Sprintf("%d", tmp.Port), 1)
-		sidecar.ApiMethod = true
+
+		log.Printf("URI record found for %s: %s", "api."+identity, details.UriRR.String())
+		details.BaseUri = strings.Replace(details.UriRR.Target, "{TARGET}", identity, 1)
+		details.BaseUri = strings.Replace(details.BaseUri, "{PORT}", fmt.Sprintf("%d", details.Port), 1)
+		log.Printf("BaseUri: %s", details.BaseUri)
+		sidecar.Methods["API"] = true
+		details.LastUpdate = time.Now()
+		sidecar.Details[method] = details
+		err = sidecar.NewMusicSyncApiClient(identity, details.BaseUri, "", "", "tlsa")
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to create MUSIC API client for %s: %v", identity, err)
+		}
 
 	default:
 		return false, nil, fmt.Errorf("unknown Sidecar sync method: %+v", method)
 	}
-
-	tmp.LastUpdate = time.Now()
-	sidecar.Details[method] = tmp
 
 	return newSidecar, sidecar, nil
 }

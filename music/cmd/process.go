@@ -5,7 +5,6 @@
 package mcmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -89,12 +88,12 @@ func init() {
 
 func SendProcess(data music.ProcessPost) (music.ProcessResponse, error) {
 	var pr music.ProcessResponse
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
+	// bytebuf := new(bytes.Buffer)
+	// json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/process", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
-		log.Println("Error from api.Post:", err)
+		log.Println("Error from api.RequestNG:", err)
 		return pr, err
 	}
 	if tdns.Globals.Verbose {
@@ -128,10 +127,10 @@ func ListProcesses() error {
 		Command: "list",
 	}
 
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
+	// bytebuf := new(bytes.Buffer)
+	// json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/process", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
 		log.Println("Error from Api Post:", err)
 		return err
@@ -170,10 +169,10 @@ func GraphProcess() error {
 		Process: processname,
 	}
 
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
+	// bytebuf := new(bytes.Buffer)
+	// json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/process", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
 		log.Println("Error from Api Post:", err)
 		return err

@@ -33,17 +33,17 @@ var testDnsQueryCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("dnsquery called")
 
-		zone := dns.Fqdn(Zonename)
+		PrepArgs("zonename")
 
 		data := music.TestPost{
 			Command: "dnsquery",
-			Signer:  Signername,
+			Signer:  music.Globals.Signername,
 			Qname:   dns.Fqdn(ownername),
 			RRtype:  rrtype,
 			Count:   testcount,
 		}
 
-		tr, _ := SendTestCommand(zone, data)
+		tr, _ := SendTestCommand(tdns.Globals.Zonename, data)
 		if tr.Error {
 			fmt.Printf("Error: %s\n", tr.ErrorMsg)
 		}
@@ -70,13 +70,14 @@ func init() {
 
 func SendTestCommand(zone string, data music.TestPost) (music.TestResponse, error) {
 	// IsDomainName() is too liberal, we need a stricter test.
-	if _, ok := dns.IsDomainName(Zonename); !ok {
-		log.Fatalf("SendZoneCommand: Error: Zone '%s' is not a legal domain name. Terminating.\n", Zonename)
+	if _, ok := dns.IsDomainName(music.Globals.Zonename); !ok {
+		log.Fatalf("SendZoneCommand: Error: Zone '%s' is not a legal domain name. Terminating.\n", music.Globals.Zonename)
 	}
 
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
-	status, buf, err := api.Post("/test", bytebuf.Bytes())
+	//	status, buf, err := music.Api.Post("/test", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/test", data, true)
 	if err != nil {
 		log.Fatalf("SendTestCommand: Error from APIpost:", err)
 

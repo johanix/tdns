@@ -7,16 +7,18 @@ package music
 import (
 	"fmt"
 	"log"
+
 	// "strings"
 	"time"
 
+	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
 
 type RLDdnsUpdater struct {
 	FetchCh  chan SignerOp
 	UpdateCh chan SignerOp
-	Api      Api
+	Api      *tdns.ApiClient
 }
 
 func init() {
@@ -29,13 +31,13 @@ func (u *RLDdnsUpdater) SetChannels(fetch, update chan SignerOp) {
 }
 
 // DDNS has no API
-func (u *RLDdnsUpdater) SetApi(api Api) {
+func (u *RLDdnsUpdater) SetApi(api *tdns.ApiClient) {
 	// no-op
 }
 
-func (u *RLDdnsUpdater) GetApi() Api {
+func (u *RLDdnsUpdater) GetApi() *tdns.ApiClient {
 	// no-op
-	return Api{}
+	return &tdns.ApiClient{}
 }
 
 func (u *RLDdnsUpdater) Update(signer *Signer, zone, owner string,
@@ -57,7 +59,6 @@ func (u *RLDdnsUpdater) Update(signer *Signer, zone, owner string,
 // Note: for DDNS we do not implement any real rate-limiting right now (other than the
 // voluntary restriction to the limits set in the config). But we keep the same interface with
 // rate-limited (bool), hold in seconds (int), error (error) as for deSEC and other APIs.
-//
 func RLDdnsUpdate(udop SignerOp) (bool, int, error) {
 	signer := udop.Signer
 	owner := udop.Owner
@@ -173,7 +174,7 @@ func RLDdnsRemoveRRset(udop SignerOp) (bool, int, error) {
 		m.RemoveRRset(rrset)
 	}
 
-	signer.PrepareTSIGExchange(&c, m)	
+	signer.PrepareTSIGExchange(&c, m)
 
 	in, _, err := c.Exchange(m, signer.Address+":"+signer.Port) // TODO: add DnsAddress or solve this in a better way
 	if err != nil {

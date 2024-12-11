@@ -17,10 +17,3 @@ const (
 	DefaultSidecarTdnsCfgFile = "/etc/music/tdns-sidecar.yaml"  // used for everything TDNS related in music-sidecar
 	DefaultZonesCfgFile       = "/etc/music/music-zones.yaml"   // Zones that MUSIC sidecar should serve; may be empty
 )
-
-type GlobalStuff struct {
-	Verbose bool
-	Debug   bool
-}
-
-var Globals GlobalStuff

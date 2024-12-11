@@ -38,7 +38,7 @@ var SchemeToString = map[DsyncScheme]string{
 	SchemeNotify:   "NOTIFY",
 	SchemeUpdate:   "UPDATE",
 	SchemeAPI:      "API",
-	SchemeMSUpdate: "MSUPDATE",
+	SchemeMSUpdate: "MSUPDATE", // MSUPDATE is used in a multi-signer context and indicates a DNS UPDATE sent from a signer to the upstream unsigned zone.
 }
 
 var StringToScheme = map[string]DsyncScheme{

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	tdns "github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
 )
 
@@ -428,10 +429,81 @@ func GenericAPIdelete(apiurl, apikey, authmethod string, usetls, verbose, debug 
 	return resp.StatusCode, buf, err
 }
 
-// api client
-func NewClient(name, baseurl, apikey, authmethod,
-	rootcafile string, verbose, debug bool) *Api {
-	api := Api{
+// The MUSIC API client has extrasupport for verification of a server cert against a TLSA, login parameters for deSEC, etc.
+func (sc *Sidecar) NewMusicSyncApiClient(name, baseurl, apikey, authmethod, rootcafile string) error {
+	if sc == nil {
+		return fmt.Errorf("sidecar is nil")
+	}
+	if sc.Methods["API"] == false || sc.Details[tdns.MsignerMethodAPI].TlsaRR == nil {
+		return fmt.Errorf("sidecar %s does not support the MUSIC API Method", sc.Identity)
+	}
+
+	api := MusicApi{
+		ApiClient: tdns.NewClient(name, baseurl, apikey, authmethod, rootcafile, tdns.Globals.Verbose, tdns.Globals.Debug),
+	}
+
+	tlsconfig := &tls.Config{}
+
+	if rootcafile == "insecure" {
+		tlsconfig.InsecureSkipVerify = true
+	} else if rootcafile == "tlsa" {
+		// use TLSA RR for verification
+		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			for _, rawCert := range rawCerts {
+				cert, err := x509.ParseCertificate(rawCert)
+				if err != nil {
+					return fmt.Errorf("failed to parse certificate: %v", err)
+				}
+				if cert.Subject.CommonName != sc.Identity {
+					return fmt.Errorf("unexpected certificate common name (should have been %s)", sc.Identity)
+				}
+
+				err = tdns.VerifyCertAgainstTlsaRR(sc.Details[tdns.MsignerMethodDNS].TlsaRR, rawCert)
+				if err != nil {
+					return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
+				}
+			}
+			return nil
+		}
+	} else {
+		rootCAPool := x509.NewCertPool()
+		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
+		rootCA, err := os.ReadFile(rootcafile)
+		if err != nil {
+			log.Fatalf("reading cert failed : %v", err)
+		}
+		if tdns.Globals.Debug {
+			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
+				name, rootcafile)
+		}
+
+		rootCAPool.AppendCertsFromPEM(rootCA)
+		tlsconfig.RootCAs = rootCAPool
+	}
+
+	// api.Client = &http.Client{}
+	api.ApiClient.Client = &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsconfig},
+	}
+
+	api.ApiClient.Debug = tdns.Globals.Debug
+	api.ApiClient.Verbose = tdns.Globals.Verbose
+	// log.Printf("client is a: %T\n", api.Client)
+
+	if tdns.Globals.Debug {
+		fmt.Printf("Setting up MUSIC Sync API client: %s\n", name)
+		fmt.Printf("* baseurl is: %s \n* authmethod is: %s \n",
+			api.ApiClient.BaseUrl, api.ApiClient.AuthMethod)
+	}
+	sc.Api = &api
+
+	return nil
+}
+
+// I think that this API client is only used for deSEC login.
+// XXX: This should die in favour of the tdns.ApiClient
+func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *tdns.ApiClient {
+	api := tdns.ApiClient{
 		Name:       name,
 		BaseUrl:    baseurl,
 		apiKey:     apikey,
@@ -446,6 +518,9 @@ func NewClient(name, baseurl, apikey, authmethod,
 				},
 			},
 		}
+	} else if rootcafile == "tlsa" {
+		// use TLSA RR for verification
+
 	} else {
 		rootCAPool := x509.NewCertPool()
 		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
@@ -635,4 +710,14 @@ func (api *Api) Put(endpoint string, data []byte) (int, []byte, error) {
 		log.Fatalf("Error from http.NewRequest: Error: %v", err)
 	}
 	return api.requestHelper(req)
+}
+
+func (api *MusicApi) RequestNG(method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
+	if api == nil {
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
+	if api.ApiClient == nil || api.ApiClient.Client == nil {
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
+	return api.ApiClient.RequestNG(method, endpoint, data, dieOnError)
 }

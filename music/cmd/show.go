@@ -5,7 +5,6 @@
 package mcmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -51,9 +50,10 @@ func init() {
 
 func SendShowCommand(data music.ShowPost) music.ShowResponse {
 
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
-	status, buf, err := api.Post("/show", bytebuf.Bytes())
+	// bytebuf := new(bytes.Buffer)
+	// json.NewEncoder(bytebuf).Encode(data)
+
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/show", data, true)
 	if err != nil {
 		log.Fatalf("SendShowCommand: Error from api.Post: %v", err)
 

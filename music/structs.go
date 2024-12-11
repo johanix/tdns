@@ -135,14 +135,16 @@ type Heartbeat struct {
 }
 
 type Sidecar struct {
-	Identity   string
-	ApiMethod  bool // API supported
-	DnsMethod  bool // DNS supported
+	Identity string
+	//	ApiMethod  bool            // API supported
+	//	DnsMethod  bool            // DNS supported
+	Methods    map[string]bool // supported methods: "API" and "DNS"
 	Details    map[tdns.MsignerMethod]SidecarDetails
 	LastHB     time.Time
 	LastFullHB time.Time
 	HBCount    int
 	Zones      []string
+	Api        *MusicApi
 }
 
 type SidecarDetails struct {

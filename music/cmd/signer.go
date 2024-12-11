@@ -4,7 +4,6 @@
 package mcmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -51,7 +50,7 @@ var addSignerCmd = &cobra.Command{
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "add",
 			Signer: music.Signer{
-				Name:   Signername,
+				Name:   music.Globals.Signername,
 				Method: strings.ToLower(signermethod),
 				// Auth:    signerauth, // Issue #28: music.AuthDataTmp(signerauth),
 				Auth:    authdata,
@@ -60,7 +59,7 @@ var addSignerCmd = &cobra.Command{
 				UseTcp:  !signernotcp,
 				UseTSIG: !signernotsig,
 			},
-			SignerGroup: Sgroupname, // may be unspecified
+			SignerGroup: music.Globals.Sgroupname, // may be unspecified
 		})
 		PrintSignerResponse(sr.Error, sr.ErrorMsg, sr.Msg)
 	},
@@ -73,7 +72,7 @@ var updateSignerCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update existing signer",
 	Run: func(cmd *cobra.Command, args []string) {
-		if Signername == "" {
+		if music.Globals.Signername == "" {
 			log.Fatalf("Error: signer to update not specified. Terminating.\n")
 		}
 
@@ -85,7 +84,7 @@ var updateSignerCmd = &cobra.Command{
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "update",
 			Signer: music.Signer{
-				Name:    Signername,
+				Name:    music.Globals.Signername,
 				Address: signeraddress,
 				Method:  strings.ToLower(signermethod),
 				// Auth:    signerauth, // Issue #28: music.AuthDataTmp(signerauth),
@@ -103,19 +102,19 @@ var joinGroupCmd = &cobra.Command{
 	Use:   "join",
 	Short: "Join a signer to a signer group",
 	Run: func(cmd *cobra.Command, args []string) {
-		if Signername == "" {
+		if music.Globals.Signername == "" {
 			log.Fatalf("SignerJoinGroup: signer not specified. Terminating.\n")
 		}
 
-		if Sgroupname == "" {
+		if music.Globals.Sgroupname == "" {
 			log.Fatalf("SignerJoinGroup: signer group not specified. Terminating.\n")
 		}
 
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "join",
 			Signer: music.Signer{
-				Name:        Signername,
-				SignerGroup: Sgroupname,
+				Name:        music.Globals.Signername,
+				SignerGroup: music.Globals.Sgroupname,
 			},
 		})
 		PrintSignerResponse(sr.Error, sr.ErrorMsg, sr.Msg)
@@ -126,19 +125,19 @@ var leaveGroupCmd = &cobra.Command{
 	Use:   "leave",
 	Short: "Remove a signer from a signer group",
 	Run: func(cmd *cobra.Command, args []string) {
-		if Signername == "" {
+		if music.Globals.Signername == "" {
 			log.Fatalf("SignerLeaveGroup: signer not specified. Terminating.\n")
 		}
 
-		if Sgroupname == "" {
+		if music.Globals.Sgroupname == "" {
 			log.Fatalf("SignerLeaveGroup: signer group not specified. Terminating.\n")
 		}
 
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "leave",
 			Signer: music.Signer{
-				Name:        Signername,
-				SignerGroup: Sgroupname,
+				Name:        music.Globals.Signername,
+				SignerGroup: music.Globals.Sgroupname,
 			},
 		})
 		PrintSignerResponse(sr.Error, sr.ErrorMsg, sr.Msg)
@@ -152,7 +151,7 @@ var deleteSignerCmd = &cobra.Command{
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "delete",
 			Signer: music.Signer{
-				Name: Signername,
+				Name: music.Globals.Signername,
 			},
 		})
 		PrintSignerResponse(sr.Error, sr.ErrorMsg, sr.Msg)
@@ -178,7 +177,7 @@ var loginSignerCmd = &cobra.Command{
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "login",
 			Signer: music.Signer{
-				Name: Signername,
+				Name: music.Globals.Signername,
 			},
 		})
 		PrintSignerResponse(sr.Error, sr.ErrorMsg, sr.Msg)
@@ -192,7 +191,7 @@ var logoutSignerCmd = &cobra.Command{
 		sr := SendSignerCmd(music.SignerPost{
 			Command: "logout",
 			Signer: music.Signer{
-				Name: Signername,
+				Name: music.Globals.Signername,
 			},
 		})
 		PrintSignerResponse(sr.Error, sr.ErrorMsg, sr.Msg)
@@ -218,10 +217,10 @@ func init() {
 
 func SendSignerCmd(data music.SignerPost) music.SignerResponse {
 
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
+	// bytebuf := new(bytes.Buffer)
+	// json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/signer", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/signer", data, true)
 	if err != nil {
 		log.Fatalf("Error from api.Post: %v", err)
 	}
@@ -251,7 +250,7 @@ func PrintSignerResponse(iserr bool, errormsg, msg string) {
 func PrintSigners(sr music.SignerResponse) {
 	if len(sr.Signers) != 0 {
 		var out []string
-		if tdns.Globals.Verbose || Showheaders {
+		if tdns.Globals.Verbose || music.Globals.Showheaders {
 			out = append(out, "Signer|Method|Address|Port|SignerGroups")
 		}
 

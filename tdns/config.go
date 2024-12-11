@@ -66,6 +66,7 @@ type InternalConf struct {
 	ValidatorCh     chan ValidatorRequest
 	ScannerQ        chan ScanRequest
 	UpdateQ         chan UpdateRequest
+	DeferredUpdateQ chan DeferredUpdate
 	DnsUpdateQ      chan DnsUpdateRequest
 	DnsNotifyQ      chan DnsNotifyRequest
 	DelegationSyncQ chan DelegationSyncRequest
