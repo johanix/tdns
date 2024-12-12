@@ -29,17 +29,17 @@ var KeystoreCmd = &cobra.Command{
 	Long: `The TDNSD keystore is where SIG(0) key pairs for zones are kept.
 The CLI contains functions for listing SIG(0) key pairs, adding and
 deleting keys.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	/*Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("keystore called. This is likely a mistake, sub command needed")
-	},
+	},*/
 }
 
 var keystoreSig0Cmd = &cobra.Command{
 	Use:   "sig0",
 	Short: "Prefix command, only usable via sub-commands",
-	Run: func(cmd *cobra.Command, args []string) {
+	/*Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("keystore sig0 called (but NYI)")
-	},
+	},*/
 }
 
 var keystoreSig0AddCmd = &cobra.Command{
@@ -120,9 +120,9 @@ var keystoreSig0SetStateCmd = &cobra.Command{
 var keystoreDnssecCmd = &cobra.Command{
 	Use:   "dnssec",
 	Short: "Prefix command, only usable via sub-commands",
-	Run: func(cmd *cobra.Command, args []string) {
+	/*Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("keystore dnssec called (but NYI)")
-	},
+	},*/
 }
 
 var keystoreDnssecAddCmd = &cobra.Command{
@@ -318,14 +318,14 @@ func Sig0KeyMgmt(cmd string) error {
 	case "list":
 		var out, tmplist []string
 		if showhdr {
-			out = append(out, "Signer|State|KeyID|Algorithm|PrivKey|KEY Record")
+			out = append(out, "Signer|State|Parentstate|KeyID|Algorithm|PrivKey|KEY Record")
 		}
 		if len(tr.Sig0keys) > 0 {
 			// fmt.Printf("Known SIG(0) key pairs:\n")
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
-					tmp[0], v.State, tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%s|%v|%v|%.50s...\n",
+					tmp[0], v.State, keyStateToString(v.ParentState), tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
 			}
 			sort.Strings(tmplist)
 			out = append(out, tmplist...)

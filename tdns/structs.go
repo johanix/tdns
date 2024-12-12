@@ -293,10 +293,12 @@ type Sig0StoreT struct {
 type Sig0Key struct {
 	Name            string
 	State           string
+	ParentState     uint8
 	Keyid           uint16
 	Algorithm       string
 	Creator         string
 	Validated       bool   // has this key been validated
+	AutoKeyBoot     bool   // Child requests automatic bootstrap of the key
 	PublishedInDNS  bool   // is this key published in DNS (as a KEY RR)
 	DnssecValidated bool   // has this key been DNSSEC validated
 	Trusted         bool   // is this key trusted
@@ -431,6 +433,7 @@ type DnssecKeys struct {
 
 type KeyDB struct {
 	DB *sql.DB
+	tx sync.Mutex
 	mu sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
@@ -438,7 +441,7 @@ type KeyDB struct {
 	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
-	UpdateTrustQ        chan UpdateTrustRequest
+	KeyBootstrapperQ    chan KeyBootstrapperRequest
 }
 
 type Tx struct {
@@ -478,16 +481,17 @@ type VerificationInfo struct {
 	AttemptsLeft   int
 	NextCheckTime  time.Time
 	ZoneData       *ZoneData
-	Keyid          int
+	Keyid          uint16
 	FailedAttempts int
 }
 
-type UpdateTrustRequest struct {
-	Cmd      string
-	KeyName  string
-	ZoneName string
-	ZoneData *ZoneData
-	Key      string
-	Verified bool
-	Keyid    int
+type KeyBootstrapperRequest struct {
+	Cmd          string
+	KeyName      string
+	ZoneName     string
+	ZoneData     *ZoneData
+	Key          string
+	Verified     bool
+	Keyid        uint16
+	ResponseChan chan *VerificationInfo
 }

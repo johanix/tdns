@@ -207,12 +207,13 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 			log.Printf("DelegationSyncSetup: No active SIG(0) key found for zone %s. Will generate new key to enable parent sync via UPDATE.", zd.ZoneName)
 
 			kp := KeystorePost{
-				Command:    "sig0-mgmt",
-				SubCommand: "generate",
-				Zone:       zd.ZoneName,
-				Algorithm:  alg,
-				State:      Sig0StateActive,
-				Creator:    "del-sync-setup",
+				Command:     "sig0-mgmt",
+				SubCommand:  "generate",
+				Zone:        zd.ZoneName,
+				Algorithm:   alg,
+				State:       Sig0StateActive,
+				ParentState: 255,
+				Creator:     "del-sync-setup",
 			}
 			resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
 			if err != nil {

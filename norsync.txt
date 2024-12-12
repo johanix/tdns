@@ -1,0 +1,6 @@
+.vscode
+.git/
+agent/tdns-agent
+cli/tdns-cli
+dog/dog
+server/tdns-server

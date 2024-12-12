@@ -36,11 +36,11 @@ func (kdb *KeyDB) Sig0TrustMgmt(tx *Tx, tp TruststorePost) (*TruststoreResponse,
 
 	const (
 		addkeysql = `
-INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, autokeyboot, dnssecvalidated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		getallchildsig0keyssql = `
-SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore`
+SELECT zonename, keyid, validated, autokeyboot, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
-SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
+SELECT zonename, keyid, validated, autokeyboot, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
 		deleteSig0KeySql = `
@@ -83,11 +83,11 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 		var keyname, keyrrstr, source string
 		var keyid int
-		var validated, dnssecvalidated, trusted bool
+		var validated, autokeyboot, dnssecvalidated, trusted bool
 
 		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrrstr)
+			err := rows.Scan(&keyname, &keyid, &validated, &autokeyboot, &dnssecvalidated, &trusted, &source, &keyrrstr)
 			if err != nil {
 				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
@@ -95,6 +95,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			tmp2[mapkey] = Sig0Key{
 				Name:            keyname,
 				Validated:       validated,
+				AutoKeyBoot:     autokeyboot,
 				DnssecValidated: dnssecvalidated,
 				Trusted:         trusted,
 				Source:          source,
@@ -108,7 +109,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		// 1. If src=file and key is supplied then add it (but as untrusted)
 		// 2. If src=dns then schedule some soort of DNS fetching exercise.
 		if tp.Src == "file" {
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, false, false, false, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, false, false, false, false, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
@@ -117,7 +118,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d added (not yet trusted)", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "keystore" {
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, true, false, true, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, true, false, false, true, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
@@ -127,7 +128,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			}
 		} else if tp.Src == "child-update" {
 			// dump.P(tp)
-			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
+			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.AutoKeyBoot, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
 				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
 				resp.Error = true
@@ -152,9 +153,9 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 		var zone, keyrr, source string
 		var keyid int
-		var trusted, validated, dnssecvalidated bool
+		var trusted, validated, autokeyboot, dnssecvalidated bool
 
-		err := row.Scan(&zone, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrr)
+		err := row.Scan(&zone, &keyid, &validated, &autokeyboot, &dnssecvalidated, &trusted, &source, &keyrr)
 		if err != nil {
 			log.Printf("Error: %v", err)
 			if err == sql.ErrNoRows {
@@ -274,12 +275,12 @@ func (kdb *KeyDB) LoadSig0ChildKeys() error {
 	const (
 		loadsig0sql = "SELECT zonename, keyid, trusted, validated, keyrr FROM Sig0TrustStore"
 		addkeysql   = `
-INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, trusted, validated, source, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, trusted, autokeyboot, validated, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		getonechildsig0keyssql = `
 SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		insertchildsig0key = `
-       	INSERT OR REPLACE INTO Sig0TrustStore(zonename, keyid, trusted, validated, source, keyrr)
-       VALUES (?, ?, ?, ?, ?, ?)`
+       	INSERT OR REPLACE INTO Sig0TrustStore(zonename, keyid, trusted, autokeyboot, validated, source, keyrr)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
 	)
 
 	log.Printf("*** Enter LoadChildSig0Keys() ***")
@@ -293,10 +294,10 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 
 	var keyname, keyrrstr string
 	var keyid int
-	var trusted, validated bool
+	var trusted, autokeyboot, validated bool
 
 	for rows.Next() {
-		err := rows.Scan(&keyname, &keyid, &trusted, &validated, &keyrrstr)
+		err := rows.Scan(&keyname, &keyid, &trusted, &autokeyboot, &validated, &keyrrstr)
 		if err != nil {
 			return fmt.Errorf("Error from rows.Scan(): %v", err)
 		}
@@ -309,10 +310,11 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 		if keyrr, ok := rr.(*dns.KEY); ok {
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
 			kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
-				Name:      keyname,
-				Validated: validated,
-				Trusted:   trusted,
-				Key:       *keyrr,
+				Name:        keyname,
+				Validated:   validated,
+				AutoKeyBoot: autokeyboot,
+				Trusted:     trusted,
+				Key:         *keyrr,
 			})
 		}
 	}
@@ -348,12 +350,13 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 				log.Printf("* LoadChildSig0Keys: loading key %s", k)
 				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
 				kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
-					Name:      k,
-					Keyid:     keyrr.KeyTag(),
-					Validated: true, // always trust config
-					Trusted:   true, // always trust config
-					Source:    "file",
-					Key:       *keyrr,
+					Name:        k,
+					Keyid:       keyrr.KeyTag(),
+					Validated:   true, // always trust config
+					AutoKeyBoot: false,
+					Trusted:     true, // always trust config
+					Source:      "file",
+					Key:         *keyrr,
 				})
 				_, err = tx.Exec(insertchildsig0key, k, keyrr.KeyTag(), true, true, "file", keyrr.String())
 				if err != nil {
@@ -385,7 +388,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	}
 
 	const (
-		fetchsig0trustanchor = "SELECT validated, dnssecvalidated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
+		fetchsig0trustanchor = "SELECT validated, autokeyboot, dnssecvalidated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
 	)
 
 	// 2. Try to fetch the key from the Sig0TrustStore database
@@ -396,9 +399,9 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	defer rows.Close()
 
 	for rows.Next() {
-		var validated, dnssecvalidated, trusted bool
+		var validated, autokeyboot, dnssecvalidated, trusted bool
 		var keyrrstr string
-		err = rows.Scan(&validated, &dnssecvalidated, &trusted, &keyrrstr)
+		err = rows.Scan(&validated, &autokeyboot, &dnssecvalidated, &trusted, &keyrrstr)
 		if err != nil {
 			return nil, err
 		}
@@ -413,6 +416,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 		sk := Sig0Key{
 			Name:            signer,
 			Validated:       validated,
+			AutoKeyBoot:     autokeyboot,
 			DnssecValidated: dnssecvalidated,
 			Trusted:         trusted,
 			Key:             *keyrr,

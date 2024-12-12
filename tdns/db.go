@@ -18,6 +18,7 @@ func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Commit()
 	tx.KeyDB.Ctx = ""
+	tx.KeyDB.tx.Unlock()
 	if err != nil {
 		log.Printf("<--- Error committing KeyDB transaction (%s): %v", tx.context, err)
 	}
@@ -28,6 +29,7 @@ func (tx *Tx) Rollback() error {
 	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Rollback()
 	tx.KeyDB.Ctx = ""
+	tx.KeyDB.tx.Unlock()
 	if err != nil {
 		log.Printf("<--- Error rolling back KeyDB transaction (%s): %v", tx.context, err)
 	}
@@ -63,6 +65,7 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
+	db.tx.Lock()
 	if db.Ctx != "" {
 		log.Printf("<--- Error: KeyDB transaction already in progress: %s", db.Ctx)
 		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
@@ -143,7 +146,7 @@ func NewKeyDB(dbfile string, force bool) (*KeyDB, error) {
 		TruststoreSig0Cache: NewSig0StoreT(),
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
-		UpdateTrustQ:        make(chan UpdateTrustRequest),
+		KeyBootstrapperQ:    make(chan KeyBootstrapperRequest),
 	}, nil
 }
 

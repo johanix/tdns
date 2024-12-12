@@ -41,4 +41,6 @@ func init() {
 
 	// From ../libcli/commands.go:
 	rootCmd.AddCommand(cli.StopCmd)
+
+	rootCmd.AddCommand(cli.KeyStateCmd)
 }

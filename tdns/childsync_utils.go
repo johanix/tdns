@@ -53,22 +53,28 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 }
 
 type UpdateResult struct {
-	EDEFound     bool
-	EDECode      uint16
-	EDEMessage   string
-	EDESender    string
+	EDEFound   bool
+	EDECode    uint16
+	EDEMessage string
+	EDESender  string
+	//KeyStateFound   bool
+	//KeyState        uint8
+	//KeyStateMessage string
 	Rcode        int
 	TargetStatus map[string]TargetUpdateStatus
 }
 
 type TargetUpdateStatus struct {
-	Sender     string
-	Rcode      int
-	Error      bool
-	ErrorMsg   string
-	EDEFound   bool
-	EDECode    uint16
-	EDEMessage string
+	Sender          string
+	Rcode           int
+	Error           bool
+	ErrorMsg        string
+	EDEFound        bool
+	EDECode         uint16
+	EDEMessage      string
+	KeyStateFound   bool
+	KeyState        uint8
+	KeyStateMessage string
 }
 
 // Note: the target.Addresses must already be in addr:port format.
@@ -89,6 +95,9 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, Upda
 	var edeFound bool
 	var edeCode uint16
 	var edeMessage, edeSender string
+	var keystateFound bool
+	var keystate uint8
+	var keystateMessage string
 
 	for _, dst := range addrs {
 		if Globals.Verbose {
@@ -113,6 +122,14 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, Upda
 			continue
 		}
 
+		keystateopt, _ := ExtractKeyStateFromMsg(res)
+
+		if keystateopt != nil {
+			keystateFound = true
+			keystate = keystateopt.KeyState
+			keystateMessage = keystateopt.ExtraText
+		}
+
 		edeFound, edeCode, edeMessage = ExtractEDEFromMsg(res)
 		log.Printf("after ExtractEDEFromMsg: EDE found: %t, code: %d, message: %s", edeFound, edeCode, edeMessage)
 		if edeFound {
@@ -120,11 +137,14 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, Upda
 			log.Printf("EDE Code: %d, EDE Message: %s", edeCode, edeMessage)
 		}
 		ur.TargetStatus[dst] = TargetUpdateStatus{
-			Rcode:      res.Rcode,
-			EDEFound:   edeFound,
-			EDECode:    edeCode,
-			EDEMessage: edeMessage,
-			Sender:     edeSender,
+			Rcode:           res.Rcode,
+			EDEFound:        edeFound,
+			EDECode:         edeCode,
+			EDEMessage:      edeMessage,
+			Sender:          edeSender,
+			KeyStateFound:   keystateFound,
+			KeyState:        keystate,
+			KeyStateMessage: keystateMessage,
 		}
 
 		if res.Rcode != dns.RcodeSuccess {

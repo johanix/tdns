@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -331,10 +332,97 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	// If there is delegation data and an NS RRset is present, return a referral
 	if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
 		log.Printf("---> Sending referral for %s", qname)
+
+		if qtype == dns.TypeANY {
+			fmt.Printf("QueryResponder: ANY query for %s\n", qname)
+			// Kontrollera EDNS0 options för ANY-frågor
+
+			keystate, _ := ExtractKeyStateFromMsg(r)
+			if keystate != nil {
+
+				response, _ := processKeyState(keystate, kdb, qname)
+
+				keyStateOpt := CreateKeyStateOption(
+					response.KeyID,
+					response.KeyState,
+					response.ExtraText,
+				)
+				//opt.Option = append(opt.Option, keyStateOpt)
+				//m.IsEdns0().Option = append(m.IsEdns0().Option, keyStateOpt)
+
+				// Add the option to the Extra section of the message
+				m.Extra = []dns.RR{&dns.OPT{
+					Hdr: dns.RR_Header{
+						Name:   ".",
+						Rrtype: dns.TypeOPT,
+						Class:  dns.DefaultMsgSize,
+					},
+					Option: []dns.EDNS0{keyStateOpt},
+				}}
+
+				// Hämta aktiv SIG(0) nyckel för parent
+				sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+				if err != nil {
+					log.Printf("Error getting active SIG(0) key: %v", err)
+					w.WriteMsg(m)
+					return nil
+				}
+
+				// Signera svaret med parent's SIG(0) nyckel
+				signedMsg, err := SignMsg(*m, zd.ZoneName, sak)
+				if err != nil {
+					log.Printf("Error signing KeyState response: %v", err)
+					w.WriteMsg(m)
+					return nil
+				}
+
+				w.WriteMsg(signedMsg)
+				return nil
+
+			}
+
+		}
+
 		m.MsgHdr.Authoritative = false
 		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 		m.Extra = append(m.Extra, cdd.A_glue...)
 		m.Extra = append(m.Extra, cdd.AAAA_glue...)
+
+		fmt.Printf("\n;; HEADER SECTION:\n")
+		fmt.Printf(";; opcode: %s, status: %s, id: %d\n", dns.OpcodeToString[m.Opcode], dns.RcodeToString[m.Rcode], m.Id)
+		fmt.Printf(";; flags: %v; QUERY: %d, ANSWER: %d, AUTHORITY: %d, ADDITIONAL: %d\n",
+			m.MsgHdr, len(m.Question), len(m.Answer), len(m.Ns), len(m.Extra))
+
+		fmt.Printf("\n;; QUESTION SECTION:\n")
+		for _, q := range m.Question {
+			fmt.Printf("%s\n", q.String())
+		}
+
+		fmt.Printf("\n;; ANSWER SECTION:\n")
+		for _, rr := range m.Answer {
+			fmt.Printf("%s\n", rr.String())
+		}
+
+		fmt.Printf("\n;; AUTHORITY SECTION:\n")
+		for _, rr := range m.Ns {
+			fmt.Printf("%s\n", rr.String())
+		}
+
+		fmt.Printf("\n;; ADDITIONAL SECTION:\n")
+		for _, rr := range m.Extra {
+			fmt.Printf("%s\n", rr.String())
+		}
+
+		if opt := m.IsEdns0(); opt != nil {
+			fmt.Printf("\n;; OPT PSEUDOSECTION:\n")
+			fmt.Printf(";; EDNS: version: %d, flags: %d; udp: %d\n",
+				opt.Version(), 0, opt.UDPSize())
+
+			for _, option := range opt.Option {
+				fmt.Printf(";; EDNS OPTION: %v\n", option)
+			}
+		}
+
 		w.WriteMsg(m)
 		return nil
 	}

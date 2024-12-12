@@ -74,6 +74,7 @@ func SetupRouter(conf *tdns.Config) *mux.Router {
 
 	sr.HandleFunc("/ping", tdns.APIping(conf, conf.AppName, conf.AppVersion, conf.ServerBootTime)).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
+	sr.HandleFunc("/keystate", kdb.APIkeystate()).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	// The /command endpoint is the only one not in the tdns lib
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")

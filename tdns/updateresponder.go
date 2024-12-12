@@ -86,6 +86,26 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		}
 	}
 
+	autoKeyBoot := false
+
+	keystate, _ := ExtractKeyStateFromMsg(r)
+	needsSignature := false
+
+	if keystate != nil {
+		needsSignature = true
+		if keystate.KeyState == KeyStateRequestAutoBootstrap {
+			fmt.Printf("UpdateResponder: Child %s requests automatic bootstrap of key %d", qname, keystate.KeyID)
+			autoKeyBoot = true
+			AttachKeyStateToResponse(m, &KeyStateOption{keystate.KeyID, 9, "test"})
+		}
+
+		if keystate.KeyState == KeyStateRequestManualBootstrap {
+			fmt.Printf("UpdateResponder: Child %s requests manual bootstrap of key %d", qname, keystate.KeyID)
+			autoKeyBoot = false
+			AttachKeyStateToResponse(m, &KeyStateOption{keystate.KeyID, 10, "test"})
+		}
+	}
+
 	// example of how to populate an OPT RR. This is a DNS Cookie, we're interested in the EDE.
 	//	o := new(dns.OPT)
 	// o.Hdr.Name = "."
@@ -218,6 +238,27 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	log.Printf("UpdateResponder: %+v %+v %+v %+v %+v", dur.Status.Type, dur.Status.ValidationRcode, dur.Status.Validated, dur.Status.ValidatedByTrustedKey, dur.Status.SignerName)
 	// send response
 	m = m.SetRcode(m, int(dur.Status.ValidationRcode))
+
+	// Innan vi skickar svaret, signera det om det behövs
+	if needsSignature {
+		// Hämta parent's aktiva SIG(0) nyckel
+		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+		if err != nil {
+			zd.Logger.Printf("Error getting active SIG(0) key for signing response: %v", err)
+			w.WriteMsg(m)
+			return err
+		}
+
+		// Signera svaret
+		signedMsg, err := SignMsg(*m, zd.ZoneName, sak)
+		if err != nil {
+			zd.Logger.Printf("Error signing KeyState response: %v", err)
+			w.WriteMsg(m)
+			return err
+		}
+		m = signedMsg
+	}
+
 	w.WriteMsg(m)
 
 	if dur.Status.ValidationRcode != dns.RcodeSuccess {
@@ -260,12 +301,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// send into suitable channel for pending updates
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
 	updateq <- UpdateRequest{
-		Cmd:       dur.Status.Type,
-		ZoneName:  zone,
-		Actions:   r.Ns,
-		Validated: dur.Status.Validated,
-		Trusted:   dur.Status.ValidatedByTrustedKey,
-		Status:    dur.Status,
+		Cmd:         dur.Status.Type,
+		ZoneName:    zone,
+		Actions:     r.Ns,
+		Validated:   dur.Status.Validated,
+		Trusted:     dur.Status.ValidatedByTrustedKey,
+		Status:      dur.Status,
+		AutoKeyBoot: autoKeyBoot,
 	}
 	return nil
 }

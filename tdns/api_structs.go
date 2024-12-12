@@ -8,6 +8,22 @@ import (
 	"time"
 )
 
+type KeyStatePost struct {
+	Command   string
+	Zone      string
+	KeyID     uint16
+	KeyState  uint8
+	ExtraText string
+}
+
+type KeyStateResponse struct {
+	Error    bool
+	ErrorMsg string
+	KeyState *KeyStateOption
+	Time     time.Time
+	AppName  string
+}
+
 type KeystorePost struct {
 	Command         string // "sig0"
 	SubCommand      string // "list" | "add" | "delete" | ...
@@ -22,6 +38,7 @@ type KeystorePost struct {
 	DnskeyRR        string
 	PrivateKeyCache *PrivateKeyCache
 	State           string
+	ParentState     uint8
 	Creator         string
 }
 
@@ -44,6 +61,7 @@ type TruststorePost struct {
 	Keyname         string
 	Keyid           int
 	Validated       bool
+	AutoKeyBoot     bool // Child requests automatic bootstrap of the key
 	DnssecValidated bool
 	Trusted         bool
 	Src             string // "dns" | "file"

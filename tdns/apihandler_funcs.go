@@ -462,3 +462,97 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+func (kdb *KeyDB) APIkeystate() func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var ksp KeyStatePost
+		err := decoder.Decode(&ksp)
+		if err != nil {
+			log.Println("APIkeystate: error decoding keystate post:", err)
+		}
+
+		log.Printf("API: received /keystate request (cmd: %s) from %s.\n",
+			ksp.Command, r.RemoteAddr)
+
+		resp := KeyStateResponse{
+			Time: time.Now(),
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}()
+
+		// Hitta zonen
+		zd, exist := Zones.Get(ksp.Zone)
+		if !exist {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", ksp.Zone)
+			return
+		}
+
+		switch ksp.Command {
+		case "inquire":
+			// Skapa en DNS-förfrågan med EDNS(0) KeyState option
+			m := new(dns.Msg)
+			m.SetQuestion(dns.Fqdn(ksp.Zone), dns.TypeANY)
+
+			// Lägg till EDNS(0) KeyState option
+			keyStateOpt := CreateKeyStateOption(ksp.KeyID, ksp.KeyState, ksp.ExtraText)
+			o := new(dns.OPT)
+			o.Hdr.Name = "."
+			o.Hdr.Rrtype = dns.TypeOPT
+			o.Option = []dns.EDNS0{keyStateOpt}
+			m.Extra = append(m.Extra, o)
+
+			// Hämta parent's adress för uppdateringar
+			dsync_target, err := LookupDSYNCTarget(ksp.Zone, Globals.IMR, dns.TypeANY, SchemeUpdate)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Failed to lookup DSYNC target: %v", err)
+				return
+			}
+
+			// Hämta aktiv nyckel för signering
+			sak, err := zd.KeyDB.GetSig0Keys(ksp.Zone, Sig0StateActive)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Could not fetch active key: %v", err)
+				return
+			}
+
+			// Signera meddelandet
+			signedMsg, err := SignMsg(*m, ksp.Zone, sak)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Failed to sign message: %v", err)
+				return
+			}
+
+			// Skicka det signerade meddelandet
+			c := new(dns.Client)
+			c.Timeout = 5 * time.Second
+			r, _, err := c.Exchange(signedMsg, dsync_target.Addresses[0])
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Failed to send DNS query: %v", err)
+				return
+			}
+
+			keystate, err := ExtractKeyStateFromMsg(r)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Failed to extract KeyState from response: %v", err)
+				return
+			}
+
+			//		fmt.Printf("KeyState: %+v\n", keystate)
+			resp.KeyState = keystate
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", ksp.Command)
+		}
+	}
+}

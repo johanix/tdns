@@ -261,7 +261,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 
 	const (
 		addSig0KeySql = `
-INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
+INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, parentstate, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		addDnssecKeySql = `
 INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	)
@@ -287,10 +287,12 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 	if state == "" {
 		state = "active"
 	}
+	// Default parent state is unknown state
+	parentstate := uint8(255)
 
 	switch rrtype {
 	case dns.TypeKEY:
-		_, err = tx.Exec(addSig0KeySql, owner, state, pkc.KeyId,
+		_, err = tx.Exec(addSig0KeySql, owner, state, parentstate, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], creator, pkc.PrivateKey, pkc.KeyRR.String())
 
 	case dns.TypeDNSKEY:

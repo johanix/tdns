@@ -26,6 +26,7 @@ type UpdateRequest struct {
 	Validated      bool     // Signature over update msg is validated
 	Trusted        bool     // Content of update is trusted (via validation or policy)
 	InternalUpdate bool     // Internal update, not a DNS UPDATE from the outside
+	AutoKeyBoot    bool     // Child requests automatic bootstrap of the key
 	Status         *UpdateStatus
 }
 
@@ -166,13 +167,14 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 
 						if keyrr, ok := rr.(*dns.KEY); ok {
 							tppost := TruststorePost{
-								SubCommand: subcommand,
-								Src:        "child-update",
-								Keyname:    keyrr.Header().Name,
-								Keyid:      int(keyrr.KeyTag()),
-								KeyRR:      rr.String(),
-								Validated:  ur.Validated,
-								Trusted:    ur.Trusted,
+								SubCommand:  subcommand,
+								Src:         "child-update",
+								Keyname:     keyrr.Header().Name,
+								Keyid:       int(keyrr.KeyTag()),
+								KeyRR:       rr.String(),
+								AutoKeyBoot: ur.AutoKeyBoot,
+								Validated:   ur.Validated,
+								Trusted:     ur.Trusted,
 							}
 
 							_, err := kdb.Sig0TrustMgmt(tx, tppost)
@@ -180,16 +182,17 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 							}
 
-							if ur.Validated && !ur.Trusted {
-								utr := UpdateTrustRequest{
-									Cmd:      "VERIFY",
+							// Send the key to the bootstrapper if the key is validated and the child requests automatic bootstrap
+							if ur.Validated && !ur.Trusted && ur.AutoKeyBoot {
+								utr := KeyBootstrapperRequest{
+									Cmd:      kbCmdBootstrap,
 									KeyName:  keyrr.Header().Name,
 									ZoneName: ur.ZoneName,
 									Key:      keyrr.String(),
-									Keyid:    int(keyrr.KeyTag()),
+									Keyid:    keyrr.KeyTag(),
 									ZoneData: zd,
 								}
-								go func() { kdb.UpdateTrustQ <- utr }()
+								go func() { kdb.KeyBootstrapperQ <- utr }()
 							}
 
 						} else {

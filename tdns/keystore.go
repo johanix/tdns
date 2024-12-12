@@ -18,12 +18,13 @@ func (kdb *KeyDB) Sig0KeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error
 
 	const (
 		addSig0KeySql = `
-INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
-		setStateSig0KeySql = "UPDATE Sig0KeyStore SET state=? WHERE zonename=? AND keyid=?"
-		deleteSig0KeySql   = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
-		getAllSig0KeysSql  = `SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore`
-		getSig0KeySql      = `
-SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, parentstate, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		setStateSig0KeySql       = "UPDATE Sig0KeyStore SET state=? WHERE zonename=? AND keyid=?"
+		setParentStateSig0KeySql = "UPDATE Sig0KeyStore SET parentstate=? WHERE zonename=? AND keyid=?"
+		deleteSig0KeySql         = `DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+		getAllSig0KeysSql        = `SELECT zonename, state, parentstate, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore`
+		getSig0KeySql            = `
+SELECT zonename, state, parentstate, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 	)
 
 	var resp = KeystoreResponse{Time: time.Now()}
@@ -44,10 +45,11 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 		var keyname, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid int
+		var parentstate uint8
 
 		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
+			err := rows.Scan(&keyname, &state, &parentstate, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
 			if err != nil {
 				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
 			}
@@ -56,12 +58,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = Sig0Key{
-				Name:       keyname,
-				State:      state,
-				Algorithm:  algorithm,
-				Creator:    creator,
-				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:4], privatekey[len(privatekey)-4:]),
-				Keystr:     keyrrstr,
+				Name:        keyname,
+				State:       state,
+				Algorithm:   algorithm,
+				Creator:     creator,
+				PrivateKey:  fmt.Sprintf("%s*****%s", privatekey[0:4], privatekey[len(privatekey)-4:]),
+				Keystr:      keyrrstr,
+				ParentState: parentstate,
 			}
 		}
 		resp.Sig0keys = tmp2
@@ -73,7 +76,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		log.Printf("[Sig0KeyMgmt]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
 		// res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
 		// 	dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.KeyRR.String())
-		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
+		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, kp.ParentState, pkc.KeyRR.KeyTag(),
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.PrivateKey, pkc.KeyRR.String())
 		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
@@ -149,6 +152,20 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StatePublished)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateActive)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateRetired)
+
+	case "setparentstate":
+		res, err = tx.Exec(setParentStateSig0KeySql, kp.ParentState, kp.Keyname, kp.Keyid)
+		if err != nil {
+			log.Printf("Error: %v", err)
+			return &resp, err
+		} else {
+			rows, _ := res.RowsAffected()
+			if rows > 0 {
+				resp.Msg = fmt.Sprintf("Updated %d rows", rows)
+			} else {
+				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
+			}
+		}
 
 	case "delete":
 		const getSig0KeySql = `

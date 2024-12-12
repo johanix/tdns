@@ -111,12 +111,13 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 		// zd.Logger.Printf(msg)
 
 		kp := KeystorePost{
-			Command:    "sig0-mgmt",
-			SubCommand: "generate",
-			Zone:       zd.ZoneName,
-			Algorithm:  alg,
-			State:      Sig0StateActive,
-			Creator:    "bootstrap-sig0",
+			Command:     "sig0-mgmt",
+			SubCommand:  "generate",
+			Zone:        zd.ZoneName,
+			Algorithm:   alg,
+			State:       Sig0StateActive,
+			ParentState: 255,
+			Creator:     "bootstrap-sig0",
 		}
 		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
 		if err != nil {
@@ -143,6 +144,8 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 
 func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error, UpdateResult) {
 	var err error
+	fmt.Printf("BERRA - BootstrapSig0KeyWithParent(%s)\n", zd.ZoneName)
+
 	// 1. Get the parent zone
 	if zd.Parent == "" {
 		zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
@@ -168,12 +171,13 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error, Update
 		//		zd.Logger.Printf(msg)
 
 		kp := KeystorePost{
-			Command:    "sig0-mgmt",
-			SubCommand: "generate",
-			Zone:       zd.ZoneName,
-			Algorithm:  alg,
-			State:      Sig0StateActive,
-			Creator:    "bootstrap-sig0",
+			Command:     "sig0-mgmt",
+			SubCommand:  "generate",
+			Zone:        zd.ZoneName,
+			Algorithm:   alg,
+			State:       Sig0StateActive,
+			ParentState: 255,
+			Creator:     "bootstrap-sig0",
 		}
 		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
 		if err != nil {
@@ -211,6 +215,23 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error, Update
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to create update message: %v", zd.ZoneName, err), err, UpdateResult{}
 	}
 
+	const OptionCodeKeyState = 65002
+	// Create the KeyState EDNS(0) option
+	keyStateOption := &dns.EDNS0_LOCAL{
+		Code: OptionCodeKeyState,
+		Data: createKeyStateData(pkc.KeyId, 0, "Automatic requested"),
+	}
+
+	// Add the option to the Extra section of the message
+	msg.Extra = []dns.RR{&dns.OPT{
+		Hdr: dns.RR_Header{
+			Name:   ".",
+			Rrtype: dns.TypeOPT,
+			Class:  dns.DefaultMsgSize,
+		},
+		Option: []dns.EDNS0{keyStateOption},
+	}}
+
 	msg, err = SignMsg(*msg, zd.ZoneName, sak)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to sign message: %v", zd.ZoneName, err), err, UpdateResult{}
@@ -235,6 +256,57 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error, Update
 			}
 		}()
 
+		if ur.TargetStatus[dsyncTarget.Addresses[0]].KeyStateFound {
+			//response, _ := processKeyState(keystate, zd.KeyDB, zd.ZoneName)
+			parentstate := ur.TargetStatus[dsyncTarget.Addresses[0]].KeyState
+			//AttachKeyStateToResponse(msg, response)
+
+			fmt.Printf("BootstrapSig0KeyWithParent(%s): parentstate: %d\n", zd.ZoneName, parentstate)
+
+			kpparent := KeystorePost{
+				Command:     "sig0-mgmt",
+				SubCommand:  "setparentstate",
+				Keyname:     pkc.KeyRR.Header().Name,
+				Keyid:       uint16(pkc.KeyRR.KeyTag()),
+				ParentState: parentstate,
+			}
+
+			resp, err := zd.KeyDB.Sig0KeyMgmt(tx, kpparent)
+			if err != nil {
+				return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to set parent state of key %d to %d: %v",
+					zd.ZoneName, pkc.KeyRR.KeyTag(), parentstate, err), err, UpdateResult{}
+			}
+			zd.Logger.Printf(resp.Msg)
+		}
+		/*
+			if opt := ur.Status.IsEdns0(); opt != nil {
+				for _, option := range opt.Option {
+					if local, ok := option.(*dns.EDNS0_LOCAL); ok {
+						fmt.Printf("QueryResponder: Found KeyState option\n")
+						fmt.Printf("QueryResponder: local.Code: %d\n", local.Code)
+						if local.Code == OptcodeKeyState {
+							keystate, err := ParseKeyStateOption(local)
+							if err != nil {
+								log.Printf("Error parsing KeyState option: %v", err)
+								continue
+							}
+
+							response, err := processKeyState(keystate, kdb, qname)
+							if err != nil {
+								log.Printf("Error handling KeyState request: %v", err)
+								continue
+							}
+							fmt.Printf("QueryResponder: Found KeyState response\n")
+							// Lägg till KeyState response som EDNS0 option
+							AttachKeyStateToResponse(msg, response)
+
+
+						}
+					}
+				}
+			}
+		*/
+
 		// 5. Change state of the new key from "created" to "active".
 		kp := KeystorePost{
 			Command:    "sig0-mgmt",
@@ -245,6 +317,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, error, Update
 		}
 
 		resp, err := zd.KeyDB.Sig0KeyMgmt(tx, kp)
+
 		if err != nil {
 			str := fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to change state of key %d to active: %v",
 				zd.ZoneName, pkc.KeyRR.KeyTag(), err)
@@ -310,12 +383,13 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	//		return "", 0, 0, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
 	//	}
 	kp := KeystorePost{
-		Command:    "sig0-mgmt",
-		SubCommand: "generate",
-		Zone:       zd.ZoneName,
-		Algorithm:  alg,
-		State:      Sig0StateCreated,
-		Creator:    "rollover-sig0",
+		Command:     "sig0-mgmt",
+		SubCommand:  "generate",
+		Zone:        zd.ZoneName,
+		Algorithm:   alg,
+		State:       Sig0StateCreated,
+		Creator:     "rollover-sig0",
+		ParentState: 255,
 	}
 	kpresp, err = zd.KeyDB.Sig0KeyMgmt(tx, kp)
 	if err != nil {

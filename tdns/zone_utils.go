@@ -735,6 +735,12 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
+		err := zd.InitializeParentSig0Key()
+		if err != nil {
+			zd.Logger.Printf("Error initializing parent SIG(0) key for zone %s: %v", zd.ZoneName, err)
+			return err
+		}
+
 		dsync_rrset, exist := apex.RRtypes.Get(TypeDSYNC)
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify

@@ -237,3 +237,37 @@ func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, er
 	}
 	return nil, nil
 }
+
+/*
+func ValidateKeyStateResponse(msg *dns.Msg, kdb *KeyDB) error {
+	if len(msg.Extra) == 0 {
+		return fmt.Errorf("no SIG(0) signature found in response")
+	}
+
+	// Hitta SIG(0) signaturen
+	var sig *dns.SIG
+	for _, rr := range msg.Extra {
+		if s, ok := rr.(*dns.SIG); ok && s.Header().Rrtype == dns.TypeSIG {
+			sig = s
+			break
+		}
+	}
+
+	if sig == nil {
+		return fmt.Errorf("no SIG(0) signature found")
+	}
+
+	// Hämta publik nyckel för validering
+	pubkey, err := kdb.GetTrustedKey(sig.SignerName, sig.KeyTag)
+	if err != nil {
+		return fmt.Errorf("failed to get trusted key: %v", err)
+	}
+
+	// Validera signaturen
+	if err := msg.VerifyWithKey(pubkey); err != nil {
+		return fmt.Errorf("signature validation failed: %v", err)
+	}
+
+	return nil
+}
+*/

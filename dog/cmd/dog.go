@@ -118,6 +118,13 @@ var rootCmd = &cobra.Command{
 				}
 				do_bit = options["do_bit"] == "true"
 				m.SetEdns0(4096, do_bit)
+
+				// Lägg till KeyState EDNS0 option för ANY-frågor
+				if rrtype == dns.TypeANY {
+					keyStateOpt := tdns.CreateKeyStateOption(45421, tdns.KeyStateInquiryKey, "")
+					m.IsEdns0().Option = append(m.IsEdns0().Option, keyStateOpt)
+				}
+
 				start := time.Now()
 				res, err := dns.Exchange(m, server)
 				elapsed := time.Since(start)

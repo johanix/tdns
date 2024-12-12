@@ -74,6 +74,7 @@ func SetupRouter(conf *tdns.Config) *mux.Router {
 
 	sr.HandleFunc("/ping", tdns.APIping(conf, conf.AppName, conf.AppVersion, conf.ServerBootTime)).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
+	sr.HandleFunc("/keystate", kdb.APIkeystate()).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	sr.HandleFunc("/zone", tdns.APIzone(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/delegation", tdns.APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
