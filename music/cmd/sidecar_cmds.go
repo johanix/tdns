@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/music"
 	tdns "github.com/johanix/tdns/tdns"
+	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
@@ -143,10 +145,78 @@ var sidecarHelloCmd = &cobra.Command{
 	},
 }
 
+var scUri, scAddr string
+var scPort uint16
+
+var sidecarDebugHelloCmd = &cobra.Command{
+	Use:   "debug-hello",
+	Short: "Send a hello message to a sidecar specified on the command line",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename", "port", "addr", "uri")
+
+		out := []string{}
+		if tdns.Globals.ShowHeaders {
+			out = append(out, "IDENTITY|METHOD|RESPONSE")
+		}
+
+		sidecar := &music.Sidecar{
+			Identity: "debug-sidecar",
+			Methods:  map[string]bool{"API": true, "DNS": true},
+			Details: map[tdns.MsignerMethod]music.SidecarDetails{
+				tdns.MsignerMethodAPI: {
+					Port:    scPort,
+					Addrs:   []string{scAddr},
+					BaseUri: scUri,
+					TlsaRR: &dns.TLSA{
+						Hdr: dns.RR_Header{
+							Name:   "api.debug-sidecar. IN TLSA 3 1 1 123132345345345",
+							Rrtype: dns.TypeTLSA,
+							Class:  dns.ClassINET,
+							Ttl:    3600,
+						},
+					},
+					LastUpdate: time.Now(),
+				},
+				tdns.MsignerMethodDNS: {
+					Port:       scPort,
+					Addrs:      []string{scAddr},
+					LastUpdate: time.Now(),
+				},
+			},
+		}
+
+		err := sidecar.NewMusicSyncApiClient(sidecar.Identity, tdns.Globals.BaseUri, "", "", "insecure")
+		if err != nil {
+			log.Fatalf("failed to create MUSIC API client for %s: %v", sidecar.Identity, err)
+		}
+
+		fmt.Printf("Sidecar: %s\n", sidecar.Identity)
+		err = sidecar.SendHello()
+		if err != nil {
+			log.Printf("Error sending hello to sidecar %s: %v", sidecar.Identity, err)
+		}
+		if sidecar.Methods["API"] {
+			fmt.Printf("API method\n")
+			out = append(out, fmt.Sprintf("%s|%s|%s", sidecar.Identity, "API", err))
+		}
+
+		if sidecar.Methods["DNS"] {
+			fmt.Printf("DNS method\n")
+			out = append(out, fmt.Sprintf("%s|%s|%s", sidecar.Identity, "DNS", err))
+		}
+
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	},
+}
+
 func init() {
 	//	rootCmd.AddCommand(showCmd)
-	SidecarCmd.AddCommand(sidecarLocateCmd, sidecarIdentifyCmd, sidecarHelloCmd)
+	SidecarCmd.AddCommand(sidecarLocateCmd, sidecarIdentifyCmd, sidecarHelloCmd, sidecarDebugHelloCmd)
 
 	SidecarCmd.PersistentFlags().StringVarP(&sidecarId, "id", "i", "", "Identity of sidecar")
 	SidecarCmd.PersistentFlags().StringVarP(&sidecarMethod, "method", "m", "", "Sidecar sync method")
+
+	sidecarDebugHelloCmd.PersistentFlags().StringVarP(&tdns.Globals.BaseUri, "uri", "u", "", "URI of sidecar")
+	sidecarDebugHelloCmd.PersistentFlags().StringVarP(&tdns.Globals.Address, "addr", "a", "", "Address of sidecar")
+	sidecarDebugHelloCmd.PersistentFlags().Uint16VarP(&tdns.Globals.Port, "port", "p", 0, "Port of sidecar")
 }

@@ -23,7 +23,10 @@ type GlobalStuff struct {
 	AppMode     string
 	AppVersion  string
 	AppDate     string
-	ShowHeaders bool	// -H in various CLI commands
+	ShowHeaders bool // -H in various CLI commands
+	BaseUri     string
+	Port        uint16
+	Address     string
 }
 
 var Globals = GlobalStuff{

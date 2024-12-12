@@ -47,6 +47,24 @@ func PrepArgs(required ...string) error {
 				os.Exit(1)
 			}
 
+		case "addr":
+			if tdns.Globals.Address == "" {
+				fmt.Printf("Error: address not specified using --addr flag\n")
+				os.Exit(1)
+			}
+
+		case "uri":
+			if tdns.Globals.BaseUri == "" {
+				fmt.Printf("Error: URI not specified using --uri flag\n")
+				os.Exit(1)
+			}
+
+		case "port":
+			if tdns.Globals.Port == 0 {
+				fmt.Printf("Error: port not specified using --port flag\n")
+				os.Exit(1)
+			}
+
 		case "signergroupname":
 			if music.Globals.Sgroupname == "" {
 				fmt.Printf("Error: signer group not specified. Terminating.\n")

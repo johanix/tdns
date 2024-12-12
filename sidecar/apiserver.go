@@ -106,6 +106,7 @@ func MusicSetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("secureRouter: %s", r.URL.Path)
 			// Skip validation for /hello endpoint
 			if r.URL.Path == "/api/v1/hello" {
 				next.ServeHTTP(w, r)
