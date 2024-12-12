@@ -63,22 +63,27 @@ func (sc *Sidecar) NewMusicSyncApiClient(name, baseurl, apikey, authmethod, root
 	if rootcafile == "insecure" {
 		tlsconfig.InsecureSkipVerify = true
 	} else if rootcafile == "tlsa" {
+		// use TLSA RR for verification; InsecureSkipVerify must still be true
+		tlsconfig.InsecureSkipVerify = true
 		// use TLSA RR for verification
 		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			log.Printf("NewMusicSyncApiClient: VerifyPeerCertificate called for %s (have TLSA: %s)", sc.Identity,
+				sc.Details[tdns.MsignerMethodAPI].TlsaRR.String())
 			for _, rawCert := range rawCerts {
 				cert, err := x509.ParseCertificate(rawCert)
 				if err != nil {
 					return fmt.Errorf("failed to parse certificate: %v", err)
 				}
-				if cert.Subject.CommonName != sc.Identity {
+				if cert.Subject.CommonName != "api."+sc.Identity {
 					return fmt.Errorf("unexpected certificate common name (should have been %s)", sc.Identity)
 				}
 
-				err = tdns.VerifyCertAgainstTlsaRR(sc.Details[tdns.MsignerMethodDNS].TlsaRR, rawCert)
+				err = tdns.VerifyCertAgainstTlsaRR(sc.Details[tdns.MsignerMethodAPI].TlsaRR, rawCert)
 				if err != nil {
 					return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 				}
 			}
+			// log.Printf("NewMusicSyncApiClient: VerifyPeerCertificate returning nil (all good)")
 			return nil
 		}
 	} else {
@@ -105,6 +110,8 @@ func (sc *Sidecar) NewMusicSyncApiClient(name, baseurl, apikey, authmethod, root
 	api.ApiClient.Debug = tdns.Globals.Debug
 	api.ApiClient.Verbose = tdns.Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
+
+	// dump.P(tlsconfig)
 
 	if tdns.Globals.Debug {
 		fmt.Printf("Setting up MUSIC Sync API client: %s\n", name)

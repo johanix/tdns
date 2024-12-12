@@ -195,27 +195,32 @@ type Process struct {
 	Desc string
 }
 
-type BeatPost struct {
-	Type  string
-	Name  string
-	Zones []string
+type SidecarBeatPost struct {
+	Type        string
+	Identity    string
+	SharedZones []string
 }
 
-type BeatResponse struct {
+type SidecarBeatResponse struct {
+	Status   string
 	Time     time.Time
 	Client   string
 	Msg      string
 	Error    bool
 	ErrorMsg string
 }
-
-type HelloPost struct {
-	Type  string
-	Name  string
-	Zones []string
+type SidecarHelloPost struct {
+	Type      string
+	Name      string
+	Identity  string
+	Addresses []string
+	Port      uint16
+	TLSA      dns.TLSA
+	Zones     []string
 }
 
-type HelloResponse struct {
+type SidecarHelloResponse struct {
+	Status   string
 	Time     time.Time
 	Client   string
 	Msg      string

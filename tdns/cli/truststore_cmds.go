@@ -103,8 +103,6 @@ func init() {
 	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd, truststoreSig0DeleteCmd, truststoreSig0ListCmd,
 		truststoreSig0TrustCmd, truststoreSig0UntrustCmd)
 
-	// TruststoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
-
 	truststoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	truststoreSig0TrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 	truststoreSig0UntrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")

@@ -553,7 +553,7 @@ func PrintZones(zm map[string]music.Zone, showall bool, fsmstatus string) {
 		var out []string
 		var zone music.Zone
 
-		if tdns.Globals.Verbose || music.Globals.Showheaders {
+		if tdns.Globals.Verbose || tdns.Globals.ShowHeaders {
 			// out = append(out, "Zone|SignerGroup|Process|State|Timestamp|Next State(s)|ZSK State")
 			if showall {
 				out = append(out, "Zone|SignerGroup|Process|State|Timestamp|Next State(s)")

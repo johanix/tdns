@@ -307,7 +307,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if error != nil {
 			log.Println("JSON parse error: ", error)
 		}
-		fmt.Printf("API%s: received %d bytes of response data: %s\n", method, len(buf), prettyJSON.String())
+		fmt.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
 		fmt.Printf("API%s: end of response\n", method)
 	}
 

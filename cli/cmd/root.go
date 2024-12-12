@@ -44,6 +44,8 @@ func init() {
 		false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
 		false, "verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
+		false, "show headers")
 }
 
 // initConfig reads in config file and ENV variables if set.

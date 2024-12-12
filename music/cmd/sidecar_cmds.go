@@ -175,12 +175,12 @@ var sidecarDebugHelloCmd = &cobra.Command{
 							Ttl:    3600,
 						},
 					},
-					LastUpdate: time.Now(),
+					LastHB: time.Now(),
 				},
 				tdns.MsignerMethodDNS: {
-					Port:       scPort,
-					Addrs:      []string{scAddr},
-					LastUpdate: time.Now(),
+					Port:   scPort,
+					Addrs:  []string{scAddr},
+					LastHB: time.Now(),
 				},
 			},
 		}

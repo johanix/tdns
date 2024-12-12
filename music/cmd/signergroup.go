@@ -97,7 +97,7 @@ func SendSignerGroupCmd(group string, data music.SignerGroupPost) music.SignerGr
 func PrintSignerGroups(sgr music.SignerGroupResponse) {
 	if len(sgr.SignerGroups) > 0 {
 		var out []string
-		if tdns.Globals.Verbose || music.Globals.Showheaders {
+		if tdns.Globals.Verbose || tdns.Globals.ShowHeaders {
 			out = append(out, "Group|Locked|Signers|# Zones|# Proc Zones|Current Process|PendingAddition|PendingRemoval")
 		}
 

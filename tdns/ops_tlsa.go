@@ -62,12 +62,9 @@ func parseCertificate(certPEM string) (string, error) {
 		return "", fmt.Errorf("failed to parse certificate: %v", err)
 	}
 
-	spkiASN1, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal public key: %v", err)
-	}
-
-	hash := sha256.Sum256(spkiASN1)
+	// Use the entire certificate for hashing instead of just the public key
+	hash := sha256.Sum256(cert.Raw)
+	// log.Printf("parseCertificate: hash: %s", hex.EncodeToString(hash[:]))
 	return hex.EncodeToString(hash[:]), nil
 }
 
@@ -105,7 +102,6 @@ func LookupTlsaRR(name string) (*RRset, error) {
 		return nil, fmt.Errorf("no %s TLSA records found", name)
 	}
 
-	// var tlsaRecords []*dns.TLSA
 	var rrset RRset
 	for _, ans := range r.Answer {
 		if tlsa, ok := ans.(*dns.TLSA); ok {
@@ -123,16 +119,24 @@ func LookupTlsaRR(name string) (*RRset, error) {
 }
 
 func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
+	decodedCert, err := hex.DecodeString(tlsarr.Certificate)
+	if err != nil {
+		return fmt.Errorf("failed to decode TLSA certificate: %v", err)
+	}
 	if tlsarr.Usage == 3 {
 		switch tlsarr.MatchingType {
 		case 1: // SHA-256
 			hash := sha256.Sum256(rawcert)
-			if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
+			// log.Printf("hash: %s", hex.EncodeToString(hash[:]))
+			// log.Printf("hash as bytes: %v", hash[:])
+			//log.Printf("cert: %s", tlsarr.Certificate)
+			//log.Printf("cert as bytes: %v", decodedCert)
+			if bytes.Equal(hash[:], decodedCert) {
 				return nil
 			}
 		case 2: // SHA-512
 			hash := sha512.Sum512(rawcert)
-			if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
+			if bytes.Equal(hash[:], decodedCert) {
 				return nil
 			}
 		}

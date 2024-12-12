@@ -136,7 +136,7 @@ type InternalConf struct {
 	DdnsUpdate      chan SignerOp
 	Processes       map[string]FSM
 	MusicSyncQ      chan tdns.MusicSyncRequest
-	HeartbeatQ      chan Heartbeat
+	HeartbeatQ      chan SidecarHeartbeat
 	SidecarId       string
 	UpdateQ         chan tdns.UpdateRequest
 	DeferredUpdateQ chan tdns.DeferredUpdate
@@ -164,7 +164,7 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 				cfgfile, err)
 			return errors.New(msg)
 		} else {
-			if Globals.Debug {
+			if tdns.Globals.Debug {
 				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
 			}
 		}
@@ -183,7 +183,7 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 		if err := validate.Struct(&config); err != nil {
 			log.Fatalf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
 		} else {
-			if Globals.Debug {
+			if tdns.Globals.Debug {
 				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
 			}
 		}
@@ -219,7 +219,7 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 		log.Fatalf("Unknown app mode: %s", appMode)
 	}
 
-	if Globals.Debug {
+	if tdns.Globals.Debug {
 		fmt.Printf("*** LoadMusicConfig: reloading config from \"%s\". Safemode: %v\n", cfgfile, safemode)
 	}
 	if safemode {

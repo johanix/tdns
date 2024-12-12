@@ -674,14 +674,14 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := BeatResponse{
+		resp := SidecarBeatResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIbeat: received /beat request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var bp BeatPost
+		var bp SidecarBeatPost
 		err := decoder.Decode(&bp)
 		if err != nil {
 			log.Println("APIbeat: error decoding beat post:", err)
@@ -690,11 +690,11 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch bp.Type {
 		case "BEAT", "FULLBEAT":
 			resp.Msg = "OK"
-			mconf.Internal.HeartbeatQ <- Heartbeat{
-				Name:  bp.Name,
-				Type:  bp.Type,
-				Time:  time.Now(),
-				Zones: bp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarHeartbeat{
+				Identity:    bp.Identity,
+				Type:        bp.Type,
+				Time:        time.Now(),
+				SharedZones: bp.SharedZones,
 			}
 
 		default:
@@ -717,14 +717,14 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := HelloResponse{
+		resp := SidecarHelloResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var hp HelloPost
+		var hp SidecarHelloPost
 		err := decoder.Decode(&hp)
 		if err != nil {
 			log.Println("APIhello: error decoding hello post:", err)
@@ -732,11 +732,11 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch hp.Type {
 		case "HELLO":
-			mconf.Internal.HeartbeatQ <- Heartbeat{
-				Name:  hp.Name,
-				Type:  "HELLO",
-				Time:  time.Now(),
-				Zones: hp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarHeartbeat{
+				Identity:    hp.Identity,
+				Type:        "HELLO",
+				Time:        time.Now(),
+				SharedZones: hp.Zones,
 			}
 
 		default:

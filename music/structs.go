@@ -127,53 +127,30 @@ type SignerOpResult struct {
 	Response string
 }
 
-type Heartbeat struct {
-	Name  string
-	Type  string
-	Time  time.Time
-	Zones []string
+type SidecarHeartbeat struct {
+	Identity    string
+	Type        string
+	Time        time.Time
+	SharedZones []string
 }
 
 type Sidecar struct {
-	Identity string
-	//	ApiMethod  bool            // API supported
-	//	DnsMethod  bool            // DNS supported
+	Identity   string
 	Methods    map[string]bool // supported methods: "API" and "DNS"
 	Details    map[tdns.MsignerMethod]SidecarDetails
 	LastHB     time.Time
 	LastFullHB time.Time
-	HBCount    int
-	Zones      []string
 	Api        *MusicApi
 }
 
 type SidecarDetails struct {
-	Addrs      []string
-	Port       uint16
-	TlsaRR     *dns.TLSA
-	UriRR      *dns.URI
-	KeyRR      *dns.KEY
-	BaseUri    string
-	LastUpdate time.Time
-}
-
-type SidecarHelloPost struct {
-	SidecarId string
-	Addresses []string
-	Port      uint16
-	TLSA      dns.TLSA
-}
-
-type SidecarHelloResponse struct {
-	Status string
-}
-
-type SidecarBeatPost struct {
-	Name        string
-	Type        string
+	Addrs       []string
+	Port        uint16
+	TlsaRR      *dns.TLSA
+	UriRR       *dns.URI
+	KeyRR       *dns.KEY
+	BaseUri     string
 	SharedZones []string
-}
-
-type SidecarBeatResponse struct {
-	Status string
+	LastHB      time.Time
+	BeatCount   int
 }

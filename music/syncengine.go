@@ -50,7 +50,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	var syncitem tdns.MusicSyncRequest
 	syncQ := mconf.Internal.MusicSyncQ
 
-	var beatitem Heartbeat
+	var beatitem SidecarHeartbeat
 	beatQ := mconf.Internal.HeartbeatQ
 
 	if !viper.GetBool("syncengine.active") {
@@ -148,16 +148,16 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 			ReportProgress()
 
 		case beatitem = <-beatQ:
-			log.Printf("MusicSyncEngine: Received heartbeat from %s", beatitem.Name)
+			log.Printf("MusicSyncEngine: Received heartbeat from %s", beatitem.Identity)
 			switch beatitem.Type {
 			case "HELLO":
-				log.Printf("MusicSyncEngine: Received initial hello from %s", beatitem.Name)
+				log.Printf("MusicSyncEngine: Received initial hello from %s", beatitem.Identity)
 			case "BEAT":
-				log.Printf("MusicSyncEngine: Received heartbeat from %s", beatitem.Name)
+				log.Printf("MusicSyncEngine: Received heartbeat from %s", beatitem.Identity)
 			case "FULLBEAT":
-				log.Printf("MusicSyncEngine: Received full heartbeat from %s", beatitem.Name)
+				log.Printf("MusicSyncEngine: Received full heartbeat from %s", beatitem.Identity)
 			default:
-				log.Printf("MusicSyncEngine: Unknown heartbeat type: %s in beat from %s", beatitem.Type, beatitem.Name)
+				log.Printf("MusicSyncEngine: Unknown heartbeat type: %s in beat from %s", beatitem.Type, beatitem.Identity)
 			}
 
 		case <-HBticker.C:
@@ -263,7 +263,8 @@ func (s *Sidecar) SendHello() error {
 		log.Printf("Sending HELLO message to sidecar %s via API method (baseuri: %s)", s.Identity, s.Details[tdns.MsignerMethodAPI].BaseUri)
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
-			SidecarId: s.Identity,
+			Type:      "HELLO",
+			Identity:  s.Identity,
 			Addresses: s.Details[tdns.MsignerMethodAPI].Addrs,
 			Port:      s.Details[tdns.MsignerMethodAPI].Port,
 		}
@@ -313,8 +314,8 @@ func (s *Sidecar) SendHello() error {
 		}
 		// defer resp.Body.Close()
 
-		var hr HelloResponse
-		err = json.Unmarshal(resp, &hr)
+		var shr SidecarHelloResponse
+		err = json.Unmarshal(resp, &shr)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal response: %v", err)
 		}

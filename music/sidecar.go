@@ -18,8 +18,8 @@ import (
 // var Sidecars = cmap.New[*Sidecar]()
 
 func SidecarToString(sidecar *Sidecar) string {
-	return fmt.Sprintf("* Sidecar %s (API: %v, DNS: %v): last update %s", sidecar.Identity,
-		sidecar.Methods["API"], sidecar.Methods["DNS"], sidecar.Details[tdns.MsignerMethodDNS].LastUpdate.Format(time.RFC3339))
+	return fmt.Sprintf("* Sidecar %s (API: %v, DNS: %v): last HB %s", sidecar.Identity,
+		sidecar.Methods["API"], sidecar.Methods["DNS"], sidecar.Details[tdns.MsignerMethodDNS].LastHB.Format(time.RFC3339))
 }
 
 // Returns true if the sidecar is new (not previously known)
@@ -51,7 +51,7 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 	}
 	log.Printf("LocateSidecar: known sidecars (post check):\n%v", knownSidecars)
 
-	if !newSidecar && sidecar.Details[method].LastUpdate.After(time.Now().Add(-1*time.Hour)) {
+	if !newSidecar && sidecar.Details[method].LastHB.After(time.Now().Add(-1*time.Hour)) {
 		log.Printf("LocateSidecar: Sidecar %s method %s was updated less than an hour ago, not updating again", identity, tdns.MsignerMethodToString[method])
 		return false, sidecar, nil
 	}
@@ -120,7 +120,7 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 			return false, nil, fmt.Errorf("no valid KEY record found for %s", "dns."+identity)
 		}
 		sidecar.Methods["DNS"] = true
-		details.LastUpdate = time.Now()
+		details.LastHB = time.Now()
 		sidecar.Details[method] = details
 
 	case tdns.MsignerMethodAPI:
@@ -195,9 +195,10 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 		log.Printf("URI record found for %s: %s", "api."+identity, details.UriRR.String())
 		details.BaseUri = strings.Replace(details.UriRR.Target, "{TARGET}", identity, 1)
 		details.BaseUri = strings.Replace(details.BaseUri, "{PORT}", fmt.Sprintf("%d", details.Port), 1)
+		details.BaseUri = strings.TrimSuffix(details.BaseUri, "/")
 		log.Printf("BaseUri: %s", details.BaseUri)
 		sidecar.Methods["API"] = true
-		details.LastUpdate = time.Now()
+		details.LastHB = time.Now()
 		sidecar.Details[method] = details
 		err = sidecar.NewMusicSyncApiClient(identity, details.BaseUri, "", "", "tlsa")
 		if err != nil {

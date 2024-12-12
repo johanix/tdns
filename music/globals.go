@@ -20,11 +20,10 @@ import (
 var Validate = validator.New()
 
 type GlobalStuff struct {
-	Verbose  bool
-	Debug    bool
+//	Verbose  bool
+//	Debug    bool
 	Sidecars *Sidecars
 	// Api         *Api
-	Showheaders bool
 	Zonename    string
 	Signername  string
 	Sgroupname  string

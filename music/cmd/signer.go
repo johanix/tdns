@@ -250,7 +250,7 @@ func PrintSignerResponse(iserr bool, errormsg, msg string) {
 func PrintSigners(sr music.SignerResponse) {
 	if len(sr.Signers) != 0 {
 		var out []string
-		if tdns.Globals.Verbose || music.Globals.Showheaders {
+		if tdns.Globals.Verbose || tdns.Globals.ShowHeaders {
 			out = append(out, "Signer|Method|Address|Port|SignerGroups")
 		}
 

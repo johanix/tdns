@@ -83,9 +83,9 @@ func InitApi() {
 			log.Fatalf("Error from json.NewEncoder: %v", err)
 		}
 		var prettyJSON bytes.Buffer
-		error := json.Indent(&prettyJSON, bytebuf.Bytes(), "", "  ")
-		if error != nil {
-			log.Println("JSON parse error: ", error)
+		err = json.Indent(&prettyJSON, bytebuf.Bytes(), "", "  ")
+		if err != nil {
+			log.Println("JSON parse error: ", err)
 		}
 		fmt.Printf("initApi: api connection to %s initialized (%s)\n:\napi: %s\n", baseurl, apikey, prettyJSON.String())
 	}
