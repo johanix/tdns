@@ -26,13 +26,6 @@ type Sidecars struct {
 func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	ourSidecarId := mconf.Sidecar.Identity
 
-	// sidecars is a map of known "remote" sidecars that we
-	// have received HELLO messages from.
-	//	sidecars := map[tdns.MsignerMethod]map[string]*Sidecar{
-	//		tdns.MsignerMethodAPI: map[string]*Sidecar{},
-	//		tdns.MsignerMethodDNS: map[string]*Sidecar{},
-	//	}
-
 	sidecars := &Sidecars{
 		S: cmap.New[*Sidecar](),
 	}
@@ -42,16 +35,18 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	// correct
 	wannabe_sidecars := map[string]*Sidecar{}
 
-	// zones is a map of zones and the remote sidecars that share them with us
-	zones := map[string][]*Sidecar{}
+	// mszones is a map of zones and the remote sidecars that share them with us
+	mszones := map[string][]*Sidecar{}
 
 	var missing []string
 	var zonename string
 	var syncitem tdns.MusicSyncRequest
 	syncQ := mconf.Internal.MusicSyncQ
 
-	var beatitem SidecarHeartbeat
+	var sbr SidecarBeatReport
 	beatQ := mconf.Internal.HeartbeatQ
+
+	mconf.Internal.MusicSyncStatusQ = make(chan MusicSyncStatus, 10)
 
 	if !viper.GetBool("syncengine.active") {
 		log.Printf("MusicSyncEngine is NOT active. No detection of of communication with other music-sidecars will be done.")
@@ -129,7 +124,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 					log.Printf("  %s", rr.String())
 				}
 
-				err := sidecars.UpdateSidecars(ourSidecarId, wannabe_sidecars, syncitem, zones, zonename)
+				err := sidecars.UpdateSidecars(ourSidecarId, wannabe_sidecars, syncitem, mszones, zonename)
 				if err != nil {
 					log.Printf("MusicSyncEngine: Error sending HELLO message: %v", err)
 				}
@@ -147,17 +142,17 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 			}
 			ReportProgress()
 
-		case beatitem = <-beatQ:
-			log.Printf("MusicSyncEngine: Received heartbeat from %s", beatitem.Identity)
-			switch beatitem.Type {
+		case sbr = <-beatQ:
+			log.Printf("MusicSyncEngine: Received heartbeat from %s", sbr.Beat.Identity)
+			switch sbr.Beat.Type {
 			case "HELLO":
-				log.Printf("MusicSyncEngine: Received initial hello from %s", beatitem.Identity)
+				log.Printf("MusicSyncEngine: Received initial hello from %s", sbr.Beat.Identity)
 			case "BEAT":
-				log.Printf("MusicSyncEngine: Received heartbeat from %s", beatitem.Identity)
+				log.Printf("MusicSyncEngine: Received heartbeat from %s", sbr.Beat.Identity)
 			case "FULLBEAT":
-				log.Printf("MusicSyncEngine: Received full heartbeat from %s", beatitem.Identity)
+				log.Printf("MusicSyncEngine: Received full heartbeat from %s", sbr.Beat.Identity)
 			default:
-				log.Printf("MusicSyncEngine: Unknown heartbeat type: %s in beat from %s", beatitem.Type, beatitem.Identity)
+				log.Printf("MusicSyncEngine: Unknown heartbeat type: %s in beat from %s", sbr.Beat.Type, sbr.Beat.Identity)
 			}
 
 		case <-HBticker.C:
@@ -170,11 +165,29 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 		case <-HelloEvalTicker.C:
 			log.Printf("MusicSyncEngine: Hello evaluation ticker. Evaluating sidecars that claim to share zones with us.")
-			err := EvaluateSidecarHello(sidecars, wannabe_sidecars, zones)
+			err := EvaluateSidecarHello(sidecars, wannabe_sidecars, mszones)
 			if err != nil {
 				log.Printf("MusicSyncEngine: Hello evaluation ticker. Error evaluating sidecars: %v", err)
 			}
 			ReportProgress()
+
+		case req := <-mconf.Internal.MusicSyncStatusQ:
+			log.Printf("MusicSyncEngine: Received STATUS request")
+			if req.Response == nil {
+				log.Printf("MusicSyncEngine: STATUS request has no response channel")
+				continue
+			}
+
+			cleaned := map[string]*Sidecar{}
+			for _, s := range sidecars.S.Items() {
+				log.Printf("MusicSyncEngine: Sidecar %s: %+v", s.Identity, s.Details)
+				cleaned[s.Identity] = s.CleanCopy()
+			}
+
+			req.Response <- MusicSyncStatus{
+				Sidecars: cleaned,
+				Error:    false,
+			}
 
 		case <-stopch:
 			HBticker.Stop()
@@ -186,7 +199,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 }
 
 func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[string]*Sidecar,
-	syncitem tdns.MusicSyncRequest, zones map[string][]*Sidecar, zonename string) error {
+	syncitem tdns.MusicSyncRequest, mszones map[string][]*Sidecar, zonename string) error {
 
 	for _, remoteSidecarRR := range syncitem.MusicSyncStatus.MsignerAdds {
 		if prr, ok := remoteSidecarRR.(*dns.PrivateRR); ok {
@@ -269,45 +282,7 @@ func (s *Sidecar) SendHello() error {
 			Port:      s.Details[tdns.MsignerMethodAPI].Port,
 		}
 
-		// Encode the struct as JSON
-		//	jsonData, err := json.Marshal(helloPost)
-		//	if err != nil {
-		//		return fmt.Errorf("failed to marshal SidecarHelloPost: %v", err)
-		//	}
-
-		// Lookup the TLSA record for the target sidecar
-		// tlsarrset := s.Details[tdns.MsignerMethodAPI].TlsaRR
-
-		// Use the TLSA record to authenticate the remote end securely
-		// (This is a simplified example, in a real implementation you would need to configure the TLS client with the TLSA record)
-		// tlsConfig := &tls.Config{
-		// 	VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		// 		for _, rawCert := range rawCerts {
-		// 			cert, err := x509.ParseCertificate(rawCert)
-		// 			if err != nil {
-		// 				return fmt.Errorf("failed to parse certificate: %v", err)
-		// 			}
-		// 			if cert.Subject.CommonName != s.Identity {
-		// 				return fmt.Errorf("unexpected certificate common name (should have been %s)", s.Identity)
-		// 			}
-		//
-		// 		err = tdns.VerifyCertAgainstTlsaRR(tlsarrset, rawCert)
-		// 		if err != nil {
-		// 			return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
-		// 		}
-		// 		return nil
-		// 	},
-		//}
-
-		// Create the HTTPS client
-		// client := &http.Client{
-		// 	Transport: &http.Transport{
-		// 		TLSClientConfig: tlsConfig,
-		// 	},
-		// }
-
 		// Send the HTTPS POST request
-		// resp, err := s.Api.Client.Post(url, "application/json", bytes.NewBuffer(jsonData))
 		status, resp, err := s.Api.RequestNG("POST", "/hello", helloPost, false)
 		if err != nil {
 			return fmt.Errorf("failed to send HTTPS POST request: %v", err)
@@ -320,11 +295,6 @@ func (s *Sidecar) SendHello() error {
 			return fmt.Errorf("failed to unmarshal response: %v", err)
 		}
 
-		// Print the response to stdout
-		// body, err := io.ReadAll(resp.Body)
-		// if err != nil {
-		//	return fmt.Errorf("failed to read response body: %v", err)
-		// }
 		fmt.Printf("Received response (status %d): %s\n", status, string(resp))
 	}
 

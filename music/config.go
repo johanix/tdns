@@ -126,21 +126,22 @@ type CommonConf struct {
 // Internal stuff that we want to be able to reach via the Config struct, but are not
 // represented in the yaml config file.
 type InternalConf struct {
-	APIStopCh       chan struct{}
-	EngineCheck     chan EngineCheck
-	MusicDB         *MusicDB
-	TokViper        *viper.Viper
-	DesecFetch      chan SignerOp
-	DesecUpdate     chan SignerOp
-	DdnsFetch       chan SignerOp
-	DdnsUpdate      chan SignerOp
-	Processes       map[string]FSM
-	MusicSyncQ      chan tdns.MusicSyncRequest
-	HeartbeatQ      chan SidecarHeartbeat
-	SidecarId       string
-	UpdateQ         chan tdns.UpdateRequest
-	DeferredUpdateQ chan tdns.DeferredUpdate
-	KeyDB           *tdns.KeyDB
+	APIStopCh        chan struct{}
+	EngineCheck      chan EngineCheck
+	MusicDB          *MusicDB
+	TokViper         *viper.Viper
+	DesecFetch       chan SignerOp
+	DesecUpdate      chan SignerOp
+	DdnsFetch        chan SignerOp
+	DdnsUpdate       chan SignerOp
+	Processes        map[string]FSM
+	MusicSyncQ       chan tdns.MusicSyncRequest
+	HeartbeatQ       chan SidecarBeatReport
+	SidecarId        string
+	UpdateQ          chan tdns.UpdateRequest
+	DeferredUpdateQ  chan tdns.DeferredUpdate
+	KeyDB            *tdns.KeyDB
+	MusicSyncStatusQ chan MusicSyncStatus
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) error {

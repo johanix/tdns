@@ -41,13 +41,14 @@ func SetupRouter(tconf *tdns.Config, mconf *music.Config) *mux.Router {
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
 	// MUSIC stuff
-	// sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
 	sr.HandleFunc("/signer", music.APIsigner(mconf)).Methods("POST")
 	sr.HandleFunc("/zone", music.APIzone(mconf)).Methods("POST")
 	sr.HandleFunc("/signergroup", music.APIsignergroup(mconf)).Methods("POST")
 	sr.HandleFunc("/test", music.APItest(mconf)).Methods("POST")
 	sr.HandleFunc("/process", music.APIprocess(mconf)).Methods("POST")
 	sr.HandleFunc("/show", music.APIshow(mconf, r)).Methods("POST")
+
+	sr.HandleFunc("/sidecar", music.APIsidecar(mconf)).Methods("POST")
 
 	return r
 }

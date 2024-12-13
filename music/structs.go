@@ -127,13 +127,6 @@ type SignerOpResult struct {
 	Response string
 }
 
-type SidecarHeartbeat struct {
-	Identity    string
-	Type        string
-	Time        time.Time
-	SharedZones []string
-}
-
 type Sidecar struct {
 	Identity   string
 	Methods    map[string]bool // supported methods: "API" and "DNS"
@@ -153,4 +146,12 @@ type SidecarDetails struct {
 	SharedZones []string
 	LastHB      time.Time
 	BeatCount   int
+}
+
+type MusicSyncStatus struct {
+	Command  string
+	Sidecars map[string]*Sidecar
+	Error    bool
+	ErrorMsg string
+	Response chan MusicSyncStatus // Note: response channel uses same struct
 }

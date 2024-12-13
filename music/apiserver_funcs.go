@@ -11,8 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 
 	"github.com/gorilla/mux"
@@ -687,25 +689,25 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIbeat: error decoding beat post:", err)
 		}
 
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIbeat: error encoding response: %v\n", err)
+			}
+		}()
+
 		switch bp.Type {
 		case "BEAT", "FULLBEAT":
 			resp.Msg = "OK"
-			mconf.Internal.HeartbeatQ <- SidecarHeartbeat{
-				Identity:    bp.Identity,
-				Type:        bp.Type,
-				Time:        time.Now(),
-				SharedZones: bp.SharedZones,
+			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+				Time: time.Now(),
+				Beat: bp,
 			}
 
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.Type)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from json.NewEncoder: %v\n", err)
 		}
 	}
 }
@@ -732,11 +734,14 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch hp.Type {
 		case "HELLO":
-			mconf.Internal.HeartbeatQ <- SidecarHeartbeat{
-				Identity:    hp.Identity,
-				Type:        "HELLO",
-				Time:        time.Now(),
-				SharedZones: hp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+				Time: time.Now(),
+				Beat: SidecarBeatPost{
+					Identity:    hp.Identity,
+					Type:        "HELLO",
+					Time:        time.Now(),
+					SharedZones: hp.Zones,
+				},
 			}
 
 		default:
@@ -753,7 +758,8 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 }
 
 func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *http.Request) {
-	address := viper.GetString("services.apiserver.api")
+	address := viper.GetString("apiserver.address")
+	name := viper.GetString("service.name")
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -774,8 +780,7 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 		case "api":
 			message := "All ok, here are all defined API endpoints"
 
-			data := []string{fmt.Sprintf("API provided by MUSICD listening on: %s",
-				address)}
+			data := []string{fmt.Sprintf("API provided by %s listening on: %v", name, address)}
 
 			walker := func(route *mux.Route, router *mux.Router,
 				ancestors []*mux.Route) error {
@@ -802,5 +807,61 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 		if err != nil {
 			log.Printf("Error from Encoder: %v\n", err)
 		}
+	}
+}
+
+func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var sp SidecarPost
+		err := decoder.Decode(&sp)
+		if err != nil {
+			log.Println("APIsidecar: error decoding sidecar post:", err)
+		}
+
+		log.Printf("APIsidecar: received /sidecar request (command: %s) from %s.\n",
+			sp.Command, r.RemoteAddr)
+
+		var resp = SidecarResponse{
+			Status: 101,
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error encoding response: %v\n", err)
+				dump.P(resp)
+			}
+		}()
+
+		switch strings.ToLower(sp.Command) {
+		case "status":
+			responseCh := make(chan MusicSyncStatus)
+			log.Printf("APIsidecar: STATUS request received")
+			mconf.Internal.MusicSyncStatusQ <- MusicSyncStatus{
+				Command:  "STATUS",
+				Response: responseCh,
+			}
+			log.Printf("APIsidecar: STATUS request sent to MusicSyncStatusQ")
+			select {
+			case tmp := <-responseCh:
+				log.Printf("APIsidecar: STATUS response received")
+				if tmp.Error {
+					http.Error(w, tmp.ErrorMsg, http.StatusInternalServerError)
+					return
+				}
+				resp.Sidecars = tmp.Sidecars
+
+			case <-time.After(5 * time.Second):
+				log.Printf("APIsidecar: STATUS request timed out")
+				http.Error(w, "Request timed out", http.StatusGatewayTimeout)
+				return
+			}
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", sp.Command)
+		}
+
 	}
 }

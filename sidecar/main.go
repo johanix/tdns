@@ -151,7 +151,7 @@ func main() {
 	tconf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
 	tconf.Internal.MusicSyncQ = make(chan tdns.MusicSyncRequest, 10)
 
-	mconf.Internal.HeartbeatQ = make(chan music.SidecarHeartbeat, 10)
+	mconf.Internal.HeartbeatQ = make(chan music.SidecarBeatReport, 10)
 	go tdns.RefreshEngine(&tconf, stopch, appMode)
 
 	//	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)

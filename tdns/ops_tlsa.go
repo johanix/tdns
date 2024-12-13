@@ -123,14 +123,11 @@ func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to decode TLSA certificate: %v", err)
 	}
-	if tlsarr.Usage == 3 {
+	switch tlsarr.Usage {
+	case 3:
 		switch tlsarr.MatchingType {
 		case 1: // SHA-256
 			hash := sha256.Sum256(rawcert)
-			// log.Printf("hash: %s", hex.EncodeToString(hash[:]))
-			// log.Printf("hash as bytes: %v", hash[:])
-			//log.Printf("cert: %s", tlsarr.Certificate)
-			//log.Printf("cert as bytes: %v", decodedCert)
 			if bytes.Equal(hash[:], decodedCert) {
 				return nil
 			}
@@ -140,6 +137,8 @@ func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
 				return nil
 			}
 		}
+	default:
+		return fmt.Errorf("only TLSA usage 3 is supported (this TLSA has usage %d)", tlsarr.Usage)
 	}
-	return fmt.Errorf("no matching TLSA record found")
+	return fmt.Errorf("TLSA RR %s did not match cert", tlsarr.String())
 }

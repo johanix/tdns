@@ -199,6 +199,12 @@ type SidecarBeatPost struct {
 	Type        string
 	Identity    string
 	SharedZones []string
+	Time        time.Time
+}
+
+type SidecarBeatReport struct {
+	Time time.Time
+	Beat SidecarBeatPost
 }
 
 type SidecarBeatResponse struct {
@@ -224,6 +230,17 @@ type SidecarHelloResponse struct {
 	Time     time.Time
 	Client   string
 	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
+type SidecarPost struct {
+	Command string
+}
+
+type SidecarResponse struct {
+	Status   int
+	Sidecars map[string]*Sidecar
 	Error    bool
 	ErrorMsg string
 }

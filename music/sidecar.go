@@ -259,3 +259,24 @@ func (ss *Sidecars) IdentifySidecars(zonename string) ([]dns.RR, []*Sidecar, err
 
 	return msigners, sidecars, nil
 }
+
+// CleanCopy returns a copy of the Sidecar with the Api.ApiClient.Client set to nil
+// as that can not be marshalled to JSON.
+func (s *Sidecar) CleanCopy() *Sidecar {
+	log.Printf("CleanCopy: Sidecar %s: %+v", s.Identity, s.Details)
+	c := *s             // Create a shallow copy of the Sidecar
+	c.Api = &MusicApi{} // Create a new MusicApi instance
+	c.Api = s.Api
+	if s.Api != nil {
+		c.Api.ApiClient = &tdns.ApiClient{} // Create a new ApiClient instance
+		c.Api.ApiClient = s.Api.ApiClient
+		if s.Api.ApiClient != nil {
+			c.Api.ApiClient.Client = nil // Set the Client to nil
+		}
+	}
+	c.Details = make(map[tdns.MsignerMethod]SidecarDetails)
+	for method, details := range s.Details {
+		c.Details[method] = details // Copy the details
+	}
+	return &c
+}

@@ -27,6 +27,7 @@ type MusicSyncStatus struct {
 	Error          bool
 	ErrorMsg       string
 	Status         bool
+	// Sidecars       map[string]*Sidecar
 }
 
 type MultiSignerConf struct {

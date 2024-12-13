@@ -5,6 +5,7 @@
 package mcmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -209,9 +210,24 @@ var sidecarDebugHelloCmd = &cobra.Command{
 	},
 }
 
+var sidecarStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show the status of all known sidecars and their shared zones",
+	Run: func(cmd *cobra.Command, args []string) {
+		// Step 2: Implement the command logic
+		response, err := sendStatusRequest()
+		if err != nil {
+			log.Fatalf("Error sending status request: %v", err)
+		}
+
+		// Step 3: Process the response
+		displaySidecarStatus(response)
+	},
+}
+
 func init() {
 	//	rootCmd.AddCommand(showCmd)
-	SidecarCmd.AddCommand(sidecarLocateCmd, sidecarIdentifyCmd, sidecarHelloCmd, sidecarDebugHelloCmd)
+	SidecarCmd.AddCommand(sidecarLocateCmd, sidecarIdentifyCmd, sidecarHelloCmd, sidecarDebugHelloCmd, sidecarStatusCmd)
 
 	SidecarCmd.PersistentFlags().StringVarP(&sidecarId, "id", "i", "", "Identity of sidecar")
 	SidecarCmd.PersistentFlags().StringVarP(&sidecarMethod, "method", "m", "", "Sidecar sync method")
@@ -219,4 +235,45 @@ func init() {
 	sidecarDebugHelloCmd.PersistentFlags().StringVarP(&tdns.Globals.BaseUri, "uri", "u", "", "URI of sidecar")
 	sidecarDebugHelloCmd.PersistentFlags().StringVarP(&tdns.Globals.Address, "addr", "a", "", "Address of sidecar")
 	sidecarDebugHelloCmd.PersistentFlags().Uint16VarP(&tdns.Globals.Port, "port", "p", 0, "Port of sidecar")
+}
+
+func sendStatusRequest() (music.SidecarResponse, error) {
+	var response music.SidecarResponse
+
+	// Create the SidecarPost with the "STATUS" command
+	post := music.SidecarPost{
+		Command: "status",
+	}
+
+	// Send the request to the /sidecar endpoint
+	_, buf, err := tdns.Globals.Api.RequestNG("POST", "/sidecar", post, true)
+	if err != nil {
+		return response, fmt.Errorf("failed to send status request: %v", err)
+	}
+
+	// Unmarshal the response
+	err = json.Unmarshal(buf, &response)
+	if err != nil {
+		return response, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	return response, nil
+}
+
+func displaySidecarStatus(response music.SidecarResponse) {
+	if response.Error {
+		log.Printf("Error: %s", response.ErrorMsg)
+		return
+	}
+
+	for id, sidecar := range response.Sidecars {
+		fmt.Printf("Sidecar ID: %s\n", id)
+		if details, ok := sidecar.Details[tdns.MsignerMethodAPI]; ok {
+			fmt.Printf("Shared Zones via API: %v\n", details.SharedZones)
+		}
+		if details, ok := sidecar.Details[tdns.MsignerMethodDNS]; ok {
+			fmt.Printf("Shared Zones via DNS: %v\n", details.SharedZones)
+		}
+		fmt.Println("-----")
+	}
 }
