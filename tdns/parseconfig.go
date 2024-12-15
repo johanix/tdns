@@ -124,8 +124,8 @@ func ParseConfig(conf *Config, reload bool) error {
 		}
 
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			log.Fatalf("Error: DnssecPolicy 'default' not defined. Default policy is required.")
-			// return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required.")
+			// log.Fatalf("Error: DnssecPolicy 'default' not defined. Default policy is required.")
+			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required.")
 		}
 
 		// dump.P(conf.Internal.DnssecPolicies)
@@ -206,6 +206,11 @@ func ParseConfig(conf *Config, reload bool) error {
 	if !reload || kdb == nil {
 
 		dbFile := viper.GetString("db.file")
+		// Ensure the database file path is within allowed boundaries
+		dbFile = filepath.Clean(dbFile)
+		if strings.Contains(dbFile, "..") {
+			return errors.New("invalid database file path: must not contain directory traversal")
+		}
 		if conf.AppName != "sidecar-cli" && conf.AppName != "tdns-cli" {
 			// Verify that we have a MUSIC DB file.
 			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
@@ -508,7 +513,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)", all_zones, len(zrch))
 
 	if Globals.Debug {
-		log.Printf("ParseConfig: exit")
+		log.Print("ParseConfig: exit")
 	}
 	return all_zones, nil
 }

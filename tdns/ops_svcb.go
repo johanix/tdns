@@ -11,6 +11,10 @@ import (
 )
 
 func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyValue) error {
+	name = dns.Fqdn(name)
+	if _, valid := dns.IsDomainName(name); !valid {
+		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
+	}
 
 	svcb := dns.SVCB{
 		Priority: 1,
@@ -23,27 +27,6 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		Class:  dns.ClassINET,
 		Ttl:    120,
 	}
-
-	//	if port != 0 {
-	//		e := new(dns.SVCBPort)
-	//		e.Port = port
-	//		svcb.Value = append(svcb.Value, e)
-	//	}
-
-	//	for k, v := range params {
-	//		switch k {
-	//		case "ipv4hint", "ipv6hint":
-	//			var e string
-	//			if k == "ipv4hint" {
-	//				e = new(dns.SVCBIPv4Hint)
-	//			} else if k == "ipv6hint" {
-	//				e = new(dns.SVCBIPv6Hint)
-	//			}
-	//			ip := net.ParseIP(v)
-	//			e.Hint = []net.IP{ip}
-	//			svcb.Value = append(svcb.Value, e)
-	//		}
-	//	}
 
 	log.Printf("PublishSVCBRR: publishing SVCB RR: %s", svcb.String())
 
@@ -62,11 +45,21 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 }
 
 func (zd *ZoneData) UnpublishSvcbRR(name string) error {
-	anti_svcb_rr, err := dns.NewRR(fmt.Sprintf("%s 0 IN SVCB 1 0 %s", name, name))
-	if err != nil {
-		return err
+	name = dns.Fqdn(name)
+	if _, valid := dns.IsDomainName(name); !valid {
+		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
 	}
-	anti_svcb_rr.Header().Class = dns.ClassANY // XXX: dns.NewRR fails to parse a CLASS ANY SVCB RRset, so we set the class manually.
+
+	anti_svcb_rr := &dns.SVCB{
+		Priority: 1,
+		Target:   dns.Fqdn(name),
+	}
+	anti_svcb_rr.Hdr = dns.RR_Header{
+		Name:   name,
+		Rrtype: dns.TypeSVCB,
+		Class:  dns.ClassANY,
+		Ttl:    0,
+	}
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
@@ -82,6 +75,9 @@ func LookupSVCB(name string) (*RRset, error) {
 	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
+	}
+	if len(clientConfig.Servers) == 0 {
+		return nil, fmt.Errorf("no DNS servers found in client configuration")
 	}
 
 	m := new(dns.Msg)

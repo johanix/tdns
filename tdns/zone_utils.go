@@ -1007,6 +1007,13 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 }
 
 func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
+	if zonename == "" {
+		return nil, fmt.Errorf("zonename cannot be empty")
+	}
+	if !dns.IsFqdn(zonename) {
+		return nil, fmt.Errorf("zonename must be fully qualified (end with dot)")
+	}
+
 	log.Printf("CreateAutoZone: Zone %s enter", zonename)
 
 	// Create a fake zone for the sidecar identity just to be able to
@@ -1015,7 +1022,7 @@ func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, er
 $ORIGIN {ZONENAME}
 $TTL 86400
 {ZONENAME}    IN SOA ns1.{ZONENAME} hostmaster.{ZONENAME} (
-          2021010101 ; serial
+          {SERIAL}   ; serial
           3600       ; refresh (1 hour)
           1800       ; retry (30 minutes)
           1209600    ; expire (2 weeks)
@@ -1023,7 +1030,9 @@ $TTL 86400
           )
 {ZONENAME}     IN NS  ns.{ZONENAME}
 `
+	currentTime := fmt.Sprintf("%d", time.Now().Unix())
 	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
+	zonedatastr = strings.ReplaceAll(zonedatastr, "{SERIAL}", currentTime)
 
 	if len(addrs) == 0 {
 		addrs = []string{"192.0.2.1"} // fake it till you make it

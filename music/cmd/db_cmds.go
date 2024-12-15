@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -33,7 +34,12 @@ var dbInitCmd = &cobra.Command{
 		if _, err := os.Stat(musicDbFile); err == nil {
 			fmt.Printf("Warning: MUSIC DB file '%s' already exists.\n", musicDbFile)
 		} else if os.IsNotExist(err) {
-			file, err := os.Create(musicDbFile)
+			// Validate parent directory
+			parentDir := filepath.Dir(musicDbFile)
+			if _, err := os.Stat(parentDir); os.IsNotExist(err) {
+				log.Fatalf("Error: Parent directory '%s' does not exist", parentDir)
+			}
+			file, err := os.OpenFile(musicDbFile, os.O_CREATE|os.O_RDWR, 0644)
 			if err != nil {
 				log.Fatalf("Error creating MUSIC DB file '%s': %v", musicDbFile, err)
 			}

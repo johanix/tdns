@@ -344,7 +344,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	apex, _ := zd.Data.Get(zd.ZoneName)
 	if err != nil {
-		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: failed to get zone apex %s", zd.ZoneName, err)
+		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: failed to get zone apex %v", zd.ZoneName, err)
 	}
 
 	soa_rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
@@ -358,11 +358,6 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
-
-	if err := zp.Err(); err != nil {
-		zd.Logger.Printf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
-		return false, soa.Serial, fmt.Errorf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
-	}
 
 	zd.ComputeIndices()
 	zd.XfrType = "axfr"

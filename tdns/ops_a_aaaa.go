@@ -6,11 +6,15 @@ package tdns
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishAddrRR(name, addr string) error {
+	if _, valid := dns.IsDomainName(name); !valid {
+		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
+	}
 	var rr dns.RR
 
 	if ip := net.ParseIP(addr); ip != nil {
@@ -39,28 +43,47 @@ func (zd *ZoneData) PublishAddrRR(name, addr string) error {
 		return fmt.Errorf("invalid IP address: %s", addr)
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{rr},
 		InternalUpdate: true,
+	}:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout while sending update request")
 	}
 
 	return nil
 }
 
 func (zd *ZoneData) UnpublishAddrRR(name, addr string) error {
+	if _, valid := dns.IsDomainName(name); !valid {
+		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
+	}
 	var rr dns.RR
-	var err error
 
 	if ip := net.ParseIP(addr); ip != nil {
 		if ip.To4() != nil {
-			rr, err = dns.NewRR(fmt.Sprintf("%s 0 ANY A 0", name))
+			rr = &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassANY,
+					Ttl:    0,
+				},
+				A: ip,
+			}
 		} else {
-			rr, err = dns.NewRR(fmt.Sprintf("%s 0 ANY AAAA 0", name))
-		}
-		if err != nil {
-			return err
+			rr = &dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   name,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassANY,
+					Ttl:    0,
+				},
+				AAAA: ip,
+			}
 		}
 	} else {
 		return fmt.Errorf("invalid IP address: %s", addr)

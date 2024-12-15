@@ -186,7 +186,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 				case *dns.DNSKEY:
 					keyid := rr.(*dns.DNSKEY).KeyTag()
 					t := " ZSK ;"
-					if rr.(*dns.DNSKEY).Flags == 257 {
+					if rr.(*dns.DNSKEY).Flags&0x0001 != 0 {
 						t = " KSK ;"
 					}
 					PrintKeyRR(rr, "DNSKEY", t, keyid, leftpad, rightmargin)

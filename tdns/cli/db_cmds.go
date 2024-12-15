@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -33,7 +34,12 @@ var dbInitCmd = &cobra.Command{
 		if _, err := os.Stat(tdnsDbFile); err == nil {
 			fmt.Printf("Warning: TDNS DB file '%s' already exists.\n", tdnsDbFile)
 		} else if os.IsNotExist(err) {
-			file, err := os.Create(tdnsDbFile)
+			// Validate parent directory
+			parentDir := filepath.Dir(tdnsDbFile)
+			if _, err := os.Stat(parentDir); os.IsNotExist(err) {
+				log.Fatalf("Error: Parent directory '%s' does not exist", parentDir)
+			}
+			file, err := os.OpenFile(tdnsDbFile, os.O_CREATE|os.O_RDWR, 0644)
 			if err != nil {
 				log.Fatalf("Error creating TDNS DB file '%s': %v", tdnsDbFile, err)
 			}
