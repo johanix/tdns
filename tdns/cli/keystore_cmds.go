@@ -121,7 +121,7 @@ var keystoreDnssecCmd = &cobra.Command{
 	Use:   "dnssec",
 	Short: "Prefix command, only usable via sub-commands",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore dnssec called (but NYI)")
+		fmt.Println("keystore dnssec called (this is an empty prefix command)")
 	},
 }
 
@@ -208,10 +208,7 @@ func init() {
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
-
-	KeystoreCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
-
-	KeystoreCmd.PersistentFlags().BoolVarP(&showhdr, "showhdr", "H", false, "Show column headers")
+	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
@@ -317,7 +314,7 @@ func Sig0KeyMgmt(cmd string) error {
 	switch cmd {
 	case "list":
 		var out, tmplist []string
-		if showhdr {
+		if tdns.Globals.ShowHeaders {
 			out = append(out, "Signer|State|KeyID|Algorithm|PrivKey|KEY Record")
 		}
 		if len(tr.Sig0keys) > 0 {
@@ -418,7 +415,7 @@ func DnssecKeyMgmt(cmd string) error {
 					tmp[0], v.State, tmp[1], v.Flags, v.Algorithm, v.PrivateKey, v.Keystr))
 			}
 			sort.Strings(out)
-			if showhdr {
+			if tdns.Globals.ShowHeaders {
 				out = append([]string{"Signer|State|KeyID|Flags|Algorithm|PrivKey|DNSKEY Record"}, out...)
 			}
 

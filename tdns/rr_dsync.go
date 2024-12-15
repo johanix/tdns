@@ -43,6 +43,9 @@ var StringToScheme = map[string]DsyncScheme{
 	"NOTIFY": SchemeNotify,
 	"UPDATE": SchemeUpdate,
 	"API":    SchemeAPI,
+	"1":      SchemeNotify,
+	"2":      SchemeUpdate,
+	"3":      SchemeAPI,
 }
 
 func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }

@@ -21,19 +21,19 @@ func init() {
 const TypeMSIGNER = 0x0F9C
 
 type MSIGNER struct {
-	State  uint8         // 0=OFF, 1=ON
-	Scheme MsignerScheme // 1=DNS, 2=API
+	State     uint8            // 0=OFF, 1=ON
+	Mechanism MsignerMechanism // 1=DNS, 2=API
 	//	Port   uint16
 	Target string
 }
 
-type MsignerScheme uint8
+type MsignerMechanism uint8
 
 const (
-	MSignSchemeDNS = 1
-	MSignSchemeAPI = 2
-	MSignStateON   = 1
-	MSignStateOFF  = 0
+	MSignMechanismDNS = 1
+	MSignMechanismAPI = 2
+	MSignStateON      = 1
+	MSignStateOFF     = 0
 )
 
 var StateToString = map[uint8]string{
@@ -46,35 +46,37 @@ var StringToState = map[string]uint8{
 	"OFF": MSignStateOFF,
 }
 
-var MsignerSchemeToString = map[MsignerScheme]string{
-	MSignSchemeDNS: "DNS",
-	MSignSchemeAPI: "API",
+var MsignerMechanismToString = map[MsignerMechanism]string{
+	MSignMechanismDNS: "DNS",
+	MSignMechanismAPI: "API",
 }
 
-var StringToMsignerScheme = map[string]MsignerScheme{
-	"DNS": MSignSchemeDNS,
-	"API": MSignSchemeAPI,
+var StringToMsignerMechanism = map[string]MsignerMechanism{
+	"DNS": MSignMechanismDNS,
+	"API": MSignMechanismAPI,
 }
 
 func NewMSIGNER() dns.PrivateRdata { return new(MSIGNER) }
 
 func (rd MSIGNER) String() string {
 	//	return fmt.Sprintf("%s\t%s %d %s", StateToString[rd.State], MsignerSchemeToString[rd.Scheme], rd.Port, rd.Target)
-	return fmt.Sprintf("%s\t%s %s", StateToString[rd.State], MsignerSchemeToString[rd.Scheme], rd.Target)
+	return fmt.Sprintf("%s\t%s %s", StateToString[rd.State], MsignerMechanismToString[rd.Mechanism], rd.Target)
 }
 
 func (rd *MSIGNER) Parse(txt []string) error {
-	if len(txt) != 4 {
-		return errors.New("MSIGNER requires a state, a scheme, a port and a target")
+	//	if len(txt) != 4 {
+	//		return errors.New("MSIGNER requires a state, a scheme, a port and a target")
+	if len(txt) != 3 {
+		return errors.New("MSIGNER requires a state, a sync mechanism and a target")
 	}
 	state, exist := StringToState[txt[0]]
 	if !exist {
 		return fmt.Errorf("invalid MSIGNER type: %s.", txt[0])
 	}
 
-	scheme, exist := StringToMsignerScheme[txt[1]]
+	mechanism, exist := StringToMsignerMechanism[txt[1]]
 	if !exist {
-		return fmt.Errorf("invalid MSIGNER scheme: %s.", txt[1])
+		return fmt.Errorf("invalid MSIGNER sync mechanism: %s.", txt[1])
 	}
 
 	//	port, err := strconv.Atoi(txt[2])
@@ -82,13 +84,13 @@ func (rd *MSIGNER) Parse(txt []string) error {
 	//		return fmt.Errorf("invalid MSIGNER port: %s. Error: %v", txt[2], err)
 	//	}
 
-	tgt := dns.Fqdn(txt[3])
+	tgt := dns.Fqdn(txt[2])
 	if _, ok := dns.IsDomainName(tgt); !ok {
 		return fmt.Errorf("invalid MSIGNER target: %s.", txt[2])
 	}
 
 	rd.State = state
-	rd.Scheme = scheme
+	rd.Mechanism = mechanism
 	//	rd.Port = uint16(port)
 	rd.Target = tgt
 
@@ -102,7 +104,7 @@ func (rd *MSIGNER) Pack(buf []byte) (int, error) {
 		return off, err
 	}
 
-	off, err = packUint8(uint8(rd.Scheme), buf, off)
+	off, err = packUint8(uint8(rd.Mechanism), buf, off)
 	if err != nil {
 		return off, err
 	}
@@ -137,7 +139,7 @@ func (rd *MSIGNER) Unpack(buf []byte) (int, error) {
 	if err != nil {
 		return off, err
 	}
-	rd.Scheme = MsignerScheme(tmp)
+	rd.Mechanism = MsignerMechanism(tmp)
 	if off == len(buf) {
 		return off, nil
 	}
@@ -166,7 +168,7 @@ func (rd *MSIGNER) Copy(dest dns.PrivateRdata) error {
 
 	d := dest.(*MSIGNER)
 	d.State = rd.State
-	d.Scheme = rd.Scheme
+	d.Mechanism = rd.Mechanism
 	//	d.Port = rd.Port
 	d.Target = rd.Target
 	return nil

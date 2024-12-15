@@ -32,9 +32,8 @@ func init() {
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
-	rootCmd.PersistentFlags().BoolVarP(&mcmd.Showheaders, "headers", "H", false, "Show column headers on output")
-	rootCmd.PersistentFlags().StringVarP(&mcmd.Zonename, "zone", "z", "", "name of zone")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H", false, "Show column headers on output")
+	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "name of zone")
 	rootCmd.PersistentFlags().StringVarP(&mcmd.Signername, "signer", "s", "", "name of signer")
 	rootCmd.PersistentFlags().StringVarP(&mcmd.Sgroupname, "group", "g", "", "name of signer group")
 }
-

@@ -157,123 +157,22 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 }
 
 func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
-	log.Printf("DelegationSyncSetup: setting up zone %s", zd.ZoneName)
 	if !zd.Options[OptDelSyncChild] {
 		log.Printf("DelegationSyncSetup: Zone %s does not have child-side delegation sync enabled. Skipping.", zd.ZoneName)
 		return nil
 	}
 
-	log.Printf("DelegationSyncSetup: Checking whether zone %s allows updates and if so has a KEY RRset published.", zd.ZoneName)
-	apex, _ := zd.GetOwner(zd.ZoneName)
-	_, keyrrexist := apex.RRtypes.Get(dns.TypeKEY)
-
-	if keyrrexist && !zd.Options[OptDontPublishKey] {
-		err := zd.VerifyPublishedKeyRRs()
-		if err != nil {
-			zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
-			return err
-		}
-		zd.Logger.Printf("DelegationSyncSetup: Zone %s: Verified published KEY RRset", zd.ZoneName)
-	}
-
 	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	if alg == 0 {
-		log.Printf("DelegationSyncSetup: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
+		log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 		alg = dns.ED25519
 	}
 
-	// 1. Are updates to the zone data allowed?
-	if !zd.Options[OptAllowUpdates] {
-		if keyrrexist {
-			log.Printf("DelegationSyncSetup: Zone %s does not allow updates, but a KEY RRset is already published in the zone.", zd.ZoneName)
-		} else {
-			log.Printf("DelegationSyncSetup: Zone %s does not allow updates. Cannot publish a KEY RRset.", zd.ZoneName)
-		}
-		return nil
-	}
-
-	log.Printf("DelegationSyncSetup: Zone %s allows updates. KEY RR exist: %v, dont-publish-key: %v", zd.ZoneName, keyrrexist, zd.Options[OptDontPublishKey])
-
-	// 2. Updates allowed, but there is no KEY RRset published.
-	if !keyrrexist && !zd.Options[OptDontPublishKey] {
-		log.Printf("DelegationSyncSetup: Fetching the private SIG(0) key for %s", zd.ZoneName)
-		sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-		if err != nil {
-			log.Printf("DelegationSyncSetup: Error from kdb.GetSig0Keys(%s, %s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, Sig0StateActive, err)
-			return err
-		}
-		if len(sak.Keys) == 0 {
-			log.Printf("DelegationSyncSetup: No active SIG(0) key found for zone %s. Will generate new key to enable parent sync via UPDATE.", zd.ZoneName)
-
-			kp := KeystorePost{
-				Command:    "sig0-mgmt",
-				SubCommand: "generate",
-				Zone:       zd.ZoneName,
-				Algorithm:  alg,
-				State:      Sig0StateActive,
-				Creator:    "del-sync-setup",
-			}
-			resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
-			if err != nil {
-				return fmt.Errorf("DelegationSyncSetup(%s) failed to generate keypair: %v", zd.ZoneName, err)
-			}
-			zd.Logger.Printf(resp.Msg)
-
-			sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-			if err != nil {
-				return fmt.Errorf("DelegationSyncSetup(%s, after key generation) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
-			}
-
-			//			algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-			//			alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-			//			if alg == 0 {
-			//				log.Printf("DelegationSynchSetup: Unknown keygen algorithm: \"%s\"", algstr)
-			//				return fmt.Errorf("unknown keygen algorithm: %s", algstr)
-			//			}
-			//			pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "del-sync", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
-			//			if err != nil {
-			//				zd.Logger.Printf("Error from kdb.GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-			//				return err
-			//			}
-			//			zd.Logger.Printf("DelegationSynchSetup: %s", msg)
-			//			sak = &Sig0ActiveKeys{
-			//				Keys: []*PrivateKeyCache{pkc},
-			//			}
-		}
-
-		if len(sak.Keys) == 0 {
-			log.Printf("DelegationSyncSetup: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
-			return fmt.Errorf("no active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", zd.ZoneName)
-		}
-		log.Printf("DelegationSyncSetup: Publishing KEY RR for zone %s", zd.ZoneName)
-		err = zd.PublishKeyRRs(sak)
-		if err != nil {
-			log.Printf("DelegationSyncSetup: Error from PublishKeyRRs(): %s", err)
-			return err
-		} else {
-			keyrrexist = true
-		}
-	}
-
-	// 3. There is a KEY RRset, question is whether it is signed or not
-	if keyrrexist && zd.Options[OptOnlineSigning] {
-		log.Printf("DelegationSyncSetup: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", zd.ZoneName)
-		//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-		//			if err != nil {
-		//				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
-		//				continue
-		//			}
-		rrset, _ := apex.RRtypes.Get(dns.TypeKEY)
-		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
-		if err != nil {
-			log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
-		} else {
-			apex.RRtypes.Set(dns.TypeKEY, rrset)
-			log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
-		}
-	} else {
-		log.Printf("DelegationSyncSetup: Zone %s does not allow online signing, KEY RRset cannot be re-signed", zd.ZoneName)
+	err := zd.Sig0KeyPreparation(zd.ZoneName, alg, kdb)
+	if err != nil {
+		zd.Logger.Printf("DelegationSyncSetup: Zone %s: Error from Sig0KeyPreparation(): %v", zd.ZoneName, err)
+		return err
 	}
 
 	// 4. There is a KEY RRset, we have tried to sign it if possible. But has it been uploaded to the parent?
@@ -288,6 +187,127 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 		return err
 	}
 	log.Printf("DelegationSyncSetup: Zone %s: SIG(0) key bootstrap: %s", zd.ZoneName, msg)
+	return nil
+}
+
+func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
+	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+	if alg == 0 {
+		log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
+		alg = dns.ED25519
+	}
+
+	return zd.Sig0KeyPreparation(name, alg, kdb)
+}
+
+func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error {
+	log.Printf("Sig0KeyPreparation: setting up SIG(0) key pair for zone %s", name)
+
+	log.Printf("Sig0KeyPreparation: Checking whether zone %s allows updates and if so has a KEY RRset published.", name)
+	apex, _ := zd.GetOwner(zd.ZoneName)
+	_, keyrrexist := apex.RRtypes.Get(dns.TypeKEY)
+
+	if keyrrexist && !zd.Options[OptDontPublishKey] {
+		err := zd.VerifyPublishedKeyRRs()
+		if err != nil {
+			zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", name, err)
+			return err
+		}
+		zd.Logger.Printf("Sig0KeyPreparation: Zone %s: Verified published KEY RRset", name)
+	}
+
+	// 1. Are updates to the zone data allowed?
+	if !zd.Options[OptAllowUpdates] {
+		if keyrrexist {
+			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates, but a KEY RRset is already published in the zone.", name)
+		} else {
+			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates. Cannot publish a KEY RRset.", name)
+		}
+		return nil
+	}
+
+	log.Printf("Sig0KeyPreparation: Zone %s allows updates. KEY RR exist: %v, dont-publish-key: %v", name, keyrrexist, zd.Options[OptDontPublishKey])
+
+	// 2. Updates allowed, but there is no KEY RRset published.
+	if !keyrrexist && !zd.Options[OptDontPublishKey] {
+		log.Printf("Sig0KeyPreparation: Fetching the private SIG(0) key for %s", name)
+		sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+		if err != nil {
+			log.Printf("Sig0KeyPreparation: Error from kdb.GetSig0Keys(%s, %s): %v. Parent sync via UPDATE not possible.", name, Sig0StateActive, err)
+			return err
+		}
+		if len(sak.Keys) == 0 {
+			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for zone %s. Will generate new key to enable parent sync via UPDATE.", name)
+
+			kp := KeystorePost{
+				Command:    "sig0-mgmt",
+				SubCommand: "generate",
+				Zone:       zd.ZoneName,
+				Algorithm:  alg,
+				State:      Sig0StateActive,
+				Creator:    "del-sync-setup",
+			}
+			resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
+			if err != nil {
+				return fmt.Errorf("Sig0KeyPreparation(%s) failed to generate keypair: %v", name, err)
+			}
+			zd.Logger.Printf(resp.Msg)
+
+			sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+			if err != nil {
+				return fmt.Errorf("Sig0KeyPreparation(%s, after key generation) failed to get SIG(0) active keys: %v", name, err)
+			}
+		}
+
+		if len(sak.Keys) == 0 {
+			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", name)
+			return fmt.Errorf("no active SIG(0) key found for zone %s. Parent sync via UPDATE not possible.", name)
+		}
+		log.Printf("Sig0KeyPreparation: Publishing KEY RR for zone %s", name)
+		err = zd.PublishKeyRRs(sak)
+		if err != nil {
+			log.Printf("DelegationSyncSetup: Error from PublishKeyRRs(): %s", err)
+			return err
+		} else {
+			keyrrexist = true
+		}
+	}
+
+	// 3. There is a KEY RRset, question is whether it is signed or not
+	if keyrrexist && zd.Options[OptOnlineSigning] {
+		log.Printf("Sig0KeyPreparation: Fetching the private DNSSEC key for %s in prep for signing KEY RRset", name)
+		//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
+		//			if err != nil {
+		//				log.Printf("DelegationSyncher: Error from kdb.GetDnssecActiveKeys(%s): %v. Parent sync via UPDATE not possible.", zd.ZoneName, err)
+		//				continue
+		//			}
+		rrset, _ := apex.RRtypes.Get(dns.TypeKEY)
+		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
+		if err != nil {
+			log.Printf("Error signing %s KEY RRset: %v", zd.ZoneName, err)
+		} else {
+			apex.RRtypes.Set(dns.TypeKEY, rrset)
+			log.Printf("Successfully signed %s KEY RRset", zd.ZoneName)
+		}
+	} else {
+		log.Printf("Sig0KeyPreparation: Zone %s does not allow online signing, KEY RRset cannot be re-signed", name)
+	}
+
+	// This moved to DelegationSyncSetup() above:
+
+	// 4. There is a KEY RRset, we have tried to sign it if possible. But has it been uploaded to the parent?
+	// XXX: This is a bit of a hack, but we need to bootstrap the parent with the child's SIG(0) key. In the future
+	// we should keep state of whether successful key bootstrapping has been done or not in the keystore.
+	//	msg, err, ur := zd.BootstrapSig0KeyWithParent(alg)
+	//	if err != nil {
+	//		log.Printf("DelegationSyncSetup: Zone %s: Error from BootstrapSig0KeyWithParent(): %v.", zd.ZoneName, err)
+	//		for _, tes := range ur.TargetStatus {
+	//			log.Printf("DelegationSyncSetup: Zone %s: TargetUpdateStatus: %v", zd.ZoneName, tes)
+	//		}
+	//		return err
+	//	}
+	//	log.Printf("DelegationSyncSetup: Zone %s: SIG(0) key bootstrap: %s", zd.ZoneName, msg)
 	return nil
 }
 
