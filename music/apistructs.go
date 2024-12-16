@@ -201,13 +201,13 @@ type SidecarBeatResponse struct {
 	ErrorMsg string
 }
 type SidecarHelloPost struct {
-	Type      string
-	Name      string
-	Identity  string
-	Addresses []string
-	Port      uint16
-	TLSA      dns.TLSA
-	Zones     []string
+	MessageType string
+	Name        string
+	Identity    string
+	Addresses   []string
+	Port        uint16
+	TLSA        dns.TLSA
+	Zones       []string
 }
 
 type SidecarHelloResponse struct {

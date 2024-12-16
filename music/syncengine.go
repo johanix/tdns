@@ -276,10 +276,10 @@ func (s *Sidecar) SendHello() error {
 		log.Printf("Sending HELLO message to sidecar %s via API method (baseuri: %s)", s.Identity, s.Details[tdns.MsignerMethodAPI].BaseUri)
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
-			Type:      "HELLO",
-			Identity:  s.Identity,
-			Addresses: s.Details[tdns.MsignerMethodAPI].Addrs,
-			Port:      s.Details[tdns.MsignerMethodAPI].Port,
+			MessageType: "HELLO",
+			Identity:    s.Identity,
+			Addresses:   s.Details[tdns.MsignerMethodAPI].Addrs,
+			Port:        s.Details[tdns.MsignerMethodAPI].Port,
 		}
 
 		// Send the HTTPS POST request

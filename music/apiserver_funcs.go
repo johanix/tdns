@@ -189,10 +189,22 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIzone: error decoding zone post:", err)
 		}
 
-		log.Printf("APIzone: received /zone request (command: %s) from %s.\n",
-			zp.Command, r.RemoteAddr)
+		log.Printf("APIzone: received /zone request (command: %s) from %s.\n", zp.Command, r.RemoteAddr)
 
 		w.Header().Set("Content-Type", "application/json")
+
+		switch zp.Command {
+		case "list":
+			zs, err := mdb.ListZones(tx)
+			if err != nil {
+				log.Printf("Error from ListZones: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+			resp.Zones = zs
+			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
+			return
+		}
 
 		dbzone, _, err := mdb.GetZone(tx, zp.Zone.Name) // Get a more complete Zone structure
 		if err != nil {
@@ -200,13 +212,13 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ErrorMsg = err.Error()
 		} else {
 			switch zp.Command {
-			case "list":
-				zs, err := mdb.ListZones(tx)
-				if err != nil {
-					log.Printf("Error from ListZones: %v", err)
-				}
-				resp.Zones = zs
-			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
+			//			case "list":
+			//				zs, err := mdb.ListZones(tx)
+			//				if err != nil {
+			//					log.Printf("Error from ListZones: %v", err)
+			//				}
+			//				resp.Zones = zs
+			//			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
 			case "status":
 				var zl = make(map[string]Zone, 1)
 				if dbzone.Exists {
@@ -732,7 +744,7 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIhello: error decoding hello post:", err)
 		}
 
-		switch hp.Type {
+		switch hp.MessageType {
 		case "HELLO":
 			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
 				Time: time.Now(),
@@ -746,7 +758,7 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.Type)
+			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.MessageType)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -45,11 +46,16 @@ func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
 		Ttl:    7200,
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{&uri},
 		InternalUpdate: true,
+	}:
+		// Successfully sent to channel
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("PublishUriRR: timeout sending update request to KeyDB.UpdateQ")
 	}
 
 	return nil
@@ -58,6 +64,9 @@ func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
 func (zd *ZoneData) UnpublishUriRR(target string) error {
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("UnpublishUriRR: KeyDB.UpdateQ is nil")
+	}
+	if _, ok := dns.IsDomainName(target); !ok {
+		return fmt.Errorf("target must be a valid domain name")
 	}
 	var uri = dns.URI{
 		Priority: 0,
@@ -72,11 +81,16 @@ func (zd *ZoneData) UnpublishUriRR(target string) error {
 		Ttl:    0,
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{&uri},
 		InternalUpdate: true,
+	}:
+		// Successfully sent to channel
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("UnpublishUriRR: timeout sending update request to KeyDB.UpdateQ")
 	}
 
 	return nil
