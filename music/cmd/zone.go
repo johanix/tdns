@@ -333,7 +333,7 @@ var listBlockedZonesCmd = &cobra.Command{
 	Short: "List zones that are blocked for some reason",
 	Run: func(cmd *cobra.Command, args []string) {
 		if tdns.Globals.Zonename == "" {
-			tdns.Globals.Zonename = "zone-name-not-set.se." // must have something, not used
+			tdns.Globals.Zonename = "." // must have something, not used
 		}
 		data := music.ZonePost{
 			Command: "list",

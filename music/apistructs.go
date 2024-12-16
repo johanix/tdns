@@ -181,7 +181,7 @@ type Process struct {
 }
 
 type SidecarBeatPost struct {
-	Type        string
+	MessageType string
 	Identity    string
 	SharedZones []string
 	Time        time.Time
@@ -193,7 +193,7 @@ type SidecarBeatReport struct {
 }
 
 type SidecarBeatResponse struct {
-	Status   string
+	Status   int
 	Time     time.Time
 	Client   string
 	Msg      string
@@ -211,7 +211,7 @@ type SidecarHelloPost struct {
 }
 
 type SidecarHelloResponse struct {
-	Status   string
+	Status   int
 	Time     time.Time
 	Client   string
 	Msg      string

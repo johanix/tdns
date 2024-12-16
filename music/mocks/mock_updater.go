@@ -46,8 +46,8 @@ func (m *MockUpdater) SetApi(api *tdns.ApiClient) {
 }
 
 func (m *MockUpdater) GetApi() *tdns.ApiClient {
-	if api := m.Called().Get(0); api != nil {
-		return api.(*tdns.ApiClient)
+	if api, ok := m.Called().Get(0).(*tdns.ApiClient); ok {
+		return api
 	}
 	return nil
 }

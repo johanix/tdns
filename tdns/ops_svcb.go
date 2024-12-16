@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -38,11 +39,16 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		return fmt.Errorf("PublishSVCBRR: KeyDB.UpdateQ is nil")
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{&svcb},
 		InternalUpdate: true,
+	}:
+		// Successfully sent to the channel
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("PublishSVCBRR: timed out while sending update request")
 	}
 
 	return nil
@@ -69,49 +75,21 @@ func (zd *ZoneData) UnpublishSvcbRR(name string) error {
 		Ttl:    0,
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{anti_svcb_rr},
 		InternalUpdate: true,
+	}:
+		// Successfully sent to the channel
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("UnpublishSvcbRR: timed out while sending update request")
 	}
 
 	return nil
 }
 
 func LookupSVCB(name string) (*RRset, error) {
-	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
-	}
-	if len(clientConfig.Servers) == 0 {
-		return nil, fmt.Errorf("no DNS servers found in client configuration")
-	}
-
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), dns.TypeSVCB)
-	c := new(dns.Client)
-	r, _, err := c.Exchange(m, clientConfig.Servers[0]+":53")
-	if err != nil {
-		return nil, fmt.Errorf("failed to lookup %s SVCB record: %v", name, err)
-	}
-	if len(r.Answer) == 0 {
-		return nil, fmt.Errorf("no %s SVCB records found", name)
-	}
-
-	// var svcbRecords []*dns.SVCB
-	var rrset RRset
-	for _, ans := range r.Answer {
-		if svcb, ok := ans.(*dns.SVCB); ok {
-			rrset.RRs = append(rrset.RRs, svcb)
-			continue
-		}
-		if rrsig, ok := ans.(*dns.RRSIG); ok {
-			if rrsig.TypeCovered == dns.TypeSVCB {
-				rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
-			}
-			continue
-		}
-	}
-	return &rrset, nil
+	return RecursiveDNSQueryWithConfig(dns.Fqdn(name), dns.TypeSVCB, 3*time.Second, 3)
 }

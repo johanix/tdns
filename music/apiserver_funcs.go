@@ -709,7 +709,7 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		switch bp.Type {
+		switch bp.MessageType {
 		case "BEAT", "FULLBEAT":
 			resp.Msg = "OK"
 			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
@@ -719,7 +719,7 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.Type)
+			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.MessageType)
 		}
 	}
 }
@@ -750,7 +750,7 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 				Time: time.Now(),
 				Beat: SidecarBeatPost{
 					Identity:    hp.Identity,
-					Type:        "HELLO",
+					MessageType: "HELLO",
 					Time:        time.Now(),
 					SharedZones: hp.Zones,
 				},

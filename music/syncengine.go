@@ -144,7 +144,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 		case sbr = <-beatQ:
 			log.Printf("MusicSyncEngine: Received heartbeat from %s", sbr.Beat.Identity)
-			switch sbr.Beat.Type {
+			switch sbr.Beat.MessageType {
 			case "HELLO":
 				log.Printf("MusicSyncEngine: Received initial hello from %s", sbr.Beat.Identity)
 			case "BEAT":
@@ -152,7 +152,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 			case "FULLBEAT":
 				log.Printf("MusicSyncEngine: Received full heartbeat from %s", sbr.Beat.Identity)
 			default:
-				log.Printf("MusicSyncEngine: Unknown heartbeat type: %s in beat from %s", sbr.Beat.Type, sbr.Beat.Identity)
+				log.Printf("MusicSyncEngine: Unknown heartbeat type: %s in beat from %s", sbr.Beat.MessageType, sbr.Beat.Identity)
 			}
 
 		case <-HBticker.C:
@@ -207,7 +207,11 @@ func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[str
 				log.Printf("UpdateSidecars: Unknown RR type in MSIGNER RRset: %s", remoteSidecarRR.String())
 				continue
 			}
-			msrr := prr.Data.(*tdns.MSIGNER)
+			msrr, ok := prr.Data.(*tdns.MSIGNER)
+			if !ok {
+				log.Printf("UpdateSidecars: MSIGNER RRset contains non-MSIGNER RR: %s", remoteSidecarRR.String())
+				continue
+			}
 			remoteMethod := msrr.Method
 			remoteSidecar := msrr.Target
 			// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMethodToString[remoteMethod], sidecarId)
@@ -226,18 +230,23 @@ func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[str
 			}
 
 			if new {
-				err := s.NewMusicSyncApiClient(remoteSidecar, s.Details[remoteMethod].BaseUri, "", "", "tlsa")
-				if err != nil {
-					log.Printf("UpdateSidecars: Error creating MUSIC SyncAPI client for remote sidecar %s: %v", remoteSidecar, err)
+				if _, exists := s.Details[remoteMethod]; !exists {
+					log.Printf("UpdateSidecars: Sidecar %s does not have a %s method configured", remoteSidecar, tdns.MsignerMethodToString[remoteMethod])
 					continue
-				}
-				// Schedule sending an HELLO message to the new sidecar
-				log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
-					tdns.MsignerMethodToString[remoteMethod], remoteSidecar)
-				// Add code to send HELLO message here
-				err = s.SendHello()
-				if err != nil {
-					log.Printf("UpdateSidecars: Error sending HELLO message to %s: %v", remoteSidecar, err)
+				} else {
+					err := s.NewMusicSyncApiClient(remoteSidecar, s.Details[remoteMethod].BaseUri, "", "", "tlsa")
+					if err != nil {
+						log.Printf("UpdateSidecars: Error creating MUSIC SyncAPI client for remote sidecar %s: %v", remoteSidecar, err)
+						continue
+					}
+					// Schedule sending an HELLO message to the new sidecar
+					log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
+						tdns.MsignerMethodToString[remoteMethod], remoteSidecar)
+					// Add code to send HELLO message here
+					err = s.SendHello()
+					if err != nil {
+						log.Printf("UpdateSidecars: Error sending HELLO message to %s: %v", remoteSidecar, err)
+					}
 				}
 			}
 

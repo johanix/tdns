@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -86,36 +87,14 @@ func (zd *ZoneData) UnpublishTlsaRR() error {
 }
 
 func LookupTlsaRR(name string) (*RRset, error) {
-	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
-	}
-
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), dns.TypeTLSA)
-	c := new(dns.Client)
-	r, _, err := c.Exchange(m, clientConfig.Servers[0]+":53")
+	rrset, err := RecursiveDNSQueryWithConfig(dns.Fqdn(name), dns.TypeTLSA, 3*time.Second, 3)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup %s TLSA record: %v", name, err)
 	}
-	if len(r.Answer) == 0 {
+	if len(rrset.RRs) == 0 {
 		return nil, fmt.Errorf("no %s TLSA records found", name)
 	}
-
-	var rrset RRset
-	for _, ans := range r.Answer {
-		if tlsa, ok := ans.(*dns.TLSA); ok {
-			rrset.RRs = append(rrset.RRs, tlsa)
-			continue
-		}
-		if rrsig, ok := ans.(*dns.RRSIG); ok {
-			if rrsig.TypeCovered == dns.TypeTLSA {
-				rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
-			}
-			continue
-		}
-	}
-	return &rrset, nil
+	return rrset, nil
 }
 
 func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
