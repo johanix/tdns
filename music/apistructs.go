@@ -141,21 +141,6 @@ type SignerGroupResponse struct {
 	SignerGroups map[string]SignerGroup
 }
 
-// type Api struct {
-// 	Name       string
-// 	Client     *http.Client
-// 	BaseUrl    string
-// 	apiKey     string
-// 	Authmethod string
-// 	Verbose    bool
-// 	Debug      bool
-
-// 	// deSEC stuff
-// 	Email    string
-// 	Password string
-// 	TokViper *viper.Viper
-// }
-
 type MusicApi struct {
 	Name       string
 	Client     *http.Client

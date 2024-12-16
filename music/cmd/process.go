@@ -18,7 +18,6 @@ import (
 
 var processname string
 
-// processCmd represents the process command
 var ProcessCmd = &cobra.Command{
 	Use:   "process",
 	Short: "list or visualize the defined processes",
@@ -36,10 +35,6 @@ var processListCmd = &cobra.Command{
 		}
 	},
 }
-
-// XXX: This really doesn't belong here, it would be more correct with
-//      an "engine check" command than this "process check" command. But
-//      this will have to do for now.
 
 var processCheckCmd = &cobra.Command{
 	Use:   "check",
@@ -72,24 +67,14 @@ var processGraphCmd = &cobra.Command{
 }
 
 func init() {
-	//	rootCmd.AddCommand(processCmd)
 	ProcessCmd.AddCommand(processListCmd, processCheckCmd, processGraphCmd)
 
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// processCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// processCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	processGraphCmd.Flags().StringVarP(&processname, "process", "p", "", "name of process")
 	processGraphCmd.MarkFlagRequired("process")
 }
 
 func SendProcess(data music.ProcessPost) (music.ProcessResponse, error) {
 	var pr music.ProcessResponse
-	// bytebuf := new(bytes.Buffer)
-	// json.NewEncoder(bytebuf).Encode(data)
 
 	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
@@ -127,9 +112,6 @@ func ListProcesses() error {
 		Command: "list",
 	}
 
-	// bytebuf := new(bytes.Buffer)
-	// json.NewEncoder(bytebuf).Encode(data)
-
 	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
 		log.Println("Error from Api Post:", err)
@@ -146,11 +128,10 @@ func ListProcesses() error {
 	}
 
 	var out []string
-	//	if tdns.Globals.Verbose {
-	//		out = append(out, "Process|Description")
-	//	}
+	if tdns.Globals.Verbose {
+		out = append(out, "Process|Description")
+	}
 	for _, p := range pr.Processes {
-		// out = append(out, fmt.Sprintf("%s|%s", p.Name, p.Desc))
 		if p.Desc == "" {
 			out = append(out, fmt.Sprintf("%s|[no information]", p.Name))
 		} else {
@@ -168,9 +149,6 @@ func GraphProcess() error {
 		Command: "graph",
 		Process: processname,
 	}
-
-	// bytebuf := new(bytes.Buffer)
-	// json.NewEncoder(bytebuf).Encode(data)
 
 	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
