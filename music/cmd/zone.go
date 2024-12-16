@@ -232,7 +232,6 @@ var zoneStepFsmCmd = &cobra.Command{
 			Command: "list",
 		}
 		zr := SendZoneCommand(tdns.Globals.Zonename, data)
-		zm := zr.Zones
 
 		fsm := zr.Zones[tdns.Globals.Zonename].FSM
 
@@ -248,7 +247,7 @@ var zoneStepFsmCmd = &cobra.Command{
 		}
 
 		zr = SendZoneCommand(tdns.Globals.Zonename, data)
-		zm = zr.Zones
+		zm := zr.Zones
 
 		if zr.Msg != "" {
 			fmt.Printf("%s\n", zr.Msg)

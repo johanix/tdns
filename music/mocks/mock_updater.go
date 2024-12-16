@@ -5,6 +5,7 @@ package mocks
 
 import (
 	"github.com/johanix/tdns/music"
+	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/mock"
 )
@@ -40,13 +41,13 @@ func (m *MockUpdater) SetChannels(fetch, update chan music.SignerOp) {
 	m.Called(fetch, update)
 }
 
-func (m *MockUpdater) SetApi(api music.Api) {
+func (m *MockUpdater) SetApi(api *tdns.ApiClient) {
 	m.Called(api)
 }
 
-func (m *MockUpdater) GetApi() music.Api {
+func (m *MockUpdater) GetApi() *tdns.ApiClient {
 	if api := m.Called().Get(0); api != nil {
-		return api.(music.Api)
+		return api.(*tdns.ApiClient)
 	}
 	return nil
 }

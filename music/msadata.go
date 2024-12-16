@@ -131,13 +131,16 @@ func AttachMSADataToResponse(msg *dns.Msg, msaDataOpt *MSADataOption) {
 		msaDataOpt.ExtraText,
 	)
 
-	msg.Extra = append(msg.Extra, &dns.OPT{
-		Hdr: dns.RR_Header{
-			Name:   ".",
-			Rrtype: dns.TypeOPT,
-			Class:  dns.DefaultMsgSize,
-		},
-		Option: []dns.EDNS0{edns0_msadataOpt},
-	})
-
+	opt := msg.IsEdns0()
+	if opt == nil {
+		opt = &dns.OPT{
+			Hdr: dns.RR_Header{
+				Name:   ".",
+				Rrtype: dns.TypeOPT,
+				Class:  dns.DefaultMsgSize,
+			},
+		}
+		msg.Extra = append(msg.Extra, opt)
+	}
+	opt.Option = append(opt.Option, edns0_msadataOpt)
 }

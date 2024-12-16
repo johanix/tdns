@@ -136,6 +136,8 @@ func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
 			if bytes.Equal(hash[:], decodedCert) {
 				return nil
 			}
+		default:
+			return fmt.Errorf("unsupported TLSA matching type: %d", tlsarr.MatchingType)
 		}
 	default:
 		return fmt.Errorf("only TLSA usage 3 is supported (this TLSA has usage %d)", tlsarr.Usage)

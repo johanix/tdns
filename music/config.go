@@ -655,7 +655,7 @@ func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (
 	// A sidecar auto zone needs to be signed by the sidecar.
 	zd.Options[tdns.OptOnlineSigning] = true
 	if tmp, exists := tconf.Internal.DnssecPolicies["default"]; !exists {
-		log.Fatalf("SetupSidecarAutoZone: DnssecPolicy 'default' not defined. Default policy is required for sidecar auto zones.")
+		return nil, fmt.Errorf("SetupSidecarAutoZone: DnssecPolicy 'default' not defined. Default policy is required for sidecar auto zones.")
 	} else {
 		zd.DnssecPolicy = &tmp
 	}

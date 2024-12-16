@@ -16,6 +16,10 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
 	}
 
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("PublishSvcbRR: KeyDB.UpdateQ is nil")
+	}
+
 	svcb := dns.SVCB{
 		Priority: 1,
 		Target:   dns.Fqdn(name),
@@ -48,6 +52,10 @@ func (zd *ZoneData) UnpublishSvcbRR(name string) error {
 	name = dns.Fqdn(name)
 	if _, valid := dns.IsDomainName(name); !valid {
 		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
+	}
+
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("UnpublishSvcbRR: KeyDB.UpdateQ is nil")
 	}
 
 	anti_svcb_rr := &dns.SVCB{

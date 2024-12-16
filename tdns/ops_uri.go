@@ -15,15 +15,17 @@ import (
 // baseurl: https://{TARGET}/api/v1
 // port: 443
 func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
-
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("PublishUriRR: KeyDB.UpdateQ is nil")
+	}
 	if _, ok := dns.IsDomainName(target); !ok {
 		return fmt.Errorf("target must be a valid domain name")
 	}
 
-	if !strings.Contains(baseurl, "{TARGET}:") {
+	if !strings.Contains(baseurl, "{TARGET}") {
 		return fmt.Errorf("baseurl must contain {TARGET} to be used as a template")
 	}
-	if !strings.Contains(baseurl, ":{PORT}") {
+	if !strings.Contains(baseurl, "{PORT}") {
 		return fmt.Errorf("baseurl must contain {PORT} to be used as a template")
 	}
 
@@ -54,6 +56,9 @@ func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
 }
 
 func (zd *ZoneData) UnpublishUriRR(target string) error {
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("UnpublishUriRR: KeyDB.UpdateQ is nil")
+	}
 	var uri = dns.URI{
 		Priority: 0,
 		Weight:   0,

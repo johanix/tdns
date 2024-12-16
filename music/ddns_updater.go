@@ -15,6 +15,7 @@ import (
 )
 
 type DdnsUpdater struct {
+	Api *tdns.ApiClient
 }
 
 func init() {
@@ -26,12 +27,14 @@ func (u *DdnsUpdater) SetChannels(fetch, update chan SignerOp) {
 }
 
 func (u *DdnsUpdater) SetApi(api *tdns.ApiClient) {
-	// no-op
+	u.Api = api
 }
 
 func (u *DdnsUpdater) GetApi() *tdns.ApiClient {
-	// no-op
-	return &tdns.ApiClient{}
+	if u.Api == nil {
+		u.Api = &tdns.ApiClient{}
+	}
+	return u.Api
 }
 
 func (signer *Signer) NewDnsClient() dns.Client {

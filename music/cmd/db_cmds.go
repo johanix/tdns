@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -30,6 +31,11 @@ var dbInitCmd = &cobra.Command{
 		if musicDbFile == "" {
 			log.Fatalf("Error: MUSIC DB file not specified in config nor on command line")
 		}
+		cleanPath := filepath.Clean(musicDbFile)
+		if strings.Contains(cleanPath, "..") {
+			log.Fatalf("Error: Invalid database file path containing directory traversal")
+		}
+		musicDbFile = cleanPath
 
 		if _, err := os.Stat(musicDbFile); err == nil {
 			fmt.Printf("Warning: MUSIC DB file '%s' already exists.\n", musicDbFile)

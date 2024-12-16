@@ -176,16 +176,15 @@ func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *music.Config, done <-chan
 		// Remove VerifyPeerCertificate as we now handle this in middleware per-endpoint
 	}
 
-	server := &http.Server{
-		Handler:   router,
-		TLSConfig: tlsConfig,
-	}
-
 	for idx, address := range addresses {
 		go func(address string) {
-			addr := net.JoinHostPort(address, fmt.Sprintf("%d", port))
-			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, addr)
-			server.Addr = addr
+			server := &http.Server{
+				Handler:   router,
+				TLSConfig: tlsConfig,
+				Addr:      net.JoinHostPort(address, fmt.Sprintf("%d", port)),
+			}
+
+			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, server.Addr)
 			log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
 		}(string(address))
 

@@ -78,8 +78,11 @@ func SendProcess(data music.ProcessPost) (music.ProcessResponse, error) {
 
 	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/process", data, true)
 	if err != nil {
-		log.Println("Error from api.RequestNG:", err)
+		log.Println("Failed to send process request:", err)
 		return pr, err
+	}
+	if status < 200 || status >= 300 {
+		return pr, fmt.Errorf("process request returned unexpected status code %d", status)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)

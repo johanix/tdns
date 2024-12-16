@@ -407,7 +407,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				}
 				if conf.Internal.MusicSyncQ == nil {
 					log.Printf("Error: Zone %s: Option \"%s\" set but no multi-signer sync channel configured. This is a fatal error.", zname, ZoneOptionToString[opt])
-					os.Exit(1)
+					return nil, errors.New("ParseZones: no multi-signer sync channel configured")
 				}
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)

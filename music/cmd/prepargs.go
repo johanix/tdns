@@ -13,7 +13,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func PrepArgs(required ...string) error {
+func PrepArgs(required ...string) {
 
 	for _, arg := range required {
 		if tdns.Globals.Debug {
@@ -112,5 +112,4 @@ func PrepArgs(required ...string) error {
 			os.Exit(1)
 		}
 	}
-	return nil
 }

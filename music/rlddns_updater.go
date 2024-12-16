@@ -32,12 +32,14 @@ func (u *RLDdnsUpdater) SetChannels(fetch, update chan SignerOp) {
 
 // DDNS has no API
 func (u *RLDdnsUpdater) SetApi(api *tdns.ApiClient) {
-	// no-op
+	u.Api = api
 }
 
 func (u *RLDdnsUpdater) GetApi() *tdns.ApiClient {
-	// no-op
-	return &tdns.ApiClient{}
+	if u.Api == nil {
+		u.Api = &tdns.ApiClient{}
+	}
+	return u.Api
 }
 
 func (u *RLDdnsUpdater) Update(signer *Signer, zone, owner string,

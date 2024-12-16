@@ -49,10 +49,12 @@ var zoneDsyncStatusCmd = &cobra.Command{
 		for key, status := range resp.Functions {
 			out = append(out, fmt.Sprintf("%s|%s", key, status))
 		}
+
 		sort.Strings(out)
 		if tdns.Globals.ShowHeaders {
 			out = append([]string{"Function|Status"}, out...)
 		}
+
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		if len(resp.Todo) > 0 {
 			fmt.Printf("\nTODO:\n")

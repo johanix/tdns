@@ -20,11 +20,11 @@ import (
 	tdns "github.com/johanix/tdns/tdns"
 )
 
-func ExtractHoldPeriod(buf []byte) int {
+func ExtractHoldPeriod(buf []byte) (int, error) {
 	var de DesecError
 	err := json.Unmarshal(buf, &de)
 	if err != nil {
-		log.Fatalf("Error from unmarshal DesecError: %v\n", err)
+		return 0, fmt.Errorf("error unmarshalling DesecError: %v\n", err)
 	}
 	// "Request was throttled. Expected available in 1 second."
 	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
@@ -34,10 +34,10 @@ func ExtractHoldPeriod(buf []byte) int {
 	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
 	de.Hold, err = strconv.Atoi(de.Detail)
 	if err != nil {
-		log.Printf("Error from Atoi: %v\n", err)
+		return 0, fmt.Errorf("error converting hold period to int: %v\n", err)
 	}
 	fmt.Printf("Rate-limited. Hold period: %d\n", de.Hold)
-	return de.Hold
+	return de.Hold, nil
 }
 
 type DesecError struct {

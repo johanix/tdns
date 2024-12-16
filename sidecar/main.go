@@ -250,5 +250,10 @@ func main() {
 	go music.DdnsMgr(&mconf, done)
 	go music.FSMEngine(&mconf, done)
 
+	err = tdns.Globals.Validate()
+	if err != nil {
+		log.Fatalf("Error validating TDNS globals: %v", err)
+	}
+
 	mainloop(&tconf, &mconf, appMode)
 }

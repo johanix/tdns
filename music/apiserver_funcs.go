@@ -828,6 +828,7 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
+			// Note: the resp.Sidecars field has already been cleaned from non serializable fields in the MusicSyncEngine.
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
 				log.Printf("Error encoding response: %v\n", err)
