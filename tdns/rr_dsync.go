@@ -28,21 +28,28 @@ type DSYNC struct {
 type DsyncScheme uint8
 
 const (
-	SchemeNotify = 1
-	SchemeUpdate = 2
-	SchemeAPI    = 3
+	SchemeNotify   = 1
+	SchemeUpdate   = 2
+	SchemeAPI      = 3
+	SchemeMSUpdate = 4
 )
 
 var SchemeToString = map[DsyncScheme]string{
-	SchemeNotify: "NOTIFY",
-	SchemeUpdate: "UPDATE",
-	SchemeAPI:    "API",
+	SchemeNotify:   "NOTIFY",
+	SchemeUpdate:   "UPDATE",
+	SchemeAPI:      "API",
+	SchemeMSUpdate: "MSUPDATE", // MSUPDATE is used in a multi-signer context and indicates a DNS UPDATE sent from a signer to the upstream unsigned zone.
 }
 
 var StringToScheme = map[string]DsyncScheme{
-	"NOTIFY": SchemeNotify,
-	"UPDATE": SchemeUpdate,
-	"API":    SchemeAPI,
+	"NOTIFY":   SchemeNotify,
+	"UPDATE":   SchemeUpdate,
+	"MSUPDATE": SchemeMSUpdate,
+	"API":      SchemeAPI,
+	"1":        SchemeNotify,
+	"2":        SchemeUpdate,
+	"3":        SchemeAPI,
+	"4":        SchemeMSUpdate,
 }
 
 func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }

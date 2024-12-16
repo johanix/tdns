@@ -36,19 +36,23 @@ func mainloop(conf *tdns.Config, mconf *music.Config, appMode string) {
 	hupper := make(chan os.Signal, 1)
 	signal.Notify(hupper, syscall.SIGHUP)
 
+	defer signal.Stop(exit)
+	defer signal.Stop(hupper)
+
 	var err error
 	var all_zones []string
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		for {
 			// log.Println("mainloop: signal dispatcher")
 			select {
 			case <-exit:
 				log.Println("mainloop: Exit signal received. Cleaning up.")
 				// do whatever we need to do to wrap up nicely
-				wg.Done()
+				return
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
@@ -61,7 +65,7 @@ func mainloop(conf *tdns.Config, mconf *music.Config, appMode string) {
 
 			case <-conf.Internal.APIStopCh:
 				log.Println("mainloop: Stop command received. Cleaning up.")
-				wg.Done()
+				return
 			}
 		}
 	}()
@@ -70,8 +74,6 @@ func mainloop(conf *tdns.Config, mconf *music.Config, appMode string) {
 	// XXX: From musicd.
 	mconf.Internal.TokViper.WriteConfig()
 	fmt.Printf("mainloop: saved state of API tokens to disk\n")
-	fmt.Println("mainloop: leaving signal dispatcher")
-
 	fmt.Println("mainloop: leaving signal dispatcher")
 }
 
@@ -119,14 +121,18 @@ func main() {
 	}
 	kdb := tconf.Internal.KeyDB
 	kdb.UpdateQ = make(chan tdns.UpdateRequest, 10)
+	kdb.DeferredUpdateQ = make(chan tdns.DeferredUpdate, 10)
 
 	tconf.Internal.UpdateQ = kdb.UpdateQ
 	mconf.Internal.UpdateQ = kdb.UpdateQ
+	tconf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+	mconf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
 	mconf.Internal.KeyDB = kdb
 
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
 	music.LoadMusicConfig(&mconf, tconf.AppMode, false) // on initial startup a config error should cause an abort.
-	//	mconf.Internal = music.InternalConf{}
+
+	// dump.P(mconf.Sidecar)
 
 	logfile := viper.GetString("log.file")
 	err = tdns.SetupLogging(logfile)
@@ -143,9 +149,9 @@ func main() {
 	tconf.Internal.RefreshZoneCh = make(chan tdns.ZoneRefresher, 10)
 	tconf.Internal.BumpZoneCh = make(chan tdns.BumperData, 10)
 	tconf.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 10)
-	tconf.Internal.MultiSignerSyncQ = make(chan tdns.MultiSignerSyncRequest, 10)
+	tconf.Internal.MusicSyncQ = make(chan tdns.MusicSyncRequest, 10)
 
-	mconf.Internal.HeartbeatQ = make(chan music.Heartbeat, 10)
+	mconf.Internal.HeartbeatQ = make(chan music.SidecarBeatReport, 10)
 	go tdns.RefreshEngine(&tconf, stopch, appMode)
 
 	//	conf.Internal.ValidatorCh = make(chan tdns.ValidatorRequest, 10)
@@ -154,7 +160,7 @@ func main() {
 	tconf.Internal.NotifyQ = make(chan tdns.NotifyRequest, 10)
 	go tdns.Notifier(tconf.Internal.NotifyQ)
 
-	mconf.Internal.MultiSignerSyncQ = tconf.Internal.MultiSignerSyncQ
+	mconf.Internal.MusicSyncQ = tconf.Internal.MusicSyncQ
 	// The MusicSyncEngine is started here to ensure that it is running before we start parsing zones.
 	go music.MusicSyncEngine(&mconf, stopch)
 
@@ -166,34 +172,36 @@ func main() {
 
 	//	go func() {
 	//		time.Sleep(5 * time.Second)
-	err = music.LoadSidecarConfig(&mconf, all_zones)
+	err = mconf.LoadSidecarConfig(&tconf, all_zones)
 	if err != nil {
-		fmt.Printf("Error loading sidecar config: %v", err)
+		fmt.Printf("Error loading sidecar config: %v\n", err)
 		log.Fatalf("Error loading sidecar config: %v", err)
 	}
 	//	}()
 
 	apistopper := make(chan struct{}) //
 	tconf.Internal.APIStopCh = apistopper
-	// sidecar mgmt API:
-	go APIdispatcher(&tconf, &mconf, apistopper)
-	// sidecar-to-sidecar sync API:
 
-	go MusicAPIdispatcher(&tconf, &mconf, apistopper)
+	go APIdispatcher(&tconf, &mconf, apistopper)          // sidecar mgmt API:
+	go MusicSyncAPIdispatcher(&tconf, &mconf, apistopper) // sidecar-to-sidecar sync API:
 
 	tconf.Internal.ScannerQ = make(chan tdns.ScanRequest, 5)
 	tconf.Internal.DnsUpdateQ = make(chan tdns.DnsUpdateRequest, 100)
 	tconf.Internal.DnsNotifyQ = make(chan tdns.DnsNotifyRequest, 100)
 	tconf.Internal.AuthQueryQ = make(chan tdns.AuthQueryRequest, 100)
+	tconf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
 
 	go tdns.AuthQueryEngine(tconf.Internal.AuthQueryQ)
 	go tdns.ScannerEngine(tconf.Internal.ScannerQ, tconf.Internal.AuthQueryQ)
 	go kdb.ZoneUpdaterEngine(stopch)
+	go kdb.DeferredUpdaterEngine(stopch)
 	go tdns.UpdateHandler(&tconf)
 	go tdns.NotifyHandler(&tconf)
 	go tdns.DnsEngine(&tconf)
 	go kdb.DelegationSyncher(tconf.Internal.DelegationSyncQ, tconf.Internal.NotifyQ)
-	// go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
+
+	// The ResignerEngine is needed only for the sidecar auto zones.
+	go tdns.ResignerEngine(tconf.Internal.ResignQ, make(chan struct{}))
 
 	mconf.Internal.EngineCheck = make(chan music.EngineCheck, 100)
 
@@ -214,18 +222,22 @@ func main() {
 	mconf.Internal.DdnsFetch = make(chan music.SignerOp, 100)
 	mconf.Internal.DdnsUpdate = make(chan music.SignerOp, 100)
 
-	rootcafile := viper.GetString("common.rootCA")
-	desecapi, err := music.DesecSetupClient(rootcafile, music.CliConf.Verbose, music.CliConf.Debug)
-	if err != nil {
-		log.Fatalf("Error from DesecSetupClient: %v\n", err)
-	}
-	desecapi.TokViper = music.TokVip
+	// XXX: Why don't we need this anymore?
+	// rootcafile := viper.GetString("common.rootCA")
 
-	rldu := music.Updaters["rldesec-api"]
-	rldu.SetChannels(mconf.Internal.DesecFetch, mconf.Internal.DesecUpdate)
-	rldu.SetApi(*desecapi)
-	du := music.Updaters["desec-api"]
-	du.SetApi(*desecapi) // it is ok to reuse the same object here
+	// XXX: Let's put deSEC support on hold until we've sorted out the distributed multi-signer issues.
+	//	desecapi, err := music.DesecSetupClient(rootcafile, music.CliConf.Verbose, music.CliConf.Debug)
+	//	if err != nil {
+	//		log.Fatalf("Error from DesecSetupClient: %v\n", err)
+	//	}
+	//	desecapi := music.GetUpdater("desec-api").GetApi()
+	//	desecapi.TokViper = music.TokVip
+
+	//	rldu := music.Updaters["rldesec-api"]
+	//	rldu.SetChannels(mconf.Internal.DesecFetch, mconf.Internal.DesecUpdate)
+	//	rldu.SetApi(*desecapi)
+	//	du := music.Updaters["desec-api"]
+	//	du.SetApi(*desecapi) // it is ok to reuse the same object here
 
 	rlddu := music.Updaters["rlddns"]
 	rlddu.SetChannels(mconf.Internal.DdnsFetch, mconf.Internal.DdnsUpdate)
@@ -234,9 +246,14 @@ func main() {
 
 	// XXX: From musicd.
 	go music.DbUpdater(&mconf)
-	go music.DeSECmgr(&mconf, done)
+	// 	go music.DeSECmgr(&mconf, done)
 	go music.DdnsMgr(&mconf, done)
 	go music.FSMEngine(&mconf, done)
+
+	err = tdns.Globals.Validate()
+	if err != nil {
+		log.Fatalf("Error validating TDNS globals: %v", err)
+	}
 
 	mainloop(&tconf, &mconf, appMode)
 }

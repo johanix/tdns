@@ -327,3 +327,65 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	return &rrset, rcode, fmt.Errorf("No Answers found from any auth server looking up '%s %s'.\n",
 		qname, dns.TypeToString[rrtype])
 }
+
+func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
+	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
+	}
+	if len(clientConfig.Servers) == 0 {
+		return nil, fmt.Errorf("no DNS servers found in client configuration")
+	}
+
+	var rrset *RRset
+	for _, server := range clientConfig.Servers {
+		rrset, err = RecursiveDNSQuery(server, qname, qtype, timeout, retries)
+		if err == nil {
+			return rrset, nil
+		}
+		log.Printf("failed to lookup %s record using server %s after %d attempts: %v", qname, server, retries, err)
+	}
+
+	return nil, fmt.Errorf("failed to find any %s records after trying all resolvers", qname)
+}
+
+func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(qname, qtype)
+	c := &dns.Client{
+		Timeout: timeout,
+	}
+
+	var rrset RRset
+	var lastErr error
+	for attempt := 0; attempt < retries; attempt++ {
+		r, _, err := c.Exchange(m, server+":53")
+		if err != nil {
+			lastErr = err
+			log.Printf("attempt %d: failed to lookup %s record using server %s: %v", attempt+1, qname, server, err)
+			continue
+		}
+		if len(r.Answer) == 0 {
+			log.Printf("attempt %d: no %s records found using server %s", attempt+1, qname, server)
+			continue
+		}
+
+		for _, ans := range r.Answer {
+			if rr, ok := ans.(dns.RR); ok && rr.Header().Rrtype == qtype {
+				rrset.RRs = append(rrset.RRs, rr)
+				continue
+			}
+			if rrsig, ok := ans.(*dns.RRSIG); ok {
+				if rrsig.TypeCovered == qtype {
+					rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
+				}
+				continue
+			}
+		}
+
+		if len(rrset.RRs) > 0 {
+			return &rrset, nil
+		}
+	}
+	return nil, lastErr
+}

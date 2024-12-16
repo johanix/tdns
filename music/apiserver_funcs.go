@@ -11,8 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 
 	"github.com/gorilla/mux"
@@ -187,10 +189,22 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIzone: error decoding zone post:", err)
 		}
 
-		log.Printf("APIzone: received /zone request (command: %s) from %s.\n",
-			zp.Command, r.RemoteAddr)
+		log.Printf("APIzone: received /zone request (command: %s) from %s.\n", zp.Command, r.RemoteAddr)
 
 		w.Header().Set("Content-Type", "application/json")
+
+		switch zp.Command {
+		case "list":
+			zs, err := mdb.ListZones(tx)
+			if err != nil {
+				log.Printf("Error from ListZones: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+			resp.Zones = zs
+			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
+			return
+		}
 
 		dbzone, _, err := mdb.GetZone(tx, zp.Zone.Name) // Get a more complete Zone structure
 		if err != nil {
@@ -198,13 +212,13 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ErrorMsg = err.Error()
 		} else {
 			switch zp.Command {
-			case "list":
-				zs, err := mdb.ListZones(tx)
-				if err != nil {
-					log.Printf("Error from ListZones: %v", err)
-				}
-				resp.Zones = zs
-			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
+			//			case "list":
+			//				zs, err := mdb.ListZones(tx)
+			//				if err != nil {
+			//					log.Printf("Error from ListZones: %v", err)
+			//				}
+			//				resp.Zones = zs
+			//			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
 			case "status":
 				var zl = make(map[string]Zone, 1)
 				if dbzone.Exists {
@@ -674,38 +688,38 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := BeatResponse{
+		resp := SidecarBeatResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIbeat: received /beat request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var bp BeatPost
+		var bp SidecarBeatPost
 		err := decoder.Decode(&bp)
 		if err != nil {
 			log.Println("APIbeat: error decoding beat post:", err)
 		}
 
-		switch bp.Type {
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIbeat: error encoding response: %v\n", err)
+			}
+		}()
+
+		switch bp.MessageType {
 		case "BEAT", "FULLBEAT":
 			resp.Msg = "OK"
-			mconf.Internal.HeartbeatQ <- Heartbeat{
-				Name:  bp.Name,
-				Type:  bp.Type,
-				Time:  time.Now(),
-				Zones: bp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+				Time: time.Now(),
+				Beat: bp,
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.Type)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from json.NewEncoder: %v\n", err)
+			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.MessageType)
 		}
 	}
 }
@@ -717,31 +731,34 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := HelloResponse{
+		resp := SidecarHelloResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var hp HelloPost
+		var hp SidecarHelloPost
 		err := decoder.Decode(&hp)
 		if err != nil {
 			log.Println("APIhello: error decoding hello post:", err)
 		}
 
-		switch hp.Type {
+		switch hp.MessageType {
 		case "HELLO":
-			mconf.Internal.HeartbeatQ <- Heartbeat{
-				Name:  hp.Name,
-				Type:  "HELLO",
-				Time:  time.Now(),
-				Zones: hp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+				Time: time.Now(),
+				Beat: SidecarBeatPost{
+					Identity:    hp.Identity,
+					MessageType: "HELLO",
+					Time:        time.Now(),
+					SharedZones: hp.Zones,
+				},
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.Type)
+			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.MessageType)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -753,7 +770,8 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 }
 
 func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *http.Request) {
-	address := viper.GetString("services.apiserver.api")
+	address := viper.GetString("apiserver.address")
+	name := viper.GetString("service.name")
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -774,8 +792,7 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 		case "api":
 			message := "All ok, here are all defined API endpoints"
 
-			data := []string{fmt.Sprintf("API provided by MUSICD listening on: %s",
-				address)}
+			data := []string{fmt.Sprintf("API provided by %s listening on: %v", name, address)}
 
 			walker := func(route *mux.Route, router *mux.Router,
 				ancestors []*mux.Route) error {
@@ -802,5 +819,62 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 		if err != nil {
 			log.Printf("Error from Encoder: %v\n", err)
 		}
+	}
+}
+
+func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var sp SidecarPost
+		err := decoder.Decode(&sp)
+		if err != nil {
+			log.Println("APIsidecar: error decoding sidecar post:", err)
+		}
+
+		log.Printf("APIsidecar: received /sidecar request (command: %s) from %s.\n",
+			sp.Command, r.RemoteAddr)
+
+		var resp = SidecarResponse{
+			Status: 101,
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			// Note: the resp.Sidecars field has already been cleaned from non serializable fields in the MusicSyncEngine.
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error encoding response: %v\n", err)
+				dump.P(resp)
+			}
+		}()
+
+		switch strings.ToLower(sp.Command) {
+		case "status":
+			responseCh := make(chan MusicSyncStatus)
+			log.Printf("APIsidecar: STATUS request received")
+			mconf.Internal.MusicSyncStatusQ <- MusicSyncStatus{
+				Command:  "STATUS",
+				Response: responseCh,
+			}
+			log.Printf("APIsidecar: STATUS request sent to MusicSyncStatusQ")
+			select {
+			case tmp := <-responseCh:
+				log.Printf("APIsidecar: STATUS response received")
+				if tmp.Error {
+					http.Error(w, tmp.ErrorMsg, http.StatusInternalServerError)
+					return
+				}
+				resp.Sidecars = tmp.Sidecars
+
+			case <-time.After(5 * time.Second):
+				log.Printf("APIsidecar: STATUS request timed out")
+				http.Error(w, "Request timed out", http.StatusGatewayTimeout)
+				return
+			}
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", sp.Command)
+		}
+
 	}
 }

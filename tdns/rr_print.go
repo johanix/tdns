@@ -14,7 +14,7 @@ import (
 )
 
 // leftpad = amount of white space instead of the domain name on continuation lines during multiline output
-func KeyRRPrint(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmargin int) {
+func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmargin int) {
 	if leftpad == 0 {
 		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
 	}
@@ -46,7 +46,7 @@ func KeyRRPrint(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 	fmt.Printf("%s ; %s alg = %s ; key id = %d\n", spaces, ktype, algstr, keyid)
 }
 
-func RrsigRRPrint(rr dns.RR, leftpad, rightmargin int) {
+func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
 	if leftpad == 0 {
 		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
 	}
@@ -76,7 +76,7 @@ func RrsigRRPrint(rr dns.RR, leftpad, rightmargin int) {
 	}
 }
 
-func SvcbRRPrint(rr dns.RR, leftpad, rightmargin int) {
+func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 	if leftpad == 0 {
 		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
 	}
@@ -96,7 +96,7 @@ func SvcbRRPrint(rr dns.RR, leftpad, rightmargin int) {
 	}
 }
 
-func SoaRRPrint(rr dns.RR, leftpad, rightmargin int) {
+func PrintSoaRR(rr dns.RR, leftpad, rightmargin int) {
 	if leftpad == 0 {
 		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
 	}
@@ -116,7 +116,7 @@ func SoaRRPrint(rr dns.RR, leftpad, rightmargin int) {
 
 }
 
-func GenericRRPrint(rr dns.RR, leftpad, rightmargin int) {
+func PrintGenericRR(rr dns.RR, leftpad, rightmargin int) {
 	// fmt.Printf("%s\n", rr.String())
 	p := strings.Fields(rr.String())
 	namepad := strings.Repeat(" ", leftpad-len(p[0])-len(p[1]))
@@ -182,22 +182,22 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 				case *dns.KEY:
 					keyid := rr.(*dns.KEY).KeyTag()
 					t := ""
-					KeyRRPrint(rr, "KEY", t, keyid, leftpad, rightmargin)
+					PrintKeyRR(rr, "KEY", t, keyid, leftpad, rightmargin)
 				case *dns.DNSKEY:
 					keyid := rr.(*dns.DNSKEY).KeyTag()
 					t := " ZSK ;"
-					if rr.(*dns.DNSKEY).Flags == 257 {
+					if rr.(*dns.DNSKEY).Flags&0x0001 != 0 {
 						t = " KSK ;"
 					}
-					KeyRRPrint(rr, "DNSKEY", t, keyid, leftpad, rightmargin)
+					PrintKeyRR(rr, "DNSKEY", t, keyid, leftpad, rightmargin)
 
 				case *dns.RRSIG:
-					RrsigRRPrint(rr, leftpad, rightmargin)
+					PrintRrsigRR(rr, leftpad, rightmargin)
 
 				case *dns.SVCB, *dns.PrivateRR:
 					switch rr.Header().Rrtype {
 					case TypeDELEG, dns.TypeSVCB:
-						SvcbRRPrint(rr, leftpad, rightmargin)
+						PrintSvcbRR(rr, leftpad, rightmargin)
 
 					default:
 						// fmt.Printf("This is a %s RR\n", dns.TypeToString[rr.Header().Rrtype])
@@ -208,7 +208,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 					}
 
 				case *dns.SOA:
-					SoaRRPrint(rr, leftpad, rightmargin)
+					PrintSoaRR(rr, leftpad, rightmargin)
 
 				default:
 					p := strings.Fields(rr.String())
@@ -313,20 +313,20 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) {
 
 	switch rr.(type) {
 	case *dns.SOA:
-		SoaRRPrint(rr, leftpad, 78)
+		PrintSoaRR(rr, leftpad, 78)
 	case *dns.DNSKEY:
 		t := " ZSK ;"
 		if rr.(*dns.DNSKEY).Flags&0x0001 == 1 {
 			t = " KSK ;"
 		}
-		KeyRRPrint(rr, "DNSKEY", t, rr.(*dns.DNSKEY).KeyTag(), leftpad, 78)
+		PrintKeyRR(rr, "DNSKEY", t, rr.(*dns.DNSKEY).KeyTag(), leftpad, 78)
 	case *dns.KEY:
-		KeyRRPrint(rr, "KEY", "", rr.(*dns.KEY).KeyTag(), leftpad, 78)
+		PrintKeyRR(rr, "KEY", "", rr.(*dns.KEY).KeyTag(), leftpad, 78)
 	case *dns.RRSIG:
-		RrsigRRPrint(rr, leftpad, 78)
+		PrintRrsigRR(rr, leftpad, 78)
 	case *dns.SVCB:
-		SvcbRRPrint(rr, leftpad, 78)
+		PrintSvcbRR(rr, leftpad, 78)
 	default:
-		GenericRRPrint(rr, leftpad, 78)
+		PrintGenericRR(rr, leftpad, 78)
 	}
 }

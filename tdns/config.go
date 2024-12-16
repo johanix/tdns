@@ -56,22 +56,23 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	CfgFile          string //
-	ZonesCfgFile     string //
-	KeyDB            *KeyDB
-	DnssecPolicies   map[string]DnssecPolicy
-	APIStopCh        chan struct{}
-	RefreshZoneCh    chan ZoneRefresher
-	BumpZoneCh       chan BumperData
-	ValidatorCh      chan ValidatorRequest
-	ScannerQ         chan ScanRequest
-	UpdateQ          chan UpdateRequest
-	DnsUpdateQ       chan DnsUpdateRequest
-	DnsNotifyQ       chan DnsNotifyRequest
-	DelegationSyncQ  chan DelegationSyncRequest
-	MultiSignerSyncQ chan MultiSignerSyncRequest
-	NotifyQ          chan NotifyRequest
-	AuthQueryQ       chan AuthQueryRequest
+	CfgFile         string //
+	ZonesCfgFile    string //
+	KeyDB           *KeyDB
+	DnssecPolicies  map[string]DnssecPolicy
+	APIStopCh       chan struct{}
+	RefreshZoneCh   chan ZoneRefresher
+	BumpZoneCh      chan BumperData
+	ValidatorCh     chan ValidatorRequest
+	ScannerQ        chan ScanRequest
+	UpdateQ         chan UpdateRequest
+	DeferredUpdateQ chan DeferredUpdate
+	DnsUpdateQ      chan DnsUpdateRequest
+	DnsNotifyQ      chan DnsNotifyRequest
+	DelegationSyncQ chan DelegationSyncRequest
+	MusicSyncQ      chan MusicSyncRequest
+	NotifyQ         chan NotifyRequest
+	AuthQueryQ      chan AuthQueryRequest
 	// ResignQ         chan ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
 	ResignQ chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 }
@@ -151,6 +152,14 @@ func (conf *Config) ReloadZoneConfig() (string, error) {
 
 	for _, zname := range prezones {
 		if !slices.Contains(zonelist, zname) {
+			zd, exists := Zones.Get(zname)
+			if !exists {
+				log.Printf("ReloadZoneConfig: Zone %s not in config and also not in zone list.", zname)
+			}
+			if zd.Options[OptAutomaticZone] {
+				log.Printf("ReloadZoneConfig: Zone %s is an automatic zone. Not removing from zone list.", zname)
+				continue
+			}
 			log.Printf("ReloadZoneConfig: Zone %s no longer in config. Removing from zone list.", zname)
 			Zones.Remove(zname)
 		}

@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	cli "github.com/johanix/tdns/tdns/cli"
 	tdns "github.com/johanix/tdns/tdns"
+	cli "github.com/johanix/tdns/tdns/cli"
 )
 
 var cfgFile, cfgFileUsed string
@@ -44,6 +44,8 @@ func init() {
 		false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
 		false, "verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
+		false, "show headers")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -95,7 +97,7 @@ func initApi() {
 	apikey := viper.GetString("cli.tdnsd.apikey")
 	authmethod := viper.GetString("cli.tdnsd.authmethod")
 
-	tdns.Globals.Api = tdns.NewClient("tdnsd", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
+	tdns.Globals.Api = tdns.NewClient("tdns-cli", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
 	if tdns.Globals.Api == nil {
 		log.Fatalf("initApi: tdns.Globals.Api is nil. Exiting.")
 	}

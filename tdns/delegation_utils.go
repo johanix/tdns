@@ -566,7 +566,7 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	}
 
 	if oldapex == nil {
-		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		log.Printf("DnskeysChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
 		return true, nil // on initial load, we always return false, nil, nil as we don't know that the DNSKEYs have changed
 	}
 
@@ -583,20 +583,8 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-type MultiSignerSyncStatus struct {
-	ZoneName       string
-	MsignerAdds    []dns.RR
-	MsignerRemoves []dns.RR
-	DnskeyAdds     []dns.RR
-	DnskeyRemoves  []dns.RR
-	Msg            string
-	Error          bool
-	ErrorMsg       string
-	Status         bool
-}
-
-func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MultiSignerSyncStatus, error) {
-	var mss = MultiSignerSyncStatus{
+func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error) {
+	var mss = MusicSyncStatus{
 		ZoneName: zd.ZoneName,
 		Msg:      "No change",
 		Error:    false,
@@ -616,7 +604,7 @@ func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MultiSignerSyncStatu
 	}
 
 	if oldapex == nil {
-		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		log.Printf("MsignerChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
 		mss.MsignerAdds = newmsigner.RRs
 		return true, &mss, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
 	}

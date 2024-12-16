@@ -11,6 +11,7 @@ import (
 	"log"
 	"time"
 
+	tdns "github.com/johanix/tdns/tdns"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -19,12 +20,12 @@ import (
 type RLDesecUpdater struct {
 	FetchCh  chan SignerOp
 	UpdateCh chan SignerOp
-	Api      Api
+	Api      *tdns.ApiClient
 }
 
 func init() {
 	Updaters["rldesec-api"] = &RLDesecUpdater{
-		Api: Api{},
+		Api: &tdns.ApiClient{},
 	}
 }
 
@@ -33,11 +34,11 @@ func (u *RLDesecUpdater) SetChannels(fetch, update chan SignerOp) {
 	u.UpdateCh = update
 }
 
-func (u *RLDesecUpdater) SetApi(api Api) {
+func (u *RLDesecUpdater) SetApi(api *tdns.ApiClient) {
 	u.Api = api
 }
 
-func (u *RLDesecUpdater) GetApi() Api {
+func (u *RLDesecUpdater) GetApi() *tdns.ApiClient {
 	return u.Api
 }
 
@@ -59,7 +60,8 @@ func (u *RLDesecUpdater) FetchRRset(s *Signer, zone, owner string,
 }
 
 // Returns: rrl=true if reate-limited, int=seconds penalty (now testing with status),
-//          error (if any), []dns.RR data
+//
+//	error (if any), []dns.RR data
 func RLDesecFetchRRset(fdop SignerOp) (bool, int, error) {
 	signer := fdop.Signer
 	zone := fdop.Zone

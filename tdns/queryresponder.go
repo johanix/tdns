@@ -39,6 +39,7 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 	if err != nil || apex == nil {
 		if err != nil {
 			log.Printf("ApexResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
+			return err
 		} else {
 			log.Printf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
 		}
@@ -85,10 +86,15 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
 		}
 
-	case TypeDSYNC, TypeNOTIFY, TypeMSIGNER, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
-		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD, dns.TypeKEY,
+	case // TDNS special types
+		TypeDSYNC, TypeNOTIFY, TypeMSIGNER, TypeDELEG,
+		// Standard DNS types
+		dns.TypeMX, dns.TypeTLSA, dns.TypeSRV, dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT,
+		dns.TypeZONEMD, dns.TypeKEY, dns.TypeURI, dns.TypeSVCB,
+		// DNSSEC types
 		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
 		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
+		//
 		if rrset, ok := apex.RRtypes.Get(qtype); ok {
 			if len(rrset.RRs) > 0 {
 				m.Answer = append(m.Answer, rrset.RRs...)
@@ -346,8 +352,14 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	// 2. Check for exact match qname+qtype
 	log.Printf("---> Checking for exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
 	switch qtype {
-	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, TypeNOTIFY, TypeDSYNC,
-		TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
+	case // Standard DNS types
+		dns.TypeNS, dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, dns.TypeCNAME, dns.TypeSOA, dns.TypeKEY,
+		// TDNS special DNS types
+		TypeNOTIFY, TypeDSYNC, TypeDELEG, TypeMSIGNER,
+		// DNSSEC types
+		dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeCSYNC,
+		// some modern DNS types
+		dns.TypeURI, dns.TypeSVCB, dns.TypeHTTPS, dns.TypeTLSA, dns.TypeCAA:
 		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(owner.RRtypes.GetOnlyRRSet(qtype).RRs) > 0 {
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
@@ -401,7 +413,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		return nil
 	}
 
-	// Final catcheverything we don't want to deal with
+	// Final catch everything we don't want to deal with
 	m.MsgHdr.Rcode = dns.RcodeRefused
 	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
