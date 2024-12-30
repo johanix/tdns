@@ -141,6 +141,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 				zname := item.Key
 				zd := item.Val
 
+				// dump.P(zd.Options)
 				options := []ZoneOption{}
 				for opt, val := range zd.Options {
 					if val {

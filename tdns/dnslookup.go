@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // 1. Is the RRset in a zone that we're auth for? If so we claim that the data is valid
@@ -291,36 +292,35 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 			continue // go to next server
 		}
 
-		if r != nil {
-			rcode = r.MsgHdr.Rcode
-			if len(r.Answer) != 0 {
-				for _, rr := range r.Answer {
-					switch t := rr.Header().Rrtype; t {
-					case rrtype:
-						rrset.RRs = append(rrset.RRs, rr)
-					case dns.TypeRRSIG:
-						rrset.RRSIGs = append(rrset.RRSIGs, rr)
-					default:
-						lg.Printf("Got a %s RR when looking for %s %s",
-							dns.TypeToString[t], qname,
-							dns.TypeToString[rrtype])
-					}
+		if r == nil {
+			continue
+		}
+		rcode = r.MsgHdr.Rcode
+		if len(r.Answer) != 0 {
+			for _, rr := range r.Answer {
+				switch t := rr.Header().Rrtype; t {
+				case rrtype:
+					rrset.RRs = append(rrset.RRs, rr)
+				case dns.TypeRRSIG:
+					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				default:
+					lg.Printf("Got a %s RR when looking for %s %s",
+						dns.TypeToString[t], qname,
+						dns.TypeToString[rrtype])
 				}
-				RRsetCache.Set(qname, rrtype, &CachedRRset{
-					Name:       qname,
-					RRtype:     rrtype,
-					Rcode:      uint8(rcode),
-					RRset:      &rrset,
-					Expiration: time.Now().Add(time.Duration(rrset.RRs[0].Header().Ttl) * time.Second),
-				})
-				return &rrset, rcode, nil
-			} else {
-				if rcode == dns.RcodeSuccess {
-					return &rrset, rcode, nil // no point in continuing
-				}
-				continue // go to next server
 			}
+			RRsetCache.Set(qname, rrtype, &CachedRRset{
+				Name:       qname,
+				RRtype:     rrtype,
+				Rcode:      uint8(rcode),
+				RRset:      &rrset,
+				Expiration: time.Now().Add(time.Duration(rrset.RRs[0].Header().Ttl) * time.Second),
+			})
+			return &rrset, rcode, nil
 		} else {
+			if rcode == dns.RcodeSuccess {
+				return &rrset, rcode, nil // no point in continuing
+			}
 			continue // go to next server
 		}
 	}
@@ -329,6 +329,23 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 }
 
 func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
+	resolvers := viper.GetStringSlice("dns.resolvers")
+	if len(resolvers) == 0 {
+		return nil, fmt.Errorf("no DNS servers found in client configuration")
+	}
+
+	for _, server := range resolvers {
+		rrset, err := RecursiveDNSQuery(server, qname, qtype, timeout, retries)
+		if err == nil {
+			return rrset, nil
+		}
+		log.Printf("failed to lookup %s record using server %s after %d attempts: %v", qname, server, retries, err)
+	}
+
+	return nil, fmt.Errorf("failed to find any %s records after trying all resolvers", qname)
+}
+
+func RecursiveDNSQueryWithResolvConf(qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
 	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)

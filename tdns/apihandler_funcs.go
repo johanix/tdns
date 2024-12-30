@@ -258,6 +258,8 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "status":
 			log.Printf("APIconfig: config status inquiry")
+			resp.DnsEngine = conf.DnsEngine
+			resp.Apiserver = conf.Apiserver
 			resp.Msg = fmt.Sprintf("Configuration is ok, server boot time: %s, last config reload: %s",
 				conf.ServerBootTime.Format(timelayout), conf.ServerConfigTime.Format(timelayout))
 

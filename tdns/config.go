@@ -96,6 +96,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	configsections["service"] = config.Service
 	configsections["db"] = config.Db
 	configsections["apiserver"] = config.Apiserver
+	configsections["dnsengine"] = config.DnsEngine
 
 	if err := ValidateBySection(&config, configsections, cfgfile); err != nil {
 		log.Fatalf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)

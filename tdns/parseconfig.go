@@ -278,10 +278,17 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 	zones := zconfig.Zones
 	primary_zones := []string{}
 
-	for zname, zconf := range zconfig.Zones {
-		if zname != dns.Fqdn(zname) {
-			delete(zones, zname)
-			zname = dns.Fqdn(zname)
+	// The zone structure is a map[string]ZoneConf, with the zone name as the key.
+	// However, the config structure is
+	// zones:
+	//    zone_id:
+	//       name: zone_name
+	//       ...
+	// Therefore we need to ensure that we use the FQDN of the zone name as the key, regardless of the zone_id.
+	for zid, zconf := range zconfig.Zones {
+		zname := dns.Fqdn(zconf.Name)
+		if zname != zid {
+			delete(zones, zid)
 			zconf.Name = zname
 			zones[zname] = zconf
 		}

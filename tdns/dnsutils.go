@@ -245,11 +245,13 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	checkedForUnchanged := false
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		// log.Printf("ReadZoneData: parsed RR: %s", rr.String())
+		log.Printf("ReadZoneData: parsed RR: %s", rr.String())
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
+
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true
 			apex, _ := zd.Data.Get(zd.ZoneName)
+			//dump.P(apex)
 			soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 			zd.Logger.Printf("ParseZoneFromReader: %s: old incoming serial: %d new SOA serial: %d",
 				zd.ZoneName, zd.IncomingSerial, soa.Serial)
