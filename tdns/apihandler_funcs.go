@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 	// "github.com/miekg/dns"
 )
 
@@ -474,4 +476,59 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 			resp.Error = true
 		}
 	}
+}
+
+func WalkRoutes(router *mux.Router, address string) {
+	log.Printf("Defined API endpoints for router on: %s\n", address)
+
+	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+		path, _ := route.GetPathTemplate()
+		methods, _ := route.GetMethods()
+		for m := range methods {
+			log.Printf("%-6s %s\n", methods[m], path)
+		}
+		return nil
+	}
+	if err := router.Walk(walker); err != nil {
+		log.Panicf("Logging err: %s\n", err.Error())
+	}
+	//	return nil
+}
+
+func TdnsSetupRouter(conf *Config) *mux.Router {
+	kdb := conf.Internal.KeyDB
+	r := mux.NewRouter().StrictSlash(true)
+
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.key")).Subrouter()
+
+	sr.HandleFunc("/ping", APIping(conf, conf.AppName, conf.AppVersion, conf.ServerBootTime)).Methods("POST")
+	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
+	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
+	sr.HandleFunc("/zone", APIzone(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone/dsync", APIzoneDsync(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
+	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
+	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
+
+	return r
+}
+
+// In practice APIdispatcher doesn't need a termination signal, as it will
+// just sit inside http.ListenAndServe, but we keep it for symmetry.
+func APIdispatcher(conf *Config, done <-chan struct{}) {
+	router := TdnsSetupRouter(conf)
+
+	WalkRoutes(router, viper.GetString("apiserver.address"))
+	log.Println("")
+
+	address := viper.GetString("apiserver.address")
+
+	go func() {
+		log.Println("Starting API dispatcher #1. Listening on", address)
+		log.Fatal(http.ListenAndServe(address, router))
+	}()
+
+	log.Println("API dispatcher: unclear how to stop the http server nicely.")
 }

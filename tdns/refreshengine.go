@@ -23,8 +23,9 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
-func RefreshEngine(conf *Config, stopch chan struct{}, appMode string) {
+func RefreshEngine(conf *Config, stopch chan struct{}) {
 
+	appMode := conf.AppMode
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 

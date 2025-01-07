@@ -60,6 +60,7 @@ type InternalConf struct {
 	ZonesCfgFile    string //
 	KeyDB           *KeyDB
 	DnssecPolicies  map[string]DnssecPolicy
+	StopCh          chan struct{}
 	APIStopCh       chan struct{}
 	RefreshZoneCh   chan ZoneRefresher
 	BumpZoneCh      chan BumperData
