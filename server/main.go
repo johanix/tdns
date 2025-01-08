@@ -83,7 +83,10 @@ func main() {
 		log.Fatalf("Error parsing zones: %v", err)
 	}
 
-	apirouter := tdns.SetupAPIRouter(&conf)
+	apirouter, err := tdns.SetupAPIRouter(&conf)
+	if err != nil {
+		log.Fatalf("Error setting up API router: %v", err)
+	}
 	err = tdns.MainStartThreads(&conf, apirouter)
 	if err != nil {
 		log.Fatalf("Error starting TDNS threads: %v", err)

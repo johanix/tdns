@@ -14,7 +14,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 	// "github.com/miekg/dns"
 )
 
@@ -262,7 +261,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "status":
 			log.Printf("APIconfig: config status inquiry")
 			resp.DnsEngine = conf.DnsEngine
-			resp.Apiserver = conf.Apiserver
+			resp.ApiServer = conf.ApiServer
 			resp.Msg = fmt.Sprintf("Configuration is ok, server boot time: %s, last config reload: %s",
 				conf.App.ServerBootTime.Format(timelayout), conf.App.ServerConfigTime.Format(timelayout))
 
@@ -496,11 +495,15 @@ func WalkRoutes(router *mux.Router, address string) {
 	//	return nil
 }
 
-func SetupAPIRouter(conf *Config) *mux.Router {
+func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
+	apikey := conf.ApiServer.ApiKey
+	if apikey == "" {
+		return nil, fmt.Errorf("apiserver.apikey is not set")
+	}
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.key")).Subrouter()
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
@@ -513,33 +516,13 @@ func SetupAPIRouter(conf *Config) *mux.Router {
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
-	return r
-}
-
-// In practice APIdispatcher doesn't need a termination signal, as it will
-// just sit inside http.ListenAndServe, but we keep it for symmetry.
-func xxxAPIdispatcher(conf *Config, done <-chan struct{}) {
-	router := SetupAPIRouter(conf)
-
-	WalkRoutes(router, viper.GetString("apiserver.address"))
-	log.Println("")
-
-	address := viper.GetString("apiserver.address")
-
-	go func() {
-		log.Println("Starting API dispatcher #1. Listening on", address)
-		log.Fatal(http.ListenAndServe(address, router))
-	}()
-
-	log.Println("API dispatcher: unclear how to stop the http server nicely.")
+	return r, nil
 }
 
 func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error {
-	// router := TdnsSetupRouter(conf)
-	// addresses := viper.GetStringSlice("apiserver.addresses")
-	addresses := conf.Apiserver.Addresses
-	certFile := conf.Apiserver.CertFile
-	keyFile := conf.Apiserver.KeyFile
+	addresses := conf.ApiServer.Addresses
+	certFile := conf.ApiServer.CertFile
+	keyFile := conf.ApiServer.KeyFile
 
 	if len(addresses) == 0 {
 		log.Println("APIdispatcher: no addresses to listen on (key 'apiserver.addresses' not set). Not starting.")

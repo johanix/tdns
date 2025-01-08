@@ -24,7 +24,6 @@ func main() {
 
 	// These are set here to enable various config reload functions to reload from the correct files.
 	tconf.Internal.CfgFile = music.DefaultSidecarTdnsCfgFile
-
 	switch mconf.Zones.Config {
 	case "":
 		tconf.Internal.ZonesCfgFile = music.DefaultZonesCfgFile
@@ -44,7 +43,6 @@ func main() {
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
 	music.LoadMusicConfig(&mconf, tconf.App.Mode, false) // on initial startup a config error should cause an abort.
 
-	mconf.Internal.HeartbeatQ = make(chan music.SidecarBeatReport, 10)
 	mconf.Internal.MusicSyncQ = tconf.Internal.MusicSyncQ
 	// The MusicSyncEngine is started here to ensure that it is running before we start parsing zones.
 	go music.MusicSyncEngine(&mconf, tconf.Internal.StopCh)
@@ -61,15 +59,18 @@ func main() {
 		log.Fatalf("Error loading sidecar config: %v", err)
 	}
 
-	apirouter := music.SetupAPIRouter(&tconf, &mconf) // sidecar mgmt API is a combo of TDNS and MUSIC
+	apirouter, err := music.SetupAPIRouter(&tconf, &mconf) // sidecar mgmt API is a combo of TDNS and MUSIC
+	if err != nil {
+		log.Fatalf("Error setting up API router: %v", err)
+	}
 	err = tdns.MainStartThreads(&tconf, apirouter)
 	if err != nil {
 		log.Fatalf("Error starting TDNS threads: %v", err)
 	}
 
 	// The ResignerEngine is needed only for the sidecar auto zones.
-	tconf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
-	go tdns.ResignerEngine(tconf.Internal.ResignQ, make(chan struct{}))
+	// tconf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
+	// go tdns.ResignerEngine(tconf.Internal.ResignQ, make(chan struct{}))
 
 	err = music.MainInit(&tconf, &mconf)
 	if err != nil {

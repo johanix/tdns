@@ -162,7 +162,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	switch conf.App.Mode {
 	case "sidecar", "server":
 		conf.Internal.ResignQ = make(chan *ZoneData, 10)
-		go ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
+		go ResignerEngine(conf.Internal.ResignQ, stopch)
 	default:
 		// agent does not resign zones
 		log.Printf("TDNS %s (%s): not starting resigner engine", conf.App.Name, conf.App.Mode)

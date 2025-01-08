@@ -6,7 +6,6 @@
 package music
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -884,11 +883,15 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 }
 
 // This is the sidecar mgmt API router.
-func SetupAPIRouter(tconf *tdns.Config, mconf *Config) *mux.Router {
+func SetupAPIRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
 	kdb := tconf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
+	apikey := mconf.ApiServer.ApiKey
+	if apikey == "" {
+		return nil, fmt.Errorf("apiserver.apikey is not set")
+	}
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.key")).Subrouter()
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 
 	// TDNS stuff
 	sr.HandleFunc("/ping", tdns.APIping(tconf)).Methods("POST")
@@ -912,11 +915,11 @@ func SetupAPIRouter(tconf *tdns.Config, mconf *Config) *mux.Router {
 
 	sr.HandleFunc("/sidecar", APIsidecar(mconf)).Methods("POST")
 
-	return r
+	return r, nil
 }
 
 // This is the sidecar-to-sidecar sync API router.
-func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) *mux.Router {
+func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/", HomeLink)
 
@@ -974,57 +977,17 @@ func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) *mux.Router {
 	secureRouter.HandleFunc("/ping", tdns.APIping(tconf)).Methods("POST")
 	secureRouter.HandleFunc("/beat", APIbeat(mconf)).Methods("POST")
 
-	return r
-}
-
-// This is the sidecar mgmt API dispatcher.
-func xxxAPIdispatcher(tconf *tdns.Config, mconf *Config, done <-chan struct{}) {
-	router := SetupAPIRouter(tconf, mconf)
-	// addresses := viper.GetStringSlice("apiserver.addresses")
-	addresses := tconf.Apiserver.Addresses
-	certFile := tconf.Apiserver.CertFile
-	keyFile := tconf.Apiserver.KeyFile
-
-	if len(addresses) == 0 {
-		log.Println("API dispatcher: no addresses to listen on. Not starting.")
-		return
-	}
-
-	tdns.WalkRoutes(router, addresses[0])
-	log.Println("")
-
-	servers := make([]*http.Server, len(addresses))
-
-	for idx, address := range addresses {
-		idxCopy := idx
-		servers[idx] = &http.Server{
-			Addr:    address,
-			Handler: router,
-		}
-		go func(srv *http.Server, idx int) {
-			log.Printf("Starting API dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
-			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-				log.Fatalf("ListenAndServeTLS(): %v", err)
-			}
-		}(servers[idx], idxCopy)
-	}
-
-	go func() {
-		<-done
-		log.Println("Shutting down API servers...")
-		for _, srv := range servers {
-			if err := srv.Shutdown(context.Background()); err != nil {
-				log.Printf("API server Shutdown for address %s: %v", srv.Addr, err)
-			}
-		}
-	}()
+	return r, nil
 }
 
 // This is the sidecar-to-sidecar sync API dispatcher.
 func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *Config, done <-chan struct{}) error {
 	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Identity)
 
-	router := SetupMusicSyncRouter(tconf, mconf)
+	router, err := SetupMusicSyncRouter(tconf, mconf)
+	if err != nil {
+		return err
+	}
 	addresses := mconf.Sidecar.Api.Addresses.Listen
 	port := mconf.Sidecar.Api.Port
 	certFile := mconf.Sidecar.Api.Cert

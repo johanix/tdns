@@ -132,7 +132,7 @@ type ConfigResponse struct {
 	AppName   string
 	Time      time.Time
 	DnsEngine DnsEngineConf
-	Apiserver ApiserverConf
+	ApiServer ApiServerConf
 	Msg       string
 	Error     bool
 	ErrorMsg  string

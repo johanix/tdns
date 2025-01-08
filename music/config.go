@@ -28,7 +28,7 @@ import (
 // var verbose bool
 
 type Config struct {
-	ApiServer tdns.ApiserverConf
+	ApiServer tdns.ApiServerConf
 	Signers   []SignerConf
 	Db        DbConf
 	Common    CommonConf
