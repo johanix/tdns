@@ -33,7 +33,7 @@ type PingResponse struct {
 
 var pongs int = 0
 
-func APIping(conf *Config, appName, appVersion string, bootTime time.Time) func(w http.ResponseWriter, r *http.Request) {
+func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		tls := ""
@@ -41,7 +41,7 @@ func APIping(conf *Config, appName, appVersion string, bootTime time.Time) func(
 			tls = "TLS "
 		}
 
-		log.Printf("APIping: received %s/ping request from %s.\n", tls, r.RemoteAddr)
+		log.Printf("APIping: received %s/ping request from %s. app.Name: %s, Globals.AppName: ", tls, r.RemoteAddr, conf.App.Name)
 
 		decoder := json.NewDecoder(r.Body)
 		var pp PingPost
@@ -53,12 +53,12 @@ func APIping(conf *Config, appName, appVersion string, bootTime time.Time) func(
 		hostname, _ := os.Hostname()
 		response := PingResponse{
 			Time:       time.Now(),
-			BootTime:   bootTime,
-			Version:    appVersion,
-			Daemon:     appName,
+			BootTime:   conf.App.ServerBootTime,
+			Version:    conf.App.Version,
+			Daemon:     conf.App.Name,
 			ServerHost: hostname,
 			Client:     r.RemoteAddr,
-			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, appName, hostname),
+			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, conf.App.Name, hostname),
 			Pings:      pp.Pings + 1,
 			Pongs:      pongs,
 		}

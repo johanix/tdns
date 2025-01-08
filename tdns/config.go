@@ -16,24 +16,28 @@ import (
 )
 
 type Config struct {
-	AppName          string
-	AppVersion       string
-	AppMode          string
-	AppDate          string
-	ServerBootTime   time.Time
-	ServerConfigTime time.Time
-	Service          ServiceConf
-	DnsEngine        DnsEngineConf
-	Apiserver        ApiserverConf
-	DnssecPolicies   map[string]DnssecPolicyConf
-	MultiSigner      map[string]MultiSignerConf `yaml:"multisigner"`
-	Zones            map[string]ZoneConf
-	Db               DbConf
-	Registrars       map[string][]string
-	Log              struct {
+	App            AppDetails
+	Service        ServiceConf
+	DnsEngine      DnsEngineConf
+	Apiserver      ApiserverConf
+	DnssecPolicies map[string]DnssecPolicyConf
+	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
+	Zones          map[string]ZoneConf
+	Db             DbConf
+	Registrars     map[string][]string
+	Log            struct {
 		File string `validate:"required"`
 	}
 	Internal InternalConf
+}
+
+type AppDetails struct {
+	Name             string
+	Version          string
+	Mode             string
+	Date             string
+	ServerBootTime   time.Time
+	ServerConfigTime time.Time
 }
 
 type ServiceConf struct {
@@ -47,8 +51,11 @@ type DnsEngineConf struct {
 }
 
 type ApiserverConf struct {
-	Address string `validate:"required"`
-	ApiKey  string `validate:"required"`
+	Addresses []string `validate:"required"`
+	ApiKey    string   `validate:"required"`
+	CertFile  string   `validate:"required,file"`
+	KeyFile   string   `validate:"required,file"`
+	UseTLS    bool
 }
 
 type DbConf struct {
@@ -125,10 +132,10 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 	validate := validator.New()
 
 	for k, data := range configsections {
-		log.Printf("%s: Validating config for %s section\n", strings.ToUpper(config.AppName), k)
+		log.Printf("%s: Validating config for %s section\n", strings.ToUpper(config.App.Name), k)
 		if err := validate.Struct(data); err != nil {
 			log.Fatalf("%s: Config %s, section %s: missing required attributes:\n%v\n",
-				strings.ToUpper(config.AppName), cfgfile, k, err)
+				strings.ToUpper(config.App.Name), cfgfile, k, err)
 		}
 	}
 	return nil
@@ -139,7 +146,7 @@ func (conf *Config) ReloadConfig() (string, error) {
 	if err != nil {
 		log.Printf("Error parsing config: %v", err)
 	}
-	conf.ServerConfigTime = time.Now()
+	conf.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
 }
 
@@ -168,6 +175,6 @@ func (conf *Config) ReloadZoneConfig() (string, error) {
 	}
 
 	log.Printf("ReloadZones: zones after reloading: %v", zonelist)
-	conf.ServerConfigTime = time.Now()
+	conf.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
 }

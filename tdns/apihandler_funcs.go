@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -182,11 +183,11 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Printf("API: received /command request (cmd: %s) from %s. AppName: %s\n",
-			cp.Command, r.RemoteAddr, Globals.AppName)
+			cp.Command, r.RemoteAddr, conf.App.Name)
 
 		resp := CommandResponse{
 			Time:    time.Now(),
-			AppName: Globals.AppName,
+			AppName: conf.App.Name,
 		}
 
 		switch cp.Command {
@@ -263,7 +264,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.Apiserver = conf.Apiserver
 			resp.Msg = fmt.Sprintf("Configuration is ok, server boot time: %s, last config reload: %s",
-				conf.ServerBootTime.Format(timelayout), conf.ServerConfigTime.Format(timelayout))
+				conf.App.ServerBootTime.Format(timelayout), conf.App.ServerConfigTime.Format(timelayout))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
@@ -495,19 +496,19 @@ func WalkRoutes(router *mux.Router, address string) {
 	//	return nil
 }
 
-func TdnsSetupRouter(conf *Config) *mux.Router {
+func SetupAPIRouter(conf *Config) *mux.Router {
 	kdb := conf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
 
 	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", viper.GetString("apiserver.key")).Subrouter()
 
-	sr.HandleFunc("/ping", APIping(conf, conf.AppName, conf.AppVersion, conf.ServerBootTime)).Methods("POST")
+	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
 	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
-	sr.HandleFunc("/zone", APIzone(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-	sr.HandleFunc("/zone/dsync", APIzoneDsync(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone", APIzone(&conf.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone/dsync", APIzoneDsync(&conf.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
@@ -517,8 +518,8 @@ func TdnsSetupRouter(conf *Config) *mux.Router {
 
 // In practice APIdispatcher doesn't need a termination signal, as it will
 // just sit inside http.ListenAndServe, but we keep it for symmetry.
-func APIdispatcher(conf *Config, done <-chan struct{}) {
-	router := TdnsSetupRouter(conf)
+func xxxAPIdispatcher(conf *Config, done <-chan struct{}) {
+	router := SetupAPIRouter(conf)
 
 	WalkRoutes(router, viper.GetString("apiserver.address"))
 	log.Println("")
@@ -531,4 +532,49 @@ func APIdispatcher(conf *Config, done <-chan struct{}) {
 	}()
 
 	log.Println("API dispatcher: unclear how to stop the http server nicely.")
+}
+
+func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error {
+	// router := TdnsSetupRouter(conf)
+	// addresses := viper.GetStringSlice("apiserver.addresses")
+	addresses := conf.Apiserver.Addresses
+	certFile := conf.Apiserver.CertFile
+	keyFile := conf.Apiserver.KeyFile
+
+	if len(addresses) == 0 {
+		log.Println("APIdispatcher: no addresses to listen on (key 'apiserver.addresses' not set). Not starting.")
+		return fmt.Errorf("no addresses to listen on")
+	}
+
+	WalkRoutes(router, addresses[0])
+	log.Println("")
+
+	servers := make([]*http.Server, len(addresses))
+
+	for idx, address := range addresses {
+		idxCopy := idx
+		servers[idx] = &http.Server{
+			Addr:    address,
+			Handler: router,
+		}
+
+		go func(srv *http.Server, idx int) {
+			log.Printf("Starting API dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+				log.Fatalf("ListenAndServeTLS(): %v", err)
+			}
+		}(servers[idx], idxCopy)
+	}
+
+	go func() {
+		<-done
+		log.Println("Shutting down API servers...")
+		for _, srv := range servers {
+			if err := srv.Shutdown(context.Background()); err != nil {
+				log.Printf("API server Shutdown: %v", err)
+			}
+		}
+	}()
+
+	return nil
 }

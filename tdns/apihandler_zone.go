@@ -15,7 +15,7 @@ import (
 	// "github.com/miekg/dns"
 )
 
-func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -30,7 +30,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 
 		resp := ZoneResponse{
 			Time:    time.Now(),
-			AppName: Globals.AppName,
+			AppName: app.Name,
 		}
 
 		defer func() {
@@ -166,7 +166,7 @@ func APIzone(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter
 	}
 }
 
-func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -180,7 +180,7 @@ func APIzoneDsync(refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseW
 			zdp.Command, r.RemoteAddr)
 
 		resp := ZoneDsyncResponse{
-			AppName:   Globals.AppName,
+			AppName:   app.Name,
 			Time:      time.Now(),
 			Functions: map[string]string{},
 		}

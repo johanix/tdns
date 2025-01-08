@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -67,8 +68,8 @@ func MainLoop(conf *Config) {
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 func MainInit(conf *Config) error {
-	conf.ServerBootTime = time.Now()
-	conf.ServerConfigTime = time.Now()
+	conf.App.ServerBootTime = time.Now()
+	conf.App.ServerConfigTime = time.Now()
 
 	flag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
 	flag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -78,11 +79,11 @@ func MainInit(conf *Config) error {
 		flag.PrintDefaults()
 	}
 
-	switch conf.AppMode {
+	switch conf.App.Mode {
 	case "server", "agent", "sidecar", "scanner":
-		fmt.Printf("*** TDNS %s mode of operation: %s (verbose: %t, debug: %t)\n", Globals.AppName, conf.AppMode, Globals.Verbose, Globals.Debug)
+		fmt.Printf("*** TDNS %s mode of operation: %s (verbose: %t, debug: %t)\n", conf.App.Name, conf.App.Mode, Globals.Verbose, Globals.Debug)
 	default:
-		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %s", Globals.AppName, conf.AppMode)
+		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %s", conf.App.Name, conf.App.Mode)
 	}
 
 	err := ParseConfig(conf, false) // false = !reload, initial config
@@ -109,7 +110,7 @@ func MainInit(conf *Config) error {
 		return fmt.Errorf("Error validating TDNS globals: %v", err)
 	}
 
-	fmt.Printf("TDNS %s version %s starting.\n", Globals.AppName, Globals.AppVersion)
+	fmt.Printf("TDNS %s version %s starting.\n", conf.App.Name, conf.App.Version)
 
 	conf.Internal.StopCh = make(chan struct{}, 10)
 
@@ -128,15 +129,19 @@ func MainInit(conf *Config) error {
 	return nil
 }
 
-func MainStartThreads(conf *Config) error {
+func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	stopch := conf.Internal.StopCh
 
-	if conf.AppMode != "sidecar" {
-		// The music sidecar has its own API, so we must not start the TDNS API here.
-		conf.Internal.APIStopCh = make(chan struct{})
-		go APIdispatcher(conf, conf.Internal.APIStopCh)
+	// if conf.App.Mode != "sidecar" {
+	// The music sidecar has its own API, so we must not start the TDNS API here.
+	conf.Internal.APIStopCh = make(chan struct{})
+	// router := TdnsSetupRouter(conf)
+	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
+	if err != nil {
+		return fmt.Errorf("Error starting API dispatcher: %v", err)
 	}
+	// }
 
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
@@ -153,6 +158,15 @@ func MainStartThreads(conf *Config) error {
 	go NotifyHandler(conf)
 	go DnsEngine(conf)
 	go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+
+	switch conf.App.Mode {
+	case "sidecar", "server":
+		conf.Internal.ResignQ = make(chan *ZoneData, 10)
+		go ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
+	default:
+		// agent does not resign zones
+		log.Printf("TDNS %s (%s): not starting resigner engine", conf.App.Name, conf.App.Mode)
+	}
 
 	return nil
 }

@@ -31,7 +31,7 @@ func MainInit(tconf *tdns.Config, mconf *Config) error {
 	apistopper := make(chan struct{}) //
 	tconf.Internal.APIStopCh = apistopper
 
-	go APIdispatcher(tconf, mconf, apistopper)          // sidecar mgmt API:
+	// go APIdispatcher(tconf, mconf, apistopper)          // sidecar mgmt API:
 	go MusicSyncAPIdispatcher(tconf, mconf, apistopper) // sidecar-to-sidecar sync API:
 
 	// XXX: Why don't we need this anymore?

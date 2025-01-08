@@ -44,7 +44,8 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	syncQ := mconf.Internal.MusicSyncQ
 
 	var sbr SidecarBeatReport
-	beatQ := mconf.Internal.HeartbeatQ
+	beatQ := make(chan SidecarBeatReport, 10)
+	mconf.Internal.HeartbeatQ = beatQ
 
 	mconf.Internal.MusicSyncStatusQ = make(chan MusicSyncStatus, 10)
 

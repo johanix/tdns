@@ -25,7 +25,7 @@ type RefreshCounter struct {
 
 func RefreshEngine(conf *Config, stopch chan struct{}) {
 
-	appMode := conf.AppMode
+	appMode := conf.App.Mode
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 

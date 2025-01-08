@@ -101,7 +101,7 @@ func ParseConfig(conf *Config, reload bool) error {
 		log.Fatalf("Error unmarshalling config into struct: %v", err)
 	}
 
-	if conf.AppMode == "server" || conf.AppMode == "sidecar" {
+	if conf.App.Mode == "server" || conf.App.Mode == "sidecar" {
 		// dump.P(conf.DnssecPolicies)
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
@@ -211,7 +211,7 @@ func ParseConfig(conf *Config, reload bool) error {
 		if strings.Contains(dbFile, "..") {
 			return errors.New("invalid database file path: must not contain directory traversal")
 		}
-		if conf.AppName != "sidecar-cli" && conf.AppName != "tdns-cli" {
+		if conf.App.Name != "sidecar-cli" && conf.App.Name != "tdns-cli" {
 			// Verify that we have a MUSIC DB file.
 			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
 			if _, err := os.Stat(dbFile); os.IsNotExist(err) {
@@ -300,7 +300,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 		if zconf.Template != "" {
 			if tmpl, exist = zconfig.Templates[zconf.Template]; exist {
 				fmt.Printf("Zone %s uses the existing template %s\n", zname, zconf.Template)
-				zconf, err = ExpandTemplate(zconf, tmpl, conf.AppMode)
+				zconf, err = ExpandTemplate(zconf, tmpl, conf.App.Mode)
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
 					os.Exit(1)
@@ -388,11 +388,11 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				cleanoptions = append(cleanoptions, opt)
 
 			case OptOnlineSigning: // zone may be signed (and re-signed) online as needed; only possible if dnssec policy is set
-				if conf.AppMode == "agent" {
+				if conf.App.Mode == "agent" {
 					log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
 					continue
 				}
-				if conf.AppMode == "sidecar" {
+				if conf.App.Mode == "sidecar" {
 					log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-SIDECAR does not allow online signing.", zname, ZoneOptionToString[opt])
 					continue
 				}
@@ -509,7 +509,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 		}
 	}
 
-	if conf.AppMode == "agent" && len(primary_zones) > 0 {
+	if conf.App.Mode == "agent" && len(primary_zones) > 0 {
 		fmt.Printf("Error: The TDNS agent does not support primary zones: %v\n", primary_zones)
 		log.Fatalf("Error: The TDNS agent does not support primary zones: %v", primary_zones)
 	}

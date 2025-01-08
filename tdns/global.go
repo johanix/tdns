@@ -23,10 +23,6 @@ type GlobalStuff struct {
 	Slurp       bool
 	Algorithm   string
 	Rrtype      string
-	AppName     string
-	AppMode     string
-	AppVersion  string
-	AppDate     string
 	ShowHeaders bool // -H in various CLI commands
 	BaseUri     string
 	Port        uint16

@@ -28,7 +28,7 @@ import (
 // var verbose bool
 
 type Config struct {
-	ApiServer ApiServerConf
+	ApiServer tdns.ApiserverConf
 	Signers   []SignerConf
 	Db        DbConf
 	Common    CommonConf
@@ -71,12 +71,12 @@ type ZonesConf struct {
 	Config string `validate:"file"` // not required
 }
 
-type ApiServerConf struct {
-	Address  string `validate:"required,hostname_port"`
-	ApiKey   string `validate:"required"`
-	CertFile string `validate:"required,file"`
-	KeyFile  string `validate:"required,file"`
-	UseTLS   bool
+type xxxApiServerConf struct {
+	Addresses []string `validate:"required"`
+	ApiKey    string   `validate:"required"`
+	CertFile  string   `validate:"required,file"`
+	KeyFile   string   `validate:"required,file"`
+	UseTLS    bool
 }
 
 type FSMEngineConf struct {

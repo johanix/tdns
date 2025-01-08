@@ -62,11 +62,10 @@ func mainloop(conf *tdns.Config) {
 func main() {
 	var conf tdns.Config
 
-	conf.AppMode = "agent"
-
-	tdns.Globals.AppVersion = appVersion
-	tdns.Globals.AppName = appName
-	tdns.Globals.AppDate = appDate
+	conf.App.Mode = "agent"
+	conf.App.Version = appVersion
+	conf.App.Name = appName
+	conf.App.Date = appDate
 
 	// These are the defaults, but they are defined here to make it possible for eg. MUSIC to use a different defaul
 	conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
@@ -82,14 +81,11 @@ func main() {
 		log.Fatalf("Error parsing zones: %v", err)
 	}
 
-	err = tdns.MainStartThreads(&conf)
+	apirouter := tdns.SetupAPIRouter(&conf)
+	err = tdns.MainStartThreads(&conf, apirouter)
 	if err != nil {
 		log.Fatalf("Error starting TDNS threads: %v", err)
 	}
-
-	// tdns-agent does not resign zones.
-	// conf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
-	// go tdns.ResignerEngine(conf.Internal.ResignQ, make(chan struct{}))
 
 	tdns.MainLoop(&conf)
 }

@@ -17,10 +17,10 @@ func main() {
 	var tconf tdns.Config
 	var mconf music.Config
 
-	tconf.AppMode = "sidecar"
-	tdns.Globals.AppVersion = appVersion
-	tdns.Globals.AppName = appName
-	tdns.Globals.AppDate = appDate
+	tconf.App.Mode = "sidecar"
+	tconf.App.Version = appVersion
+	tconf.App.Name = appName
+	tconf.App.Date = appDate
 
 	// These are set here to enable various config reload functions to reload from the correct files.
 	tconf.Internal.CfgFile = music.DefaultSidecarTdnsCfgFile
@@ -42,7 +42,7 @@ func main() {
 	mconf.Internal.DeferredUpdateQ = tconf.Internal.DeferredUpdateQ
 
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
-	music.LoadMusicConfig(&mconf, tconf.AppMode, false) // on initial startup a config error should cause an abort.
+	music.LoadMusicConfig(&mconf, tconf.App.Mode, false) // on initial startup a config error should cause an abort.
 
 	mconf.Internal.HeartbeatQ = make(chan music.SidecarBeatReport, 10)
 	mconf.Internal.MusicSyncQ = tconf.Internal.MusicSyncQ
@@ -61,7 +61,8 @@ func main() {
 		log.Fatalf("Error loading sidecar config: %v", err)
 	}
 
-	err = tdns.MainStartThreads(&tconf)
+	apirouter := music.SetupAPIRouter(&tconf, &mconf) // sidecar mgmt API is a combo of TDNS and MUSIC
+	err = tdns.MainStartThreads(&tconf, apirouter)
 	if err != nil {
 		log.Fatalf("Error starting TDNS threads: %v", err)
 	}

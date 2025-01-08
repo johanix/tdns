@@ -141,9 +141,9 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 						m.SetRcode(r, dns.RcodeSuccess)
 						v := viper.GetString("server.version")
 						if v == "" {
-							v = fmt.Sprintf("tdnsd version %s", conf.AppVersion)
+							v = fmt.Sprintf("tdnsd version %s", conf.App.Version)
 						} else if strings.Contains(v, "{version}") {
-							v = strings.Replace(v, "{version}", conf.AppVersion, -1)
+							v = strings.Replace(v, "{version}", conf.App.Version, -1)
 						}
 						m.Answer = append(m.Answer, &dns.TXT{
 							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
@@ -173,8 +173,8 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
 
-			log.Printf("DnsHandler: AppMode: \"%s\"", conf.AppMode)
-			if conf.AppMode == "agent" {
+			log.Printf("DnsHandler: AppMode: \"%s\"", conf.App.Mode)
+			if conf.App.Mode == "agent" {
 				log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %s", qname)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
