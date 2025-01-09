@@ -18,10 +18,12 @@ type CustomValidator struct {
 }
 
 // NewCustomValidator creates a new instance of CustomValidator
-func NewCustomValidator() *CustomValidator {
+func NewCustomValidator() (*CustomValidator, error) {
 	v := validator.New()
-	v.RegisterValidation("certkey", ValidateCertAndKeyFiles)
-	return &CustomValidator{v}
+	if err := v.RegisterValidation("certkey", ValidateCertAndKeyFiles); err != nil {
+		return nil, fmt.Errorf("NewCustomValidator: error registering certkey validation: %v", err)
+	}
+	return &CustomValidator{v}, nil
 }
 
 func ValidateConfig(v *viper.Viper, cfgfile string) error {
@@ -69,7 +71,10 @@ func ValidateZones(c *Config, cfgfile string) error {
 
 func ValidateBySection(config *Config, configsections map[string]interface{}, cfgfile string) error {
 	// validate := validator.New()
-	validate := NewCustomValidator()
+	validate, err := NewCustomValidator()
+	if err != nil {
+		return fmt.Errorf("ValidateBySection: error creating custom validator: %v", err)
+	}
 
 	for k, data := range configsections {
 		log.Printf("%s: Validating config for %s section\n", strings.ToUpper(config.App.Name), k)
@@ -137,6 +142,7 @@ func ValidateCertAndKeyFiles(fl validator.FieldLevel) bool {
 }
 
 // ValidateConfigWithCustomValidator validates the config using the custom validator
+// XXX: Not used at the moment.
 func ValidateConfigWithCustomValidator(v *viper.Viper, cfgfile string) error {
 	var config Config
 
@@ -151,7 +157,10 @@ func ValidateConfigWithCustomValidator(v *viper.Viper, cfgfile string) error {
 	}
 
 	// Use the custom validator for other validations
-	validate := NewCustomValidator()
+	validate, err := NewCustomValidator()
+	if err != nil {
+		return fmt.Errorf("ValidateConfigWithCustomValidator: error creating custom validator: %v", err)
+	}
 	if err := validate.Struct(&config); err != nil {
 		return fmt.Errorf("config validation error: %v", err)
 	}

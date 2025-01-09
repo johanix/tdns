@@ -791,6 +791,21 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 			Status: 101,
 		}
 
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error from Encoder: %v\n", err)
+			}
+		}()
+
+		if err != nil { // from decoder.Decode()
+			log.Println("APIshow: error decoding show post:", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
 		switch sp.Command {
 		case "api":
 			message := "All ok, here are all defined API endpoints"
@@ -816,12 +831,6 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 			resp.Message = "Defined updaters"
 			resp.Updaters = ListUpdaters()
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from Encoder: %v\n", err)
-		}
 	}
 }
 
@@ -830,9 +839,6 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var sp SidecarPost
 		err := decoder.Decode(&sp)
-		if err != nil {
-			log.Println("APIsidecar: error decoding sidecar post:", err)
-		}
 
 		log.Printf("APIsidecar: received /sidecar request (command: %s) from %s.\n",
 			sp.Command, r.RemoteAddr)
@@ -850,6 +856,13 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 				dump.P(resp)
 			}
 		}()
+
+		if err != nil { // from decoder.Decode()
+			log.Println("APIsidecar: error decoding sidecar post:", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
 
 		switch strings.ToLower(sp.Command) {
 		case "status":

@@ -876,7 +876,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 }
 
 func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
-	if !zd.Options[OptOnlineSigning] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
+	if !zd.Options[OptOnlineSigning] {
 		return nil // this zone should not be signed (at least not by us)
 	}
 

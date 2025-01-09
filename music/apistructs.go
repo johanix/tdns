@@ -33,6 +33,8 @@ type ShowResponse struct {
 	Message  string
 	ApiData  []string
 	Updaters map[string]bool
+	Error    bool
+	ErrorMsg string
 }
 
 type ShowAPIresponse struct {

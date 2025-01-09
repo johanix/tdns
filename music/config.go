@@ -71,14 +71,6 @@ type ZonesConf struct {
 	Config string `validate:"file"` // not required
 }
 
-type xxxApiServerConf struct {
-	Addresses []string `validate:"required"`
-	ApiKey    string   `validate:"required"`
-	CertFile  string   `validate:"required,file"`
-	KeyFile   string   `validate:"required,file"`
-	UseTLS    bool
-}
-
 type FSMEngineConf struct {
 	Active    *bool `validate:"required"`
 	Intervals IntervalsConf
