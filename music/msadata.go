@@ -19,7 +19,7 @@ type MSADataOption struct {
 	ExtraText string
 }
 
-// CreateKeyStateOption skapar en EDNS0_LOCAL option för KeyState
+// CreateMSADataOption skapar en EDNS0_LOCAL option för MSAData
 func CreateMSADataOption(MSAData uint8, extraText string) *dns.EDNS0_LOCAL {
 	data := make([]byte, 1+len(extraText))
 	data[0] = MSAData
@@ -90,7 +90,7 @@ func handleMSADataOption(opt *dns.OPT, zonename string) (*dns.EDNS0_LOCAL, error
 }
 
 func msaDataToString(state uint8) string {
-	fmt.Printf("msaDataToString: state=%d\n", state)
+	log.Printf("msaDataToString: state=%d\n", state)
 
 	states := map[uint8]string{
 		MSADataHello: "Init Hello",
@@ -102,7 +102,7 @@ func msaDataToString(state uint8) string {
 }
 
 func ExtractMSADataFromMsg(msg *dns.Msg) (*MSADataOption, error) {
-	fmt.Printf("ExtractMSADataFromMsg: msg.Extra: %+v", msg.Extra)
+	log.Printf("ExtractMSADataFromMsg: msg.Extra: %+v", msg.Extra)
 
 	if opt := msg.IsEdns0(); opt != nil {
 		for _, option := range opt.Option {

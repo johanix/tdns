@@ -14,8 +14,6 @@ import (
 	tdns "github.com/johanix/tdns/tdns"
 
 	"github.com/spf13/viper"
-
-	"github.com/go-playground/validator/v10"
 )
 
 // initConfig reads in config file and ENV variables if set.
@@ -49,7 +47,7 @@ func InitConfig() {
 		log.Fatalf("Error loading MUSIC config: %v", err)
 	}
 
-	music.Validate = validator.New()
+	// Validate the MUSIC config; music.Validate is initialized in music/globals.go
 	if err := music.Validate.Struct(&mconf); err != nil {
 		log.Fatalf("Config '%s' is missing required attributes:\n%v\n", music.DefaultSidecarCfgFile, err)
 	}
@@ -72,7 +70,7 @@ func InitApi() {
 			Name:       tdns.Globals.Api.Name,
 			BaseUrl:    tdns.Globals.Api.BaseUrl,
 			AuthMethod: tdns.Globals.Api.AuthMethod,
-			Client:     nil,
+			Client:     nil, // attempting to marshal http.Client will cause a panic
 			Verbose:    tdns.Globals.Verbose,
 			Debug:      tdns.Globals.Debug,
 			UseTLS:     tdns.Globals.Api.UseTLS,
@@ -87,6 +85,6 @@ func InitApi() {
 		if err != nil {
 			log.Println("JSON parse error: ", err)
 		}
-		fmt.Printf("initApi: api connection to %s initialized (%s)\n:\napi: %s\n", baseurl, apikey, prettyJSON.String())
+		fmt.Printf("InitApi: api connection to %s initialized (key: ***)\n:\napi: %s\n", baseurl, prettyJSON.String())
 	}
 }

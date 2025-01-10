@@ -156,20 +156,35 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 	return nil
 }
 
+func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
+	algstr := viper.GetString(configKey)
+	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+	if alg == 0 {
+		log.Printf("Unknown keygen algorithm \"%s\", using default", algstr)
+		alg = defaultAlg
+	}
+	return alg, nil
+}
+
 func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 	if !zd.Options[OptDelSyncChild] {
 		log.Printf("DelegationSyncSetup: Zone %s does not have child-side delegation sync enabled. Skipping.", zd.ZoneName)
 		return nil
 	}
 
-	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
-		alg = dns.ED25519
+	// algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+	// if alg == 0 {
+	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
+	// 	alg = dns.ED25519
+	// }
+	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	if err != nil {
+		log.Printf("DelegationSyncSetup: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		return err
 	}
 
-	err := zd.Sig0KeyPreparation(zd.ZoneName, alg, kdb)
+	err = zd.Sig0KeyPreparation(zd.ZoneName, alg, kdb)
 	if err != nil {
 		zd.Logger.Printf("DelegationSyncSetup: Zone %s: Error from Sig0KeyPreparation(): %v", zd.ZoneName, err)
 		return err
@@ -191,11 +206,16 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
-	algstr := viper.GetString("delegationsync.parent.update.keygen.algorithm")
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
-		alg = dns.ED25519
+	// algstr := viper.GetString("delegationsync.parent.update.keygen.algorithm")
+	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+	// if alg == 0 {
+	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
+	// 	alg = dns.ED25519
+	// }
+	alg, err := parseKeygenAlgorithm("delegationsync.parent.update.keygen.algorithm", dns.ED25519)
+	if err != nil {
+		log.Printf("ParentSig0KeyPrep: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		return err
 	}
 
 	return zd.Sig0KeyPreparation(name, alg, kdb)
@@ -204,11 +224,16 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 // MusicSig0KeyPrep and ParentSig0KeyPrep are identical except for the source of the keygen algorithm
 // which is specified in the relevant section of the configuration file.
 func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
-	algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
-	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-	if alg == 0 {
-		log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
-		alg = dns.ED25519
+	// algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
+	// if alg == 0 {
+	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
+	// 	alg = dns.ED25519
+	// }
+	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	if err != nil {
+		log.Printf("MusicSig0KeyPrep: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		return err
 	}
 
 	return zd.Sig0KeyPreparation(name, alg, kdb)
@@ -223,7 +248,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	if err != nil {
 		return fmt.Errorf("Sig0KeyPreparation(%s) failed to get owner: %v", name, err)
 	}
-	// dump.P(owner)
+
 	var keyrrexist bool
 	if owner != nil {
 		_, keyrrexist = owner.RRtypes.Get(dns.TypeKEY)
@@ -291,25 +316,8 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		if err != nil {
 			log.Printf("Sig0KeyPreparation: Error from PublishKeyRRs() publishing '%s KEY' RR in zone %s: %v", name, zd.ZoneName, err)
 			return err
-		} else {
-			keyrrexist = true
 		}
 	}
-
-	// 3. There is a KEY RRset, question is whether it is signed or not
-	//	if keyrrexist && zd.Options[OptOnlineSigning] {
-	//		log.Printf("Sig0KeyPreparation: Fetching the private DNSSEC key for %s in prep for signing '%s KEY' RRset", zd.ZoneName, name)
-	//		rrset, _ := owner.RRtypes.Get(dns.TypeKEY)
-	//		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, false)
-	//		if err != nil {
-	//			log.Printf("Sig0KeyPreparation: Error signing '%s KEY' RRset: %v", name, err)
-	//		} else {
-	//			owner.RRtypes.Set(dns.TypeKEY, rrset)
-	//			log.Printf("Sig0KeyPreparation: Successfully signed '%s KEY' RRset", name)
-	//		}
-	//	} else {
-	//		log.Printf("Sig0KeyPreparation: Zone %s does not allow online signing, KEY RRset cannot be re-signed", name)
-	//	}
 
 	return nil
 }

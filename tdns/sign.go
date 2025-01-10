@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/rand"
@@ -232,7 +231,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 		// Bummer, promoting didn't work, let's generate KSK:
 		if len(dak.KSKs) == 0 {
-			dump.P(zd.DnssecPolicy)
+			// dump.P(zd.DnssecPolicy)
 			_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "signzone", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil) // nil = no tx
 			if err != nil {
 				return 0, err

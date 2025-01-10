@@ -39,13 +39,12 @@ type Config struct {
 }
 
 type SidecarConf struct {
-	Identity string
+	Identity string `validate:"required,hostname"`
 	Api      SidecarApiConf
 	Dns      SidecarDnsConf
 }
 
 type SidecarApiConf struct {
-	//	Identity  string
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -59,7 +58,6 @@ type SidecarApiConf struct {
 }
 
 type SidecarDnsConf struct {
-	//	Identity  string
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -316,6 +314,12 @@ func (mconf *Config) LoadSidecarConfig(tconf *tdns.Config, all_zones []string) e
 	}
 
 	mconf.Sidecar.Identity = dns.Fqdn(mconf.Sidecar.Identity)
+	if !slices.Contains(all_zones, mconf.Sidecar.Identity) {
+		_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
+		if err != nil {
+			return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar identity '%s': %v", mconf.Sidecar.Identity, err)
+		}
+	}
 
 	if len(mconf.Sidecar.Api.Addresses.Publish) > 0 {
 		err := mconf.SetupApiMethod(tconf, all_zones)
@@ -340,13 +344,6 @@ func (mconf *Config) LoadSidecarConfig(tconf *tdns.Config, all_zones []string) e
 
 func (mconf *Config) SetupApiMethod(tconf *tdns.Config, all_zones []string) error {
 	apiname := "api." + mconf.Sidecar.Identity
-
-	if !slices.Contains(all_zones, mconf.Sidecar.Identity) {
-		_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
-		if err != nil {
-			return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar identity '%s': %v", mconf.Sidecar.Identity, err)
-		}
-	}
 
 	certFile := viper.GetString("sidecar.api.cert")
 	keyFile := viper.GetString("sidecar.api.key")

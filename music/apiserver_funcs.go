@@ -6,6 +6,7 @@
 package music
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -1021,20 +1022,33 @@ func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *Config, done <-chan struc
 		// Remove VerifyPeerCertificate as we now handle this in middleware per-endpoint
 	}
 
+	servers := make([]*http.Server, len(addresses))
+
 	for idx, address := range addresses {
 		idxCopy := idx
-		go func(address string, idx int) {
-			server := &http.Server{
-				Handler:   router,
-				TLSConfig: tlsConfig,
-				Addr:      net.JoinHostPort(address, fmt.Sprintf("%d", port)),
+		servers[idx] = &http.Server{
+			Handler:   router,
+			TLSConfig: tlsConfig,
+			Addr:      net.JoinHostPort(address, fmt.Sprintf("%d", port)),
+		}
+
+		go func(srv *http.Server, idx int) {
+			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+				log.Fatalf("ListenAndServeTLS(): %v", err)
 			}
-
-			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, server.Addr)
-			log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
-		}(string(address), idxCopy)
-
-		log.Println("MusicSyncAPIdispatcher: unclear how to stop the http server nicely.")
+		}(servers[idx], idxCopy)
 	}
+
+	go func() {
+		<-done
+		log.Println("Shutting down MusicSyncAPI servers...")
+		for _, srv := range servers {
+			if err := srv.Shutdown(context.Background()); err != nil {
+				log.Printf("MusicSyncAPI server Shutdown: %v", err)
+			}
+		}
+	}()
+
 	return nil
 }

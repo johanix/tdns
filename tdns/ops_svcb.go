@@ -33,7 +33,7 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		Ttl:    120,
 	}
 
-	log.Printf("PublishSVCBRR: publishing SVCB RR: %s", svcb.String())
+	log.Printf("PublishSvcbRR: publishing SVCB RR: %s", svcb.String())
 
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishSVCBRR: KeyDB.UpdateQ is nil")

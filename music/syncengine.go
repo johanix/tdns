@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -296,6 +297,9 @@ func (s *Sidecar) SendHello() error {
 		status, resp, err := s.Api.RequestNG("POST", "/hello", helloPost, false)
 		if err != nil {
 			return fmt.Errorf("failed to send HTTPS POST request: %v", err)
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("received HTTP status %d from sidecar %s: %s", status, s.Identity, string(resp))
 		}
 		// defer resp.Body.Close()
 

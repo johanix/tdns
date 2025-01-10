@@ -81,63 +81,6 @@ type InternalConf struct {
 	ResignQ chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 }
 
-// func ValidateConfig(v *viper.Viper, cfgfile string) error {
-// 	var config Config
-
-// 	if v == nil {
-// 		if err := viper.Unmarshal(&config); err != nil {
-// 			log.Fatalf("ValidateConfig: Unmarshal error: %v", err)
-// 		}
-// 	} else {
-// 		if err := v.Unmarshal(&config); err != nil {
-// 			log.Fatalf("ValidateConfig: Unmarshal error: %v", err)
-// 		}
-// 	}
-
-// 	var configsections = make(map[string]interface{}, 5)
-
-// 	configsections["log"] = config.Log
-// 	configsections["service"] = config.Service
-// 	configsections["db"] = config.Db
-// 	configsections["apiserver"] = config.ApiServer
-// 	configsections["dnsengine"] = config.DnsEngine
-
-// 	if err := ValidateBySection(&config, configsections, cfgfile); err != nil {
-// 		log.Fatalf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
-// 	}
-// 	return nil
-// }
-
-// func ValidateZones(c *Config, cfgfile string) error {
-// 	config := c
-
-// 	var zones = make(map[string]interface{}, 5)
-
-// Cannot validate a map[string]foobar, must validate the individual foobars:
-// for zname, val := range config.Zones {
-// 	zones["zone:"+zname] = val
-// }
-
-// if err := ValidateBySection(config, zones, cfgfile); err != nil {
-// 	log.Fatalf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
-// }
-// return nil
-// }
-
-// func ValidateBySection(config *Config, configsections map[string]interface{}, cfgfile string) error {
-// 	validate := validator.New()
-// 	validate := NewCustomValidator()
-
-// 	for k, data := range configsections {
-// 		log.Printf("%s: Validating config for %s section\n", strings.ToUpper(config.App.Name), k)
-// 		if err := validate.Struct(data); err != nil {
-// 			log.Fatalf("%s: Config %s, section %s: missing required attributes:\n%v\n",
-// 			strings.ToUpper(config.App.Name), cfgfile, k, err)
-// 		}
-// 	}
-// 	return nil
-// }
-
 func (conf *Config) ReloadConfig() (string, error) {
 	err := ParseConfig(conf, true) // true: reload, not initial parsing
 	if err != nil {

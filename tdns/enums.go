@@ -49,5 +49,6 @@ var StringToZoneOption = map[string]ZoneOption{
 	"multisigner":            OptMultiSigner,
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
+	"automatic-zone":         OptAutomaticZone,
 	"agent":                  OptAgent,
 }

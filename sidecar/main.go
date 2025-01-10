@@ -68,10 +68,6 @@ func main() {
 		log.Fatalf("Error starting TDNS threads: %v", err)
 	}
 
-	// The ResignerEngine is needed only for the sidecar auto zones.
-	// tconf.Internal.ResignQ = make(chan *tdns.ZoneData, 10)
-	// go tdns.ResignerEngine(tconf.Internal.ResignQ, make(chan struct{}))
-
 	err = music.MainInit(&tconf, &mconf)
 	if err != nil {
 		log.Fatalf("Error initializing MUSIC: %v", err)

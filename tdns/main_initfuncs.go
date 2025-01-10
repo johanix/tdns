@@ -37,13 +37,14 @@ func MainLoop(conf *Config) {
 	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		for {
 			// log.Println("mainloop: signal dispatcher")
 			select {
 			case <-exit:
 				log.Println("mainloop: Exit signal received. Cleaning up.")
 				// do whatever we need to do to wrap up nicely
-				wg.Done()
+				return
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
@@ -56,7 +57,7 @@ func MainLoop(conf *Config) {
 
 			case <-conf.Internal.APIStopCh:
 				log.Println("mainloop: Stop command received. Cleaning up.")
-				wg.Done()
+				return
 			}
 		}
 	}()

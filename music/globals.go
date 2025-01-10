@@ -10,26 +10,21 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
-// var CfgFile string
+var Validate *validator.Validate
 
-// var Showheaders bool
-
-//var api *Api
-
-// var validate *validator.Validate
-var Validate = validator.New()
+func init() {
+	Validate = validator.New()
+}
 
 type GlobalStuff struct {
-//	Verbose  bool
-//	Debug    bool
 	Sidecars *Sidecars
 	// Api         *Api
-	Zonename    string
-	Signername  string
-	Sgroupname  string
-	FSMname     string
-	FSMmode     string
-	CfgFile     string
+	Zonename   string
+	Signername string
+	Sgroupname string
+	FSMname    string
+	FSMmode    string
+	CfgFile    string
 }
 
 var Globals = GlobalStuff{

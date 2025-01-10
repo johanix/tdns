@@ -56,7 +56,7 @@ func MainInit(tconf *tdns.Config, mconf *Config) error {
 
 	var done = make(chan struct{}, 1)
 
-	go DbUpdater(mconf)
+	go DbUpdater(mconf, done)
 	// 	go music.DeSECmgr(&mconf, done)
 	go DdnsMgr(mconf, done)
 	go FSMEngine(mconf, done)

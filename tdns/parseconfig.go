@@ -237,7 +237,10 @@ func ParseConfig(conf *Config, reload bool) error {
 	//		log.Fatalf("Error from LoadSig0ChildKeys(): %v", err)
 	//	}
 
-	ValidateConfig(nil, DefaultCfgFile) // will terminate on error
+	err = ValidateConfig(nil, DefaultCfgFile) // will terminate on error
+	if err != nil {
+		return err
+	}
 
 	if Globals.Debug {
 		log.Printf("ParseConfig: exit")
@@ -520,7 +523,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)", all_zones, len(zrch))
 
 	if Globals.Debug {
-		log.Print("ParseConfig: exit")
+		log.Print("ParseZones: exit")
 	}
 	return all_zones, nil
 }

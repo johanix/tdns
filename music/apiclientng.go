@@ -28,9 +28,9 @@ func ExtractHoldPeriod(buf []byte) (int, error) {
 	}
 	// "Request was throttled. Expected available in 1 second."
 	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
-	de.Detail = strings.TrimLeft(de.Detail, "Request was throttled. Expected available in ")
+	de.Detail = strings.TrimPrefix(de.Detail, "Request was throttled. Expected available in ")
 	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
-	de.Detail = strings.TrimRight(de.Detail, " second.")
+	de.Detail = strings.TrimSuffix(de.Detail, " second.")
 	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
 	de.Hold, err = strconv.Atoi(de.Detail)
 	if err != nil {
