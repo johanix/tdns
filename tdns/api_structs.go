@@ -6,6 +6,8 @@ package tdns
 import (
 	"net/http"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 type KeystorePost struct {
@@ -127,11 +129,13 @@ type ConfigPost struct {
 }
 
 type ConfigResponse struct {
-	AppName  string
-	Time     time.Time
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	AppName   string
+	Time      time.Time
+	DnsEngine DnsEngineConf
+	ApiServer ApiServerConf
+	Msg       string
+	Error     bool
+	ErrorMsg  string
 }
 
 type DelegationPost struct {
@@ -186,6 +190,11 @@ type ApiClient struct {
 	UseTLS     bool
 	Verbose    bool
 	Debug      bool
+
+	// deSEC stuff (from MUSIC)
+	Email    string
+	Password string
+	TokViper *viper.Viper
 }
 
 type MultiSignerPost struct {

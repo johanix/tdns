@@ -4,13 +4,16 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -157,7 +160,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	}
 
 	var msignerchanged, keyschanged bool
-	var mss *MultiSignerSyncStatus
+	var mss *MusicSyncStatus
 	if zd.Options[OptMultiSigner] {
 		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
 		if err != nil {
@@ -209,7 +212,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 				// return false, err
 			}
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+			zd.MusicSyncQ <- MusicSyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
@@ -221,11 +224,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		if msignerchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
-				Command:           "RESET-MSIGNER-GROUP",
-				ZoneName:          zd.ZoneName,
-				ZoneData:          zd,
-				MsignerSyncStatus: mss,
+			zd.MusicSyncQ <- MusicSyncRequest{
+				Command:         "RESET-MSIGNER-GROUP",
+				ZoneName:        zd.ZoneName,
+				ZoneData:        zd,
+				MusicSyncStatus: mss,
 			}
 		}
 	}
@@ -293,7 +296,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	var msignerchanged, keyschanged bool
-	var mss *MultiSignerSyncStatus
+	var mss *MusicSyncStatus
 	if zd.Options[OptMultiSigner] {
 		msignerchanged, mss, err = zd.MsignerChanged(&new_zd)
 		if err != nil {
@@ -344,7 +347,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 				// return false, err
 			}
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
+			zd.MusicSyncQ <- MusicSyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
@@ -356,11 +359,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 		if msignerchanged {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: MSIGNER RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
-			zd.MultiSignerSyncQ <- MultiSignerSyncRequest{
-				Command:           "RESET-MSIGNER-GROUP",
-				ZoneName:          zd.ZoneName,
-				ZoneData:          zd,
-				MsignerSyncStatus: mss,
+			zd.MusicSyncQ <- MusicSyncRequest{
+				Command:         "RESET-MSIGNER-GROUP",
+				ZoneName:        zd.ZoneName,
+				ZoneData:        zd,
+				MusicSyncStatus: mss,
 			}
 		}
 	}
@@ -794,8 +797,13 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 	return &cdd, nil
 }
 
-func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
-	zd.Logger.Printf("SetupZoneSync(%s)", zd.ZoneName)
+func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
+	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
+	if !wantsSync {
+		zd.Logger.Printf("SetupZoneSync: Zone %s does not require delegation sync", zd.ZoneName)
+		return nil
+	}
+	zd.Logger.Printf("SetupZoneSync: Zone %s requests delegation sync", zd.ZoneName)
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
@@ -813,9 +821,31 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
 		} else {
 			zd.Logger.Printf("SetupZoneSync: Zone %s: No DSYNC RRset in zone. Will add.", zd.ZoneName)
+			//			ur := UpdateRequest{
+			//				Cmd:          "DEFERRED-UPDATE",
+			//				ZoneName:     zd.ZoneName,
+			//				Description:  fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
+			//				PreCondition: ZoneIsReady(zd.ZoneName),
+			//				Action:       zd.PublishDsyncRRs,
+			//			}
+			//			zd.KeyDB.UpdateQ <- ur
 			err := zd.PublishDsyncRRs()
 			if err != nil {
 				zd.Logger.Printf("Error from PublishDsyncRRs(%s): %v", zd.ZoneName, err)
+				return err
+			}
+		}
+
+		// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
+		// we generate a SIG(0) key pair for the target and publish the public key in the zone.
+		updateTarget := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
+		if _, ok := dns.IsDomainName(updateTarget); !ok {
+			zd.Logger.Printf("SetupZoneSync(%s, parent-side): Invalid DSYNC update target: %s", zd.ZoneName, updateTarget)
+		} else {
+			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC update target: %s", zd.ZoneName, updateTarget)
+			err := zd.ParentSig0KeyPrep(updateTarget, zd.KeyDB)
+			if err != nil {
+				zd.Logger.Printf("Error from ParentSig0KeyPrep(%s): %v", updateTarget, err)
 				return err
 			}
 		}
@@ -828,15 +858,6 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
 		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
 			switch scheme {
 			case "update":
-				// 1. Is there a KEY RRset already?
-				//				if !zd.Options[OptDontPublishKey] {
-				//					err := zd.VerifyPublishedKeyRRs()
-				//					if err != nil {
-				//						zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", zd.ZoneName, err)
-				//						return err
-				//					}
-				//					zd.Logger.Printf("SetupZoneSync: Zone %s: Verified published KEY RRset", zd.ZoneName)
-				//				}
 				delsyncq <- DelegationSyncRequest{
 					Command:  "DELEGATION-SYNC-SETUP",
 					ZoneName: zd.ZoneName,
@@ -855,8 +876,8 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan DelegationSyncRequest) error {
 	return nil
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
-	if !zd.Options[OptOnlineSigning] { // XXX: Need to sort out whether to use the sign-zone or online-signing option
+func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
+	if !zd.Options[OptOnlineSigning] {
 		return nil // this zone should not be signed (at least not by us)
 	}
 
@@ -881,7 +902,14 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan *ZoneData) error {
 
 	log.Printf("SetupZoneSigning: zone %s signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
 
-	resignq <- zd
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	select {
+	case resignq <- zd:
+	case <-ctx.Done():
+		log.Printf("SetupZoneSigning: timeout while sending zone %s to resign queue", zd.ZoneName)
+	}
 
 	return nil
 }
@@ -980,4 +1008,94 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 		}
 	}
 	return &dd, nil
+}
+
+func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
+	if zonename == "" {
+		return nil, fmt.Errorf("zonename cannot be empty")
+	}
+	if !dns.IsFqdn(zonename) {
+		return nil, fmt.Errorf("zonename must be fully qualified (end with dot)")
+	}
+
+	log.Printf("CreateAutoZone: Zone %s enter", zonename)
+
+	// Create a fake zone for the sidecar identity just to be able to
+	// to use to generate the TLSA.
+	tmpl := `
+$ORIGIN {ZONENAME}
+$TTL 86400
+{ZONENAME}    IN SOA ns1.{ZONENAME} hostmaster.{ZONENAME} (
+          {SERIAL}   ; serial
+          3600       ; refresh (1 hour)
+          1800       ; retry (30 minutes)
+          1209600    ; expire (2 weeks)
+          86400      ; minimum (1 day)
+          )
+{ZONENAME}     IN NS  ns.{ZONENAME}
+`
+	currentTime := fmt.Sprintf("%d", time.Now().Unix())
+	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
+	zonedatastr = strings.ReplaceAll(zonedatastr, "{SERIAL}", currentTime)
+
+	if len(addrs) == 0 {
+		addrs = []string{"192.0.2.1"} // fake it till you make it
+	}
+
+	log.Printf("CreateAutoZone: adding NS RRs for addresses: %v", addrs)
+	for _, addr := range addrs {
+		if strings.Contains(addr, ":") {
+			// IPv6 address
+			zonedatastr += fmt.Sprintf("ns.%s IN AAAA %s\n", zonename, addr)
+		} else {
+			// IPv4 address
+			zonedatastr += fmt.Sprintf("ns.%s IN A %s\n", zonename, addr)
+		}
+	}
+
+	log.Printf("CreateAutoZone: template zone data:\n%s\n", zonedatastr)
+
+	zd := &ZoneData{
+		ZoneName:  zonename,
+		ZoneStore: MapZone,
+		Logger:    log.Default(),
+		ZoneType:  Primary,
+		Options:   map[ZoneOption]bool{OptAutomaticZone: true},
+		KeyDB:     kdb,
+	}
+
+	log.Printf("CreateAutoZone: reading zone data for zone '%s'", zonename)
+	_, _, err := zd.ReadZoneData(zonedatastr, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read zone data: %v", err)
+	}
+
+	zd.Ready = true
+	Zones.Set(zonename, zd)
+
+	return zd, nil
+}
+
+// Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
+func (tconf *Config) FindNameserverAddrs() ([]string, error) {
+	addrs := []string{}
+	log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
+	dump.P(tconf.DnsEngine)
+	for _, ns := range tconf.DnsEngine.Addresses {
+		addr, port, err := net.SplitHostPort(ns)
+		if err != nil {
+			return nil, fmt.Errorf("FindNameserverAddrs: failed to split host and port from address '%s': %v", ns, err)
+		}
+		if port != "53" {
+			continue
+		}
+		if addr == "127.0.0.1" || addr == "::1" {
+			continue
+		}
+		if addr == "" {
+			continue
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, nil
 }

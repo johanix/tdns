@@ -17,6 +17,7 @@ const (
 	OptMultiSigner
 	OptDirty
 	OptFrozen
+	OptAutomaticZone
 	OptAgent // XXX: Hmm. Is this needed?
 )
 
@@ -32,6 +33,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptMultiSigner:       "multisigner",
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
+	OptAutomaticZone:     "automatic-zone",
 	OptAgent:             "agent",
 }
 
@@ -47,5 +49,6 @@ var StringToZoneOption = map[string]ZoneOption{
 	"multisigner":            OptMultiSigner,
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
+	"automatic-zone":         OptAutomaticZone,
 	"agent":                  OptAgent,
 }

@@ -13,6 +13,36 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Define sets of known types
+var tdnsSpecialTypes = map[uint16]bool{
+	TypeDSYNC:   true,
+	TypeNOTIFY:  true,
+	TypeMSIGNER: true,
+	TypeDELEG:   true,
+}
+
+var standardDNSTypes = map[uint16]bool{
+	dns.TypeMX:         true,
+	dns.TypeTLSA:       true,
+	dns.TypeSRV:        true,
+	dns.TypeA:          true,
+	dns.TypeAAAA:       true,
+	dns.TypeNS:         true,
+	dns.TypeTXT:        true,
+	dns.TypeZONEMD:     true,
+	dns.TypeKEY:        true,
+	dns.TypeURI:        true,
+	dns.TypeSVCB:       true,
+	dns.TypeNSEC:       true,
+	dns.TypeNSEC3:      true,
+	dns.TypeNSEC3PARAM: true,
+	dns.TypeRRSIG:      true,
+	dns.TypeDNSKEY:     true,
+	dns.TypeCSYNC:      true,
+	dns.TypeCDS:        true,
+	dns.TypeCDNSKEY:    true,
+}
+
 func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
@@ -39,6 +69,7 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 	if err != nil || apex == nil {
 		if err != nil {
 			log.Printf("ApexResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
+			return err
 		} else {
 			log.Printf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
 		}
@@ -85,25 +116,31 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
 		}
 
-	case TypeDSYNC, TypeNOTIFY, TypeMSIGNER, dns.TypeMX, dns.TypeTLSA, dns.TypeSRV,
-		dns.TypeA, dns.TypeAAAA, dns.TypeNS, dns.TypeTXT, dns.TypeZONEMD, dns.TypeKEY,
-		dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeRRSIG,
-		dns.TypeDNSKEY, dns.TypeCSYNC, dns.TypeCDS, dns.TypeCDNSKEY:
-		if rrset, ok := apex.RRtypes.Get(qtype); ok {
-			if len(rrset.RRs) > 0 {
-				m.Answer = append(m.Answer, rrset.RRs...)
-				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-				v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
-				m.Extra = append(m.Extra, v4glue.RRs...)
-				m.Extra = append(m.Extra, v6glue.RRs...)
-				if dnssec_ok {
-					apex.RRtypes.Set(qtype, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(qtype), zd.ZoneName))
-					apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
+	default:
+		// Check if qtype is in our known types
+		if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
+			if rrset, ok := apex.RRtypes.Get(qtype); ok {
+				if len(rrset.RRs) > 0 {
+					m.Answer = append(m.Answer, rrset.RRs...)
+					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+					v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
+					m.Extra = append(m.Extra, v4glue.RRs...)
+					m.Extra = append(m.Extra, v6glue.RRs...)
+					if dnssec_ok {
+						apex.RRtypes.Set(qtype, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(qtype), zd.ZoneName))
+						apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
 
-					m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
-					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
-					m.Extra = append(m.Extra, v4glue.RRSIGs...)
-					m.Extra = append(m.Extra, v6glue.RRSIGs...)
+						m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
+						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
+						m.Extra = append(m.Extra, v4glue.RRSIGs...)
+						m.Extra = append(m.Extra, v6glue.RRSIGs...)
+					}
+				} else {
+					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+					if dnssec_ok {
+						apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
+					}
 				}
 			} else {
 				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
@@ -112,24 +149,17 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 				}
 			}
-		} else {
-			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-			if dnssec_ok {
-				apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
-				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
-			}
-		}
-		// Anything special?
-		switch qtype {
-		case dns.TypeNS:
-			m.Ns = []dns.RR{} // authority not needed when querying for zone NS
-		}
 
-	default:
-		// every apex query we don't want to deal with
-		m.MsgHdr.Rcode = dns.RcodeRefused
-		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
+			// Special handling for certain types
+			if qtype == dns.TypeNS {
+				m.Ns = []dns.RR{} // authority not needed when querying for zone NS
+			}
+		} else {
+			// every apex query we don't want to deal with
+			m.MsgHdr.Rcode = dns.RcodeRefused
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
+		}
 	}
 	w.WriteMsg(m)
 	return nil
@@ -345,9 +375,16 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	// 2. Check for exact match qname+qtype
 	log.Printf("---> Checking for exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
-	switch qtype {
-	case dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, TypeNOTIFY, TypeDSYNC,
-		TypeDELEG, dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG:
+	//	switch qtype {
+	//	case // Standard DNS types
+	//		dns.TypeNS, dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, dns.TypeCNAME, dns.TypeSOA, dns.TypeKEY,
+	// TDNS special DNS types
+	//		TypeNOTIFY, TypeDSYNC, TypeDELEG, TypeMSIGNER,
+	// DNSSEC types
+	//		dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeCSYNC,
+	// some modern DNS types
+	//		dns.TypeURI, dns.TypeSVCB, dns.TypeHTTPS, dns.TypeTLSA, dns.TypeCAA:
+	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
 		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(owner.RRtypes.GetOnlyRRSet(qtype).RRs) > 0 {
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
@@ -401,7 +438,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		return nil
 	}
 
-	// Final catcheverything we don't want to deal with
+	// Final catch everything we don't want to deal with
 	m.MsgHdr.Rcode = dns.RcodeRefused
 	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)

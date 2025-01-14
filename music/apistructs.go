@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -32,6 +33,8 @@ type ShowResponse struct {
 	Message  string
 	ApiData  []string
 	Updaters map[string]bool
+	Error    bool
+	ErrorMsg string
 }
 
 type ShowAPIresponse struct {
@@ -140,7 +143,7 @@ type SignerGroupResponse struct {
 	SignerGroups map[string]SignerGroup
 }
 
-type Api struct {
+type MusicApi struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string
@@ -148,6 +151,9 @@ type Api struct {
 	Authmethod string
 	Verbose    bool
 	Debug      bool
+
+	// tdns API client, we're using most of the tdns API client,
+	ApiClient *tdns.ApiClient
 
 	// deSEC stuff
 	Email    string
@@ -176,13 +182,38 @@ type Process struct {
 	Desc string
 }
 
-type BeatPost struct {
-	Type  string
-	Name  string
-	Zones []string
+type SidecarBeatPost struct {
+	MessageType string
+	Identity    string
+	SharedZones []string
+	Time        time.Time
 }
 
-type BeatResponse struct {
+type SidecarBeatReport struct {
+	Time time.Time
+	Beat SidecarBeatPost
+}
+
+type SidecarBeatResponse struct {
+	Status   int
+	Time     time.Time
+	Client   string
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+type SidecarHelloPost struct {
+	MessageType string
+	Name        string
+	Identity    string
+	Addresses   []string
+	Port        uint16
+	TLSA        dns.TLSA
+	Zones       []string
+}
+
+type SidecarHelloResponse struct {
+	Status   int
 	Time     time.Time
 	Client   string
 	Msg      string
@@ -190,16 +221,13 @@ type BeatResponse struct {
 	ErrorMsg string
 }
 
-type HelloPost struct {
-	Type  string
-	Name  string
-	Zones []string
+type SidecarPost struct {
+	Command string
 }
 
-type HelloResponse struct {
-	Time     time.Time
-	Client   string
-	Msg      string
+type SidecarResponse struct {
+	Status   int
+	Sidecars map[string]*Sidecar
 	Error    bool
 	ErrorMsg string
 }

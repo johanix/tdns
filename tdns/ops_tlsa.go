@@ -4,19 +4,20 @@
 package tdns
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
-func (zd *ZoneData) PublishTLSARR(certPEM string, port uint16) error {
+func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {
 	certData, err := parseCertificate(certPEM)
 	if err != nil {
 		return err
@@ -29,16 +30,16 @@ func (zd *ZoneData) PublishTLSARR(certPEM string, port uint16) error {
 		Certificate:  certData,
 	}
 	tlsa.Hdr = dns.RR_Header{
-		Name:   fmt.Sprintf("_%d._tcp.%s", port, zd.ZoneName),
+		Name:   fmt.Sprintf("_%d._tcp.%s", port, name),
 		Rrtype: dns.TypeTLSA,
 		Class:  dns.ClassINET,
 		Ttl:    120,
 	}
 
-	log.Printf("PublishTLSARR: publishing TLSA RR: %s", tlsa.String())
+	log.Printf("PublishTlsaRR: publishing TLSA RR: %s", tlsa.String())
 
 	if zd.KeyDB.UpdateQ == nil {
-		return fmt.Errorf("PublishTLSARR: KeyDB.UpdateQ is nil")
+		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
@@ -62,16 +63,13 @@ func parseCertificate(certPEM string) (string, error) {
 		return "", fmt.Errorf("failed to parse certificate: %v", err)
 	}
 
-	spkiASN1, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal public key: %v", err)
-	}
-
-	hash := sha256.Sum256(spkiASN1)
+	// Use the entire certificate for hashing instead of just the public key
+	hash := sha256.Sum256(cert.Raw)
+	// log.Printf("parseCertificate: hash: %s", hex.EncodeToString(hash[:]))
 	return hex.EncodeToString(hash[:]), nil
 }
 
-func (zd *ZoneData) UnpublishTLSARR() error {
+func (zd *ZoneData) UnpublishTlsaRR() error {
 	anti_tlsa_rr, err := dns.NewRR(fmt.Sprintf("_443._tcp.%s 0 IN TLSA 3 1 1 %s", zd.ZoneName, "example_certificate_data"))
 	if err != nil {
 		return err
@@ -88,60 +86,40 @@ func (zd *ZoneData) UnpublishTLSARR() error {
 	return nil
 }
 
-func LookupTLSA(name string) (*RRset, error) {
-	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
-	}
-
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), dns.TypeTLSA)
-	c := new(dns.Client)
-	r, _, err := c.Exchange(m, clientConfig.Servers[0]+":53")
+func LookupTlsaRR(name string) (*RRset, error) {
+	rrset, err := RecursiveDNSQueryWithConfig(dns.Fqdn(name), dns.TypeTLSA, 3*time.Second, 3)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup %s TLSA record: %v", name, err)
 	}
-	if len(r.Answer) == 0 {
+	if len(rrset.RRs) == 0 {
 		return nil, fmt.Errorf("no %s TLSA records found", name)
 	}
-
-	// var tlsaRecords []*dns.TLSA
-	var rrset RRset
-	for _, ans := range r.Answer {
-		if tlsa, ok := ans.(*dns.TLSA); ok {
-			rrset.RRs = append(rrset.RRs, tlsa)
-			continue
-		}
-		if rrsig, ok := ans.(*dns.RRSIG); ok {
-			if rrsig.TypeCovered == dns.TypeTLSA {
-				rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
-			}
-			continue
-		}
-	}
-	return &rrset, nil
+	return rrset, nil
 }
 
-func VerifyCertAgainstTLSA(tlsarrset *RRset, rawcert []byte) error {
-	for _, rr := range tlsarrset.RRs {
-		tlsarr, ok := rr.(*dns.TLSA)
-		if !ok {
-			continue
-		}
-		if tlsarr.Usage == 3 {
-			switch tlsarr.MatchingType {
-			case 1: // SHA-256
-				hash := sha256.Sum256(rawcert)
-				if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
-					return nil
-				}
-			case 2: // SHA-512
-				hash := sha512.Sum512(rawcert)
-				if bytes.Equal(hash[:], []byte(tlsarr.Certificate)) {
-					return nil
-				}
-			}
-		}
+func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
+	decodedCert, err := hex.DecodeString(tlsarr.Certificate)
+	if err != nil {
+		return fmt.Errorf("failed to decode TLSA certificate: %v", err)
 	}
-	return nil
+	switch tlsarr.Usage {
+	case 3:
+		switch tlsarr.MatchingType {
+		case 1: // SHA-256
+			hash := sha256.Sum256(rawcert)
+			if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
+				return nil
+			}
+		case 2: // SHA-512
+			hash := sha512.Sum512(rawcert)
+			if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
+				return nil
+			}
+		default:
+			return fmt.Errorf("unsupported TLSA matching type: %d", tlsarr.MatchingType)
+		}
+	default:
+		return fmt.Errorf("only TLSA usage 3 is supported (this TLSA has usage %d)", tlsarr.Usage)
+	}
+	return fmt.Errorf("TLSA RR %s did not match cert", tlsarr.String())
 }

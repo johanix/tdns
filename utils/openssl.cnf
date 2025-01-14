@@ -1,0 +1,27 @@
+   [ req ]
+    default_bits       = 2048
+    distinguished_name = req_distinguished_name
+    req_extensions     = req_ext
+    x509_extensions    = v3_req
+
+    [ req_distinguished_name ]
+    countryName                 = Country Name (2 letter code)
+    countryName_default         = US
+    stateOrProvinceName         = State or Province Name (full name)
+    stateOrProvinceName_default = California
+    localityName                = Locality Name (eg, city)
+    localityName_default        = San Francisco
+    organizationName            = Organization Name (eg, company)
+    organizationName_default    = My Company
+    commonName                  = Common Name (e.g. server FQDN or YOUR name)
+    commonName_max              = 64
+
+    [ req_ext ]
+    subjectAltName = @alt_names
+
+    [ alt_names ]
+    DNS.1 = example.com
+
+    [ v3_req ]
+    keyUsage = digitalSignature, keyEncipherment
+    extendedKeyUsage = serverAuth, clientAuth

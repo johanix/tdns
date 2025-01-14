@@ -9,7 +9,8 @@ echo Generating private key
 openssl genpkey -algorithm RSA -out ${cn}.key
 
 echo Generating CSR
-openssl req -new -key ${cn}.key -out ${cn}.csr -subj "/CN=${cn}"
+openssl req -new -key ${cn}.key -out ${cn}.csr -subj "/CN=${cn}" -config openssl.cnf
 
 echo Generating certificate
-openssl x509 -req -days 3650 -in ${cn}.csr -signkey ${cn}.key -out ${cn}.crt
+openssl x509 -req -days 3650 -in ${cn}.csr -signkey ${cn}.key -out ${cn}.crt -extensions v3_req -extfile openssl.cnf
+

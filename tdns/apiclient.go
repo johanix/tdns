@@ -28,44 +28,80 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 		AuthMethod: authmethod,
 	}
 
+	tlsconfig := &tls.Config{}
+
 	if rootcafile == "insecure" {
-		api.Client = &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
-			},
-		}
+		tlsconfig.InsecureSkipVerify = true
+	} else if rootcafile == "tlsa" {
+		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the MUSIC side afterwards.
+
+		// use TLSA RR for verification
+		//		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		//			for _, rawCert := range rawCerts {
+		//				cert, err := x509.ParseCertificate(rawCert)
+		//				if err != nil {
+		//					return fmt.Errorf("failed to parse certificate: %v", err)
+		//				}
+		//				if cert.Subject.CommonName != sc.Identity {
+		//					return fmt.Errorf("unexpected certificate common name (should have been %s)", sc.Identity)
+		//				}
+		//
+		//				err = tdns.VerifyCertAgainstTlsaRR(sc.Details[tdns.MsignerMethodDNS].TlsaRR, rawCert)
+		//				if err != nil {
+		//					return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
+		//				}
+		//			}
+		//			return nil
+		//		}
 	} else {
 		rootCAPool := x509.NewCertPool()
 		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
-		rootCA, err := ioutil.ReadFile(rootcafile)
+		rootCA, err := os.ReadFile(rootcafile)
 		if err != nil {
 			log.Fatalf("reading cert failed : %v", err)
 		}
-		if debug {
+		if Globals.Debug {
 			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
 				name, rootcafile)
 		}
 
 		rootCAPool.AppendCertsFromPEM(rootCA)
-
-		api.Client = &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					RootCAs: rootCAPool,
-				},
-			},
-		}
+		tlsconfig.RootCAs = rootCAPool
 	}
-	// api.Client = &http.Client{}
-	api.Debug = debug
-	api.Verbose = verbose
+
+	//	} else {
+	//		rootCAPool := x509.NewCertPool()
+	//		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
+	//		rootCA, err := ioutil.ReadFile(rootcafile)
+	//		if err != nil {
+	//			log.Fatalf("reading cert failed : %v", err)
+	//		}
+	//		if debug {
+	//			log.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
+	//		}
+	//
+	//		rootCAPool.AppendCertsFromPEM(rootCA)
+
+	//		api.Client = &http.Client{
+	//			Transport: &http.Transport{
+	//				TLSClientConfig: &tls.Config{
+	//					RootCAs: rootCAPool,
+	//				},
+	//			},
+	//		}
+	//	}
+	api.Client = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsconfig,
+		},
+	}
+	api.Debug = Globals.Debug
+	api.Verbose = Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
 
 	if debug {
-		fmt.Printf("Setting up %s API client:\n", name)
-		fmt.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
+		log.Printf("Setting up %s API client:\n", name)
+		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
 			api.BaseUrl, api.apiKey, api.AuthMethod)
 	}
 
@@ -90,8 +126,7 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	}
 
 	if api.Debug {
-		fmt.Println()
-		fmt.Printf("requestHelper: about to send request using auth method '%s' and key '%s'\n",
+		log.Printf("\nrequestHelper: about to send request using auth method '%s' and key '%s'\n",
 			api.AuthMethod, api.apiKey)
 	}
 
@@ -272,7 +307,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if error != nil {
 			log.Println("JSON parse error: ", error)
 		}
-		fmt.Printf("API%s: received %d bytes of response data: %s\n", method, len(buf), prettyJSON.String())
+		fmt.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
 		fmt.Printf("API%s: end of response\n", method)
 	}
 

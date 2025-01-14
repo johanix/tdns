@@ -7,7 +7,6 @@ all:
 	$(MAKE) -C ./sidecar/
 	$(MAKE) -C ./sidecar-cli/
 
-
 clean:
 	$(MAKE) -C ./server/ clean
 	$(MAKE) -C ./cli/ clean

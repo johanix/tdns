@@ -11,7 +11,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 )
 
-func DbUpdater(conf *Config) {
+func DbUpdater(conf *Config, done <-chan struct{}) {
 
 	log.Printf("dbUpdater: Starting DB Update Service.")
 
@@ -140,6 +140,11 @@ func DbUpdater(conf *Config) {
 		case update = <-dbupdateC:
 			queue = append(queue, update)
 			RunDBQueue()
+
+		case <-done:
+			log.Println("dbUpdater: received done signal, shutting down")
+			ticker.Stop()
+			return
 
 		case <-ticker.C:
 			RunDBQueue()

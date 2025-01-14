@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
@@ -249,14 +250,16 @@ var zoneListCmd = &cobra.Command{
 		}
 		hdr += "Frozen|Dirty|Options"
 		out := []string{}
-		if showhdr {
+		if tdns.Globals.ShowHeaders {
 			out = append(out, hdr)
 		}
+		zoneLines := []string{}
 		for zname, zconf := range cr.Zones {
 			opts := []string{}
 			for _, opt := range zconf.Options {
 				opts = append(opts, tdns.ZoneOptionToString[opt])
 			}
+			sort.Strings(opts)
 			line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
 			if showprimary {
 				line += fmt.Sprintf("%s|", zconf.Primary)
@@ -268,8 +271,12 @@ var zoneListCmd = &cobra.Command{
 				line += fmt.Sprintf("%s|", zconf.Zonefile)
 			}
 			line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, opts)
-			out = append(out, line)
+			zoneLines = append(zoneLines, line)
 		}
+		sort.Slice(zoneLines, func(i, j int) bool {
+			return zoneLines[i] < zoneLines[j]
+		})
+		out = append(out, zoneLines...)
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
 	},
 }
@@ -308,7 +315,6 @@ func init() {
 
 	ZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
 
-	zoneListCmd.Flags().BoolVarP(&showhdr, "headers", "H", false, "Show column headers")
 	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
 	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
 	zoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
@@ -330,11 +336,11 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		return cr, fmt.Errorf("error from unmarshal: %v", err)
+		return cr, fmt.Errorf("error from json.Unmarshal: %v", err)
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from tdnsd: %s", cr.ErrorMsg)
+		return cr, fmt.Errorf("error from %s: %s", cr.AppName, cr.ErrorMsg)
 	}
 
 	return cr, nil

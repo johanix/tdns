@@ -3,16 +3,16 @@ module sidecar-cli
 go 1.23.2
 
 replace (
-	github.com/johanix/tdns/libcli => ../libcli
 	github.com/johanix/tdns/music => ../music
 	github.com/johanix/tdns/music/cmd => ../music/cmd
 	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cli => ../tdns/cli
 )
 
 require (
-	github.com/johanix/tdns/libcli v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/music/cmd v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
 )
 

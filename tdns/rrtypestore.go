@@ -21,6 +21,8 @@ func (s *RRTypeStore) Get(key uint16) (RRset, bool) {
 }
 
 func (s *RRTypeStore) GetOnlyRRSet(key uint16) RRset {
+	// dump.P(s)
+	// dump.P(key)
 	rrset, _ := s.data.Get(key)
 	return rrset
 }

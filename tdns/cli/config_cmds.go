@@ -82,6 +82,24 @@ var configStatusCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		if tdns.Globals.Verbose {
+			if len(resp.DnsEngine.Addresses) > 0 {
+				fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
+			} else {
+				fmt.Printf("DnsEngine: not listening on any addresses\n")
+			}
+			if len(resp.ApiServer.Addresses) > 0 {
+				fmt.Printf("ApiServer: listening on %v\n", resp.ApiServer.Addresses)
+			} else {
+				fmt.Printf("ApiServer: not listening on any addresses\n")
+			}
+			if resp.ApiServer.ApiKey != "" {
+				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(resp.ApiServer.ApiKey), resp.ApiServer.ApiKey[:3], resp.ApiServer.ApiKey[len(resp.ApiServer.ApiKey)-3:])
+			} else {
+				fmt.Printf("ApiServer: api key is not set\n")
+			}
+		}
+
 		if resp.Msg != "" {
 			fmt.Printf("%s\n", resp.Msg)
 		}

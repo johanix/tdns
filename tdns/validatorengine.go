@@ -1,32 +1,30 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
-package main
+package tdns
 
 import (
 	"fmt"
 	"log"
 	"time"
 
-	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 
-	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 )
 
 type CacheRRset struct {
-	RRset     *tdns.RRset
+	RRset     *RRset
 	Validated bool
 	Expires   time.Time
 }
 
-type RRsetCache cmap.ConcurrentMap[string, CacheRRset]
+// type RRsetCache cmap.ConcurrentMap[string, CacheRRset]
 
-func NewRRsetCache() *RRsetCache {
-	cache := cmap.New[CacheRRset]()
-	return (*RRsetCache)(&cache)
-}
+// func NewRRsetCache() *RRsetCache {
+// 	cache := cmap.New[CacheRRset]()
+// 	return (*RRsetCache)(&cache)
+// }
 
 // The ValidatorEngine is responsible for validating RRsets on request. The reason to have it as a separate
 // goroutine is to easier be able to keep state and minimize complexity in other parts of the code. Note that
@@ -36,9 +34,9 @@ func NewRRsetCache() *RRsetCache {
 // The common case will be that the RRset is in a child zone, and the delegation is signed. In this case, the
 // validator will check that the delegation is correct, and that the child zone is signed.
 
-func ValidatorEngine(conf *tdns.Config, stopch chan struct{}) {
+func ValidatorEngine(conf *Config, stopch chan struct{}) {
 	var validatorch = conf.Internal.ValidatorCh
-	var vr tdns.ValidatorRequest
+	var vr ValidatorRequest
 
 	if !viper.GetBool("validator.active") {
 		log.Printf("ValidatorEngine is NOT active.")
@@ -52,13 +50,13 @@ func ValidatorEngine(conf *tdns.Config, stopch chan struct{}) {
 
 	// var DnskeyCache = NewRRsetCache()
 
-	var rrset *tdns.RRset
+	var rrset *RRset
 	// var owner
 	var rrtype string
 
 	for vr = range validatorch {
 		rrset = vr.RRset
-		resp := tdns.ValidatorResponse{
+		resp := ValidatorResponse{
 			Validated: false,
 			Msg:       "ValidatorEngine: request to validate a RRset",
 		}
@@ -78,7 +76,7 @@ func ValidatorEngine(conf *tdns.Config, stopch chan struct{}) {
 		log.Printf("ValidatorEngine: request to validate %s %s (%d RRs)", ownername, rrtype, len(rrset.RRs))
 
 		// Is the RRset in a part of the namespace that we know anything about?
-		zd, _ := tdns.FindZone(ownername)
+		zd, _ := FindZone(ownername)
 		if zd == nil {
 			log.Printf("ValidatorEngine: RRset %s %s is not in or below a zone we know anything about", ownername, rrtype)
 			continue

@@ -119,7 +119,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
 	rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 	if Globals.Debug {
-		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
+		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
 	}
 
 	// Rest of apex
@@ -128,7 +128,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
 			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRs...)
 			if Globals.Debug {
-				zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
+				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
 			}
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
 			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRSIGs...)
@@ -147,7 +147,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
-					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				}
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
@@ -173,7 +173,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
-					zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
+					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
 				}
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
@@ -196,7 +196,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// env.RR = append(env.RR, soa) // trailing SOA
 	rrs = append(rrs, soa)
 	if Globals.Debug {
-		zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
+		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
 	}
 
 	total_sent += len(rrs)
@@ -211,78 +211,6 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, total_sent)
 
 	return total_sent, nil
-}
-
-// If the zone is completely loaded, return true otherwise false
-func (zd *ZoneData) xxxReadZoneFile(filename string, force bool) (bool, uint32, error) {
-	zd.Logger.Printf("ReadZoneFile: zone: %s filename: %s", zd.ZoneName, filename)
-
-	f, err := os.Open(filename)
-	if err != nil {
-		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to read %s: %v", filename, err)
-	}
-	if zd.ZoneStore == MapZone || zd.ZoneStore == SliceZone {
-		// zd.Data = make(map[string]OwnerData, 30)
-		zd.Data = cmap.New[OwnerData]()
-	}
-
-	zp := dns.NewZoneParser(bufio.NewReader(f), "", "")
-	zp.SetIncludeAllowed(true)
-
-	firstSoaSeen := false
-	checkedForUnchanged := false
-
-	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		// log.Printf("ReadZoneFile: RR: %s", rr.String())
-		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
-		if firstSoaSeen && !checkedForUnchanged {
-			checkedForUnchanged = true
-			apex, _ := zd.Data.Get(zd.ZoneName)
-			soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
-			zd.Logger.Printf("ReadZoneFile: %s: old incoming serial: %d new SOA serial: %d",
-				zd.ZoneName, zd.IncomingSerial, soa.Serial)
-			if soa.Serial == zd.IncomingSerial {
-				if !force {
-					zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
-					return false, soa.Serial, nil
-				}
-				zd.Logger.Printf("ReadZoneFile: %s: new SOA serial is the same as current but still forced to reload.", zd.ZoneName)
-			}
-		}
-	}
-
-	if err := zp.Err(); err != nil {
-		log.Printf("Error from ZoneParser: %v", err)
-		return false, 0, err
-	}
-
-	// apex, err := zd.GetOwner(zd.ZoneName)
-	apex, _ := zd.Data.Get(zd.ZoneName)
-	if err != nil {
-		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
-	}
-	//	dump.P(apex)
-	soa_rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-	var soa *dns.SOA
-	if len(soa_rrset.RRs) > 0 {
-		soa = soa_rrset.RRs[0].(*dns.SOA)
-	} else {
-		log.Printf("ReadZoneFile: Error: SOA: %v", soa_rrset)
-		return false, 0, fmt.Errorf("Error loading zone %s from file %s", zd.ZoneName, f.Name())
-	}
-
-	zd.CurrentSerial = soa.Serial
-	zd.IncomingSerial = soa.Serial
-
-	if err := zp.Err(); err != nil {
-		zd.Logger.Printf("ReadZoneFile: Error from ZoneParser(%s): %v",
-			zd.ZoneName, err)
-		return false, soa.Serial, fmt.Errorf("Error from ZoneParser: %v", err)
-	}
-	// zd.Logger.Printf("*** Zone %s read from file. No errors.", zd.ZoneName)
-	zd.ComputeIndices() // for zonestore SliceZone, otherwise no-op
-	zd.XfrType = "axfr" // XXX: technically not true
-	return true, soa.Serial, nil
 }
 
 func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, error) {
@@ -317,11 +245,13 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	checkedForUnchanged := false
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		// log.Printf("ReadZoneData: parsed RR: %s", rr.String())
+		log.Printf("ReadZoneData: parsed RR: %s", rr.String())
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
+
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true
 			apex, _ := zd.Data.Get(zd.ZoneName)
+			//dump.P(apex)
 			soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 			zd.Logger.Printf("ParseZoneFromReader: %s: old incoming serial: %d new SOA serial: %d",
 				zd.ZoneName, zd.IncomingSerial, soa.Serial)
@@ -337,16 +267,14 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	var err error
 
-	// log.Printf("ReadZoneData: all RRs parsed")
-
 	if err = zp.Err(); err != nil {
-		zd.Logger.Printf("ParseZoneFromReader: Error from ZoneParser: %v", err)
+		zd.Logger.Printf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
 		return false, 0, err
 	}
 
 	apex, _ := zd.Data.Get(zd.ZoneName)
 	if err != nil {
-		return false, 0, fmt.Errorf("ReadZoneData: Error: failed to get zone apex %s", zd.ZoneName)
+		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: failed to get zone apex %v", zd.ZoneName, err)
 	}
 
 	soa_rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
@@ -354,18 +282,12 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	if len(soa_rrset.RRs) > 0 {
 		soa = soa_rrset.RRs[0].(*dns.SOA)
 	} else {
-		log.Printf("ReadZoneData: Error: SOA: %v", soa_rrset)
-		return false, 0, fmt.Errorf("Error loading zone %s from data", zd.ZoneName)
+		log.Printf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
+		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
 	}
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
-
-	if err := zp.Err(); err != nil {
-		zd.Logger.Printf("ReadZoneData: Error from ZoneParser(%s): %v",
-			zd.ZoneName, err)
-		return false, soa.Serial, fmt.Errorf("Error from ZoneParser: %v", err)
-	}
 
 	zd.ComputeIndices()
 	zd.XfrType = "axfr"

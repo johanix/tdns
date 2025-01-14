@@ -5,7 +5,6 @@
 package mcmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -28,9 +27,9 @@ var addSignerGroupCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a new signer group to MuSiC",
 	Run: func(cmd *cobra.Command, args []string) {
-		sgr := SendSignerGroupCmd(Sgroupname, music.SignerGroupPost{
+		sgr := SendSignerGroupCmd(music.Globals.Sgroupname, music.SignerGroupPost{
 			Command: "add",
-			Name:    Sgroupname,
+			Name:    music.Globals.Sgroupname,
 		})
 		if sgr.Msg != "" {
 			fmt.Printf("%s\n", sgr.Msg)
@@ -44,10 +43,10 @@ var deleteSignerGroupCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		data := music.SignerGroupPost{
 			Command: "delete",
-			Name:    Sgroupname,
+			Name:    music.Globals.Sgroupname,
 		}
 
-		sgr := SendSignerGroupCmd(Sgroupname, data)
+		sgr := SendSignerGroupCmd(music.Globals.Sgroupname, data)
 		if sgr.Msg != "" {
 			fmt.Printf("%s\n", sgr.Msg)
 		}
@@ -75,10 +74,10 @@ func SendSignerGroupCmd(group string, data music.SignerGroupPost) music.SignerGr
 		log.Fatalf("Signer group must be specified.\n")
 	}
 
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
+	// bytebuf := new(bytes.Buffer)
+	// json.NewEncoder(bytebuf).Encode(data)
 
-	status, buf, err := api.Post("/signergroup", bytebuf.Bytes())
+	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/signergroup", data, true)
 	if err != nil {
 		log.Fatalf("SendSignerGroupCmd: Error from APIpost: %v\n", err)
 	}
@@ -98,7 +97,7 @@ func SendSignerGroupCmd(group string, data music.SignerGroupPost) music.SignerGr
 func PrintSignerGroups(sgr music.SignerGroupResponse) {
 	if len(sgr.SignerGroups) > 0 {
 		var out []string
-		if tdns.Globals.Verbose || Showheaders {
+		if tdns.Globals.Verbose || tdns.Globals.ShowHeaders {
 			out = append(out, "Group|Locked|Signers|# Zones|# Proc Zones|Current Process|PendingAddition|PendingRemoval")
 		}
 

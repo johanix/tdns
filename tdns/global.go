@@ -4,6 +4,10 @@
 package tdns
 
 import (
+	"fmt"
+	"net"
+	"net/url"
+
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
@@ -19,10 +23,10 @@ type GlobalStuff struct {
 	Slurp       bool
 	Algorithm   string
 	Rrtype      string
-	AppName     string
-	AppMode     string
-	AppVersion  string
-	AppDate     string
+	ShowHeaders bool // -H in various CLI commands
+	BaseUri     string
+	Port        uint16
+	Address     string
 }
 
 var Globals = GlobalStuff{
@@ -32,3 +36,20 @@ var Globals = GlobalStuff{
 }
 
 var Zones = cmap.New[*ZoneData]()
+
+func (gs *GlobalStuff) Validate() error {
+	if gs.Port > 65535 {
+		return fmt.Errorf("invalid port number: %d", gs.Port)
+	}
+	if gs.Address != "" {
+		if net.ParseIP(gs.Address) == nil {
+			return fmt.Errorf("invalid address format: %s", gs.Address)
+		}
+	}
+	if gs.BaseUri != "" {
+		if _, err := url.Parse(gs.BaseUri); err != nil {
+			return fmt.Errorf("invalid base URI: %s", gs.BaseUri)
+		}
+	}
+	return nil
+}

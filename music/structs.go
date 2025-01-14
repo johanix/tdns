@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"time"
 
+	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -126,9 +127,31 @@ type SignerOpResult struct {
 	Response string
 }
 
-type Heartbeat struct {
-	Name  string
-	Type  string
-	Time  time.Time
-	Zones []string
+type Sidecar struct {
+	Identity   string
+	Methods    map[string]bool // supported methods: "API" and "DNS"
+	Details    map[tdns.MsignerMethod]SidecarDetails
+	LastHB     time.Time
+	LastFullHB time.Time
+	Api        *MusicApi
+}
+
+type SidecarDetails struct {
+	Addrs       []string
+	Port        uint16
+	TlsaRR      *dns.TLSA
+	UriRR       *dns.URI
+	KeyRR       *dns.KEY
+	BaseUri     string
+	SharedZones []string
+	LastHB      time.Time
+	BeatCount   int
+}
+
+type MusicSyncStatus struct {
+	Command  string
+	Sidecars map[string]*Sidecar
+	Error    bool
+	ErrorMsg string
+	Response chan MusicSyncStatus // Note: response channel uses same struct
 }

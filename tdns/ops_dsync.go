@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -56,7 +55,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		// }
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
-			zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
+			// zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
 			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", zd.ZoneName, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("Zone %s: Invalid DSYNC notify target: %s", zd.ZoneName, target)
@@ -149,6 +148,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	ur := UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
+		Description:    fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
 		Actions:        rrset.RRs, // Add all the DSYNC RRs first.
 		InternalUpdate: true,
 	}
@@ -192,19 +192,29 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	return nil
 }
 
-func (zd *ZoneData) UnpublishDsyncRRs() error {
-	anti_dsync_rr, err := dns.NewRR("_dsync." + zd.ZoneName + " 7200 IN DSYNC ANY NOTIFY 53 1.2.3.4")
-	if err != nil {
-		return fmt.Errorf("Error from NewRR(%s): %v", "_dsync."+zd.ZoneName+" 7200 ANY DSYNC ANY NOTIFY 53 1.2.3.4", err)
+// ZoneIsReady returns a function that can be used as a PreCondition for a DeferredUpdate.
+// The returned function will return true if the zone exists and is ready, otherwise false.
+func ZoneIsReady(zonename string) func() bool {
+	return func() bool {
+		_, ok := Zones.Get(zonename)
+		return ok
 	}
-	// ClassANY == remove RRset
-	anti_dsync_rr.Header().Class = dns.ClassANY // XXX: dns.NewRR fails to parse a CLASS ANY DSYNC RRset, so we set the class manually.
-	log.Printf("Unpublishing DSYNC RRset: %s", anti_dsync_rr.String())
+}
+
+func (zd *ZoneData) UnpublishDsyncRRs() error {
+	// Create a string representation of an empty DSYNC record for deletion
+	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC \"NOTIFY\" 53 1.2.3.4", zd.ZoneName)
+
+	anti_dsync, err := dns.NewRR(dsync_str)
+	if err != nil {
+		return fmt.Errorf("failed to create DSYNC RR: %v", err)
+	}
+	anti_dsync.Header().Class = dns.ClassANY // Delete DSYNC RRset
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{anti_dsync_rr},
+		Actions:        []dns.RR{anti_dsync},
 		InternalUpdate: true,
 	}
 

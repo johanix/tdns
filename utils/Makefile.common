@@ -21,17 +21,16 @@ netbsd:	version.go
 
 # johaniaws: Sync local tdns source to remote AWS environment.
 # Requires: sshfs mount at ~/sshfs/msigner1
-TDNS_SRC ?= ~/src/git/tdns
-TDNS_AWS_DIR ?= ~/sshfs/msigner1/src/tdns
+# TDNS_SRC ?= ~/src/git/tdns
+# TDNS_AWS_DIR ?= ~/sshfs/msigner1/src/tdns
+TDNS_SRC ?= /Users/johani/src/git/tdns
+TDNS_AWS_DIR ?= /Users/johani/sshfs/msigner1/src/tdns
 
 johaniaws:
-	rsync --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
+	rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
 
 test:
 	$(GO) test -v -cover
-
-clean:
-	@rm -f $(PROG)
 
 # install:
 # 	install -s -b -c ${PROG} /usr/local/bin/

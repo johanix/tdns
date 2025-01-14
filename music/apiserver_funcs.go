@@ -6,16 +6,22 @@
 package music
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 
 	"github.com/gorilla/mux"
+	"github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
 )
 
@@ -187,10 +193,22 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Println("APIzone: error decoding zone post:", err)
 		}
 
-		log.Printf("APIzone: received /zone request (command: %s) from %s.\n",
-			zp.Command, r.RemoteAddr)
+		log.Printf("APIzone: received /zone request (command: %s) from %s.\n", zp.Command, r.RemoteAddr)
 
 		w.Header().Set("Content-Type", "application/json")
+
+		switch zp.Command {
+		case "list":
+			zs, err := mdb.ListZones(tx)
+			if err != nil {
+				log.Printf("Error from ListZones: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+			resp.Zones = zs
+			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
+			return
+		}
 
 		dbzone, _, err := mdb.GetZone(tx, zp.Zone.Name) // Get a more complete Zone structure
 		if err != nil {
@@ -198,13 +216,13 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ErrorMsg = err.Error()
 		} else {
 			switch zp.Command {
-			case "list":
-				zs, err := mdb.ListZones(tx)
-				if err != nil {
-					log.Printf("Error from ListZones: %v", err)
-				}
-				resp.Zones = zs
-			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
+			//			case "list":
+			//				zs, err := mdb.ListZones(tx)
+			//				if err != nil {
+			//					log.Printf("Error from ListZones: %v", err)
+			//				}
+			//				resp.Zones = zs
+			//			// fmt.Printf("\n\nAPIzone: resp: %v\n\n", resp)
 			case "status":
 				var zl = make(map[string]Zone, 1)
 				if dbzone.Exists {
@@ -438,8 +456,10 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+
 		defer func() {
 			mdb.CloseTransactionNG(tx, err)
+			w.Header().Set("Content-Type", "application/json")
 			err = json.NewEncoder(w).Encode(resp)
 			if err != nil {
 				log.Printf("Error from Encoder: %v\n", err)
@@ -450,8 +470,10 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		var sp SignerPost
 		err = decoder.Decode(&sp)
 		if err != nil {
-			log.Println("APIsigner: error decoding signer post:",
-				err)
+			log.Printf("APIsigner: error decoding signer post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
 		}
 
 		log.Printf("APIsigner: received /signer request (command: %s) from %s.\n",
@@ -463,7 +485,9 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "list":
 			ss, err := mdb.ListSigners(tx)
 			if err != nil {
-				log.Printf("Error from ListSigners: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
 			}
 			resp.Signers = ss
 
@@ -472,6 +496,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		case "update":
@@ -479,6 +504,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		case "delete":
@@ -486,6 +512,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		case "join":
@@ -493,6 +520,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		case "leave":
@@ -500,6 +528,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		case "login":
@@ -507,6 +536,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		case "logout":
@@ -514,6 +544,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 
 		default:
@@ -522,14 +553,11 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		ss, err := mdb.ListSigners(tx)
 		if err != nil {
 			log.Printf("Error from ListSigners: %v", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
 		}
 		resp.Signers = ss
-
-		w.Header().Set("Content-Type", "application/json")
-		//		err = json.NewEncoder(w).Encode(resp)
-		//		if err != nil {
-		//			log.Printf("Error from Encoder: %v\n", err)
-		//		}
 	}
 }
 
@@ -554,8 +582,10 @@ func APIsignergroup(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+
 		defer func() {
 			mdb.CloseTransactionNG(tx, err)
+			w.Header().Set("Content-Type", "application/json")
 			err = json.NewEncoder(w).Encode(resp)
 			if err != nil {
 				log.Printf("Error from Encoder: %v\n", err)
@@ -569,8 +599,10 @@ func APIsignergroup(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		var sgp SignerGroupPost
 		err = decoder.Decode(&sgp)
 		if err != nil {
-			log.Println("APIsignergroup: error decoding signergroup post:",
-				err)
+			log.Printf("APIsignergroup: error decoding signergroup post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
 		}
 
 		fmt.Printf("apiserver: /signergroup %v\n", sgp)
@@ -583,6 +615,8 @@ func APIsignergroup(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			msg, err := mdb.AddSignerGroup(tx, sgp.Name)
 			if err != nil {
 				log.Printf("Error from AddSignerGroup: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			}
 			resp.Msg = msg
 
@@ -590,6 +624,8 @@ func APIsignergroup(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			msg, err := mdb.DeleteSignerGroup(tx, sgp.Name)
 			if err != nil {
 				log.Printf("Error from DeleteSignerGroup: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			}
 			resp.Msg = msg
 		default:
@@ -599,14 +635,10 @@ func APIsignergroup(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		ss, err := mdb.ListSignerGroups(tx)
 		if err != nil {
 			log.Printf("Error from ListSignerGroups: %v", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
 		}
 		resp.SignerGroups = ss
-
-		w.Header().Set("Content-Type", "application/json")
-		//		err = json.NewEncoder(w).Encode(resp)
-		//		if err != nil {
-		//			log.Printf("Error from Encoder: %v\n", err)
-		//		}
 	}
 }
 
@@ -621,13 +653,25 @@ func APIprocess(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var pp ProcessPost
 		err := decoder.Decode(&pp)
-		if err != nil {
-			log.Println("APIprocess: error decoding process post:", err)
-		}
 
 		var resp = ProcessResponse{
 			Time:   time.Now(),
 			Client: r.RemoteAddr,
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error from Encoder: %v\n", err)
+			}
+		}()
+
+		if err != nil {
+			log.Printf("APIprocess: error decoding process post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
 		}
 
 		fmt.Printf("apiserver: /process %v\n", pp)
@@ -658,12 +702,6 @@ func APIprocess(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		default:
 
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from Encoder: %v\n", err)
-		}
 	}
 }
 
@@ -674,38 +712,42 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := BeatResponse{
+		resp := SidecarBeatResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIbeat: received /beat request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var bp BeatPost
+		var bp SidecarBeatPost
 		err := decoder.Decode(&bp)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIbeat: error encoding response: %v\n", err)
+			}
+		}()
+
 		if err != nil {
-			log.Println("APIbeat: error decoding beat post:", err)
+			log.Printf("APIbeat: error decoding beat post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
 		}
 
-		switch bp.Type {
+		switch bp.MessageType {
 		case "BEAT", "FULLBEAT":
 			resp.Msg = "OK"
-			mconf.Internal.HeartbeatQ <- Heartbeat{
-				Name:  bp.Name,
-				Type:  bp.Type,
-				Time:  time.Now(),
-				Zones: bp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+				Time: time.Now(),
+				Beat: bp,
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.Type)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from json.NewEncoder: %v\n", err)
+			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.MessageType)
 		}
 	}
 }
@@ -717,51 +759,58 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := HelloResponse{
+		resp := SidecarHelloResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var hp HelloPost
+		var hp SidecarHelloPost
 		err := decoder.Decode(&hp)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIhello: error encoding response: %v\n", err)
+			}
+		}()
+
 		if err != nil {
-			log.Println("APIhello: error decoding hello post:", err)
+			log.Printf("APIhello: error decoding hello post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
 		}
 
-		switch hp.Type {
+		switch hp.MessageType {
 		case "HELLO":
-			mconf.Internal.HeartbeatQ <- Heartbeat{
-				Name:  hp.Name,
-				Type:  "HELLO",
-				Time:  time.Now(),
-				Zones: hp.Zones,
+			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+				Time: time.Now(),
+				Beat: SidecarBeatPost{
+					Identity:    hp.Identity,
+					MessageType: "HELLO",
+					Time:        time.Now(),
+					SharedZones: hp.Zones,
+				},
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.Type)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from json.NewEncoder: %v\n", err)
+			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.MessageType)
 		}
 	}
 }
 
 func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *http.Request) {
-	address := viper.GetString("services.apiserver.api")
+	address := viper.GetString("apiserver.address")
+	name := viper.GetString("service.name")
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
 		var sp ShowPost
 		err := decoder.Decode(&sp)
-		if err != nil {
-			log.Println("APIshow: error decoding show post:", err)
-		}
 
 		log.Printf("APIshow: received /show request (command: %s) from %s.\n",
 			sp.Command, r.RemoteAddr)
@@ -770,12 +819,26 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 			Status: 101,
 		}
 
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error from Encoder: %v\n", err)
+			}
+		}()
+
+		if err != nil { // from decoder.Decode()
+			log.Println("APIshow: error decoding show post:", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
 		switch sp.Command {
 		case "api":
 			message := "All ok, here are all defined API endpoints"
 
-			data := []string{fmt.Sprintf("API provided by MUSICD listening on: %s",
-				address)}
+			data := []string{fmt.Sprintf("API provided by %s listening on: %v", name, address)}
 
 			walker := func(route *mux.Route, router *mux.Router,
 				ancestors []*mux.Route) error {
@@ -796,11 +859,225 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 			resp.Message = "Defined updaters"
 			resp.Updaters = ListUpdaters()
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(resp)
-		if err != nil {
-			log.Printf("Error from Encoder: %v\n", err)
-		}
 	}
+}
+
+func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var sp SidecarPost
+		err := decoder.Decode(&sp)
+
+		log.Printf("APIsidecar: received /sidecar request (command: %s) from %s.\n",
+			sp.Command, r.RemoteAddr)
+
+		var resp = SidecarResponse{
+			Status: 101,
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			// Note: the resp.Sidecars field has already been cleaned from non serializable fields in the MusicSyncEngine.
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("Error encoding response: %v\n", err)
+				dump.P(resp)
+			}
+		}()
+
+		if err != nil { // from decoder.Decode()
+			log.Println("APIsidecar: error decoding sidecar post:", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
+		switch strings.ToLower(sp.Command) {
+		case "status":
+			responseCh := make(chan MusicSyncStatus)
+			log.Printf("APIsidecar: STATUS request received")
+			mconf.Internal.MusicSyncStatusQ <- MusicSyncStatus{
+				Command:  "STATUS",
+				Response: responseCh,
+			}
+			log.Printf("APIsidecar: STATUS request sent to MusicSyncStatusQ")
+			select {
+			case tmp := <-responseCh:
+				log.Printf("APIsidecar: STATUS response received")
+				if tmp.Error {
+					http.Error(w, tmp.ErrorMsg, http.StatusInternalServerError)
+					return
+				}
+				resp.Sidecars = tmp.Sidecars
+
+			case <-time.After(5 * time.Second):
+				log.Printf("APIsidecar: STATUS request timed out")
+				http.Error(w, "Request timed out", http.StatusGatewayTimeout)
+				return
+			}
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", sp.Command)
+		}
+
+	}
+}
+
+// This is the sidecar mgmt API router.
+func SetupAPIRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
+	kdb := tconf.Internal.KeyDB
+	r := mux.NewRouter().StrictSlash(true)
+	apikey := mconf.ApiServer.ApiKey
+	if apikey == "" {
+		return nil, fmt.Errorf("apiserver.apikey is not set")
+	}
+
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+
+	// TDNS stuff
+	sr.HandleFunc("/ping", tdns.APIping(tconf)).Methods("POST")
+	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
+	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
+	sr.HandleFunc("/zone", tdns.APIzone(&tconf.App, tconf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/delegation", tdns.APIdelegation(tconf.Internal.DelegationSyncQ)).Methods("POST")
+	sr.HandleFunc("/debug", tdns.APIdebug()).Methods("POST")
+
+	sr.HandleFunc("/command", tdns.APIcommand(tconf)).Methods("POST")
+	sr.HandleFunc("/config", tdns.APIconfig(tconf)).Methods("POST")
+	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
+
+	// MUSIC stuff
+	sr.HandleFunc("/signer", APIsigner(mconf)).Methods("POST")
+	sr.HandleFunc("/zone", APIzone(mconf)).Methods("POST")
+	sr.HandleFunc("/signergroup", APIsignergroup(mconf)).Methods("POST")
+	sr.HandleFunc("/test", APItest(mconf)).Methods("POST")
+	sr.HandleFunc("/process", APIprocess(mconf)).Methods("POST")
+	sr.HandleFunc("/show", APIshow(mconf, r)).Methods("POST")
+
+	sr.HandleFunc("/sidecar", APIsidecar(mconf)).Methods("POST")
+
+	return r, nil
+}
+
+// This is the sidecar-to-sidecar sync API router.
+func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
+	r := mux.NewRouter().StrictSlash(true)
+	r.HandleFunc("/", HomeLink)
+
+	// Create base subrouter without auth header requirement
+	sr := r.PathPrefix("/api/v1").Subrouter()
+
+	// Special case for /hello endpoint which validates against TLSA in payload
+	sr.HandleFunc("/hello", APIhello(mconf)).Methods("POST")
+
+	// All other endpoints require valid client cert matching TLSA record
+	secureRouter := r.PathPrefix("/api/v1").Subrouter()
+	secureRouter.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("secureRouter: %s", r.URL.Path)
+			// Skip validation for /hello endpoint
+			if r.URL.Path == "/api/v1/hello" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Get peer certificate from TLS connection
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				http.Error(w, "Client certificate required", http.StatusUnauthorized)
+				return
+			}
+			clientCert := r.TLS.PeerCertificates[0]
+
+			// Get TLSA record for the client's identity and verify
+			clientId := clientCert.Subject.CommonName
+			sidecar, ok := Globals.Sidecars.S.Get(clientId)
+			if !ok {
+				log.Printf("secureRouter: Unknown client identity: %s", clientId)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			tlsaRR := sidecar.Details[tdns.MsignerMethodAPI].TlsaRR
+			if tlsaRR == nil {
+				log.Printf("secureRouter: No TLSA record available for client: %s", clientId)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			err := tdns.VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw)
+			if err != nil {
+				log.Printf("secureRouter: Certificate verification for client id '%s' failed: %v", clientId, err)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	secureRouter.HandleFunc("/ping", tdns.APIping(tconf)).Methods("POST")
+	secureRouter.HandleFunc("/beat", APIbeat(mconf)).Methods("POST")
+
+	return r, nil
+}
+
+// This is the sidecar-to-sidecar sync API dispatcher.
+func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *Config, done <-chan struct{}) error {
+	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Identity)
+
+	router, err := SetupMusicSyncRouter(tconf, mconf)
+	if err != nil {
+		return err
+	}
+	addresses := mconf.Sidecar.Api.Addresses.Listen
+	port := mconf.Sidecar.Api.Port
+	certFile := mconf.Sidecar.Api.Cert
+	keyFile := mconf.Sidecar.Api.Key
+	if len(addresses) == 0 {
+		log.Println("MusicSyncAPIdispatcher: no addresses to listen on. Not starting.")
+		return nil
+	}
+	if certFile == "" || keyFile == "" {
+		log.Println("MusicSyncAPIdispatcher: certFile or keyFile not set. Not starting.")
+		return nil
+	}
+
+	// Configure TLS settings
+	tlsConfig := &tls.Config{
+		ClientAuth: tls.RequestClientCert, // Request but don't require - we'll handle verification in middleware
+		MinVersion: tls.VersionTLS12,
+		// Remove VerifyPeerCertificate as we now handle this in middleware per-endpoint
+	}
+
+	servers := make([]*http.Server, len(addresses))
+
+	for idx, address := range addresses {
+		idxCopy := idx
+		servers[idx] = &http.Server{
+			Handler:   router,
+			TLSConfig: tlsConfig,
+			Addr:      net.JoinHostPort(address, fmt.Sprintf("%d", port)),
+		}
+
+		go func(srv *http.Server, idx int) {
+			log.Printf("Starting MusicSyncAPI dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+				log.Fatalf("ListenAndServeTLS(): %v", err)
+			}
+		}(servers[idx], idxCopy)
+	}
+
+	go func() {
+		<-done
+		log.Println("Shutting down MusicSyncAPI servers...")
+		for _, srv := range servers {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("MusicSyncAPI server Shutdown: %v", err)
+			}
+		}
+	}()
+
+	return nil
 }
