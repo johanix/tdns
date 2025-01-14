@@ -42,7 +42,7 @@ func DbUpdater(conf *Config, done <-chan struct{}) {
 			tx, err := mdb.StartTransactionNG()
 			if err != nil {
 				log.Printf("RunDBQueue: Error from mdb.Begin(): %v", err)
-				log.Printf("RunDBQueue: This may be a fatal error?", err)
+				log.Printf("RunDBQueue: This may be a fatal error? %v", err)
 			}
 
 			switch t {

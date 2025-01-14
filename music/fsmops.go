@@ -260,17 +260,17 @@ func (z *Zone) AttemptStateTransition(tx *sql.Tx, nextstate string,
 				log.Printf("$$$ ROG -> running StateTransition with %v as tx", tx)
 				err := z.StateTransition(tx, currentstate, nextstate) // success
 				if err != nil {
-				   log.Printf("*** AttemptStateTransition(%s): '%s--->%s': Transition failed",
-					z.Name, currentstate, nextstate)
-				   return false,
-				       fmt.Sprintf("Zone %s did not transition from '%s' to '%s'",
-						z.Name, currentstate, nextstate), err
+					log.Printf("*** AttemptStateTransition(%s): '%s--->%s': Transition failed",
+						z.Name, currentstate, nextstate)
+					return false,
+						fmt.Sprintf("Zone %s did not transition from '%s' to '%s'",
+							z.Name, currentstate, nextstate), err
 				} else {
-				  log.Printf("*** AttemptStateTransition(%s): '%s--->%s': Transition complete",
-					z.Name, currentstate, nextstate)
-				  return true,
-					fmt.Sprintf("Zone %s transitioned from '%s' to '%s'",
-						z.Name, currentstate, nextstate), nil
+					log.Printf("*** AttemptStateTransition(%s): '%s--->%s': Transition complete",
+						z.Name, currentstate, nextstate)
+					return true,
+						fmt.Sprintf("Zone %s transitioned from '%s' to '%s'",
+							z.Name, currentstate, nextstate), nil
 				}
 			} else {
 				stopreason, exist, err := z.MusicDB.GetMeta(tx, z, "stop-reason")

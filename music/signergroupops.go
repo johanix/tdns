@@ -19,18 +19,20 @@ func (mdb *MusicDB) AddSignerGroup(tx *sql.Tx, sg string) (string, error) {
 	if sg == "" {
 		return "", errors.New("Signer group without name cannot be created")
 	}
-	
-	if tx == nil { panic("tx=nil") }
-//	localtx, tx, err := mdb.StartTransaction(tx)
-//	if err != nil {
-//		log.Printf("AddSignerGroup: Error from mdb.StartTransaction(): %v\n", err)
-//		return "fail", err
-//	}
-//	defer mdb.CloseTransaction(localtx, tx, err)
+
+	if tx == nil {
+		panic("tx=nil")
+	}
+	//	localtx, tx, err := mdb.StartTransaction(tx)
+	//	if err != nil {
+	//		log.Printf("AddSignerGroup: Error from mdb.StartTransaction(): %v\n", err)
+	//		return "fail", err
+	//	}
+	//	defer mdb.CloseTransaction(localtx, tx, err)
 
 	_, err := mdb.GetSignerGroup(tx, sg, false)
 	if err == nil {
-	    return fmt.Sprintf("Signergroup %s already exists.", sg), err
+		return fmt.Sprintf("Signergroup %s already exists.", sg), err
 	}
 
 	const addcmd = "INSERT OR REPLACE INTO signergroups(name) VALUES (?)"
@@ -48,13 +50,15 @@ func (mdb *MusicDB) GetSignerGroup(tx *sql.Tx, sg string, apisafe bool) (*Signer
 		return &SignerGroup{}, nil // A non-existent signergroup is not an error
 	}
 
-	if tx == nil { panic("tx=nil") }
-//	localtx, tx, err := mdb.StartTransaction(tx)
-//	if err != nil {
-//		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-//		return nil, err
-//	}
-//	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	//	localtx, tx, err := mdb.StartTransaction(tx)
+	//	if err != nil {
+	//		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
+	//		return nil, err
+	//	}
+	//	defer mdb.CloseTransaction(localtx, tx, err)
 
 	const sqlq = `
 SELECT name, locked, COALESCE(curprocess, '') AS curp, COALESCE(pendadd, '') AS padd,
@@ -72,7 +76,7 @@ COALESCE(pendremove, '') AS prem FROM signergroups WHERE name=?`
 	case nil:
 		sm, err := mdb.GetGroupSigners(tx, name, apisafe)
 		if err != nil {
-		   return nil, err
+			return nil, err
 		}
 		dbref := mdb
 		if apisafe {
@@ -116,17 +120,19 @@ COALESCE(pendremove, '') AS prem FROM signergroups WHERE name=?`
 
 func (mdb *MusicDB) DeleteSignerGroup(tx *sql.Tx, group string) (string, error) {
 
-	if tx == nil { panic("tx=nil") }
-//	localtx, tx, err := mdb.StartTransaction(tx)
-//	if err != nil {
-//		log.Printf("DeleteSignerGroup: Error from mdb.StartTransaction(): %v\n", err)
-//		return "fail", err
-//	}
-//	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	//	localtx, tx, err := mdb.StartTransaction(tx)
+	//	if err != nil {
+	//		log.Printf("DeleteSignerGroup: Error from mdb.StartTransaction(): %v\n", err)
+	//		return "fail", err
+	//	}
+	//	defer mdb.CloseTransaction(localtx, tx, err)
 
-        _, err := mdb.GetSignerGroup(tx, group, false)
+	_, err := mdb.GetSignerGroup(tx, group, false)
 	if err != nil {
-	    return fmt.Sprintf("Signergroup %s not deleted. Reason: %v", group, err), err
+		return fmt.Sprintf("Signergroup %s not deleted. Reason: %v", group, err), err
 	}
 
 	const sqlq = "DELETE FROM signergroups WHERE name=?"
@@ -151,19 +157,21 @@ func (mdb *MusicDB) DeleteSignerGroup(tx *sql.Tx, group string) (string, error) 
 	}
 
 	return fmt.Sprintf("Signergroup %s deleted. Any zones or signers in signergroup were detached.", group),
-	       nil
+		nil
 }
 
 func (mdb *MusicDB) ListSignerGroups(tx *sql.Tx) (map[string]SignerGroup, error) {
 	var sgl = make(map[string]SignerGroup, 2)
 
-	if tx == nil { panic("tx=nil") }
-//	localtx, tx, err := mdb.StartTransaction(tx)
-//	if err != nil {
-//		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-//		return sgl, err
-//	}
-//	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	//	localtx, tx, err := mdb.StartTransaction(tx)
+	//	if err != nil {
+	//		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
+	//		return sgl, err
+	//	}
+	//	defer mdb.CloseTransaction(localtx, tx, err)
 
 	const sqlq = `
 SELECT name, COALESCE(curprocess, '') AS curp, COALESCE (pendadd, '') AS padd,
@@ -219,7 +227,7 @@ COALESCE(pendremove, '') AS prem, locked FROM signergroups`
 			}
 			zones, err = mdb.GetSignerGroupZones(tx, &sg)
 			if err != nil {
-			   return sgl, err
+				return sgl, err
 			}
 
 			pzones := 0
@@ -241,15 +249,17 @@ COALESCE(pendremove, '') AS prem, locked FROM signergroups`
 }
 
 func (sg *SignerGroup) PopulateSigners(tx *sql.Tx) error {
-     mdb := sg.DB
+	mdb := sg.DB
 
-	if tx == nil { panic("tx=nil") }
-// 	localtx, tx, err := mdb.StartTransaction(tx)
-// 	if err != nil {
-// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-// 		return err
-// 	}
-// 	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	// 	localtx, tx, err := mdb.StartTransaction(tx)
+	// 	if err != nil {
+	// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
+	// 		return err
+	// 	}
+	// 	defer mdb.CloseTransaction(localtx, tx, err)
 
 	const sqlcmd = "SELECT name FROM signers WHERE sgroup=?"
 
@@ -284,13 +294,15 @@ func (sg *SignerGroup) PopulateSigners(tx *sql.Tx) error {
 
 func (mdb *MusicDB) GetGroupSigners(tx *sql.Tx, name string, apisafe bool) (map[string]*Signer, error) {
 
-	if tx == nil { panic("tx=nil") }
-// 	localtx, tx, err := mdb.StartTransaction(tx)
-// 	if err != nil {
-// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-// 		return nil, err
-// 	}
-// 	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	// 	localtx, tx, err := mdb.StartTransaction(tx)
+	// 	if err != nil {
+	// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
+	// 		return nil, err
+	// 	}
+	// 	defer mdb.CloseTransaction(localtx, tx, err)
 
 	const sqlq = "SELECT COALESCE (signer, '') AS signer2 FROM group_signers WHERE name=?"
 
@@ -324,13 +336,15 @@ func (mdb *MusicDB) GetGroupSigners(tx *sql.Tx, name string, apisafe bool) (map[
 
 func (mdb *MusicDB) GetGroupSignersNG(tx *sql.Tx, name string, apisafe bool) (map[string]*Signer, error) {
 
-	if tx == nil { panic("tx=nil") }
-// 	localtx, tx, err := mdb.StartTransaction(tx)
-// 	if err != nil {
-// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-// 		return nil, err
-// 	}
-// 	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	// 	localtx, tx, err := mdb.StartTransaction(tx)
+	// 	if err != nil {
+	// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
+	// 		return nil, err
+	// 	}
+	// 	defer mdb.CloseTransaction(localtx, tx, err)
 
 	signers := map[string]*Signer{}
 
@@ -361,18 +375,20 @@ func (mdb *MusicDB) GetGroupSignersNG(tx *sql.Tx, name string, apisafe bool) (ma
 }
 
 // XXX: Todo: in the wrap up of a REMOVE-SIGNER the signer in PendingRemoval should be physically
-//      removed from the signer group.
 //
+//	removed from the signer group.
 func (mdb *MusicDB) CheckIfProcessComplete(tx *sql.Tx, sg *SignerGroup) (bool, string, error) {
 	var msg string
 
-	if tx == nil { panic("tx=nil") }
-// 	localtx, tx, err := mdb.StartTransaction(tx)
-// 	if err != nil {
-// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-// 		return false, err.Error(), err
-// 	}
-// 	defer mdb.CloseTransaction(localtx, tx, err)
+	if tx == nil {
+		panic("tx=nil")
+	}
+	// 	localtx, tx, err := mdb.StartTransaction(tx)
+	// 	if err != nil {
+	// 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
+	// 		return false, err.Error(), err
+	// 	}
+	// 	defer mdb.CloseTransaction(localtx, tx, err)
 
 	zones, _ := mdb.GetSignerGroupZones(tx, sg)
 	pzones := 0
@@ -412,12 +428,12 @@ func (mdb *MusicDB) CheckIfProcessComplete(tx *sql.Tx, sg *SignerGroup) (bool, s
 			_, err = tx.Exec(sqlq, sg.Name, pr)
 			if err != nil {
 				log.Printf("CheckIfProcessIsComplete: Error from tx.Exec(%s): %v",
-								      sqlq, err)
-			        return false, fmt.Sprintf("Error from tx.Exec(%s): %v", sqlq, err), err
+					sqlq, err)
+				return false, fmt.Sprintf("Error from tx.Exec(%s): %v", sqlq, err), err
 			}
 		}
 
 		return true, msg, nil
 	}
-	return false, "", nil	// not an error
+	return false, "", nil // not an error
 }
