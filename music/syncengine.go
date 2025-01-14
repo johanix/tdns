@@ -186,9 +186,13 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 				cleaned[s.Identity] = s.CleanCopy()
 			}
 
-			req.Response <- MusicSyncStatus{
+			select {
+			case req.Response <- MusicSyncStatus{
 				Sidecars: cleaned,
 				Error:    false,
+			}:
+			case <-time.After(5 * time.Second):
+				log.Printf("MusicSyncEngine: STATUS response timed out")
 			}
 
 		case <-stopch:

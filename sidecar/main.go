@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/johanix/tdns/music"
 	"github.com/johanix/tdns/music/fsm"
@@ -33,7 +32,7 @@ func main() {
 
 	err := tdns.MainInit(&tconf)
 	if err != nil {
-		log.Fatalf("Error initializing TDNS: %v", err)
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
 	mconf.Internal.KeyDB = tconf.Internal.KeyDB
@@ -50,27 +49,26 @@ func main() {
 	// ParseZones will read zone configs from the file specified in tconf.Internal.ZonesCfgFile
 	all_zones, err := tdns.ParseZones(&tconf, tconf.Internal.RefreshZoneCh, false) // false = !reload, initial config
 	if err != nil {
-		log.Fatalf("Error parsing zones: %v", err)
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error parsing zones: %v", err))
 	}
 
 	err = mconf.LoadSidecarConfig(&tconf, all_zones)
 	if err != nil {
-		fmt.Printf("Error loading sidecar config: %v\n", err)
-		log.Fatalf("Error loading sidecar config: %v", err)
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error loading sidecar config: %v", err))
 	}
 
 	apirouter, err := music.SetupAPIRouter(&tconf, &mconf) // sidecar mgmt API is a combo of TDNS and MUSIC
 	if err != nil {
-		log.Fatalf("Error setting up API router: %v", err)
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
 	err = tdns.MainStartThreads(&tconf, apirouter)
 	if err != nil {
-		log.Fatalf("Error starting TDNS threads: %v", err)
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
 	err = music.MainInit(&tconf, &mconf)
 	if err != nil {
-		log.Fatalf("Error initializing MUSIC: %v", err)
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing MUSIC: %v", err))
 	}
 
 	mconf.Internal.TokViper = music.TokVip

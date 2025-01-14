@@ -4,9 +4,9 @@
 package tdns
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -107,12 +107,12 @@ func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
 		switch tlsarr.MatchingType {
 		case 1: // SHA-256
 			hash := sha256.Sum256(rawcert)
-			if bytes.Equal(hash[:], decodedCert) {
+			if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
 				return nil
 			}
 		case 2: // SHA-512
 			hash := sha512.Sum512(rawcert)
-			if bytes.Equal(hash[:], decodedCert) {
+			if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
 				return nil
 			}
 		default:

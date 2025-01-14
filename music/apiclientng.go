@@ -27,16 +27,16 @@ func ExtractHoldPeriod(buf []byte) (int, error) {
 		return 0, fmt.Errorf("error unmarshalling DesecError: %v\n", err)
 	}
 	// "Request was throttled. Expected available in 1 second."
-	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
+	// log.Printf("deSEC error detail: '%s'\n", de.Detail)
 	de.Detail = strings.TrimPrefix(de.Detail, "Request was throttled. Expected available in ")
-	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
+	// log.Printf("deSEC error detail: '%s'\n", de.Detail)
 	de.Detail = strings.TrimSuffix(de.Detail, " second.")
-	fmt.Printf("deSEC error detail: '%s'\n", de.Detail)
+	// log.Printf("deSEC error detail: '%s'\n", de.Detail)
 	de.Hold, err = strconv.Atoi(de.Detail)
 	if err != nil {
 		return 0, fmt.Errorf("error converting hold period to int: %v\n", err)
 	}
-	fmt.Printf("Rate-limited. Hold period: %d\n", de.Hold)
+	log.Printf("Rate-limited. Hold period: %d\n", de.Hold)
 	return de.Hold, nil
 }
 
@@ -50,7 +50,7 @@ func (sc *Sidecar) NewMusicSyncApiClient(name, baseurl, apikey, authmethod, root
 	if sc == nil {
 		return fmt.Errorf("sidecar is nil")
 	}
-	if sc.Methods["API"] == false || sc.Details[tdns.MsignerMethodAPI].TlsaRR == nil {
+	if !sc.Methods["API"] || sc.Details[tdns.MsignerMethodAPI].TlsaRR == nil {
 		return fmt.Errorf("sidecar %s does not support the MUSIC API Method", sc.Identity)
 	}
 
@@ -125,10 +125,10 @@ func (sc *Sidecar) NewMusicSyncApiClient(name, baseurl, apikey, authmethod, root
 
 func (api *MusicApi) RequestNG(method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
 	if api == nil {
-		return 501, nil, fmt.Errorf("api client is nil")
+		return 501, nil, fmt.Errorf("MusicApi client is nil")
 	}
 	if api.ApiClient == nil || api.ApiClient.Client == nil {
-		return 501, nil, fmt.Errorf("api client is nil")
+		return 501, nil, fmt.Errorf("TDNS API client is nil")
 	}
 	return api.ApiClient.RequestNG(method, endpoint, data, dieOnError)
 }

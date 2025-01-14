@@ -160,7 +160,7 @@ func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
 	algstr := viper.GetString(configKey)
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	if alg == 0 {
-		log.Printf("Unknown keygen algorithm \"%s\", using default", algstr)
+		log.Printf("Unknown keygen algorithm \"%s\" in config key %s, using default algorithm %s", algstr, configKey, dns.AlgorithmToString[defaultAlg])
 		alg = defaultAlg
 	}
 	return alg, nil

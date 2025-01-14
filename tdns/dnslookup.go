@@ -309,12 +309,13 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 						dns.TypeToString[rrtype])
 				}
 			}
+
 			RRsetCache.Set(qname, rrtype, &CachedRRset{
 				Name:       qname,
 				RRtype:     rrtype,
 				Rcode:      uint8(rcode),
 				RRset:      &rrset,
-				Expiration: time.Now().Add(time.Duration(rrset.RRs[0].Header().Ttl) * time.Second),
+				Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
 			})
 			return &rrset, rcode, nil
 		} else {
@@ -326,6 +327,19 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	}
 	return &rrset, rcode, fmt.Errorf("No Answers found from any auth server looking up '%s %s'.\n",
 		qname, dns.TypeToString[rrtype])
+}
+
+func getMinTTL(rrs []dns.RR) time.Duration {
+	if len(rrs) == 0 {
+		return 0
+	}
+	min := rrs[0].Header().Ttl
+	for _, rr := range rrs[1:] {
+		if rr.Header().Ttl < min {
+			min = rr.Header().Ttl
+		}
+	}
+	return time.Duration(min) * time.Second
 }
 
 func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
@@ -373,17 +387,23 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 		Timeout: timeout,
 	}
 
+	if !strings.Contains(server, ":") {
+		server = net.JoinHostPort(server, "53")
+	}
+
 	var rrset RRset
 	var lastErr error
 	for attempt := 0; attempt < retries; attempt++ {
-		r, _, err := c.Exchange(m, server+":53")
+		backoff := time.Duration(attempt) * 100 * time.Millisecond
+		time.Sleep(backoff)
+		r, _, err := c.Exchange(m, server)
 		if err != nil {
 			lastErr = err
-			log.Printf("attempt %d: failed to lookup %s record using server %s: %v", attempt+1, qname, server, err)
+			log.Printf("attempt %d/%d: failed to lookup %s record using server %s: %v", attempt+1, retries, qname, server, err)
 			continue
 		}
 		if len(r.Answer) == 0 {
-			log.Printf("attempt %d: no %s records found using server %s", attempt+1, qname, server)
+			log.Printf("attempt %d/%d: no %s records found using server %s", attempt+1, retries, qname, server)
 			continue
 		}
 

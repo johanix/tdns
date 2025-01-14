@@ -143,6 +143,7 @@ func DbUpdater(conf *Config, done <-chan struct{}) {
 
 		case <-done:
 			log.Println("dbUpdater: received done signal, shutting down")
+			ticker.Stop()
 			return
 
 		case <-ticker.C:

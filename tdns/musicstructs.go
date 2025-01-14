@@ -48,8 +48,8 @@ type MSCNotifyConf struct {
 }
 
 type MSCAPIConf struct {
-	BaseURL    string
-	ApiKey     string
-	AuthMethod string
-	UseTLS     bool
+	BaseURL    string `validate:"required,url"`
+	ApiKey     string `validate:"required_if=AuthMethod apikey"`
+	AuthMethod string `validate:"required,oneof=none apikey"`
+	UseTLS     bool   `validate:"required"`
 }

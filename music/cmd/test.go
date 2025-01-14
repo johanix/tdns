@@ -75,7 +75,10 @@ func SendTestCommand(zone string, data music.TestPost) (music.TestResponse, erro
 	}
 
 	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
+	err := json.NewEncoder(bytebuf).Encode(data)
+	if err != nil {
+		log.Fatalf("SendTestCommand: Error from json.NewEncoder: %v", err)
+	}
 	//	status, buf, err := music.Api.Post("/test", bytebuf.Bytes())
 	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/test", data, true)
 	if err != nil {

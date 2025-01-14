@@ -289,6 +289,12 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 	//       ...
 	// Therefore we need to ensure that we use the FQDN of the zone name as the key, regardless of the zone_id.
 	for zid, zconf := range zconfig.Zones {
+		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
+			log.Printf("ParseZones: Zone %s contains invalid characters. Ignoring.", zconf.Name)
+			delete(zones, zid)
+			continue
+		}
+
 		zname := dns.Fqdn(zconf.Name)
 		if zname != zid {
 			delete(zones, zid)

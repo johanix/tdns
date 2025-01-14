@@ -75,21 +75,21 @@ func main() {
 
 	err := tdns.MainInit(&conf)
 	if err != nil {
-		log.Fatalf("Error initializing TDNS: %v", err)
+		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
 	_, err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, false) // false: not reload, initial parsing
 	if err != nil {
-		log.Fatalf("Error parsing zones: %v", err)
+		tdns.Shutdowner(&conf, fmt.Sprintf("Error parsing zones: %v", err))
 	}
 
 	apirouter, err := tdns.SetupAPIRouter(&conf)
 	if err != nil {
-		log.Fatalf("Error setting up API router: %v", err)
+		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
 	err = tdns.MainStartThreads(&conf, apirouter)
 	if err != nil {
-		log.Fatalf("Error starting TDNS threads: %v", err)
+		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
 	tdns.MainLoop(&conf)

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -901,9 +902,12 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 
 	log.Printf("SetupZoneSigning: zone %s signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	select {
 	case resignq <- zd:
-	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
 		log.Printf("SetupZoneSigning: timeout while sending zone %s to resign queue", zd.ZoneName)
 	}
 

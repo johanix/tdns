@@ -141,7 +141,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 						m.SetRcode(r, dns.RcodeSuccess)
 						v := viper.GetString("server.version")
 						if v == "" {
-							v = fmt.Sprintf("tdnsd version %s", conf.App.Version)
+							v = fmt.Sprintf("%s version %s", conf.App.Name, conf.App.Version)
 						} else if strings.Contains(v, "{version}") {
 							v = strings.Replace(v, "{version}", conf.App.Version, -1)
 						}

@@ -77,8 +77,7 @@ type InternalConf struct {
 	MusicSyncQ      chan MusicSyncRequest
 	NotifyQ         chan NotifyRequest
 	AuthQueryQ      chan AuthQueryRequest
-	// ResignQ         chan ZoneRefresher // the names of zones that should be kept re-signed should be sent into this channel
-	ResignQ chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

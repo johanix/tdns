@@ -171,3 +171,10 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 
 	return nil
 }
+
+func Shutdowner(conf *Config, msg string) {
+	log.Printf("%s: shutting down: %s", conf.App.Name, msg)
+	conf.Internal.StopCh <- struct{}{}
+	time.Sleep(2 * time.Second)
+	os.Exit(0)
+}
