@@ -68,17 +68,17 @@ func (rd *MSIGNER) Parse(txt []string) error {
 	}
 	state, exist := StringToState[txt[0]]
 	if !exist {
-		return fmt.Errorf("invalid MSIGNER type: %s.", txt[0])
+		return fmt.Errorf("invalid MSIGNER type: %s", txt[0])
 	}
 
 	method, exist := StringToMsignerMethod[txt[1]]
 	if !exist {
-		return fmt.Errorf("invalid MSIGNER sync method: %s.", txt[1])
+		return fmt.Errorf("invalid MSIGNER sync method: %s", txt[1])
 	}
 
 	tgt := dns.Fqdn(txt[2])
 	if _, ok := dns.IsDomainName(tgt); !ok {
-		return fmt.Errorf("invalid MSIGNER target: %s.", txt[2])
+		return fmt.Errorf("invalid MSIGNER target: %s", txt[2])
 	}
 
 	rd.State = state

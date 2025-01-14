@@ -58,19 +58,19 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			// zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
 			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", zd.ZoneName, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
-				return fmt.Errorf("Zone %s: Invalid DSYNC notify target: %s", zd.ZoneName, target)
+				return fmt.Errorf("zone %s: invalid DSYNC notify target: %s", zd.ZoneName, target)
 			}
 
 			port := uint16(viper.GetInt("delegationsync.parent.notify.port"))
 			if port == 0 {
 				zd.Logger.Printf("PublishDsyncRRs: zone: %s no notify port found", zd.ZoneName)
-				return fmt.Errorf("Zone %s: No notify port found. Config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no notify port found. config broken", zd.ZoneName)
 			}
 
 			notifyTypes := viper.GetStringSlice("delegationsync.parent.notify.types")
 			if len(notifyTypes) == 0 {
 				zd.Logger.Printf("PublishDsyncRRs: zone: %s no notify types found", zd.ZoneName)
-				return fmt.Errorf("Zone %s: No notify types found. Config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no notify types found. config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
 				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", zd.ZoneName, ttl, t, s, port, target)
@@ -86,7 +86,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			notifyAddresses := viper.GetStringSlice("delegationsync.parent.notify.addresses")
 			if len(notifyAddresses) == 0 {
 				zd.Logger.Printf("PublishDsyncRRs: zone: %s no notify addresses found", zd.ZoneName)
-				return fmt.Errorf("Zone %s: No notify addresses found. Config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no notify addresses found. config broken", zd.ZoneName)
 			}
 			for _, addr := range notifyAddresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
@@ -98,19 +98,19 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		case "UPDATE":
 			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
-				return fmt.Errorf("Zone %s: Invalid DSYNC update target: %s", zd.ZoneName, target)
+				return fmt.Errorf("zone %s: invalid DSYNC update target: %s", zd.ZoneName, target)
 			}
 
 			port := uint16(viper.GetInt("delegationsync.parent.update.port"))
 			if port == 0 {
 				zd.Logger.Printf("PublishDsyncRRs: zone: %s no update port found", zd.ZoneName)
-				return fmt.Errorf("Zone %s: No update port found. Config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no update port found. config broken", zd.ZoneName)
 			}
 
 			updateTypes := viper.GetStringSlice("delegationsync.parent.update.types")
 			if len(updateTypes) == 0 {
 				zd.Logger.Printf("PublishDsyncRRs: zone: %s no update types found", zd.ZoneName)
-				return fmt.Errorf("Zone %s: No update types found. Config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no update types found. config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
 				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", zd.ZoneName, ttl, t, s, port, target)
@@ -126,7 +126,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			updateAddresses := viper.GetStringSlice("delegationsync.parent.update.addresses")
 			if len(updateAddresses) == 0 {
 				zd.Logger.Printf("PublishDsyncRRs: zone: %s no update addresses found", zd.ZoneName)
-				return fmt.Errorf("Zone %s: No update addresses found. Config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no update addresses found. config broken", zd.ZoneName)
 			}
 			for _, addr := range updateAddresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
@@ -142,7 +142,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	}
 
 	if !dsync_added {
-		return fmt.Errorf("No DSYNC RRs added for zone %s", zd.ZoneName)
+		return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
 	}
 
 	ur := UpdateRequest{

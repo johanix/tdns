@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -48,14 +49,14 @@ func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 		ta, err := zd.FindDnskey(rrsig.SignerName, rrsig.KeyTag)
 		if err != nil {
 			msg := fmt.Sprintf("Error from FindDnskey(%s, %d): %v", rrsig.SignerName, rrsig.KeyTag, err)
-			zd.Logger.Printf("%s", msg)
-			return false, fmt.Errorf(msg)
+			zd.Logger.Print(msg)
+			return false, errors.New(msg)
 		}
 		if ta == nil {
 			// don't yet know how to lookup and validate new keys
 			msg := fmt.Sprintf("Error: key \"%s\" is unknown.", rrsig.SignerName)
-			zd.Logger.Printf("%s", msg)
-			return false, fmt.Errorf(msg)
+			zd.Logger.Print(msg)
+			return false, errors.New(msg)
 		}
 
 		keyrr := ta.Dnskey
@@ -167,7 +168,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 						}
 
 						// Compare the computed DS with the DS record from the parent zone
-						if strings.ToUpper(computedDS.Digest) == strings.ToUpper(dsrr.Digest) {
+						if strings.EqualFold(computedDS.Digest, dsrr.Digest) {
 							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY matches DS record. Adding to TAStore.")
 
 							// Store the KSK in the DnskeyCache
@@ -194,13 +195,13 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 	}
 
 	if !kskValidated {
-		return false, fmt.Errorf("No valid KSK found for child zone %s", cdd.ChildName)
+		return false, fmt.Errorf("no valid KSK found for child zone %s", cdd.ChildName)
 	}
 
 	// Validate the entire DNSKEY RRset
 	valid, err := zd.ValidateRRset(dnskeyrrset, verbose)
 	if err != nil || !valid {
-		return false, fmt.Errorf("Failed to validate DNSKEY RRset for child zone %s", cdd.ChildName)
+		return false, fmt.Errorf("failed to validate DNSKEY RRset for child zone %s", cdd.ChildName)
 	}
 
 	// Add ZSKs to the DnskeyCache

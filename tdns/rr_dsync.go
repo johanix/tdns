@@ -64,12 +64,12 @@ func (rd *DSYNC) Parse(txt []string) error {
 	}
 	t := dns.StringToType[txt[0]]
 	if t == 0 {
-		return fmt.Errorf("invalid DSYNC type: %s.", txt[0])
+		return fmt.Errorf("invalid DSYNC type: %s", txt[0])
 	}
 
 	scheme, exist := StringToScheme[txt[1]]
 	if !exist {
-		return fmt.Errorf("invalid DSYNC scheme: %s.", txt[1])
+		return fmt.Errorf("invalid DSYNC scheme: %s", txt[1])
 	}
 
 	port, err := strconv.Atoi(txt[2])
@@ -79,7 +79,7 @@ func (rd *DSYNC) Parse(txt []string) error {
 
 	tgt := dns.Fqdn(txt[3])
 	if _, ok := dns.IsDomainName(tgt); !ok {
-		return fmt.Errorf("invalid DSYNC target: %s.", txt[3])
+		return fmt.Errorf("invalid DSYNC target: %s", txt[3])
 	}
 
 	rd.Type = t

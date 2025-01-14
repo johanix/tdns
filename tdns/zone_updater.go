@@ -67,150 +67,147 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		for {
-			select {
-			case ur = <-updateq:
-				log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
-				if ur.Cmd == "PING" {
-					log.Printf("ZoneUpdater: PING received. PONG!")
-					continue
-				}
-				zd, ok := Zones.Get(ur.ZoneName)
-				if !ok {
-					log.Printf("ZoneUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", ur.Cmd, ur.ZoneName, ur)
-					log.Printf("ZoneUpdater: Current list of known zones: %v", Zones.Keys())
-					continue
-				}
+		for ur = range updateq {
+			log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
+			if ur.Cmd == "PING" {
+				log.Printf("ZoneUpdater: PING received. PONG!")
+				continue
+			}
+			zd, ok := Zones.Get(ur.ZoneName)
+			if !ok {
+				log.Printf("ZoneUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", ur.Cmd, ur.ZoneName, ur)
+				log.Printf("ZoneUpdater: Current list of known zones: %v", Zones.Keys())
+				continue
+			}
 
-				switch ur.Cmd {
-				case "DEFERRED-UPDATE":
-					log.Printf("ZoneUpdater: Error: Received deferred update \"%s\" (should be sent to DeferredUpdaterEngine)", ur.Description)
-					continue
+			switch ur.Cmd {
+			case "DEFERRED-UPDATE":
+				log.Printf("ZoneUpdater: Error: Received deferred update \"%s\" (should be sent to DeferredUpdaterEngine)", ur.Description)
+				continue
 
-				case "CHILD-UPDATE":
-					// This is the case where a DNS UPDATE contains updates to child delegation information.
-					// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
-					// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
-					log.Printf("ZoneUpdater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("ZoneUpdater: CHILD-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
-					if zd.Options[OptAllowChildUpdates] {
-						var updated bool
-						var err error
+			case "CHILD-UPDATE":
+				// This is the case where a DNS UPDATE contains updates to child delegation information.
+				// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
+				// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
+				log.Printf("ZoneUpdater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+				log.Printf("ZoneUpdater: CHILD-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+				if zd.Options[OptAllowChildUpdates] {
+					var updated bool
+					var err error
 
-						switch zd.ZoneType {
-						case Primary:
-							updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
-							if err != nil {
-								log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
-							}
-						case Secondary:
-							err := kdb.ApplyChildUpdateToDB(ur)
-							if err != nil {
-								log.Printf("ZoneUpdater: Error from ApplyChildUpdateToDB: %v", err)
-							}
+					switch zd.ZoneType {
+					case Primary:
+						updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
+						if err != nil {
+							log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
 						}
-						if updated {
-							zd.Options[OptDirty] = true
+					case Secondary:
+						err := kdb.ApplyChildUpdateToDB(ur)
+						if err != nil {
+							log.Printf("ZoneUpdater: Error from ApplyChildUpdateToDB: %v", err)
+						}
+					}
+					if updated {
+						zd.Options[OptDirty] = true
+					}
+				}
+
+			case "ZONE-UPDATE":
+				// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
+				// (i.e. not child delegation information).
+				log.Printf("ZoneUpdater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+				log.Printf("ZoneUpdater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+				if zd.Options[OptAllowUpdates] {
+					dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
+					if err != nil {
+						log.Printf("Error from ZoneUpdateChangesDelegationData: %v", err)
+					}
+					log.Printf("ZoneUpdater: dss.InSync: %t", dss.InSync)
+
+					if zd.Options[OptDelSyncChild] && !dss.InSync {
+						log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncQ): %d", zd.ZoneName, len(zd.DelegationSyncQ))
+						zd.DelegationSyncQ <- DelegationSyncRequest{
+							Command:    "SYNC-DELEGATION",
+							ZoneName:   zd.ZoneName,
+							ZoneData:   zd,
+							SyncStatus: dss,
+							// XXX: *NOT* populating the Adds and Removes here, using the dss data
 						}
 					}
 
-				case "ZONE-UPDATE":
-					// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
-					// (i.e. not child delegation information).
-					log.Printf("ZoneUpdater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("ZoneUpdater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
-					if zd.Options[OptAllowUpdates] {
-						dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
+					var updated bool
+
+					switch zd.ZoneType {
+					case Primary:
+						updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
 						if err != nil {
-							log.Printf("Error from ZoneUpdateChangesDelegationData: %v", err)
-						}
-						log.Printf("ZoneUpdater: dss.InSync: %t", dss.InSync)
-
-						if zd.Options[OptDelSyncChild] && !dss.InSync {
-							log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncQ): %d", zd.ZoneName, len(zd.DelegationSyncQ))
-							zd.DelegationSyncQ <- DelegationSyncRequest{
-								Command:    "SYNC-DELEGATION",
-								ZoneName:   zd.ZoneName,
-								ZoneData:   zd,
-								SyncStatus: dss,
-								// XXX: *NOT* populating the Adds and Removes here, using the dss data
-							}
+							log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
 						}
 
-						var updated bool
-
-						switch zd.ZoneType {
-						case Primary:
-							updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
-							if err != nil {
-								log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
-							}
-
-						case Secondary:
-							err := kdb.ApplyZoneUpdateToDB(ur)
-							if err != nil {
-								log.Printf("ZoneUpdater: Error from ApplyUpdateToDB: %v", err)
-							}
+					case Secondary:
+						err := kdb.ApplyZoneUpdateToDB(ur)
+						if err != nil {
+							log.Printf("ZoneUpdater: Error from ApplyUpdateToDB: %v", err)
 						}
-						if updated && !ur.InternalUpdate {
-							log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
-							zd.Options[OptDirty] = true
+					}
+					if updated && !ur.InternalUpdate {
+						log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
+						zd.Options[OptDirty] = true
+					}
+				} else {
+					log.Printf("ZoneUpdater: Zone %s has updates disallowed", zd.ZoneName)
+				}
+				log.Printf("ZoneUpdater: ZONE-UPDATE done")
+
+			case "TRUSTSTORE-UPDATE":
+				log.Printf("ZoneUpdater: Request for update to SIG(0) TrustStore for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
+				log.Printf("ZoneUpdater: TRUSTSTORE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+				tx, err := kdb.Begin("UpdaterEngine")
+				if err != nil {
+					log.Printf("Error from kdb.Begin(): %v", err)
+				}
+				for _, rr := range ur.Actions {
+					var subcommand string
+					switch rr.Header().Class {
+					case dns.ClassINET:
+						subcommand = "add"
+					case dns.ClassNONE:
+						subcommand = "delete"
+					case dns.ClassANY:
+						log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has class ANY. Delete RRset is not supported. Ignored.")
+						continue
+					default:
+						log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has unknown class: %s. Ignored.", rr.String())
+						continue
+					}
+
+					if keyrr, ok := rr.(*dns.KEY); ok {
+						tppost := TruststorePost{
+							SubCommand: subcommand,
+							Src:        "child-update",
+							Keyname:    keyrr.Header().Name,
+							Keyid:      int(keyrr.KeyTag()),
+							KeyRR:      rr.String(),
+							Validated:  ur.Validated,
+							Trusted:    ur.Trusted,
+						}
+
+						_, err := kdb.Sig0TrustMgmt(tx, tppost)
+						if err != nil {
+							log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
 						}
 					} else {
-						log.Printf("ZoneUpdater: Zone %s has updates disallowed", zd.ZoneName)
+						log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
 					}
-					log.Printf("ZoneUpdater: ZONE-UPDATE done")
-
-				case "TRUSTSTORE-UPDATE":
-					log.Printf("ZoneUpdater: Request for update to SIG(0) TrustStore for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-					log.Printf("ZoneUpdater: TRUSTSTORE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
-					tx, err := kdb.Begin("UpdaterEngine")
-					if err != nil {
-						log.Printf("Error from kdb.Begin(): %v", err)
-					}
-					for _, rr := range ur.Actions {
-						var subcommand string
-						switch rr.Header().Class {
-						case dns.ClassINET:
-							subcommand = "add"
-						case dns.ClassNONE:
-							subcommand = "delete"
-						case dns.ClassANY:
-							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has class ANY. Delete RRset is not supported. Ignored.")
-							continue
-						default:
-							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has unknown class: %s. Ignored.", rr.String())
-							continue
-						}
-
-						if keyrr, ok := rr.(*dns.KEY); ok {
-							tppost := TruststorePost{
-								SubCommand: subcommand,
-								Src:        "child-update",
-								Keyname:    keyrr.Header().Name,
-								Keyid:      int(keyrr.KeyTag()),
-								KeyRR:      rr.String(),
-								Validated:  ur.Validated,
-								Trusted:    ur.Trusted,
-							}
-
-							_, err := kdb.Sig0TrustMgmt(tx, tppost)
-							if err != nil {
-								log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
-							}
-						} else {
-							log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
-						}
-					}
-					err = tx.Commit()
-					if err != nil {
-						log.Printf("Error from tx.Commit(): %v", err)
-					}
-				default:
-					log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)
 				}
-				log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
+				err = tx.Commit()
+				if err != nil {
+					log.Printf("Error from tx.Commit(): %v", err)
+				}
+			default:
+				log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)
 			}
+			log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
 		}
 	}()
 	wg.Wait()
@@ -548,7 +545,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		return false, err
 	}
 	if len(dak.KSKs) == 0 && zd.Options[OptOnlineSigning] {
-		return false, fmt.Errorf("Zone %s has no active KSKs and online-signing is enabled. Zone update is rejected.", zd.ZoneName)
+		return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
 	}
 
 	var updated bool
@@ -691,7 +688,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 	}
 
 	for _, rr := range ur.Actions {
-		log.Printf("ZoneUpdateChangesDelegationData: checking action: %s", rr.String)
+		log.Printf("ZoneUpdateChangesDelegationData: checking action: %s", rr.String())
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
@@ -835,6 +832,9 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	}()
 
 	ddata, err := zd.DelegationData()
+	if err != nil {
+		return dss, err
+	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {

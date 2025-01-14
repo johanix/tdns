@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 )
@@ -55,7 +54,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 		//		}
 	} else {
 		rootCAPool := x509.NewCertPool()
-		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
+		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
 		rootCA, err := os.ReadFile(rootcafile)
 		if err != nil {
 			log.Fatalf("reading cert failed : %v", err)
@@ -71,8 +70,8 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 
 	//	} else {
 	//		rootCAPool := x509.NewCertPool()
-	//		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
-	//		rootCA, err := ioutil.ReadFile(rootcafile)
+	//		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
+	//		rootCA, err := os.ReadFile(rootcafile)
 	//		if err != nil {
 	//			log.Fatalf("reading cert failed : %v", err)
 	//		}
@@ -141,7 +140,7 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	}
 
 	defer resp.Body.Close()
-	buf, err := ioutil.ReadAll(resp.Body)
+	buf, err := io.ReadAll(resp.Body)
 	if api.Debug {
 		var prettyJSON bytes.Buffer
 		error := json.Indent(&prettyJSON, buf, "", "  ")

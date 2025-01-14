@@ -20,7 +20,7 @@ dnsengine:
       filetmpl:		"%s/%s.zone"		# zonename.zone
 
 apiserver:
-   address:     	127.0.0.1:8989
+   addresses:     	[ 127.0.0.1:8989 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
 
 server:

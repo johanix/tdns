@@ -55,7 +55,7 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 		prefix, ok := strings.CutSuffix(child, "."+parent)
 		if !ok {
 			// return prrs, "", fmt.Errorf("Misidentified parent for %s: %v", child, parent)
-			return dr, fmt.Errorf("Misidentified parent for %s: %v", child, parent)
+			return dr, fmt.Errorf("misidentified parent for %s: %v", child, parent)
 		}
 		name = prefix + "._dsync." + parent
 		//		if verbose {
@@ -196,7 +196,7 @@ func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) 
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("No DSYNC type %s scheme %d destination found for for zone %s",
+		return nil, fmt.Errorf("no DSYNC type %s scheme %d destination found for for zone %s",
 			dns.TypeToString[dtype], scheme, childzone)
 	}
 

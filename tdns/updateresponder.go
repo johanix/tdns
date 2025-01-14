@@ -116,8 +116,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// dump.P(zd.UpdatePolicy)
 
 	if zd.Options[OptFrozen] {
-		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update.",
-			zd.ZoneName, qname)
+		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update for owner=%s", zd.ZoneName, qname)
 		m.SetRcode(r, dns.RcodeRefused)
 		AttachEDEToResponse(m, EDEZoneFrozen)
 		w.WriteMsg(m)
@@ -327,8 +326,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 			if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 				us.Approved = false
-				us.Log("ApproveChildUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)",
-					dns.TypeToString[rrtype])
+				us.Log("ApproveChildUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)")
 				return false, false, nil
 			}
 
@@ -427,7 +425,7 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 	}
 
 	var rrtypes []string
-	for rrt, _ := range zd.UpdatePolicy.Zone.RRtypes {
+	for rrt := range zd.UpdatePolicy.Zone.RRtypes {
 		rrtypes = append(rrtypes, dns.TypeToString[rrt])
 	}
 	log.Printf("Analysing validated update using policy type %s with allowed RR types: %s",
@@ -538,15 +536,14 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// rejected, except in the special case of unvalidated key uploads.
 
 		if rrtype != dns.TypeKEY {
-			log.Printf("ApproveTrustUpdate: update of %s RRset rejected (trust update must be for a KEY RR, this is a %s RR)",
+			log.Printf("ApproveTrustUpdate: update of %s RRset rejected (trust update must be for a KEY RR)",
 				dns.TypeToString[rrtype])
 			return false, false, nil
 		}
 
 		if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 			us.Approved = false
-			log.Printf("ApproveTrustUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)",
-				dns.TypeToString[rrtype])
+			log.Printf("ApproveTrustUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)")
 			return false, false, nil
 		}
 

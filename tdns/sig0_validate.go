@@ -29,7 +29,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		us.ValidationRcode = dns.RcodeFormatError
 		us.Validated = false
 		us.ValidatedByTrustedKey = false
-		return fmt.Errorf("Update has no signature")
+		return fmt.Errorf("update has no signature")
 	}
 
 	var sig *dns.SIG
@@ -179,7 +179,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// dump.P(us)
 	if len(us.Signers) == 0 {
-		return fmt.Errorf("Update is not signed by any key")
+		return fmt.Errorf("update has no signature")
 	}
 	for _, key := range us.Signers {
 		// dump.P(key)
@@ -201,7 +201,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// If we get here then the update is not signed by any trusted, or DNSSEC validated key. Nor
 	// is it self-signed.
 	us.ValidationRcode = dns.RcodeBadKey
-	return fmt.Errorf("Update is signed by %s (keyid %d) which is neither a trusted SIG(0) key nor a DNSSEC validated key", us.Signers[0].Name, us.Signers[0].KeyId)
+	return fmt.Errorf("update is signed by %s (keyid %d) which is neither a trusted SIG(0) key nor a DNSSEC validated key", us.Signers[0].Name, us.Signers[0].KeyId)
 }
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {

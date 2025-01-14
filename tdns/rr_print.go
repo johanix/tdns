@@ -178,15 +178,15 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 
 		for _, rr := range envelope.RR {
 			if options["multi"] == "true" {
-				switch rr.(type) {
+				switch rr := rr.(type) {
 				case *dns.KEY:
-					keyid := rr.(*dns.KEY).KeyTag()
+					keyid := rr.KeyTag()
 					t := ""
 					PrintKeyRR(rr, "KEY", t, keyid, leftpad, rightmargin)
 				case *dns.DNSKEY:
-					keyid := rr.(*dns.DNSKEY).KeyTag()
+					keyid := rr.KeyTag()
 					t := " ZSK ;"
-					if rr.(*dns.DNSKEY).Flags&0x0001 != 0 {
+					if rr.Flags&0x0001 != 0 {
 						t = " KSK ;"
 					}
 					PrintKeyRR(rr, "DNSKEY", t, keyid, leftpad, rightmargin)
@@ -311,17 +311,17 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) {
 		return
 	}
 
-	switch rr.(type) {
+	switch rr := rr.(type) {
 	case *dns.SOA:
 		PrintSoaRR(rr, leftpad, 78)
 	case *dns.DNSKEY:
 		t := " ZSK ;"
-		if rr.(*dns.DNSKEY).Flags&0x0001 == 1 {
+		if rr.Flags&0x0001 == 1 {
 			t = " KSK ;"
 		}
-		PrintKeyRR(rr, "DNSKEY", t, rr.(*dns.DNSKEY).KeyTag(), leftpad, 78)
+		PrintKeyRR(rr, "DNSKEY", t, rr.KeyTag(), leftpad, 78)
 	case *dns.KEY:
-		PrintKeyRR(rr, "KEY", "", rr.(*dns.KEY).KeyTag(), leftpad, 78)
+		PrintKeyRR(rr, "KEY", "", rr.KeyTag(), leftpad, 78)
 	case *dns.RRSIG:
 		PrintRrsigRR(rr, leftpad, 78)
 	case *dns.SVCB:

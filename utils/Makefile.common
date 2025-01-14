@@ -23,6 +23,12 @@ netbsd:	version.go
 # Requires: sshfs mount at ~/sshfs/msigner1
 # TDNS_SRC ?= ~/src/git/tdns
 # TDNS_AWS_DIR ?= ~/sshfs/msigner1/src/tdns
+
+# mount:
+# sshfs ubuntu@msigner1.ddns.axfr.net:/home/ubuntu ~/sshfs/msigner1 
+# umount:
+# umount ~/sshfs/msigner1
+
 TDNS_SRC ?= /Users/johani/src/git/tdns
 TDNS_AWS_DIR ?= /Users/johani/sshfs/msigner1/src/tdns
 

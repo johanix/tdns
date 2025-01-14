@@ -44,10 +44,10 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 
 	rcode, err, ur := SendUpdate(smsg, pzone, target.Addresses)
 	if err != nil {
-		log.Printf("Error from SendUpdate(%s): %v", target, err)
+		log.Printf("Error from SendUpdate(%s): %v", target.Name, err)
 		return err, ur
 	} else {
-		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", pzone, target, dns.RcodeToString[rcode])
+		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", pzone, target.Name, dns.RcodeToString[rcode])
 	}
 	return nil, ur
 }
