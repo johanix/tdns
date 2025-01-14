@@ -475,16 +475,10 @@ func (mdb *MusicDB) ListSigners(tx *sql.Tx) (map[string]Signer, error) {
 
 // XXX: not used anymore, should die
 // XXX: how is login to API-based signers done w/o this?
-func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig,
-	tokvip *viper.Viper) (error, string) {
-	// var err error
-	// var dlr DesecLResponse
-	var msg string
-
+func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig, tokvip *viper.Viper) (string, error) {
 	switch dbsigner.Method {
 	case "ddns":
-		return fmt.Errorf("Signer %s has method=ddns: No login required.",
-			dbsigner.Name), ""
+		return "", fmt.Errorf("Signer %s has method=ddns: No login required.", dbsigner.Name)
 
 		//	case "desec-api":
 		//		api := GetUpdater("desec-api").GetApi()
@@ -502,23 +496,20 @@ func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig,
 		//			msg = "Something happened. No token received. Hmm?"
 		//		}
 	default:
-		return fmt.Errorf("Signer %s has method=%s, which is unknown.",
-			dbsigner.Name, dbsigner.Method), ""
+		return "", fmt.Errorf("Signer %s has method=%s, which is unknown.", dbsigner.Name, dbsigner.Method)
 	}
-	return nil, msg
 }
 
 // XXX: not used anymore, should die
 // XXX: how is login to API-based signers done w/o this?
-func (mdb *MusicDB) SignerLogout(dbsigner *Signer, cliconf *CliConfig,
-	tokvip *viper.Viper) (error, string) {
+func (mdb *MusicDB) SignerLogout(dbsigner *Signer, cliconf *CliConfig, tokvip *viper.Viper) (string, error) {
 	// var err error
 	var msg string
 
 	switch dbsigner.Method {
 	case "ddns":
-		return fmt.Errorf("Signer %s has method=ddns: No logout required.",
-			dbsigner.Name), ""
+		return "", fmt.Errorf("Signer %s has method=ddns: No logout required.",
+			dbsigner.Name)
 
 		//	case "desec":
 		//		err = DesecLogout(cliconf, tokvip)
@@ -528,7 +519,7 @@ func (mdb *MusicDB) SignerLogout(dbsigner *Signer, cliconf *CliConfig,
 		//		}
 		//		msg = "Logout from deSEC complete."
 	}
-	return nil, msg
+	return msg, nil
 }
 
 func (mdb *MusicDB) SaveSigners(tx *sql.Tx) error {

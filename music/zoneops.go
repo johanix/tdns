@@ -173,9 +173,9 @@ func (z *Zone) SetSignerNsNames(ns_names map[string][]string) (error, string) {
 	mdb := z.MusicDB
 
 	mdb.UpdateC <- DBUpdate{
-		Type:  "INSERT-ZONE-NS",
-		Zone:  z.Name,
-		SignerNsNames:	ns_names,
+		Type:          "INSERT-ZONE-NS",
+		Zone:          z.Name,
+		SignerNsNames: ns_names,
 	}
 
 	log.Printf("%s: Inserted new NS names for %d signers", z.Name, len(ns_names))
@@ -186,9 +186,9 @@ func (z *Zone) SetSignerDnskeys(signer_dnskeys map[string][]string) (error, stri
 	mdb := z.MusicDB
 
 	mdb.UpdateC <- DBUpdate{
-		Type:  "INSERT-ZONE-DNSKEYS",
-		Zone:  z.Name,
-		SignerDNSKEYs:	signer_dnskeys,
+		Type:          "INSERT-ZONE-DNSKEYS",
+		Zone:          z.Name,
+		SignerDNSKEYs: signer_dnskeys,
 	}
 
 	log.Printf("%s: Inserted new DNSKEYs for %d signers", z.Name, len(signer_dnskeys))
