@@ -12,7 +12,7 @@ import (
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] {
-		return fmt.Errorf("Zone %s does not allow updates", zd.ZoneName)
+		return fmt.Errorf("zone %s does not allow updates", zd.ZoneName)
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
