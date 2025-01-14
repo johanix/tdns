@@ -7,59 +7,12 @@ package main
 import (
 	// "flag"
 	"fmt"
-	"log"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/johanix/tdns/tdns"
 	// "github.com/orcaman/concurrent-map/v2"
 )
-
-// var appVersion string
-// var appMode string
-
-func mainloop(conf *tdns.Config) {
-	exit := make(chan os.Signal, 1)
-	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
-	hupper := make(chan os.Signal, 1)
-	signal.Notify(hupper, syscall.SIGHUP)
-
-	var err error
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		for {
-			// log.Println("mainloop: signal dispatcher")
-			select {
-			case <-exit:
-				log.Println("mainloop: Exit signal received. Cleaning up.")
-				// do whatever we need to do to wrap up nicely
-				wg.Done()
-			case <-hupper:
-				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
-				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				_, err = tdns.ParseZones(conf, conf.Internal.RefreshZoneCh, true) // XXX: true = reload
-				if err != nil {
-					log.Fatalf("Error parsing zones: %v", err)
-				}
-
-			case <-conf.Internal.APIStopCh:
-				log.Println("mainloop: Stop command received. Cleaning up.")
-				wg.Done()
-			}
-		}
-	}()
-	wg.Wait()
-
-	fmt.Println("mainloop: leaving signal dispatcher")
-}
-
-// const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
 func main() {
 	var conf tdns.Config

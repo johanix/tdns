@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/johanix/tdns/music"
 	"github.com/johanix/tdns/music/fsm"
@@ -40,7 +41,10 @@ func main() {
 	mconf.Internal.DeferredUpdateQ = tconf.Internal.DeferredUpdateQ
 
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
-	music.LoadMusicConfig(&mconf, tconf.App.Mode, false) // on initial startup a config error should cause an abort.
+	err = music.LoadMusicConfig(&mconf, tconf.App.Mode, false) // on initial startup a config error should cause an abort.
+	if err != nil {
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error loading MUSIC config: %v", err))
+	}
 
 	mconf.Internal.MusicSyncQ = tconf.Internal.MusicSyncQ
 	// The MusicSyncEngine is started here to ensure that it is running before we start parsing zones.
@@ -79,7 +83,11 @@ func main() {
 
 	tdns.MainLoop(&tconf)
 
-	mconf.Internal.TokViper.WriteConfig()
-	fmt.Printf("mainloop: saved state of API tokens to disk\n")
+	err = mconf.Internal.TokViper.WriteConfig()
+	if err != nil {
+		log.Printf("Error saving state of API tokens to disk: %v", err)
+	} else {
+		log.Printf("Saved state of API tokens to disk\n")
+	}
 
 }
