@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -1010,6 +1009,11 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 	return &dd, nil
 }
 
+func isValidIP(addr string) bool {
+	ip := net.ParseIP(addr)
+	return ip != nil
+}
+
 func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
 	if zonename == "" {
 		return nil, fmt.Errorf("zonename cannot be empty")
@@ -1044,6 +1048,10 @@ $TTL 86400
 
 	log.Printf("CreateAutoZone: adding NS RRs for addresses: %v", addrs)
 	for _, addr := range addrs {
+		if !isValidIP(addr) {
+			log.Printf("CreateAutoZone: invalid IP address: %s", addr)
+			return nil, fmt.Errorf("invalid IP address: %s", addr)
+		}
 		if strings.Contains(addr, ":") {
 			// IPv6 address
 			zonedatastr += fmt.Sprintf("ns.%s IN AAAA %s\n", zonename, addr)
@@ -1079,8 +1087,10 @@ $TTL 86400
 // Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
 func (tconf *Config) FindNameserverAddrs() ([]string, error) {
 	addrs := []string{}
-	log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
-	dump.P(tconf.DnsEngine)
+	if Globals.Debug {
+		log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
+		// dump.P(tconf.DnsEngine)
+	}
 	for _, ns := range tconf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
