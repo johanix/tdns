@@ -325,8 +325,7 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 			continue // go to next server
 		}
 	}
-	return &rrset, rcode, fmt.Errorf("No Answers found from any auth server looking up '%s %s'.\n",
-		qname, dns.TypeToString[rrtype])
+	return &rrset, rcode, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[rrtype])
 }
 
 func getMinTTL(rrs []dns.RR) time.Duration {
@@ -408,8 +407,8 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 		}
 
 		for _, ans := range r.Answer {
-			if rr, ok := ans.(dns.RR); ok && rr.Header().Rrtype == qtype {
-				rrset.RRs = append(rrset.RRs, rr)
+			if ans.Header().Rrtype == qtype {
+				rrset.RRs = append(rrset.RRs, ans)
 				continue
 			}
 			if rrsig, ok := ans.(*dns.RRSIG); ok {
