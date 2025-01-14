@@ -532,7 +532,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "login":
-			err, resp.Msg = mdb.SignerLogin(dbsigner, &CliConf, TokVip)
+			resp.Msg, err = mdb.SignerLogin(dbsigner, &CliConf, TokVip)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -540,7 +540,7 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "logout":
-			err, resp.Msg = mdb.SignerLogout(dbsigner, &CliConf, TokVip)
+			resp.Msg, err = mdb.SignerLogout(dbsigner, &CliConf, TokVip)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
