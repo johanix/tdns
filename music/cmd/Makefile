@@ -1,4 +1,4 @@
-PROG:=tdns-cli-lib
+PROG:=music-lib
 
 include ../../utils/Makefile.common
 

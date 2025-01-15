@@ -18,13 +18,13 @@ type MockUpdater struct {
 // Verify that MockUpdater implements music.Updater (from CodeRabbit)
 var _ music.Updater = (*MockUpdater)(nil)
 
-func (m *MockUpdater) FetchRRset(signer *music.Signer, zoneName, owner string, rrtype uint16) (error, []dns.RR) {
+func (m *MockUpdater) FetchRRset(signer *music.Signer, zoneName, owner string, rrtype uint16) ([]dns.RR, error) {
 	args := m.Called(signer, zoneName, owner, rrtype)
 	var rrs []dns.RR
 	if rr := args.Get(1); rr != nil {
 		rrs = rr.([]dns.RR)
 	}
-	return args.Error(0), rrs
+	return rrs, args.Error(0)
 }
 
 func (m *MockUpdater) RemoveRRset(signer *music.Signer, zoneName, owner string, rrsets [][]dns.RR) error {

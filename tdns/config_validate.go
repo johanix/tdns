@@ -48,7 +48,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	configsections["dnsengine"] = config.DnsEngine
 
 	if err := ValidateBySection(&config, configsections, cfgfile); err != nil {
-		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
+		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v", cfgfile, err)
 	}
 	return nil
 }
@@ -64,7 +64,7 @@ func ValidateZones(c *Config, cfgfile string) error {
 	}
 
 	if err := ValidateBySection(config, zones, cfgfile); err != nil {
-		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
+		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v", cfgfile, err)
 	}
 	return nil
 }
@@ -79,7 +79,7 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 	for k, data := range configsections {
 		log.Printf("%s: Validating config for %s section\n", strings.ToUpper(config.App.Name), k)
 		if err := validate.Struct(data); err != nil {
-			return fmt.Errorf("%s: Config %s, section %s: missing required attributes:\n%v\n",
+			return fmt.Errorf("%s: Config %s, section %s: missing required attributes:\n%v",
 				strings.ToUpper(config.App.Name), cfgfile, k, err)
 		}
 	}
