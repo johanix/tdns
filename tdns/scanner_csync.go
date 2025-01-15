@@ -41,6 +41,9 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 
 	// csync_rrset, err := pzd.LookupRRset(zone, dns.TypeCSYNC, verbose)
 	csync_rrset, err := scanner.AuthQueryNG(zone, zone, dns.TypeCSYNC, "tcp")
+	if err != nil {
+		return nil, fmt.Errorf("CheckCSYNC: Zone %s: error from AuthQueryNG: %v", zone, err)
+	}
 	if len(csync_rrset.RRs) == 0 {
 		lg.Printf("CheckCSYNC: Zone %s: no CSYNC RR found. Terminating scan.", zone)
 		// return fmt.Errorf("CSYNC scanner: Zone %s: no CSYNC RR found.", zone)
@@ -51,9 +54,9 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	var csyncrr *dns.CSYNC
 
 	for _, rr := range csync_rrset.RRs {
-		switch rr.(type) {
+		switch rr := rr.(type) {
 		case *dns.CSYNC:
-			csyncrr = rr.(*dns.CSYNC)
+			csyncrr = rr
 		case *dns.RRSIG:
 			continue
 		}
@@ -98,8 +101,11 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	//		false, scanner.Verbose, scanner.Debug)
 
 	soa_rrset, err := scanner.AuthQueryNG(zone, zone, dns.TypeSOA, "tcp")
+	if err != nil {
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: error from AuthQueryNG: %v", zone, err)
+	}
 	if len(soa_rrset.RRs) == 0 {
-		return nil, fmt.Errorf("Zone %s: CSYNC analysis: no SOA RR from auth servers. Aborting.", zone)
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: no SOA RR from auth servers. Aborting", zone)
 	}
 	start_serial := soa_rrset.RRs[0].(*dns.SOA).Serial
 
@@ -120,8 +126,11 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	//	csync_rrset, _, err = AuthDNSQuery(zone, scanner.IMR, dns.TypeCSYNC, lg,
 	//		false, scanner.Verbose, scanner.Debug)
 	csync_rrset, err = scanner.AuthQueryNG(zone, zone, dns.TypeCSYNC, "tcp")
+	if err != nil {
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: error from AuthQueryNG: %v", zone, err)
+	}
 	if len(csync_rrset.RRs) == 0 {
-		return nil, fmt.Errorf("Zone %s: CSYNC analysis: no CSYNC RR from auth servers. Aborting.", zone)
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: no CSYNC RR from auth servers. Aborting", zone)
 	}
 
 	var nib_ns []*dns.NS // nib_ns == new_in_bailiwick_ns :-)
@@ -138,10 +147,10 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 				return nil, err
 			}
 			for _, ns := range new_nsrrset {
-				switch ns.(type) {
+				switch ns := ns.(type) {
 				case *dns.NS:
-					if NSInBailiwick(zone, ns.(*dns.NS)) {
-						nib_ns = append(nib_ns, ns.(*dns.NS))
+					if NSInBailiwick(zone, ns) {
+						nib_ns = append(nib_ns, ns)
 					}
 
 				case *dns.RRSIG:
@@ -168,13 +177,16 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	//	soa_rrset, _, err = AuthDNSQuery(zone, scanner.IMR, dns.TypeSOA, lg,
 	//		false, scanner.Verbose, scanner.Debug)
 	soa_rrset, err = scanner.AuthQueryNG(zone, zone, dns.TypeSOA, "tcp")
+	if err != nil {
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: error from AuthQueryNG: %v", zone, err)
+	}
 	if len(soa_rrset.RRs) == 0 {
-		return nil, fmt.Errorf("Zone %s: CSYNC analysis: no SOA RR from auth servers. Aborting.", zone)
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: no SOA RR from auth servers. Aborting", zone)
 	}
 	end_serial := soa_rrset.RRs[0].(*dns.SOA).Serial
 
 	if start_serial != end_serial {
-		return nil, fmt.Errorf("Zone %s CSYNC analysis: SOA changed during analysis. Aborting (but will try again later).", zone)
+		return nil, fmt.Errorf("zone %s: CSYNC analysis: SOA changed during analysis. Aborting (but will try again later)", zone)
 	}
 	lg.Printf("Zone %s CSYNC analysis: SOA stable during analysis. Continuing with DB update.", zone)
 

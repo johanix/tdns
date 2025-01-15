@@ -52,7 +52,7 @@ func JoinWaitDsPreCondition(z *music.Zone) bool {
 	for _, signer := range z.SGroup.SignerMap {
 
 		updater := music.GetUpdater(signer.Method)
-		err, rrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeDNSKEY)
+		rrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeDNSKEY)
 		if err != nil {
 			log.Printf("JoinWaitDsPreCondition: Error from updater.FetchRRset: %v\n", err)
 		}
@@ -120,7 +120,7 @@ func JoinSyncNs(z *music.Zone) bool {
 	for _, signer := range z.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
 		log.Printf("JoinSyncNs: Using FetchRRset interface:\n")
-		err, rrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeNS)
+		rrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeNS)
 		if err != nil {
 			z.SetStopReason(err.Error())
 			return false
@@ -129,7 +129,7 @@ func JoinSyncNs(z *music.Zone) bool {
 		nses[signer.Name] = []*dns.NS{}
 		signer_nsnames[signer.Name] = []string{}
 
-//		const sqlq = "INSERT OR IGNORE INTO zone_nses (zone, ns, signer) VALUES (?, ?, ?)"
+		//		const sqlq = "INSERT OR IGNORE INTO zone_nses (zone, ns, signer) VALUES (?, ?, ?)"
 
 		for _, a := range rrs {
 			ns, ok := a.(*dns.NS)
@@ -141,15 +141,15 @@ func JoinSyncNs(z *music.Zone) bool {
 			signer_nsnames[signer.Name] = append(signer_nsnames[signer.Name], ns.Ns)
 
 			// XXX: Should wrap this in a transaction
-//			res, err := z.MusicDB.Exec(sqlq, z.Name, ns.Ns, signer.Name)
-//			if err != nil {
-//				log.Printf("%s: db.Exec (%s) failed: %s", z.Name, sqlq, err)
-//				return false
-//			}
-//			rows, _ := res.RowsAffected()
-//			if rows > 0 {
-//				log.Printf("%s: Origin for %s set to %s", z.Name, ns.Ns, signer.Name)
-//			}
+			//			res, err := z.MusicDB.Exec(sqlq, z.Name, ns.Ns, signer.Name)
+			//			if err != nil {
+			//				log.Printf("%s: db.Exec (%s) failed: %s", z.Name, sqlq, err)
+			//				return false
+			//			}
+			//			rows, _ := res.RowsAffected()
+			//			if rows > 0 {
+			//				log.Printf("%s: Origin for %s set to %s", z.Name, ns.Ns, signer.Name)
+			//			}
 		}
 	}
 	z.SetSignerNsNames(signer_nsnames) // replaces the SQL stuff above
@@ -215,7 +215,7 @@ func JoinSyncNSPostCondition(z *music.Zone) bool {
 
 	for _, s := range z.SGroup.SignerMap {
 		updater := music.GetUpdater(s.Method)
-		err, rrs := updater.FetchRRset(s, z.Name, z.Name, dns.TypeNS)
+		rrs, err := updater.FetchRRset(s, z.Name, z.Name, dns.TypeNS)
 		if err != nil {
 			log.Printf("Error from updater.FetchRRset: %v\n", err)
 			// XXX: johani: is it meaningful to continue here? why not just return false?

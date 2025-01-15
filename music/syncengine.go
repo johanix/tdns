@@ -52,12 +52,9 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 	if !viper.GetBool("syncengine.active") {
 		log.Printf("MusicSyncEngine is NOT active. No detection of of communication with other music-sidecars will be done.")
-		for {
-			select {
-			case <-syncQ: // ensure that we keep reading to keep the
-				log.Printf("MusicSyncEngine: NOT active, butreceived a sync request: %+v", syncitem)
-				continue // channel open (otherwise other parts of MUSIC
-			} // may block)
+		for range syncQ {
+			log.Printf("MusicSyncEngine: NOT active, but received a sync request: %+v", syncitem)
+			continue // ensure that we keep reading to keep the channel open (otherwise other parts of MUSIC may block)
 		}
 	}
 

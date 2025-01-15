@@ -16,63 +16,60 @@ import (
 )
 
 func (mdb *MusicDB) ZoneGetRRsets(dbzone *Zone, owner,
-	rrtype string) (error, string, map[string][]dns.RR) {
+	rrtype string) (string, map[string][]dns.RR, error) {
 	if !dbzone.Exists {
-		return fmt.Errorf("Zone %s unknown", dbzone.Name),
-			"", map[string][]dns.RR{}
+		return "", map[string][]dns.RR{}, fmt.Errorf("zone %s unknown", dbzone.Name)
 	}
 
 	sg := dbzone.SignerGroup()
 
 	if sg.Name == "" || sg.Name == "---" {
-		return fmt.Errorf("Zone %s has no signer group assigned", dbzone.Name),
-			"", map[string][]dns.RR{}
+		return "", map[string][]dns.RR{}, fmt.Errorf("zone %s has no signer group assigned", dbzone.Name)
 	}
 
-	err, rrsets := dbzone.RetrieveRRset(owner, dns.StringToType[rrtype])
-	return err, "", rrsets
+	rrsets, err := dbzone.RetrieveRRset(owner, dns.StringToType[rrtype])
+	return "", rrsets, err
 }
 
 func (mdb *MusicDB) ZoneCopyRRset(tx *sql.Tx, dbzone *Zone, owner,
-	rrtype, fromsigner, tosigner string) (error, string) {
+	rrtype, fromsigner, tosigner string) (string, error) {
 	if !dbzone.Exists {
-		return fmt.Errorf("Zone %s unknown", dbzone.Name), ""
+		return "", fmt.Errorf("zone %s unknown", dbzone.Name)
 	}
 
 	localtx, tx, err := mdb.StartTransaction(tx)
 	if err != nil {
 		log.Printf("ZoneJoinGroup: Error from mdb.StartTransaction(): %v\n", err)
-		return err, "fail"
+		return "fail", err
 	}
 	defer mdb.CloseTransaction(localtx, tx, err)
 
 	fs, err := mdb.GetSignerByName(tx, fromsigner, false) // not apisafe
 	if err != nil {
-		return fmt.Errorf("Signer %s (copying from) is unknown.", fromsigner), ""
+		return "", fmt.Errorf("signer %s (copying from) is unknown", fromsigner)
 	}
 	ts, err := mdb.GetSignerByName(tx, tosigner, false) // not apisafe
 	if err != nil {
-		return fmt.Errorf("Signer %s (copying to) is unknown.", tosigner), ""
+		return "", fmt.Errorf("signer %s (copying to) is unknown", tosigner)
 	}
 
-	err, rrs := fs.RetrieveRRset(dbzone.Name, owner, dns.StringToType[rrtype])
+	rrs, err := fs.RetrieveRRset(dbzone.Name, owner, dns.StringToType[rrtype])
 	if err != nil {
-		return fmt.Errorf("Error from RetrieveRRset: %v", err), ""
+		return "", fmt.Errorf("error from RetrieveRRset: %v", err)
 	}
 
 	if len(rrs) == 0 {
-		return fmt.Errorf("ZoneCopyRRset: No records returned in query to signer %s.", fs.Name),
-			""
+		return "", fmt.Errorf("ZoneCopyRRset: No records returned in query to signer %s", fs.Name)
 	}
 
 	err = ts.UpdateRRset(dbzone.Name, owner, dns.StringToType[rrtype], rrs)
 	if err != nil {
-		return fmt.Errorf("Error from UpdateRRset: %v", err), ""
+		return "", fmt.Errorf("error from UpdateRRset: %v", err)
 	}
-	return err, ""
+	return "", nil
 }
 
-func (z *Zone) RetrieveRRset(owner string, rrtype uint16) (error, map[string][]dns.RR) {
+func (z *Zone) RetrieveRRset(owner string, rrtype uint16) (map[string][]dns.RR, error) {
 	sg := z.SignerGroup()
 	signers := sg.Signers()
 
@@ -88,14 +85,14 @@ func (z *Zone) RetrieveRRset(owner string, rrtype uint16) (error, map[string][]d
 	var rrs []dns.RR
 
 	for _, s := range signers {
-		err, rrs = s.RetrieveRRset(z.Name, owner, rrtype)
+		rrs, err = s.RetrieveRRset(z.Name, owner, rrtype)
 		if err != nil {
-			return err, map[string][]dns.RR{}
+			return map[string][]dns.RR{}, err
 		} else {
 			rrmap[s.Name] = rrs
 		}
 	}
-	return nil, rrmap
+	return rrmap, nil
 }
 
 // SignerRRsets is used to return the RRset for a particular ownername and RRtype from one
@@ -103,7 +100,7 @@ func (z *Zone) RetrieveRRset(owner string, rrtype uint16) (error, map[string][]d
 
 type SignerRRsets map[string][]dns.RR
 
-func (s *Signer) RetrieveRRset(zone, owner string, rrtype uint16) (error, []dns.RR) {
+func (s *Signer) RetrieveRRset(zone, owner string, rrtype uint16) ([]dns.RR, error) {
 	fmt.Printf("Signer %s: retrieving RRset '%s %s'\n", s.Name, owner, dns.TypeToString[rrtype])
 	updater := GetUpdater(s.Method)
 	return updater.FetchRRset(s, zone, zone, rrtype)
@@ -123,15 +120,13 @@ func (s *Signer) UpdateRRset(zone, owner string, rrtype uint16, rrs []dns.RR) er
 	switch s.Method {
 	case "ddns":
 		// return DNSUpdateRRset(s, owner, rrtype)
-		return fmt.Errorf(
-			"Signer %s has method=ddns, which is not yet implemented.",
-			s.Name)
+		return fmt.Errorf("signer %s has method=ddns, which is not yet implemented", s.Name)
 	case "desec-api":
 		// XXX: old code that should be ripped out
 		//		err, _ := DesecUpdateRRset(s, StripDot(zone), StripDot(owner), rrtype, rrs)
 		//		return err
 	default:
-		return fmt.Errorf("Unknown RRset retrieval method: %s", s.Method)
+		return fmt.Errorf("unknown RRset retrieval method: %s", s.Method)
 	}
 	return nil
 }
@@ -195,24 +190,27 @@ func (mdb *MusicDB) WriteRRs(signer *Signer, owner, zone string,
 
 // XXX: is this still in use? Not really, only from apiserver:APIzone:{get-rrsets,list-rrset}.
 // XXX: broken, should return a []dns.RR, not []string.
-func (mdb *MusicDB) ListRRset(tx *sql.Tx, dbzone *Zone, signer, ownername, rrtype string) (error, string, []string) {
+func (mdb *MusicDB) ListRRset(tx *sql.Tx, dbzone *Zone, signer, ownername, rrtype string) (string, []string, error) {
 	var rrs []string
 	RRtype := dns.StringToType[rrtype]
 
 	localtx, tx, err := mdb.StartTransaction(tx)
 	if err != nil {
 		log.Printf("WriteRRs: Error from mdb.StartTransaction(): %v\n", err)
-		return err, "", rrs
+		return "", rrs, err
 	}
 	defer mdb.CloseTransaction(localtx, tx, err)
 
 	const sqlq = "SELECT rdata FROM records WHERE owner=? AND signer=? AND rrtype=?"
 
 	rows, err := tx.Query(sqlq, ownername, signer, RRtype)
+	if err != nil {
+		return "", rrs, err
+	}
 	defer rows.Close()
 
 	if CheckSQLError("ListRRset", sqlq, err, false) {
-		return err, "", rrs
+		return "", rrs, err
 	} else {
 		var rdata string
 		for rows.Next() {
@@ -225,7 +223,7 @@ func (mdb *MusicDB) ListRRset(tx *sql.Tx, dbzone *Zone, signer, ownername, rrtyp
 			}
 		}
 	}
-	return nil, "", rrs
+	return "", rrs, nil
 }
 
 func AuthoritativeDNSQuery(qname, nameserver string, rrtype uint16, verbose bool) *dns.Msg {

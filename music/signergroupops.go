@@ -202,46 +202,46 @@ COALESCE(pendremove, '') AS prem, locked FROM signergroups`
 	for sgname, sg := range sgl {
 		const sqlq2 = "SELECT COALESCE (signer, '') AS signer2 FROM group_signers WHERE name=?"
 		rows, err := tx.Query(sqlq2, sgname)
+		if err != nil {
+			log.Printf("ListSignerGroups: Error from tx.Query: %v", err)
+			return sgl, err
+		}
 		defer rows.Close()
 
-		if CheckSQLError("ListSignerGroups", sqlq2, err, false) {
-			return sgl, err
-		} else {
-			var signer string
-			var zones = []*Zone{}
-			signers := map[string]*Signer{}
-			for rows.Next() {
-				err := rows.Scan(&signer)
-				if err != nil {
-					log.Fatal("ListSignerGroups: Error from rows.Next():", err)
-				}
-				if signer == "" { // There may be rows with signer=="" (if group created w/o signers)
-					continue
-				}
-				s, err := mdb.GetSignerByName(tx, signer, true) // apisafe
-				if err != nil {
-					log.Fatalf("ListSignerGroups: Error from GetSigner: %v", err)
-				} else {
-					signers[signer] = s
-				}
-			}
-			zones, err = mdb.GetSignerGroupZones(tx, &sg)
+		var signer string
+		var zones = []*Zone{}
+		signers := map[string]*Signer{}
+		for rows.Next() {
+			err := rows.Scan(&signer)
 			if err != nil {
-				return sgl, err
+				log.Fatal("ListSignerGroups: Error from rows.Next():", err)
 			}
-
-			pzones := 0
-			for _, z := range zones {
-				if z.FSM != "" {
-					pzones++
-				}
+			if signer == "" { // There may be rows with signer=="" (if group created w/o signers)
+				continue
 			}
-
-			sg.SignerMap = signers
-			sg.NumZones = len(zones)
-			sg.NumProcessZones = pzones
-			sgl[sgname] = sg
+			s, err := mdb.GetSignerByName(tx, signer, true) // apisafe
+			if err != nil {
+				log.Fatalf("ListSignerGroups: Error from GetSigner: %v", err)
+			} else {
+				signers[signer] = s
+			}
 		}
+		zones, err = mdb.GetSignerGroupZones(tx, &sg)
+		if err != nil {
+			return sgl, err
+		}
+
+		pzones := 0
+		for _, z := range zones {
+			if z.FSM != "" {
+				pzones++
+			}
+		}
+
+		sg.SignerMap = signers
+		sg.NumZones = len(zones)
+		sg.NumProcessZones = pzones
+		sgl[sgname] = sg
 	}
 
 	fmt.Printf("ListSignerGroup(): %v\n", sgl)
@@ -264,31 +264,30 @@ func (sg *SignerGroup) PopulateSigners(tx *sql.Tx) error {
 	const sqlcmd = "SELECT name FROM signers WHERE sgroup=?"
 
 	rows, err := tx.Query(sqlcmd, sg.Name)
+	if err != nil {
+		log.Printf("PopulateSigners: Error from tx.Query: %v", err)
+		return err
+	}
 	defer rows.Close()
 
-	if CheckSQLError("PopulateSigners", sqlcmd, err, false) {
-		return err
-	} else {
-		var name string
-		signers := map[string]*Signer{}
-		for rows.Next() {
-			err := rows.Scan(&name)
+	var name string
+	signers := map[string]*Signer{}
+	for rows.Next() {
+		err := rows.Scan(&name)
+		if err != nil {
+			log.Fatal("PopulateSigners: Error from rows.Next():",
+				err)
+		} else {
+			s, err := mdb.GetSignerByName(tx, name, false) // not apisafe
 			if err != nil {
-				log.Fatal("PopulateSigners: Error from rows.Next():",
-					err)
+				log.Fatalf("PopulateSigners: Error from GetSigner: %v", err)
 			} else {
-				s, err := mdb.GetSignerByName(tx, name, false) // not apisafe
-				if err != nil {
-					log.Fatalf("PopulateSigners: Error from GetSigner: %v", err)
-				} else {
-					signers[name] = s
-					fmt.Printf("LSG: found signer obj for %s: %v\n",
-						name, s)
-				}
+				signers[name] = s
+				fmt.Printf("LSG: found signer obj for %s: %v\n", name, s)
 			}
 		}
-		sg.SignerMap = signers
 	}
+	sg.SignerMap = signers
 	return nil
 }
 
@@ -307,28 +306,28 @@ func (mdb *MusicDB) GetGroupSigners(tx *sql.Tx, name string, apisafe bool) (map[
 	const sqlq = "SELECT COALESCE (signer, '') AS signer2 FROM group_signers WHERE name=?"
 
 	rows, err := tx.Query(sqlq, name)
+	if err != nil {
+		log.Printf("GetGroupSigners: Error from tx.Query: %v", err)
+		return nil, err
+	}
 	defer rows.Close()
 
 	signers := map[string]*Signer{}
 
-	if CheckSQLError("GetGroupSigners", sqlq, err, false) {
-		return map[string]*Signer{}, err
-	} else {
-		var signer string
-		for rows.Next() {
-			err := rows.Scan(&signer)
-			if err != nil {
-				log.Fatal("GetGroupSigners: Error from rows.Next():", err)
-			}
-			if signer == "" {
-				continue // This does happen, not a problem
-			}
-			s, err := mdb.GetSignerByName(tx, signer, apisafe)
-			if err != nil {
-				log.Fatalf("GGS: Error from GetSigner: %v", err)
-			} else {
-				signers[signer] = s
-			}
+	var signer string
+	for rows.Next() {
+		err := rows.Scan(&signer)
+		if err != nil {
+			log.Fatal("GetGroupSigners: Error from rows.Next():", err)
+		}
+		if signer == "" {
+			continue // This does happen, not a problem
+		}
+		s, err := mdb.GetSignerByName(tx, signer, apisafe)
+		if err != nil {
+			log.Fatalf("GGS: Error from GetSigner: %v", err)
+		} else {
+			signers[signer] = s
 		}
 	}
 	return signers, nil
@@ -351,23 +350,23 @@ func (mdb *MusicDB) GetGroupSignersNG(tx *sql.Tx, name string, apisafe bool) (ma
 	const sqlq = "SELECT signer FROM group_signers WHERE name=?"
 
 	rows, err := tx.Query(sqlq, name)
+	if err != nil {
+		log.Printf("GetGroupSignersNG: Error from tx.Query: %v", err)
+		return nil, err
+	}
 	defer rows.Close()
 
-	if CheckSQLError("GetGroupSigners", sqlq, err, false) {
-		return nil, err
-	} else {
-		var signername string
-		for rows.Next() {
-			err := rows.Scan(&signername)
+	var signername string
+	for rows.Next() {
+		err := rows.Scan(&signername)
+		if err != nil {
+			log.Fatal("GetGroupSigners: Error from rows.Next():", err)
+		} else {
+			s, err := mdb.GetSignerByName(tx, name, apisafe)
 			if err != nil {
-				log.Fatal("GetGroupSigners: Error from rows.Next():", err)
+				log.Fatalf("GGS: Error from GetSigner: %v", err)
 			} else {
-				s, err := mdb.GetSignerByName(tx, name, apisafe)
-				if err != nil {
-					log.Fatalf("GGS: Error from GetSigner: %v", err)
-				} else {
-					signers[signername] = s
-				}
+				signers[signername] = s
 			}
 		}
 	}
@@ -399,10 +398,8 @@ func (mdb *MusicDB) CheckIfProcessComplete(tx *sql.Tx, sg *SignerGroup) (bool, s
 	}
 
 	if len(zones) == 0 || pzones == 0 {
-
-		msg = fmt.Sprintf("Signer group %s: process '%s' is now complete. Unlocking group.",
+		log.Printf("Signer group %s: process '%s' is now complete. Unlocking group.",
 			sg.Name, sg.CurrentProcess)
-		log.Printf(msg)
 
 		var sqlq string
 		cp := sg.CurrentProcess

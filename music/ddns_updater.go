@@ -79,14 +79,14 @@ func (u *DdnsUpdater) Update(signer *Signer, zone, fqdn string,
 			signer.Name, zone, fqdn, inserts_len, removes_len)
 	}
 	if inserts_len == 0 && removes_len == 0 {
-		return fmt.Errorf("Inserts and removes empty, nothing to do")
+		return fmt.Errorf("inserts and removes empty, nothing to do")
 	}
 
 	if signer.Address == "" {
-		return fmt.Errorf("No ip|host for signer %s", signer.Name)
+		return fmt.Errorf("no ip|host for signer %s", signer.Name)
 	}
 	if signer.Auth.TSIGKey == "" {
-		return fmt.Errorf("No TSIG for signer %s", signer.Name)
+		return fmt.Errorf("no TSIG for signer %s", signer.Name)
 	}
 
 	c := signer.NewDnsClient()
@@ -133,10 +133,10 @@ func (u *DdnsUpdater) RemoveRRset(signer *Signer, zone, fqdn string, rrsets [][]
 	}
 
 	if signer.Address == "" {
-		return fmt.Errorf("No ip|host for signer %s", signer.Name)
+		return fmt.Errorf("no ip|host for signer %s", signer.Name)
 	}
 	if signer.Auth.TSIGKey == "" {
-		return fmt.Errorf("No TSIG for signer %s", signer.Name)
+		return fmt.Errorf("no TSIG for signer %s", signer.Name)
 	}
 
 	c := signer.NewDnsClient()
@@ -160,13 +160,13 @@ func (u *DdnsUpdater) RemoveRRset(signer *Signer, zone, fqdn string, rrsets [][]
 }
 
 func (u *DdnsUpdater) FetchRRset(signer *Signer, zone, fqdn string,
-	rrtype uint16) (error, []dns.RR) {
+	rrtype uint16) ([]dns.RR, error) {
 	log.Printf("DDNS: FetchRRset: signer: %s zone: %s fqdn: %s rrtype: %s", signer.Name, zone, fqdn, dns.TypeToString[rrtype])
 	if signer.Address == "" {
-		return fmt.Errorf("No ip|host for signer %s", signer.Name), []dns.RR{}
+		return []dns.RR{}, fmt.Errorf("no ip|host for signer %s", signer.Name)
 	}
 	if signer.Auth.TSIGKey == "" {
-		return fmt.Errorf("No TSIG for signer %s", signer.Name), []dns.RR{}
+		return []dns.RR{}, fmt.Errorf("no TSIG for signer %s", signer.Name)
 	}
 
 	c := signer.NewDnsClient()
@@ -179,11 +179,11 @@ func (u *DdnsUpdater) FetchRRset(signer *Signer, zone, fqdn string,
 	r, _, err := c.Exchange(m, signer.Address+":"+signer.Port) // TODO: add DnsAddress or solve this in a better way
 	if err != nil {
 		log.Printf("DDNS: FetchRRset: dns.Exchange error: err: %v r: %v", err, r)
-		return err, []dns.RR{}
+		return []dns.RR{}, err
 	}
 
 	if r.MsgHdr.Rcode != dns.RcodeSuccess {
-		return fmt.Errorf("Fetch of %s RRset failed, RCODE = %s", dns.TypeToString[rrtype], dns.RcodeToString[r.MsgHdr.Rcode]), []dns.RR{}
+		return []dns.RR{}, fmt.Errorf("fetch of %s RRset failed, RCODE = %s", dns.TypeToString[rrtype], dns.RcodeToString[r.MsgHdr.Rcode])
 	}
 
 	log.Printf("Length of %s answer from %s: %d RRs\n",
@@ -251,5 +251,5 @@ func (u *DdnsUpdater) FetchRRset(signer *Signer, zone, fqdn string,
 		}
 	}
 
-	return nil, rrs
+	return rrs, nil
 }
