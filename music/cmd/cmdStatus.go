@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-//	rootCmd.AddCommand(statusCmd)
+	//	rootCmd.AddCommand(statusCmd)
 	StatusCmd.AddCommand(statusZonesCmd)
 	StatusCmd.AddCommand(statusSignerCmd)
 	StatusCmd.AddCommand(statusSignerGroupCmd)

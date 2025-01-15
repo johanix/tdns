@@ -81,7 +81,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 		return fmt.Errorf("Error: Keyfile not specified, signing update not possible")
 	}
 
-	rcode, err, _ := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
+	rcode, _, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
 	} else {

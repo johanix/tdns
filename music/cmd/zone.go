@@ -20,7 +20,7 @@ import (
 	"github.com/johanix/tdns/music"
 )
 
-var fsmname, fsmnextstate, ownername, rrtype, fromsigner, tosigner, zonetype string
+var fsmnextstate, ownername, rrtype, fromsigner, tosigner, zonetype string
 var metakey, metavalue, fsmmode string
 
 var ZoneCmd = &cobra.Command{
@@ -606,7 +606,7 @@ func PrintZones(zm map[string]music.Zone, showall bool, fsmstatus string) {
 			// }
 
 			nextStates := []string{}
-			for k, _ := range zone.NextState {
+			for k := range zone.NextState {
 				nextStates = append(nextStates, k)
 			}
 			if showall {
@@ -635,7 +635,7 @@ func PrintRRset(rrset []string) {
 	var row string
 
 	if tdns.Globals.Verbose {
-		out = append(out, fmt.Sprintf("Owner|Class|Type|Rdata"))
+		out = append(out, "Owner|Class|Type|Rdata")
 	}
 
 	for _, r := range rrset {
@@ -643,15 +643,15 @@ func PrintRRset(rrset []string) {
 		if err != nil {
 			fmt.Printf("RR '%s' failed to parse. Error: %v\n", r, err)
 		} else {
-			switch rr.(type) {
+			switch rr := rr.(type) {
 			case *dns.DNSKEY:
 				row = fmt.Sprintf("%s|IN|DNSKEY|%d %d %d|%s...%s",
-					rr.(*dns.DNSKEY).Header().Name,
-					rr.(*dns.DNSKEY).Flags,
-					rr.(*dns.DNSKEY).Protocol,
-					rr.(*dns.DNSKEY).Algorithm,
-					rr.(*dns.DNSKEY).PublicKey[0:30],
-					rr.(*dns.DNSKEY).PublicKey[len(rr.(*dns.DNSKEY).PublicKey)-30:])
+					rr.Header().Name,
+					rr.Flags,
+					rr.Protocol,
+					rr.Algorithm,
+					rr.PublicKey[0:30],
+					rr.PublicKey[len(rr.PublicKey)-30:])
 			default:
 				parts := strings.Split(rr.String(), "\t")
 				parts = parts[4:]

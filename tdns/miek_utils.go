@@ -10,10 +10,6 @@ import (
 	"strings"
 )
 
-const (
-	defaultTtl = 3600
-)
-
 // cloneSlice returns a shallow copy of s.
 func cloneSlice[E any, S ~[]E](s S) S {
 	if s == nil {

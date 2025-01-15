@@ -25,11 +25,11 @@ const (
 // Generic stop transition
 func FsmTransitionStopFactory(from string) music.FSMTransition {
 	return music.FSMTransition{
-		Description:    "Generic stop transition without criteria",
-		Criteria:     	func(z *music.Zone) bool { return true },
-		PreCondition: 	func(z *music.Zone) bool { return true },
-		Action:       	func(z *music.Zone) bool { return true },
-		PostCondition: 	func(z *music.Zone) bool { return true },
+		Description:   "Generic stop transition without criteria",
+		Criteria:      func(z *music.Zone) bool { return true },
+		PreCondition:  func(z *music.Zone) bool { return true },
+		Action:        func(z *music.Zone) bool { return true },
+		PostCondition: func(z *music.Zone) bool { return true },
 	}
 }
 
@@ -112,11 +112,11 @@ DS and NS RRsets in the parent.`,
 					music.FsmStateStop: FsmTransitionStopFactory(FsmStateParentNsSynced),
 				},
 			},
-//			music.FsmStateStop: music.FSMState{
-// 				Next: map[string]music.FSMTransition{
-// 					music.FsmStateStop: FsmGenericStop,
-// 				},
-// 			},
+			//			music.FsmStateStop: music.FSMState{
+			// 				Next: map[string]music.FSMTransition{
+			// 					music.FsmStateStop: FsmGenericStop,
+			// 				},
+			// 			},
 		},
 	},
 
@@ -156,12 +156,12 @@ as that would cause the attached zones to have to go unsigned.`,
 			},
 			FsmStateParentDsSynced: music.FSMState{
 				Next: map[string]music.FSMTransition{
-				      music.FsmStateStop: FsmTransitionStopFactory(FsmStateParentDsSynced),
-				      },
+					music.FsmStateStop: FsmTransitionStopFactory(FsmStateParentDsSynced),
+				},
 			},
-// 			music.FsmStateStop: music.FSMState{
-// 				Next: map[string]music.FSMTransition{music.FsmStateStop: FsmGenericStop},
-// 			},
+			// 			music.FsmStateStop: music.FSMState{
+			// 				Next: map[string]music.FSMTransition{music.FsmStateStop: FsmGenericStop},
+			// 			},
 		},
 	},
 

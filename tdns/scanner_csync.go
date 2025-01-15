@@ -310,15 +310,13 @@ func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, cdd *Chi
 		nsv4addrs, err := scanner.AuthQueryNG(zone, ns.Ns, dns.TypeA, "tcp")
 		if err != nil {
 			return []dns.RR{}, false,
-				fmt.Errorf("Error looking up %s A. Aborting.", ns.Ns)
+				fmt.Errorf("error looking up %s A. Aborting", ns.Ns)
 		}
 		if !validated {
 			return []dns.RR{}, false,
-				fmt.Errorf("%s A RRset not validated. Aborting.", ns.Ns)
+				fmt.Errorf("%s A RRset not validated. Aborting", ns.Ns)
 		}
-		for _, glue := range nsv4addrs.RRs {
-			new_v4glue = append(new_v4glue, glue)
-		}
+		new_v4glue = append(new_v4glue, nsv4addrs.RRs...)
 	}
 
 	//	if !RRsetsAreEqual(zone, new_v4glue, cur_v4glue, "A", scanner.Log["CSYNC"],
@@ -368,15 +366,13 @@ func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, cdd *
 		nsv6addrs, err := scanner.AuthQueryNG(zone, ns.Ns, dns.TypeAAAA, "tcp")
 		if err != nil {
 			return []dns.RR{}, false,
-				fmt.Errorf("Error looking up %s AAAA. Aborting.", ns.Ns)
+				fmt.Errorf("error looking up %s AAAA. Aborting", ns.Ns)
 		}
 		if !validated {
 			return []dns.RR{}, false,
-				fmt.Errorf("%s AAAA RRset not validated. Aborting.", ns.Ns)
+				fmt.Errorf("%s AAAA RRset not validated. Aborting", ns.Ns)
 		}
-		for _, glue := range nsv6addrs.RRs {
-			new_v6glue = append(new_v6glue, glue)
-		}
+		new_v6glue = append(new_v6glue, nsv6addrs.RRs...)
 	}
 
 	if changed, _, _ := RRsetDiffer(zone, new_v6glue, cur_v6glue, dns.TypeAAAA, scanner.Log["CSYNC"]); changed {
@@ -420,7 +416,7 @@ func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([
 
 	if !validated {
 		return []dns.RR{}, false,
-			fmt.Errorf("Zone %s CSYNC analysis: New NS RRset not authenticated. Aborting.", zone)
+			fmt.Errorf("zone %s CSYNC analysis: New NS RRset not authenticated. Aborting", zone)
 	}
 
 	if changed, _, _ := RRsetDiffer(zone, new_rrs.RRs, cur_NSrrs, dns.TypeNS, scanner.Log["CSYNC"]); changed {
@@ -451,12 +447,7 @@ func (scanner *Scanner) ZoneCSYNCKnown(zone string, csyncrr *dns.CSYNC) bool {
 		// This CSYNC is not previously known
 		return false
 	} else {
-		if old_minsoa <= new_minsoa {
-			// lg.Printf("ZoneCSYNCKnown(%s): old_minsoa=%d, new_minsoa=%d", zone,
-			//		       old_minsoa, new_minsoa)
-			return false
-		}
-		return true
+		return old_minsoa > new_minsoa
 	}
 	// unreachable: return true
 }
@@ -465,10 +456,10 @@ func (scanner *Scanner) UpdateCsyncStatus(zone string, csyncrr *dns.CSYNC) error
 	scanner.Log["CSYNC"].Printf("UpdateCsyncStatus: Updating zone %s CSYNC status, new MinSOA=%d",
 		zone, csyncrr.Serial)
 
-	const UCSsql = `
-	      	     INSERT OR IGNORE
-	      	     INTO CsyncStatus(child, minsoa, flags, immediate, useminsoa, rrtypes, rrtype, rr, lastupdate)
-	      	     VALUES (?,?,?,?,?,?,?,?,?)`
+	// const UCSsql = `
+	//	      	     INSERT OR IGNORE
+	//	      	     INTO CsyncStatus(child, minsoa, flags, immediate, useminsoa, rrtypes, rrtype, rr, lastupdate)
+	//	      	     VALUES (?,?,?,?,?,?,?,?,?)`
 
 	// immediate := (csyncrr.Flags & 0x01) == 1
 	// usesoamin := (csyncrr.Flags & 0x02) == 2
