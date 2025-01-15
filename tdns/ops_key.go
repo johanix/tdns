@@ -218,7 +218,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, UpdateResult,
 	}
 
 	// 4. Send the message to the parent
-	rcode, err, ur := SendUpdate(msg, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(msg, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err), ur, err
 	}
@@ -354,7 +354,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	}
 
 	// 4. Send the ADD message to the parent
-	rcode, err, ur := SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return "", 0, 0, ur, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to send update message: %v", zd.ZoneName, err)
 	}
@@ -395,7 +395,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string, oldkeyid
 	}
 
 	// 7. Send the REMOVE message to the parent
-	rcode, err, ur = SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err = SendUpdate(m, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%s) failed to send update message: %v",
 			zd.ZoneName, err)

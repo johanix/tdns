@@ -103,7 +103,7 @@ func PrintSignerGroups(sgr music.SignerGroupResponse) {
 
 		for k, v := range sgr.SignerGroups {
 			var ss string
-			for k1, _ := range v.SignerMap {
+			for k1 := range v.SignerMap {
 				ss += fmt.Sprintf(", %s", k1)
 			}
 			if len(ss) > 2 {

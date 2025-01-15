@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,16 +16,16 @@ import (
 
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
 // command line rather than the one in the keystore. Not to be used by TDNS-SERVER.
-func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) (error, UpdateResult) {
+func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) (UpdateResult, error) {
 	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		return fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err), UpdateResult{}
+		return UpdateResult{}, fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err)
 	}
 
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
-		return err, UpdateResult{}
+		return UpdateResult{}, fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 	}
 	var smsg *dns.Msg
 	sak := &Sig0ActiveKeys{
@@ -36,20 +37,20 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
 			log.Printf("Error from SignMsgNG2(%s): %v", Globals.Zonename, err)
-			return err, UpdateResult{}
+			return UpdateResult{}, fmt.Errorf("Error from SignMsg(%s): %v", Globals.Zonename, err)
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")
 	}
 
-	rcode, err, ur := SendUpdate(smsg, pzone, target.Addresses)
+	rcode, ur, err := SendUpdate(smsg, pzone, target.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", target.Name, err)
-		return err, ur
+		return ur, err
 	} else {
 		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", pzone, target.Name, dns.RcodeToString[rcode])
 	}
-	return nil, ur
+	return ur, nil
 }
 
 type UpdateResult struct {
@@ -73,11 +74,11 @@ type TargetUpdateStatus struct {
 
 // Note: the target.Addresses must already be in addr:port format.
 // func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
-// func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error) {
-func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
+// func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
+func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
 		log.Printf("Error: zone name not specified. Terminating.\n")
-		return 0, fmt.Errorf("zone name not specified"), UpdateResult{}
+		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
 	}
 
 	log.Printf("SendUpdate(%s) target has %d addresses: %v", zonename, len(addrs), addrs)
@@ -139,11 +140,11 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, Upda
 				log.Printf("... and got rcode NOERROR back (good)\n")
 				log.Printf("Response:\n%s\n", res.String())
 			}
-			return res.Rcode, nil, ur
+			return res.Rcode, ur, nil
 		}
 	}
 
-	return 0, fmt.Errorf("Error: all target addresses %v responded with errors or were unreachable", addrs), ur
+	return 0, ur, fmt.Errorf("all target addresses %v responded with errors or were unreachable", addrs)
 }
 
 // Parent is the zone to apply the update to.
@@ -151,10 +152,10 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, Upda
 // function that can create updates for other things too.
 func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
-		return nil, fmt.Errorf("Error: parent zone name not specified. Terminating.")
+		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
 	if child == "." || child == "" {
-		return nil, fmt.Errorf("Error: child zone name not specified. Terminating.")
+		return nil, fmt.Errorf("child zone name not specified. Terminating")
 	}
 
 	m := new(dns.Msg)
@@ -184,7 +185,7 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 
 func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if zone == "." || zone == "" {
-		return nil, fmt.Errorf("CreateUpdate: Error: zone to update not specified. Terminating.")
+		return nil, fmt.Errorf("CreateUpdate: Error: zone to update not specified. Terminating")
 	}
 
 	m := new(dns.Msg)
@@ -346,7 +347,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 	schemes := viper.GetStringSlice("delegationsync.child.schemes")
 	if len(schemes) == 0 {
 		zd.Logger.Printf("BestSyncScheme: Error: no syncronization schemes configured for child %s", zd.ZoneName)
-		return "", nil, fmt.Errorf("No synchronizations schemes configured for child %s", zd.ZoneName)
+		return "", nil, fmt.Errorf("no synchronizations schemes configured for child %s", zd.ZoneName)
 	}
 
 	for _, scheme := range schemes {
@@ -384,9 +385,9 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 			}
 
 		default:
-			msg := fmt.Sprintf("Error: zone %s unknown child scheme: %s", zd.ZoneName, scheme)
-			zd.Logger.Printf(msg)
-			return "", nil, fmt.Errorf(msg)
+			msg := fmt.Sprintf("zone %s: error: unknown child scheme: %s", zd.ZoneName, scheme)
+			zd.Logger.Print(msg)
+			return "", nil, errors.New(msg)
 		}
 	}
 

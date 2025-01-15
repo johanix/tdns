@@ -15,4 +15,3 @@ var FsmZoneIsInSync = music.FSMTransition{
 	Action:        func(z *music.Zone) bool { return true },
 	PostCondition: func(z *music.Zone) bool { return true },
 }
-

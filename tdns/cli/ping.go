@@ -14,8 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var pings int
-
 var PingCmd = &cobra.Command{
 	Use:   "ping",
 	Short: "Send an API ping request and present the response",
@@ -34,7 +32,7 @@ var PingCmd = &cobra.Command{
 			}
 		}
 
-		uptime := time.Now().Sub(pr.BootTime).Truncate(time.Second)
+		uptime := time.Since(pr.BootTime).Truncate(time.Second)
 		weeks := uptime / (7 * 24 * time.Hour)
 		uptime %= 7 * 24 * time.Hour
 		days := uptime / (24 * time.Hour)

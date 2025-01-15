@@ -38,22 +38,15 @@ func Notifier(notifyreqQ chan NotifyRequest) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		for {
-			select {
-			case nr = <-notifyreqQ:
-				zd := nr.ZoneData
+		for nr = range notifyreqQ {
+			zd := nr.ZoneData
 
-				log.Printf("NotifierEngine: Zone %s: will notify downstreams", zd.ZoneName)
+			log.Printf("NotifierEngine: Zone %s: will notify downstreams", zd.ZoneName)
 
-				zd.SendNotify(nr.RRtype, nr.Targets)
+			zd.SendNotify(nr.RRtype, nr.Targets)
 
-				if nr.Response != nil {
-					nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}
-				}
-				continue
-
-				//			default:
-				//				log.Printf("NotifierEngine: Zone %s: We should not get here. Ignoring.", nr.ZoneName)
+			if nr.Response != nil {
+				nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}
 			}
 		}
 	}()
@@ -65,11 +58,11 @@ func Notifier(notifyreqQ chan NotifyRequest) error {
 
 func xxxSendNotify(parentname, childname string, ntype string, dsynctarget *DsyncTarget) (int, error) {
 	if parentname == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("Error: parent zone name not specified. Terminating.")
+		return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: parent zone name not specified. Terminating", parentname)
 	}
 
 	if childname == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("Error: child zone name not specified. Terminating.")
+		return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: child zone name not specified. Terminating", childname)
 	}
 
 	switch ntype {
@@ -79,7 +72,7 @@ func xxxSendNotify(parentname, childname string, ntype string, dsynctarget *Dsyn
 	default:
 		// lookupzone = lib.ParentZone(zonename, lib.Globals.IMR)
 		if Globals.ParentZone == "" {
-			return dns.RcodeServerFailure, fmt.Errorf("Error: parent zone name not specified.")
+			return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: parent zone name not specified", parentname)
 		}
 	}
 
@@ -124,7 +117,7 @@ func xxxSendNotify(parentname, childname string, ntype string, dsynctarget *Dsyn
 
 func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	if zd.ZoneName == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("Error: zone name not specified. Ignoring notify request.")
+		return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: zone name not specified. Ignoring notify request", zd.ZoneName)
 	}
 
 	var err error
@@ -133,7 +126,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	case dns.TypeSOA:
 		// Here we only need the downstreams
 		if len(zd.Downstreams) == 0 {
-			return dns.RcodeServerFailure, fmt.Errorf("Zone %s: Error: no downstreams. Ignoring notify request.", zd.ZoneName)
+			return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: no downstreams. Ignoring notify request", zd.ZoneName)
 		}
 
 	case dns.TypeCSYNC, dns.TypeCDS:
@@ -141,7 +134,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 		if zd.Parent == "." {
 			zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
 			if err != nil {
-				return dns.RcodeServerFailure, fmt.Errorf("Zone %s: Error: failure locating parent zone name. Ignoring notify request.", zd.ZoneName)
+				return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: failure locating parent zone name. Ignoring notify request", zd.ZoneName)
 			}
 		}
 

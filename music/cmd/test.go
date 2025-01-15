@@ -82,8 +82,8 @@ func SendTestCommand(zone string, data music.TestPost) (music.TestResponse, erro
 	//	status, buf, err := music.Api.Post("/test", bytebuf.Bytes())
 	status, buf, err := tdns.Globals.Api.RequestNG("POST", "/test", data, true)
 	if err != nil {
-		log.Fatalf("SendTestCommand: Error from APIpost:", err)
-
+		log.Printf("SendTestCommand: Error from APIpost: %+v", err)
+		return music.TestResponse{}, err
 	}
 	if tdns.Globals.Debug {
 		fmt.Printf("Status: %d\n", status)
@@ -92,7 +92,8 @@ func SendTestCommand(zone string, data music.TestPost) (music.TestResponse, erro
 	var tr music.TestResponse
 	err = json.Unmarshal(buf, &tr)
 	if err != nil {
-		log.Fatalf("Error from unmarshal: %v\n", err)
+		log.Printf("Error from unmarshal: %+v", err)
+		return music.TestResponse{}, err
 	}
-	return tr, err
+	return tr, nil
 }

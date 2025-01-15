@@ -262,6 +262,9 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	}
 
 	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
+	if err != nil {
+		return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+	}
 	req.Header.Add("Content-Type", "application/json")
 	if api.AuthMethod == "X-API-Key" {
 		req.Header.Add("X-API-Key", api.apiKey)
@@ -279,7 +282,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 		var msg string
 		if strings.Contains(err.Error(), "connection refused") {
-			msg = fmt.Sprintf("Connection refused. Server process probably not running.")
+			msg = "Connection refused. Server process probably not running."
 		} else {
 			msg = fmt.Sprintf("Error from API request %s: %v", method, err)
 		}
