@@ -39,7 +39,7 @@ func (mdb *MusicDB) AddZone(tx *sql.Tx, z *Zone, group string, enginecheck chan 
 		return "", err
 	}
 	if dbzone.Exists {
-		return "", fmt.Errorf("Zone %s already present in MuSiC system.", fqdn)
+		return "", fmt.Errorf("zone %s already present in MuSiC system", fqdn)
 	}
 
 	const sqlq = `
@@ -109,7 +109,7 @@ func (mdb *MusicDB) UpdateZone(tx *sql.Tx, dbzone, uz *Zone, enginecheck chan En
 
 func (mdb *MusicDB) DeleteZone(tx *sql.Tx, z *Zone) (string, error) {
 	if !z.Exists {
-		return "", fmt.Errorf("Zone %s not present in MuSiC system.", z.Name)
+		return "", fmt.Errorf("zone %s not present in MuSiC system", z.Name)
 	}
 
 	if tx == nil {
@@ -153,7 +153,7 @@ func (mdb *MusicDB) DeleteZone(tx *sql.Tx, z *Zone) (string, error) {
 	return deletemsg, nil
 }
 
-func (z *Zone) SetStopReason(value string) (error, string) {
+func (z *Zone) SetStopReason(value string) (string, error) {
 	mdb := z.MusicDB
 
 	mdb.StopReasonCache[z.Name] = value
@@ -166,10 +166,10 @@ func (z *Zone) SetStopReason(value string) (error, string) {
 	}
 
 	log.Printf("%s: %s\n", z.Name, value)
-	return nil, fmt.Sprintf("Zone %s stop-reason documented as '%s'", z.Name, value)
+	return fmt.Sprintf("Zone %s stop-reason documented as '%s'", z.Name, value), nil
 }
 
-func (z *Zone) SetSignerNsNames(ns_names map[string][]string) (error, string) {
+func (z *Zone) SetSignerNsNames(ns_names map[string][]string) (string, error) {
 	mdb := z.MusicDB
 
 	mdb.UpdateC <- DBUpdate{
@@ -179,10 +179,10 @@ func (z *Zone) SetSignerNsNames(ns_names map[string][]string) (error, string) {
 	}
 
 	log.Printf("%s: Inserted new NS names for %d signers", z.Name, len(ns_names))
-	return nil, fmt.Sprintf("Zone %s signer NS names updated", z.Name)
+	return fmt.Sprintf("Zone %s signer NS names updated", z.Name), nil
 }
 
-func (z *Zone) SetSignerDnskeys(signer_dnskeys map[string][]string) (error, string) {
+func (z *Zone) SetSignerDnskeys(signer_dnskeys map[string][]string) (string, error) {
 	mdb := z.MusicDB
 
 	mdb.UpdateC <- DBUpdate{
@@ -192,7 +192,7 @@ func (z *Zone) SetSignerDnskeys(signer_dnskeys map[string][]string) (error, stri
 	}
 
 	log.Printf("%s: Inserted new DNSKEYs for %d signers", z.Name, len(signer_dnskeys))
-	return nil, fmt.Sprintf("Zone %s signer DNSKEYs updated", z.Name)
+	return fmt.Sprintf("Zone %s signer DNSKEYs updated", z.Name), nil
 }
 
 // XXX: SetDelayReason is not yet in use, but is needed for the wait-for-parent-ds stuff
@@ -226,7 +226,7 @@ func (z *Zone) SetDelayReason(tx *sql.Tx, value string, delay time.Duration) (st
 
 func (mdb *MusicDB) ZoneSetMeta(tx *sql.Tx, z *Zone, key, value string) (string, error) {
 	if !z.Exists {
-		return "", fmt.Errorf("Zone %s not present in MuSiC system.", z.Name)
+		return "", fmt.Errorf("zone %s not present in MuSiC system", z.Name)
 	}
 
 	if tx == nil {
@@ -300,11 +300,11 @@ func (z *Zone) StateTransition(tx *sql.Tx, from, to string) error {
 	}
 	fmt.Printf("This is %s StateTransition(%s-->%s) in process %s\n", z.Name, from, to, fsm)
 	if fsm == "" {
-		return fmt.Errorf("Zone %s is not currently in any ongoing process.", z.Name)
+		return fmt.Errorf("zone %s is not currently in any ongoing process", z.Name)
 	}
 
 	if z.State != from {
-		return fmt.Errorf("StateTransition: Error: zone %s is in state '%s'. Should be '%s'.\n",
+		return fmt.Errorf("StateTransition: Error: zone %s is in state '%s'. Should be '%s'",
 			z.Name, z.State, from)
 	}
 
@@ -386,7 +386,7 @@ FROM zones WHERE name=?`
 
 		nexttransitions := mdb.FSMlist[fsm].States[state].Next
 		next := map[string]bool{}
-		for k, _ := range nexttransitions {
+		for k := range nexttransitions {
 			next[k] = true
 		}
 
@@ -431,6 +431,10 @@ func (mdb *MusicDB) GetSignerGroupZones(tx *sql.Tx, sg *SignerGroup) ([]*Zone, e
 SELECT name, state, COALESCE(statestamp, datetime('now')) AS timestamp, fsm FROM zones WHERE sgroup=?`
 
 	rows, err := tx.Query(sqlq, sg.Name)
+	if err != nil {
+		log.Printf("GetSignerGroupZones: Error from SQL query: %v", err)
+		return zones, err
+	}
 	defer rows.Close()
 
 	if CheckSQLError("GetSignerGroupZones", sqlq, err, false) {
@@ -506,14 +510,14 @@ func (mdb *MusicDB) ZoneJoinGroup(tx *sql.Tx, dbzone *Zone, g string,
 
 	// must test for existence of sg, as after AddZone() it is still nil
 	if sg != nil && sg.Name != "" {
-		return "", fmt.Errorf("Zone %s already assigned to signer group %s\n",
+		return "", fmt.Errorf("zone %s already assigned to signer group %s",
 			dbzone.Name, sg.Name)
 	}
 
 	// Is the signer group locked (because of being in a process
 	// that precludes zones joining or leaving)?
 	if group.Locked {
-		return "", fmt.Errorf("Signer group %s locked from zones joining or leaving due to ongoing '%s' process.",
+		return "", fmt.Errorf("signer group %s locked from zones joining or leaving due to ongoing '%s' process",
 			group.Name, group.CurrentProcess)
 
 	}
@@ -663,7 +667,7 @@ FROM zones`
 
 			nexttransitions := mdb.FSMlist[fsm].States[state].Next
 			next := map[string]bool{}
-			for k, _ := range nexttransitions {
+			for k := range nexttransitions {
 				next[k] = true
 			}
 

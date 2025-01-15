@@ -17,7 +17,7 @@ func MainInit(tconf *tdns.Config, mconf *Config) error {
 	var err error
 	mconf.Internal.MusicDB, err = NewDB(viper.GetString("db.file"), viper.GetString("db.mode"), false) // Don't drop status tables if they exist
 	if err != nil {
-		return fmt.Errorf("Error from NewDB(%s): %v", viper.GetString("db.file"), err)
+		return fmt.Errorf("error from NewDB(%s): %v", viper.GetString("db.file"), err)
 	}
 
 	mconf.Internal.TokViper = TokVip

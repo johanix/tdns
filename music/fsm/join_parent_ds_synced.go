@@ -154,25 +154,22 @@ func VerifyCdsRemoved(z *music.Zone) bool {
 
 	for _, signer := range z.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
-		err, cdsrrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCDS)
+		cdsrrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCDS)
 		if err != nil {
 			log.Printf("Error from FetchRRset: %v\n", err)
 		}
 
 		if len(cdsrrs) > 0 {
-			z.SetStopReason(fmt.Sprintf("CDS RRset still published by %s\n",
-				signer.Name))
+			z.SetStopReason(fmt.Sprintf("CDS RRset still published by %s\n", signer.Name))
 			return false
 		}
-		err, cdnskeyrrs := updater.FetchRRset(signer, z.Name, z.Name,
-			dns.TypeCDNSKEY)
+		cdnskeyrrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCDNSKEY)
 		if err != nil {
 			log.Printf("Error from FetchRRset: %v\n", err)
 		}
 
 		if len(cdnskeyrrs) > 0 {
-			z.SetStopReason(fmt.Sprintf("CDNSKEY RRset still published by %s\n",
-				signer.Name))
+			z.SetStopReason(fmt.Sprintf("CDNSKEY RRset still published by %s\n", signer.Name))
 			return false
 		}
 	}

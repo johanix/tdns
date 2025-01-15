@@ -33,7 +33,7 @@ func (mdb *MusicDB) AddSigner(tx *sql.Tx, dbsigner *Signer, group string) (strin
 	//	defer mdb.CloseTransaction(localtx, tx, err)
 
 	if dbsigner.Exists {
-		return "", fmt.Errorf("Signer %s already present in system.",
+		return "", fmt.Errorf("signer %s already present in system",
 			dbsigner.Name)
 	}
 
@@ -42,7 +42,7 @@ func (mdb *MusicDB) AddSigner(tx *sql.Tx, dbsigner *Signer, group string) (strin
 
 	if !ok {
 		return "", fmt.Errorf(
-			"Unknown signer method: %s. Known methods are: %v", dbsigner.Method, updatermap)
+			"unknown signer method: %s. Known methods are: %v", dbsigner.Method, updatermap)
 	}
 
 	if dbsigner.Method == "ddns" || dbsigner.Method == "rlddns" {
@@ -89,7 +89,7 @@ func (mdb *MusicDB) AddSigner(tx *sql.Tx, dbsigner *Signer, group string) (strin
 func (mdb *MusicDB) UpdateSigner(tx *sql.Tx, dbsigner *Signer, us Signer) (string, error) {
 	var err error
 	if !dbsigner.Exists {
-		return "", fmt.Errorf("Signer %s not present in system.",
+		return "", fmt.Errorf("signer %s not present in system",
 			dbsigner.Name)
 	}
 
@@ -106,7 +106,7 @@ func (mdb *MusicDB) UpdateSigner(tx *sql.Tx, dbsigner *Signer, us Signer) (strin
 	updatermap := ListUpdaters()
 	_, ok := updatermap[dbsigner.Method]
 	if !ok {
-		return "", fmt.Errorf("Unknown signer method: %s. Known methods are: %v",
+		return "", fmt.Errorf("unknown signer method: %s. Known methods are: %v",
 			dbsigner.Method, updatermap)
 	}
 
@@ -169,7 +169,7 @@ func (mdb *MusicDB) SignerJoinGroup(tx *sql.Tx, dbsigner *Signer, g string) (str
 	//	defer mdb.CloseTransaction(localtx, tx, err)
 
 	if !dbsigner.Exists {
-		return "", fmt.Errorf("Signer %s is unknown.", dbsigner.Name)
+		return "", fmt.Errorf("signer %s is unknown", dbsigner.Name)
 	}
 
 	if sg, err = mdb.GetSignerGroup(tx, g, false); err != nil { // not apisafe
@@ -181,7 +181,7 @@ func (mdb *MusicDB) SignerJoinGroup(tx *sql.Tx, dbsigner *Signer, g string) (str
 	}
 
 	if sg.CurrentProcess != "" {
-		return "", fmt.Errorf("Signer group %s is currently in the '%s' process and does not accept signer addition.",
+		return "", fmt.Errorf("signer group %s is currently in the '%s' process and does not accept signer addition",
 			sg.Name, sg.CurrentProcess)
 	}
 
@@ -286,7 +286,7 @@ func (mdb *MusicDB) SignerLeaveGroup(tx *sql.Tx, dbsigner *Signer, g string) (st
 	//	defer mdb.CloseTransaction(localtx, tx, err)
 
 	if !dbsigner.Exists {
-		return "", fmt.Errorf("Signer %s is unknown.", dbsigner.Name)
+		return "", fmt.Errorf("signer %s is unknown", dbsigner.Name)
 	}
 
 	if sg, err = mdb.GetSignerGroup(tx, g, false); err != nil { // not apisafe
@@ -298,7 +298,7 @@ func (mdb *MusicDB) SignerLeaveGroup(tx *sql.Tx, dbsigner *Signer, g string) (st
 	}
 
 	if sg.CurrentProcess != "" {
-		return "", fmt.Errorf("Signer group %s is currently in the '%s' process and does not accept signer removal.",
+		return "", fmt.Errorf("signer group %s is currently in the '%s' process and does not accept signer removal",
 			sg.Name, sg.CurrentProcess)
 	}
 
@@ -341,7 +341,7 @@ func (mdb *MusicDB) SignerLeaveGroup(tx *sql.Tx, dbsigner *Signer, g string) (st
 	// (as that would cause rather obvious problems).
 	if len(sg.SignerMap) == SignerGroupMinimumSigners {
 		return "", fmt.Errorf(
-			"The signer group %s has %d zones but only %d signer, %s, which can therefore not be removed.",
+			"the signer group %s has %d zones but only %d signer, %s, which can therefore not be removed",
 			sg.Name, len(zones), SignerGroupMinimumSigners, dbsigner.Name)
 	}
 
@@ -394,7 +394,7 @@ func (mdb *MusicDB) DeleteSigner(tx *sql.Tx, dbsigner *Signer) (string, error) {
 	sgs := dbsigner.SignerGroups
 	if len(sgs) != 0 {
 		return "", fmt.Errorf(
-			"Signer %s can not be deleted as it is part of the signer groups %v.",
+			"signer %s can not be deleted as it is part of the signer groups %v",
 			dbsigner.Name, sgs)
 	}
 
@@ -430,45 +430,45 @@ func (mdb *MusicDB) ListSigners(tx *sql.Tx) (map[string]Signer, error) {
 
 	const sqlq = "SELECT name, method, addr, auth, port FROM signers"
 	rows, err := tx.Query(sqlq)
+	if err != nil {
+		log.Printf("ListSigners: Error from tx.Query: %v", err)
+		return sl, err
+	}
 	defer rows.Close()
 
-	if CheckSQLError("ListSigners", sqlq, err, false) {
-		return sl, err
-	} else {
-		var name, method, address, authstr, port string
-		for rows.Next() {
-			err := rows.Scan(&name, &method, &address, &authstr, &port)
-			if err != nil {
-				log.Fatal("ListSigners: Error from rows.Next():", err)
-			}
-
-			auth := AuthData{}
-			authparts := strings.Split(authstr, ":")
-			log.Printf("ListSigners: authparts: '%s'", authparts)
-			if len(authparts) == 3 {
-				auth = AuthData{
-					TSIGAlg:  authparts[0],
-					TSIGName: authparts[1],
-					TSIGKey:  authparts[2],
-				}
-			}
-			s := Signer{
-				Name:    name,
-				Exists:  true,
-				Method:  method,
-				Address: address,
-				AuthStr: authstr, // AuthDataTmp(auth), // TODO: Issue #28
-				Auth:    auth,    // AuthDataTmp(auth), // TODO: Issue #28
-				Port:    port,
-			}
-			sgs, err := mdb.GetSignerGroups(tx, name)
-			if err != nil {
-				log.Fatalf("mdb.ListSigners: Error from mdb.GetSignerGroups: %v",
-					err)
-			}
-			s.SignerGroups = sgs
-			sl[name] = s
+	var name, method, address, authstr, port string
+	for rows.Next() {
+		err := rows.Scan(&name, &method, &address, &authstr, &port)
+		if err != nil {
+			log.Fatal("ListSigners: Error from rows.Next():", err)
 		}
+
+		auth := AuthData{}
+		authparts := strings.Split(authstr, ":")
+		log.Printf("ListSigners: authparts: '%s'", authparts)
+		if len(authparts) == 3 {
+			auth = AuthData{
+				TSIGAlg:  authparts[0],
+				TSIGName: authparts[1],
+				TSIGKey:  authparts[2],
+			}
+		}
+		s := Signer{
+			Name:    name,
+			Exists:  true,
+			Method:  method,
+			Address: address,
+			AuthStr: authstr, // AuthDataTmp(auth), // TODO: Issue #28
+			Auth:    auth,    // AuthDataTmp(auth), // TODO: Issue #28
+			Port:    port,
+		}
+		sgs, err := mdb.GetSignerGroups(tx, name)
+		if err != nil {
+			log.Fatalf("mdb.ListSigners: Error from mdb.GetSignerGroups: %v",
+				err)
+		}
+		s.SignerGroups = sgs
+		sl[name] = s
 	}
 	return sl, nil
 }
@@ -478,7 +478,7 @@ func (mdb *MusicDB) ListSigners(tx *sql.Tx) (map[string]Signer, error) {
 func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig, tokvip *viper.Viper) (string, error) {
 	switch dbsigner.Method {
 	case "ddns":
-		return "", fmt.Errorf("Signer %s has method=ddns: No login required.", dbsigner.Name)
+		return "", fmt.Errorf("signer %s has method=ddns: No login required", dbsigner.Name)
 
 		//	case "desec-api":
 		//		api := GetUpdater("desec-api").GetApi()
@@ -496,7 +496,7 @@ func (mdb *MusicDB) SignerLogin(dbsigner *Signer, cliconf *CliConfig, tokvip *vi
 		//			msg = "Something happened. No token received. Hmm?"
 		//		}
 	default:
-		return "", fmt.Errorf("Signer %s has method=%s, which is unknown.", dbsigner.Name, dbsigner.Method)
+		return "", fmt.Errorf("signer %s has method=%s, which is unknown", dbsigner.Name, dbsigner.Method)
 	}
 }
 
@@ -508,7 +508,7 @@ func (mdb *MusicDB) SignerLogout(dbsigner *Signer, cliconf *CliConfig, tokvip *v
 
 	switch dbsigner.Method {
 	case "ddns":
-		return "", fmt.Errorf("Signer %s has method=ddns: No logout required.",
+		return "", fmt.Errorf("signer %s has method=ddns: No logout required",
 			dbsigner.Name)
 
 		//	case "desec":

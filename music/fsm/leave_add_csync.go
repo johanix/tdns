@@ -170,9 +170,9 @@ func LeaveAddCsyncAction(z *music.Zone) bool {
 	for _, signer := range z.SGroup.SignerMap {
 		// check if there is any CSYNC records if there are remove them before adding a csync record
 		updater := music.GetUpdater(signer.Method)
-		err, csyncrrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
+		csyncrrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
 		if err != nil {
-			err, _ = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
+			_, err = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
 			return false
 		}
 		if len(csyncrrs) != 0 {
@@ -197,9 +197,9 @@ func LeaveAddCsyncAction(z *music.Zone) bool {
 	}
 
 	updater := music.GetUpdater(leavingSigner.Method)
-	err, csyncrrs := updater.FetchRRset(leavingSigner, z.Name, z.Name, dns.TypeCSYNC)
+	csyncrrs, err := updater.FetchRRset(leavingSigner, z.Name, z.Name, dns.TypeCSYNC)
 	if err != nil {
-		err, _ = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", leavingSigner.Name, err))
+		_, err = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", leavingSigner.Name, err))
 		return false
 	}
 	if len(csyncrrs) != 0 {
@@ -214,8 +214,7 @@ func LeaveAddCsyncAction(z *music.Zone) bool {
 
 	if err := updater.Update(leavingSigner, z.Name, z.Name,
 		&[][]dns.RR{[]dns.RR{z.CSYNC}}, nil); err != nil {
-		z.SetStopReason(fmt.Sprintf("Unable to update %s with CSYNC record sets: %s",
-			leavingSigner.Name, err))
+		z.SetStopReason(fmt.Sprintf("Unable to update %s with CSYNC record sets: %s", leavingSigner.Name, err))
 		return false
 	}
 	log.Printf("%s: Update %s successfully with CSYNC record sets", z.Name, leavingSigner.Name)
@@ -237,9 +236,9 @@ func LeaveVerifyCsyncPublished(z *music.Zone) bool {
 	// get all csync records from all the remaining signers in the SignerGroup
 	for _, signer := range z.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
-		err, csyncrrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
+		csyncrrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
 		if err != nil {
-			err, _ = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
+			_, err = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
 			return false
 		}
 		switch len(csyncrrs) {
@@ -270,9 +269,9 @@ func LeaveVerifyCsyncPublished(z *music.Zone) bool {
 	}
 
 	updater := music.GetUpdater(leavingSigner.Method)
-	err, csyncrrs := updater.FetchRRset(leavingSigner, z.Name, z.Name, dns.TypeCSYNC)
+	csyncrrs, err := updater.FetchRRset(leavingSigner, z.Name, z.Name, dns.TypeCSYNC)
 	if err != nil {
-		err, _ = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", leavingSigner.Name, err))
+		_, err = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", leavingSigner.Name, err))
 		return false
 	}
 	switch len(csyncrrs) {
