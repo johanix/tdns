@@ -33,7 +33,7 @@ func JoinAddCsyncPreCondition(z *music.Zone) bool {
 
 	for _, s := range z.SGroup.SignerMap {
 		updater := music.GetUpdater(s.Method)
-		err, rrs := updater.FetchRRset(s, z.Name, z.Name, dns.TypeNS)
+		rrs, err := updater.FetchRRset(s, z.Name, z.Name, dns.TypeNS)
 		if err != nil {
 			log.Printf("Error from updater.FetchRRset: %v\n", err)
 			// XXX: johani: is it meaningful to continue here? why not just return false?
@@ -106,9 +106,9 @@ func JoinAddCsyncAction(z *music.Zone) bool {
 	for _, signer := range z.SGroup.SignerMap {
 		// check if there is any CSYNC records if there are remove them before adding a csync record
 		updater := music.GetUpdater(signer.Method)
-		err, csyncrrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
+		csyncrrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
 		if err != nil {
-			err, _ = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
+			_, err = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
 			return false
 		}
 		if len(csyncrrs) != 0 {
@@ -147,9 +147,9 @@ func VerifyCsyncPublished(z *music.Zone) bool {
 	csynclist := []*dns.CSYNC{}
 	for _, signer := range z.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
-		err, csyncrrs := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
+		csyncrrs, err := updater.FetchRRset(signer, z.Name, z.Name, dns.TypeCSYNC)
 		if err != nil {
-			err, _ = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
+			_, err = z.SetStopReason(fmt.Sprintf("Unable to fetch CSYNC RRset from %s: %v", signer.Name, err))
 			return false
 		}
 		switch len(csyncrrs) {

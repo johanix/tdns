@@ -209,7 +209,7 @@ func LeaveParentNsSyncedPostCondition(zone *music.Zone) bool {
 	var signerNames []string
 	for signerName, signer := range zone.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
-		err, rrSet := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeCSYNC)
+		rrSet, err := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeCSYNC)
 		if err != nil {
 			zone.SetStopReason(fmt.Sprintf("Couldn't CSYNC FetchRRset from %s\n", signerName))
 		}

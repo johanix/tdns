@@ -8,8 +8,9 @@ package music
 
 import (
 	"fmt"
-	"github.com/miekg/dns"
 	"log"
+
+	"github.com/miekg/dns"
 )
 
 // RRsetEqual compares two RRsets and returns if they are equal or not,
@@ -62,7 +63,7 @@ func SignerRRsetEqual(zone *Zone, rrType uint16) bool {
 	for signerName, signer := range zone.SGroup.SignerMap {
 		signerNames = append(signerNames, signerName)
 		updater := GetUpdater(signer.Method)
-		err, rrSet := updater.FetchRRset(signer, zone.Name, zone.Name, rrType)
+		rrSet, err := updater.FetchRRset(signer, zone.Name, zone.Name, rrType)
 		if err != nil {
 			log.Printf("SignerCompare: Error from updater.FetchRRset (signer %s): %v", signer.Name, err)
 		}
@@ -87,7 +88,7 @@ func SignerRRsetEqual(zone *Zone, rrType uint16) bool {
 		}
 	}
 	if !matches {
-		err, _ := zone.SetStopReason(fmt.Sprintf("%s not synced on signers", dns.TypeToString[rrType]))
+		_, err := zone.SetStopReason(fmt.Sprintf("%s not synced on signers", dns.TypeToString[rrType]))
 		if err != nil {
 			log.Printf("Couldn't set stop reason: %s not synced on signers\n", dns.TypeToString[rrType])
 		}

@@ -59,8 +59,6 @@ func APIGoAway(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var pongs int = 0
-
 func APItest(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	mdb := conf.Internal.MusicDB
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -340,8 +338,7 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 			case "get-rrsets":
 				// var rrsets map[string][]dns.RR
-				err, msg, _ := mdb.ZoneGetRRsets(dbzone, zp.Owner, zp.RRtype)
-				resp.Msg = msg
+				resp.Msg, _, err = mdb.ZoneGetRRsets(dbzone, zp.Owner, zp.RRtype)
 				if err != nil {
 					// log.Printf("Error from ZoneGetRRset: %v", err)
 					resp.Error = true
@@ -353,8 +350,8 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 					var result = map[string][]string{}
 					var rrset []string
-					for k, _ := range sg.Signers() {
-						err, resp.Msg, rrset = mdb.ListRRset(tx, dbzone, k, zp.Owner,
+					for k := range sg.Signers() {
+						resp.Msg, rrset, err = mdb.ListRRset(tx, dbzone, k, zp.Owner,
 							zp.RRtype)
 						if err != nil {
 							log.Fatalf("APIzone: get-rrsets: Error from ListRRset: %v\n", err)
@@ -375,7 +372,7 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				fmt.Printf("APIzone: copy-rrset: %s %s %s\n", dbzone.Name,
 					zp.Owner, zp.RRtype)
 				// var rrset []dns.RR
-				err, resp.Msg = mdb.ZoneCopyRRset(tx, dbzone, zp.Owner, zp.RRtype,
+				resp.Msg, err = mdb.ZoneCopyRRset(tx, dbzone, zp.Owner, zp.RRtype,
 					zp.FromSigner, zp.ToSigner)
 				if err != nil {
 					log.Printf("Error from ZoneCopyRRset: %v", err)
@@ -393,8 +390,7 @@ func APIzone(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 			case "list-rrset":
 				var rrset []string
-				err, resp.Msg, rrset = mdb.ListRRset(tx, dbzone, zp.Signer,
-					zp.Owner, zp.RRtype)
+				resp.Msg, rrset, err = mdb.ListRRset(tx, dbzone, zp.Signer, zp.Owner, zp.RRtype)
 				if err != nil {
 					log.Printf("Error from ListRRset: %v", err)
 					resp.Error = true
@@ -450,10 +446,10 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Msg = "Error from mdb.StartTransactionNG()"
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
-			err = json.NewEncoder(w).Encode(resp)
-			if err != nil {
-				log.Printf("Error from Encoder: %v\n", err)
-			}
+			//			err = json.NewEncoder(w).Encode(resp)
+			//			if err != nil {
+			//				log.Printf("Error from Encoder: %v\n", err)
+			//			}
 			return
 		}
 
@@ -678,7 +674,7 @@ func APIprocess(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch pp.Command {
 		case "list":
-			sp, err, msg := mdb.ListProcesses()
+			sp, msg, err := mdb.ListProcesses()
 			if err != nil {
 				log.Printf("Error from ListProcesses: %v", err)
 				resp.Error = true

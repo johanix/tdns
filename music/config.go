@@ -148,7 +148,7 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 
 		validate := validator.New()
 		if err := validate.Struct(&config); err != nil {
-			return fmt.Errorf("ValidateConfig: \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
+			return fmt.Errorf("ValidateConfig: \"%s\" is missing required attributes:\n%v", cfgfile, err)
 		} else {
 			if tdns.Globals.Debug {
 				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
@@ -167,7 +167,7 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 
 		validate := validator.New()
 		if err := validate.Struct(&config); err != nil {
-			return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
+			return fmt.Errorf("config \"%s\" is missing required attributes:\n%v", cfgfile, err)
 		} else {
 			if tdns.Globals.Debug {
 				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
@@ -638,7 +638,7 @@ func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (
 	// A sidecar auto zone needs to be signed by the sidecar.
 	zd.Options[tdns.OptOnlineSigning] = true
 	if tmp, exists := tconf.Internal.DnssecPolicies["default"]; !exists {
-		return nil, fmt.Errorf("SetupSidecarAutoZone: DnssecPolicy 'default' not defined. Default policy is required for sidecar auto zones.")
+		return nil, fmt.Errorf("SetupSidecarAutoZone: DnssecPolicy 'default' not defined. Default policy is required for sidecar auto zones")
 	} else {
 		zd.DnssecPolicy = &tmp
 	}

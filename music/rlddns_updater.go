@@ -86,11 +86,11 @@ func RLDdnsUpdate(udop SignerOp) (bool, int, error) {
 
 	var err error
 	if inserts_len == 0 && removes_len == 0 {
-		err = fmt.Errorf("Inserts and removes empty, nothing to do")
+		err = fmt.Errorf("inserts and removes empty, nothing to do")
 	} else if signer.Address == "" {
-		err = fmt.Errorf("No ip|host for signer %s", signer.Name)
+		err = fmt.Errorf("no ip|host for signer %s", signer.Name)
 	} else if signer.Auth.TSIGKey == "" {
-		err = fmt.Errorf("No TSIG for signer %s", signer.Name)
+		err = fmt.Errorf("no TSIG for signer %s", signer.Name)
 	}
 
 	if err != nil {
@@ -158,10 +158,10 @@ func RLDdnsRemoveRRset(udop SignerOp) (bool, int, error) {
 	}
 
 	if signer.Address == "" {
-		err = fmt.Errorf("No ip|host for signer %s", signer.Name)
+		err = fmt.Errorf("no ip|host for signer %s", signer.Name)
 	}
 	if signer.Auth.TSIGKey == "" {
-		err = fmt.Errorf("No TSIG for signer %s", signer.Name)
+		err = fmt.Errorf("no TSIG for signer %s", signer.Name)
 	}
 
 	if err != nil {
@@ -194,7 +194,7 @@ func RLDdnsRemoveRRset(udop SignerOp) (bool, int, error) {
 }
 
 func (u *RLDdnsUpdater) FetchRRset(s *Signer, zone, owner string,
-	rrtype uint16) (error, []dns.RR) {
+	rrtype uint16) ([]dns.RR, error) {
 
 	// fmt.Printf("rlddns.FetchRRset: received query for '%s %s'\n", owner, dns.TypeToString[rrtype])
 
@@ -209,7 +209,7 @@ func (u *RLDdnsUpdater) FetchRRset(s *Signer, zone, owner string,
 	time.Sleep(1 * time.Second)
 	resp := <-op.Response
 	// fmt.Printf("rlddns.FetchRRset: response received, returning\n")
-	return resp.Error, resp.RRs
+	return resp.RRs, resp.Error
 }
 
 func RLDdnsFetchRRset(fdop SignerOp) (bool, int, error) {
@@ -220,10 +220,10 @@ func RLDdnsFetchRRset(fdop SignerOp) (bool, int, error) {
 
 	// fmt.Printf("RLDdnsFetchRRset: received query for '%s %s'\n", owner, dns.TypeToString[rrtype])
 	if signer.Address == "" {
-		err = fmt.Errorf("No ip|host for signer %s", signer.Name)
+		err = fmt.Errorf("no ip|host for signer %s", signer.Name)
 	}
 	if signer.Auth.TSIGKey == "" {
-		err = fmt.Errorf("No TSIG for signer %s", signer.Name)
+		err = fmt.Errorf("no TSIG for signer %s", signer.Name)
 	}
 
 	if err != nil {
@@ -248,7 +248,7 @@ func RLDdnsFetchRRset(fdop SignerOp) (bool, int, error) {
 	}
 
 	if r.MsgHdr.Rcode != dns.RcodeSuccess {
-		err = fmt.Errorf("Fetch of %s RRset failed, RCODE = %s",
+		err = fmt.Errorf("fetch of %s RRset failed, RCODE = %s",
 			dns.TypeToString[rrtype],
 			dns.RcodeToString[r.MsgHdr.Rcode])
 		// fmt.Printf("RLDdnsFetchRRset: Rcode error: %v. Returning response chan + call stack\n", err)
