@@ -1,0 +1,14 @@
+# A basic test emulating a client getting two A records for a response and then
+# extracts the IP addresses from that response.
+mqueue:
+  - - "example.com. 190 IN A 23.192.228.84"
+    - "example.com. 300 IN A 96.7.128.175"
+expected:
+  - "23.192.228.84"
+  - "96.7.128.175"
+fetcher: "getFromBucket"
+checker: "orderedSliceCompare"
+runs: 1
+config:
+  nameserver: "127.0.0.1"
+  port: "53534"
