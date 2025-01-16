@@ -5,15 +5,24 @@
 package music
 
 import (
-	//	"github.com/johanix/tdns/music"
-	"github.com/go-playground/validator/v10"
+	"log"
+	"os"
+
+	tdns "github.com/johanix/tdns/tdns"
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
-var Validate *validator.Validate
+// var Validate *validator.Validate
+var Validate *tdns.CustomValidator
 
 func init() {
-	Validate = validator.New()
+	var err error
+	// Validate = validator.New()
+	Validate, err = tdns.NewCustomValidator()
+	if err != nil {
+		log.Printf("Error from NewCustomValidator(): %+v", err)
+		os.Exit(1)
+	}
 }
 
 type GlobalStuff struct {
