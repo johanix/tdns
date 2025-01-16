@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var childSig0Name, childSig0Src string
+var childSig0Src string
 
 var TruststoreCmd = &cobra.Command{
 	Use:   "truststore",
@@ -214,7 +214,7 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 	status, buf, err := api.Post("/truststore", bytebuf.Bytes())
 	if err != nil {
 		log.Println("Error from Api Post:", err)
-		return tr, fmt.Errorf("Error from api post: %v", err)
+		return tr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -222,11 +222,11 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 
 	err = json.Unmarshal(buf, &tr)
 	if err != nil {
-		return tr, fmt.Errorf("Error from unmarshal: %v\n", err)
+		return tr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 
 	if tr.Error {
-		return tr, fmt.Errorf("Error from tdnsd: %s\n", tr.ErrorMsg)
+		return tr, fmt.Errorf("error from tdnsd: %s", tr.ErrorMsg)
 	}
 
 	return tr, nil

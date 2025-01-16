@@ -211,7 +211,7 @@ func CreateUpdate(updateType string) {
 				}
 				return m, nil
 			}
-			return nil, fmt.Errorf("no SIG(0) private key for zone %s found in keystore. Signing not possible.", signer)
+			return nil, fmt.Errorf("no SIG(0) private key for zone %s found in keystore. Signing not possible", signer)
 		}
 	}
 
@@ -338,12 +338,12 @@ cmdloop:
 
 			fmt.Printf("Sending update to %s\n", server)
 			dump.P(msg)
-			rcode, err, ur := tdns.SendUpdate(msg, zone, []string{server})
-			PrintUpdateResult(ur)
+			rcode, ur, err := tdns.SendUpdate(msg, zone, []string{server})
 			if err != nil {
 				fmt.Printf("Error sending update: %v\n", err)
 				continue
 			}
+			PrintUpdateResult(ur)
 			fmt.Printf("Update sent, rcode: %d (%s)\n", rcode, dns.RcodeToString[rcode])
 
 			adds = []dns.RR{}

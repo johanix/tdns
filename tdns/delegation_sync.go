@@ -81,7 +81,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 					}
 				}
 
-				msg, rcode, err, ur := zd.SyncZoneDelegation(kdb, notifyq, ds.SyncStatus)
+				msg, rcode, ur, err := zd.SyncZoneDelegation(kdb, notifyq, ds.SyncStatus)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 					continue
@@ -113,7 +113,7 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, err, ur := zd.SyncZoneDelegation(kdb, notifyq, syncstate)
+				msg, rcode, ur, err := zd.SyncZoneDelegation(kdb, notifyq, syncstate)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
 					syncstate.Error = true
@@ -193,7 +193,7 @@ func (zd *ZoneData) DelegationSyncSetup(kdb *KeyDB) error {
 	// 4. There is a KEY RRset, we have tried to sign it if possible. But has it been uploaded to the parent?
 	// XXX: This is a bit of a hack, but we need to bootstrap the parent with the child's SIG(0) key. In the future
 	// we should keep state of whether successful key bootstrapping has been done or not in the keystore.
-	msg, err, ur := zd.BootstrapSig0KeyWithParent(alg)
+	msg, ur, err := zd.BootstrapSig0KeyWithParent(alg)
 	if err != nil {
 		log.Printf("DelegationSyncSetup: Zone %s: Error from BootstrapSig0KeyWithParent(): %v.", zd.ZoneName, err)
 		for _, tes := range ur.TargetStatus {
@@ -309,7 +309,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 
 		if len(sak.Keys) == 0 {
 			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible.", name, zd.ZoneName)
-			return fmt.Errorf("no active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible.", name, zd.ZoneName)
+			return fmt.Errorf("no active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible", name, zd.ZoneName)
 		}
 		log.Printf("Sig0KeyPreparation: Publishing '%s KEY' RR in zone %s", name, zd.ZoneName)
 		err = zd.PublishKeyRRs(sak)
@@ -329,7 +329,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 // tdns.DelegationDataChanged() is used for implicit delegation synchronization.
 
 // SyncZoneDelegation() is used for delegation synchronization request via API.
-func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus) (string, uint8, error, UpdateResult) {
+func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus) (string, uint8, UpdateResult, error) {
 
 	//	syncstate, err := AnalyseZoneDelegation(conf, zd)
 	//	if err != nil {
@@ -338,7 +338,7 @@ func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, s
 
 	if syncstate.InSync {
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
-			syncstate.ZoneName, zd.Parent), 0, nil, UpdateResult{}
+			syncstate.ZoneName, zd.Parent), 0, UpdateResult{}, nil
 	} else {
 		log.Printf("Zone \"%s\" delegation data in parent \"%s\" is NOT in sync. Sync action needed.",
 			syncstate.ZoneName, zd.Parent)
@@ -364,7 +364,7 @@ func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, s
 	scheme, dsynctarget, err := zd.BestSyncScheme()
 	if err != nil {
 		log.Printf("DelegationSyncEngine: Zone %s: Error from BestSyncScheme(): %v. Ignoring sync request.", zd.ZoneName, err)
-		return "", 0, err, UpdateResult{}
+		return "", 0, UpdateResult{}, err
 	}
 
 	var msg string
@@ -373,16 +373,16 @@ func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, s
 
 	switch scheme {
 	case "UPDATE":
-		msg, rcode, err, ur = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, dsynctarget)
+		msg, rcode, ur, err = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, dsynctarget)
 	case "NOTIFY":
 		msg, rcode, err = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, dsynctarget)
 	}
 
-	return msg, rcode, err, ur
+	return msg, rcode, ur, err
 }
 
 func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate DelegationSyncStatus,
-	dsynctarget *DsyncTarget) (string, uint8, error, UpdateResult) {
+	dsynctarget *DsyncTarget) (string, uint8, UpdateResult, error) {
 
 	// dump.P(syncstate)
 
@@ -403,7 +403,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	// dump.P(syncstate)
 	m, err := CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
 	if err != nil {
-		return "", 0, err, UpdateResult{}
+		return "", 0, UpdateResult{}, err
 	}
 
 	// 3. Fetch the SIG(0) key from the keystore
@@ -411,11 +411,11 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0Keys(%s, %s): %v", zd.ZoneName, Sig0StateActive, err)
-		return "", 0, err, UpdateResult{}
+		return "", 0, UpdateResult{}, err
 	}
 	if len(sak.Keys) == 0 {
 		log.Printf("SyncZoneDelegationViaUpdate: No active SIG(0) key found for zone %s", zd.ZoneName)
-		return "", 0, fmt.Errorf("no active SIG(0) key found for zone %s", zd.ZoneName), UpdateResult{}
+		return "", 0, UpdateResult{}, fmt.Errorf("no active SIG(0) key found for zone %s", zd.ZoneName)
 	}
 
 	// 4. Sign the msg
@@ -423,21 +423,21 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	smsg, err := SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
-		return "", 0, err, UpdateResult{}
+		return "", 0, UpdateResult{}, err
 	}
 	if smsg == nil {
 		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
-		return "", 0, err, UpdateResult{}
+		return "", 0, UpdateResult{}, err
 	}
 
 	// 5. Send the msg
 	log.Printf("SyncZoneDelegationViaUpdate: Sending the signed update to %s (addresses: %v) port %d",
 		dsynctarget.Name, dsynctarget.Addresses, dsynctarget.Port)
 
-	rcode, err, ur := SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
+	rcode, ur, err := SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
 		log.Printf("Error from SendUpdate(%s): %v", zd.Parent, err)
-		return "", 0, err, ur
+		return "", 0, ur, err
 	}
 	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
 	log.Print(msg)
@@ -448,7 +448,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	// 6. Check the response
 	// 7. Return result to CLI
 
-	return msg, uint8(rcode), err, ur
+	return msg, uint8(rcode), ur, err
 }
 
 func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus,

@@ -263,7 +263,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 
 		case "bootstrap-sig0-key":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
-			resp.Msg, err, resp.UpdateResult = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
+			resp.Msg, resp.UpdateResult, err = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -281,7 +281,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 			case "update-local":
 				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: UPDATING LOCAL KEYSTORE", zd.ZoneName)
 			}
-			resp.Msg, resp.OldKeyID, resp.NewKeyID, err, resp.UpdateResult = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action, zdp.OldKeyID, zdp.NewKeyID)
+			resp.Msg, resp.OldKeyID, resp.NewKeyID, resp.UpdateResult, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action, zdp.OldKeyID, zdp.NewKeyID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

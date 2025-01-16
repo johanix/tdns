@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -612,7 +611,7 @@ func (zd *ZoneData) NotifyDownstreams() error {
 	// zd.Logger.Printf("NotifyDownstreams: Zone %s has downstreams: %v", zd.ZoneName, zd.Downstreams)
 	if zd == nil {
 		zd.Logger.Printf("Error: zonedata is nil")
-		return fmt.Errorf("ZoneData is nil.")
+		return fmt.Errorf("zonedata is nil")
 	}
 	for _, d := range zd.Downstreams {
 
@@ -916,8 +915,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
 	if zd.Options[OptDirty] {
-		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
-		return msg, fmt.Errorf(msg)
+		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
 	}
 
 	var respch = make(chan RefresherResponse, 1)
@@ -992,7 +990,7 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 		// XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
 		//      I.e. a broken config with an in-bailiwick NS w/o any address.
 		if owner == nil {
-			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName)
+			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName, nsname)
 			continue
 		}
 
@@ -1008,6 +1006,11 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 		}
 	}
 	return &dd, nil
+}
+
+func isValidIP(addr string) bool {
+	ip := net.ParseIP(addr)
+	return ip != nil
 }
 
 func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
@@ -1044,6 +1047,10 @@ $TTL 86400
 
 	log.Printf("CreateAutoZone: adding NS RRs for addresses: %v", addrs)
 	for _, addr := range addrs {
+		if !isValidIP(addr) {
+			log.Printf("CreateAutoZone: invalid IP address: %s", addr)
+			return nil, fmt.Errorf("invalid IP address: %s", addr)
+		}
 		if strings.Contains(addr, ":") {
 			// IPv6 address
 			zonedatastr += fmt.Sprintf("ns.%s IN AAAA %s\n", zonename, addr)
@@ -1079,8 +1086,10 @@ $TTL 86400
 // Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
 func (tconf *Config) FindNameserverAddrs() ([]string, error) {
 	addrs := []string{}
-	log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
-	dump.P(tconf.DnsEngine)
+	if Globals.Debug {
+		log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
+		// dump.P(tconf.DnsEngine)
+	}
 	for _, ns := range tconf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {

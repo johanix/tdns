@@ -52,12 +52,9 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 	if !viper.GetBool("syncengine.active") {
 		log.Printf("MusicSyncEngine is NOT active. No detection of of communication with other music-sidecars will be done.")
-		for {
-			select {
-			case <-syncQ: // ensure that we keep reading to keep the
-				log.Printf("MusicSyncEngine: NOT active, butreceived a sync request: %+v", syncitem)
-				continue // channel open (otherwise other parts of MUSIC
-			} // may block)
+		for range syncQ {
+			log.Printf("MusicSyncEngine: NOT active, but received a sync request: %+v", syncitem)
+			continue // ensure that we keep reading to keep the channel open (otherwise other parts of MUSIC may block)
 		}
 	}
 
@@ -128,6 +125,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 				err := sidecars.UpdateSidecars(ourSidecarId, wannabe_sidecars, syncitem, mszones, zonename)
 				if err != nil {
+					// XXX: Handle error.
 					log.Printf("MusicSyncEngine: Error sending HELLO message: %v", err)
 				}
 
@@ -288,6 +286,10 @@ func (s *Sidecar) SendHello() error {
 
 	// dump.P(s)
 	if s.Methods["API"] {
+		if _, exists := s.Details[tdns.MsignerMethodAPI]; !exists {
+			log.Printf("SendHello: Details for API method is nil for sidecar %s", s.Identity)
+			return fmt.Errorf("API details not available for sidecar %s", s.Identity)
+		}
 		log.Printf("Sending HELLO message to sidecar %s via API method (baseuri: %s)", s.Identity, s.Details[tdns.MsignerMethodAPI].BaseUri)
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{

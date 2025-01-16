@@ -50,7 +50,8 @@ func MainLoop(conf *Config) {
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
 				all_zones, err = ParseZones(conf, conf.Internal.RefreshZoneCh, true) // true = reload
 				if err != nil {
-					log.Fatalf("Error parsing zones: %v", err)
+					log.Printf("Error parsing zones: %v", err)
+					return // terminate MainLoop --> shutdown
 				} else {
 					log.Printf("mainloop: SIGHUP received. Forcing refresh of %d configured zones.", len(all_zones))
 				}

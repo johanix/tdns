@@ -125,14 +125,14 @@ func ParseConfig(conf *Config, reload bool) error {
 
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
 			// log.Fatalf("Error: DnssecPolicy 'default' not defined. Default policy is required.")
-			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required.")
+			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
 		}
 
 		// dump.P(conf.Internal.DnssecPolicies)
 	}
 
 	var dpn []string
-	for name, _ := range conf.Internal.DnssecPolicies {
+	for name := range conf.Internal.DnssecPolicies {
 		dpn = append(dpn, name)
 	}
 	log.Printf("*** ParseConfig: DnssecPolicy configs: %v", dpn)
@@ -162,7 +162,7 @@ func ParseConfig(conf *Config, reload bool) error {
 	}
 
 	var msc []string
-	for name, _ := range conf.MultiSigner {
+	for name := range conf.MultiSigner {
 		msc = append(msc, name)
 	}
 	log.Printf("*** ParseConfig: MultiSigner configs: %v", msc)

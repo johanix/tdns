@@ -102,8 +102,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)
 					// XXX: We want to do this in parallel
 					// go func() {
-					dp, _ := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
-					msc, _ := conf.MultiSigner[zr.MultiSigner]
+					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
+					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
 						ZoneName:        zone,
 						ZoneStore:       zr.ZoneStore,

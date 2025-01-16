@@ -133,25 +133,6 @@ func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force 
 // XXX: Perhaps a working algorithm woul be to test for the remaining signature lifetime to be something like
 //
 //	less than 3 x resigning interval?
-func (rrset *RRset) xxxNeedsResigning(force bool) bool {
-	if len(rrset.RRSIGs) == 0 {
-		return true
-	}
-
-	for _, oldsig := range rrset.RRSIGs {
-		inceptionTime := time.Unix(int64(oldsig.(*dns.RRSIG).Inception), 0)
-		expirationTime := time.Unix(int64(oldsig.(*dns.RRSIG).Expiration), 0)
-
-		if time.Until(expirationTime) < 3*time.Duration(viper.GetInt("resignerengine.interval")) {
-			return true
-		}
-		if (time.Since(inceptionTime) < time.Hour) && !force {
-			return false
-		}
-	}
-	return true
-}
-
 func NeedsResigning(rrsig *dns.RRSIG) bool {
 	// here we should check is enough lifetime is left for the RRSIG
 	// to be valid.
