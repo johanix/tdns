@@ -15,7 +15,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/go-playground/validator/v10"
 	"github.com/gookit/goutil/dump"
 	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
@@ -39,7 +38,7 @@ type Config struct {
 }
 
 type SidecarConf struct {
-	Identity string `validate:"required,hostname"`
+	Identity string `validate:"required,fqdn"`
 	Api      SidecarApiConf
 	Dns      SidecarDnsConf
 }
@@ -134,54 +133,45 @@ type InternalConf struct {
 	MusicSyncStatusQ chan MusicSyncStatus
 }
 
-func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) error {
-	var config Config
+// func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) error {
+func ValidateConfig(mconf *Config, cfgfile, appMode string, safemode bool) error {
+	// var config Config
 
-	if safemode {
-		if v == nil {
-			return fmt.Errorf("ValidateConfig: cannot use safe mode with nil viper")
-		} else {
-			if err := v.Unmarshal(&config); err != nil {
-				return fmt.Errorf("ValidateConfig: unable to unmarshal the config %v", err)
-			}
-		}
+	// validate := validator.New()
+	validate, err := tdns.NewCustomValidator()
+	if err != nil {
+		return fmt.Errorf("ValidateConfig: error creating custom validator: %v", err)
+	}
 
-		validate := validator.New()
-		if err := validate.Struct(&config); err != nil {
-			return fmt.Errorf("ValidateConfig: \"%s\" is missing required attributes:\n%v", cfgfile, err)
-		} else {
-			if tdns.Globals.Debug {
-				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
-			}
-		}
+	//	if safemode && v == nil {
+	//		return fmt.Errorf("ValidateConfig: cannot use safe mode with nil viper")
+	//	}
+
+	//	if v != nil {
+	//		if err := v.Unmarshal(&config); err != nil {
+	//			return fmt.Errorf("ValidateConfig: unable to unmarshal the config %v", err)
+	//		}
+	//	} else {
+	//		if err := viper.Unmarshal(&config); err != nil {
+	//			return fmt.Errorf("ValidateConfig: unable to unmarshal the config %v", err)
+	//		}
+	//	}
+
+	//	if err := validate.Struct(&config); err != nil {
+	if err := validate.Struct(mconf); err != nil {
+		return fmt.Errorf("ValidateConfig: \"%s\" is missing required attributes:\n%v", cfgfile, err)
 	} else {
-		if v == nil {
-			if err := viper.Unmarshal(&config); err != nil {
-				return fmt.Errorf("unable to unmarshal the config %v", err)
-			}
-		} else {
-			if err := v.Unmarshal(&config); err != nil {
-				return fmt.Errorf("unable to unmarshal the config %v", err)
-			}
+		if tdns.Globals.Debug {
+			fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
 		}
-
-		validate := validator.New()
-		if err := validate.Struct(&config); err != nil {
-			return fmt.Errorf("config \"%s\" is missing required attributes:\n%v", cfgfile, err)
-		} else {
-			if tdns.Globals.Debug {
-				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
-			}
-		}
-		// fmt.Printf("config: %v\n", config)
 	}
 
 	if appMode != "sidecar-cli" && appMode != "tdns-cli" {
 		// Verify that we have a MUSIC DB file.
-		if _, err := os.Stat(config.Db.File); os.IsNotExist(err) {
-			log.Printf("ValidateConfig: MUSIC DB file '%s' does not exist.", config.Db.File)
-			log.Printf("Please initialize MUSIC DB using 'sidecar-cli music db init -f %s'.", config.Db.File)
-			return fmt.Errorf("ValidateConfig: MUSIC DB file '%s' does not exist", config.Db.File)
+		if _, err := os.Stat(mconf.Db.File); os.IsNotExist(err) {
+			log.Printf("ValidateConfig: MUSIC DB file '%s' does not exist.", mconf.Db.File)
+			log.Printf("Please initialize MUSIC DB using 'sidecar-cli music db init -f %s'.", mconf.Db.File)
+			return fmt.Errorf("ValidateConfig: MUSIC DB file '%s' does not exist", mconf.Db.File)
 		}
 	}
 	return nil
@@ -225,7 +215,8 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 			return err
 		}
 
-		err = ValidateConfig(tmpviper, cfgfile, appMode, true) // will not terminate on error
+		//		err = ValidateConfig(tmpviper, cfgfile, appMode, true) // will not terminate on error
+		err = ValidateConfig(mconf, cfgfile, appMode, true) // will not terminate on error
 		if err != nil {
 			return err
 		}
@@ -262,16 +253,16 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 		log.Fatalf("Could not load config (%s)", err)
 	}
 
-	err = ValidateConfig(nil, cfgfile, appMode, false) // will terminate on error
-	if err != nil {
-		return err
-	}
-
+	// johani testing
 	err = viper.Unmarshal(&mconf)
 	if err != nil {
 		log.Fatalf("Error unmarshalling MUSIC config into struct: %v", err)
 	}
-	// dump.P(mconf.Sidecar)
+
+	err = ValidateConfig(mconf, cfgfile, appMode, false) // will terminate on error
+	if err != nil {
+		return err
+	}
 
 	TokVip = viper.New()
 	var tokenfile string

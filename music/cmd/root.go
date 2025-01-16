@@ -35,22 +35,23 @@ func InitConfig() {
 	}
 
 	// Load MUSIC config; note that this must be after the TDNS config has been parsed and use viper.MergeConfig()
-	if err := music.LoadMusicConfig(&mconf, "sidecar-cli", false); err == nil {
+	err := viper.Unmarshal(&mconf)
+	if err != nil {
+		log.Fatalf("Error unmarshalling MUSIC config: %v", err)
+	}
+	// dump.P(mconf)
+	if err = music.LoadMusicConfig(&mconf, "sidecar-cli", false); err == nil {
 		if tdns.Globals.Verbose {
 			fmt.Println("Using MUSIC config file:", music.DefaultSidecarCfgFile)
-		}
-		err = viper.Unmarshal(&mconf)
-		if err != nil {
-			log.Fatalf("Error unmarshalling MUSIC config: %v", err)
 		}
 	} else {
 		log.Fatalf("Error loading MUSIC config: %v", err)
 	}
 
 	// Validate the MUSIC config; music.Validate is initialized in music/globals.go
-	if err := music.Validate.Struct(&mconf); err != nil {
-		log.Fatalf("Config '%s' is missing required attributes:\n%v\n", music.DefaultSidecarCfgFile, err)
-	}
+	// if err := music.Validate.Struct(&mconf); err != nil {
+	// 	log.Fatalf("Config '%s' is missing required attributes:\n%v\n", music.DefaultSidecarCfgFile, err)
+	// }
 }
 
 func InitApi() {
