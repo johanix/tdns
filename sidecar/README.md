@@ -1,19 +1,19 @@
-# MUSIC-SIDECAR
+# TDNS-SIDECAR
 
-**MUSIC-SIDECAR** is a version of **MUSICD** that is intended for
+**TDNS-SIDECAR** is a version of **MUSICD** that is intended for
 distributed operation. The idea is to have one "sidecar" next to each
 DNSSEC signer.
 
-The **MUSIC-SIDECAR** must be configured as a secondary from the
+The **TDNS-SIDECAR** must be configured as a secondary from the
 signers POV, i.e. NOTIFIES must be sent and zone transfer requests
 from the sidecar responded to.
 
 The intent is to enable zones that have a well-working zone production
-pipeline, including signers, to easily attach the *music-sidecar* as
+pipeline, including signers, to easily attach the *tdns-sidecar* as
 an additional secondary and thereby gain access to the MUSIC
 multi-signer features without the need to modify the zone production.
 
-Technically **MUSIC-SIDECAR** is implemented as a modified **MUSICD**
+Technically **TDNS-SIDECAR** is implemented as a modified **MUSICD**
 that is linked against the TDNS library. The library provides an
 implementation of all the DNS-server pieces.
 
@@ -37,15 +37,15 @@ Usage model:
 
 3.  
 
-Design constraints for the MUSIC-SIDECAR:
+Design constraints for TDNS-SIDECAR:
 
 1. Essentially all configuration errors should be fatal. There is no
    point to an agent that is running on a partially broken config.
 
-2. The **music-sidecar** can only act as a secondary for zones. Any primary zone in the
-   configuration should cause the sidecar to terminate.
+2. The **tdns-sidecar** can only act as a secondary for zones. Any
+   primary zone in the configuration should cause the sidecar to terminate.
 
-3. MUSIC-SIDECAR can not make modifications to zones. I.e. the TDNS options
+3. TDNS-SIDECAR can not make modifications to zones. I.e. the TDNS options
    online-signing, publish-key, allow-updates and allow-child-updates are
    errors and should cause the sidecar to terminate.
 

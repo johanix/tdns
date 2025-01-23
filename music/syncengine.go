@@ -51,7 +51,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	mconf.Internal.MusicSyncStatusQ = make(chan MusicSyncStatus, 10)
 
 	if !viper.GetBool("syncengine.active") {
-		log.Printf("MusicSyncEngine is NOT active. No detection of of communication with other music-sidecars will be done.")
+		log.Printf("MusicSyncEngine is NOT active. No detection of of communication with other tdns-sidecars will be done.")
 		for range syncQ {
 			log.Printf("MusicSyncEngine: NOT active, but received a sync request: %+v", syncitem)
 			continue // ensure that we keep reading to keep the channel open (otherwise other parts of MUSIC may block)
@@ -156,11 +156,11 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 			}
 
 		case <-HBticker.C:
-			log.Printf("MusicSyncEngine: Heartbeat ticker. Contacting other known music-sidecars.")
+			log.Printf("MusicSyncEngine: Heartbeat ticker. Contacting other known tdns-sidecars.")
 			ReportProgress()
 
 		case <-fullHBticker.C:
-			log.Printf("MusicSyncEngine: Full Heartbeat ticker. Contacting other known music-sidecars with complete zone lists.")
+			log.Printf("MusicSyncEngine: Full Heartbeat ticker. Contacting other known tdns-sidecars with complete zone lists.")
 			ReportProgress()
 
 		case <-HelloEvalTicker.C:

@@ -23,7 +23,7 @@ var LocalConfig string
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
-	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
+	Short: "tdns-cli is a tool used to interact with the tdns-server nameserver or tdns-agent via API",
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -33,6 +33,7 @@ func Execute() {
 }
 
 func init() {
+	fmt.Println("root/init")
 	cobra.OnInitialize(initConfig, initApi)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
@@ -58,7 +59,7 @@ func initConfig() {
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
-
+	fmt.Println("root/initConfig 1")
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
 		if tdns.Globals.Verbose {
@@ -69,6 +70,7 @@ func initConfig() {
 		log.Fatalf("Could not load config %s: Error: %v", tdns.DefaultCfgFile, err)
 	}
 
+	fmt.Println("root/initConfig 2")
 	LocalConfig = viper.GetString("cli.localconfig")
 	if LocalConfig != "" {
 		_, err := os.Stat(LocalConfig)
@@ -88,7 +90,7 @@ func initConfig() {
 		}
 		viper.SetConfigFile(LocalConfig)
 	}
-
+	fmt.Println("root/initConfig 3")
 	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
 }
 
