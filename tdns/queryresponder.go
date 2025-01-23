@@ -22,6 +22,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 }
 
 var standardDNSTypes = map[uint16]bool{
+	dns.TypeSOA:        true,
 	dns.TypeMX:         true,
 	dns.TypeTLSA:       true,
 	dns.TypeSRV:        true,
@@ -43,7 +44,7 @@ var standardDNSTypes = map[uint16]bool{
 	dns.TypeCDNSKEY:    true,
 }
 
-func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
+func (zd *ZoneData) xxxApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		log.Printf("ApexResponder: failed to get dnssec key for zone %s", zd.ZoneName)
@@ -88,7 +89,7 @@ func (zd *ZoneData) ApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string
 
 	switch qtype {
 	case dns.TypeAXFR, dns.TypeIXFR:
-		log.Printf("We have the %s %s, so let's try to serve it", ZoneStoreToString[zd.ZoneStore], qname)
+		log.Printf("We are AUTH for %s %s, so let's try to serve it", ZoneStoreToString[zd.ZoneStore], qname)
 		zd.ZoneTransferOut(w, r)
 		return nil
 
@@ -375,17 +376,15 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	// 2. Check for exact match qname+qtype
 	log.Printf("---> Checking for exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
-	//	switch qtype {
-	//	case // Standard DNS types
-	//		dns.TypeNS, dns.TypeTXT, dns.TypeMX, dns.TypeA, dns.TypeAAAA, dns.TypeSRV, dns.TypeCNAME, dns.TypeSOA, dns.TypeKEY,
-	// TDNS special DNS types
-	//		TypeNOTIFY, TypeDSYNC, TypeDELEG, TypeMSIGNER,
-	// DNSSEC types
-	//		dns.TypeDS, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeCSYNC,
-	// some modern DNS types
-	//		dns.TypeURI, dns.TypeSVCB, dns.TypeHTTPS, dns.TypeTLSA, dns.TypeCAA:
+
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
-		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(owner.RRtypes.GetOnlyRRSet(qtype).RRs) > 0 {
+		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(rrset.RRs) > 0 {
+			if qtype == dns.TypeSOA {
+				soaRR := rrset.RRs[0].(*dns.SOA)
+				soaRR.Serial = zd.CurrentSerial
+				owner.RRtypes.Set(qtype, RRset{RRs: []dns.RR{soaRR}})
+				rrset.RRs[0] = soaRR
+			}
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
 				m.Answer = append(m.Answer, rrset.RRs...)
@@ -436,6 +435,40 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		}
 		w.WriteMsg(m)
 		return nil
+	}
+
+	if qtype == dns.TypeSOA && qname == zd.ZoneName {
+		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
+		zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs),
+			zd.ZoneName, soaRRset)
+		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+
+		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
+		m.Extra = append(m.Extra, v4glue.RRs...)
+		m.Extra = append(m.Extra, v6glue.RRs...)
+		if dnssec_ok {
+			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
+			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
+			m.Extra = append(m.Extra, v4glue.RRSIGs...)
+			m.Extra = append(m.Extra, v6glue.RRSIGs...)
+		}
+	}
+
+	// AXFR and IXFR are handled by the zone transfer code
+	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
+		if qname == zd.ZoneName {
+			log.Printf("We have the %s %s, so let's try to serve it", ZoneStoreToString[zd.ZoneStore], qname)
+			zd.ZoneTransferOut(w, r)
+			return nil
+		} else {
+			m.MsgHdr.Rcode = dns.RcodeNotAuth
+			w.WriteMsg(m)
+			return nil
+		}
 	}
 
 	// Final catch everything we don't want to deal with

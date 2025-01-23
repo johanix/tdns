@@ -136,24 +136,19 @@ type InternalConf struct {
 
 func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) error {
 	var config Config
-	var msg string
 
 	if safemode {
 		if v == nil {
-			return errors.New("ValidateConfig: cannot use safe mode with nil viper")
+			return fmt.Errorf("ValidateConfig: cannot use safe mode with nil viper")
 		} else {
 			if err := v.Unmarshal(&config); err != nil {
-				msg = fmt.Sprintf("ValidateConfig: unable to unmarshal the config %v",
-					err)
-				return errors.New(msg)
+				return fmt.Errorf("ValidateConfig: unable to unmarshal the config %v", err)
 			}
 		}
 
 		validate := validator.New()
 		if err := validate.Struct(&config); err != nil {
-			msg = fmt.Sprintf("ValidateConfig: \"%s\" is missing required attributes:\n%v\n",
-				cfgfile, err)
-			return errors.New(msg)
+			return fmt.Errorf("ValidateConfig: \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
 		} else {
 			if tdns.Globals.Debug {
 				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
@@ -162,17 +157,17 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 	} else {
 		if v == nil {
 			if err := viper.Unmarshal(&config); err != nil {
-				log.Fatalf("unable to unmarshal the config %v", err)
+				return fmt.Errorf("unable to unmarshal the config %v", err)
 			}
 		} else {
 			if err := v.Unmarshal(&config); err != nil {
-				log.Fatalf("unable to unmarshal the config %v", err)
+				return fmt.Errorf("unable to unmarshal the config %v", err)
 			}
 		}
 
 		validate := validator.New()
 		if err := validate.Struct(&config); err != nil {
-			log.Fatalf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
+			return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v\n", cfgfile, err)
 		} else {
 			if tdns.Globals.Debug {
 				fmt.Printf("ValidateConfig: %s config in \"%s\" validated successfully\n", appMode, cfgfile)
@@ -186,7 +181,7 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 		if _, err := os.Stat(config.Db.File); os.IsNotExist(err) {
 			log.Printf("ValidateConfig: MUSIC DB file '%s' does not exist.", config.Db.File)
 			log.Printf("Please initialize MUSIC DB using 'sidecar-cli music db init -f %s'.", config.Db.File)
-			return errors.New("ValidateConfig: MUSIC DB file does not exist")
+			return fmt.Errorf("ValidateConfig: MUSIC DB file '%s' does not exist", config.Db.File)
 		}
 	}
 	return nil

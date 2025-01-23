@@ -85,34 +85,34 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
 
-			if zd, ok := Zones.Get(qname); ok {
-				// The qname is equal to the name of a zone we are authoritative for
-				err := zd.ApexResponder(w, r, qname, qtype, dnssec_ok, kdb)
-				if err != nil {
-					log.Printf("Error in ApexResponder: %v", err)
-				}
-				return
-			}
+			// if zd, ok := Zones.Get(qname); ok {
+			// The qname is equal to the name of a zone we are authoritative for
+			// err := zd.ApexResponder(w, r, qname, qtype, dnssec_ok, kdb)
+			// if err != nil {
+			// 	log.Printf("Error in ApexResponder: %v", err)
+			// }
+			// return
+			// }
 
 			// Let's try case folded
-			lcqname := strings.ToLower(qname)
-			if zd, ok := Zones.Get(lcqname); ok {
-				// The qname is equal to the name of a zone we are authoritative for
-				err := zd.ApexResponder(w, r, lcqname, qtype, dnssec_ok, kdb)
-				if err != nil {
-					log.Printf("Error in ApexResponder: %v", err)
-				}
-				return
-			}
+			// lcqname := strings.ToLower(qname)
+			// if zd, ok := Zones.Get(lcqname); ok {
+			// The qname is equal to the name of a zone we are authoritative for
+			// err := zd.ApexResponder(w, r, lcqname, qtype, dnssec_ok, kdb)
+			// if err != nil {
+			// 	log.Printf("Error in ApexResponder: %v", err)
+			// }
+			// return
+			// }
 
-			if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
-				// We are not authoritative for this zone, so no xfrs possible
-				m := new(dns.Msg)
-				m.SetReply(r)
-				m.MsgHdr.Rcode = dns.RcodeNotAuth
-				w.WriteMsg(m)
-				return
-			}
+			// if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
+			// 	// We are not authoritative for this zone, so no xfrs possible
+			// 	m := new(dns.Msg)
+			// 	m.SetReply(r)
+			// 	m.MsgHdr.Rcode = dns.RcodeNotAuth
+			// 	w.WriteMsg(m)
+			// 	return
+			// }
 
 			log.Printf("DnsHandler: Qname is '%s', which is not a known zone.", qname)
 			// known_zones := append([]string{}, tdns.Zones.Keys()...)

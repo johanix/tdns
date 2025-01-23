@@ -128,6 +128,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 				err := sidecars.UpdateSidecars(ourSidecarId, wannabe_sidecars, syncitem, mszones, zonename)
 				if err != nil {
+					// XXX: Handle error.
 					log.Printf("MusicSyncEngine: Error sending HELLO message: %v", err)
 				}
 
@@ -288,6 +289,10 @@ func (s *Sidecar) SendHello() error {
 
 	// dump.P(s)
 	if s.Methods["API"] {
+		if _, exists := s.Details[tdns.MsignerMethodAPI]; !exists {
+			log.Printf("SendHello: Details for API method is nil for sidecar %s", s.Identity)
+			return fmt.Errorf("API details not available for sidecar %s", s.Identity)
+		}
 		log.Printf("Sending HELLO message to sidecar %s via API method (baseuri: %s)", s.Identity, s.Details[tdns.MsignerMethodAPI].BaseUri)
 		// Create the SidecarHelloPost struct
 		helloPost := SidecarHelloPost{
