@@ -441,17 +441,6 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		tx, err := mdb.StartTransactionNG()
-		if err != nil {
-			log.Printf("APIsigner: Error from mdb.StartTransactionNG(): %v\n", err)
-			resp.Msg = "Error from mdb.StartTransactionNG()"
-			resp.Error = true
-			resp.ErrorMsg = err.Error()
-			//			err = json.NewEncoder(w).Encode(resp)
-			//			if err != nil {
-			//				log.Printf("Error from Encoder: %v\n", err)
-			//			}
-			return
-		}
 
 		defer func() {
 			mdb.CloseTransactionNG(tx, err)
@@ -461,6 +450,14 @@ func APIsigner(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Error from Encoder: %v\n", err)
 			}
 		}()
+
+		if err != nil {
+			log.Printf("APIsigner: Error from mdb.StartTransactionNG(): %v\n", err)
+			resp.Msg = "Error from mdb.StartTransactionNG()"
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
 
 		decoder := json.NewDecoder(r.Body)
 		var sp SignerPost
@@ -923,7 +920,7 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 func SetupAPIRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
 	kdb := tconf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
-	apikey := mconf.ApiServer.ApiKey
+	apikey := tconf.ApiServer.ApiKey // Updated to use tconf.ApiServer.ApiKey
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}

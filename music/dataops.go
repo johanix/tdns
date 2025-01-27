@@ -120,13 +120,13 @@ func (s *Signer) UpdateRRset(zone, owner string, rrtype uint16, rrs []dns.RR) er
 	switch s.Method {
 	case "ddns":
 		// return DNSUpdateRRset(s, owner, rrtype)
-		return fmt.Errorf("signer %s has method=ddns, which is not yet implemented", s.Name)
+		return fmt.Errorf("signer %q has method=ddns, which is not yet implemented", s.Name)
 	case "desec-api":
 		// XXX: old code that should be ripped out
 		//		err, _ := DesecUpdateRRset(s, StripDot(zone), StripDot(owner), rrtype, rrs)
 		//		return err
 	default:
-		return fmt.Errorf("unknown RRset retrieval method: %s", s.Method)
+		return fmt.Errorf("unknown RRset retrieval method: %q", s.Method)
 	}
 	return nil
 }
@@ -204,10 +204,12 @@ func (mdb *MusicDB) ListRRset(tx *sql.Tx, dbzone *Zone, signer, ownername, rrtyp
 	const sqlq = "SELECT rdata FROM records WHERE owner=? AND signer=? AND rrtype=?"
 
 	rows, err := tx.Query(sqlq, ownername, signer, RRtype)
+
+	defer rows.Close()
+
 	if err != nil {
 		return "", rrs, err
 	}
-	defer rows.Close()
 
 	if CheckSQLError("ListRRset", sqlq, err, false) {
 		return "", rrs, err

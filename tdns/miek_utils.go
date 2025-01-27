@@ -6,7 +6,6 @@ package tdns
 
 import (
 	"encoding/base64"
-	"math/big"
 	"strings"
 )
 
@@ -132,15 +131,15 @@ func dddToByte[T ~[]byte | ~string](s T) byte {
 }
 
 // Helper function for packing and unpacking
-func intToBytes(i *big.Int, length int) []byte {
-	buf := i.Bytes()
-	if len(buf) < length {
-		b := make([]byte, length)
-		copy(b[length-len(buf):], buf)
-		return b
-	}
-	return buf
-}
+// func intToBytes(i *big.Int, length int) []byte {
+// 	buf := i.Bytes()
+// 	if len(buf) < length {
+// 		b := make([]byte, length)
+// 		copy(b[length-len(buf):], buf)
+// 		return b
+// 	}
+// 	return buf
+// }
 
 func fromBase64(s []byte) (buf []byte, err error) {
 	buflen := base64.StdEncoding.DecodedLen(len(s))

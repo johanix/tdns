@@ -218,10 +218,10 @@ func (z *Zone) SetDelayReason(tx *sql.Tx, value string, delay time.Duration) (st
 
 	_, err = tx.Exec(sqlq, z.Name)
 	if err != nil {
-		log.Fatalf("DocumentStop: Error from tx.Exec(%s): %v", sqlq, err)
+		return msg, fmt.Errorf("DocumentStop: Error from tx.Exec(%s): %v", sqlq, err)
 	}
 	log.Printf("%s\n", value)
-	return msg, err
+	return msg, nil
 }
 
 func (mdb *MusicDB) ZoneSetMeta(tx *sql.Tx, z *Zone, key, value string) (string, error) {
@@ -375,8 +375,7 @@ FROM zones WHERE name=?`
 	case nil:
 		t, err := time.Parse(layout, timestamp)
 		if err != nil {
-			log.Fatal("GetZone: Error from time.Parse():", err)
-			return nil, false, err
+			return nil, false, fmt.Errorf("GetZone: Error from time.Parse(): %v", err)
 		}
 
 		sg, err := mdb.GetSignerGroup(tx, signergroup, false) // not apisafe
@@ -406,7 +405,7 @@ FROM zones WHERE name=?`
 		}, true, nil
 
 	default:
-		log.Fatalf("GetZone: error from row.Scan(): name=%s, err=%v", zonename, err)
+		return nil, false, fmt.Errorf("GetZone: error from row.Scan(): name=%s, err=%v", zonename, err)
 	}
 	return &Zone{
 		Name:   zonename,
@@ -431,40 +430,37 @@ func (mdb *MusicDB) GetSignerGroupZones(tx *sql.Tx, sg *SignerGroup) ([]*Zone, e
 SELECT name, state, COALESCE(statestamp, datetime('now')) AS timestamp, fsm FROM zones WHERE sgroup=?`
 
 	rows, err := tx.Query(sqlq, sg.Name)
+
+	defer rows.Close()
+
 	if err != nil {
 		log.Printf("GetSignerGroupZones: Error from SQL query: %v", err)
 		return zones, err
 	}
-	defer rows.Close()
 
-	if CheckSQLError("GetSignerGroupZones", sqlq, err, false) {
-		log.Printf("GetSignerGroupZones: Error from SQL query: %v", err)
-		return zones, err
-	} else {
-		rowcounter := 0
-		var name, state, fsm, timestamp string
-		for rows.Next() {
-			err := rows.Scan(&name, &state, &timestamp, &fsm)
-			if err != nil {
-				log.Fatal("GetSignerGroupZones: Error from rows.Next():", err)
-			}
-
-			t, err := time.Parse(layout, timestamp)
-			if err != nil {
-				log.Fatal("GetSignerGroupZones: Error from time.Parse():", err)
-			}
-
-			zones = append(zones, &Zone{
-				Name:       name,
-				Exists:     true,
-				State:      state,
-				Statestamp: t,
-				FSM:        fsm,
-				SGroup:     sg,
-				MusicDB:    mdb,
-			})
-			rowcounter++
+	rowcounter := 0
+	var name, state, fsm, timestamp string
+	for rows.Next() {
+		err := rows.Scan(&name, &state, &timestamp, &fsm)
+		if err != nil {
+			return nil, fmt.Errorf("GetSignerGroupZones: Error from rows.Next(): %v", err)
 		}
+
+		t, err := time.Parse(layout, timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("GetSignerGroupZones: Error from time.Parse(): %v", err)
+		}
+
+		zones = append(zones, &Zone{
+			Name:       name,
+			Exists:     true,
+			State:      state,
+			Statestamp: t,
+			FSM:        fsm,
+			SGroup:     sg,
+			MusicDB:    mdb,
+		})
+		rowcounter++
 	}
 	return zones, nil
 }

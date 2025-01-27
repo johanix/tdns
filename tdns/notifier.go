@@ -6,7 +6,6 @@ package tdns
 import (
 	"fmt"
 	"log"
-	"net"
 	"sync"
 
 	"github.com/miekg/dns"
@@ -41,7 +40,7 @@ func Notifier(notifyreqQ chan NotifyRequest) error {
 		for nr = range notifyreqQ {
 			zd := nr.ZoneData
 
-			log.Printf("NotifierEngine: Zone %s: will notify downstreams", zd.ZoneName)
+			log.Printf("NotifierEngine: Zone %q: will notify downstreams", zd.ZoneName)
 
 			zd.SendNotify(nr.RRtype, nr.Targets)
 
@@ -56,68 +55,9 @@ func Notifier(notifyreqQ chan NotifyRequest) error {
 	return nil
 }
 
-func xxxSendNotify(parentname, childname string, ntype string, dsynctarget *DsyncTarget) (int, error) {
-	if parentname == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: parent zone name not specified. Terminating", parentname)
-	}
-
-	if childname == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: child zone name not specified. Terminating", childname)
-	}
-
-	switch ntype {
-	//	case "DNSKEY":
-	//		lookupzone = zonename
-	//		lookupserver = childpri
-	default:
-		// lookupzone = lib.ParentZone(zonename, lib.Globals.IMR)
-		if Globals.ParentZone == "" {
-			return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: parent zone name not specified", parentname)
-		}
-	}
-
-	for _, dst := range dsynctarget.Addresses {
-		if Globals.Verbose {
-			fmt.Printf("Sending NOTIFY(%s) to %s on address %s:%d\n",
-				ntype, dsynctarget.Name, dst, dsynctarget.Port)
-		}
-
-		m := new(dns.Msg)
-		m.SetNotify(childname)
-
-		// remove SOA, add ntype
-		m.Question = []dns.Question{dns.Question{Name: childname, Qtype: dns.StringToType[ntype], Qclass: dns.ClassINET}}
-
-		if Globals.Debug {
-			fmt.Printf("Sending Notify:\n%s\n", m.String())
-		}
-
-		dst = net.JoinHostPort(dst, fmt.Sprintf("%d", dsynctarget.Port))
-		res, err := dns.Exchange(m, dst)
-		if err != nil {
-			log.Printf("Error from dns.Exchange(%s, NOTIFY(%s)): %v. Trying next parent server", dst, ntype, err)
-			continue
-		}
-
-		if res.Rcode != dns.RcodeSuccess {
-			if Globals.Verbose {
-				fmt.Printf("... and got rcode %s back (bad)\n",
-					dns.RcodeToString[res.Rcode])
-			}
-			log.Printf("Error: Rcode: %s", dns.RcodeToString[res.Rcode])
-		} else {
-			if Globals.Verbose {
-				fmt.Printf("... and got rcode NOERROR back (good)\n")
-			}
-			return res.Rcode, nil
-		}
-	}
-	return dns.RcodeServerFailure, fmt.Errorf("Error: No response from any parent address for NOTIFY(%s)", ntype)
-}
-
 func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	if zd.ZoneName == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: zone name not specified. Ignoring notify request", zd.ZoneName)
+		return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
 	}
 
 	var err error
@@ -126,7 +66,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	case dns.TypeSOA:
 		// Here we only need the downstreams
 		if len(zd.Downstreams) == 0 {
-			return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: no downstreams. Ignoring notify request", zd.ZoneName)
+			return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
 		}
 
 	case dns.TypeCSYNC, dns.TypeCDS:
@@ -134,7 +74,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 		if zd.Parent == "." {
 			zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
 			if err != nil {
-				return dns.RcodeServerFailure, fmt.Errorf("zone %s: error: failure locating parent zone name. Ignoring notify request", zd.ZoneName)
+				return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: failure locating parent zone name. Ignoring notify request", zd.ZoneName)
 			}
 		}
 
@@ -143,12 +83,12 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	//		lookupserver = childpri
 
 	default:
-		log.Printf("Error: Unsupported notify type: %s", dns.TypeToString[ntype])
+		log.Printf("Error: Unsupported notify type: %q", dns.TypeToString[ntype])
 	}
 
 	for _, dst := range targets {
 		if Globals.Verbose {
-			log.Printf("Sending NOTIFY(%s) to %s\n", dns.TypeToString[ntype], dst)
+			log.Printf("Sending NOTIFY(%q) to %q\n", dns.TypeToString[ntype], dst)
 		}
 
 		m := new(dns.Msg)
@@ -163,15 +103,15 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 
 		res, err := dns.Exchange(m, dst)
 		if err != nil {
-			log.Printf("Error from dns.Exchange(%s, NOTIFY(%s)): %v. Trying next NOTIFY target.", dst, dns.TypeToString[ntype], err)
+			log.Printf("Error from dns.Exchange(%q, NOTIFY(%q)): %v. Trying next NOTIFY target.", dst, dns.TypeToString[ntype], err)
 			continue
 		}
 
 		if res.Rcode != dns.RcodeSuccess {
 			if Globals.Verbose {
-				fmt.Printf("... and got rcode %s back (bad)\n", dns.RcodeToString[res.Rcode])
+				fmt.Printf("... and got rcode %q back (bad)\n", dns.RcodeToString[res.Rcode])
 			}
-			log.Printf("Error: Rcode: %s", dns.RcodeToString[res.Rcode])
+			log.Printf("Error: Rcode: %q", dns.RcodeToString[res.Rcode])
 		} else {
 			if Globals.Verbose {
 				fmt.Printf("... and got rcode NOERROR back (good)\n")
@@ -179,5 +119,5 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 			return res.Rcode, nil
 		}
 	}
-	return dns.RcodeServerFailure, fmt.Errorf("Error: No response from any NOTIFY target to NOTIFY(%s)", dns.TypeToString[ntype])
+	return dns.RcodeServerFailure, fmt.Errorf("Error: No response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
 }

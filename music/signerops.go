@@ -430,11 +430,13 @@ func (mdb *MusicDB) ListSigners(tx *sql.Tx) (map[string]Signer, error) {
 
 	const sqlq = "SELECT name, method, addr, auth, port FROM signers"
 	rows, err := tx.Query(sqlq)
+
+	defer rows.Close()
+
 	if err != nil {
 		log.Printf("ListSigners: Error from tx.Query: %v", err)
 		return sl, err
 	}
-	defer rows.Close()
 
 	var name, method, address, authstr, port string
 	for rows.Next() {

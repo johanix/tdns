@@ -22,31 +22,14 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	verbose := scanner.Verbose
 	// debug := scanner.Debug
 
-	// lg := scanner.Log["CSYNC"]
 	lg := log.Default()
 
-	// lg.Printf("CheckZoneCSYNC: checking zone %s for CSYNC RR", szd.Name)
-	// 1: Does zone have a CSYNC RR?
-	//	has, csyncrr, validated := ldb.ZoneHasCSYNC(zone, lg)
-	//	if has {
-	//	      lg.Printf("Zone %s has a CSYNC RR: %s (validated: %v)", zone,
-	//	      		      	       	     csyncrr.String(), validated)
-	//	} else {
-	//	      // lg.Printf("Zone %s does not have a CSYNC RR", zone)
-	//	      return nil
-	//	}
-
-	//	csync_rrset, _, err := AuthDNSQuery(zone, scanner.IMR, dns.TypeCSYNC, lg,
-	//		false, scanner.Verbose, scanner.Debug)
-
-	// csync_rrset, err := pzd.LookupRRset(zone, dns.TypeCSYNC, verbose)
 	csync_rrset, err := scanner.AuthQueryNG(zone, zone, dns.TypeCSYNC, "tcp")
 	if err != nil {
 		return nil, fmt.Errorf("CheckCSYNC: Zone %s: error from AuthQueryNG: %v", zone, err)
 	}
 	if len(csync_rrset.RRs) == 0 {
 		lg.Printf("CheckCSYNC: Zone %s: no CSYNC RR found. Terminating scan.", zone)
-		// return fmt.Errorf("CSYNC scanner: Zone %s: no CSYNC RR found.", zone)
 		return nil, nil
 	}
 
