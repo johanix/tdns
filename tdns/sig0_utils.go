@@ -48,7 +48,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 		if err != nil {
 			return fmt.Errorf("Error from GenerateSigningKey: %v", err)
 		}
-		log.Printf(msg)
+		log.Println(msg)
 
 		adds = []dns.RR{&newpkc.KeyRR}
 		removes = []dns.RR{&pkc.KeyRR}
@@ -78,10 +78,10 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 			return fmt.Errorf("Error from SignMsgNG(%v): %v", dsynctarget, err)
 		}
 	} else {
-		return fmt.Errorf("Error: Keyfile not specified, signing update not possible.\n")
+		return fmt.Errorf("Error: Keyfile not specified, signing update not possible")
 	}
 
-	rcode, err, _ := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
+	rcode, _, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
 		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
 	} else {
@@ -172,13 +172,13 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		// log.Printf("Key basename: %s", kbasename)
 
 		var pk crypto.PrivateKey
-		switch privkey.(type) {
+		switch privkey := privkey.(type) {
 		case *rsa.PrivateKey:
-			pk = privkey.(*rsa.PrivateKey)
+			pk = privkey
 		case ed25519.PrivateKey:
-			pk = privkey.(ed25519.PrivateKey)
+			pk = privkey
 		case *ecdsa.PrivateKey:
-			pk = privkey.(*ecdsa.PrivateKey)
+			pk = privkey
 		default:
 			return nil, "", fmt.Errorf("Error: unknown private key type: %T", privkey)
 		}
@@ -200,7 +200,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 	case "external":
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
 		if keygenprog == "" {
-			return nil, "", fmt.Errorf("Error: key generator program not specified.")
+			return nil, "", fmt.Errorf("Error: key generator program not specified")
 		}
 
 		algstr := dns.AlgorithmToString[alg]
@@ -256,7 +256,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		}
 
 	default:
-		return nil, "", fmt.Errorf("Error: unknown keygen mode: \"%s\".", mode)
+		return nil, "", fmt.Errorf("Error: unknown keygen mode: \"%s\"", mode)
 	}
 
 	const (

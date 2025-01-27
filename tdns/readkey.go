@@ -156,17 +156,15 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 	var ktype uint16
 	var alg uint8
 
-	switch rr.(type) {
+	switch rr := rr.(type) {
 	case *dns.DNSKEY:
-		rrk := rr.(*dns.DNSKEY)
 		ktype = dns.TypeDNSKEY
-		alg = rrk.Algorithm
+		alg = rr.Algorithm
 		// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	case *dns.KEY:
-		rrk := rr.(*dns.KEY)
 		ktype = dns.TypeKEY
-		alg = rrk.Algorithm
+		alg = rr.Algorithm
 		// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	default:
@@ -203,29 +201,27 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 
 	var pkc PrivateKeyCache
 
-	switch rr.(type) {
+	switch rr := rr.(type) {
 	case *dns.DNSKEY:
-		rrk := rr.(*dns.DNSKEY)
-		pkc.K, err = rrk.NewPrivateKey(privkey)
+		pkc.K, err = rr.NewPrivateKey(privkey)
 		if err != nil {
 			log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
 			return nil, fmt.Errorf("Error reading private key file '%s': %v", "foo", err)
 		}
 		pkc.KeyType = dns.TypeDNSKEY
-		pkc.Algorithm = rrk.Algorithm
-		pkc.KeyId = rrk.KeyTag()
-		pkc.DnskeyRR = *rrk
+		pkc.Algorithm = rr.Algorithm
+		pkc.KeyId = rr.KeyTag()
+		pkc.DnskeyRR = *rr
 
 	case *dns.KEY:
-		rrk := rr.(*dns.KEY)
-		pkc.K, err = rrk.NewPrivateKey(privkey)
+		pkc.K, err = rr.NewPrivateKey(privkey)
 		if err != nil {
 			return nil, fmt.Errorf("PrepareKeyCache: error parsing KEY private key: %v", err)
 		}
 		pkc.KeyType = dns.TypeKEY
-		pkc.Algorithm = rrk.Algorithm
-		pkc.KeyId = rrk.KeyTag()
-		pkc.KeyRR = *rrk
+		pkc.Algorithm = rr.Algorithm
+		pkc.KeyId = rr.KeyTag()
+		pkc.KeyRR = *rr
 
 	default:
 		return nil, fmt.Errorf("rr is of type %v", "foo")
@@ -293,10 +289,9 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 				return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
 			}
 
-			switch rr.(type) {
+			switch rr := rr.(type) {
 			case *dns.KEY:
-				rrk := rr.(*dns.KEY)
-				keymap[rr.Header().Name] = *rrk
+				keymap[rr.Header().Name] = *rr
 			default:
 				return nil, fmt.Errorf("Error: rr is of type %v", "foo")
 			}

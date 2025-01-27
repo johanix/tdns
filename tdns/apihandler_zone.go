@@ -196,14 +196,14 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 		zd, exist := Zones.Get(zdp.Zone)
 		if !exist {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zdp.Zone)
+			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", zdp.Zone)
 			return
 		}
 
 		// Most of the dsync commands relate to the child role. The exception is the publish/unpublish commands
 		if !zd.Options[OptDelSyncChild] && zdp.Command != "publish-dsync-rrset" && zdp.Command != "unpublish-dsync-rrset" {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %s does not support delegation sync (option delegation-sync-child=false)", zd.ZoneName)
+			resp.ErrorMsg = fmt.Sprintf("Zone %q does not support delegation sync (option delegation-sync-child=false)", zd.ZoneName)
 			return
 		}
 
@@ -211,7 +211,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 			imr := viper.GetString("resolver.address")
 			if imr == "" {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Parent zone to %s unknown and no resolver address configured", zd.ZoneName)
+				resp.ErrorMsg = fmt.Sprintf("Parent zone to %q unknown and no resolver address configured", zd.ZoneName)
 				return
 			}
 			zd.Parent, err = ParentZone(zd.ZoneName, imr)
@@ -263,7 +263,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 
 		case "bootstrap-sig0-key":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
-			resp.Msg, err, resp.UpdateResult = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
+			resp.Msg, resp.UpdateResult, err = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -281,7 +281,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 			case "update-local":
 				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: UPDATING LOCAL KEYSTORE", zd.ZoneName)
 			}
-			resp.Msg, resp.OldKeyID, resp.NewKeyID, err, resp.UpdateResult = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action, zdp.OldKeyID, zdp.NewKeyID)
+			resp.Msg, resp.OldKeyID, resp.NewKeyID, resp.UpdateResult, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

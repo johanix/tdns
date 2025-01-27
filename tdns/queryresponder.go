@@ -94,15 +94,12 @@ func (zd *ZoneData) xxxApexResponder(w dns.ResponseWriter, r *dns.Msg, qname str
 		return nil
 
 	case dns.TypeSOA:
-		// zd.Logger.Printf("apex: %v", apex)
 		zd.Logger.Printf("There are %d SOA RRs in %s. rrset: %v", len(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs),
 			zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
 
 		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-
-		//apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 
 		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
@@ -361,8 +358,6 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	// log.Printf("---> Checking for child delegation for %s", qname)
 	cdd := zd.FindDelegation(qname, dnssec_ok)
 
-	// dump.P(cdd)
-
 	// If there is delegation data and an NS RRset is present, return a referral
 	if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
 		log.Printf("---> Sending referral for %s", qname)
@@ -426,9 +421,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 			if dnssec_ok {
 				rrtypeList := []uint16{}
-				for _, rrtype := range owner.RRtypes.Keys() {
-					rrtypeList = append(rrtypeList, rrtype)
-				}
+				rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
 
 				AddCDEResponse(m, origqname, apex, rrtypeList)
 			}

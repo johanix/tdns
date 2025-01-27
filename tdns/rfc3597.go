@@ -46,78 +46,78 @@ func ParentZone(z, imr string) (string, error) {
 			}
 
 			log.Printf("ParentZone: ERROR: Failed to locate parent of '%s' via Answer and Authority. Now guessing.", z)
-			return upone, fmt.Errorf("Failed to located parent of '%s' via Answer and Authority", z)
+			return upone, fmt.Errorf("failed to located parent of '%s' via Answer and Authority", z)
 		}
 	}
 	log.Printf("ParentZone: had difficulties splitting zone '%s'\n", z)
-	return z, fmt.Errorf("Failed to split zone name '%s' into labels.", z)
+	return z, fmt.Errorf("failed to split zone name '%s' into labels", z)
 }
 
 func (zd *ZoneData) FetchParentData() error {
-     var err error
+	var err error
 
-     if zd.Parent == "" {
-     	SetupIMR()
-	zd.Logger.Printf("Identifying name of parent zone for %s", zd.ZoneName)
-     	zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
-	if err != nil {
-	   return err
+	if zd.Parent == "" {
+		SetupIMR()
+		zd.Logger.Printf("Identifying name of parent zone for %s", zd.ZoneName)
+		zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+		if err != nil {
+			return err
+		}
 	}
-     }
 
-     if len(zd.ParentNS) == 0 {
-	zd.Logger.Printf("Fetching NS RRset for %s", zd.Parent)
-     	m := new(dns.Msg)
-	m.SetQuestion(zd.Parent, dns.TypeNS)
+	if len(zd.ParentNS) == 0 {
+		zd.Logger.Printf("Fetching NS RRset for %s", zd.Parent)
+		m := new(dns.Msg)
+		m.SetQuestion(zd.Parent, dns.TypeNS)
 
-	r, err := dns.Exchange(m, Globals.IMR)
-	if err != nil {
-	   return err
+		r, err := dns.Exchange(m, Globals.IMR)
+		if err != nil {
+			return err
+		}
+		if r != nil {
+			if len(r.Answer) > 0 {
+				for _, rr := range r.Answer {
+					if rr.Header().Rrtype == dns.TypeNS && rr.Header().Name == zd.Parent {
+						zd.ParentNS = append(zd.ParentNS, rr.(*dns.NS).Ns)
+					}
+				}
+			}
+		}
 	}
-	if r != nil {
-	   if len(r.Answer) > 0 {
-	      for _, rr := range r.Answer {
-	      	  if rr.Header().Rrtype == dns.TypeNS && rr.Header().Name == zd.Parent {
-		     zd.ParentNS = append(zd.ParentNS, rr.(*dns.NS).Ns)
-		  }
-	      }
-	   }
+
+	if len(zd.ParentServers) == 0 {
+		zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", zd.Parent)
+		for _, ns := range zd.ParentNS {
+			for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+				m := new(dns.Msg)
+				m.SetQuestion(ns, rrtype)
+
+				r, err := dns.Exchange(m, Globals.IMR)
+				if err != nil {
+					return err
+				}
+				if r != nil {
+					if len(r.Answer) > 0 {
+						for _, rr := range r.Answer {
+							if rr.Header().Name == ns {
+								switch rr := rr.(type) {
+								case *dns.A:
+									zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.A.String(), "53"))
+								case *dns.AAAA:
+									zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.AAAA.String(), "53"))
+								default:
+									return fmt.Errorf("unexpected RRtype: %s (should be %s)",
+										dns.TypeToString[rr.Header().Rrtype],
+										dns.TypeToString[rrtype])
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
-     }
 
-     if len(zd.ParentServers) == 0 {
-	zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", zd.Parent)
-     	for _, ns := range zd.ParentNS {
-	    for _, rrtype := range []uint16{ dns.TypeA, dns.TypeAAAA } {
-     	    	m := new(dns.Msg)
-	    	m.SetQuestion(ns, rrtype)
-
-	    	r, err := dns.Exchange(m, Globals.IMR)
-	    	if err != nil {
-	       	   return err
-	    	}
-	    	if r != nil {
-	       	   if len(r.Answer) > 0 {
-	       	      for _, rr := range r.Answer {
-		      	  if rr.Header().Name == ns {
-		      	     switch rr.(type) {
-			     case *dns.A:
-		      	     	zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
-			     case *dns.AAAA:
-		      	     	zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
-			     default:
-				return fmt.Errorf("Unexpected RRtype: %s (should be %s)",
-				       dns.TypeToString[rr.Header().Rrtype],
-				       dns.TypeToString[rrtype])
-			     }
-			  }
-		      }
-		  }
-	      }
-	   }
-	}
-     }
-
-     zd.Logger.Printf("FetchParentData for parent %s: all done", zd.Parent)
-     return nil
+	zd.Logger.Printf("FetchParentData for parent %s: all done", zd.Parent)
+	return nil
 }

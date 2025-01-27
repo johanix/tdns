@@ -28,44 +28,43 @@ func (mdb *MusicDB) ZoneAttachFsm(tx *sql.Tx, dbzone *Zone, fsm, fsmsigner strin
 	// 	}
 	// 	defer mdb.CloseTransaction(localtx, tx, err)
 
-	log.Printf("ZoneAttachFsm: zone: %s fsm: %s fsmsigner: '%s'", dbzone.Name, fsm, fsmsigner)
+	log.Printf("ZoneAttachFsm: zone: %q fsm: %q fsmsigner: %q", dbzone.Name, fsm, fsmsigner)
 	if !dbzone.Exists {
-		return "", fmt.Errorf("Zone %s unknown", dbzone.Name)
+		return "", fmt.Errorf("Zone %q unknown", dbzone.Name)
 	}
 
 	sgname := dbzone.SignerGroup().Name
 
 	if sgname == "" || sgname == "---" {
-		return "", fmt.Errorf("Zone %s not assigned to any signer group, so it can not attach to a process\n",
+		return "", fmt.Errorf("zone %q not assigned to any signer group, so it can not attach to a process",
 			dbzone.Name)
 	}
 
 	var exist bool
 	var process FSM
 	if process, exist = mdb.FSMlist[fsm]; !exist {
-		return "", fmt.Errorf("Process %s unknown. Sorry.", fsm)
+		return "", fmt.Errorf("process %q unknown. sorry", fsm)
 	}
 
 	if dbzone.FSM != "" {
 		if preempt {
-			msg = fmt.Sprintf("Zone %s was in process '%s', which is now preempted by new process.\n", dbzone.Name, dbzone.FSM)
+			msg = fmt.Sprintf("Zone %q was in process %q, which is now preempted by new process.\n", dbzone.Name, dbzone.FSM)
 		} else {
-			return "", fmt.Errorf(
-				"Zone %s already attached to process %s. Only one process at a time possible.\n",
+			return "", fmt.Errorf("zone %q already attached to process %q. only one process at a time possible",
 				dbzone.Name, dbzone.FSM)
 		}
 	}
 
 	initialstate := process.InitialState
 
-	log.Printf("ZAF: Updating zone %s to fsm=%s, fsmsigner=%s", dbzone.Name, fsm, fsmsigner)
+	log.Printf("ZAF: Updating zone %q to fsm=%q, fsmsigner=%q", dbzone.Name, fsm, fsmsigner)
 
 	const sqlq = "UPDATE zones SET fsm=?, fsmsigner=?, state=? WHERE name=?"
 	_, err := tx.Exec(sqlq, fsm, fsmsigner, initialstate, dbzone.Name)
 	if CheckSQLError("JoinGroup", sqlq, err, false) {
 		return msg, err
 	}
-	return msg + fmt.Sprintf("Zone %s has now started process '%s' in state '%s'.",
+	return msg + fmt.Sprintf("Zone %q has now started process %q in state %q.",
 		dbzone.Name, fsm, initialstate), nil
 }
 
@@ -75,29 +74,27 @@ func (mdb *MusicDB) ZoneDetachFsm(tx *sql.Tx, dbzone *Zone, fsm, fsmsigner strin
 		panic("tx=nil")
 	}
 	if !dbzone.Exists {
-		return "", fmt.Errorf("Zone %s unknown", dbzone.Name)
+		return "", fmt.Errorf("zone %q unknown", dbzone.Name)
 	}
 
 	sgname := dbzone.SignerGroup().Name
 
 	if sgname == "" || sgname == "---" {
-		return "", fmt.Errorf("Zone %s not assigned to any signer group, so it can not detach from a process\n",
+		return "", fmt.Errorf("zone %q not assigned to any signer group, so it can not detach from a process",
 			dbzone.Name)
 	}
 
 	var exist bool
 	if _, exist = mdb.FSMlist[fsm]; !exist {
-		return "", fmt.Errorf("Process %s unknown. Sorry.", fsm)
+		return "", fmt.Errorf("process %q unknown. sorry", fsm)
 	}
 
 	if dbzone.FSM == "" || dbzone.FSM == "---" {
-		return "", fmt.Errorf("Zone %s is not attached to any process.\n",
-			dbzone.Name)
+		return "", fmt.Errorf("zone %q is not attached to any process", dbzone.Name)
 	}
 
 	if dbzone.FSM != fsm {
-		return "", fmt.Errorf(
-			"Zone %s should be attached to process %s but is instead attached to %s.\n",
+		return "", fmt.Errorf("zone %q should be attached to process %q but is instead attached to %q",
 			dbzone.Name, fsm, dbzone.FSM)
 	}
 
@@ -114,7 +111,7 @@ func (mdb *MusicDB) ZoneDetachFsm(tx *sql.Tx, dbzone *Zone, fsm, fsmsigner strin
 	if CheckSQLError("DetachFsm", sqlq, err, false) {
 		return "", err
 	}
-	return fmt.Sprintf("Zone %s has now left process '%s'.",
+	return fmt.Sprintf("Zone %q has now left process %q",
 		dbzone.Name, fsm), nil
 }
 
@@ -128,13 +125,13 @@ func (mdb *MusicDB) ZoneStepFsm(tx *sql.Tx, dbzone *Zone, nextstate string) (boo
 		panic("tx=nil")
 	}
 	if !dbzone.Exists {
-		return false, "", fmt.Errorf("Zone %s unknown", dbzone.Name)
+		return false, "", fmt.Errorf("Zone %q unknown", dbzone.Name)
 	}
 
 	fsmname := dbzone.FSM
 
 	if fsmname == "" || fsmname == "---" {
-		return false, "", fmt.Errorf("Zone %s not attached to any process.", dbzone.Name)
+		return false, "", fmt.Errorf("zone %q not attached to any process", dbzone.Name)
 	}
 
 	CurrentFsm := mdb.FSMlist[fsmname]
@@ -146,7 +143,7 @@ func (mdb *MusicDB) ZoneStepFsm(tx *sql.Tx, dbzone *Zone, nextstate string) (boo
 		// 2. Count of #zones in process in signergroup is decremented
 		msg, err := mdb.ZoneDetachFsm(tx, dbzone, fsmname, "")
 		if err != nil {
-			log.Printf("ZoneStepFsm: Error from ZoneDetachFsm(%s, %s): %v",
+			log.Printf("ZoneStepFsm: Error from ZoneDetachFsm(%q, %q): %v",
 				dbzone.Name, fsmname, err)
 			return false, "", err
 		}
@@ -166,13 +163,11 @@ func (mdb *MusicDB) ZoneStepFsm(tx *sql.Tx, dbzone *Zone, nextstate string) (boo
 	var CurrentState FSMState
 	var exist bool
 	if CurrentState, exist = CurrentFsm.States[state]; !exist {
-		return false, "", fmt.Errorf(
-			"Zone state '%s' does not exist in process %s. Terminating.",
-			state, dbzone.FSM)
+		return false, "", fmt.Errorf("zone state %q does not exist in process %q. terminating", state, dbzone.FSM)
 	}
 
 	var transitions []string
-	for k, _ := range CurrentState.Next {
+	for k := range CurrentState.Next {
 		transitions = append(transitions, k)
 	}
 
@@ -187,7 +182,7 @@ func (mdb *MusicDB) ZoneStepFsm(tx *sql.Tx, dbzone *Zone, nextstate string) (boo
 		log.Printf("$$$ ROG -> Heading into AttempStateTransition with %v as tx", tx)
 		success, msg, err := dbzone.AttemptStateTransition(tx, nextname, t)
 		// return dbzone.AttemptStateTransition(nextname, t)
-		log.Printf("ZoneStepFsm debug: result from AttemptStateTransition: success: %v, err: %v, msg: '%s'\n", success, err, msg)
+		log.Printf("ZoneStepFsm debug: result from AttemptStateTransition: success: %v, err: %v, msg: %q\n", success, err, msg)
 		return success, msg, err
 	}
 
@@ -205,21 +200,17 @@ func (mdb *MusicDB) ZoneStepFsm(tx *sql.Tx, dbzone *Zone, nextstate string) (boo
 				// success, err, msg := dbzone.AttemptStateTransition(tx, nextstate, t)
 				return dbzone.AttemptStateTransition(tx, nextstate, t)
 			} else {
-				return false, "", fmt.Errorf(
-					"State '%s' is not a possible next state from '%s'",
-					nextstate, state)
+				return false, "", fmt.Errorf("state %q is not a possible next state from %q", nextstate, state)
 			}
 		} else {
-			return false, "", fmt.Errorf(
-				"Multiple possible next states from '%s': [%s] but next state not specified",
+			return false, "", fmt.Errorf("multiple possible next states from %q: [%s] but next state not specified",
 				state, strings.Join(transitions, " "))
 		}
 	}
 
 	// Arriving here equals len(CurrentState.Next) == 0, i.e. you are in a
 	// state with no "next" state. If that happens the FSM is likely buggy.
-	return false, "", fmt.Errorf(
-		"Zero possible next states from '%s': you lose.", state)
+	return false, "", fmt.Errorf("zero possible next states from %q: you lose", state)
 }
 
 // pre-condition false ==> return false, nil, "msg": no transit, no error
@@ -237,78 +228,76 @@ func (z *Zone) AttemptStateTransition(tx *sql.Tx, nextstate string,
 
 	currentstate := z.State
 
-	log.Printf("AttemptStateTransition: zone '%s' to state '%s'\n", z.Name, nextstate)
+	log.Printf("AttemptStateTransition: zone %q to state %q\n", z.Name, nextstate)
 
 	// If pre-condition(aka criteria)==true ==> execute action
 	// If post-condition==true ==> change state.
 	// If post-condition==false ==> bump hold time
-	log.Printf("*** AttemptStateTransition(%s): '%s--->%s': PreCondition",
+	log.Printf("*** AttemptStateTransition(%q): %q--->%q: PreCondition",
 		z.Name, currentstate, nextstate)
 	if t.PreCondition(z) {
-		log.Printf("*** AttemptStateTransition(%s): '%s--->%s': PreCondition: true\n",
+		log.Printf("*** AttemptStateTransition(%q): %q--->%q: PreCondition: true\n",
 			z.Name, currentstate, nextstate)
-		log.Printf("*** AttemptStateTransition(%s): '%s--->%s': ACTION",
+		log.Printf("*** AttemptStateTransition(%q): %q--->%q: ACTION",
 			z.Name, currentstate, nextstate)
 		t.Action(z)                 //TODO XXX: catch return value
 		if t.PostCondition != nil { //TODO XXX: remove once we have post conditions everywhere.
-			log.Printf("*** AttemptStateTransition(%s): '%s--->%s': PostCondition",
+			log.Printf("*** AttemptStateTransition(%q): %q--->%q: PostCondition",
 				z.Name, currentstate, nextstate)
 			postcond := t.PostCondition(z)
 			if postcond {
-				log.Printf("*** AttemptStateTransition(%s): '%s--->%s': PostCondition: true",
+				log.Printf("*** AttemptStateTransition(%q): %q--->%q: PostCondition: true",
 					z.Name, currentstate, nextstate)
 				log.Printf("$$$ ROG -> running StateTransition with %v as tx", tx)
 				err := z.StateTransition(tx, currentstate, nextstate) // success
 				if err != nil {
-				   log.Printf("*** AttemptStateTransition(%s): '%s--->%s': Transition failed",
-					z.Name, currentstate, nextstate)
-				   return false,
-				       fmt.Sprintf("Zone %s did not transition from '%s' to '%s'",
-						z.Name, currentstate, nextstate), err
+					log.Printf("*** AttemptStateTransition(%q): %q--->%q: Transition failed",
+						z.Name, currentstate, nextstate)
+					return false,
+						fmt.Sprintf("Zone %q did not transition from %q to %q",
+							z.Name, currentstate, nextstate), err
 				} else {
-				  log.Printf("*** AttemptStateTransition(%s): '%s--->%s': Transition complete",
-					z.Name, currentstate, nextstate)
-				  return true,
-					fmt.Sprintf("Zone %s transitioned from '%s' to '%s'",
-						z.Name, currentstate, nextstate), nil
+					log.Printf("*** AttemptStateTransition(%q): %q--->%q: Transition complete",
+						z.Name, currentstate, nextstate)
+					return true,
+						fmt.Sprintf("Zone %q transitioned from %q to %q",
+							z.Name, currentstate, nextstate), nil
 				}
 			} else {
 				stopreason, exist, err := z.MusicDB.GetMeta(tx, z, "stop-reason")
 				if err != nil {
-					return false, fmt.Sprintf("Error retrieving metadata for zone %s",
-						z.Name), err
+					return false, fmt.Sprintf("Error retrieving metadata for zone %q", z.Name), err
 				}
 				if exist {
-					stopreason = fmt.Sprintf(" Current stop reason: %s", stopreason)
+					stopreason = fmt.Sprintf(" Current stop reason: %q", stopreason)
 				}
 				return false,
-					fmt.Sprintf("Zone %s did not transition from %s to %s.",
-						z.Name, currentstate, nextstate), nil
+					fmt.Sprintf("Zone %q did not transition from %q to %q.", z.Name, currentstate, nextstate), nil
 			}
 
 		} else {
 			// there is no post-condition
-			log.Fatalf("AttemptStateTransition: Error: no PostCondition defined for transition %s --> %s", currentstate, nextstate)
+			log.Fatalf("AttemptStateTransition: Error: no PostCondition defined for transition %q --> %q", currentstate, nextstate)
 			// obviously, because of the log.Fatalf this return won't happen:
-			return false, "", fmt.Errorf("Cannot transition due to lack of definied post-condition for transition %s --> %s", currentstate, nextstate)
+			return false, "", fmt.Errorf("Cannot transition due to lack of definied post-condition for transition %q --> %q", currentstate, nextstate)
 		}
 	}
 	// pre-condition returns false
 	stopreason, exist, err := z.MusicDB.GetStopReason(tx, z)
 	if err != nil {
-		return false, fmt.Sprintf("%s: Error retrieving current stop reason: %v",
+		return false, fmt.Sprintf("%q: Error retrieving current stop reason: %v",
 			z.Name, stopreason), err
 
 	}
 	if exist {
-		stopreason = fmt.Sprintf(" Current stop reason: %s", stopreason)
+		stopreason = fmt.Sprintf(" Current stop reason: %q", stopreason)
 	}
 
-	return false, fmt.Sprintf("%s: PreCondition for '%s' failed.%s\n",
+	return false, fmt.Sprintf("%q: PreCondition for %q failed.%s\n",
 		z.Name, nextstate, stopreason), nil
 }
 
-func (mdb *MusicDB) ListProcesses() ([]Process, error, string) {
+func (mdb *MusicDB) ListProcesses() ([]Process, string, error) {
 	var resp []Process
 	for name, fsm := range mdb.FSMlist {
 		resp = append(resp, Process{
@@ -316,7 +305,7 @@ func (mdb *MusicDB) ListProcesses() ([]Process, error, string) {
 			Desc: fsm.Desc,
 		})
 	}
-	return resp, nil, ""
+	return resp, "", nil
 }
 
 func (z *Zone) GetParentAddressOrStop() (string, error) {
@@ -325,12 +314,12 @@ func (z *Zone) GetParentAddressOrStop() (string, error) {
 	var err error
 
 	if parentAddress, exist, err = z.MusicDB.GetMeta(nil, z, "parentaddr"); err != nil {
-		return "", fmt.Errorf("Zone %s: Error retrieving parent address: %v", z.Name, err)
+		return "", fmt.Errorf("Zone %q: Error retrieving parent address: %v", z.Name, err)
 	}
 
 	if !exist {
 		z.SetStopReason("No parent-agent address registered")
-		return "", fmt.Errorf("Zone %s has no parent address registered", z.Name)
+		return "", fmt.Errorf("Zone %q has no parent address registered", z.Name)
 	}
 	return parentAddress, nil
 }
@@ -345,7 +334,7 @@ func (mdb *MusicDB) GraphProcess(fsm string) (string, error) {
 	var process FSM
 
 	if process, exist = mdb.FSMlist[fsm]; !exist {
-		return "", fmt.Errorf("Process %s unknown. Sorry.", fsm)
+		return "", fmt.Errorf("process %s unknown. sorry", fsm)
 	}
 
 	gtype := "flowchart"
@@ -369,7 +358,7 @@ func MermaidFlowChart(process *FSM) (string, error) {
 	var stateToId = map[string]string{}
 
 	log.Printf("GraphProcess: graphing process %s\n", process.Name)
-	for sn, _ := range process.States {
+	for sn := range process.States {
 		stateId := fmt.Sprintf("State%d", statenum)
 		graph += fmt.Sprintf("%s(%s)\n", stateId, sn)
 		stateToId[sn] = stateId
@@ -395,7 +384,7 @@ func MermaidFlowChart(process *FSM) (string, error) {
 			if txt != "" && len(txt) > 5 {
 				txt = "|" + txt[:len(txt)-5] + "|"
 			}
-			graph += fmt.Sprintf("%s --> %s %s\n", stateToId[thisstate],
+			graph += fmt.Sprintf("%s --> %q %q\n", stateToId[thisstate],
 				txt, nextstate)
 		}
 		statenum++

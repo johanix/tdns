@@ -9,7 +9,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -68,21 +67,8 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 	resp.InSync = !differ
 	// log.Printf("AnalyseZoneDelegation: Zone %s: NS RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 
-	if len(adds) > 0 {
-		//		var tmp []dns.NS
-		for _, rr := range adds {
-			resp.NsAdds = append(resp.NsAdds, rr)
-		}
-		//		resp.NsAdds = tmp
-	}
-
-	if len(removes) > 0 {
-		//		var tmp []dns.NS
-		for _, rr := range removes {
-			resp.NsRemoves = append(resp.NsRemoves, rr)
-		}
-		//		resp.NsRemoves = tmp
-	}
+	resp.NsAdds = append(resp.NsAdds, adds...)
+	resp.NsRemoves = append(resp.NsRemoves, removes...)
 
 	// 2. Compute the names of the in-bailiwick subset of nameservers
 	child_inb, _ := BailiwickNS(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
@@ -104,17 +90,8 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 		// log.Printf("AnalyseZoneDelegation: Zone %s: A RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 		if gluediff {
 			resp.InSync = false
-			if len(adds) > 0 {
-				for _, rr := range adds {
-					resp.AAdds = append(resp.AAdds, rr)
-				}
-			}
-
-			if len(removes) > 0 {
-				for _, rr := range removes {
-					resp.ARemoves = append(resp.ARemoves, rr)
-				}
-			}
+			resp.AAdds = append(resp.AAdds, adds...)
+			resp.ARemoves = append(resp.ARemoves, removes...)
 		}
 
 		child_aaaa_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs
@@ -127,17 +104,8 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 		// log.Printf("AnalyseZoneDelegation: Zone %s: AAAA RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 		if differ {
 			resp.InSync = false
-			if len(adds) > 0 {
-				for _, rr := range adds {
-					resp.AAAAAdds = append(resp.AAAAAdds, rr)
-				}
-			}
-
-			if len(removes) > 0 {
-				for _, rr := range removes {
-					resp.AAAARemoves = append(resp.AAAARemoves, rr)
-				}
-			}
+			resp.AAAAAdds = append(resp.AAAAAdds, adds...)
+			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
 		}
 	}
 	// 4. If NS RRsets differ, then also compare glue for parent in-bailiwick nameservers
@@ -181,12 +149,8 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 				parpri, ns, dns.TypeA)
 			if gluediff {
 				differ = true
-				for _, rr := range a_glue_removes {
-					removes = append(removes, rr)
-				}
-				for _, rr := range a_glue_adds {
-					adds = append(adds, rr)
-				}
+				removes = append(removes, a_glue_removes...)
+				adds = append(adds, a_glue_adds...)
 			}
 		} else {
 			fmt.Printf("*** Note: configured NOT to update A glue.\n")
@@ -198,12 +162,8 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 				parpri, ns, dns.TypeAAAA)
 			if gluediff {
 				differ = true
-				for _, rr := range aaaa_glue_removes {
-					removes = append(removes, rr)
-				}
-				for _, rr := range aaaa_glue_adds {
-					adds = append(adds, rr)
-				}
+				removes = append(removes, aaaa_glue_removes...)
+				adds = append(adds, aaaa_glue_adds...)
 			}
 		} else {
 			fmt.Printf("*** Note: configured NOT to update AAAA glue.\n")
@@ -224,166 +184,6 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 // DelegationDataChanged() compares the delegation data in the old vs new *ZoneData structs.
 // Returns unsynched bool, adds, removes []dns.RR, error
 
-// XXX: FIXME: This is old code that no longer works. At least the viper.Get* things are broken.
-func (zd *ZoneData) xxxDelegationDataChanged(newzd *ZoneData) (bool, []dns.RR, []dns.RR, DelegationSyncStatus, error) {
-	var resp = DelegationSyncStatus{
-		Time:     time.Now(),
-		ZoneName: zd.ZoneName,
-		InSync:   true,
-	}
-
-	Globals.Zonename = zd.ZoneName
-
-	var nsdiff, fakeolddata bool
-	var adds, removes []dns.RR
-
-	oldapex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, []dns.RR{}, []dns.RR{}, resp,
-			fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
-	}
-
-	if oldapex == nil {
-		if !viper.GetBool("childsync.sync-on-boot") {
-			zd.Logger.Printf("DelDataChanged: Zone %s old apexdata was nil. Claiming this is a non-change.",
-				zd.ZoneName)
-			return false, []dns.RR{}, []dns.RR{}, resp, nil
-		}
-		zd.Logger.Printf("Zone %s delegation sync-on-boot: faking empty old apex data", zd.ZoneName)
-		fakeolddata = true
-		oldapex = &OwnerData{
-			Name:    zd.ZoneName,
-			RRtypes: NewRRTypeStore(),
-		}
-		oldapex.RRtypes.Set(dns.TypeNS, RRset{})
-		oldapex.RRtypes.Set(dns.TypeA, RRset{})
-		oldapex.RRtypes.Set(dns.TypeAAAA, RRset{})
-	}
-
-	newapex, err := newzd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, []dns.RR{}, []dns.RR{}, resp,
-			fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
-	}
-
-	// XXX: Should we remove all the policy checks here and just report on whether stuff is in sync or not?
-	// XXX: Once we know the status we can make a policy decision.
-	if viper.GetBool("childsync.update-ns") {
-		nsdiff, adds, removes = RRsetDiffer(zd.ZoneName, newapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
-			oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs, dns.TypeNS, zd.Logger)
-		resp.InSync = !nsdiff
-	} else {
-		zd.Logger.Printf("*** Note: configured NOT to update NS RRset.\n")
-	}
-
-	if len(adds) > 0 {
-		resp.NsAdds = append(resp.NsAdds, adds...)
-	}
-
-	if len(removes) > 0 {
-		resp.NsRemoves = append(resp.NsRemoves, removes...)
-	}
-
-	//	Compute the names of the in-bailiwick subset of nameservers
-	new_ns_inb, _ := BailiwickNS(zd.ZoneName, newapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
-	old_ns_inb, _ := BailiwickNS(zd.ZoneName, oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
-	for _, ns := range new_ns_inb {
-		zd.Logger.Printf("New in-bailiwick NS: %s\n", ns)
-	}
-	for _, ns := range old_ns_inb {
-		zd.Logger.Printf("Old in-bailiwick NS: %s\n", ns)
-	}
-
-	var oldowner *OwnerData
-	for _, ns := range new_ns_inb {
-		if fakeolddata {
-			oldowner = oldapex
-		} else {
-			oldowner, err = zd.GetOwner(ns)
-			if err != nil {
-				zd.Logger.Printf("Error from zd.GetOwner(%s): %v", ns, err)
-				return false, []dns.RR{}, []dns.RR{}, resp, fmt.Errorf("Error from zd.GetOwner(%s): %v", ns, err)
-			}
-		}
-
-		// When adding a new nameserver to the NS RRset any in-bailiwick glue needs to be added, even though
-		// the actual A and AAAA RRs for the glue have not changed. I.e. the change is the the address records
-		// are now glue.
-		ns_is_new_nameserver := true
-		for _, oldns := range old_ns_inb {
-			if ns == oldns {
-				ns_is_new_nameserver = false
-				break
-			}
-		}
-		log.Printf("*** %s: ns_is_new_nameserver: %v", ns, ns_is_new_nameserver)
-
-		newowner, err := newzd.GetOwner(ns)
-		if err != nil {
-			zd.Logger.Printf("Error from newzd.GetOwner(%s): %v", ns, err)
-			return false, []dns.RR{}, []dns.RR{}, resp, fmt.Errorf("Error from newzd.GetOwner(%s): %v", ns, err)
-		}
-
-		if viper.GetBool("childsync.update-a") {
-			zd.Logger.Printf("Comparing A glue for new NS %s:\n", ns)
-
-			log.Printf("newowner.RRtypes[A]:\n")
-			dump.P(newowner.RRtypes.GetOnlyRRSet(dns.TypeA))
-			log.Printf("oldowner.RRtypes[A]:\n")
-			dump.P(oldowner.RRtypes.GetOnlyRRSet(dns.TypeA))
-			gluediff, a_glue_adds, a_glue_removes := RRsetDiffer(ns,
-				newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs,
-				oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs,
-				dns.TypeA, zd.Logger)
-			if gluediff {
-				resp.InSync = false
-				resp.ARemoves = append(resp.ARemoves, a_glue_removes...)
-				resp.AAdds = append(resp.AAdds, a_glue_adds...)
-			} else if ns_is_new_nameserver {
-				// When adding a new nameserver to the NS RRset, all its addresses become glue,
-				// regardless of whether the changed or not.
-				resp.InSync = false
-				resp.AAdds = append(resp.AAdds, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs...)
-			}
-		} else {
-			zd.Logger.Printf("*** Note: configured NOT to update A glue.\n")
-		}
-
-		if viper.GetBool("childsync.update-aaaa") {
-			zd.Logger.Printf("Comparing AAAA glue for new NS %s:\n", ns)
-			gluediff, aaaa_glue_adds, aaaa_glue_removes := RRsetDiffer(ns,
-				newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs,
-				oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs,
-				dns.TypeAAAA, zd.Logger)
-			if gluediff {
-				//				differ = true
-				resp.InSync = false
-				resp.AAAARemoves = append(resp.AAAARemoves, aaaa_glue_removes...)
-				resp.AAAAAdds = append(resp.AAAAAdds, aaaa_glue_adds...)
-			} else if ns_is_new_nameserver {
-				// When adding a new nameserver to the NS RRset, all its addresses become glue,
-				// regardless of whether the changed or not.
-				resp.InSync = false
-				resp.AAAAAdds = append(resp.AAAAAdds, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs...)
-
-			}
-		} else {
-			fmt.Printf("*** Note: configured NOT to update AAAA glue.\n")
-		}
-	}
-
-	// dump.P(resp)
-
-	//if !differ {
-	if resp.InSync {
-		fmt.Printf("Old delegation data is identical to new. No update needed.\n")
-		return false, []dns.RR{}, []dns.RR{}, resp, nil
-	}
-
-	return true, adds, removes, resp, nil
-}
-
-// Let's try to modernize this.
 func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
 	log.Printf("*** Enter DDCNG(%s)", newzd.ZoneName)
 	var dss = DelegationSyncStatus{
@@ -493,22 +293,14 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			// dump.P(oldowner.RRtypes[dns.TypeA])
 			diff, adds, removes := RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, dns.TypeA, zd.Logger)
 			if diff {
-				for _, rr := range adds {
-					dss.AAdds = append(dss.AAdds, rr)
-				}
-				for _, rr := range removes {
-					dss.ARemoves = append(dss.ARemoves, rr)
-				}
+				dss.AAdds = append(dss.AAdds, adds...)
+				dss.ARemoves = append(dss.ARemoves, removes...)
 				dss.InSync = false
 			}
 			diff, adds, removes = RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, dns.TypeAAAA, zd.Logger)
 			if diff {
-				for _, rr := range adds {
-					dss.AAAAAdds = append(dss.AAAAAdds, rr)
-				}
-				for _, rr := range removes {
-					dss.AAAARemoves = append(dss.AAAARemoves, rr)
-				}
+				dss.AAAAAdds = append(dss.AAAAAdds, adds...)
+				dss.AAAARemoves = append(dss.AAAARemoves, removes...)
 				dss.InSync = false
 			}
 		}
