@@ -375,11 +375,6 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
 		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(rrset.RRs) > 0 {
-			// if Globals.Debug && qtype == TypeHSYNC {
-			// 	log.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
-			// 	log.Printf("Exact match rrset: %+v", rrset)
-			// 	log.Printf("HSYNC qname: %s origqname: %s", qname, origqname)
-			// }
 			if qtype == dns.TypeSOA {
 				soaRR := rrset.RRs[0].(*dns.SOA)
 				soaRR.Serial = zd.CurrentSerial
@@ -398,9 +393,6 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
-			if Globals.Debug && qtype == TypeHSYNC {
-				log.Printf("HSYNC response msg: %s", m.String())
-			}
 			if dnssec_ok {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {

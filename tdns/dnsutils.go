@@ -356,19 +356,6 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 			tmp.RRs = append(tmp.RRs, rr)
 			omap.RRtypes.Set(rrtype, tmp)
-			if Globals.Debug {
-				switch v.(type) {
-				case *dns.PrivateRR:
-					switch rrtype {
-					case TypeDSYNC:
-						log.Printf("SortFunc: rrtype: %d DSYNC: %s", rrtype, rr.String())
-						log.Printf("SortFunc: DSYNC RRs: %+v", tmp.RRs)
-					case TypeHSYNC:
-						log.Printf("SortFunc: rrtype: %d HSYNC: %s", rrtype, rr.String())
-						log.Printf("SortFunc: HSYNC RRs: %+v", tmp.RRs)
-					}
-				}
-			}
 		}
 	}
 	if ztype == MapZone {
