@@ -23,7 +23,7 @@ type Updater interface {
 
 	Update(signer *Signer, zone, fqdn string, inserts, removes *[][]dns.RR) error
 	RemoveRRset(signer *Signer, zone, fqdn string, rrsets [][]dns.RR) error
-	FetchRRset(signer *Signer, zone, fqdn string, rrtype uint16) (error, []dns.RR)
+	FetchRRset(signer *Signer, zone, fqdn string, rrtype uint16) ([]dns.RR, error)
 }
 
 var Updaters map[string]Updater = make(map[string]Updater)
@@ -38,7 +38,7 @@ func GetUpdater(type_ string) Updater {
 
 func ListUpdaters() map[string]bool {
 	res := map[string]bool{}
-	for u, _ := range Updaters {
+	for u := range Updaters {
 		res[u] = true
 	}
 	return res

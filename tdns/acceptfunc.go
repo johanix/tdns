@@ -47,8 +47,6 @@ const (
 )
 
 const (
-	headerSize = 12
-
 	// Header.Bits
 	_QR = 1 << 15 // query/response (response=1)
 	_AA = 1 << 10 // authoritative

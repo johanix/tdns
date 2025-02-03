@@ -12,7 +12,7 @@ import (
 
 func SetupLogging(logfile string) error {
 
-        log.SetFlags(log.Lshortfile | log.Ltime)
+	log.SetFlags(log.Lshortfile | log.Ltime)
 
 	if logfile != "" {
 		log.SetOutput(&lumberjack.Logger{

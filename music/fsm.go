@@ -5,8 +5,8 @@
 package music
 
 const (
- 	FsmStateStop             = "stop"	// XXX: Yes, we need to keep this in the music package
-)				   		//      because it is referred to from zoneops.go et al
+	FsmStateStop = "stop" // XXX: Yes, we need to keep this in the music package
+) //      because it is referred to from zoneops.go et al
 
 type FSMState struct {
 	Next map[string]FSMTransition
@@ -34,4 +34,3 @@ type FSM struct {
 	InitialState string // zones that enter this process start here
 	States       map[string]FSMState
 }
-

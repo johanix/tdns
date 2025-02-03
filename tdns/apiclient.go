@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 )
@@ -55,7 +54,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 		//		}
 	} else {
 		rootCAPool := x509.NewCertPool()
-		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
+		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
 		rootCA, err := os.ReadFile(rootcafile)
 		if err != nil {
 			log.Fatalf("reading cert failed : %v", err)
@@ -71,8 +70,8 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 
 	//	} else {
 	//		rootCAPool := x509.NewCertPool()
-	//		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
-	//		rootCA, err := ioutil.ReadFile(rootcafile)
+	//		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
+	//		rootCA, err := os.ReadFile(rootcafile)
 	//		if err != nil {
 	//			log.Fatalf("reading cert failed : %v", err)
 	//		}
@@ -141,7 +140,7 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	}
 
 	defer resp.Body.Close()
-	buf, err := ioutil.ReadAll(resp.Body)
+	buf, err := io.ReadAll(resp.Body)
 	if api.Debug {
 		var prettyJSON bytes.Buffer
 		error := json.Indent(&prettyJSON, buf, "", "  ")
@@ -263,6 +262,9 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	}
 
 	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
+	if err != nil {
+		return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+	}
 	req.Header.Add("Content-Type", "application/json")
 	if api.AuthMethod == "X-API-Key" {
 		req.Header.Add("X-API-Key", api.apiKey)
@@ -280,7 +282,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 		var msg string
 		if strings.Contains(err.Error(), "connection refused") {
-			msg = fmt.Sprintf("Connection refused. Server process probably not running.")
+			msg = "Connection refused. Server process probably not running."
 		} else {
 			msg = fmt.Sprintf("Error from API request %s: %v", method, err)
 		}

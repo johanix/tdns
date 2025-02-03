@@ -15,9 +15,6 @@ import (
 	// "github.com/DNSSEC-Provisioning/music/signer"
 )
 
-var cfgFile string
-var verbose bool
-
 var zoneReadFake = &cobra.Command{
 	Use:   "readfake",
 	Short: "Create a fake zone from a compiled in string",

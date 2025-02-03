@@ -83,7 +83,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
 			}
 			if fi, err := os.Stat(daemonbinary); err == nil {
 				var stderr, stdout io.Reader
-				age := time.Now().Sub(fi.ModTime()).Round(time.Second)
+				age := time.Since(fi.ModTime()).Round(time.Second)
 				fmt.Printf("Daemon binary \"%s\" found (%v old)\n",
 					daemonbinary, age)
 				cmd := exec.Command(daemonbinary)
@@ -199,12 +199,11 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
 }
 
 func (api *ApiClient) UpdateDaemon(data CommandPost, dieOnError bool) (int, CommandResponse, error) {
-
 	var cr CommandResponse
 	status, buf, err := api.RequestNG(http.MethodPost, "/command", data, dieOnError)
 	if err != nil {
 		if strings.Contains(err.Error(), "connection refused") {
-			return 501, cr, errors.New("Connection refused")
+			return 501, cr, errors.New("connection refused")
 		} else {
 			return 501, cr, err
 		}
@@ -297,8 +296,6 @@ func (api *ApiClient) ShowApi() {
 		fmt.Printf("%s\n", ep)
 	}
 }
-
-var newapi bool
 
 var ServerName string = "PLACEHOLDER"
 

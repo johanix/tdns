@@ -144,7 +144,7 @@ func NewDB(dbfile, dbmode string, force bool) (*MusicDB, error) {
 	}
 
 	if force {
-		for table, _ := range DefaultTables {
+		for table := range DefaultTables {
 			sqlcmd := fmt.Sprintf("DROP TABLE %s", table)
 			_, err = db.Exec(sqlcmd)
 			if err != nil {
@@ -238,7 +238,6 @@ func (mdb *MusicDB) CloseTransaction(localtx bool, tx *sql.Tx, err error) {
 		// Perhaps not our problem? err != nil and it's the callers problem?
 		// return err
 	}
-	return
 }
 
 func (mdb *MusicDB) CloseTransactionNG(tx *sql.Tx, err error) {
@@ -262,7 +261,6 @@ func (mdb *MusicDB) CloseTransactionNG(tx *sql.Tx, err error) {
 	// Perhaps not our problem? err != nil and it's the callers problem?
 	// return err
 	//	}
-	return
 }
 
 // const GSGsql  = "SELECT name FROM signergroups WHERE signer=?"
@@ -326,7 +324,7 @@ func (mdb *MusicDB) GetSigner(tx *sql.Tx, s *Signer, apisafe bool) (*Signer, err
 			Port:    s.Port,
 			UseTcp:  s.UseTcp,
 			UseTSIG: s.UseTSIG,
-		}, fmt.Errorf("Signer %s is unknown.", s.Name)
+		}, fmt.Errorf("signer %s is unknown", s.Name)
 
 	case nil:
 		// fmt.Printf("GetSigner: found signer(%s, %s, %s, %s, %s)\n", name,

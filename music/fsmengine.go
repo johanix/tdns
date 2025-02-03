@@ -41,11 +41,10 @@ func FSMEngine(conf *Config, stopch chan struct{}) {
 
 	if !viper.GetBool("fsmengine.active") {
 		log.Printf("FSM Engine is NOT active. All state transitions must be managed manually.")
-		for {
-			select {
-			case <-checkch: // ensure that we keep reading to keep the
-				continue // channel open (otherwise other parts of MUSIC
-			} // may block)
+		for range checkch {
+			// ensure that we keep reading to keep the
+			continue // channel open (otherwise other parts of MUSIC
+			// may block)
 		}
 	}
 

@@ -611,7 +611,7 @@ func (zd *ZoneData) NotifyDownstreams() error {
 	// zd.Logger.Printf("NotifyDownstreams: Zone %s has downstreams: %v", zd.ZoneName, zd.Downstreams)
 	if zd == nil {
 		zd.Logger.Printf("Error: zonedata is nil")
-		return fmt.Errorf("ZoneData is nil.")
+		return fmt.Errorf("zonedata is nil")
 	}
 	for _, d := range zd.Downstreams {
 
@@ -915,8 +915,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
 	if zd.Options[OptDirty] {
-		msg := fmt.Sprintf("Zone %s: zone has been modified, reload not possible", zd.ZoneName)
-		return msg, fmt.Errorf(msg)
+		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
 	}
 
 	var respch = make(chan RefresherResponse, 1)
@@ -991,7 +990,7 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 		// XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
 		//      I.e. a broken config with an in-bailiwick NS w/o any address.
 		if owner == nil {
-			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName)
+			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName, nsname)
 			continue
 		}
 

@@ -10,16 +10,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-type xxxRefreshCounter struct {
-	Name           string
-	SOARefresh     uint32
-	CurRefresh     uint32
-	IncomingSerial uint32
-	Upstream       string
-	Downstreams    []string
-	Zonefile       string
-}
-
 // func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
 func ResignerEngine(zoneresignch chan *ZoneData, stopch chan struct{}) {
 

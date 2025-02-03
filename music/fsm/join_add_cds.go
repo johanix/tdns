@@ -56,7 +56,7 @@ func JoinAddCdsAction(zone *music.Zone) bool {
 	for _, signer := range zone.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
 		log.Printf("[JoinAddCdsAction]\t Using FetchRRset interface[DNSKEY]\n")
-		err, rrs := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeDNSKEY)
+		rrs, err := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeDNSKEY)
 		if err != nil {
 			log.Printf("Error from updater.FetchRRset: %v\n", err)
 		}
@@ -85,7 +85,7 @@ func JoinAddCdsAction(zone *music.Zone) bool {
 		updater := music.GetUpdater(signer.Method)
 		if err := updater.Update(signer, zone.Name, zone.Name,
 			&[][]dns.RR{cdses, cdnskeys}, nil); err != nil {
-			err, _ := zone.SetStopReason(fmt.Sprintf("Unable to update %s with CDS/CDNSKEY record sets: %s",
+			_, err = zone.SetStopReason(fmt.Sprintf("Unable to update %s with CDS/CDNSKEY record sets: %s",
 				signer.Name, err))
 			if err != nil {
 				log.Printf("Could not set stop reason: Unable to update %s with CDS/CDNSKEY rrset: %s",
@@ -118,7 +118,7 @@ func VerifyCdsPublished(zone *music.Zone) bool {
 	for _, signer := range zone.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
 		log.Printf("VerifyCdsPublished: %s Using FetchRRset interface\n", zone.Name)
-		err, rrSet := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeDNSKEY)
+		rrSet, err := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeDNSKEY)
 		if err != nil {
 			log.Printf("Error from updater.FetchRRset: %v\n", err)
 		}
@@ -145,15 +145,14 @@ func VerifyCdsPublished(zone *music.Zone) bool {
 	// Compare DNSKEYs to published CDS/CDNSKEY RRsets.
 	for _, signer := range zone.SGroup.SignerMap {
 		updater := music.GetUpdater(signer.Method)
-		err, cdsRRset := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeCDS)
+		cdsRRset, err := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeCDS)
 		if err != nil {
-			err, _ = zone.SetStopReason(fmt.Sprintf("Unable to fetch CDS RRset from %s: %v",
-				signer.Name, err))
+			_, err = zone.SetStopReason(fmt.Sprintf("Unable to fetch CDS RRset from %s: %v", signer.Name, err))
 			return false
 		}
-		err, cdnskeyRRset := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeCDNSKEY)
+		cdnskeyRRset, err := updater.FetchRRset(signer, zone.Name, zone.Name, dns.TypeCDNSKEY)
 		if err != nil {
-			err, _ = zone.SetStopReason(fmt.Sprintf("Unable to fetch CDNSKEY RRset from %s: %v",
+			_, err = zone.SetStopReason(fmt.Sprintf("Unable to fetch CDNSKEY RRset from %s: %v",
 				signer.Name, err))
 			return false
 		}
@@ -165,13 +164,13 @@ func VerifyCdsPublished(zone *music.Zone) bool {
 			}
 			cdsFromSigners[cdsRR.KeyTag] = cdsRR
 			if _, exist := cdsFromKSK[cdsRR.KeyTag]; !exist {
-				err, _ = zone.SetStopReason(fmt.Sprintf("CDS RR with keyid=%d published by signer %s should not exist", cdsRR.KeyTag, signer.Name))
+				_, err = zone.SetStopReason(fmt.Sprintf("CDS RR with keyid=%d published by signer %s should not exist", cdsRR.KeyTag, signer.Name))
 				return false
 			}
 		}
 		for _, cdsRR := range cdsFromKSK {
 			if _, exist := cdsFromSigners[cdsRR.KeyTag]; !exist {
-				err, _ = zone.SetStopReason(fmt.Sprintf("CDS RR with keyid=%d should be published by %s, but is not",
+				_, err = zone.SetStopReason(fmt.Sprintf("CDS RR with keyid=%d should be published by %s, but is not",
 					cdsRR.KeyTag, signer.Name))
 				return false
 			}
@@ -185,7 +184,7 @@ func VerifyCdsPublished(zone *music.Zone) bool {
 			keyTag := cdnskeyRR.KeyTag()
 			cdnskeyFromSigners[keyTag] = cdnskeyRR
 			if _, exist := cdnskeyFromKSK[keyTag]; !exist {
-				err, _ = zone.SetStopReason(fmt.Sprintf("CDNSKEY RR with keyid=%d published by %s should not exist",
+				_, err = zone.SetStopReason(fmt.Sprintf("CDNSKEY RR with keyid=%d published by %s should not exist",
 					keyTag, signer.Name))
 				return false
 			}
@@ -193,7 +192,7 @@ func VerifyCdsPublished(zone *music.Zone) bool {
 		for _, cdnskeyRR := range cdnskeyFromKSK {
 			keyTag := cdnskeyRR.KeyTag()
 			if _, exist := cdnskeyFromSigners[keyTag]; !exist {
-				err, _ = zone.SetStopReason(fmt.Sprintf("CDNSKEY RR with keyid=%d should be published by %s, but is not",
+				_, err = zone.SetStopReason(fmt.Sprintf("CDNSKEY RR with keyid=%d should be published by %s, but is not",
 					keyTag, signer.Name))
 				return false
 			}

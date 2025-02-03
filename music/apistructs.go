@@ -147,7 +147,7 @@ type MusicApi struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string
-	apiKey     string
+	ApiKey     string // TODO: to remove, but we still need it for a while
 	Authmethod string
 	Verbose    bool
 	Debug      bool

@@ -26,18 +26,18 @@ const maxTok = 512 // Token buffer start size, and growth size amount.
 // * Handle braces - anywhere.
 const (
 	// Zonefile
- 	zEOF = iota
- 	zString
- 	zBlank
- 	zQuote
- 	zNewline
- 	zRrtpe
- 	zOwner
- 	zClass
- 	zDirOrigin   // $ORIGIN
- 	zDirTTL      // $TTL
- 	zDirInclude  // $INCLUDE
- 	zDirGenerate // $GENERATE
+	zEOF = iota
+	zString
+	zBlank
+	zQuote
+	zNewline
+	zRrtpe
+	zOwner
+	zClass
+	zDirOrigin   // $ORIGIN
+	zDirTTL      // $TTL
+	zDirInclude  // $INCLUDE
+	zDirGenerate // $GENERATE
 )
 
 // ParseError is a parsing error. It contains the parse error and the location in the io.Reader
@@ -72,10 +72,10 @@ type lex struct {
 
 type zlexer struct {
 	br io.ByteReader
- 
- 	readErr error
- 
- 	line   int
+
+	readErr error
+
+	line   int
 	column int
 
 	comBuf  string
@@ -632,4 +632,3 @@ func appendOrigin(name, origin string) string {
 	}
 	return name + "." + origin
 }
-

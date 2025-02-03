@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -255,12 +254,13 @@ func Sig0KeyMgmt(cmd string) error {
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
-
-		dump.P(pkc)
+		if pkc == nil {
+			log.Fatalf("Error: no SIG(0) key found in keyfile '%s'", filename)
+		}
 
 		fmt.Printf("KeyRR: %s\n", pkc.KeyRR.String())
 
-		if pkc != nil && pkc.KeyType == dns.TypeKEY {
+		if pkc.KeyType == dns.TypeKEY {
 			if pkc.KeyRR.Header().Name != tdns.Globals.Zonename {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
 					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
@@ -358,9 +358,13 @@ func DnssecKeyMgmt(cmd string) error {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
 		}
 
+		if pkc == nil {
+			log.Fatalf("Error: no DNSKEY found in keyfile '%s'", filename)
+		}
+
 		fmt.Printf("DNSKEY RR: %s\n", pkc.DnskeyRR.String())
 
-		if pkc != nil && pkc.KeyType == dns.TypeDNSKEY {
+		if pkc.KeyType == dns.TypeDNSKEY {
 			if pkc.DnskeyRR.Header().Name != tdns.Globals.Zonename {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
 					tdns.Globals.Zonename, pkc.DnskeyRR.Header().Name)
