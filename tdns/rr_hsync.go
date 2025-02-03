@@ -95,7 +95,7 @@ func (rd *HSYNC) Parse(txt []string) error {
 
 	tgt := dns.Fqdn(txt[3])
 	if _, ok := dns.IsDomainName(tgt); !ok {
-		return fmt.Errorf("invalid HSYNC target: %s", txt[2])
+		return fmt.Errorf("invalid HSYNC target: %s", txt[3])
 	}
 
 	rd.State = state
