@@ -85,14 +85,14 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
 
-			// if zd, ok := Zones.Get(qname); ok {
-			// The qname is equal to the name of a zone we are authoritative for
-			// err := zd.ApexResponder(w, r, qname, qtype, dnssec_ok, kdb)
-			// if err != nil {
-			// 	log.Printf("Error in ApexResponder: %v", err)
-			// }
-			// return
-			// }
+			if zd, ok := Zones.Get(qname); ok {
+				log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
+				err := zd.QueryResponder(w, r, qname, qtype, dnssec_ok, kdb)
+				if err != nil {
+					log.Printf("Error in QueryResponder: %v", err)
+				}
+				return
+			}
 
 			// Let's try case folded
 			// lcqname := strings.ToLower(qname)
@@ -105,18 +105,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			// return
 			// }
 
-			// if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
-			// 	// We are not authoritative for this zone, so no xfrs possible
-			// 	m := new(dns.Msg)
-			// 	m.SetReply(r)
-			// 	m.MsgHdr.Rcode = dns.RcodeNotAuth
-			// 	w.WriteMsg(m)
-			// 	return
-			// }
-
-			log.Printf("DnsHandler: Qname is '%s', which is not a known zone.", qname)
-			// known_zones := append([]string{}, tdns.Zones.Keys()...)
-			// log.Printf("DnsHandler: Known zones are: %v", known_zones)
+			log.Printf("DnsHandler: Qname is %q, which is not a known zone.", qname)
 
 			// Let's see if we can find the zone
 			zd, folded := FindZone(qname)

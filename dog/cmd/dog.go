@@ -123,6 +123,7 @@ var rootCmd = &cobra.Command{
 				elapsed := time.Since(start)
 				if err != nil {
 					fmt.Printf("Error from %s: %v\n", server, err)
+					fmt.Printf("*** This is what we got: %+v\n", res)
 					os.Exit(1)
 				}
 				tdns.MsgPrint(res, server, elapsed, short, options)

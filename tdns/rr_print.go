@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -306,6 +307,9 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 }
 
 func PrintRR(rr dns.RR, leftpad int, options map[string]string) {
+	if Globals.Debug && rr.Header().Rrtype == TypeHSYNC {
+		log.Printf("PrintRR: rr: %s", rr.String())
+	}
 	if !(options["multi"] == "true") {
 		fmt.Printf("%s\n", rr.String())
 		return
