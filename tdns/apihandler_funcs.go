@@ -519,6 +519,29 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	return r, nil
 }
 
+// SetupCombinerAPIRouter sets up a router for the combiner API. It should
+// only support debugging functionality and a single endpoint for replacing
+// specific zone data with new data delivered via this API.
+func SetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
+	kdb := conf.Internal.KeyDB
+	r := mux.NewRouter().StrictSlash(true)
+	apikey := conf.ApiServer.ApiKey
+	if apikey == "" {
+		return nil, fmt.Errorf("apiserver.apikey is not set")
+	}
+
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+
+	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
+	sr.HandleFunc("/zone/replace", APIzoneReplace(&conf.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
+	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
+
+	return r, nil
+}
+
 func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error {
 	addresses := conf.ApiServer.Addresses
 	certFile := conf.ApiServer.CertFile
