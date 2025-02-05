@@ -91,6 +91,9 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				if err != nil {
 					log.Printf("Error in QueryResponder: %v", err)
 				}
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeServerFailure)
+				w.WriteMsg(m)
 				return
 			}
 
