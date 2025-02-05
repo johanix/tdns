@@ -3,7 +3,7 @@ appversion=$1
 appdate=$2
 prog=$3
 
-versioned_progs="tdns-agent tdns-server music-sidecar"
+versioned_progs="tdns-agent tdns-server tdns-msa tdns-combiner"
 
 # if [ "$prog" = "tdns-agent" ] || [ "$prog" = "tdns-server" ] || [ "$prog" = "music-sidecar" ]; then 
 case " $versioned_progs " in

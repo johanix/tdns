@@ -1,4 +1,4 @@
-module music-sidecar
+module tdns-combiner
 
 go 1.23.2
 
