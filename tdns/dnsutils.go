@@ -245,7 +245,9 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	checkedForUnchanged := false
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		log.Printf("ReadZoneData: parsed RR: %s", rr.String())
+		if Globals.Debug {
+			zd.Logger.Printf("ReadZoneData: parsed RR: %s", rr.String())
+		}
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 
 		if firstSoaSeen && !checkedForUnchanged {

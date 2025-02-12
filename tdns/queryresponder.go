@@ -19,6 +19,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	TypeNOTIFY:  true,
 	TypeMSIGNER: true,
 	TypeDELEG:   true,
+	TypeHSYNC:   true,
 }
 
 var standardDNSTypes = map[uint16]bool{
@@ -393,9 +394,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
 			if dnssec_ok {
-
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
-				// if zd.OnlineSigning && cs != nil {
 				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
