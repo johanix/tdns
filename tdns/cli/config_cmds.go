@@ -16,7 +16,7 @@ import (
 
 var ConfigCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Prefix command, not useable by itself",
+	Short: "Commands to reload config, reload zones, etc",
 }
 
 var configReloadCmd = &cobra.Command{

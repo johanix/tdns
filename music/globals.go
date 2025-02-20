@@ -17,7 +17,7 @@ func init() {
 }
 
 type GlobalStuff struct {
-	Sidecars *Sidecars
+	MSAs *MSAs
 	// Api         *Api
 	Zonename   string
 	Signername string
@@ -28,7 +28,7 @@ type GlobalStuff struct {
 }
 
 var Globals = GlobalStuff{
-	Sidecars: &Sidecars{
-		S: cmap.New[*Sidecar](),
+	MSAs: &MSAs{
+		S: cmap.New[*MSA](),
 	},
 }

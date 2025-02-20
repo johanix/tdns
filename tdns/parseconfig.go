@@ -88,7 +88,7 @@ func ParseConfig(conf *Config, reload bool) error {
 		log.Fatalf("Could not load config %s: Error: %v", cfgfile, err)
 	}
 
-	viper.WriteConfigAs("/tmp/tdnsd.parsed.yaml")
+	viper.WriteConfigAs(fmt.Sprintf("/tmp/%s.parsed.yaml", conf.App.Name))
 	Globals.IMR = viper.GetString("resolver.address")
 	if Globals.IMR == "" {
 		log.Fatalf("Error: IMR undefined.")

@@ -705,14 +705,14 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := SidecarBeatResponse{
+		resp := MSABeatResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIbeat: received /beat request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var bp SidecarBeatPost
+		var bp MSABeatPost
 		err := decoder.Decode(&bp)
 
 		defer func() {
@@ -733,7 +733,7 @@ func APIbeat(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch bp.MessageType {
 		case "BEAT", "FULLBEAT":
 			resp.Msg = "OK"
-			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+			mconf.Internal.HeartbeatQ <- MSABeatReport{
 				Time: time.Now(),
 				Beat: bp,
 			}
@@ -752,14 +752,14 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := SidecarHelloResponse{
+		resp := MSAHelloResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var hp SidecarHelloPost
+		var hp MSAHelloPost
 		err := decoder.Decode(&hp)
 
 		defer func() {
@@ -779,9 +779,9 @@ func APIhello(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch hp.MessageType {
 		case "HELLO":
-			mconf.Internal.HeartbeatQ <- SidecarBeatReport{
+			mconf.Internal.HeartbeatQ <- MSABeatReport{
 				Time: time.Now(),
-				Beat: SidecarBeatPost{
+				Beat: MSABeatPost{
 					Identity:    hp.Identity,
 					MessageType: "HELLO",
 					Time:        time.Now(),
@@ -855,22 +855,22 @@ func APIshow(conf *Config, router *mux.Router) func(w http.ResponseWriter, r *ht
 	}
 }
 
-func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
+func APImsa(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var sp SidecarPost
+		var sp MSAPost
 		err := decoder.Decode(&sp)
 
-		log.Printf("APIsidecar: received /sidecar request (command: %s) from %s.\n",
+		log.Printf("APImsa: received /msa request (command: %s) from %s.\n",
 			sp.Command, r.RemoteAddr)
 
-		var resp = SidecarResponse{
+		var resp = MSAResponse{
 			Status: 101,
 		}
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
-			// Note: the resp.Sidecars field has already been cleaned from non serializable fields in the MusicSyncEngine.
+			// Note: the resp.MSA field has already been cleaned from non serializable fields in the MusicSyncEngine.
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
 				log.Printf("Error encoding response: %v\n", err)
@@ -879,7 +879,7 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err != nil { // from decoder.Decode()
-			log.Println("APIsidecar: error decoding sidecar post:", err)
+			log.Println("APImsa: error decoding /msa post:", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
@@ -888,23 +888,23 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch strings.ToLower(sp.Command) {
 		case "status":
 			responseCh := make(chan MusicSyncStatus)
-			log.Printf("APIsidecar: STATUS request received")
+			log.Printf("APImsa: STATUS request received")
 			mconf.Internal.MusicSyncStatusQ <- MusicSyncStatus{
 				Command:  "STATUS",
 				Response: responseCh,
 			}
-			log.Printf("APIsidecar: STATUS request sent to MusicSyncStatusQ")
+			log.Printf("APImsa: STATUS request sent to MusicSyncStatusQ")
 			select {
 			case tmp := <-responseCh:
-				log.Printf("APIsidecar: STATUS response received")
+				log.Printf("APImsa: STATUS response received")
 				if tmp.Error {
 					http.Error(w, tmp.ErrorMsg, http.StatusInternalServerError)
 					return
 				}
-				resp.Sidecars = tmp.Sidecars
+				resp.MSAs = tmp.MSAs
 
 			case <-time.After(5 * time.Second):
-				log.Printf("APIsidecar: STATUS request timed out")
+				log.Printf("APImsa: STATUS request timed out")
 				http.Error(w, "Request timed out", http.StatusGatewayTimeout)
 				return
 			}
@@ -916,7 +916,7 @@ func APIsidecar(mconf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// This is the sidecar mgmt API router.
+// This is the MSA mgmt API router.
 func SetupAPIRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
 	kdb := tconf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
@@ -947,12 +947,12 @@ func SetupAPIRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/process", APIprocess(mconf)).Methods("POST")
 	sr.HandleFunc("/show", APIshow(mconf, r)).Methods("POST")
 
-	sr.HandleFunc("/sidecar", APIsidecar(mconf)).Methods("POST")
+	sr.HandleFunc("/msa", APImsa(mconf)).Methods("POST")
 
 	return r, nil
 }
 
-// This is the sidecar-to-sidecar sync API router.
+// This is the msa-to-msa sync API router.
 func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error) {
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/", HomeLink)
@@ -983,14 +983,14 @@ func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error
 
 			// Get TLSA record for the client's identity and verify
 			clientId := clientCert.Subject.CommonName
-			sidecar, ok := Globals.Sidecars.S.Get(clientId)
+			msa, ok := Globals.MSAs.S.Get(clientId)
 			if !ok {
 				log.Printf("secureRouter: Unknown client identity: %s", clientId)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			tlsaRR := sidecar.Details[tdns.MsignerMethodAPI].TlsaRR
+			tlsaRR := msa.Details[tdns.MsignerMethodAPI].TlsaRR
 			if tlsaRR == nil {
 				log.Printf("secureRouter: No TLSA record available for client: %s", clientId)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -1014,18 +1014,18 @@ func SetupMusicSyncRouter(tconf *tdns.Config, mconf *Config) (*mux.Router, error
 	return r, nil
 }
 
-// This is the sidecar-to-sidecar sync API dispatcher.
+// This is the msa-to-msar sync API dispatcher.
 func MusicSyncAPIdispatcher(tconf *tdns.Config, mconf *Config, done <-chan struct{}) error {
-	log.Printf("MusicSyncAPIdispatcher: starting with sidecar ID '%s'", mconf.Sidecar.Identity)
+	log.Printf("MusicSyncAPIdispatcher: starting with MSA ID '%s'", mconf.MSA.Identity)
 
 	router, err := SetupMusicSyncRouter(tconf, mconf)
 	if err != nil {
 		return err
 	}
-	addresses := mconf.Sidecar.Api.Addresses.Listen
-	port := mconf.Sidecar.Api.Port
-	certFile := mconf.Sidecar.Api.Cert
-	keyFile := mconf.Sidecar.Api.Key
+	addresses := mconf.MSA.Api.Addresses.Listen
+	port := mconf.MSA.Api.Port
+	certFile := mconf.MSA.Api.Cert
+	keyFile := mconf.MSA.Api.Key
 	if len(addresses) == 0 {
 		log.Println("MusicSyncAPIdispatcher: no addresses to listen on. Not starting.")
 		return nil

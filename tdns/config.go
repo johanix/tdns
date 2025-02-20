@@ -52,6 +52,16 @@ type ApiServerConf struct {
 	CertFile  string   `validate:"required,file,certkey"`
 	KeyFile   string   `validate:"required,file"`
 	UseTLS    bool
+	Server	  ApiServerAppConf
+	Agent	  ApiServerAppConf
+	MSA	  ApiServerAppConf
+	Combiner  ApiServerAppConf
+}
+
+type ApiServerAppConf struct {
+	Addresses	[]string
+	ApiKey		string
+	
 }
 
 type DbConf struct {

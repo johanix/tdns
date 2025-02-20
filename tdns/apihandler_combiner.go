@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package tdns
 
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	// "github.com/miekg/dns"
 )
 
 func APIzoneReplace(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {

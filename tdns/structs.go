@@ -61,6 +61,7 @@ type ZoneData struct {
 	ApexLen    int
 	//	RRs            RRArray
 	Data            cmap.ConcurrentMap[string, OwnerData]
+	CombinerData    *cmap.ConcurrentMap[string, OwnerData]
 	Ready           bool   // true if zd.Data has been populated (from file or upstream)
 	XfrType         string // axfr | ixfr
 	Logger          *log.Logger
@@ -84,6 +85,7 @@ type ZoneData struct {
 	DnssecPolicy    *DnssecPolicy
 	MultiSigner     *MultiSignerConf
 	KeyDB           *KeyDB
+	AppType         AppType
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data

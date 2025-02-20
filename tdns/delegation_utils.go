@@ -375,7 +375,7 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error) {
+func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error) {
 	var mss = MusicSyncStatus{
 		ZoneName: zd.ZoneName,
 		Msg:      "No change",
@@ -390,22 +390,22 @@ func (zd *ZoneData) MsignerChanged(newzd *ZoneData) (bool, *MusicSyncStatus, err
 		return false, nil, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	newmsigner, err := newzd.GetRRset(zd.ZoneName, TypeMSIGNER)
+	newhsync, err := newzd.GetRRset(zd.ZoneName, TypeHSYNC)
 	if err != nil {
 		return false, nil, err
 	}
 
 	if oldapex == nil {
-		log.Printf("MsignerChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		mss.MsignerAdds = newmsigner.RRs
+		log.Printf("HsyncChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		mss.MsignerAdds = newhsync.RRs
 		return true, &mss, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
 	}
 
-	oldmsigner, err := zd.GetRRset(zd.ZoneName, TypeMSIGNER)
+	oldhsync, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
 	if err != nil {
 		return false, nil, err
 	}
 
-	differ, mss.MsignerAdds, mss.MsignerRemoves = RRsetDiffer(zd.ZoneName, newmsigner.RRs, oldmsigner.RRs, TypeMSIGNER, zd.Logger)
+	differ, mss.MsignerAdds, mss.MsignerRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
 	return differ, &mss, nil
 }

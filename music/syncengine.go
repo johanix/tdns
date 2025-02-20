@@ -20,32 +20,32 @@ import (
 	"github.com/spf13/viper"
 )
 
-type Sidecars struct {
-	S cmap.ConcurrentMap[string, *Sidecar]
+type MSAs struct {
+	S cmap.ConcurrentMap[string, *MSA]
 }
 
 func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
-	ourSidecarId := mconf.Sidecar.Identity
+	ourMSAId := mconf.MSA.Identity
 
-	sidecars := &Sidecars{
-		S: cmap.New[*Sidecar](),
+	sidecars := &MSAs{
+		S: cmap.New[*MSA](),
 	}
 
 	// wannabe_sidecars is a map of sidecars that we have received
 	// a HELLO message from, but have not yet verified that they are
 	// correct
-	wannabe_sidecars := map[string]*Sidecar{}
+	wannabe_sidecars := map[string]*MSA{}
 
 	// mszones is a map of zones and the remote sidecars that share them with us
-	mszones := map[string][]*Sidecar{}
+	mszones := map[string][]*MSA{}
 
 	var missing []string
 	var zonename string
 	var syncitem tdns.MusicSyncRequest
 	syncQ := mconf.Internal.MusicSyncQ
 
-	var sbr SidecarBeatReport
-	beatQ := make(chan SidecarBeatReport, 10)
+	var sbr MSABeatReport
+	beatQ := make(chan MSABeatReport, 10)
 	mconf.Internal.HeartbeatQ = beatQ
 
 	mconf.Internal.MusicSyncStatusQ = make(chan MusicSyncStatus, 10)
@@ -123,7 +123,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 					log.Printf("  %s", rr.String())
 				}
 
-				err := sidecars.UpdateSidecars(ourSidecarId, wannabe_sidecars, syncitem, mszones, zonename)
+				err := sidecars.UpdateMSAs(ourMSAId, wannabe_sidecars, syncitem, mszones, zonename)
 				if err != nil {
 					// XXX: Handle error.
 					log.Printf("MusicSyncEngine: Error sending HELLO message: %v", err)
@@ -165,7 +165,7 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 
 		case <-HelloEvalTicker.C:
 			log.Printf("MusicSyncEngine: Hello evaluation ticker. Evaluating sidecars that claim to share zones with us.")
-			err := EvaluateSidecarHello(sidecars, wannabe_sidecars, mszones)
+			err := EvaluateMSAHello(sidecars, wannabe_sidecars, mszones)
 			if err != nil {
 				log.Printf("MusicSyncEngine: Hello evaluation ticker. Error evaluating sidecars: %v", err)
 			}
@@ -178,15 +178,15 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 				continue
 			}
 
-			cleaned := map[string]*Sidecar{}
+			cleaned := map[string]*MSA{}
 			for _, s := range sidecars.S.Items() {
-				log.Printf("MusicSyncEngine: Sidecar %s: %+v", s.Identity, s.Details)
+				log.Printf("MusicSyncEngine: MSA %s: %+v", s.Identity, s.Details)
 				cleaned[s.Identity] = s.CleanCopy()
 			}
 
 			select {
 			case req.Response <- MusicSyncStatus{
-				Sidecars: cleaned,
+				MSAs: cleaned,
 				Error:    false,
 			}:
 			case <-time.After(5 * time.Second):
@@ -202,54 +202,54 @@ func MusicSyncEngine(mconf *Config, stopch chan struct{}) {
 	}
 }
 
-func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[string]*Sidecar,
-	syncitem tdns.MusicSyncRequest, mszones map[string][]*Sidecar, zonename string) error {
+func (ss *MSAs) UpdateMSAs(ourMSAId string, wannabe_sidecars map[string]*MSA,
+	syncitem tdns.MusicSyncRequest, mszones map[string][]*MSA, zonename string) error {
 
-	for _, remoteSidecarRR := range syncitem.MusicSyncStatus.MsignerAdds {
-		if prr, ok := remoteSidecarRR.(*dns.PrivateRR); ok {
+	for _, remoteMSARR := range syncitem.MusicSyncStatus.MsignerAdds {
+		if prr, ok := remoteMSARR.(*dns.PrivateRR); ok {
 			if prr.Header().Rrtype != tdns.TypeMSIGNER {
-				log.Printf("UpdateSidecars: Unknown RR type in MSIGNER RRset: %s", remoteSidecarRR.String())
+				log.Printf("UpdateMSAs: Unknown RR type in MSIGNER RRset: %s", remoteMSARR.String())
 				continue
 			}
 			msrr, ok := prr.Data.(*tdns.MSIGNER)
 			if !ok {
-				log.Printf("UpdateSidecars: MSIGNER RRset contains non-MSIGNER RR: %s", remoteSidecarRR.String())
+				log.Printf("UpdateMSAs: MSIGNER RRset contains non-MSIGNER RR: %s", remoteMSARR.String())
 				continue
 			}
 			remoteMethod := msrr.Method
-			remoteSidecar := msrr.Target
-			// log.Printf("MaybeSendHello: remoteSidecar: %s, remoteMechanism: %s, sidecarId: %s", remoteSidecar, tdns.MsignerMethodToString[remoteMethod], sidecarId)
-			if remoteSidecar == ourSidecarId {
+			remoteMSA := msrr.Target
+			// log.Printf("MaybeSendHello: remoteMSA: %s, remoteMechanism: %s, sidecarId: %s", remoteMSA, tdns.MsignerMethodToString[remoteMethod], sidecarId)
+			if remoteMSA == ourMSAId {
 				// we don't need to send a hello to ourselves
-				log.Printf("UpdateSidecars: remoteSidecar [%s][%s] is ourselves (%s), no need to talk to ourselves",
-					tdns.MsignerMethodToString[remoteMethod], remoteSidecar, ourSidecarId)
+				log.Printf("UpdateMSAs: remoteMSA [%s][%s] is ourselves (%s), no need to talk to ourselves",
+					tdns.MsignerMethodToString[remoteMethod], remoteMSA, ourMSAId)
 				continue
 			}
 
 			// is this a new sidecar
-			new, s, err := ss.LocateSidecar(remoteSidecar, remoteMethod)
+			new, s, err := ss.LocateMSA(remoteMSA, remoteMethod)
 			if err != nil {
-				log.Printf("UpdateSidecars: Error locating sidecar %s: %v", remoteSidecar, err)
+				log.Printf("UpdateMSAs: Error locating sidecar %s: %v", remoteMSA, err)
 				continue
 			}
 
 			if new {
 				if _, exists := s.Details[remoteMethod]; !exists {
-					log.Printf("UpdateSidecars: Sidecar %s does not have a %s method configured", remoteSidecar, tdns.MsignerMethodToString[remoteMethod])
+					log.Printf("UpdateMSAs: MSA %s does not have a %s method configured", remoteMSA, tdns.MsignerMethodToString[remoteMethod])
 					continue
 				} else {
-					err := s.NewMusicSyncApiClient(remoteSidecar, s.Details[remoteMethod].BaseUri, "", "", "tlsa")
+					err := s.NewMusicSyncApiClient(remoteMSA, s.Details[remoteMethod].BaseUri, "", "", "tlsa")
 					if err != nil {
-						log.Printf("UpdateSidecars: Error creating MUSIC SyncAPI client for remote sidecar %s: %v", remoteSidecar, err)
+						log.Printf("UpdateMSAs: Error creating MUSIC SyncAPI client for remote sidecar %s: %v", remoteMSA, err)
 						continue
 					}
 					// Schedule sending an HELLO message to the new sidecar
 					log.Printf("MaybeSendHello: Scheduling HELLO message to remote %s sidecar %s",
-						tdns.MsignerMethodToString[remoteMethod], remoteSidecar)
+						tdns.MsignerMethodToString[remoteMethod], remoteMSA)
 					// Add code to send HELLO message here
 					err = s.SendHello()
 					if err != nil {
-						log.Printf("UpdateSidecars: Error sending HELLO message to %s: %v", remoteSidecar, err)
+						log.Printf("UpdateMSAs: Error sending HELLO message to %s: %v", remoteMSA, err)
 					}
 				}
 			}
@@ -260,7 +260,7 @@ func (ss *Sidecars) UpdateSidecars(ourSidecarId string, wannabe_sidecars map[str
 	return nil
 }
 
-func EvaluateSidecarHello(sidecars *Sidecars, wannabe_sidecars map[string]*Sidecar, zones map[string][]*Sidecar) error {
+func EvaluateMSAHello(sidecars *MSAs, wannabe_sidecars map[string]*MSA, zones map[string][]*MSA) error {
 
 	// for each sidecar in wannabe_sidecars, check if it is already in sidecars
 	// if it is, add it to sidecars and remove it from wannabe_sidecars
@@ -272,7 +272,7 @@ func EvaluateSidecarHello(sidecars *Sidecars, wannabe_sidecars map[string]*Sidec
 			delete(wannabe_sidecars, ws.Identity)
 		} else {
 			// check if it should be in the set of known sidecars
-			log.Printf("EvaluateSidecarHello: Sidecar %s is not in sidecars, but claims to share zones with us.",
+			log.Printf("EvaluateMSAHello: MSA %s is not in sidecars, but claims to share zones with us.",
 				ws.Identity)
 		}
 	}
@@ -280,9 +280,9 @@ func EvaluateSidecarHello(sidecars *Sidecars, wannabe_sidecars map[string]*Sidec
 	return nil
 }
 
-func (s *Sidecar) SendHello() error {
+func (s *MSA) SendHello() error {
 
-	log.Printf("Sending HELLO message to sidecar %s", SidecarToString(s))
+	log.Printf("Sending HELLO message to sidecar %s", MSAToString(s))
 
 	// dump.P(s)
 	if s.Methods["API"] {
@@ -291,8 +291,8 @@ func (s *Sidecar) SendHello() error {
 			return fmt.Errorf("API details not available for sidecar %s", s.Identity)
 		}
 		log.Printf("Sending HELLO message to sidecar %s via API method (baseuri: %s)", s.Identity, s.Details[tdns.MsignerMethodAPI].BaseUri)
-		// Create the SidecarHelloPost struct
-		helloPost := SidecarHelloPost{
+		// Create the MSAHelloPost struct
+		helloPost := MSAHelloPost{
 			MessageType: "HELLO",
 			Identity:    s.Identity,
 			Addresses:   s.Details[tdns.MsignerMethodAPI].Addrs,
@@ -309,7 +309,7 @@ func (s *Sidecar) SendHello() error {
 		}
 		// defer resp.Body.Close()
 
-		var shr SidecarHelloResponse
+		var shr MSAHelloResponse
 		err = json.Unmarshal(resp, &shr)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal response: %v", err)
