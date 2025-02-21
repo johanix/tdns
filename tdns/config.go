@@ -19,6 +19,7 @@ type Config struct {
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
 	Zones          map[string]ZoneConf
+	Templates      map[string]ZoneConf // Templates are reusable zone configurations
 	Db             DbConf
 	Registrars     map[string][]string
 	Log            struct {
@@ -52,16 +53,15 @@ type ApiServerConf struct {
 	CertFile  string   `validate:"required,file,certkey"`
 	KeyFile   string   `validate:"required,file"`
 	UseTLS    bool
-	Server	  ApiServerAppConf
-	Agent	  ApiServerAppConf
-	MSA	  ApiServerAppConf
+	Server    ApiServerAppConf
+	Agent     ApiServerAppConf
+	MSA       ApiServerAppConf
 	Combiner  ApiServerAppConf
 }
 
 type ApiServerAppConf struct {
-	Addresses	[]string
-	ApiKey		string
-	
+	Addresses []string
+	ApiKey    string
 }
 
 type DbConf struct {
@@ -91,7 +91,7 @@ type InternalConf struct {
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
-	err := ParseConfig(conf, true) // true: reload, not initial parsing
+	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		log.Printf("Error parsing config: %v", err)
 	}
@@ -103,7 +103,7 @@ func (conf *Config) ReloadZoneConfig() (string, error) {
 	prezones := Zones.Keys()
 	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
-	zonelist, err := ParseZones(conf, conf.Internal.RefreshZoneCh, true) // true: reload, not initial parsing
+	zonelist, err := conf.ParseZones(true) // true: reload, not initial parsing
 	if err != nil {
 		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)
 	}

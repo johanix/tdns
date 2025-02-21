@@ -137,6 +137,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "list-zones":
 			zones := map[string]ZoneConf{}
+			log.Printf("APIzone: listing zones. len(Zones): %d. keys: %v", len(Zones.Keys()), Zones.Keys())
 			for item := range Zones.IterBuffered() {
 				zname := item.Key
 				zd := item.Val
