@@ -132,6 +132,7 @@ func (conf *Config) MainInit() error {
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
 
+	log.Printf("*** MainInit: 1. Refreshch: %v", conf.Internal.RefreshZoneCh)
 	// Parse all configured zones
 	_, err = conf.ParseZones(false) // false = initial load, not reload
 	if err != nil {
