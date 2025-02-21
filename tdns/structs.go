@@ -96,8 +96,8 @@ type ZoneConf struct {
 	Store        string `validate:"required"` // xfr | map | slice | reg
 	Primary      string // upstream, for secondary zones
 	Notify       []string
-	OptionsStrs  []string     `yaml:"options"`
-	Options      []ZoneOption `yaml:"-"` // not used by yaml, but by code
+	OptionsStrs  []string     `yaml:"options" mapstructure:"options"`
+	Options      []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen       bool         // true if zone is frozen; not a config param
 	Dirty        bool         // true if zone has been modified; not a config param
 	UpdatePolicy UpdatePolicyConf

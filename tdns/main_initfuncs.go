@@ -48,7 +48,7 @@ func MainLoop(conf *Config) {
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
 				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				all_zones, err = ParseZones(conf, conf.Internal.RefreshZoneCh, true) // true = reload
+				all_zones, err = conf.ParseZones(true) // true = reload
 				if err != nil {
 					log.Printf("Error parsing zones: %v", err)
 					return // terminate MainLoop --> shutdown
@@ -69,7 +69,7 @@ func MainLoop(conf *Config) {
 
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
-func MainInit(conf *Config) error {
+func (conf *Config) MainInit() error {
 	conf.App.ServerBootTime = time.Now()
 	conf.App.ServerConfigTime = time.Now()
 
@@ -83,15 +83,19 @@ func MainInit(conf *Config) error {
 
 	switch conf.App.Mode {
 	case "server", "agent", "sidecar", "scanner":
-		fmt.Printf("*** TDNS %s mode of operation: %s (verbose: %t, debug: %t)\n", conf.App.Name, conf.App.Mode, Globals.Verbose, Globals.Debug)
+		fmt.Printf("*** TDNS %s mode of operation: %s (verbose: %t, debug: %t)\n",
+			conf.App.Name, conf.App.Mode, Globals.Verbose, Globals.Debug)
 	default:
-		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %s", conf.App.Name, conf.App.Mode)
+		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %s",
+			conf.App.Name, conf.App.Mode)
 	}
 
-	err := ParseConfig(conf, false) // false = !reload, initial config
+	err := conf.ParseConfig(false) // false = !reload, initial config
 	if err != nil {
 		return fmt.Errorf("Error parsing config \"%s\": %v", conf.Internal.CfgFile, err)
 	}
+
+	// Initialize channels and start engines
 	kdb := conf.Internal.KeyDB
 	kdb.UpdateQ = make(chan UpdateRequest, 10)
 	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
@@ -127,6 +131,12 @@ func MainInit(conf *Config) error {
 
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
+
+	// Parse all configured zones
+	_, err = conf.ParseZones(false) // false = initial load, not reload
+	if err != nil {
+		return fmt.Errorf("Error parsing zones: %v", err)
+	}
 
 	return nil
 }
