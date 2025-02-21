@@ -59,8 +59,8 @@ func ValidateZones(c *Config, cfgfile string) error {
 	var zones = make(map[string]interface{}, 5)
 
 	// Cannot validate a map[string]foobar, must validate the individual foobars:
-	for zname, val := range config.Zones {
-		zones["zone:"+zname] = val
+	for _, val := range config.Zones {
+		zones["zone:"+val.Name] = val
 	}
 
 	if err := ValidateBySection(config, zones, cfgfile); err != nil {

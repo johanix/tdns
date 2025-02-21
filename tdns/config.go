@@ -18,11 +18,12 @@ type Config struct {
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
-	Zones          map[string]ZoneConf
-	Templates      map[string]ZoneConf // Templates are reusable zone configurations
-	Db             DbConf
-	Registrars     map[string][]string
-	Log            struct {
+	// Zones          map[string]ZoneConf
+	Zones      []ZoneConf          `yaml:"zones"`
+	Templates  map[string]ZoneConf // Templates are reusable zone configurations
+	Db         DbConf
+	Registrars map[string][]string
+	Log        struct {
 		File string `validate:"required"`
 	}
 	Internal InternalConf
