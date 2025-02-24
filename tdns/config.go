@@ -12,27 +12,28 @@ import (
 )
 
 type Config struct {
-	App            AppDetails
+	// OBE App            AppDetails
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
 	// Zones          map[string]ZoneConf
-	Zones      []ZoneConf          `yaml:"zones"`
-	Templates  map[string]ZoneConf // Templates are reusable zone configurations
+	Zones      []ZoneConf `yaml:"zones"`
+	Templates  []ZoneConf `yaml:"templates"`
 	Db         DbConf
 	Registrars map[string][]string
 	Log        struct {
 		File string `validate:"required"`
 	}
+	Agent    AgentConf
 	Internal InternalConf
 }
 
 type AppDetails struct {
 	Name             string
 	Version          string
-	Mode             string
+	Type             AppType
 	Date             string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
@@ -89,6 +90,9 @@ type InternalConf struct {
 	NotifyQ         chan NotifyRequest
 	AuthQueryQ      chan AuthQueryRequest
 	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+	SyncQ           chan SyncRequest
+	HeartbeatQ      chan AgentBeatReport
+	SyncStatusQ     chan SyncStatus
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
@@ -96,7 +100,7 @@ func (conf *Config) ReloadConfig() (string, error) {
 	if err != nil {
 		log.Printf("Error parsing config: %v", err)
 	}
-	conf.App.ServerConfigTime = time.Now()
+	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
 }
 
@@ -125,6 +129,6 @@ func (conf *Config) ReloadZoneConfig() (string, error) {
 	}
 
 	log.Printf("ReloadZones: zones after reloading: %v", zonelist)
-	conf.App.ServerConfigTime = time.Now()
+	Globals.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
 }

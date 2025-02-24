@@ -86,6 +86,7 @@ type ZoneData struct {
 	MultiSigner     *MultiSignerConf
 	KeyDB           *KeyDB
 	AppType         AppType
+	SyncQ           chan SyncRequest
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data

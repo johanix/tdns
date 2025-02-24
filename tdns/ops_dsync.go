@@ -56,7 +56,11 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
 			// zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
-			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", zd.ZoneName, 1))
+			replacer := zd.ZoneName
+			if replacer == "." {
+				replacer = "root"
+			}
+			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", replacer, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC notify target: %s", zd.ZoneName, target)
 			}
@@ -73,7 +77,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: no notify types found. config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", zd.ZoneName, ttl, t, s, port, target)
+				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					zd.Logger.Printf("Error from NewRR(%s): %v", foo, err)
@@ -96,7 +100,11 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			}
 
 		case "UPDATE":
-			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
+			replacer := zd.ZoneName
+			if replacer == "." {
+				replacer = "root"
+			}
+			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", replacer, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC update target: %s", zd.ZoneName, target)
 			}
@@ -113,7 +121,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: no update types found. config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", zd.ZoneName, ttl, t, s, port, target)
+				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					zd.Logger.Printf("Error from NewRR(%s): %v", foo, err)

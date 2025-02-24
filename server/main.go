@@ -17,10 +17,10 @@ import (
 func main() {
 	var conf tdns.Config
 
-	conf.App.Mode = "server"
-	conf.App.Version = appVersion
-	conf.App.Name = appName
-	conf.App.Date = appDate
+	tdns.Globals.App.Type = tdns.AppTypeServer
+	tdns.Globals.App.Version = appVersion
+	tdns.Globals.App.Name = appName
+	tdns.Globals.App.Date = appDate
 
 	// These are the defaults, but they are defined here to make it possible for eg. MUSIC to use a different defaul
 	//	conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile

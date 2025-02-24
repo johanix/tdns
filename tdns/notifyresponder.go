@@ -38,15 +38,15 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 	qname := dhr.Qname
 	ntype := dhr.Msg.Question[0].Qtype
 
-	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone '%s'", dns.TypeToString[ntype], qname)
+	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone %q", dns.TypeToString[ntype], qname)
 
 	m := new(dns.Msg)
 	m.SetReply(dhr.Msg)
 
 	// Let's see if we can find the zone
 	zd, _ := FindZone(qname)
-	if zd == nil && !zd.IsChildDelegation(qname) {
-		log.Printf("NotifyResponder: Received Notify for unknown zone %s. Ignoring.", qname)
+	if zd == nil || (zd != nil && zd.IsChildDelegation(qname)) {
+		log.Printf("NotifyResponder: Received Notify for unknown zone %q. Ignoring.", qname)
 		m := new(dns.Msg)
 		m.SetRcode(dhr.Msg, dns.RcodeRefused)
 		dhr.ResponseWriter.WriteMsg(m)
@@ -61,11 +61,11 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 			Name:      qname, // send zone name into RefreshEngine
 			ZoneStore: zd.ZoneStore,
 		}
-		log.Printf("NotifyResponder: Received NOTIFY(%s) for %s Refreshing.",
+		log.Printf("NotifyResponder: Received NOTIFY(%s) for %q Refreshing.",
 			dns.TypeToString[ntype], qname)
 
 	case dns.TypeCDS, dns.TypeCSYNC:
-		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
+		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %q. This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		scannerq <- ScanRequest{
 			Cmd:       "SCAN",
@@ -75,7 +75,7 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 		}
 
 	case dns.TypeDNSKEY:
-		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %s This should trigger a scan for the %s %s RRset",
+		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %q. This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		scannerq <- ScanRequest{
 			Cmd:       "SCAN",

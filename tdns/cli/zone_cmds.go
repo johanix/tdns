@@ -27,7 +27,13 @@ var zoneReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		resp, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		resp, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "reload",
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Force:   force,
@@ -59,7 +65,13 @@ var zoneSignCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "sign-zone",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
@@ -85,7 +97,13 @@ var zoneWriteCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "write-zone",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
@@ -111,7 +129,13 @@ var zoneNsecGenerateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "generate-nsec",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
@@ -136,8 +160,13 @@ var zoneNsecShowCmd = &cobra.Command{
 	Short: "Send an NSEC show command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "show-nsec-chain",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
@@ -167,7 +196,13 @@ var zoneFreezeCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "freeze",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
@@ -192,8 +227,13 @@ var zoneThawCmd = &cobra.Command{
 	Short: "Tell tdnsd to thaw a zone (i.e. accept changes to the zone data again)",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "thaw",
 			Zone:    tdns.Globals.Zonename,
 			Force:   force,
@@ -223,7 +263,15 @@ var zoneListCmd = &cobra.Command{
 	Short: "Send an zone list command to tdnsd",
 	Run: func(cmd *cobra.Command, args []string) {
 
-		cr, err := SendZoneCommand(tdns.Globals.Api, tdns.ZonePost{
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		fmt.Printf("zoneListCmd: prefix: %q, api: %v\n", prefixcmd, api)
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "list-zones",
 		})
 		if err != nil {
@@ -231,7 +279,7 @@ var zoneListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdns-server: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -336,7 +384,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		return cr, fmt.Errorf("error from json.Unmarshal: %v", err)
+		return cr, fmt.Errorf("error from json.Unmarshal: %v json: %q", err, string(buf))
 	}
 
 	if cr.Error {

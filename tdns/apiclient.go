@@ -155,6 +155,9 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 }
 
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
+	if api == nil {
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer

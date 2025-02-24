@@ -180,11 +180,11 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Printf("API: received /command request (cmd: %s) from %s. AppName: %s\n",
-			cp.Command, r.RemoteAddr, conf.App.Name)
+			cp.Command, r.RemoteAddr, Globals.App.Name)
 
 		resp := CommandResponse{
 			Time:    time.Now(),
-			AppName: conf.App.Name,
+			AppName: Globals.App.Name,
 		}
 
 		switch cp.Command {
@@ -261,7 +261,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Msg = fmt.Sprintf("Configuration is ok, server boot time: %s, last config reload: %s",
-				conf.App.ServerBootTime.Format(timelayout), conf.App.ServerConfigTime.Format(timelayout))
+				Globals.App.ServerBootTime.Format(timelayout), Globals.App.ServerConfigTime.Format(timelayout))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)

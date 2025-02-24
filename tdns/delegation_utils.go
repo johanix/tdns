@@ -375,8 +375,9 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error) {
-	var mss = MusicSyncStatus{
+func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
+	var hss = HsyncStatus{
+		Time:     time.Now(),
 		ZoneName: zd.ZoneName,
 		Msg:      "No change",
 		Error:    false,
@@ -397,8 +398,8 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error
 
 	if oldapex == nil {
 		log.Printf("HsyncChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		mss.MsignerAdds = newhsync.RRs
-		return true, &mss, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
+		hss.HsyncAdds = newhsync.RRs
+		return true, &hss, nil
 	}
 
 	oldhsync, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
@@ -406,6 +407,6 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error
 		return false, nil, err
 	}
 
-	differ, mss.MsignerAdds, mss.MsignerRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
-	return differ, &mss, nil
+	differ, hss.HsyncAdds, hss.HsyncRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
+	return differ, &hss, nil
 }

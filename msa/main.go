@@ -17,7 +17,7 @@ func main() {
 	var tconf tdns.Config
 	var mconf music.Config
 
-	tconf.App.Mode = "sidecar"
+	tconf.App.Mode = tdns.AppTypeMSA
 	tconf.App.Version = appVersion
 	tconf.App.Name = appName
 	tconf.App.Date = appDate

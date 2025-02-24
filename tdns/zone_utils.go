@@ -159,10 +159,10 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	}
 
 	var hsyncchanged, keyschanged bool
-	var mss *MusicSyncStatus
+	var hss *HsyncStatus
 	switch zd.AppType {
 	case AppTypeMSA, AppTypeCombiner:
-		hsyncchanged, mss, err = zd.HsyncChanged(&new_zd)
+		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
 			// return false, err
@@ -212,23 +212,24 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 				// return false, err
 			}
-			zd.MusicSyncQ <- MusicSyncRequest{
+			zd.SyncQ <- SyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
 				OldDnskeys: oldkeys,
 				NewDnskeys: newkeys,
+				SyncStatus: nil,
 			}
 		}
 
 		if hsyncchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: HSYNC RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
-			zd.MusicSyncQ <- MusicSyncRequest{
-				Command:         "RESET-HSYNC-GROUP",
-				ZoneName:        zd.ZoneName,
-				ZoneData:        zd,
-				MusicSyncStatus: mss,
+			zd.SyncQ <- SyncRequest{
+				Command:    "RESET-HSYNC-GROUP",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				SyncStatus: hss,
 			}
 		}
 	}
@@ -296,10 +297,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	var hsyncchanged, dnskeyschanged bool
-	var mss *MusicSyncStatus
+	var hss *HsyncStatus
 	switch zd.AppType {
 	case AppTypeMSA, AppTypeCombiner:
-		hsyncchanged, mss, err = zd.HsyncChanged(&new_zd)
+		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
 			// return false, err
@@ -367,33 +368,40 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	if hsyncchanged {
 		switch zd.AppType {
 		case AppTypeMSA:
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
-			zd.MusicSyncQ <- MusicSyncRequest{
-				Command:         "RESET-HSYNC-GROUP",
-				ZoneName:        zd.ZoneName,
-				ZoneData:        zd,
-				MusicSyncStatus: mss,
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HSyncEngine", zd.ZoneName)
+			zd.SyncQ <- SyncRequest{
+				Command:    "RESET-HSYNC-GROUP",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				SyncStatus: hss,
 			}
 		case AppTypeCombiner:
-			// A combiner needs to act on HSYNC changes, but only to verify whether itself is in the HSYNC
+			// A combiner needs to act on HSYNC changes, but only to verify whether itself is in the HSYNC RRset
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Verifying whether we are in the HSYNC RRset", zd.ZoneName)
+			// XXX: Kludge just for testing. Should be replaced by HSYNC RRset parsing
+			zd.Options[OptAllowCombine] = true
 			// TODO: Implement this
 		}
 	}
 
+	zd.Logger.Printf("FetchFromUpstream: Zone %q: Globals.App.Type: %q allow-combine: %v",
+		zd.ZoneName, AppTypeToString[Globals.App.Type], zd.Options[OptAllowCombine])
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
-	if zd.AppType == AppTypeCombiner && zd.Options[OptCombiner] {
+	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowCombine] {
 		// XXX: We are a combiner and this zone has a HSYNC RRset. Therefore we need to check whether there are
 		// any local changes to the zone that needs to be applied before we can send the zone to the downstreams.
 		// XXX: This MUST not be a request through a channel, but rather a direct call to something that does this.
+		zd.Logger.Printf("FetchFromUpstream: Zone %q: Combining with local changes", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {
-			zd.Logger.Printf("Error from CombineWithLocalChanges(%s): %v", zd.ZoneName, err)
+			zd.Logger.Printf("Error from CombineWithLocalChanges(%q): %v", zd.ZoneName, err)
 			return false, err
 		}
-		if !success {
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: Local changes to the zone have not been applied. Not sending to downstreams.", zd.ZoneName)
+		if success {
+			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have been applied. Sending to downstreams.", zd.ZoneName)
+		} else {
+			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have not been applied. Not sending to downstreams.", zd.ZoneName)
 		}
 	}
 
@@ -587,8 +595,8 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 
 // XXX: Is qname the name of a zone cut for a child zone?
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
-	// zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
-	// 	qname, zd.ZoneName)
+	zd.Logger.Printf("IsChildDelegation: checking delegation of %q from %q",
+		qname, zd.ZoneName)
 	owner, err := zd.GetOwner(qname)
 	if err != nil || owner == nil || qname == zd.ZoneName {
 		return false
@@ -716,7 +724,7 @@ func FindZone(qname string) (*ZoneData, bool) {
 			return zd, true
 		}
 	}
-	log.Printf("FindZone: no zone for qname=%s found", qname)
+	log.Printf("FindZone: no zone for qname=%q found", qname)
 	return nil, false
 }
 
@@ -1137,4 +1145,16 @@ func (tconf *Config) FindNameserverAddrs() ([]string, error) {
 		addrs = append(addrs, addr)
 	}
 	return addrs, nil
+}
+
+type HsyncStatus struct {
+	Time         time.Time
+	ZoneName     string
+	Command      string
+	Status       bool
+	Error        bool
+	ErrorMsg     string
+	Msg          string
+	HsyncAdds    []dns.RR // Changed from Adds
+	HsyncRemoves []dns.RR // Changed from Removes
 }

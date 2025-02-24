@@ -25,7 +25,6 @@ type RefreshCounter struct {
 
 func RefreshEngine(conf *Config, stopch chan struct{}) {
 
-	appMode := conf.App.Mode
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 
@@ -158,7 +157,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 					Zones.Set(zone, zd)
 
-					if appMode != "agent" {
+					if Globals.App.Type != AppTypeAgent {
 						err = zd.SetupZoneSigning(conf.Internal.ResignQ)
 						if err != nil {
 							log.Printf("Error from SetupZoneSigning(%s): %v", zone, err)

@@ -45,8 +45,8 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
-	sr.HandleFunc("/zone", APIzone(&conf.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-	sr.HandleFunc("/zone/dsync", APIzoneDsync(&conf.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone/dsync", APIzoneDsync(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
@@ -70,7 +70,11 @@ func SetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
-	sr.HandleFunc("/zone/replace", APIzoneReplace(&conf.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	// XXX: this is a temporary endpoint that should migrate into the combiner
+	// endpoint.
+	sr.HandleFunc("/replace", APIzoneReplace(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 

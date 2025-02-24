@@ -79,14 +79,20 @@ var combinerListDataCmd = &cobra.Command{
 	Short: "List local data added to a zone in the combiner",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		parent, _ := getCommandContext("list-data")
 		zone := args[0]
+
+		api, err := getApiClient(parent, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
 
 		req := tdns.CombinerPost{
 			Command: "list",
 			Zone:    zone,
 		}
 
-		_, buf, err := tdns.Globals.Api.RequestNG("POST", "/combiner", req, true)
+		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
@@ -143,6 +149,7 @@ var combinerAddDataCmd = &cobra.Command{
 	Short: "Add local data to a zone passing through the combiner",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
+		parent, _ := getCommandContext("add-data")
 		zone := dns.Fqdn(args[0])
 		file := args[1]
 
@@ -152,13 +159,18 @@ var combinerAddDataCmd = &cobra.Command{
 			log.Fatalf("Error reading zone file: %v", err)
 		}
 
+		api, err := getApiClient(parent, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
 		req := tdns.CombinerPost{
 			Command: "add",
 			Zone:    zone,
 			Data:    data,
 		}
 
-		_, buf, err := tdns.Globals.Api.RequestNG("POST", "/combiner", req, true)
+		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}

@@ -15,9 +15,6 @@ func init() {
 	rootCmd.AddCommand(cli.PingCmd)
 	rootCmd.AddCommand(cli.DaemonCmd)
 
-	// From ../tdns/cli/zone_cmds.go:
-	rootCmd.AddCommand(cli.ZoneCmd)
-
 	// From ../tdns/cli/ddns_cmds.go:
 	rootCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
 
@@ -35,6 +32,8 @@ func init() {
 
 	// From ../tdns/cli/config_cmds.go:
 	rootCmd.AddCommand(cli.ConfigCmd)
+	cli.CombinerCmd.AddCommand(cli.ConfigCmd)
+	cli.AgentCmd.AddCommand(cli.ConfigCmd)
 
 	// From ../tdns/cli/rfc3597.go:
 	rootCmd.AddCommand(cli.ToRFC3597Cmd)
@@ -47,4 +46,13 @@ func init() {
 
 	// From ../tdns/cli/combiner_cmds.go:
 	rootCmd.AddCommand(cli.CombinerCmd)
+
+	// From ../tdns/cli/agent_cmds.go:
+	rootCmd.AddCommand(cli.AgentCmd)
+
+	// From ../tdns/cli/zone_cmds.go:
+	rootCmd.AddCommand(cli.ZoneCmd)
+	cli.CombinerCmd.AddCommand(cli.ZoneCmd)
+	cli.AgentCmd.AddCommand(cli.ZoneCmd)
+
 }

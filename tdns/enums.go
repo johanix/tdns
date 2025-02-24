@@ -10,6 +10,7 @@ const (
 	OptDelSyncChild
 	OptAllowUpdates
 	OptAllowChildUpdates
+	OptAllowCombine // Dynamically et if app=combiner and zone contains a HSYNC RRset
 	OptFoldCase
 	OptBlackLies
 	OptDontPublishKey
@@ -18,8 +19,7 @@ const (
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
-	OptAgent    // XXX: Hmm. Is this needed?
-	OptCombiner // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	OptAgent // XXX: Hmm. Is this needed?
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -36,7 +36,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
 	OptAgent:             "agent",
-	OptCombiner:          "combiner", // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	OptAllowCombine:      "allow-combine", // Dynamically et if app=combiner and zone contains a HSYNC RRset
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -44,6 +44,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"delegation-sync-child":  OptDelSyncChild,
 	"allow-updates":          OptAllowUpdates,
 	"allow-child-updates":    OptAllowChildUpdates,
+	"allow-combine":          OptAllowCombine,
 	"fold-case":              OptFoldCase,
 	"black-lies":             OptBlackLies,
 	"dont-publish-key":       OptDontPublishKey,
