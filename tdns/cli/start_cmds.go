@@ -57,7 +57,9 @@ var DaemonStatusCmd = &cobra.Command{
 	Short: "Query for the status of the management daemon",
 	Long:  `Query for the status of the management daemon`,
 	Run: func(cmd *cobra.Command, args []string) {
-		_, resp, _ := tdns.Globals.Api.UpdateDaemon(tdns.CommandPost{Command: "status"},
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+		_, resp, _ := api.UpdateDaemon(tdns.CommandPost{Command: "status"},
 			true)
 		fmt.Printf("Status: %s Message: %s\n", resp.Status, resp.Msg)
 	},
@@ -70,7 +72,10 @@ var DaemonReloadCmd = &cobra.Command{
 	Long: `Reload config from file (the assumption is that something in the config has changed).
 Right now this doesn't do much, but later on various services will be able to restart.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		_, resp, _ := tdns.Globals.Api.UpdateDaemon(tdns.CommandPost{Command: "reload"}, true)
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
+		_, resp, _ := api.UpdateDaemon(tdns.CommandPost{Command: "reload"}, true)
 		fmt.Printf("Reload: %s Message: %s\n", resp.Status, resp.Msg)
 	},
 }
@@ -82,11 +87,14 @@ var DaemonStartCmd = &cobra.Command{
 	Short: "Start the axfr-statusd daemon",
 	Long:  `Start the axfr-statusd daemon. If it was already running, then this is a no-op.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
 		maxwait := viper.GetInt("cli.maxwait")
 		if maxwait < MaxWait {
 			maxwait = MaxWait
 		}
-		tdns.Globals.Api.StartDaemon(maxwait, tdns.Globals.Slurp)
+		api.StartDaemon(maxwait, tdns.Globals.Slurp)
 	},
 }
 
@@ -95,7 +103,10 @@ var DaemonStopCmd = &cobra.Command{
 	Short: "Stop the management daemon",
 	Long:  `Stop the management daemon. If it was not running, then this is a no-op.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		tdns.Globals.Api.StopDaemon()
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
+		api.StopDaemon()
 	},
 }
 
@@ -103,7 +114,10 @@ var DaemonRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Stop and then start the management daemon",
 	Run: func(cmd *cobra.Command, args []string) {
-		tdns.Globals.Api.StopDaemon()
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
+		api.StopDaemon()
 		time.Sleep(4 * time.Second)
 		maxwait := viper.GetInt("cli.maxwait")
 		if maxwait < MaxWait {
@@ -153,10 +167,13 @@ var DaemonApiCmd = &cobra.Command{
 	Long: `The daemon api queries the statusd for the provided API
 and prints that out in a (hopefully) comprehensible fashion.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
 		if len(args) != 0 {
 			log.Fatal("api must have no arguments")
 		}
-		tdns.Globals.Api.ShowApi()
+		api.ShowApi()
 	},
 }
 

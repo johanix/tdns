@@ -111,7 +111,10 @@ func init() {
 }
 
 func Sig0TrustMgmt(subcommand string) error {
-	tr, err := SendTruststore(tdns.Globals.Api, tdns.TruststorePost{
+	prefixcmd, _ := getCommandContext("truststore")
+	api, _ := getApiClient(prefixcmd, true)
+
+	tr, err := SendTruststore(api, tdns.TruststorePost{
 		Command:    "child-sig0-mgmt",
 		SubCommand: "list",
 	})
@@ -190,7 +193,7 @@ func Sig0TrustMgmt(subcommand string) error {
 		}
 	}
 
-	tr, err = SendTruststore(tdns.Globals.Api, tsp)
+	tr, err = SendTruststore(api, tsp)
 
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

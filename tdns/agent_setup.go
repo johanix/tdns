@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gookit/goutil/dump"
@@ -43,7 +45,8 @@ type AgentDnsConf struct {
 		Publish []string
 		Listen  []string
 	}
-	Port uint16
+	BaseUrl string
+	Port    uint16
 }
 
 // Commenting out MSA-specific functions
@@ -528,19 +531,35 @@ func (conf *Config) SetupApiTransport() error {
 			if !ok {
 				return fmt.Errorf("SetupApiTransport: zone data for agent identity %q not found", identity)
 			}
+			log.Printf("SetupApiTransport: publishing HTTPS transport records for agent %q", identity)
 
 			// Publish _https._tcp URI record
-			err := zd.PublishUriRR("_https._tcp."+identity, conf.Agent.Api.BaseUrl, conf.Agent.Api.Port)
+			uristr := strings.Replace(conf.Agent.Api.BaseUrl, "{TARGET}", identity, 1)
+			uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.Agent.Api.Port), 1)
+			uri, err := url.Parse(uristr)
 			if err != nil {
-				return fmt.Errorf("failed to publish URI record: %v", err)
+				return fmt.Errorf("SetupApiTransport: failed to parse base URL: %q", uristr)
 			}
+			// Split host and port since url.Parse doesn't handle dns:// URLs properly
+			host, _, err := net.SplitHostPort(uri.Host)
+			if err != nil {
+				host = uri.Host // No port specified
+			}
+			log.Printf("SetupApiTransport: publishing _https._tcp URI record for agent %q with target %q", identity, host)
+
+			// Publish _https._tcp URI record
+			err = zd.PublishUriRR("_https._tcp."+identity, identity, conf.Agent.Api.BaseUrl, conf.Agent.Api.Port)
+			if err != nil {
+				return fmt.Errorf("SetupApiTransport: failed to publish URI record: %v", err)
+			}
+			log.Printf("SetupApiTransport: successfully published URI record for agent %q", identity)
 
 			// Publish TLSA record
-			err = zd.PublishTlsaRR(identity, conf.Agent.Api.Port, conf.Agent.Api.CertData)
+			err = zd.PublishTlsaRR(host, conf.Agent.Api.Port, conf.Agent.Api.CertData)
 			if err != nil {
-				return fmt.Errorf("failed to publish TLSA record: %v", err)
+				return fmt.Errorf("SetupApiTransport: failed to publish TLSA record: %v", err)
 			}
-
+			log.Printf("SetupApiTransport: successfully published TLSA record for agent %q", identity)
 			// Publish SVCB record with addresses
 			var value []dns.SVCBKeyValue
 			var ipv4hint, ipv6hint []net.IP
@@ -567,10 +586,11 @@ func (conf *Config) SetupApiTransport() error {
 				value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 			}
 
-			err = zd.PublishSvcbRR(identity, conf.Agent.Api.Port, value)
+			err = zd.PublishSvcbRR(host, conf.Agent.Api.Port, value)
 			if err != nil {
-				return fmt.Errorf("failed to publish SVCB record: %v", err)
+				return fmt.Errorf("SetupApiTransport: failed to publish SVCB record: %v", err)
 			}
+			log.Printf("SetupApiTransport: successfully published SVCB record for agent %q", identity)
 
 			return nil
 		},
@@ -580,7 +600,7 @@ func (conf *Config) SetupApiTransport() error {
 }
 
 func (conf *Config) SetupDnsTransport() error {
-	identity := conf.Agent.Identity
+	identity := dns.Fqdn(conf.Agent.Identity)
 
 	du := createDeferredUpdate(
 		identity,
@@ -590,18 +610,36 @@ func (conf *Config) SetupDnsTransport() error {
 			if !ok {
 				return fmt.Errorf("SetupDnsTransport: zone data for agent identity %q not found", identity)
 			}
+			log.Printf("SetupDnsTransport: publishing DNS transport records for agent %q", identity)
+
+			uristr := strings.Replace(conf.Agent.Dns.BaseUrl, "{TARGET}", identity, 1)
+			uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.Agent.Dns.Port), 1)
+			uri, err := url.Parse(uristr)
+			if err != nil {
+				return fmt.Errorf("SetupDnsTransport: failed to parse base URL: %q", uristr)
+			}
+
+			log.Printf("*** SetupDnsTransport: DEBUG: uri: %q, uri.Host: %q", uri, uri.Host)
+			// Split host and port since url.Parse doesn't handle dns:// URLs properly
+			host, _, err := net.SplitHostPort(uri.Host)
+			if err != nil {
+				host = uri.Host // No port specified
+			}
+			log.Printf("*** SetupDnsTransport: publishing _dns._tcp URI record for agent %q with target %q", identity, host)
 
 			// Publish _dns._tcp URI record
-			err := zd.PublishUriRR("_dns._tcp."+identity, "", conf.Agent.Dns.Port)
+			err = zd.PublishUriRR("_dns._tcp."+identity, identity, conf.Agent.Dns.BaseUrl, conf.Agent.Dns.Port)
 			if err != nil {
-				return fmt.Errorf("failed to publish URI record: %v", err)
+				return fmt.Errorf("SetupDnsTransport: failed to publish URI record: %v", err)
 			}
+			log.Printf("SetupDnsTransport: successfully published URI record for agent %q", identity)
 
 			// Publish KEY record for SIG(0)
-			err = zd.AgentSig0KeyPrep(identity, zd.KeyDB)
+			err = zd.AgentSig0KeyPrep(host, zd.KeyDB)
 			if err != nil {
-				return fmt.Errorf("failed to publish KEY record: %v", err)
+				return fmt.Errorf("SetupDnsTransport: failed to publish KEY record: %v", err)
 			}
+			log.Printf("SetupDnsTransport: successfully published KEY record for agent %q", identity)
 
 			// Publish SVCB record with addresses
 			var value []dns.SVCBKeyValue
@@ -629,10 +667,11 @@ func (conf *Config) SetupDnsTransport() error {
 				value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 			}
 
-			err = zd.PublishSvcbRR(identity, conf.Agent.Dns.Port, value)
+			err = zd.PublishSvcbRR(host, conf.Agent.Dns.Port, value)
 			if err != nil {
-				return fmt.Errorf("failed to publish SVCB record: %v", err)
+				return fmt.Errorf("SetupDnsTransport: failed to publish SVCB record: %v", err)
 			}
+			log.Printf("SetupDnsTransport: successfully published SVCB record for agent %q", identity)
 
 			return nil
 		},

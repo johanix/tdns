@@ -16,6 +16,7 @@ clean:
 	$(MAKE) -C ./combiner/ clean
 	$(MAKE) -C ./msa/ clean
 	$(MAKE) -C ./sidecar-cli/ clean
+	$(MAKE) -C ./msa/ clean
 
 install:
 	$(MAKE) -C ./server/ install

@@ -15,8 +15,19 @@ import (
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
+	if Globals.Debug {
+		log.Printf("PublishKeyRRs: received request to publish KEY records for %q", zd.ZoneName)
+	}
 	if zd.Options[OptDontPublishKey] {
 		return fmt.Errorf("zone %q does not allow KEY RR publication", zd.ZoneName)
+	}
+
+	if !strings.HasSuffix(zd.ZoneName, zd.ZoneName) {
+		return fmt.Errorf("PublishKeyRRs: zone %q is not a subdomain of %q", zd.ZoneName, zd.ZoneName)
+	}
+
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("PublishKeyRRs: KeyDB.UpdateQ is nil")
 	}
 
 	rrset := RRset{
@@ -24,6 +35,10 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	}
 
 	for _, pkc := range sak.Keys {
+		if !strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
+			log.Printf("PublishKeyRRs: DEBUG: SIG(0) key %q is not a subdomain of zone %q", pkc.KeyRR.Header().Name, zd.ZoneName)
+			return fmt.Errorf("PublishKeyRRs: SIG(0) key %q is not a subdomain of zone %q", pkc.KeyRR.Header().Name, zd.ZoneName)
+		}
 		rrset.RRs = append(rrset.RRs, &pkc.KeyRR)
 	}
 

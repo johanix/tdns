@@ -249,7 +249,10 @@ func (kdb *KeyDB) DeferredUpdaterEngine(stopchan chan struct{}) error {
 					// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
 					if du.PreCondition() {
 						log.Printf("DeferredUpdater: PreCondition is true for deferred update \"%s\". Executing immediately.", du.Description)
-						du.Action()
+						err := du.Action()
+						if err != nil {
+							log.Printf("DeferredUpdater: Error return from deferred update %q action: %v", du.Description, err)
+						}
 					} else {
 						log.Printf("DeferredUpdater: PreCondition is false for deferred update \"%s\". Deferring execution.", du.Description)
 						du := DeferredUpdate{

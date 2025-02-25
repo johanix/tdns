@@ -269,7 +269,7 @@ var zoneListCmd = &cobra.Command{
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
 
-		fmt.Printf("zoneListCmd: prefix: %q, api: %v\n", prefixcmd, api)
+		// fmt.Printf("zoneListCmd: prefix: %q, api: %v\n", prefixcmd, api)
 
 		cr, err := SendZoneCommand(api, tdns.ZonePost{
 			Command: "list-zones",

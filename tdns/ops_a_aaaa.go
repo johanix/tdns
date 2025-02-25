@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"time"
 
@@ -37,6 +38,9 @@ func createAddrRR(name string, addr string, ttl uint32, class uint16) (dns.RR, e
 }
 
 func (zd *ZoneData) PublishAddrRR(name, addr string) error {
+	if Globals.Debug {
+		log.Printf("PublishAddrRR: received request to publish address record for %q, addr: %q", name, addr)
+	}
 	rr, err := createAddrRR(name, addr, 120, dns.ClassINET)
 	if err != nil {
 		return err
