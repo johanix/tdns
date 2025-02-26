@@ -1,8 +1,8 @@
 apiserver:
-   address:	127.0.0.1:8080
-   apikey:	you-have-stolen-my-frotzblinger
-   certFile: ../etc/certs/localhost.crt
-   keyFile: ../etc/certs/localhost.key
+   address:     127.0.0.1:8080
+   apikey:      you-have-stolen-my-frotzblinger
+   certFile:    ../etc/certs/localhost.crt
+   keyFile:     ../etc/certs/localhost.key
 
 fsmengine:
    active:	true
