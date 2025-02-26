@@ -450,3 +450,25 @@ type Tx struct {
 	KeyDB   *KeyDB
 	context string
 }
+
+// String-based versions of RRset for JSON marshaling
+type RRsetString struct {
+	Name   string   `json:"name"`
+	RRtype uint16   `json:"rrtype"`
+	RRs    []string `json:"rrs"`
+	RRSIGs []string `json:"rrsigs,omitempty"`
+}
+
+type CombinerPost struct {
+	Command string              `json:"command"` // add, list, remove
+	Zone    string              `json:"zone"`    // zone name
+	Data    map[string][]string `json:"data"`    // The RRs as strings, indexed by owner name
+}
+
+type CombinerResponse struct {
+	Time     time.Time                `json:"time"`
+	Error    bool                     `json:"error"`
+	ErrorMsg string                   `json:"error_msg,omitempty"`
+	Msg      string                   `json:"msg,omitempty"`
+	Data     map[string][]RRsetString `json:"data,omitempty"`
+}
