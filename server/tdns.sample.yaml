@@ -1,11 +1,19 @@
 cli:
-   tdnsd:
+   server:
       baseurl:          http://127.0.0.1:8989/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
+   msa:
+      baseurl:          http://127.0.0.1:8990/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
+   combiner:
+      baseurl:          http://127.0.0.1:8991/api/v1
       apikey:           winter-is-coming-santa-stuck-in-chimney
       authmethod:       X-API-Key
 
 service:
-   name:		TDNSD
+   name:		TDNS-SERVER
    verbose:		true
    debug:		true   # writes processed zone to disk
    refresh:		true
@@ -22,6 +30,18 @@ dnsengine:
 apiserver:
    addresses:     	[ 127.0.0.1:8989 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
+   server:
+      baseurl:          http://127.0.0.1:8989/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
+   msa:
+      baseurl:          http://127.0.0.1:8990/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
+   combiner:
+      baseurl:          http://127.0.0.1:8991/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
 
 server:
    id:			ooga booga boo

@@ -18,7 +18,8 @@ const (
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
-	OptAgent // XXX: Hmm. Is this needed?
+	OptAgent    // XXX: Hmm. Is this needed?
+	OptCombiner // Dynamically et if app=combiner and zone contains a HSYNC RRset
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -35,6 +36,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
 	OptAgent:             "agent",
+	OptCombiner:          "combiner", // Dynamically et if app=combiner and zone contains a HSYNC RRset
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -51,4 +53,27 @@ var StringToZoneOption = map[string]ZoneOption{
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
 	"agent":                  OptAgent,
+}
+
+type AppType uint8
+
+const (
+	AppTypeServer AppType = iota + 1
+	AppTypeAgent
+	AppTypeMSA
+	AppTypeCombiner
+)
+
+var AppTypeToString = map[AppType]string{
+	AppTypeServer:   "server",
+	AppTypeAgent:    "agent",
+	AppTypeMSA:      "msa",
+	AppTypeCombiner: "combiner",
+}
+
+var StringToAppType = map[string]AppType{
+	"server":   AppTypeServer,
+	"agent":    AppTypeAgent,
+	"msa":      AppTypeMSA,
+	"combiner": AppTypeCombiner,
 }

@@ -23,7 +23,9 @@ func main() {
 	tconf.App.Date = appDate
 
 	// These are set here to enable various config reload functions to reload from the correct files.
-	tconf.Internal.CfgFile = music.DefaultSidecarTdnsCfgFile
+	tconf.Internal.CfgFile = music.DefaultMSACfgFile
+
+	// XXX: Zones should be loaded from the main config
 	switch mconf.Zones.Config {
 	case "":
 		tconf.Internal.ZonesCfgFile = music.DefaultZonesCfgFile

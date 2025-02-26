@@ -61,6 +61,7 @@ type ZoneData struct {
 	ApexLen    int
 	//	RRs            RRArray
 	Data            cmap.ConcurrentMap[string, OwnerData]
+	CombinerData    *cmap.ConcurrentMap[string, OwnerData]
 	Ready           bool   // true if zd.Data has been populated (from file or upstream)
 	XfrType         string // axfr | ixfr
 	Logger          *log.Logger
@@ -84,6 +85,7 @@ type ZoneData struct {
 	DnssecPolicy    *DnssecPolicy
 	MultiSigner     *MultiSignerConf
 	KeyDB           *KeyDB
+	AppType         AppType
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -447,4 +449,26 @@ type Tx struct {
 	*sql.Tx
 	KeyDB   *KeyDB
 	context string
+}
+
+// String-based versions of RRset for JSON marshaling
+type RRsetString struct {
+	Name   string   `json:"name"`
+	RRtype uint16   `json:"rrtype"`
+	RRs    []string `json:"rrs"`
+	RRSIGs []string `json:"rrsigs,omitempty"`
+}
+
+type CombinerPost struct {
+	Command string              `json:"command"` // add, list, remove
+	Zone    string              `json:"zone"`    // zone name
+	Data    map[string][]string `json:"data"`    // The RRs as strings, indexed by owner name
+}
+
+type CombinerResponse struct {
+	Time     time.Time                `json:"time"`
+	Error    bool                     `json:"error"`
+	ErrorMsg string                   `json:"error_msg,omitempty"`
+	Msg      string                   `json:"msg,omitempty"`
+	Data     map[string][]RRsetString `json:"data,omitempty"`
 }

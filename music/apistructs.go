@@ -182,19 +182,19 @@ type Process struct {
 	Desc string
 }
 
-type SidecarBeatPost struct {
+type MSABeatPost struct {
 	MessageType string
 	Identity    string
 	SharedZones []string
 	Time        time.Time
 }
 
-type SidecarBeatReport struct {
+type MSABeatReport struct {
 	Time time.Time
-	Beat SidecarBeatPost
+	Beat MSABeatPost
 }
 
-type SidecarBeatResponse struct {
+type MSABeatResponse struct {
 	Status   int
 	Time     time.Time
 	Client   string
@@ -202,7 +202,7 @@ type SidecarBeatResponse struct {
 	Error    bool
 	ErrorMsg string
 }
-type SidecarHelloPost struct {
+type MSAHelloPost struct {
 	MessageType string
 	Name        string
 	Identity    string
@@ -212,7 +212,7 @@ type SidecarHelloPost struct {
 	Zones       []string
 }
 
-type SidecarHelloResponse struct {
+type MSAHelloResponse struct {
 	Status   int
 	Time     time.Time
 	Client   string
@@ -221,13 +221,13 @@ type SidecarHelloResponse struct {
 	ErrorMsg string
 }
 
-type SidecarPost struct {
+type MSAPost struct {
 	Command string
 }
 
-type SidecarResponse struct {
+type MSAResponse struct {
 	Status   int
-	Sidecars map[string]*Sidecar
+	MSAs map[string]*MSA
 	Error    bool
 	ErrorMsg string
 }

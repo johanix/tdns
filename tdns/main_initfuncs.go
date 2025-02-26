@@ -136,7 +136,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	stopch := conf.Internal.StopCh
 
 	// if conf.App.Mode != "sidecar" {
-	// The music sidecar has its own API, so we must not start the TDNS API here.
+	// The music sidecar has its own apihandler, so we must not start the TDNS apihandler here.
 	conf.Internal.APIStopCh = make(chan struct{})
 	// router := TdnsSetupRouter(conf)
 	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)

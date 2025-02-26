@@ -14,6 +14,8 @@ cli/tdns-cli
 dog/dog
 sidecar/music-sidecar
 sidecar-cli/sidecar-cli
+combiner/tdns-combiner
+msa/tdns-msa
 
 */version.go
 
@@ -35,3 +37,5 @@ go.work
 
 # IDE
 .idea/
+
+.vscode

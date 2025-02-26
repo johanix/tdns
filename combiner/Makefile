@@ -1,4 +1,4 @@
-PROG:=music-sidecar
+PROG:=tdns-combiner
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 GO:=CGO_ENABLED=1 go

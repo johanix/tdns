@@ -44,4 +44,7 @@ func init() {
 
 	// From ../tdns/cli/commands.go:
 	rootCmd.AddCommand(cli.StopCmd)
+
+	// From ../tdns/cli/combiner_cmds.go:
+	rootCmd.AddCommand(cli.CombinerCmd)
 }

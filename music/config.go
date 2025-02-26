@@ -35,16 +35,16 @@ type Config struct {
 	Internal  InternalConf
 	FSMEngine FSMEngineConf
 	Zones     ZonesConf
-	Sidecar   SidecarConf
+	MSA       MSAConf
 }
 
-type SidecarConf struct {
+type MSAConf struct {
 	Identity string `validate:"required,hostname"`
-	Api      SidecarApiConf
-	Dns      SidecarDnsConf
+	Api      MSAApiConf
+	Dns      MSADnsConf
 }
 
-type SidecarApiConf struct {
+type MSAApiConf struct {
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -57,7 +57,7 @@ type SidecarApiConf struct {
 	KeyData  string
 }
 
-type SidecarDnsConf struct {
+type MSADnsConf struct {
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -126,8 +126,8 @@ type InternalConf struct {
 	DdnsUpdate       chan SignerOp
 	Processes        map[string]FSM
 	MusicSyncQ       chan tdns.MusicSyncRequest
-	HeartbeatQ       chan SidecarBeatReport
-	SidecarId        string
+	HeartbeatQ       chan MSABeatReport
+	MSAId            string
 	UpdateQ          chan tdns.UpdateRequest
 	DeferredUpdateQ  chan tdns.DeferredUpdate
 	KeyDB            *tdns.KeyDB
@@ -176,11 +176,11 @@ func ValidateConfig(v *viper.Viper, cfgfile, appMode string, safemode bool) erro
 		// fmt.Printf("config: %v\n", config)
 	}
 
-	if appMode != "sidecar-cli" && appMode != "tdns-cli" {
+	if appMode != "msa-cli" && appMode != "tdns-cli" {
 		// Verify that we have a MUSIC DB file.
 		if _, err := os.Stat(config.Db.File); os.IsNotExist(err) {
 			log.Printf("ValidateConfig: MUSIC DB file %q does not exist.", config.Db.File)
-			log.Printf("Please initialize MUSIC DB using 'sidecar-cli music db init -f %s'.", config.Db.File)
+			log.Printf("Please initialize MUSIC DB using 'msa-cli music db init -f %s'.", config.Db.File)
 			return fmt.Errorf("ValidateConfig: MUSIC DB file %q does not exist", config.Db.File)
 		}
 	}
@@ -199,8 +199,8 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 	switch appMode {
 	case "server":
 		cfgfile = DefaultCfgFile
-	case "sidecar", "sidecar-cli":
-		cfgfile = DefaultSidecarCfgFile
+	case "msa", "msa-cli":
+		cfgfile = DefaultMSACfgFile
 	default:
 		log.Fatalf("Unknown app mode: %q", appMode)
 	}
@@ -216,7 +216,7 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 		switch appMode {
 		case "server":
 			err = tmpviper.ReadInConfig()
-		case "sidecar", "sidecar-cli":
+		case "msa", "msa-cli":
 			err = tmpviper.MergeInConfig()
 		default:
 			log.Fatalf("Unknown app mode: %q", appMode)
@@ -241,19 +241,19 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 		if tdns.Globals.Debug {
 			fmt.Printf("*** LoadMusicConfig: server config merged from %q\n", cfgfile)
 		}
-	case "sidecar":
+	case "msa":
 		err = viper.MergeInConfig()
 		if err != nil {
 			log.Printf("Error from viper.MergeInConfig: %v", err)
 			return err
 		}
 		if tdns.Globals.Debug {
-			fmt.Printf("*** LoadMusicConfig: sidecar config merged from %q\n", cfgfile)
+			fmt.Printf("*** LoadMusicConfig: MSA config merged from %q\n", cfgfile)
 		}
-	case "sidecar-cli":
+	case "msa-cli":
 		err = viper.MergeInConfig()
 		if tdns.Globals.Debug {
-			fmt.Printf("*** LoadMusicConfig: sidecar-cli config merged from %q\n", cfgfile)
+			fmt.Printf("*** LoadMusicConfig: msa-cli config merged from %q\n", cfgfile)
 		}
 	default:
 		log.Fatalf("Unknown app mode: %q", appMode)
@@ -271,7 +271,7 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 	if err != nil {
 		log.Fatalf("Error unmarshalling MUSIC config into struct: %v", err)
 	}
-	// dump.P(mconf.Sidecar)
+	// dump.P(mconf.MSA)
 
 	TokVip = viper.New()
 	var tokenfile string
@@ -298,40 +298,40 @@ func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
 	return nil
 }
 
-func (mconf *Config) LoadSidecarConfig(tconf *tdns.Config, all_zones []string) error {
+func (mconf *Config) LoadMSAConfig(tconf *tdns.Config, all_zones []string) error {
 	if tdns.Globals.Debug {
-		log.Printf("loadSidecarConfig: enter")
+		log.Printf("LoadMSAConfig: enter")
 	}
 
-	if len(mconf.Sidecar.Api.Addresses.Listen) == 0 && len(mconf.Sidecar.Dns.Addresses.Listen) == 0 {
-		dump.P(mconf.Sidecar)
-		return errors.New("LoadSidecarConfig: neither sidecar syncapi nor syncdns addresses set in config file")
+	if len(mconf.MSA.Api.Addresses.Listen) == 0 && len(mconf.MSA.Dns.Addresses.Listen) == 0 {
+		dump.P(mconf.MSA)
+		return errors.New("LoadMSAConfig: neither MSA syncapi nor syncdns addresses set in config file")
 	}
 
-	mconf.Sidecar.Identity = dns.Fqdn(mconf.Sidecar.Identity)
-	if !slices.Contains(all_zones, mconf.Sidecar.Identity) {
-		_, err := mconf.SetupSidecarAutoZone(mconf.Sidecar.Identity, tconf)
+	mconf.MSA.Identity = dns.Fqdn(mconf.MSA.Identity)
+	if !slices.Contains(all_zones, mconf.MSA.Identity) {
+		_, err := mconf.SetupMSAAutoZone(mconf.MSA.Identity, tconf)
 		if err != nil {
-			return fmt.Errorf("LoadSidecarConfig: failed to create minimal auto zone for sidecar identity %q: %v", mconf.Sidecar.Identity, err)
+			return fmt.Errorf("LoadMSAConfig: failed to create minimal auto zone for MSA identity %q: %v", mconf.MSA.Identity, err)
 		}
 	}
 
-	if len(mconf.Sidecar.Api.Addresses.Publish) > 0 {
+	if len(mconf.MSA.Api.Addresses.Publish) > 0 {
 		err := mconf.SetupApiMethod(tconf, all_zones)
 		if err != nil {
-			return fmt.Errorf("LoadSidecarConfig: failed to setup API method: %v", err)
+			return fmt.Errorf("LoadMSAConfig: failed to setup API method: %v", err)
 		}
 	}
 
-	if len(mconf.Sidecar.Dns.Addresses.Publish) > 0 {
+	if len(mconf.MSA.Dns.Addresses.Publish) > 0 {
 		err := mconf.SetupDnsMethod()
 		if err != nil {
-			return fmt.Errorf("LoadSidecarConfig: failed to setup DNS method: %v", err)
+			return fmt.Errorf("LoadMSAConfig: failed to setup DNS method: %v", err)
 		}
 	}
 
 	if tdns.Globals.Debug {
-		log.Printf("LoadSidecarConfig: exit")
+		log.Printf("LoadMSAConfig: exit")
 	}
 
 	return nil
@@ -349,74 +349,74 @@ func createDeferredUpdate(zoneName, description string, action func() error) tdn
 }
 
 func (mconf *Config) SetupApiMethod(tconf *tdns.Config, all_zones []string) error {
-	apiname := "api." + mconf.Sidecar.Identity
+	apiname := "api." + mconf.MSA.Identity
 
-	certFile := viper.GetString("sidecar.api.cert")
-	keyFile := viper.GetString("sidecar.api.key")
+	certFile := viper.GetString("msa.api.cert")
+	keyFile := viper.GetString("msa.api.key")
 
 	if certFile == "" || keyFile == "" {
-		return errors.New("LoadSidecarConfig: Sidecar API identity defined, but cert or key file not set in config file")
+		return errors.New("LoadMSAConfig: MSA API identity defined, but cert or key file not set in config file")
 	}
 
-	certPEM, err := os.ReadFile(mconf.Sidecar.Api.Cert)
+	certPEM, err := os.ReadFile(mconf.MSA.Api.Cert)
 	if err != nil {
-		return fmt.Errorf("LoadSidecarConfig: error reading cert file: %v", err)
+		return fmt.Errorf("LoadMSAConfig: error reading cert file: %v", err)
 	}
 
-	keyPEM, err := os.ReadFile(mconf.Sidecar.Api.Key)
+	keyPEM, err := os.ReadFile(mconf.MSA.Api.Key)
 	if err != nil {
-		return fmt.Errorf("LoadSidecarConfig: error reading key file: %v", err)
+		return fmt.Errorf("LoadMSAConfig: error reading key file: %v", err)
 	}
 
-	mconf.Sidecar.Api.CertData = string(certPEM)
-	mconf.Sidecar.Api.KeyData = string(keyPEM)
+	mconf.MSA.Api.CertData = string(certPEM)
+	mconf.MSA.Api.KeyData = string(keyPEM)
 
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return fmt.Errorf("LoadSidecarConfig: failed to parse certificate PEM")
+		return fmt.Errorf("LoadMSAConfig: failed to parse certificate PEM")
 	}
 
 	// Parse the certificate
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("LoadSidecarConfig: failed to parse certificate: %v", err)
+		return fmt.Errorf("LoadMSAConfig: failed to parse certificate: %v", err)
 	}
 
 	// Extract the CN from the certificate
 	certCN := cert.Subject.CommonName
 
 	// Compare the CN with the expected CN
-	if certCN != "api."+mconf.Sidecar.Identity {
-		log.Printf("LoadSidecarConfig: Error: mconf.Sidecar.Identity: %q viper: %q", mconf.Sidecar.Identity, viper.GetString("sidecar.identity"))
-		dump.P(mconf.Sidecar)
-		return fmt.Errorf("LoadSidecarConfig: Error: Sidecar certificate CN %q does not match sidecar API target %q", certCN, mconf.Sidecar.Identity)
+	if certCN != "api."+mconf.MSA.Identity {
+		log.Printf("LoadMSAConfig: Error: mconf.MSA.Identity: %q viper: %q", mconf.MSA.Identity, viper.GetString("msa.identity"))
+		dump.P(mconf.MSA)
+		return fmt.Errorf("LoadMSAConfig: Error: MSA certificate CN %q does not match MSA API target %q", certCN, mconf.MSA.Identity)
 	}
 
-	log.Printf("LoadSidecarConfig: cert CN %q matches sidecar API identity 'api.%s'", certCN, mconf.Sidecar.Identity)
+	log.Printf("LoadMSAConfig: cert CN %q matches MSA API identity 'api.%s'", certCN, mconf.MSA.Identity)
 
 	du := createDeferredUpdate(
-		mconf.Sidecar.Identity,
-		fmt.Sprintf("Publish TLSA RR for sidecar API target %q", apiname),
+		mconf.MSA.Identity,
+		fmt.Sprintf("Publish TLSA RR for MSA API target %q", apiname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
 			}
 
-			log.Printf("LoadSidecarConfig: sending PING command to sidecar %q", mconf.Sidecar.Identity)
+			log.Printf("LoadMSAConfig: sending PING command to MSA  %q", mconf.MSA.Identity)
 			zd.KeyDB.UpdateQ <- tdns.UpdateRequest{
 				Cmd: "PING",
 			}
 
-			// sidecar API identity
-			log.Printf("LoadSidecarConfig: publishing TLSA RR for sidecar API target %q", apiname)
+			// MSA API identity
+			log.Printf("LoadMSAConfig: publishing TLSA RR for MSA API target %q", apiname)
 
-			err = zd.PublishTlsaRR(apiname, mconf.Sidecar.Api.Port, string(certPEM))
+			err = zd.PublishTlsaRR(apiname, mconf.MSA.Api.Port, string(certPEM))
 			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to publish TLSA RR: %v", err)
+				return fmt.Errorf("LoadMSAConfig: failed to publish TLSA RR: %v", err)
 			}
 
-			log.Printf("LoadSidecarConfig: Successfully published TLSA RR for sidecar API target %q", apiname)
+			log.Printf("LoadMSAConfig: Successfully published TLSA RR for MSA API target %q", apiname)
 			return nil
 		},
 	)
@@ -424,49 +424,49 @@ func (mconf *Config) SetupApiMethod(tconf *tdns.Config, all_zones []string) erro
 	mconf.Internal.DeferredUpdateQ <- du
 
 	du = createDeferredUpdate(
-		mconf.Sidecar.Identity,
-		fmt.Sprintf("Publish URI RR for sidecar API target %q", apiname),
+		mconf.MSA.Identity,
+		fmt.Sprintf("Publish URI RR for MSA API target %q", apiname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
 			}
 
-			log.Printf("LoadSidecarConfig: sending PING command to sidecar %q", mconf.Sidecar.Identity)
+			log.Printf("LoadMSAConfig: sending PING command to MSA %q", mconf.MSA.Identity)
 			zd.KeyDB.UpdateQ <- tdns.UpdateRequest{
 				Cmd: "PING",
 			}
 
-			// sidecar API identity
-			log.Printf("LoadSidecarConfig: publishing URI RR for sidecar API target %q", apiname)
+			// MSA API identity
+			log.Printf("LoadMSAConfig: publishing URI RR for MSA API target %q", apiname)
 
-			err = zd.PublishUriRR(apiname, mconf.Sidecar.Api.BaseUrl, mconf.Sidecar.Api.Port)
+			err = zd.PublishUriRR(apiname, mconf.MSA.Api.BaseUrl, mconf.MSA.Api.Port)
 			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to publish URI RR: %v", err)
+				return fmt.Errorf("LoadMSAConfig: failed to publish URI RR: %v", err)
 			}
 
-			log.Printf("LoadSidecarConfig: Successfully published TLSA RR for sidecar API target %q", apiname)
+			log.Printf("LoadMSAConfig: Successfully published TLSA RR for MSA API target %q", apiname)
 			return nil
 		},
 	)
 	mconf.Internal.DeferredUpdateQ <- du
 
 	du = createDeferredUpdate(
-		mconf.Sidecar.Identity,
-		fmt.Sprintf("Publish SVCB RR for sidecar API target %q", apiname),
+		mconf.MSA.Identity,
+		fmt.Sprintf("Publish SVCB RR for MSA API target %q", apiname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
 			}
 
 			var ipv4hint, ipv6hint []net.IP
 			var value []dns.SVCBKeyValue
-			if len(mconf.Sidecar.Api.Addresses.Publish) > 0 {
-				for _, addr := range mconf.Sidecar.Api.Addresses.Publish {
+			if len(mconf.MSA.Api.Addresses.Publish) > 0 {
+				for _, addr := range mconf.MSA.Api.Addresses.Publish {
 					ip := net.ParseIP(addr)
 					if ip == nil {
-						log.Printf("LoadSidecarConfig: failed to parse address %q", addr)
+						log.Printf("LoadMSAConfig: failed to parse address %q", addr)
 						continue
 					}
 					if ip.To4() != nil {
@@ -477,8 +477,8 @@ func (mconf *Config) SetupApiMethod(tconf *tdns.Config, all_zones []string) erro
 				}
 			}
 
-			if mconf.Sidecar.Api.Port != 0 {
-				value = append(value, &dns.SVCBPort{Port: mconf.Sidecar.Api.Port})
+			if mconf.MSA.Api.Port != 0 {
+				value = append(value, &dns.SVCBPort{Port: mconf.MSA.Api.Port})
 			}
 
 			if len(ipv4hint) > 0 {
@@ -489,33 +489,33 @@ func (mconf *Config) SetupApiMethod(tconf *tdns.Config, all_zones []string) erro
 				value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 			}
 
-			err = zd.PublishSvcbRR(apiname, mconf.Sidecar.Api.Port, value)
+			err = zd.PublishSvcbRR(apiname, mconf.MSA.Api.Port, value)
 			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar API target SVCB RR: %v", err)
+				return fmt.Errorf("LoadMSAConfig: failed to publish MSA API target SVCB RR: %v", err)
 			}
 
-			log.Printf("LoadSidecarConfig: Successfully published sidecar API target SVCB RR %q", apiname)
+			log.Printf("LoadMSAConfig: Successfully published MSA API target SVCB RR %q", apiname)
 			return nil
 		},
 	)
 	mconf.Internal.DeferredUpdateQ <- du
 
 	du = createDeferredUpdate(
-		mconf.Sidecar.Identity,
-		fmt.Sprintf("Publish ADDR RRs for sidecar API target %q", apiname),
+		mconf.MSA.Identity,
+		fmt.Sprintf("Publish ADDR RRs for MSA API target %q", apiname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
 			}
 
-			for _, addr := range mconf.Sidecar.Api.Addresses.Publish {
+			for _, addr := range mconf.MSA.Api.Addresses.Publish {
 				err = zd.PublishAddrRR(apiname, addr)
 				if err != nil {
-					return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar API address RRs: %v", err)
+					return fmt.Errorf("LoadMSAConfig: failed to publish MSA API address RRs: %v", err)
 				}
 			}
-			log.Printf("LoadSidecarConfig: Successfully published sidecar API address RRs %q", apiname)
+			log.Printf("LoadMSAig: Successfully published sidecar API address RRs %q", apiname)
 			return nil
 		},
 	)
@@ -524,15 +524,15 @@ func (mconf *Config) SetupApiMethod(tconf *tdns.Config, all_zones []string) erro
 }
 
 func (mconf *Config) SetupDnsMethod() error {
-	dnsname := "dns." + mconf.Sidecar.Identity
+	dnsname := "dns." + mconf.MSA.Identity
 
 	du := createDeferredUpdate(
-		mconf.Sidecar.Identity,
+		mconf.MSA.Identity,
 		fmt.Sprintf("Publish KEY RR for sidecar DNS target %q SIG(0) public key", dnsname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.MSA.Identity)
 			}
 
 			err := zd.MusicSig0KeyPrep(dnsname, zd.KeyDB)
@@ -547,19 +547,19 @@ func (mconf *Config) SetupDnsMethod() error {
 	mconf.Internal.DeferredUpdateQ <- du
 
 	du = createDeferredUpdate(
-		mconf.Sidecar.Identity,
+		mconf.MSA.Identity,
 		fmt.Sprintf("Publish SVCB RRs for sidecar DNS identity %q", dnsname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.MSA.Identity)
 			}
 
 			var ipv4hint, ipv6hint []net.IP
 			var value []dns.SVCBKeyValue
 
-			if len(mconf.Sidecar.Dns.Addresses.Publish) > 0 {
-				for _, addr := range mconf.Sidecar.Dns.Addresses.Publish {
+			if len(mconf.MSA.Dns.Addresses.Publish) > 0 {
+				for _, addr := range mconf.MSA.Dns.Addresses.Publish {
 					ip := net.ParseIP(addr)
 					if ip == nil {
 						log.Printf("LoadSidecarConfig: failed to parse address %q", addr)
@@ -573,8 +573,8 @@ func (mconf *Config) SetupDnsMethod() error {
 				}
 			}
 
-			if mconf.Sidecar.Dns.Port != 0 {
-				value = append(value, &dns.SVCBPort{Port: mconf.Sidecar.Dns.Port})
+			if mconf.MSA.Dns.Port != 0 {
+				value = append(value, &dns.SVCBPort{Port: mconf.MSA.Dns.Port})
 			}
 
 			if len(ipv4hint) > 0 {
@@ -586,7 +586,7 @@ func (mconf *Config) SetupDnsMethod() error {
 			}
 
 			log.Printf("LoadSidecarConfig: publishing SVCB RR for sidecar DNS target %q", dnsname)
-			err := zd.PublishSvcbRR(dnsname, mconf.Sidecar.Dns.Port, value)
+			err := zd.PublishSvcbRR(dnsname, mconf.MSA.Dns.Port, value)
 			if err != nil {
 				return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar DNS target SVCB RR: %v", err)
 			}
@@ -597,15 +597,15 @@ func (mconf *Config) SetupDnsMethod() error {
 	mconf.Internal.DeferredUpdateQ <- du
 
 	du = createDeferredUpdate(
-		mconf.Sidecar.Identity,
+		mconf.MSA.Identity,
 		fmt.Sprintf("Publish ADDR RRs for sidecar DNS target %q", dnsname),
 		func() error {
-			zd, ok := tdns.Zones.Get(mconf.Sidecar.Identity)
+			zd, ok := tdns.Zones.Get(mconf.MSA.Identity)
 			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.Sidecar.Identity)
+				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.MSA.Identity)
 			}
 
-			for _, addr := range mconf.Sidecar.Dns.Addresses.Publish {
+			for _, addr := range mconf.MSA.Dns.Addresses.Publish {
 				err := zd.PublishAddrRR(dnsname, addr)
 				if err != nil {
 					return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar DNS address RRs: %v", err)
@@ -644,14 +644,14 @@ func (mconf *Config) SetupSidecarAutoZone(zonename string, tconf *tdns.Config) (
 	}
 	err = zd.SetupZoneSigning(tconf.Internal.ResignQ)
 	if err != nil {
-		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to set up zone signing for sidecar auto zone %q: %v", zonename, err)
+		return nil, fmt.Errorf("SetupMSAAutoZone: failed to set up zone signing for MSA auto zone %q: %v", zonename, err)
 	}
 
-	// A sidecar auto zone will try to set up delegation syncing with the parent.
+	// A MSA auto zone will try to set up delegation syncing with the parent.
 	zd.Options[tdns.OptDelSyncChild] = true
 	err = zd.SetupZoneSync(tconf.Internal.DelegationSyncQ)
 	if err != nil {
-		return nil, fmt.Errorf("SetupSidecarAutoZone: failed to set up delegation syncing for sidecar auto zone %q: %v", zonename, err)
+		return nil, fmt.Errorf("SetupMSAAutoZone: failed to set up delegation syncing for MSA auto zone %q: %v", zonename, err)
 	}
 
 	return zd, nil

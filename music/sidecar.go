@@ -15,45 +15,45 @@ import (
 	"github.com/spf13/viper"
 )
 
-// var Sidecars = cmap.New[*Sidecar]()
+// var MSAs = cmap.New[*MSA]()
 
-func SidecarToString(sidecar *Sidecar) string {
-	return fmt.Sprintf("* Sidecar %s (API: %v, DNS: %v): last HB %s", sidecar.Identity,
-		sidecar.Methods["API"], sidecar.Methods["DNS"], sidecar.Details[tdns.MsignerMethodDNS].LastHB.Format(time.RFC3339))
+func MSAToString(msa *MSA) string {
+	return fmt.Sprintf("* MSA %s (API: %v, DNS: %v): last HB %s", msa.Identity,
+		msa.Methods["API"], msa.Methods["DNS"], msa.Details[tdns.HsyncMethodDNS].LastHB.Format(time.RFC3339))
 }
 
-// Returns true if the sidecar is new (not previously known)
-func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (bool, *Sidecar, error) {
-	log.Printf("LocateSidecar: identity: %s, method: %s", identity, tdns.MsignerMethodToString[method])
+// Returns true if the MSA is new (not previously known)
+func (ss *MSAs) LocateMSA(identity string, method tdns.HsyncMethod) (bool, *MSA, error) {
+	log.Printf("LocateMSA: identity: %s, method: %s", identity, tdns.HsyncMethodToString[method])
 
-	var knownSidecars string
-	for _, sidecar := range ss.S.Items() {
-		knownSidecars += SidecarToString(sidecar) + "\n"
+	var knownMSAs string
+	for _, msa := range ss.S.Items() {
+		knownMSAs += MSAToString(msa) + "\n"
 	}
-	log.Printf("LocateSidecar: known sidecars:\n%v", knownSidecars)
+	log.Printf("LocateMSA: known MSAs:\n%v", knownMSAs)
 
-	newSidecar := false
-	sidecar, ok := ss.S.Get(identity)
+	newMSA := false
+	msa, ok := ss.S.Get(identity)
 	if !ok {
-		log.Printf("LocateSidecar: Sidecar %s not found, creating new", identity)
-		sidecar = &Sidecar{
+		log.Printf("LocateMSA: MSA %s not found, creating new", identity)
+		msa = &MSA{
 			Identity: identity,
-			Details:  map[tdns.MsignerMethod]SidecarDetails{},
+			Details:  map[tdns.HsyncMethod]MSADetails{},
 			Methods:  map[string]bool{},
 		}
-		ss.S.Set(identity, sidecar)
-		newSidecar = true
+		ss.S.Set(identity, msa)
+		newMSA = true
 	}
 
-	knownSidecars = ""
-	for _, sidecar := range ss.S.Items() {
-		knownSidecars += SidecarToString(sidecar) + "\n"
+	knownMSAs = ""
+	for _, msa := range ss.S.Items() {
+		knownMSAs += MSAToString(msa) + "\n"
 	}
-	log.Printf("LocateSidecar: known sidecars (post check):\n%v", knownSidecars)
+	log.Printf("LocateMSA: known msas (post check):\n%v", knownMSAs)
 
-	if !newSidecar && sidecar.Details[method].LastHB.After(time.Now().Add(-1*time.Hour)) {
-		log.Printf("LocateSidecar: Sidecar %s method %s was updated less than an hour ago, not updating again", identity, tdns.MsignerMethodToString[method])
-		return false, sidecar, nil
+	if !newMSA && sidecar.Details[method].LastHB.After(time.Now().Add(-1*time.Hour)) {
+		log.Printf("LocateMSA: MSA %s method %s was updated less than an hour ago, not updating again", identity, tdns.HsyncMethodToString[method])
+		return false, msa, nil
 	}
 
 	// var err error
@@ -77,9 +77,9 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 		return r.Answer[0].(*dns.SVCB), nil
 	}
 
-	details := sidecar.Details[method]
+	details := msa.Details[method]
 	switch method {
-	case tdns.MsignerMethodDNS:
+	case tdns.HsyncMethodDNS:
 		svcbRR, err := lookupSVCB("dns", identity)
 		if err != nil {
 			return false, nil, err
@@ -119,11 +119,11 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 		if details.KeyRR == nil {
 			return false, nil, fmt.Errorf("no valid KEY record found for %s", "dns."+identity)
 		}
-		sidecar.Methods["DNS"] = true
+		msa.Methods["DNS"] = true
 		details.LastHB = time.Now()
-		sidecar.Details[method] = details
+		msa.Details[method] = details
 
-	case tdns.MsignerMethodAPI:
+	case tdns.MSAMethodAPI:
 		svcbRR, err := lookupSVCB("api", identity)
 		if err != nil {
 			return false, nil, err
@@ -197,74 +197,74 @@ func (ss *Sidecars) LocateSidecar(identity string, method tdns.MsignerMethod) (b
 		details.BaseUri = strings.Replace(details.BaseUri, "{PORT}", fmt.Sprintf("%d", details.Port), 1)
 		details.BaseUri = strings.TrimSuffix(details.BaseUri, "/")
 		log.Printf("BaseUri: %s", details.BaseUri)
-		sidecar.Methods["API"] = true
+		msa.Methods["API"] = true
 		details.LastHB = time.Now()
-		sidecar.Details[method] = details
-		err = sidecar.NewMusicSyncApiClient(identity, details.BaseUri, "", "", "tlsa")
+		msa.Details[method] = details
+		err = wMusicSyncApiClient(identity, details.BaseUri, "", "", "tlsa")
 		if err != nil {
 			return false, nil, fmt.Errorf("failed to create MUSIC API client for %s: %v", identity, err)
 		}
 
 	default:
-		return false, nil, fmt.Errorf("unknown Sidecar sync method: %+v", method)
+		return false, nil, fmt.Errorf("unknown MSA sync method: %+v", method)
 	}
 
-	return newSidecar, sidecar, nil
+	return newMSA, msa, nil
 }
 
-func (ss *Sidecars) IdentifySidecars(zonename string) ([]dns.RR, []*Sidecar, error) {
+func (ss *MSC) IdentifyMSAs(zonename string) ([]dns.RR, []*MSA, error) {
 	resolverAddress := viper.GetString("resolver.address")
 	c := new(dns.Client)
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(zonename), tdns.TypeMSIGNER)
+	m.SetQuestion(dns.Fqdn(zonename), tdns.TypeHSYNC)
 
 	r, _, err := c.Exchange(m, resolverAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to lookup MSIGNER RRset for %s: %v", zonename, err)
+		return nil, nil, fmt.Errorf("failed to lookup HSYNC RRset for %s: %v", zonename, err)
 	}
 
 	if len(r.Answer) == 0 {
-		return nil, nil, fmt.Errorf("no MSIGNER records found for %s", zonename)
+		return nil, nil, fmt.Errorf("no HSYNC records found for %s", zonename)
 	}
 
-	var msigners []dns.RR
-	var sidecars []*Sidecar
+	var hsyncs []dns.RR
+	var msas []*MSA
 
 	for _, ans := range r.Answer {
 		if prr, ok := ans.(*dns.PrivateRR); ok {
-			if prr.Header().Rrtype != tdns.TypeMSIGNER {
+			if prr.Header().Rrtype != tdns.TypeHSYNC {
 				continue
 			}
-			msigner := prr.Data.(*tdns.MSIGNER)
-			msigners = append(msigners, prr)
-			new, sidecar, err := ss.LocateSidecar(msigner.Target, msigner.Method)
+			hsync := prr.Data.(*tdns.HSYNC)
+			hsyncs = append(hsyncs, prr)
+			new, msa, err := ss.LocateMSA(hsync.Target, hsync.Method)
 			if err != nil {
-				log.Printf("Warning: failed to locate sidecar %s: %v", msigner.Target, err)
-				sidecar = nil
-				ss.S.Remove(msigner.Target)
+				log.Printf("Warning: failed to locate MSA %s: %v", hsync.Target, err)
+				msa = nil
+				ss.S.Remove(hsync.Target)
 				continue
 			}
 			if new {
-				log.Printf("New sidecar %s discovered", msigner.Target)
+				log.Printf("New MSA %s discovered", hsync.Target)
 			}
-			sidecars = append(sidecars, sidecar)
+			msas = append(msas, msa)
 		}
 	}
 
 	if len(ss.S.Keys()) == 0 {
-		return nil, nil, fmt.Errorf("no valid sidecars found for %s", zonename)
+		return nil, nil, fmt.Errorf("no valid MSAs found for %s", zonename)
 	} else {
-		log.Printf("Found %d sidecars for %s", len(ss.S.Keys()), zonename)
+		log.Printf("Found %d MSAs for %s", len(ss.S.Keys()), zonename)
 	}
 
-	return msigners, sidecars, nil
+	return hsyncs, MSAs, nil
 }
 
-// CleanCopy returns a copy of the Sidecar with the Api.ApiClient.Client set to nil
+// CleanCopy returns a copy of the MSA with the Api.ApiClient.Client set to nil
 // as that can not be marshalled to JSON.
-func (s *Sidecar) CleanCopy() *Sidecar {
-	log.Printf("CleanCopy: Sidecar %s: %+v", s.Identity, s.Details)
-	c := *s             // Create a shallow copy of the Sidecar
+func (s *MSA) CleanCopy() *MSA {
+	log.Printf("CleanCopy: MSA %s: %+v", s.Identity, s.Details)
+	c := *s             // Create a shallow copy of the MSA
 	c.Api = &MusicApi{} // Create a new MusicApi instance
 	c.Api = s.Api
 	if s.Api != nil {
@@ -274,7 +274,7 @@ func (s *Sidecar) CleanCopy() *Sidecar {
 			c.Api.ApiClient.Client = nil // Set the Client to nil
 		}
 	}
-	c.Details = make(map[tdns.MsignerMethod]SidecarDetails)
+	c.Details = make(map[tdns.HsyncMethod]MSADetails)
 	for method, details := range s.Details {
 		c.Details[method] = details // Copy the details
 	}
