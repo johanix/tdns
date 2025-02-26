@@ -473,3 +473,17 @@ type CombinerResponse struct {
 	Msg      string                   `json:"msg,omitempty"`
 	Data     map[string][]RRsetString `json:"data,omitempty"`
 }
+
+type AgentPost struct {
+	Command string `json:"command"`
+	Zone    string `json:"zone"`
+}
+
+type AgentResponse struct {
+	Time        time.Time `json:"time"`
+	Error       bool      `json:"error"`
+	ErrorMsg    string    `json:"error_msg,omitempty"`
+	Msg         string    `json:"msg,omitempty"`
+	HsyncRRs    []string  `json:"hsync_rrs,omitempty"`
+	HsyncStatus []HsyncAgentStatus
+}

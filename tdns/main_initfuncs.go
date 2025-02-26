@@ -173,6 +173,8 @@ func (conf *Config) MainInit() error {
 		if err != nil {
 			return fmt.Errorf("Error setting up agent: %v", err)
 		}
+		// Initialize AgentRegistry for agent mode only
+		conf.Internal.Registry = NewAgentRegistry()
 	case AppTypeServer, AppTypeMSA, AppTypeCombiner:
 		// ... existing server/MSA/combiner setup ...
 	default:

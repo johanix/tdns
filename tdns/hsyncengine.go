@@ -52,13 +52,11 @@ type Agents struct {
 func HsyncEngine(conf *Config, stopch chan struct{}) {
 	ourId := conf.Agent.Identity
 
-	agents := &Agents{
-		S: cmap.New[*Agent](),
-	}
+	registry := conf.Internal.Registry
 
 	// wannabe_agents is a map of agents that we have received
 	// a HELLO message from, but have not yet verified
-	wannabe_agents := map[string]*Agent{}
+	wannabe_agents := make(map[string]*Agent)
 
 	// syncedZones maps zone names to the agents that share them with us
 	syncedZones := map[string][]*Agent{}
@@ -94,22 +92,22 @@ func HsyncEngine(conf *Config, stopch chan struct{}) {
 	for {
 		select {
 		case syncitem = <-syncQ:
-			handleSyncRequest(syncitem, agents, wannabe_agents, syncedZones, ourId)
+			handleSyncRequest(registry, ourId, wannabe_agents, syncitem)
 
 		case beatReport = <-beatQ:
-			handleBeatReport(beatReport, agents, wannabe_agents)
+			handleBeatReport(beatReport, registry, wannabe_agents)
 
 		case <-HBticker.C:
-			sendHeartbeats(agents)
+			sendHeartbeats(registry)
 
 		case <-fullHBticker.C:
-			sendFullHeartbeats(agents)
+			sendFullHeartbeats(registry)
 
 		case <-HelloEvalTicker.C:
-			evaluateHellos(agents, wannabe_agents, syncedZones)
+			evaluateHellos(registry, wannabe_agents, syncedZones)
 
 		case req := <-conf.Internal.SyncStatusQ:
-			handleStatusRequest(req, agents)
+			handleStatusRequest(req, registry)
 
 		case <-stopch:
 			HBticker.Stop()
@@ -133,14 +131,11 @@ func configureInterval(key string, min, max int) int {
 	return interval
 }
 
-func handleSyncRequest(req SyncRequest, agents *Agents, wannabe_agents map[string]*Agent,
-	syncedZones map[string][]*Agent, ourId string) {
-
+func handleSyncRequest(registry *AgentRegistry, ourId string, wannabe_agents map[string]*Agent, req SyncRequest) {
 	switch req.Command {
-	case "RESET-HSYNC-GROUP":
-		log.Printf("HSyncEngine: Zone %s HSYNC RRset has changed. Resetting sync group.", req.ZoneName)
-
-		err := agents.UpdateAgents(ourId, wannabe_agents, req, syncedZones, req.ZoneName)
+	case "HSYNC-UPDATE":
+		log.Printf("HSyncEngine: Zone %s HSYNC RRset has changed. Updating sync group.", req.ZoneName)
+		err := registry.UpdateAgents(ourId, wannabe_agents, req, req.ZoneName)
 		if err != nil {
 			log.Printf("HSyncEngine: Error updating agents: %v", err)
 		}
@@ -157,11 +152,11 @@ func handleSyncRequest(req SyncRequest, agents *Agents, wannabe_agents map[strin
 		}
 
 	default:
-		log.Printf("HSyncEngine: Unknown command: %s in request: %+v", req.Command, req)
+		log.Printf("HSyncEngine: Unknown command: %s", req.Command)
 	}
 }
 
-func handleBeatReport(report AgentBeatReport, agents *Agents, wannabe_agents map[string]*Agent) {
+func handleBeatReport(report AgentBeatReport, registry *AgentRegistry, wannabe_agents map[string]*Agent) {
 	log.Printf("HSyncEngine: Received heartbeat from %s", report.Beat.Identity)
 
 	switch report.Beat.MessageType {
@@ -172,7 +167,7 @@ func handleBeatReport(report AgentBeatReport, agents *Agents, wannabe_agents map
 
 	case "BEAT":
 		log.Printf("HSyncEngine: Received heartbeat from %s", report.Beat.Identity)
-		if agent, exists := agents.S.Get(report.Beat.Identity); exists {
+		if agent, exists := registry.S.Get(report.Beat.Identity); exists {
 			for transport := range report.Agent.Details {
 				newDetails := agent.Details[transport]
 				newDetails.LastHB = time.Now()
@@ -182,7 +177,7 @@ func handleBeatReport(report AgentBeatReport, agents *Agents, wannabe_agents map
 
 	case "FULLBEAT":
 		log.Printf("HSyncEngine: Received full heartbeat from %s", report.Beat.Identity)
-		if agent, exists := agents.S.Get(report.Beat.Identity); exists {
+		if agent, exists := registry.S.Get(report.Beat.Identity); exists {
 			for transport, details := range report.Agent.Details {
 				newDetails := details
 				newDetails.LastHB = time.Now()
@@ -192,9 +187,9 @@ func handleBeatReport(report AgentBeatReport, agents *Agents, wannabe_agents map
 	}
 }
 
-func sendHeartbeats(agents *Agents) {
+func sendHeartbeats(registry *AgentRegistry) {
 	log.Printf("HSyncEngine: Sending heartbeats to known agents")
-	for _, agent := range agents.S.Items() {
+	for _, agent := range registry.S.Items() {
 		err := agent.SendBeat("BEAT")
 		if err != nil {
 			log.Printf("HSyncEngine: Error sending heartbeat to %s: %v", agent.Identity, err)
@@ -202,9 +197,9 @@ func sendHeartbeats(agents *Agents) {
 	}
 }
 
-func sendFullHeartbeats(agents *Agents) {
+func sendFullHeartbeats(registry *AgentRegistry) {
 	log.Printf("HSyncEngine: Sending full heartbeats to known agents")
-	for _, agent := range agents.S.Items() {
+	for _, agent := range registry.S.Items() {
 		err := agent.SendBeat("FULLBEAT")
 		if err != nil {
 			log.Printf("HSyncEngine: Error sending full heartbeat to %s: %v", agent.Identity, err)
@@ -212,7 +207,7 @@ func sendFullHeartbeats(agents *Agents) {
 	}
 }
 
-func evaluateHellos(agents *Agents, wannabe_agents map[string]*Agent, syncedZones map[string][]*Agent) {
+func evaluateHellos(registry *AgentRegistry, wannabe_agents map[string]*Agent, syncedZones map[string][]*Agent) {
 	log.Printf("HSyncEngine: Evaluating agents that claim to share zones with us")
 
 	for identity, wannabe := range wannabe_agents {
@@ -222,7 +217,7 @@ func evaluateHellos(agents *Agents, wannabe_agents map[string]*Agent, syncedZone
 			for _, agent := range zoneAgents {
 				if agent.Identity == identity {
 					found = true
-					agents.S.Set(identity, wannabe)
+					registry.S.Set(identity, wannabe)
 					delete(wannabe_agents, identity)
 					log.Printf("HSyncEngine: Confirmed agent %s shares zone %s with us", identity, zonename)
 					break
@@ -239,7 +234,7 @@ func evaluateHellos(agents *Agents, wannabe_agents map[string]*Agent, syncedZone
 	}
 }
 
-func handleStatusRequest(req SyncStatus, agents *Agents) {
+func handleStatusRequest(req SyncStatus, registry *AgentRegistry) {
 	log.Printf("HSyncEngine: Received STATUS request")
 	if req.Response == nil {
 		log.Printf("HSyncEngine: STATUS request has no response channel")
@@ -247,7 +242,7 @@ func handleStatusRequest(req SyncStatus, agents *Agents) {
 	}
 
 	cleaned := map[string]*Agent{}
-	for _, agent := range agents.S.Items() {
+	for _, agent := range registry.S.Items() {
 		cleaned[agent.Identity] = agent.CleanCopy()
 	}
 
@@ -284,15 +279,23 @@ func (agent *Agent) SendBeat(beatType string) error {
 	return fmt.Errorf("no valid transport method available for agent %s", agent.Identity)
 }
 
-func (a *Agents) UpdateAgents(ourId string, wannabe_agents map[string]*Agent,
-	req SyncRequest, syncedZones map[string][]*Agent, zonename string) error {
+func (ar *AgentRegistry) UpdateAgents(ourId string, wannabe_agents map[string]*Agent,
+	req SyncRequest, zonename string) error {
 
+	// Handle new HSYNC records
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*HSYNC); ok {
 				if hsync.Target == ourId {
-					// We're the Target, need to sync with Upstream
-					new, agent, err := a.LocateAgent(hsync.Upstream)
+					// We're the Target
+					if hsync.Upstream == "." {
+						// Special case: no upstream to sync with
+						log.Printf("UpdateAgents: Zone %s: we are target but upstream is '.', no sync needed", zonename)
+						continue
+					}
+
+					// Need to sync with Upstream
+					new, agent, err := ar.LocateAgent(hsync.Upstream)
 					if err != nil {
 						log.Printf("UpdateAgents: Error locating agent %s: %v", hsync.Upstream, err)
 						continue
@@ -305,9 +308,42 @@ func (a *Agents) UpdateAgents(ourId string, wannabe_agents map[string]*Agent,
 							log.Printf("UpdateAgents: Error sending HELLO to %s: %v", hsync.Upstream, err)
 							continue
 						}
+					}
 
-						// Add to synced zones map
-						syncedZones[zonename] = append(syncedZones[zonename], agent)
+					ar.AddRemoteAgent(zonename, agent)
+					ar.AddZoneToAgent(agent.Identity, zonename)
+
+				} else {
+					// Not our target, but register the agent in our registry
+					_, agent, err := ar.LocateAgent(hsync.Target)
+					if err != nil {
+						log.Printf("UpdateAgents: Error locating remote agent %s: %v", hsync.Target, err)
+						continue
+					}
+					ar.AddRemoteAgent(zonename, agent)
+					ar.AddZoneToAgent(agent.Identity, zonename)
+				}
+			}
+		}
+	}
+
+	// Handle removed HSYNC records
+	for _, rr := range req.SyncStatus.HsyncRemoves {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if hsync, ok := prr.Data.(*HSYNC); ok {
+				if hsync.Target == ourId {
+					// We're no longer involved in this zone's management
+					// Schedule a cleanup of our relationships for this zone
+					go ar.CleanupZoneRelationships(zonename)
+				} else {
+					// Remote agent was removed, update registry
+					if agent, exists := ar.S.Get(hsync.Target); exists {
+						for transport := range agent.Details {
+							if agent.Details[transport].Zones != nil {
+								delete(agent.Details[transport].Zones, zonename)
+							}
+						}
+						ar.RemoveRemoteAgent(zonename, hsync.Target)
 					}
 				}
 			}

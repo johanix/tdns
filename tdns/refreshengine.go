@@ -116,7 +116,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						DnssecPolicy:    &dp,
 						MultiSigner:     &msc,
 						DelegationSyncQ: conf.Internal.DelegationSyncQ,
-						MusicSyncQ:      conf.Internal.MusicSyncQ,
+						MusicSyncQ:      conf.Internal.MusicSyncQ, // TODO: remove this
+						SyncQ:           conf.Internal.SyncQ,
 						Data:            cmap.New[OwnerData](),
 						KeyDB:           conf.Internal.KeyDB,
 					}

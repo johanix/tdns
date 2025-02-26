@@ -40,15 +40,27 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 
 	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 
+	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
-	sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
-	sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-	sr.HandleFunc("/zone/dsync", APIzoneDsync(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-	sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
+
+	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeAgent {
+		sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
+		sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
+		sr.HandleFunc("/zone/dsync", APIzoneDsync(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
+	}
+
+	if Globals.App.Type == AppTypeAgent {
+		sr.HandleFunc("/agent", APIagent(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	}
+	if Globals.App.Type == AppTypeCombiner {
+		sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	}
+
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
 	return r, nil
@@ -72,6 +84,26 @@ func SetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
+	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
+
+	return r, nil
+}
+
+func SetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
+	kdb := conf.Internal.KeyDB
+	r := mux.NewRouter().StrictSlash(true)
+	apikey := conf.ApiServer.ApiKey
+	if apikey == "" {
+		return nil, fmt.Errorf("apiserver.apikey is not set")
+	}
+
+	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+
+	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
+	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 

@@ -90,7 +90,9 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 func ValidateCertAndKeyFiles(fl validator.FieldLevel) bool {
 	certFile := fl.Field().String()
 	keyFile := fl.Parent().FieldByName("KeyFile").String()
-	log.Printf("ValidateCertAndKeyFiles: certFile: %s, keyFile: %s", certFile, keyFile)
+	if Globals.Debug {
+		log.Printf("ValidateCertAndKeyFiles: certFile: %s, keyFile: %s", certFile, keyFile)
+	}
 
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {

@@ -82,7 +82,15 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 
-	r, err := dns.Exchange(m, zd.Upstream)
+	upstream := zd.Upstream
+	if _, _, err := net.SplitHostPort(upstream); err != nil {
+		// If error, assume no port was specified
+		upstream = net.JoinHostPort(upstream, "53")
+		if Globals.Verbose {
+			zd.Logger.Printf("DoTransfer: zone %q: no port specified for upstream %q, using default port 53", zd.ZoneName, zd.Upstream)
+		}
+	}
+	r, err := dns.Exchange(m, upstream)
 	if err != nil {
 		log.Printf("Error from dns.Exchange(%s, SOA): %v", zd.ZoneName, err)
 		return false, 0, err
@@ -226,7 +234,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 			zd.Logger.Printf("FetchFromFile: Zone %s: HSYNC RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
 			zd.SyncQ <- SyncRequest{
-				Command:    "RESET-HSYNC-GROUP",
+				Command:    "HSYNC-UPDATE",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
 				SyncStatus: hss,
@@ -299,7 +307,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	var hsyncchanged, dnskeyschanged bool
 	var hss *HsyncStatus
 	switch zd.AppType {
-	case AppTypeMSA, AppTypeCombiner:
+	case AppTypeMSA, AppTypeAgent, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
@@ -367,10 +375,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	if hsyncchanged {
 		switch zd.AppType {
-		case AppTypeMSA:
+		case AppTypeMSA, AppTypeAgent:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HSyncEngine", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
-				Command:    "RESET-HSYNC-GROUP",
+				Command:    "HSYNC-UPDATE",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
 				SyncStatus: hss,

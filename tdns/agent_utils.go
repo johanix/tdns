@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 )
 
@@ -22,20 +24,61 @@ type Agent struct {
 }
 
 type AgentDetails struct {
-	Addrs   []string
-	Port    uint16
-	BaseUri string
-	UriRR   *dns.URI
-	KeyRR   *dns.KEY  // for DNS transport
-	TlsaRR  *dns.TLSA // for HTTPS transport
-	LastHB  time.Time
+	Addrs     []string
+	Port      uint16
+	BaseUri   string
+	UriRR     *dns.URI
+	KeyRR     *dns.KEY  // for DNS transport
+	TlsaRR    *dns.TLSA // for HTTPS transport
+	LastHB    time.Time
+	Endpoint  string
+	Zones     map[string]bool // zones we share with this agent
+	State     string          // "discovered", "contact_attempted", "connected", "failed"
+	LastError string
 }
 
-func (a *Agents) LocateAgent(identity string) (bool, *Agent, error) {
+type AgentRegistry struct {
+	S            cmap.ConcurrentMap[string, *Agent]
+	remoteAgents map[string][]*Agent
+	mu           sync.RWMutex // protects remoteAgents
+}
+
+func (ar *AgentRegistry) AddZoneToAgent(identity, zone string) {
+	if agent, exists := ar.S.Get(identity); exists {
+		for transport := range agent.Details {
+			details := agent.Details[transport]
+			if details.Zones == nil {
+				details.Zones = make(map[string]bool)
+			}
+			details.Zones[zone] = true
+			agent.Details[transport] = details
+		}
+	}
+}
+
+func (ar *AgentRegistry) GetAgentsForZone(zone string) []*Agent {
+	var agents []*Agent
+	for _, agent := range ar.S.Items() {
+		// Check any transport method - they should all have the same zone info
+		if details, exists := agent.Details["dns"]; exists && details.Zones[zone] {
+			agents = append(agents, agent)
+		}
+	}
+	return agents
+}
+
+func NewAgentRegistry() *AgentRegistry {
+	return &AgentRegistry{
+		S:            cmap.New[*Agent](),
+		remoteAgents: make(map[string][]*Agent),
+	}
+}
+
+func (ar *AgentRegistry) LocateAgent(identity string) (bool, *Agent, error) {
 	log.Printf("LocateAgent: looking up agent %s", identity)
 
 	// Check if we already know this agent
-	agent, exists := a.S.Get(identity)
+	agent, exists := ar.S.Get(identity)
 	if exists && agent.Details["dns"].LastHB.After(time.Now().Add(-1*time.Hour)) {
 		log.Printf("LocateAgent: agent %s already known and recent", identity)
 		return false, agent, nil
@@ -47,7 +90,7 @@ func (a *Agents) LocateAgent(identity string) (bool, *Agent, error) {
 			Details:  map[string]AgentDetails{},
 			Methods:  map[string]bool{},
 		}
-		a.S.Set(identity, agent)
+		ar.S.Set(identity, agent)
 	}
 
 	resolverAddress := viper.GetString("resolver.address")
@@ -146,7 +189,7 @@ func (a *Agents) LocateAgent(identity string) (bool, *Agent, error) {
 	}
 
 	if !agent.Methods["dns"] && !agent.Methods["https"] {
-		a.S.Remove(identity)
+		ar.S.Remove(identity)
 		return false, nil, fmt.Errorf("no valid transport found for agent %s", identity)
 	}
 
@@ -155,28 +198,35 @@ func (a *Agents) LocateAgent(identity string) (bool, *Agent, error) {
 
 // CleanCopy returns a copy of the Agent without any sensitive data
 func (a *Agent) CleanCopy() *Agent {
-	return &Agent{
+	copy := &Agent{
 		Identity: a.Identity,
-		Methods:  a.Methods,
-		Details: map[string]AgentDetails{
-			"dns": {
-				Addrs:   a.Details["dns"].Addrs,
-				Port:    a.Details["dns"].Port,
-				BaseUri: a.Details["dns"].BaseUri,
-				LastHB:  a.Details["dns"].LastHB,
-			},
-			"https": {
-				Addrs:   a.Details["https"].Addrs,
-				Port:    a.Details["https"].Port,
-				BaseUri: a.Details["https"].BaseUri,
-				LastHB:  a.Details["https"].LastHB,
-			},
-		},
+		Details:  make(map[string]AgentDetails),
+		Methods:  make(map[string]bool),
 	}
+
+	for transport, details := range a.Details {
+		copyDetails := AgentDetails{
+			LastHB:    details.LastHB,
+			Endpoint:  details.Endpoint,
+			State:     details.State,
+			LastError: details.LastError,
+			Zones:     make(map[string]bool),
+		}
+		for zone := range details.Zones {
+			copyDetails.Zones[zone] = true
+		}
+		copy.Details[transport] = copyDetails
+	}
+
+	for method, enabled := range a.Methods {
+		copy.Methods[method] = enabled
+	}
+
+	return copy
 }
 
 // IdentifyAgents looks for HSYNC records in a zone and identifies agents we need to sync with
-func (a *Agents) IdentifyAgents(zd *ZoneData, ourIdentity string) ([]*Agent, error) {
+func (ar *AgentRegistry) IdentifyAgents(zd *ZoneData, ourIdentity string) ([]*Agent, error) {
 	var agents []*Agent
 
 	rrset, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
@@ -192,7 +242,7 @@ func (a *Agents) IdentifyAgents(zd *ZoneData, ourIdentity string) ([]*Agent, err
 					continue
 				}
 				// Found another agent, try to locate it
-				new, agent, err := a.LocateAgent(hsync.Target)
+				new, agent, err := ar.LocateAgent(hsync.Target)
 				if err != nil {
 					log.Printf("Warning: failed to locate agent %s: %v", hsync.Target, err)
 					continue
@@ -212,4 +262,44 @@ func AgentToString(a *Agent) string {
 		return "<nil>"
 	}
 	return fmt.Sprintf("%s", a.Identity)
+}
+
+// AddRemoteAgent adds an agent to the list of remote agents for a zone
+func (ar *AgentRegistry) AddRemoteAgent(zonename string, agent *Agent) {
+	ar.mu.Lock()
+	defer ar.mu.Unlock()
+	if ar.remoteAgents[zonename] == nil {
+		ar.remoteAgents[zonename] = make([]*Agent, 0)
+	}
+	ar.remoteAgents[zonename] = append(ar.remoteAgents[zonename], agent)
+}
+
+// RemoveRemoteAgent removes an agent from the list of remote agents for a zone
+func (ar *AgentRegistry) RemoveRemoteAgent(zonename string, identity string) {
+	ar.mu.Lock()
+	defer ar.mu.Unlock()
+	agents := ar.remoteAgents[zonename]
+	for i, a := range agents {
+		if a.Identity == identity {
+			ar.remoteAgents[zonename] = append(agents[:i], agents[i+1:]...)
+			break
+		}
+	}
+}
+
+func (ar *AgentRegistry) GetRemoteAgents(zonename string) []*Agent {
+	ar.mu.RLock()
+	defer ar.mu.RUnlock()
+	return ar.remoteAgents[zonename]
+}
+
+// CleanupZoneRelationships handles the complex cleanup when we're no longer involved in a zone's management
+func (ar *AgentRegistry) CleanupZoneRelationships(zonename string) {
+	// TODO: Implement cleanup:
+	// 1. Remove zone from all agents that have it
+	// 2. Remove all agents from remoteAgents[zonename]
+	// 3. For any agent that no longer shares zones with us:
+	//    - Send GOODBYE message
+	//    - Remove from registry
+	log.Printf("TODO: Implement cleanup for zone %s", zonename)
 }

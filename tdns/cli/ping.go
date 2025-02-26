@@ -64,8 +64,14 @@ func getCommandContext(cmdName string) (parent string, chain []string) {
 			} else {
 				parent = "server" // Default to "server" for backward compatibility
 			}
+			if tdns.Globals.Debug {
+				fmt.Printf("getCommandContext: parent: %s, chain: %v\n", parent, args[:i+1])
+			}
 			return parent, args[:i+1]
 		}
+	}
+	if tdns.Globals.Debug {
+		fmt.Printf("getCommandContext: default case, parent: %s, chain: %v\n", parent, args)
 	}
 	return "server", nil // Default case if command not found (shouldn't happen)
 }

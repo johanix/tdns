@@ -93,6 +93,7 @@ type InternalConf struct {
 	SyncQ           chan SyncRequest
 	HeartbeatQ      chan AgentBeatReport
 	SyncStatusQ     chan SyncStatus
+	Registry        *AgentRegistry
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
