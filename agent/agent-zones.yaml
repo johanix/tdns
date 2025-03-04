@@ -1,0 +1,30 @@
+templates:
+   - name:		agent
+     type:		secondary
+     primary:		127.0.0.1:5355
+
+   - name: child-agent
+     store:           map
+     type:            secondary
+     notify:          [ 127.0.0.1:5399 ]
+     options:         [ delegation-sync-child, multisigner ]
+     dnssecpolicy:    none
+     multisigner:     mstest
+
+zones:
+   - name:            test.net
+     zonefile:        /etc/tdns/zones/test.net
+     template:        parent-primary
+     notify:	      [ 127.0.0.1:5366 ]
+
+   - name:            johani.org.
+     zonefile:        /etc/axfr.net/zones/johani.org
+     options:	      [ online-signing ]
+     template:        secondary
+
+   # Commented zones kept for reference
+   # child.test.net:
+   #    name:         child.test.net
+   #    zonefile:     /etc/axfr.net/zones/child.test.net
+   #    template:     child-primary
+   # ... other commented zones ...

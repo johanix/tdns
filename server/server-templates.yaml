@@ -1,0 +1,47 @@
+templates:
+   - name: 	parent-primary:
+     store:           map
+     type:            primary
+     notify:          [ 127.0.0.1:5399 ]
+     options:         [ delegation-sync-parent, allow-updates, allow-child-updates, multisigner ]
+     dnssecpolicy:    default
+     multisigner:     none
+     updatepolicy:
+        child:
+           type:      selfsub
+           rrtypes:   [ A, AAAA, NS, DS, KEY ]
+           keybootstrap: [ manual, dnssec-validated, consistent-lookup ]
+        zone:
+           type:      selfsub
+           rrtypes:   [ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+
+   - name: parent-agent
+     store:           map
+     type:            secondary
+     notify:          [ 127.0.0.1:5399 ]
+     options:         [ delegation-sync-parent, allow-child-updates, multisigner ]
+     dnssecpolicy:    none
+     updatepolicy:
+        child:
+           type:      selfsub
+           rrtypes:   [ A, AAAA, NS, DS, KEY ]
+           keybootstrap: [ manual, dnssec-validated, consistent-lookup ]
+
+   - name: child-primary
+     store:           map
+     type:            primary
+     notify:          [ 127.0.0.1:5399 ]
+     options:         [ delegation-sync-child, online-signing, allow-updates, multisigner ]
+     dnssecpolicy:    default
+     updatepolicy:
+        zone:
+           type:      selfsub
+           rrtypes:   [ A, AAAA, MX, TXT, KEY, NS, CDS, CSYNC ]
+
+   - name: child-agent
+     store:           map
+     type:            secondary
+     notify:          [ 127.0.0.1:5399 ]
+     options:         [ delegation-sync-child, multisigner ]
+     dnssecpolicy:    none
+     multisigner:     mstest

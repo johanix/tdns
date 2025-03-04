@@ -1,37 +1,43 @@
+include:
+   - combiner-zones.yaml
+
 apiserver:
-   address:	127.0.0.1:8080
+   addresses:	[ 127.0.0.1:8082 ]
    apikey:	you-have-stolen-my-frotzblinger
-   certFile: ../etc/certs/localhost.crt
-   keyFile: ../etc/certs/localhost.key
+   certFile:	/etc/tdns/certs/localhost.crt
+   keyFile:	/etc/tdns/certs/localhost.key
 
-fsmengine:
-   active:	true
-   intervals:
-      target:	20	# check non-blocked zones this often
-      minimum:	15
-      maximum:	900
-      complete:	7200	# check ALL zones this often
+service:
+   name:                TDNS-COMBINER
+   verbose:             true
+   debug:               true   # writes processed zone to disk
+   refresh:             true
+   maxrefresh:          1800    # seconds. Cap refresh counter to max this
+#   reset_soa_serial:   false   # replace inbound SOA serial with unixtime.
+   resign:              false    # re-sign primary zones as needed
 
-signers:
-   ddns:
-      limits:
-         fetch:	   5
-         update:   2
-   desec:
-      email:       johan.stenstam@internetstiftelsen.se
-      password:    Blurg99,123
-      baseurl:     https://desec.io/api/v1
-      limits:
-         fetch:	   5 # ops/s
-         update:   2 # ops/s
+dnsengine:
+   addresses:           [ 127.0.0.1:5366, '[::1]:5366']
+   zones:
+      config:           /etc/tdns/tdns-czones.yaml
+      filedir:          /etc/axfr.net/zones
+      filetmpl:         "%s/%s.zone.new"                # zonename.zone
 
-db:
-   file:	/var/tmp/music.db
-   mode:	WAL # write-ahead logging. WAL mode can not be reverted. Then the db must be dropped and recreated.
+resignerengine:
+   interval:            300 # seconds between runs. Reasonable value is likely ~3600
+   keygen:
+      mode:             internal # internal | external
+      generator:        /opt/local/bin/dnssec-keygen
+#      algorithm:       ED25519 # moved to the dnssec policy
 
 common:
-   tokenfile:	../etc/musicd.tokens.yaml
-   command:	/usr/local/sbin/musicd
+   command:	/usr/local/libexec/tdns-combiner
    rootca:      ../etc/certs/PublicRootCAs.pem
    debug:	true
    verbose:	true
+
+log:
+   file:	/var/log/axfr.net/tdns-combiner.log
+
+db:
+   file:	/var/tmp/combiner.db
