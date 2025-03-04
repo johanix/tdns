@@ -55,7 +55,7 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	}
 
 	if Globals.App.Type == AppTypeAgent {
-		sr.HandleFunc("/agent", APIagent(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	}
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")

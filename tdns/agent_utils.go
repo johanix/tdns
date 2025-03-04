@@ -7,7 +7,8 @@ package tdns
 import (
 	"fmt"
 	"log"
-	"strings"
+	"net"
+	"net/url"
 	"sync"
 	"time"
 
@@ -18,9 +19,10 @@ import (
 
 type Agent struct {
 	Identity string
-	Details  map[string]AgentDetails // "dns" or "https"
+	Details  map[string]AgentDetails // "dns" or "api"
 	Methods  map[string]bool
 	Api      *ApiClient
+	Complete bool // New field indicating all lookups are done
 }
 
 type AgentDetails struct {
@@ -38,22 +40,31 @@ type AgentDetails struct {
 }
 
 type AgentRegistry struct {
-	S            cmap.ConcurrentMap[string, *Agent]
-	remoteAgents map[string][]*Agent
-	mu           sync.RWMutex // protects remoteAgents
+	S             cmap.ConcurrentMap[string, *Agent]
+	remoteAgents  map[string][]*Agent
+	mu            sync.RWMutex // protects remoteAgents
+	LocalIdentity string       // our own identity
 }
 
 func (ar *AgentRegistry) AddZoneToAgent(identity, zone string) {
-	if agent, exists := ar.S.Get(identity); exists {
-		for transport := range agent.Details {
-			details := agent.Details[transport]
-			if details.Zones == nil {
-				details.Zones = make(map[string]bool)
-			}
-			details.Zones[zone] = true
-			agent.Details[transport] = details
-		}
+	agent, exists := ar.S.Get(identity)
+	if !exists {
+		return
 	}
+
+	// Add zone to both transports
+	for transport := range agent.Details {
+		details := agent.Details[transport]
+		if details.Zones == nil {
+			details.Zones = make(map[string]bool)
+		}
+		details.Zones[zone] = true
+		agent.Details[transport] = details
+	}
+
+	// Update remoteAgents map
+	ar.AddRemoteAgent(zone, agent)
+	ar.S.Set(identity, agent)
 }
 
 func (ar *AgentRegistry) GetAgentsForZone(zone string) []*Agent {
@@ -67,20 +78,25 @@ func (ar *AgentRegistry) GetAgentsForZone(zone string) []*Agent {
 	return agents
 }
 
-func NewAgentRegistry() *AgentRegistry {
+func NewAgentRegistry(identity string) *AgentRegistry {
+	if identity == "" {
+		log.Printf("NewAgentRegistry: error: identity is empty")
+		return nil
+	}
 	return &AgentRegistry{
-		S:            cmap.New[*Agent](),
-		remoteAgents: make(map[string][]*Agent),
+		S:             cmap.New[*Agent](),
+		remoteAgents:  make(map[string][]*Agent),
+		LocalIdentity: identity,
 	}
 }
 
 func (ar *AgentRegistry) LocateAgent(identity string) (bool, *Agent, error) {
 	log.Printf("LocateAgent: looking up agent %s", identity)
 
-	// Check if we already know this agent
+	// Check if we already know this agent and it's complete
 	agent, exists := ar.S.Get(identity)
-	if exists && agent.Details["dns"].LastHB.After(time.Now().Add(-1*time.Hour)) {
-		log.Printf("LocateAgent: agent %s already known and recent", identity)
+	if exists && agent.Complete && agent.Details["dns"].LastHB.After(time.Now().Add(-1*time.Hour)) {
+		log.Printf("LocateAgent: agent %s already known, complete and recent", identity)
 		return false, agent, nil
 	}
 
@@ -89,110 +105,159 @@ func (ar *AgentRegistry) LocateAgent(identity string) (bool, *Agent, error) {
 			Identity: identity,
 			Details:  map[string]AgentDetails{},
 			Methods:  map[string]bool{},
+			Complete: false,
+		}
+		// Initialize Zones map for each transport
+		for _, transport := range []string{"dns", "api"} {
+			details := AgentDetails{
+				Zones: make(map[string]bool),
+			}
+			agent.Details[transport] = details
 		}
 		ar.S.Set(identity, agent)
 	}
 
 	resolverAddress := viper.GetString("resolver.address")
-	c := new(dns.Client)
+	resolvers := []string{resolverAddress}
+	timeout := 2 * time.Second
+	retries := 3
 
 	// Look up URIs for both transports
-	for _, transport := range []string{"dns", "https"} {
-		svcname := fmt.Sprintf("_%s._tcp.%s", transport, identity)
-		m := new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(svcname), dns.TypeURI)
-		r, _, err := c.Exchange(m, resolverAddress)
-		if err != nil || len(r.Answer) == 0 {
-			continue // this transport not available
-		}
-
-		var uri *dns.URI
-		for _, ans := range r.Answer {
-			if u, ok := ans.(*dns.URI); ok {
-				uri = u
-				break
-			}
-		}
-		if uri == nil {
-			continue
-		}
-
+	for _, transport := range []string{"dns", "api"} {
 		details := agent.Details[transport]
-		details.UriRR = uri
+		var targetName string // Declare targetName at transport scope
 
-		// Get the target name from the URI
-		targetName := strings.TrimSuffix(uri.Target, ".")
+		// Only look up URI if we don't have it
+		if details.UriRR == nil {
+			svcname := fmt.Sprintf("_%s._tcp.%s", transport, identity)
+			if transport == "api" {
+				svcname = fmt.Sprintf("_https._tcp.%s", identity)
+			}
+			svcname = dns.Fqdn(svcname)
 
-		// Look up SVCB for the target
-		m = new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(targetName), dns.TypeSVCB)
-		r, _, err = c.Exchange(m, resolverAddress)
-		if err != nil || len(r.Answer) == 0 {
-			continue
-		}
+			rrset, err := RecursiveDNSQueryWithServers(svcname, dns.TypeURI, timeout, retries, resolvers)
+			if err != nil {
+				log.Printf("LocateAgent: error response to URI query for %s transport: %v", transport, err)
+				continue // Try the next transport instead of failing
+			}
 
-		svcb := r.Answer[0].(*dns.SVCB)
-		for _, kv := range svcb.Value {
-			switch kv.Key() {
-			case dns.SVCB_IPV4HINT:
-				ipv4Hints := kv.(*dns.SVCBIPv4Hint)
-				for _, ip := range ipv4Hints.Hint {
-					details.Addrs = append(details.Addrs, ip.String())
+			// Process URI response
+			if len(rrset.RRs) > 0 {
+				if u, ok := rrset.RRs[0].(*dns.URI); ok {
+					details.UriRR = u
 				}
-			case dns.SVCB_IPV6HINT:
-				ipv6Hints := kv.(*dns.SVCBIPv6Hint)
-				for _, ip := range ipv6Hints.Hint {
-					details.Addrs = append(details.Addrs, ip.String())
-				}
-			case dns.SVCB_PORT:
-				port := kv.(*dns.SVCBPort)
-				details.Port = uint16(port.Port)
 			}
 		}
 
-		// Look up either KEY (DNS) or TLSA (HTTPS)
-		if transport == "dns" {
-			m = new(dns.Msg)
-			m.SetQuestion(dns.Fqdn(targetName), dns.TypeKEY)
-			r, _, err = c.Exchange(m, resolverAddress)
-			if err == nil && len(r.Answer) > 0 {
-				for _, ans := range r.Answer {
-					if k, ok := ans.(*dns.KEY); ok {
+		// Only proceed with SVCB if we have URI
+		if details.UriRR != nil && len(details.Addrs) == 0 {
+			uristr := details.UriRR.Target
+			parsedUri, err := url.Parse(uristr)
+			if err != nil {
+				log.Printf("LocateAgent: failed to parse URI target %q: %v", uristr, err)
+				continue
+			}
+
+			targetName, _, err = net.SplitHostPort(parsedUri.Host)
+			if err != nil {
+				targetName = parsedUri.Host
+			}
+
+			rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeSVCB, timeout, retries, resolvers)
+			if err != nil {
+				log.Printf("LocateAgent: error response to SVCB query: %v", err)
+				continue // Try the next transport
+			}
+
+			// Process SVCB response
+			if len(rrset.RRs) > 0 {
+				if svcb, ok := rrset.RRs[0].(*dns.SVCB); ok {
+					// Process SVCB record (addresses and port)
+					for _, kv := range svcb.Value {
+						switch kv.Key() {
+						case dns.SVCB_IPV4HINT:
+							ipv4Hints := kv.(*dns.SVCBIPv4Hint)
+							for _, ip := range ipv4Hints.Hint {
+								details.Addrs = append(details.Addrs, ip.String())
+							}
+						case dns.SVCB_IPV6HINT:
+							ipv6Hints := kv.(*dns.SVCBIPv6Hint)
+							for _, ip := range ipv6Hints.Hint {
+								details.Addrs = append(details.Addrs, ip.String())
+							}
+						case dns.SVCB_PORT:
+							port := kv.(*dns.SVCBPort)
+							details.Port = uint16(port.Port)
+						}
+					}
+				}
+			}
+		}
+
+		// Only proceed with KEY/TLSA if we have addresses and a target name
+		if len(details.Addrs) > 0 && targetName != "" {
+			if transport == "dns" && details.KeyRR == nil {
+				// Look up KEY
+				rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeKEY, timeout, retries, resolvers)
+				if err != nil {
+					log.Printf("LocateAgent: error response to KEY query: %v", err)
+					continue
+				}
+
+				for _, rr := range rrset.RRs {
+					if k, ok := rr.(*dns.KEY); ok {
 						details.KeyRR = k
+						agent.Methods["dns"] = true
 						break
 					}
 				}
-			}
-		} else {
-			tlsaName := fmt.Sprintf("_%d._tcp.%s", details.Port, targetName)
-			m = new(dns.Msg)
-			m.SetQuestion(dns.Fqdn(tlsaName), dns.TypeTLSA)
-			r, _, err = c.Exchange(m, resolverAddress)
-			if err == nil && len(r.Answer) > 0 {
-				for _, ans := range r.Answer {
-					if t, ok := ans.(*dns.TLSA); ok {
+			} else if transport == "api" && details.TlsaRR == nil {
+				// Look up TLSA
+				tlsaName := fmt.Sprintf("_%d._tcp.%s", details.Port, targetName)
+				rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
+				if err != nil {
+					log.Printf("LocateAgent: error response to TLSA query: %v", err)
+					continue
+				}
+
+				for _, rr := range rrset.RRs {
+					if t, ok := rr.(*dns.TLSA); ok {
 						details.TlsaRR = t
+						agent.Methods["api"] = true
 						break
 					}
 				}
 			}
 		}
 
-		if (transport == "dns" && details.KeyRR != nil) ||
-			(transport == "https" && details.TlsaRR != nil) {
-			details.LastHB = time.Now()
-			details.BaseUri = strings.Replace(uri.Target, "{PORT}", fmt.Sprintf("%d", details.Port), 1)
-			details.BaseUri = strings.TrimSuffix(details.BaseUri, "/")
-			agent.Methods[transport] = true
-			agent.Details[transport] = details
+		agent.Details[transport] = details
+	}
+
+	// Check if we have all the data we need
+	agent.Complete = true
+	for transport, details := range agent.Details {
+		if details.UriRR == nil || len(details.Addrs) == 0 {
+			agent.Complete = false
+			break
+		}
+		if transport == "dns" && details.KeyRR == nil {
+			agent.Complete = false
+			break
+		}
+		if transport == "api" && details.TlsaRR == nil {
+			agent.Complete = false
+			break
 		}
 	}
 
-	if !agent.Methods["dns"] && !agent.Methods["https"] {
-		ar.S.Remove(identity)
-		return false, nil, fmt.Errorf("no valid transport found for agent %s", identity)
+	// Before returning, ensure this agent is in remoteAgents for all its zones
+	for transport := range agent.Details {
+		for zone := range agent.Details[transport].Zones {
+			ar.AddRemoteAgent(zone, agent)
+		}
 	}
 
+	ar.S.Set(identity, agent)
 	return true, agent, nil
 }
 
@@ -278,6 +343,8 @@ func (ar *AgentRegistry) AddRemoteAgent(zonename string, agent *Agent) {
 func (ar *AgentRegistry) RemoveRemoteAgent(zonename string, identity string) {
 	ar.mu.Lock()
 	defer ar.mu.Unlock()
+
+	// Remove from remoteAgents
 	agents := ar.remoteAgents[zonename]
 	for i, a := range agents {
 		if a.Identity == identity {
@@ -285,11 +352,46 @@ func (ar *AgentRegistry) RemoveRemoteAgent(zonename string, identity string) {
 			break
 		}
 	}
+
+	// Clean up zone association in agent
+	if agent, exists := ar.S.Get(identity); exists {
+		for transport := range agent.Details {
+			delete(agent.Details[transport].Zones, zonename)
+		}
+		ar.S.Set(identity, agent)
+	}
 }
 
 func (ar *AgentRegistry) GetRemoteAgents(zonename string) []*Agent {
 	ar.mu.RLock()
 	defer ar.mu.RUnlock()
+
+	// If we don't have any agents for this zone yet, try to find them
+	if len(ar.remoteAgents[zonename]) == 0 {
+		// Look up HSYNC records for the zone
+		if zd, exists := Zones.Get(zonename); exists {
+			if owner, err := zd.GetOwner(zonename); err == nil {
+				hsyncRRset := owner.RRtypes.GetOnlyRRSet(TypeHSYNC)
+				if len(hsyncRRset.RRs) > 0 {
+					for _, rr := range hsyncRRset.RRs {
+						if prr, ok := rr.(*dns.PrivateRR); ok {
+							if hsync, ok := prr.Data.(*HSYNC); ok {
+								// Skip if this is our own identity
+								if hsync.Target == ar.LocalIdentity {
+									continue
+								}
+								// Found an HSYNC record, try to locate the agent
+								if _, agent, err := ar.LocateAgent(hsync.Target); err == nil {
+									ar.AddZoneToAgent(agent.Identity, zonename)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return ar.remoteAgents[zonename]
 }
 

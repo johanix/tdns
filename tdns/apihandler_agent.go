@@ -13,7 +13,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func APIagent(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var cp AgentPost
@@ -26,7 +26,8 @@ func APIagent(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) f
 			cp.Command, r.RemoteAddr)
 
 		resp := AgentResponse{
-			Time: time.Now(),
+			Time:     time.Now(),
+			Identity: conf.Agent.Identity,
 		}
 
 		defer func() {
@@ -67,27 +68,37 @@ func APIagent(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) f
 			for i, rr := range hsyncRRset.RRs {
 				hsyncStrs[i] = rr.String()
 			}
-
 			resp.HsyncRRs = hsyncStrs
 
-			// Get the statuses of the agents
-			statuses := []HsyncAgentStatus{}
-			for _, rr := range hsyncRRset.RRs {
-				switch priv := rr.(type) {
-				case *dns.PrivateRR:
-					if hsync, ok := priv.Data.(*HSYNC); ok {
-						status := &HsyncAgentStatus{
-							Identity: hsync.Target,
-						}
-						statuses = append(statuses, *status)
-					}
-				}
+			// Get the actual agents from the registry
+			resp.Agents = conf.Internal.Registry.GetRemoteAgents(cp.Zone)
+			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", cp.Zone)
+
+		case "hsync-locate":
+			if cp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "No agent identity specified"
+				return
 			}
-			resp.HsyncStatus = statuses
-			resp.Msg = fmt.Sprintf("HSYNC RRset for zone %s", cp.Zone)
+
+			cp.AgentId = dns.Fqdn(cp.AgentId)
+			new, agent, err := conf.Internal.Registry.LocateAgent(cp.AgentId)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Failed to locate agent %s: %v", cp.AgentId, err)
+				return
+			}
+
+			if new {
+				resp.Msg = fmt.Sprintf("Located new agent %s", cp.AgentId)
+			} else {
+				resp.Msg = fmt.Sprintf("Found existing agent %s", cp.AgentId)
+			}
+
+			resp.Agents = []*Agent{agent}
 
 		default:
-			resp.ErrorMsg = fmt.Sprintf("Unknown combiner command: %s", cp.Command)
+			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", cp.Command)
 			resp.Error = true
 		}
 	}

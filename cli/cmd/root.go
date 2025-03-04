@@ -119,7 +119,9 @@ func initApi() {
 			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
 		}
 		tdns.Globals.ApiClients[val.Name] = tmp
-		fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
+		if tdns.Globals.Debug {
+			fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
+		}
 	}
 
 	// for convenience we store the API client for "server" in the old place also

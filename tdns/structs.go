@@ -477,13 +477,15 @@ type CombinerResponse struct {
 type AgentPost struct {
 	Command string `json:"command"`
 	Zone    string `json:"zone"`
+	AgentId string `json:"agent_id"`
 }
 
 type AgentResponse struct {
-	Time        time.Time `json:"time"`
-	Error       bool      `json:"error"`
-	ErrorMsg    string    `json:"error_msg,omitempty"`
-	Msg         string    `json:"msg,omitempty"`
-	HsyncRRs    []string  `json:"hsync_rrs,omitempty"`
-	HsyncStatus []HsyncAgentStatus
+	Identity string
+	Time     time.Time
+	Error    bool
+	ErrorMsg string
+	Msg      string
+	HsyncRRs []string // Keep the HSYNC RRset for reference
+	Agents   []*Agent // The actual agents involved in the zone
 }

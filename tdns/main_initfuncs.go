@@ -174,7 +174,7 @@ func (conf *Config) MainInit() error {
 			return fmt.Errorf("Error setting up agent: %v", err)
 		}
 		// Initialize AgentRegistry for agent mode only
-		conf.Internal.Registry = NewAgentRegistry()
+		conf.Internal.Registry = NewAgentRegistry(conf.Agent.Identity)
 	case AppTypeServer, AppTypeMSA, AppTypeCombiner:
 		// ... existing server/MSA/combiner setup ...
 	default:
@@ -209,9 +209,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 
 	switch Globals.App.Type {
 	case AppTypeAgent:
-		if viper.GetBool("hsyncengine.active") {
-			go HsyncEngine(conf, conf.Internal.StopCh) // Only used by agent
-		}
+		go HsyncEngine(conf, conf.Internal.StopCh) // Only used by agent
 	}
 
 	switch Globals.App.Type {

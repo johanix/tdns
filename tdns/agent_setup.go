@@ -531,7 +531,7 @@ func (conf *Config) SetupApiTransport() error {
 			if !ok {
 				return fmt.Errorf("SetupApiTransport: zone data for agent identity %q not found", identity)
 			}
-			log.Printf("SetupApiTransport: publishing HTTPS transport records for agent %q", identity)
+			log.Printf("SetupApiTransport: publishing URI record for agent %q, api transport", identity)
 
 			// Publish _https._tcp URI record
 			uristr := strings.Replace(conf.Agent.Api.BaseUrl, "{TARGET}", identity, 1)

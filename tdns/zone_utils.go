@@ -168,7 +168,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 
 	var hsyncchanged, keyschanged bool
 	var hss *HsyncStatus
-	switch zd.AppType {
+	switch Globals.App.Type {
 	case AppTypeMSA, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
@@ -275,6 +275,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 		Verbose:        zd.Verbose,
 		Debug:          zd.Debug,
 		Options:        zd.Options,
+		Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -306,7 +307,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	var hsyncchanged, dnskeyschanged bool
 	var hss *HsyncStatus
-	switch zd.AppType {
+	switch Globals.App.Type {
 	case AppTypeMSA, AppTypeAgent, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
@@ -347,7 +348,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	if dnskeyschanged {
-		switch zd.AppType {
+		switch Globals.App.Type {
 		case AppTypeMSA:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
@@ -374,9 +375,9 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	if hsyncchanged {
-		switch zd.AppType {
+		switch Globals.App.Type {
 		case AppTypeMSA, AppTypeAgent:
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HSyncEngine", zd.ZoneName)
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
 				ZoneName:   zd.ZoneName,
