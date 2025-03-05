@@ -60,4 +60,6 @@ func init() {
 	cli.CombinerCmd.AddCommand(cli.ZoneCmd)
 	cli.AgentCmd.AddCommand(cli.ZoneCmd)
 
+	// From ../tdns/cli/base32_cmds.go
+	rootCmd.AddCommand(cli.Base32Cmd)
 }
