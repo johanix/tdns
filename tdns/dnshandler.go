@@ -86,6 +86,14 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
 
 			if zd, ok := Zones.Get(qname); ok {
+				if zd.Error {
+					log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in error state: %s", qname, zd.ErrorMsg)
+					m := new(dns.Msg)
+					m.SetRcode(r, dns.RcodeServerFailure)
+					w.WriteMsg(m)
+					return
+				}
+
 				log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
 				err := zd.QueryResponder(w, r, qname, qtype, dnssec_ok, kdb)
 				if err != nil {

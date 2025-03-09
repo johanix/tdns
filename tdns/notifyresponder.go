@@ -53,6 +53,14 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 		return nil // didn't find any zone for that qname
 	}
 
+	if zd.Error {
+		log.Printf("NotifyResponder: Received Notify for zone %q, but it is in error state: %s", qname, zd.ErrorMsg)
+		m := new(dns.Msg)
+		m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
+		dhr.ResponseWriter.WriteMsg(m)
+		return nil // didn't find any zone for that qname
+	}
+
 	// log.Printf("NotifyResponder: The qname %s seems to belong to the known zone %s", qname, zd.ZoneName)
 
 	switch ntype {

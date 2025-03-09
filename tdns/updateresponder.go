@@ -112,6 +112,14 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return nil // didn't find any zone for that qname
 	}
 
+	if zd.Error {
+		log.Printf("UpdateResponder: zone %s is in error state: %s", qname, zd.ErrorMsg)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		AttachEDEToResponse(m, dns.ExtendedErrorCodeNotReady)
+		w.WriteMsg(m)
+		return nil // didn't find any zone for that qname
+	}
+
 	// dump.P(zd.Options)
 	// dump.P(zd.UpdatePolicy)
 
