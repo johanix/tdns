@@ -303,6 +303,11 @@ var zoneListCmd = &cobra.Command{
 		}
 		zoneLines := []string{}
 		for zname, zconf := range cr.Zones {
+			if zconf.Error {
+				line := fmt.Sprintf("%s|%s||||Error: %s", zname, "ERROR", zconf.ErrorMsg)
+				zoneLines = append(zoneLines, line)
+				continue
+			}
 			opts := []string{}
 			for _, opt := range zconf.Options {
 				opts = append(opts, tdns.ZoneOptionToString[opt])

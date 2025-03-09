@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/spf13/pflag"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	// "github.com/johanix/tdns/tdns"
@@ -73,9 +74,10 @@ func (conf *Config) MainInit() error {
 	Globals.App.ServerBootTime = time.Now()
 	Globals.App.ServerConfigTime = time.Now()
 
-	flag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
-	flag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
-	flag.Parse()
+	pflag.StringVar(&conf.Internal.CfgFile, "config", DefaultServerCfgFile, "config file path")
+	pflag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
+	pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
+	pflag.Parse()
 
 	flag.Usage = func() {
 		flag.PrintDefaults()

@@ -42,7 +42,6 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
 	case Secondary:
 		do_transfer, upstream_serial, err := zd.DoTransfer()
 		if err != nil {
-			zd.Logger.Printf("Error from DoZoneTransfer(%s): %v", zd.ZoneName, err)
 			return false, err
 		}
 

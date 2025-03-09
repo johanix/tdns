@@ -47,7 +47,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	configsections["apiserver"] = config.ApiServer
 	configsections["dnsengine"] = config.DnsEngine
 
-	if err := ValidateBySection(&config, configsections, cfgfile); err != nil {
+	if _, err := ValidateBySection(&config, configsections, cfgfile); err != nil {
 		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v", cfgfile, err)
 	}
 	return nil
@@ -63,27 +63,27 @@ func ValidateZones(c *Config, cfgfile string) error {
 		zones["zone:"+val.Name] = val
 	}
 
-	if err := ValidateBySection(config, zones, cfgfile); err != nil {
+	if _, err := ValidateBySection(config, zones, cfgfile); err != nil {
 		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v", cfgfile, err)
 	}
 	return nil
 }
 
-func ValidateBySection(config *Config, configsections map[string]interface{}, cfgfile string) error {
+func ValidateBySection(config *Config, configsections map[string]interface{}, cfgfile string) (string, error) {
 	// validate := validator.New()
 	validate, err := NewCustomValidator()
 	if err != nil {
-		return fmt.Errorf("ValidateBySection: error creating custom validator: %v", err)
+		return "", fmt.Errorf("ValidateBySection: error creating custom validator: %v", err)
 	}
 
 	for k, data := range configsections {
 		log.Printf("%s: Validating config for %q section\n", strings.ToUpper(Globals.App.Name), k)
 		if err := validate.Struct(data); err != nil {
-			return fmt.Errorf("%s: Config %s, section %q: missing required attributes:\n%v",
-				strings.ToUpper(Globals.App.Name), cfgfile, k, err)
+			return fmt.Sprintf("%s: Config %s, section %q: missing required attributes:\n%v",
+				strings.ToUpper(Globals.App.Name), cfgfile, k, err), err
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // validateCertAndKeyFiles is the custom validation function

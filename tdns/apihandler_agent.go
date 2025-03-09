@@ -82,20 +82,25 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			cp.AgentId = dns.Fqdn(cp.AgentId)
-			new, agent, err := conf.Internal.Registry.LocateAgent(cp.AgentId)
+			agent, err := conf.Internal.Registry.GetAgentInfo(cp.AgentId)
 			if err != nil {
+				// Start async lookup and return a message that lookup is in progress
+				conf.Internal.Registry.LocateAgent(cp.AgentId, "")
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Failed to locate agent %s: %v", cp.AgentId, err)
+				resp.ErrorMsg = fmt.Sprintf("agent lookup in progress for %s", cp.AgentId)
 				return
 			}
 
-			if new {
-				resp.Msg = fmt.Sprintf("Located new agent %s", cp.AgentId)
-			} else {
-				resp.Msg = fmt.Sprintf("Found existing agent %s", cp.AgentId)
+			// If agent info is incomplete, start a new lookup
+			if agent.State == AgentStateNeeded {
+				conf.Internal.Registry.LocateAgent(cp.AgentId, "")
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("agent information is incomplete for %s, lookup in progress", cp.AgentId)
+				return
 			}
 
 			resp.Agents = []*Agent{agent}
+			resp.Msg = fmt.Sprintf("Found existing agent %s", cp.AgentId)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", cp.Command)

@@ -109,6 +109,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			// }
 
 			log.Printf("DnsHandler: Qname is %q, which is not a known zone.", qname)
+			log.Printf("DnsHandler: known zones are: %v", Zones.Keys())
 
 			// Let's see if we can find the zone
 			zd, folded := FindZone(qname)

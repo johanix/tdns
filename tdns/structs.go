@@ -87,6 +87,8 @@ type ZoneData struct {
 	KeyDB           *KeyDB
 	AppType         AppType
 	SyncQ           chan SyncRequest
+	Error           bool   // zone is broken and cannot be used
+	ErrorMsg        string // reason for the error (if known)
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -105,6 +107,8 @@ type ZoneConf struct {
 	DnssecPolicy string
 	Template     string
 	MultiSigner  string
+	Error        bool   // zone is broken and cannot be used
+	ErrorMsg     string // reason for the error (if known)
 }
 
 type TemplateConf struct {

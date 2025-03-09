@@ -17,12 +17,20 @@ import (
 	"github.com/spf13/viper"
 )
 
+// Agent state constants
+const (
+	AgentStateNeeded      = "needed"      // Agent is required but we don't have complete information
+	AgentStateKnown       = "known"       // We have complete information but haven't established communication
+	AgentStateOperational = "operational" // We have established successful communication
+)
+
 type Agent struct {
-	Identity string
-	Details  map[string]AgentDetails // "dns" or "api"
-	Methods  map[string]bool
-	Api      *ApiClient
-	Complete bool // New field indicating all lookups are done
+	Identity  string
+	Details   map[string]AgentDetails
+	Methods   map[string]bool
+	Api       *ApiClient
+	State     string    // Agent state: needed, known, operational
+	LastState time.Time // When state last changed
 }
 
 type AgentDetails struct {
@@ -90,175 +98,209 @@ func NewAgentRegistry(identity string) *AgentRegistry {
 	}
 }
 
-func (ar *AgentRegistry) LocateAgent(identity string) (bool, *Agent, error) {
+// LocateAgent is completely asynchronous with no return values
+func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 	log.Printf("LocateAgent: looking up agent %s", identity)
 
-	// Check if we already know this agent and it's complete
-	agent, exists := ar.S.Get(identity)
-	if exists && agent.Complete && agent.Details["dns"].LastHB.After(time.Now().Add(-1*time.Hour)) {
-		log.Printf("LocateAgent: agent %s already known, complete and recent", identity)
-		return false, agent, nil
+	// Skip if this is our own identity
+	if ar.LocalIdentity != "" && identity == ar.LocalIdentity {
+		log.Printf("LocateAgent: skipping self-identification for %s", identity)
+		return
 	}
 
-	if !exists {
-		agent = &Agent{
-			Identity: identity,
-			Details:  map[string]AgentDetails{},
-			Methods:  map[string]bool{},
-			Complete: false,
+	go func() {
+		log.Printf("LocateAgent: looking up agent %s for zone %s", identity, zonename)
+
+		// Check if we already know this agent and it's operational
+		agent, exists := ar.S.Get(identity)
+		if exists && agent.State == AgentStateOperational &&
+			agent.Details["dns"].LastHB.After(time.Now().Add(-1*time.Hour)) {
+			// Add zone if provided
+			if zonename != "" {
+				ar.AddZoneToAgent(identity, zonename)
+			}
+			return
 		}
-		// Initialize Zones map for each transport
+
+		// Initialize agent if needed
+		if !exists {
+			agent = &Agent{
+				Identity:  identity,
+				Details:   map[string]AgentDetails{},
+				Methods:   map[string]bool{},
+				State:     AgentStateNeeded,
+				LastState: time.Now(),
+			}
+			// Initialize Zones map for each transport
+			for _, transport := range []string{"dns", "api"} {
+				details := AgentDetails{
+					Zones: make(map[string]bool),
+					State: AgentStateNeeded,
+				}
+				agent.Details[transport] = details
+			}
+			ar.S.Set(identity, agent)
+		}
+
+		// Do agent lookup
+		resolverAddress := viper.GetString("resolver.address")
+		resolvers := []string{resolverAddress}
+		timeout := 2 * time.Second
+		retries := 3
+
+		// Look up URIs for both transports
 		for _, transport := range []string{"dns", "api"} {
-			details := AgentDetails{
-				Zones: make(map[string]bool),
-			}
-			agent.Details[transport] = details
-		}
-		ar.S.Set(identity, agent)
-	}
+			details := agent.Details[transport]
+			var targetName string
 
-	resolverAddress := viper.GetString("resolver.address")
-	resolvers := []string{resolverAddress}
-	timeout := 2 * time.Second
-	retries := 3
+			// Only look up URI if we don't have it
+			if details.UriRR == nil {
+				svcname := fmt.Sprintf("_%s._tcp.%s", transport, identity)
+				if transport == "api" {
+					svcname = fmt.Sprintf("_https._tcp.%s", identity)
+				}
+				svcname = dns.Fqdn(svcname)
 
-	// Look up URIs for both transports
-	for _, transport := range []string{"dns", "api"} {
-		details := agent.Details[transport]
-		var targetName string // Declare targetName at transport scope
+				rrset, err := RecursiveDNSQueryWithServers(svcname, dns.TypeURI, timeout, retries, resolvers)
+				if err != nil {
+					log.Printf("LocateAgent: error response to URI query for %s transport: %v", transport, err)
+					continue // Try the next transport instead of failing
+				}
 
-		// Only look up URI if we don't have it
-		if details.UriRR == nil {
-			svcname := fmt.Sprintf("_%s._tcp.%s", transport, identity)
-			if transport == "api" {
-				svcname = fmt.Sprintf("_https._tcp.%s", identity)
-			}
-			svcname = dns.Fqdn(svcname)
-
-			rrset, err := RecursiveDNSQueryWithServers(svcname, dns.TypeURI, timeout, retries, resolvers)
-			if err != nil {
-				log.Printf("LocateAgent: error response to URI query for %s transport: %v", transport, err)
-				continue // Try the next transport instead of failing
-			}
-
-			// Process URI response
-			if len(rrset.RRs) > 0 {
-				if u, ok := rrset.RRs[0].(*dns.URI); ok {
-					details.UriRR = u
+				// Process URI response
+				if len(rrset.RRs) > 0 {
+					if u, ok := rrset.RRs[0].(*dns.URI); ok {
+						details.UriRR = u
+					}
 				}
 			}
-		}
 
-		// Only proceed with SVCB if we have URI
-		if details.UriRR != nil && len(details.Addrs) == 0 {
-			uristr := details.UriRR.Target
-			parsedUri, err := url.Parse(uristr)
-			if err != nil {
-				log.Printf("LocateAgent: failed to parse URI target %q: %v", uristr, err)
-				continue
-			}
+			// Only proceed with SVCB if we have URI
+			if details.UriRR != nil && len(details.Addrs) == 0 {
+				uristr := details.UriRR.Target
+				parsedUri, err := url.Parse(uristr)
+				if err != nil {
+					log.Printf("LocateAgent: failed to parse URI target %q: %v", uristr, err)
+					continue
+				}
 
-			targetName, _, err = net.SplitHostPort(parsedUri.Host)
-			if err != nil {
-				targetName = parsedUri.Host
-			}
+				targetName, _, err = net.SplitHostPort(parsedUri.Host)
+				if err != nil {
+					targetName = parsedUri.Host
+				}
 
-			rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeSVCB, timeout, retries, resolvers)
-			if err != nil {
-				log.Printf("LocateAgent: error response to SVCB query: %v", err)
-				continue // Try the next transport
-			}
+				rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeSVCB, timeout, retries, resolvers)
+				if err != nil {
+					log.Printf("LocateAgent: error response to SVCB query: %v", err)
+					continue // Try the next transport
+				}
 
-			// Process SVCB response
-			if len(rrset.RRs) > 0 {
-				if svcb, ok := rrset.RRs[0].(*dns.SVCB); ok {
-					// Process SVCB record (addresses and port)
-					for _, kv := range svcb.Value {
-						switch kv.Key() {
-						case dns.SVCB_IPV4HINT:
-							ipv4Hints := kv.(*dns.SVCBIPv4Hint)
-							for _, ip := range ipv4Hints.Hint {
-								details.Addrs = append(details.Addrs, ip.String())
+				// Process SVCB response
+				if len(rrset.RRs) > 0 {
+					if svcb, ok := rrset.RRs[0].(*dns.SVCB); ok {
+						// Process SVCB record (addresses and port)
+						for _, kv := range svcb.Value {
+							switch kv.Key() {
+							case dns.SVCB_IPV4HINT:
+								ipv4Hints := kv.(*dns.SVCBIPv4Hint)
+								for _, ip := range ipv4Hints.Hint {
+									details.Addrs = append(details.Addrs, ip.String())
+								}
+							case dns.SVCB_IPV6HINT:
+								ipv6Hints := kv.(*dns.SVCBIPv6Hint)
+								for _, ip := range ipv6Hints.Hint {
+									details.Addrs = append(details.Addrs, ip.String())
+								}
+							case dns.SVCB_PORT:
+								port := kv.(*dns.SVCBPort)
+								details.Port = uint16(port.Port)
 							}
-						case dns.SVCB_IPV6HINT:
-							ipv6Hints := kv.(*dns.SVCBIPv6Hint)
-							for _, ip := range ipv6Hints.Hint {
-								details.Addrs = append(details.Addrs, ip.String())
-							}
-						case dns.SVCB_PORT:
-							port := kv.(*dns.SVCBPort)
-							details.Port = uint16(port.Port)
 						}
 					}
 				}
 			}
-		}
 
-		// Only proceed with KEY/TLSA if we have addresses and a target name
-		if len(details.Addrs) > 0 && targetName != "" {
-			if transport == "dns" && details.KeyRR == nil {
-				// Look up KEY
-				rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeKEY, timeout, retries, resolvers)
-				if err != nil {
-					log.Printf("LocateAgent: error response to KEY query: %v", err)
-					continue
-				}
-
-				for _, rr := range rrset.RRs {
-					if k, ok := rr.(*dns.KEY); ok {
-						details.KeyRR = k
-						agent.Methods["dns"] = true
-						break
+			// Only proceed with KEY/TLSA if we have addresses and a target name
+			if len(details.Addrs) > 0 && targetName != "" {
+				if transport == "dns" && details.KeyRR == nil {
+					// Look up KEY
+					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeKEY, timeout, retries, resolvers)
+					if err != nil {
+						log.Printf("LocateAgent: error response to KEY query: %v", err)
+						continue
 					}
-				}
-			} else if transport == "api" && details.TlsaRR == nil {
-				// Look up TLSA
-				tlsaName := fmt.Sprintf("_%d._tcp.%s", details.Port, targetName)
-				rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
-				if err != nil {
-					log.Printf("LocateAgent: error response to TLSA query: %v", err)
-					continue
-				}
 
-				for _, rr := range rrset.RRs {
-					if t, ok := rr.(*dns.TLSA); ok {
-						details.TlsaRR = t
-						agent.Methods["api"] = true
-						break
+					for _, rr := range rrset.RRs {
+						if k, ok := rr.(*dns.KEY); ok {
+							details.KeyRR = k
+							agent.Methods["dns"] = true
+							break
+						}
+					}
+				} else if transport == "api" && details.TlsaRR == nil {
+					// Look up TLSA
+					tlsaName := fmt.Sprintf("_%d._tcp.%s", details.Port, targetName)
+					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
+					if err != nil {
+						log.Printf("LocateAgent: error response to TLSA query: %v", err)
+						continue
+					}
+
+					for _, rr := range rrset.RRs {
+						if t, ok := rr.(*dns.TLSA); ok {
+							details.TlsaRR = t
+							agent.Methods["api"] = true
+							break
+						}
 					}
 				}
 			}
+
+			agent.Details[transport] = details
 		}
 
-		agent.Details[transport] = details
+		// Update agent state based on available methods
+		if agent.Methods["dns"] || agent.Methods["api"] {
+			agent.State = AgentStateKnown
+			agent.LastState = time.Now()
+
+			// If we're in known state and have a zone, try to send hello
+			if zonename != "" {
+				ar.AddZoneToAgent(identity, zonename)
+				// Try to send hello
+				go func() {
+					err := agent.SendBeat("HELLO")
+					if err != nil {
+						log.Printf("LocateAgent: error sending HELLO to %s: %v", identity, err)
+						return
+					}
+
+					// Update state after successful hello
+					agent.State = AgentStateOperational
+					agent.LastState = time.Now()
+					ar.S.Set(identity, agent)
+				}()
+			}
+		}
+
+		ar.S.Set(identity, agent)
+	}()
+}
+
+// Create a new synchronous function for code that needs immediate results
+func (ar *AgentRegistry) GetAgentInfo(identity string) (*Agent, error) {
+	// Skip if this is our own identity
+	if ar.LocalIdentity != "" && identity == ar.LocalIdentity {
+		return nil, fmt.Errorf("cannot get info for self as remote agent")
 	}
 
-	// Check if we have all the data we need
-	agent.Complete = true
-	for transport, details := range agent.Details {
-		if details.UriRR == nil || len(details.Addrs) == 0 {
-			agent.Complete = false
-			break
-		}
-		if transport == "dns" && details.KeyRR == nil {
-			agent.Complete = false
-			break
-		}
-		if transport == "api" && details.TlsaRR == nil {
-			agent.Complete = false
-			break
-		}
+	// Check if we already know this agent
+	agent, exists := ar.S.Get(identity)
+	if !exists {
+		return nil, fmt.Errorf("agent %s not found", identity)
 	}
 
-	// Before returning, ensure this agent is in remoteAgents for all its zones
-	for transport := range agent.Details {
-		for zone := range agent.Details[transport].Zones {
-			ar.AddRemoteAgent(zone, agent)
-		}
-	}
-
-	ar.S.Set(identity, agent)
-	return true, agent, nil
+	return agent, nil
 }
 
 // CleanCopy returns a copy of the Agent without any sensitive data
@@ -307,14 +349,7 @@ func (ar *AgentRegistry) IdentifyAgents(zd *ZoneData, ourIdentity string) ([]*Ag
 					continue
 				}
 				// Found another agent, try to locate it
-				new, agent, err := ar.LocateAgent(hsync.Target)
-				if err != nil {
-					log.Printf("Warning: failed to locate agent %s: %v", hsync.Target, err)
-					continue
-				}
-				if new {
-					agents = append(agents, agent)
-				}
+				ar.LocateAgent(hsync.Target, "")
 			}
 		}
 	}
@@ -381,9 +416,13 @@ func (ar *AgentRegistry) GetRemoteAgents(zonename string) []*Agent {
 									continue
 								}
 								// Found an HSYNC record, try to locate the agent
-								if _, agent, err := ar.LocateAgent(hsync.Target); err == nil {
-									ar.AddZoneToAgent(agent.Identity, zonename)
+								agent, err := ar.GetAgentInfo(hsync.Target)
+								if err != nil {
+									// Start async lookup
+									ar.LocateAgent(hsync.Target, zonename)
+									continue
 								}
+								ar.AddZoneToAgent(agent.Identity, zonename)
 							}
 						}
 					}

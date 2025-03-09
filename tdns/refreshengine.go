@@ -63,6 +63,14 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 			}
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
+					if zd.Error {
+						log.Printf("RefreshEngine: Zone %s is in error state: %s", zone, zd.ErrorMsg)
+						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in error state: %s", zone, zd.ErrorMsg)
+						if zr.Response != nil {
+							zr.Response <- resp
+						}
+						continue
+					}
 					if zd.ZoneType == Primary && zd.Options[OptDirty] {
 						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
 						log.Printf(resp.Msg)
@@ -125,6 +133,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
+						zd.Error = true
+						zd.ErrorMsg = fmt.Sprintf("refresh error: %v", err)
+						Zones.Set(zone, zd)
 						continue // cannot do much else
 						// return // terminate goroutine
 					}
@@ -201,6 +212,10 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					log.Printf("RefreshEngine: will refresh zone %s due to refresh counter", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)
+					if zd.Error {
+						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not refreshing.", zone, zd.ErrorMsg)
+						continue
+					}
 					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
@@ -226,6 +241,12 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 			var err error
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
+					if zd.Error {
+						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
+						log.Printf(resp.ErrorMsg)
+					}
 					resp, err = zd.BumpSerial()
 					if err != nil {
 						resp.Error = true

@@ -73,7 +73,14 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 		delete(config, "include")
 		for _, inc := range includes {
 			if includeFile, ok := inc.(string); ok {
-				fullPath := filepath.Join(baseDir, includeFile)
+				var fullPath string
+				if filepath.IsAbs(includeFile) {
+					// If the included file path is absolute, use it as is
+					fullPath = includeFile
+				} else {
+					// If the included file path is relative, join it with the base directory
+					fullPath = filepath.Join(baseDir, includeFile)
+				}
 				fullPath = filepath.Clean(fullPath)
 
 				included, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1)
@@ -264,6 +271,11 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 		zname := dns.Fqdn(zconf.Name)
 		zconf.Name = zname
 
+		zd := ZoneData{
+			ZoneName: zname,
+			Zonefile: zconf.Zonefile,
+		}
+
 		// Handle template expansion if specified
 		if zconf.Template != "" {
 			if tmpl, exist := Templates[zconf.Template]; exist {
@@ -272,11 +284,19 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				zconf, err = ExpandTemplate(zconf, &tmpl, Globals.App.Type)
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
-					return nil, err
+					// return nil, err
+					zd.Error = true
+					zd.ErrorMsg = fmt.Sprintf("template expansion error: %s: %v", zconf.Template, err)
+					Zones.Set(zname, &zd)
+					continue
 				}
 				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
 			} else {
-				fmt.Printf("Zone %q refers to the NON-existing template %q. Ignored.\n", zname, zconf.Template)
+				zd.Error = true
+				zd.ErrorMsg = fmt.Sprintf("template %q does not exist", zconf.Template)
+				Zones.Set(zname, &zd)
+				fmt.Printf("Zone %q refers to the non-existing template %q. Ignored.\n", zname, zconf.Template)
+				continue
 			}
 		}
 
@@ -305,6 +325,9 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			zonetype = Secondary
 			if zconf.Primary == "" {
 				log.Printf("Error: Zone %q is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
+				zd.Error = true
+				zd.ErrorMsg = "secondary zone but has no primary (upstream) configured"
+				Zones.Set(zname, &zd)
 				continue
 			}
 
@@ -317,6 +340,9 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 		default:
 			log.Printf("Error: Zone %s: Unknown zone type: \"%s\". Zone ignored.", zname, zconf.Type)
+			zd.Error = true
+			zd.ErrorMsg = fmt.Sprintf("unknown zone type: %s", zconf.Type)
+			Zones.Set(zname, &zd)
 			continue
 		}
 
@@ -482,17 +508,20 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			}
 		}
 
-		all_zones = append(all_zones, zname)
-
 		// log.Printf("*** ParseZones: 5. Refreshch: %v", conf.Internal.RefreshZoneCh)
 
 		// Validate this zone's configuration
 		var zones = make(map[string]interface{}, 1)
 		zones["zone:"+zname] = zconf
-		if err := ValidateBySection(conf, zones, "foobar"); err != nil {
-			log.Printf("Error validating zone %s: %v", zname, err)
+		if errmsg, err := ValidateBySection(conf, zones, "foobar"); err != nil {
+			log.Printf("Error validating zone %s:\n%s", zname, errmsg)
+			zd.Error = true
+			zd.ErrorMsg = fmt.Sprintf("config validation: %v", err)
+			Zones.Set(zname, &zd)
 			continue
 		}
+
+		all_zones = append(all_zones, zname)
 
 		// If validation passed, send to refresh channel
 		conf.Internal.RefreshZoneCh <- ZoneRefresher{
