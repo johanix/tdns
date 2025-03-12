@@ -5,12 +5,14 @@
 package tdns
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -20,464 +22,6 @@ import (
 	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
-
-type AgentConf struct {
-	Identity string `validate:"required,hostname"`
-	Api      AgentApiConf
-	Dns      AgentDnsConf
-}
-
-type AgentApiConf struct {
-	Addresses struct {
-		Publish []string
-		Listen  []string
-	}
-	BaseUrl  string
-	Port     uint16
-	Cert     string
-	Key      string
-	CertData string
-	KeyData  string
-}
-
-type AgentDnsConf struct {
-	Addresses struct {
-		Publish []string
-		Listen  []string
-	}
-	BaseUrl string
-	Port    uint16
-}
-
-// Commenting out MSA-specific functions
-/*
-func LoadMusicConfig(mconf *Config, appMode string, safemode bool) error {
-	if Globals.Debug {
-		log.Printf("LoadMusicConfig: enter")
-	}
-	var cfgfile string
-	switch appMode {
-	case "server":
-		cfgfile = DefaultCfgFile
-	case "msa", "msa-cli":
-		cfgfile = DefaultMSACfgFile
-	default:
-		log.Fatalf("Unknown app mode: %q", appMode)
-	}
-
-	if Globals.Debug {
-		fmt.Printf("*** LoadMusicConfig: reloading config from %q. Safemode: %v\n", cfgfile, safemode)
-	}
-	if safemode {
-		tmpviper := viper.New()
-		tmpviper.SetConfigFile(cfgfile)
-
-		var err error
-		switch appMode {
-		case "server":
-			err = tmpviper.ReadInConfig()
-		case "msa", "msa-cli":
-			err = tmpviper.MergeInConfig()
-		default:
-			log.Fatalf("Unknown app mode: %q", appMode)
-		}
-		if err != nil {
-			return err
-		}
-
-		err = ValidateConfig(tmpviper, cfgfile, appMode, true) // will not terminate on error
-		if err != nil {
-			return err
-		}
-		fmt.Printf("LoadConfig: safe config validation succeeded, no errors. Now reloading.\n")
-	}
-
-	viper.SetConfigFile(cfgfile)
-
-	var err error
-	switch appMode {
-	case "server":
-		err = viper.ReadInConfig()
-		if Globals.Debug {
-			fmt.Printf("*** LoadMusicConfig: server config merged from %q\n", cfgfile)
-		}
-	case "msa":
-		err = viper.MergeInConfig()
-		if err != nil {
-			log.Printf("Error from viper.MergeInConfig: %v", err)
-			return err
-		}
-		if Globals.Debug {
-			fmt.Printf("*** LoadMusicConfig: MSA config merged from %q\n", cfgfile)
-		}
-	case "msa-cli":
-		err = viper.MergeInConfig()
-		if Globals.Debug {
-			fmt.Printf("*** LoadMusicConfig: msa-cli config merged from %q\n", cfgfile)
-		}
-	default:
-		log.Fatalf("Unknown app mode: %q", appMode)
-	}
-	if err != nil {
-		log.Fatalf("Could not load config (%s)", err)
-	}
-
-	err = ValidateConfig(nil, cfgfile, appMode, false) // will terminate on error
-	if err != nil {
-		return err
-	}
-
-	err = viper.Unmarshal(&mconf)
-	if err != nil {
-		log.Fatalf("Error unmarshalling MUSIC config into struct: %v", err)
-	}
-	// dump.P(mconf.MSA)
-
-	CliConf.Verbose = viper.GetBool("common.verbose")
-	CliConf.Debug = viper.GetBool("common.debug")
-
-	if Globals.Debug {
-		log.Printf("LoadMusicConfig: exit")
-	}
-	return nil
-}
-
-func (mconf *Config) LoadMSAConfig(tconf *Config, all_zones []string) error {
-	if Globals.Debug {
-		log.Printf("LoadMSAConfig: enter")
-	}
-
-	if len(mconf.MSA.Api.Addresses.Listen) == 0 && len(mconf.MSA.Dns.Addresses.Listen) == 0 {
-		dump.P(mconf.MSA)
-		return errors.New("LoadMSAConfig: neither MSA syncapi nor syncdns addresses set in config file")
-	}
-
-	mconf.MSA.Identity = dns.Fqdn(mconf.MSA.Identity)
-	if !slices.Contains(all_zones, mconf.MSA.Identity) {
-		_, err := mconf.SetupMSAAutoZone(mconf.MSA.Identity, tconf)
-		if err != nil {
-			return fmt.Errorf("LoadMSAConfig: failed to create minimal auto zone for MSA identity %q: %v", mconf.MSA.Identity, err)
-		}
-	}
-
-	if len(mconf.MSA.Api.Addresses.Publish) > 0 {
-		err := mconf.SetupApiMethod(tconf, all_zones)
-		if err != nil {
-			return fmt.Errorf("LoadMSAConfig: failed to setup API method: %v", err)
-		}
-	}
-
-	if len(mconf.MSA.Dns.Addresses.Publish) > 0 {
-		err := mconf.SetupDnsMethod()
-		if err != nil {
-			return fmt.Errorf("LoadMSAConfig: failed to setup DNS method: %v", err)
-		}
-	}
-
-	if Globals.Debug {
-		log.Printf("LoadMSAConfig: exit")
-	}
-
-	return nil
-}
-
-func (mconf *Config) SetupMSAAutoZone(zonename string, tconf *Config) (*ZoneData, error) {
-	log.Printf("SetupMSAAutoZone: Zone %q not found, creating a minimal auto zone", zonename)
-
-	addrs, err := tconf.FindNameserverAddrs()
-	if err != nil {
-		return nil, fmt.Errorf("SetupMSAAutoZone: failed to find nameserver addresses: %v", err)
-	}
-
-	zd, err := mconf.Internal.KeyDB.CreateAutoZone(zonename, addrs)
-	if err != nil {
-		return nil, fmt.Errorf("SetupMSAAutoZone: failed to create minimal auto zone for MSA auto zone %q: %v", zonename, err)
-	}
-	zd.Options[OptAllowUpdates] = true
-	zd.MusicSyncQ = mconf.Internal.MusicSyncQ
-
-	// A MSA auto zone will try to set up delegation syncing with the parent.
-	zd.Options[OptDelSyncChild] = true
-	err = zd.SetupZoneSync(tconf.Internal.DelegationSyncQ)
-	if err != nil {
-		return nil, fmt.Errorf("SetupMSAAutoZone: failed to set up delegation syncing for MSA auto zone %q: %v", zonename, err)
-	}
-
-	return zd, nil
-}
-
-func (mconf *Config) SetupApiMethod(tconf *Config, all_zones []string) error {
-	apiname := "api." + mconf.MSA.Identity
-
-	certFile := viper.GetString("msa.api.cert")
-	keyFile := viper.GetString("msa.api.key")
-
-	if certFile == "" || keyFile == "" {
-		return errors.New("LoadMSAConfig: MSA API identity defined, but cert or key file not set in config file")
-	}
-
-	certPEM, err := os.ReadFile(mconf.MSA.Api.Cert)
-	if err != nil {
-		return fmt.Errorf("LoadMSAConfig: error reading cert file: %v", err)
-	}
-
-	keyPEM, err := os.ReadFile(mconf.MSA.Api.Key)
-	if err != nil {
-		return fmt.Errorf("LoadMSAConfig: error reading key file: %v", err)
-	}
-
-	mconf.MSA.Api.CertData = string(certPEM)
-	mconf.MSA.Api.KeyData = string(keyPEM)
-
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return fmt.Errorf("LoadMSAConfig: failed to parse certificate PEM")
-	}
-
-	// Parse the certificate
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("LoadMSAConfig: failed to parse certificate: %v", err)
-	}
-
-	// Extract the CN from the certificate
-	certCN := cert.Subject.CommonName
-
-	// Compare the CN with the expected CN
-	if certCN != "api."+mconf.MSA.Identity {
-		log.Printf("LoadMSAConfig: Error: mconf.MSA.Identity: %q viper: %q", mconf.MSA.Identity, viper.GetString("msa.identity"))
-		dump.P(mconf.MSA)
-		return fmt.Errorf("LoadMSAConfig: Error: MSA certificate CN %q does not match MSA API target %q", certCN, mconf.MSA.Identity)
-	}
-
-	log.Printf("LoadMSAConfig: cert CN %q matches MSA API identity 'api.%s'", certCN, mconf.MSA.Identity)
-
-	du := createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish TLSA RR for MSA API target %q", apiname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
-			}
-
-			log.Printf("LoadMSAConfig: sending PING command to MSA  %q", mconf.MSA.Identity)
-			zd.KeyDB.UpdateQ <- UpdateRequest{
-				Cmd: "PING",
-			}
-
-			// MSA API identity
-			log.Printf("LoadMSAConfig: publishing TLSA RR for MSA API target %q", apiname)
-
-			err = zd.PublishTlsaRR(apiname, mconf.MSA.Api.Port, string(certPEM))
-			if err != nil {
-				return fmt.Errorf("LoadMSAConfig: failed to publish TLSA RR: %v", err)
-			}
-
-			log.Printf("LoadMSAConfig: Successfully published TLSA RR for MSA API target %q", apiname)
-			return nil
-		},
-	)
-
-	mconf.Internal.DeferredUpdateQ <- du
-
-	du = createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish URI RR for MSA API target %q", apiname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
-			}
-
-			log.Printf("LoadMSAConfig: sending PING command to MSA %q", mconf.MSA.Identity)
-			zd.KeyDB.UpdateQ <- UpdateRequest{
-				Cmd: "PING",
-			}
-
-			// MSA API identity
-			log.Printf("LoadMSAConfig: publishing URI RR for MSA API target %q", apiname)
-
-			err = zd.PublishUriRR(apiname, mconf.MSA.Api.BaseUrl, mconf.MSA.Api.Port)
-			if err != nil {
-				return fmt.Errorf("LoadMSAConfig: failed to publish URI RR: %v", err)
-			}
-
-			log.Printf("LoadMSAConfig: Successfully published TLSA RR for MSA API target %q", apiname)
-			return nil
-		},
-	)
-	mconf.Internal.DeferredUpdateQ <- du
-
-	du = createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish SVCB RR for MSA API target %q", apiname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
-			}
-
-			var ipv4hint, ipv6hint []net.IP
-			var value []dns.SVCBKeyValue
-			if len(mconf.MSA.Api.Addresses.Publish) > 0 {
-				for _, addr := range mconf.MSA.Api.Addresses.Publish {
-					ip := net.ParseIP(addr)
-					if ip == nil {
-						log.Printf("LoadMSAConfig: failed to parse address %q", addr)
-						continue
-					}
-					if ip.To4() != nil {
-						ipv4hint = append(ipv4hint, ip)
-					} else {
-						ipv6hint = append(ipv6hint, ip)
-					}
-				}
-			}
-
-			if mconf.MSA.Api.Port != 0 {
-				value = append(value, &dns.SVCBPort{Port: mconf.MSA.Api.Port})
-			}
-
-			if len(ipv4hint) > 0 {
-				value = append(value, &dns.SVCBIPv4Hint{Hint: ipv4hint})
-			}
-
-			if len(ipv6hint) > 0 {
-				value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
-			}
-
-			err = zd.PublishSvcbRR(apiname, mconf.MSA.Api.Port, value)
-			if err != nil {
-				return fmt.Errorf("LoadMSAConfig: failed to publish MSA API target SVCB RR: %v", err)
-			}
-
-			log.Printf("LoadMSAConfig: Successfully published MSA API target SVCB RR %q", apiname)
-			return nil
-		},
-	)
-	mconf.Internal.DeferredUpdateQ <- du
-
-	du = createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish ADDR RRs for MSA API target %q", apiname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadMSAConfig: Action: zone data for MSA identity %q still not found", mconf.MSA.Identity)
-			}
-
-			for _, addr := range mconf.MSA.Api.Addresses.Publish {
-				err = zd.PublishAddrRR(apiname, addr)
-				if err != nil {
-					return fmt.Errorf("LoadMSAConfig: failed to publish MSA API address RRs: %v", err)
-				}
-			}
-			log.Printf("LoadMSAig: Successfully published sidecar API address RRs %q", apiname)
-			return nil
-		},
-	)
-	mconf.Internal.DeferredUpdateQ <- du
-	return nil
-}
-
-func (mconf *Config) SetupDnsMethod() error {
-	dnsname := "dns." + mconf.MSA.Identity
-
-	du := createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish KEY RR for sidecar DNS target %q SIG(0) public key", dnsname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.MSA.Identity)
-			}
-
-			err := zd.MusicSig0KeyPrep(dnsname, zd.KeyDB)
-			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to publish KEY RR for sidecar DNS target '%s' SIG(0) public key: %v", dnsname, err)
-			}
-
-			log.Printf("LoadSidecarConfig: Successfully published KEY RR for sidecar DNS target %q SIG(0) public key", dnsname)
-			return nil
-		},
-	)
-	mconf.Internal.DeferredUpdateQ <- du
-
-	du = createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish SVCB RRs for sidecar DNS identity %q", dnsname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.MSA.Identity)
-			}
-
-			var ipv4hint, ipv6hint []net.IP
-			var value []dns.SVCBKeyValue
-
-			if len(mconf.MSA.Dns.Addresses.Publish) > 0 {
-				for _, addr := range mconf.MSA.Dns.Addresses.Publish {
-					ip := net.ParseIP(addr)
-					if ip == nil {
-						log.Printf("LoadSidecarConfig: failed to parse address %q", addr)
-						continue
-					}
-					if ip.To4() != nil {
-						ipv4hint = append(ipv4hint, ip)
-					} else {
-						ipv6hint = append(ipv6hint, ip)
-					}
-				}
-			}
-
-			if mconf.MSA.Dns.Port != 0 {
-				value = append(value, &dns.SVCBPort{Port: mconf.MSA.Dns.Port})
-			}
-
-			if len(ipv4hint) > 0 {
-				value = append(value, &dns.SVCBIPv4Hint{Hint: ipv4hint})
-			}
-
-			if len(ipv6hint) > 0 {
-				value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
-			}
-
-			log.Printf("LoadSidecarConfig: publishing SVCB RR for sidecar DNS target %q", dnsname)
-			err := zd.PublishSvcbRR(dnsname, mconf.MSA.Dns.Port, value)
-			if err != nil {
-				return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar DNS target SVCB RR: %v", err)
-			}
-			log.Printf("LoadSidecarConfig: Successfully published sidecar DNS target SVCB RR %q", dnsname)
-			return nil
-		},
-	)
-	mconf.Internal.DeferredUpdateQ <- du
-
-	du = createDeferredUpdate(
-		mconf.MSA.Identity,
-		fmt.Sprintf("Publish ADDR RRs for sidecar DNS target %q", dnsname),
-		func() error {
-			zd, ok := Zones.Get(mconf.MSA.Identity)
-			if !ok {
-				return fmt.Errorf("LoadSidecarConfig: Action: zone data for sidecar identity %q still not found", mconf.MSA.Identity)
-			}
-
-			for _, addr := range mconf.MSA.Dns.Addresses.Publish {
-				err := zd.PublishAddrRR(dnsname, addr)
-				if err != nil {
-					return fmt.Errorf("LoadSidecarConfig: failed to publish sidecar DNS address RRs: %v", err)
-				}
-			}
-			log.Printf("LoadSidecarConfig: Successfully published sidecar DNS address RRs %q", dnsname)
-			return nil
-		},
-	)
-	mconf.Internal.DeferredUpdateQ <- du
-
-	return nil
-}
-*/
 
 func createDeferredUpdate(zoneName, description string, action func() error) DeferredUpdate {
 	return DeferredUpdate{
@@ -493,17 +37,26 @@ func createDeferredUpdate(zoneName, description string, action func() error) Def
 func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 	log.Printf("SetupAgentAutoZone: Zone %q not found, creating a minimal auto zone", zonename)
 
-	addrs, err := conf.FindNameserverAddrs()
+	addrs, err := conf.FindDnsEngineAddrs()
 	if err != nil {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to find nameserver addresses: %v", err)
 	}
 
+	// dump.P(addrs)
 	zd, err := conf.Internal.KeyDB.CreateAutoZone(zonename, addrs)
 	if err != nil {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
 	zd.Options[OptAllowUpdates] = true
 	zd.SyncQ = conf.Internal.SyncQ
+
+	// Check for local notify configuration and set downstream targets
+	if conf.Agent.Local.Notify != nil && len(conf.Agent.Local.Notify) > 0 {
+		zd.Downstreams = conf.Agent.Local.Notify
+		if Globals.Debug {
+			log.Printf("SetupAgentAutoZone: Setting downstream notify targets for zone %s: %v", zonename, zd.Downstreams)
+		}
+	}
 
 	// Agent auto zone needs to be signed
 	zd.Options[OptOnlineSigning] = true
@@ -553,6 +106,15 @@ func (conf *Config) SetupApiTransport() error {
 				return fmt.Errorf("SetupApiTransport: failed to publish URI record: %v", err)
 			}
 			log.Printf("SetupApiTransport: successfully published URI record for agent %q", identity)
+
+			// Publish address records for the URI target
+			for _, addr := range conf.Agent.Api.Addresses.Publish {
+				err = zd.PublishAddrRR(host, addr)
+				if err != nil {
+					return fmt.Errorf("SetupApiTransport: failed to publish address record for %s %s: %v", host, addr, err)
+				}
+			}
+			log.Printf("SetupApiTransport: successfully published address records for agent %q", identity)
 
 			// Publish TLSA record
 			err = zd.PublishTlsaRR(host, conf.Agent.Api.Port, conf.Agent.Api.CertData)
@@ -634,6 +196,15 @@ func (conf *Config) SetupDnsTransport() error {
 			}
 			log.Printf("SetupDnsTransport: successfully published URI record for agent %q", identity)
 
+			// Publish address records for the URI target
+			for _, addr := range conf.Agent.Dns.Addresses.Publish {
+				err = zd.PublishAddrRR(host, addr)
+				if err != nil {
+					return fmt.Errorf("SetupDnsTransport: failed to publish address record for %s %s: %v", host, addr, err)
+				}
+			}
+			log.Printf("SetupApiTransport: successfully published address records for agent %q", identity)
+
 			// Publish KEY record for SIG(0)
 			err = zd.AgentSig0KeyPrep(host, zd.KeyDB)
 			if err != nil {
@@ -705,8 +276,8 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 	// Setup API transport if configured
 	if len(conf.Agent.Api.Addresses.Publish) > 0 {
 		// Load and verify API certificate
-		certFile := conf.Agent.Api.Cert
-		keyFile := conf.Agent.Api.Key
+		certFile := conf.Agent.Api.CertFile
+		keyFile := conf.Agent.Api.KeyFile
 
 		if certFile == "" || keyFile == "" {
 			return errors.New("SetupAgent: API transport defined, but cert or key file not set")
@@ -769,4 +340,85 @@ func (zd *ZoneData) AgentSig0KeyPrep(name string, kdb *KeyDB) error {
 	}
 
 	return zd.Sig0KeyPreparation(name, alg, kdb)
+}
+
+func (agent *Agent) NewAgentSyncApiClient() error {
+	if agent == nil {
+		return fmt.Errorf("agent is nil")
+	}
+
+	if !agent.Methods["api"] || agent.Details["api"].TlsaRR == nil {
+		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
+	}
+
+	if Globals.Debug {
+		log.Printf("NewAgentSyncApiClient: enter. identity: %s, baseurl: %s",
+			agent.Identity, agent.Details["api"].BaseUri)
+	}
+	api := AgentApi{
+		ApiClient: NewClient(agent.Identity, agent.Details["api"].BaseUri, "", "", "tlsa"),
+	}
+
+	tlsconfig := &tls.Config{}
+
+	//	if rootcafile == "insecure" {
+	//		tlsconfig.InsecureSkipVerify = true
+	//	} else if rootcafile == "tlsa" {
+	// use TLSA RR for verification; InsecureSkipVerify must still be true
+	tlsconfig.InsecureSkipVerify = true
+	// use TLSA RR for verification
+	tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		log.Printf("NewAgentSyncApiClient: VerifyPeerCertificate called for %s (have TLSA: %s)", agent.Identity,
+			agent.Details["api"].TlsaRR.String())
+		for _, rawCert := range rawCerts {
+			cert, err := x509.ParseCertificate(rawCert)
+			if err != nil {
+				return fmt.Errorf("failed to parse certificate: %v", err)
+			}
+			if cert.Subject.CommonName != agent.Identity {
+				return fmt.Errorf("unexpected certificate common name (should have been %s)", agent.Identity)
+			}
+
+			err = VerifyCertAgainstTlsaRR(agent.Details["api"].TlsaRR, rawCert)
+			if err != nil {
+				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
+			}
+		}
+		// log.Printf("NewMusicSyncApiClient: VerifyPeerCertificate returning nil (all good)")
+		return nil
+	}
+	//	} else {
+	//		rootCAPool := x509.NewCertPool()
+	//		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
+	//		rootCA, err := os.ReadFile(rootcafile)
+	//		if err != nil {
+	//			log.Fatalf("reading cert failed : %v", err)
+	//		}
+	//		if Globals.Debug {
+	//			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
+	//				name, rootcafile)
+	//		}
+
+	//		rootCAPool.AppendCertsFromPEM(rootCA)
+	//		tlsconfig.RootCAs = rootCAPool
+	//	}
+
+	// api.Client = &http.Client{}
+	api.ApiClient.Client = &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsconfig},
+	}
+
+	api.ApiClient.Debug = Globals.Debug
+	api.ApiClient.Verbose = Globals.Verbose
+	// log.Printf("client is a: %T\n", api.Client)
+
+	// dump.P(tlsconfig)
+
+	if Globals.Debug {
+		fmt.Printf("Setting up AGENT-TO-AGENT Sync API client: %s\n", agent.Identity)
+		fmt.Printf("* baseurl is: %s \n* authmethod is: %s \n", api.ApiClient.BaseUrl, api.ApiClient.AuthMethod)
+	}
+	agent.Api = &api
+
+	return nil
 }

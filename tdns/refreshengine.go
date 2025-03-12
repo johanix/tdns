@@ -63,9 +63,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 			}
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
-					if zd.Error {
-						log.Printf("RefreshEngine: Zone %s is in error state: %s", zone, zd.ErrorMsg)
-						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in error state: %s", zone, zd.ErrorMsg)
+					if zd.Error && zd.ErrorType != RefreshError {
+						log.Printf("RefreshEngine: Zone %s is in %s error state: %s", zone, zd.ErrorType, zd.ErrorMsg)
+						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, zd.ErrorType, zd.ErrorMsg)
 						if zr.Response != nil {
 							zr.Response <- resp
 						}
@@ -79,14 +79,21 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						}
 						continue
 					}
-					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'",
-						zone)
+					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'", zone)
 					// if _, haveParams := refreshCounters[zone]; !haveParams {
 					if _, haveParams := refreshCounters.Get(zone); !haveParams {
-						soa, _ := zd.GetSOA()
+						var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
+						soa, err := zd.GetSOA()
+						if err != nil {
+							log.Printf("RefreshEngine: Error from GetSOA(%s): %v", zone, err)
+							zd.SetError(RefreshError, "get soa error: %v", err)
+							zd.LatestError = time.Now()
+						} else {
+							refresh = soa.Refresh
+						}
 						refreshCounters.Set(zone, &RefreshCounter{
 							Name:        zone,
-							SOARefresh:  soa.Refresh,
+							SOARefresh:  refresh,
 							CurRefresh:  1, // force immediate refresh
 							Upstream:    zr.Primary,
 							Downstreams: zr.Notify,
@@ -97,8 +104,9 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					go func(zd *ZoneData) {
 						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
 						if err != nil {
-							log.Printf("RefreshEngine: Error from zone refresh(%s): %v",
-								zone, err)
+							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
+							zd.SetError(RefreshError, "refresh error: %v", err)
+							zd.LatestError = time.Now()
 						}
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
@@ -133,9 +141,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
-						zd.Error = true
-						zd.ErrorMsg = fmt.Sprintf("refresh error: %v", err)
-						Zones.Set(zone, zd)
+						zd.SetError(RefreshError, "refresh error: %v", err)
+						zd.LatestError = time.Now()
 						continue // cannot do much else
 						// return // terminate goroutine
 					}
@@ -184,6 +191,11 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 					}
 
 					if updated {
+						zd.LatestRefresh = time.Now()
+						zd.RefreshCount++
+						if zd.Error && zd.ErrorType == RefreshError {
+							zd.SetError(NoError, "")
+						}
 						if resetSoaSerial {
 							zd.CurrentSerial = uint32(time.Now().Unix())
 							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",

@@ -19,7 +19,7 @@ import (
 	"net/http"
 )
 
-func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *ApiClient {
+func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient {
 	api := ApiClient{
 		Name:       name,
 		BaseUrl:    baseurl,
@@ -32,7 +32,8 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 	if rootcafile == "insecure" {
 		tlsconfig.InsecureSkipVerify = true
 	} else if rootcafile == "tlsa" {
-		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the MUSIC side afterwards.
+
+		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the Agent side afterwards.
 
 		// use TLSA RR for verification
 		//		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -60,8 +61,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 			log.Fatalf("reading cert failed : %v", err)
 		}
 		if Globals.Debug {
-			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
-				name, rootcafile)
+			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
 		}
 
 		rootCAPool.AppendCertsFromPEM(rootCA)
@@ -98,7 +98,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 	api.Verbose = Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
 
-	if debug {
+	if Globals.Debug {
 		log.Printf("Setting up %s API client:\n", name)
 		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
 			api.BaseUrl, api.apiKey, api.AuthMethod)

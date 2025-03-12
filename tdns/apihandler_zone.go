@@ -151,12 +151,19 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				}
 
 				zconf := ZoneConf{
-					Name:     zname,
-					Dirty:    zd.Options[OptDirty],
-					Frozen:   zd.Options[OptFrozen],
-					Options:  options,
-					Error:    zd.Error,
-					ErrorMsg: zd.ErrorMsg,
+					Name:         zname,
+					Type:         ZoneTypeToString[zd.ZoneType],
+					Store:        ZoneStoreToString[zd.ZoneStore],
+					Dirty:        zd.Options[OptDirty],
+					Frozen:       zd.Options[OptFrozen],
+					Options:      options,
+					Error:        zd.Error,
+					ErrorType:    zd.ErrorType,
+					ErrorMsg:     zd.ErrorMsg,
+					RefreshCount: zd.RefreshCount,
+					Zonefile:     zd.Zonefile,
+					Primary:      zd.Parent,
+					Downstreams:  zd.Downstreams,
 				}
 				zones[zname] = zconf
 			}

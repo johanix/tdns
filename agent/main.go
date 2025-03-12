@@ -23,9 +23,9 @@ func main() {
 
 	// These are the defaults, but they are defined here to make it possible for eg. MUSIC to use a different defaul
 	// conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
-	conf.Internal.CfgFile = tdns.DefaultAgentCfgFile
+	// conf.Internal.CfgFile = tdns.DefaultAgentCfgFile
 
-	err := conf.MainInit()
+	err := conf.MainInit(tdns.DefaultAgentCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}

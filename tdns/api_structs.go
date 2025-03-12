@@ -185,6 +185,7 @@ type ApiClient struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string
+        Addresses  []string  // if non-empty, replace the host part of the BaseUrl with each of these
 	apiKey     string
 	AuthMethod string
 	UseTLS     bool

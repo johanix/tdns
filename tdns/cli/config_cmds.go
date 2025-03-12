@@ -35,7 +35,7 @@ var configReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -61,7 +61,7 @@ var configReloadZonesCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -87,11 +87,12 @@ var configStatusCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
 		if tdns.Globals.Verbose {
+			fmt.Printf("Status for %s:\n", resp.AppName)
 			if len(resp.DnsEngine.Addresses) > 0 {
 				fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
 			} else {

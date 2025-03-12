@@ -1,13 +1,12 @@
 package tdns
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 )
 
@@ -28,17 +27,6 @@ type SyncResponse struct {
 	Msg      string
 }
 
-type AgentBeatReport struct {
-	Beat  *AgentBeat
-	Agent *Agent
-}
-
-type AgentBeat struct {
-	MessageType string // "HELLO", "BEAT", or "FULLBEAT"
-	Identity    string
-	Timestamp   time.Time
-}
-
 type SyncStatus struct {
 	Identity string
 	Agents   map[string]*Agent
@@ -46,9 +34,9 @@ type SyncStatus struct {
 	Response chan SyncStatus
 }
 
-type Agents struct {
-	S cmap.ConcurrentMap[string, *Agent]
-}
+// type Agents struct {
+//	S cmap.ConcurrentMap[string, *Agent]
+//}
 
 // Define task struct for deferred operations
 type DeferredTask struct {
@@ -60,7 +48,7 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
-func HsyncEngine(conf *Config, stopch chan struct{}) {
+func HsyncEngine(conf *Config, helloQ <-chan AgentMsgReport, heartbeatQ <-chan AgentMsgReport, stopch chan struct{}) {
 	ourId := conf.Agent.Identity
 
 	registry := conf.Internal.Registry
@@ -76,9 +64,9 @@ func HsyncEngine(conf *Config, stopch chan struct{}) {
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
 
-	var beatReport AgentBeatReport
-	beatQ := make(chan AgentBeatReport, 10)
-	conf.Internal.HeartbeatQ = beatQ
+	var msgReport AgentMsgReport
+	//msgQ := make(chan AgentMsgReport, 10)
+	// conf.Internal.HeartbeatQ = msgQ
 
 	conf.Internal.SyncStatusQ = make(chan SyncStatus, 10)
 
@@ -94,13 +82,14 @@ func HsyncEngine(conf *Config, stopch chan struct{}) {
 	// Configure intervals
 	helloEvalInterval := configureInterval("syncengine.intervals.helloeval", 300, 1800)
 	heartbeatInterval := configureInterval("syncengine.intervals.heartbeat", 15, 1800)
-	fullHeartbeatInterval := configureInterval("syncengine.intervals.fullheartbeat", 60, 3600)
+	// fullHeartbeatInterval := configureInterval("syncengine.intervals.fullheartbeat", 60, 3600)
 
 	log.Printf("Starting HsyncEngine (heartbeat will run once every %d seconds)", heartbeatInterval)
 
 	HelloEvalTicker := time.NewTicker(time.Duration(helloEvalInterval) * time.Second)
 	HBticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
-	fullHBticker := time.NewTicker(time.Duration(fullHeartbeatInterval) * time.Second)
+	// XXX: Unclear whether we need a separate "full" heartbeat
+	// fullHBticker := time.NewTicker(time.Duration(fullHeartbeatInterval) * time.Second)
 
 	// Add ticker for incomplete agent checks
 	incompleteAgentTicker := time.NewTicker(30 * time.Second)
@@ -110,14 +99,17 @@ func HsyncEngine(conf *Config, stopch chan struct{}) {
 		case syncitem = <-syncQ:
 			registry.HandleSyncRequest(ourId, wannabe_agents, syncitem)
 
-		case beatReport = <-beatQ:
-			registry.HandleBeatReport(beatReport, wannabe_agents)
+		case msgReport = <-helloQ:
+			registry.HelloHandler(msgReport, wannabe_agents)
+
+		case msgReport = <-heartbeatQ:
+			registry.HeartbeatHandler(msgReport, wannabe_agents)
 
 		case <-HBticker.C:
 			registry.SendHeartbeats()
 
-		case <-fullHBticker.C:
-			registry.SendFullHeartbeats()
+		// case <-fullHBticker.C:
+		// 	registry.SendFullHeartbeats()
 
 		case <-HelloEvalTicker.C:
 			registry.EvaluateHellos(wannabe_agents, syncedZones)
@@ -130,7 +122,7 @@ func HsyncEngine(conf *Config, stopch chan struct{}) {
 			// stop all tickers
 			HelloEvalTicker.Stop()
 			HBticker.Stop()
-			fullHBticker.Stop()
+			//fullHBticker.Stop()
 			incompleteAgentTicker.Stop()
 			return
 		}
@@ -192,18 +184,27 @@ func (ar *AgentRegistry) HandleSyncRequest(ourId string, wannabe_agents map[stri
 	}
 }
 
-func (ar *AgentRegistry) HandleBeatReport(report AgentBeatReport, wannabe_agents map[string]*Agent) {
-	log.Printf("HsyncEngine: Received heartbeat from %s", report.Beat.Identity)
+func (ar *AgentRegistry) HelloHandler(report AgentMsgReport, wannabe_agents map[string]*Agent) {
+	log.Printf("HelloHandler: Received HELLO from %s", report.Msg.Identity)
 
-	switch report.Beat.MessageType {
+	switch report.Msg.MessageType {
 	case "HELLO":
-		log.Printf("HsyncEngine: Received initial hello from %s", report.Beat.Identity)
+		log.Printf("HelloHandler: Received initial hello from %s", report.Msg.Identity)
 		// Store in wannabe_agents until we verify it shares zones with us
-		wannabe_agents[report.Beat.Identity] = report.Agent
+		wannabe_agents[report.Msg.Identity] = report.Agent
 
+	default:
+		log.Printf("HelloHandler: Unknown message type: %s", report.Msg.MessageType)
+	}
+}
+
+func (ar *AgentRegistry) HeartbeatHandler(report AgentMsgReport, wannabe_agents map[string]*Agent) {
+	log.Printf("HeartbeatHandler: Received %s from %s", report.Msg.MessageType, report.Msg.Identity)
+
+	switch report.Msg.MessageType {
 	case "BEAT":
-		log.Printf("HsyncEngine: Received heartbeat from %s", report.Beat.Identity)
-		if agent, exists := ar.S.Get(report.Beat.Identity); exists {
+		log.Printf("HeartbeatHandler: Received heartbeat from %s", report.Msg.Identity)
+		if agent, exists := ar.S.Get(report.Msg.Identity); exists {
 			for transport := range report.Agent.Details {
 				newDetails := agent.Details[transport]
 				newDetails.LastHB = time.Now()
@@ -212,36 +213,70 @@ func (ar *AgentRegistry) HandleBeatReport(report AgentBeatReport, wannabe_agents
 		}
 
 	case "FULLBEAT":
-		log.Printf("HsyncEngine: Received full heartbeat from %s", report.Beat.Identity)
-		if agent, exists := ar.S.Get(report.Beat.Identity); exists {
+		log.Printf("HeartbeatHandler: Received full heartbeat from %s", report.Msg.Identity)
+		if agent, exists := ar.S.Get(report.Msg.Identity); exists {
 			for transport, details := range report.Agent.Details {
 				newDetails := details
 				newDetails.LastHB = time.Now()
 				agent.Details[transport] = newDetails
 			}
 		}
+	default:
+		log.Printf("HeartbeatHandler: Unknown message type: %s", report.Msg.MessageType)
 	}
 }
 
 func (ar *AgentRegistry) SendHeartbeats() {
 	log.Printf("HsyncEngine: Sending heartbeats to known agents")
 	for _, agent := range ar.S.Items() {
-		err := agent.SendBeat("BEAT")
-		if err != nil {
+		status, resp, err := agent.SendApiMsg(&AgentMsgPost{
+			MessageType: "BEAT",
+			Identity:    agent.Identity,
+			Zone:        "",
+		})
+		details := agent.Details["api"]
+		switch {
+		case err != nil:
 			log.Printf("HsyncEngine: Error sending heartbeat to %s: %v", agent.Identity, err)
+			details.LatestError = err.Error()
+
+		case status != http.StatusOK:
+			log.Printf("HsyncEngine: Heartbeat to %s returned status %d", agent.Identity, status)
+			details.LatestError = fmt.Sprintf("status %d", status)
+
+		default:
+			var amr AgentMsgResponse
+			err = json.Unmarshal(resp, &amr)
+			if err != nil {
+				log.Printf("HsyncEngine: Error unmarshalling heartbeat response: %v", err)
+				details.LatestError = err.Error()
+			}
+			if amr.Status == "ok" {
+				details.LastHB = time.Now()
+				details.LatestError = ""
+				details.Heartbeats++
+			}
 		}
+		agent.Details["api"] = details
 	}
 }
 
-func (ar *AgentRegistry) SendFullHeartbeats() {
-	log.Printf("HsyncEngine: Sending full heartbeats to known agents")
-	for _, agent := range ar.S.Items() {
-		err := agent.SendBeat("FULLBEAT")
-		if err != nil {
-			log.Printf("HsyncEngine: Error sending full heartbeat to %s: %v", agent.Identity, err)
-		}
-	}
-}
+// func (ar *AgentRegistry) SendFullHeartbeats() {
+// 	log.Printf("HsyncEngine: Sending full heartbeats to known agents")
+// 	for _, agent := range ar.S.Items() {
+// 		status, resp, err := agent.SendApiMsg(&AgentMsgPost{
+// 			MessageType: "FULLBEAT",
+// 			Identity:    agent.Identity,
+//			Zone:        "",
+//		})
+//		if err != nil {
+//			log.Printf("HsyncEngine: Error sending full heartbeat to %s: %v", agent.Identity, err)
+//		}
+//		if status != http.StatusOK {
+// 			log.Printf("HsyncEngine: Full heartbeat to %s returned status %d", agent.Identity, status)
+// 		}
+// 	}
+// }
 
 func (ar *AgentRegistry) EvaluateHellos(wannabe_agents map[string]*Agent, syncedZones map[string][]*Agent) {
 	log.Printf("HsyncEngine: Evaluating agents that claim to share zones with us")
@@ -297,106 +332,70 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	}
 }
 
-func (agent *Agent) SendBeat(beatType string) error {
-	beat := &AgentBeat{
-		MessageType: beatType,
+func (agent *Agent) SendMsg(msgType, zone string) ([]byte, error) {
+	msg := &AgentMsgPost{
+		MessageType: msgType,
 		Identity:    agent.Identity,
-		Timestamp:   time.Now(),
+		Zone:        zone,
+		Time:        time.Now(),
 	}
 
 	// Try API first, fall back to DNS if needed
 	if agent.Methods["api"] {
-		err := agent.sendBeatHTTPS(beat)
-		if err == nil {
-			return nil
+		status, resp, err := agent.SendApiMsg(msg)
+		if err == nil && status == http.StatusOK {
+			return resp, nil
 		}
-		log.Printf("API beat to %s failed: %v, trying DNS", agent.Identity, err)
+		log.Printf("API beat to %q failed: status: %d, error: %v, trying DNS", agent.Identity, status, err)
 	}
 
 	if agent.Methods["dns"] {
-		return agent.sendBeatDNS(beat)
-	}
-
-	return fmt.Errorf("no valid transport method available for agent %s", agent.Identity)
-}
-
-// UpdateAgents updates the registry based on the HSYNC records in the request. It has already been
-// split into "adds" and "removes" by zd.HsyncCHanged() so we can process them independently.
-func (ar *AgentRegistry) UpdateAgents(ourId string, wannabe_agents map[string]*Agent,
-	req SyncRequest, zonename string) error {
-
-	// Handle new HSYNC records
-	for _, rr := range req.SyncStatus.HsyncAdds {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
-				log.Printf("UpdateAgents: Zone %s: analysing HSYNC: %q", zonename, hsync.String())
-
-				if hsync.Target == ourId {
-					// We're the Target
-					if hsync.Upstream == "." {
-						// Special case: no upstream to sync with
-						log.Printf("UpdateAgents: Zone %s: we are target but upstream is '.', no sync needed", zonename)
-						continue
-					}
-
-					// Need to sync with Upstream - do this asynchronously
-					ar.LocateAgent(hsync.Upstream, zonename)
-				} else {
-					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Target)
-					// Not our target, locate agent asynchronously
-					ar.LocateAgent(hsync.Target, zonename)
-				}
-			}
+		_, resp, err := agent.SendDnsMsg(msg)
+		if err == nil {
+			return resp, nil
 		}
+		log.Printf("DNS beat to %s failed: %v", agent.Identity, err)
 	}
 
-	// Handle removed HSYNC records
-	for _, rr := range req.SyncStatus.HsyncRemoves {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
-				if hsync.Target == ourId {
-					// We're no longer involved in this zone's management
-					ar.CleanupZoneRelationships(zonename)
-				} else {
-					// Remote agent was removed, update registry
-					if agent, exists := ar.S.Get(hsync.Target); exists {
-						for transport := range agent.Details {
-							if agent.Details[transport].Zones != nil {
-								delete(agent.Details[transport].Zones, zonename)
-							}
-						}
-						ar.RemoveRemoteAgent(zonename, hsync.Target)
-					}
-				}
-			}
-		}
-	}
-
-	return nil
+	return nil, fmt.Errorf("no valid transport method available for agent %s", agent.Identity)
 }
 
 // Helper methods for SendBeat
-func (agent *Agent) sendBeatHTTPS(beat *AgentBeat) error {
+func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (int, []byte, error) {
 	if agent.Api == nil {
-		return fmt.Errorf("no API client configured for agent %s", agent.Identity)
+		return 0, nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
 	}
 
-	status, _, err := agent.Api.RequestNG("POST", "/beat", beat, false)
+	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/beat", msg, false)
 	if err != nil {
-		return fmt.Errorf("HTTPS beat failed: %v", err)
+		return 0, nil, fmt.Errorf("HTTPS beat failed: %v", err)
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("HTTPS beat returned status %d", status)
+		return 0, nil, fmt.Errorf("HTTPS beat returned status %d", status)
 	}
 
-	return nil
+	return status, resp, nil
 }
 
-func (agent *Agent) sendBeatDNS(beat *AgentBeat) error {
+func (agent *Agent) SendApiHello(msg *AgentMsgPost) (int, []byte, error) {
+	if agent.Api == nil {
+		return 0, nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
+	}
+
+	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/hello", msg, false)
+	if err != nil {
+		return 0, nil, fmt.Errorf("API hello failed: %v", err)
+	}
+	if status != http.StatusOK {
+		return 0, nil, fmt.Errorf("API hello returned status %d", status)
+	}
+
+	return status, resp, nil
+}
+
+func (agent *Agent) SendDnsMsg(msg *AgentMsgPost) (int, []byte, error) {
 	// TODO: Implement DNS-based heartbeat
 	// This would involve creating a signed DNS message
 	// containing the heartbeat information
-	return fmt.Errorf("DNS transport not yet implemented")
+	return 0, nil, fmt.Errorf("DNS transport not yet implemented")
 }
-
-// ... additional helper functions ...

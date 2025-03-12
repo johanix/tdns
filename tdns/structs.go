@@ -87,8 +87,12 @@ type ZoneData struct {
 	KeyDB           *KeyDB
 	AppType         AppType
 	SyncQ           chan SyncRequest
-	Error           bool   // zone is broken and cannot be used
-	ErrorMsg        string // reason for the error (if known)
+	Error           bool      // zone is broken and cannot be used
+	ErrorType       ErrorType // "config" | "refresh" | "notify" | "update"
+	ErrorMsg        string    // reason for the error (if known)
+	LatestError     time.Time // time of latest error
+	RefreshCount    int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	LatestRefresh   time.Time // time of latest successful refresh
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -99,6 +103,7 @@ type ZoneConf struct {
 	Store        string `validate:"required"` // xfr | map | slice | reg
 	Primary      string // upstream, for secondary zones
 	Notify       []string
+	Downstreams  []string
 	OptionsStrs  []string     `yaml:"options" mapstructure:"options"`
 	Options      []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen       bool         // true if zone is frozen; not a config param
@@ -107,8 +112,10 @@ type ZoneConf struct {
 	DnssecPolicy string
 	Template     string
 	MultiSigner  string
-	Error        bool   // zone is broken and cannot be used
-	ErrorMsg     string // reason for the error (if known)
+	Error        bool      // zone is broken and cannot be used
+	ErrorType    ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg     string    // reason for the error (if known)
+	RefreshCount int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 }
 
 type TemplateConf struct {
@@ -478,18 +485,18 @@ type CombinerResponse struct {
 	Data     map[string][]RRsetString `json:"data,omitempty"`
 }
 
-type AgentPost struct {
-	Command string `json:"command"`
-	Zone    string `json:"zone"`
-	AgentId string `json:"agent_id"`
-}
+// type AgentPost struct {
+//	Command string `json:"command"`
+//	Zone    string `json:"zone"`
+//	AgentId string `json:"agent_id"`
+// }
 
-type AgentResponse struct {
-	Identity string
-	Time     time.Time
-	Error    bool
-	ErrorMsg string
-	Msg      string
-	HsyncRRs []string // Keep the HSYNC RRset for reference
-	Agents   []*Agent // The actual agents involved in the zone
-}
+// type AgentResponse struct {
+//	Identity string
+//	Time     time.Time
+//	Error    bool
+//	ErrorMsg string
+//	Msg      string
+//	HsyncRRs []string // Keep the HSYNC RRset for reference
+//	Agents   []*Agent // The actual agents involved in the zone
+// }

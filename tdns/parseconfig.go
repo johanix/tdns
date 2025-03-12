@@ -263,17 +263,18 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 	// Process each zone configuration
 	for _, zconf := range conf.Zones {
-		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
-			log.Printf("ParseZones: Zone %s contains invalid characters. Ignoring.", zconf.Name)
-			continue
-		}
-
 		zname := dns.Fqdn(zconf.Name)
 		zconf.Name = zname
 
 		zd := ZoneData{
 			ZoneName: zname,
 			Zonefile: zconf.Zonefile,
+		}
+
+		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
+			log.Printf("ParseZones: Zone %s contains invalid characters. Ignoring.", zconf.Name)
+			zd.SetError(ConfigError, "zone name contains invalid characters: %q", zconf.Name)
+			continue
 		}
 
 		// Handle template expansion if specified
@@ -285,16 +286,12 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
 					// return nil, err
-					zd.Error = true
-					zd.ErrorMsg = fmt.Sprintf("template expansion error: %s: %v", zconf.Template, err)
-					Zones.Set(zname, &zd)
+					zd.SetError(ConfigError, "template expansion error: %q: %v", zconf.Template, err)
 					continue
 				}
 				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
 			} else {
-				zd.Error = true
-				zd.ErrorMsg = fmt.Sprintf("template %q does not exist", zconf.Template)
-				Zones.Set(zname, &zd)
+				zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
 				fmt.Printf("Zone %q refers to the non-existing template %q. Ignored.\n", zname, zconf.Template)
 				continue
 			}
@@ -325,9 +322,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			zonetype = Secondary
 			if zconf.Primary == "" {
 				log.Printf("Error: Zone %q is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
-				zd.Error = true
-				zd.ErrorMsg = "secondary zone but has no primary (upstream) configured"
-				Zones.Set(zname, &zd)
+				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
 				continue
 			}
 
@@ -340,9 +335,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 		default:
 			log.Printf("Error: Zone %s: Unknown zone type: \"%s\". Zone ignored.", zname, zconf.Type)
-			zd.Error = true
-			zd.ErrorMsg = fmt.Sprintf("unknown zone type: %s", zconf.Type)
-			Zones.Set(zname, &zd)
+			zd.SetError(ConfigError, "unknown zone type: %s", zconf.Type)
 			continue
 		}
 
@@ -358,8 +351,9 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			if !exist {
 				log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Zone will not be signed.", zname, zconf.DnssecPolicy)
 				zconf.DnssecPolicy = ""
+				zd.SetError(DnssecError, "DNSSEC policy %q does not exist", zconf.DnssecPolicy)
 			}
-			log.Printf("ParseZones: zone %s: DNSSEC policy \"%s\" accepted", zname, zconf.DnssecPolicy)
+			log.Printf("ParseZones: zone %s: DNSSEC policy %q accepted", zname, zconf.DnssecPolicy)
 		}
 
 		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
@@ -369,7 +363,8 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			option = strings.ToLower(option)
 			opt, exist := StringToZoneOption[option]
 			if !exist {
-				log.Printf("ParseZones: Zone %s: Unknown option: \"%s\". Ignored.", zname, option)
+				log.Printf("ParseZones: Zone %s: Unknown option: %q. Ignored.", zname, option)
+				zd.SetError(ConfigError, "unknown config option: %q", option)
 				continue
 			}
 
@@ -404,15 +399,18 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			case OptMultiSigner:
 				if zconf.MultiSigner == "" || zconf.MultiSigner == "none" {
 					log.Printf("Error: Zone %s: Option \"%s\" set without a corresponding multisigner config. Option ignored.", zname, ZoneOptionToString[opt])
+					zd.SetError(ConfigError, "option %s set without a corresponding multisigner config", ZoneOptionToString[opt])
 					continue
 				}
 				if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
 					log.Printf("Error: Zone %s: Option \"%s\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, ZoneOptionToString[opt], zconf.MultiSigner)
+					zd.SetError(ConfigError, "option %s set to non-existing multi-signer config \"%s\"", ZoneOptionToString[opt], zconf.MultiSigner)
 					continue
 				}
 				if conf.Internal.MusicSyncQ == nil {
 					log.Printf("Error: Zone %s: Option \"%s\" set but no multi-signer sync channel configured. This is a fatal error.", zname, ZoneOptionToString[opt])
-					return nil, errors.New("ParseZones: no multi-signer sync channel configured")
+					zd.SetError(ConfigError, "no multi-signer sync channel configured")
+					continue
 				}
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
@@ -421,6 +419,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			default:
 				// Should not happen
 				log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])
+				zd.SetError(ConfigError, "unknown config option: %s", ZoneOptionToString[opt])
 				continue
 			}
 		}
@@ -445,7 +444,8 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			// these are also ok, but imply that no updates are allowed
 			options[OptAllowChildUpdates] = false
 		default:
-			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Child.Type)
+			log.Printf("ParseZones: Error: zone %s has an unknown child update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Child.Type)
+			zd.SetError(ConfigError, "unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
 			continue
 		}
 
@@ -459,6 +459,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			options[OptAllowUpdates] = false
 		default:
 			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Zone.Type)
+			zd.SetError(ConfigError, "unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
 			continue
 		}
 
@@ -499,8 +500,8 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
 			// Agent only supports primary zone if it matches its identity
 			if zname != conf.Agent.Identity {
-				return nil, fmt.Errorf("the TDNS agent only supports a primary zone matching its identity (%q), this zone is not allowed: %q",
-					conf.Agent.Identity, zname)
+				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.Agent.Identity)
+				continue
 			} else {
 				// For agent's own zone, ensure required options are set
 				options[OptAllowUpdates] = true
@@ -515,9 +516,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 		zones["zone:"+zname] = zconf
 		if errmsg, err := ValidateBySection(conf, zones, "foobar"); err != nil {
 			log.Printf("Error validating zone %s:\n%s", zname, errmsg)
-			zd.Error = true
-			zd.ErrorMsg = fmt.Sprintf("config validation: %v", err)
-			Zones.Set(zname, &zd)
+			zd.SetError(ConfigError, "config validation: %v", err)
 			continue
 		}
 

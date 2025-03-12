@@ -50,7 +50,7 @@ type DnsEngineConf struct {
 }
 
 type ApiServerConf struct {
-	Addresses []string `validate:"required"`
+	Addresses []string `validate:"required"` // Must be in addr:port format
 	ApiKey    string   `validate:"required"`
 	CertFile  string   `validate:"required,file,certkey"`
 	KeyFile   string   `validate:"required,file"`
@@ -64,6 +64,40 @@ type ApiServerConf struct {
 type ApiServerAppConf struct {
 	Addresses []string
 	ApiKey    string
+}
+
+type AgentConf struct {
+	Identity string `validate:"required,hostname"`
+	Local    struct {
+		Notify []string // secondaries to notify for an agent autozone
+	}
+	Remote struct {
+		LocateInterval int // time in seconds
+	}
+	Api AgentApiConf
+	Dns AgentDnsConf
+}
+
+type AgentApiConf struct {
+	Addresses struct {
+		Publish []string
+		Listen  []string
+	}
+	BaseUrl  string
+	Port     uint16
+	CertFile string
+	KeyFile  string
+	CertData string
+	KeyData  string
+}
+
+type AgentDnsConf struct {
+	Addresses struct {
+		Publish []string
+		Listen  []string
+	}
+	BaseUrl string
+	Port    uint16
 }
 
 type DbConf struct {
@@ -91,7 +125,8 @@ type InternalConf struct {
 	AuthQueryQ      chan AuthQueryRequest
 	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ           chan SyncRequest
-	HeartbeatQ      chan AgentBeatReport
+	HeartbeatQ      chan AgentMsgReport // incoming /beat
+	HelloQ          chan AgentMsgReport // incoming /hello
 	SyncStatusQ     chan SyncStatus
 	Registry        *AgentRegistry
 }

@@ -191,26 +191,21 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "status":
 			log.Printf("Daemon status inquiry\n")
 			resp.Status = "ok" // only status we know, so far
-			resp.Msg = "We're happy, but send more cookies"
+			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
 
 		case "stop":
 			log.Printf("Daemon instructed to stop\n")
 			// var done struct{}
 			resp.Status = "stopping"
-			resp.Msg = "Daemon was happy, but now winding down"
+			resp.Msg = fmt.Sprintf("%s: Daemon was happy, but now winding down", Globals.App.Name)
 
-			// w.Header().Set("Content-Type", "application/json")
-			// err := json.NewEncoder(w).Encode(resp)
-			// if err != nil {
-			//		log.Printf("Error from json encoder: %v", err)
-			// }
 			go func() {
 				time.Sleep(5000 * time.Millisecond)
 				stopCh <- struct{}{}
 			}()
 
 		default:
-			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", cp.Command)
+			resp.ErrorMsg = fmt.Sprintf("%s: Unknown command: %s", Globals.App.Name, cp.Command)
 			resp.Error = true
 		}
 
@@ -236,7 +231,8 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			cp.Command, r.RemoteAddr)
 
 		resp := ConfigResponse{
-			Time: time.Now(),
+			AppName: Globals.App.Name,
+			Time:    time.Now(),
 		}
 
 		switch cp.Command {
@@ -260,8 +256,8 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Printf("APIconfig: config status inquiry")
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
-			resp.Msg = fmt.Sprintf("Configuration is ok, server boot time: %s, last config reload: %s",
-				Globals.App.ServerBootTime.Format(timelayout), Globals.App.ServerConfigTime.Format(timelayout))
+			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
+				Globals.App.Name, Globals.App.ServerBootTime.Format(timelayout), Globals.App.ServerConfigTime.Format(timelayout))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)

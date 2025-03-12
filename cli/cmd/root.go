@@ -114,7 +114,7 @@ type ApiDetails struct {
 func initApi() {
 	for _, val := range cconf.ApiServers {
 		// XXX: here we should validate the conf for this apiserver
-		tmp := tdns.NewClient("tdns-cli", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
+		tmp := tdns.NewClient("tdns-cli", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
 		if tmp == nil {
 			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
 		}

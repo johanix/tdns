@@ -43,7 +43,7 @@ func main() {
 	}
 
 	// Initialize the application
-	err := conf.MainInit()
+	err := conf.MainInit(tdns.DefaultServerCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}

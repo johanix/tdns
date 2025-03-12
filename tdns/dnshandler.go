@@ -87,11 +87,14 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 			if zd, ok := Zones.Get(qname); ok {
 				if zd.Error {
-					log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in error state: %s", qname, zd.ErrorMsg)
-					m := new(dns.Msg)
-					m.SetRcode(r, dns.RcodeServerFailure)
-					w.WriteMsg(m)
-					return
+					if zd.ErrorType != RefreshError || zd.RefreshCount == 0 {
+						log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
+							qname, zd.ErrorType, zd.ErrorMsg)
+						m := new(dns.Msg)
+						m.SetRcode(r, dns.RcodeServerFailure)
+						w.WriteMsg(m)
+						return
+					}
 				}
 
 				log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
@@ -192,6 +195,23 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 			if folded {
 				qname = strings.ToLower(qname)
+			}
+
+			if zd.Error && zd.ErrorType != RefreshError {
+				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
+					qname, zd.ErrorType, zd.ErrorMsg)
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeServerFailure)
+				w.WriteMsg(m)
+				return
+			}
+
+			if zd.RefreshCount == 0 {
+				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it has not been refreshed at least once yet", qname)
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeServerFailure)
+				w.WriteMsg(m)
+				return
 			}
 
 			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)

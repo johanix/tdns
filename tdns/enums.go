@@ -3,6 +3,8 @@
  */
 package tdns
 
+import "fmt"
+
 type ZoneOption uint8
 
 const (
@@ -77,4 +79,34 @@ var StringToAppType = map[string]AppType{
 	"agent":    AppTypeAgent,
 	"msa":      AppTypeMSA,
 	"combiner": AppTypeCombiner,
+}
+
+type ErrorType uint8
+
+const (
+	NoError ErrorType = iota
+	ConfigError
+	RefreshError
+	AgentError
+	DnssecError
+)
+
+var ErrorTypeToString = map[ErrorType]string{
+	ConfigError:  "config",
+	RefreshError: "refresh",
+	AgentError:   "agent",
+	DnssecError:  "DNSSEC",
+}
+
+func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface{}) {
+	if errtype == NoError {
+		zd.Error = false
+		zd.ErrorType = NoError
+		zd.ErrorMsg = ""
+	} else {
+		zd.Error = true
+		zd.ErrorType = errtype
+		zd.ErrorMsg = fmt.Sprintf(errmsg, args...)
+	}
+	Zones.Set(zd.ZoneName, zd)
 }

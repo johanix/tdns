@@ -4,12 +4,15 @@
 package tdns
 
 import (
+	// "encoding/json"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
 
@@ -31,8 +34,10 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		}
 
 		defer func() {
+			dump.Print(resp)
 			w.Header().Set("Content-Type", "application/json")
-			err := json.NewEncoder(w).Encode(resp)
+			sanitizedResp := SanitizeForJSON(resp)
+			err := json.NewEncoder(w).Encode(sanitizedResp)
 			if err != nil {
 				log.Printf("Error from json encoder: %v", err)
 			}
@@ -71,7 +76,12 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.HsyncRRs = hsyncStrs
 
 			// Get the actual agents from the registry
-			resp.Agents = conf.Internal.Registry.GetRemoteAgents(cp.Zone)
+			resp.Agents, err = conf.Internal.Registry.GetRemoteAgents(cp.Zone)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("error getting remote agents: %v", err)
+				return
+			}
 			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", cp.Zone)
 
 		case "hsync-locate":
@@ -102,9 +112,114 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", cp.AgentId)
 
+			//		case "list-known-agents":
+			//			resp.Agents, err = conf.Internal.Registry.GetRemoteAgents(cp.Zone)
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", cp.Command)
 			resp.Error = true
+		}
+	}
+}
+
+func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	if conf.Internal.HeartbeatQ == nil {
+		log.Println("APIbeat: HeartbeatQ channel is not set. Cannot forward heartbeats. This is a fatal error.")
+		os.Exit(1)
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := AgentMsgResponse{
+			Time: time.Now(),
+			Msg:  "Hi there!",
+		}
+		log.Printf("APIbeat: received /beat request from %s.\n", r.RemoteAddr)
+
+		decoder := json.NewDecoder(r.Body)
+		var bp AgentBeatPost
+		err := decoder.Decode(&bp)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIbeat: error encoding response: %v\n", err)
+			}
+		}()
+
+		if err != nil {
+			log.Printf("APIbeat: error decoding beat post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
+		switch bp.MessageType {
+		case "BEAT", "FULLBEAT":
+			resp.Msg = "OK"
+			conf.Internal.HeartbeatQ <- AgentMsgReport{
+				Msg: &AgentMsgPost{
+					MessageType: bp.MessageType,
+					Identity:    bp.Identity,
+					Time:        time.Now(),
+					Zones:       bp.Zones,
+				},
+			}
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.MessageType)
+		}
+	}
+}
+
+// This is the agent-to-agent sync API hello handler.
+func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	if conf.Internal.HeartbeatQ == nil {
+		log.Println("APIhello: HeartbeatQ channel is not set. Cannot forward heartbeats. This is a fatal error.")
+		os.Exit(1)
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := AgentMsgResponse{
+			Time: time.Now(),
+			Msg:  fmt.Sprintf("Hello there! I'm a TDNS agent with identity %q.", conf.Agent.Identity),
+		}
+		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
+
+		decoder := json.NewDecoder(r.Body)
+		var hp AgentMsgPost
+		err := decoder.Decode(&hp)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIhello: error encoding response: %v\n", err)
+			}
+		}()
+
+		if err != nil {
+			log.Printf("APIhello: error decoding hello post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
+		switch hp.MessageType {
+		case "HELLO":
+			conf.Internal.HelloQ <- AgentMsgReport{
+				Msg: &AgentMsgPost{
+					MessageType: "HELLO",
+					Identity:    hp.Identity,
+					Time:        time.Now(),
+					Zone:        hp.Zone,
+				},
+			}
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.MessageType)
 		}
 	}
 }

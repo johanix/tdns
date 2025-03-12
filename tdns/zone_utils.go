@@ -758,6 +758,10 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
 	zd.mu.Lock()
 
+	defer func() {
+		zd.mu.Unlock()
+	}()
+
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
@@ -768,20 +772,23 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 		//			zd.mu.Unlock()
 		//			return resp, err
 		//		}
-		apex, _ := zd.GetOwner(zd.ZoneName)
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
+			return resp, err
+		}
 		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
+		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
 		if err != nil {
 			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
-			zd.mu.Unlock()
 			return resp, err
 		}
 	}
-	zd.mu.Unlock()
+	//	zd.mu.Unlock()
 
 	zd.NotifyDownstreams()
 
@@ -1130,23 +1137,23 @@ $TTL 86400
 }
 
 // Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
-func (tconf *Config) FindNameserverAddrs() ([]string, error) {
+func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
 	if Globals.Debug {
-		log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
+		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Addresses)
 		// dump.P(tconf.DnsEngine)
 	}
-	for _, ns := range tconf.DnsEngine.Addresses {
+	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
-			return nil, fmt.Errorf("FindNameserverAddrs: failed to split host and port from address '%s': %v", ns, err)
+			return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
 		}
 		if port != "53" {
 			continue
 		}
-		if addr == "127.0.0.1" || addr == "::1" {
-			continue
-		}
+		// if addr == "127.0.0.1" || addr == "::1" {
+		// 	continue
+		// }
 		if addr == "" {
 			continue
 		}

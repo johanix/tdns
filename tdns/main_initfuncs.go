@@ -70,11 +70,11 @@ func MainLoop(conf *Config) {
 
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
 
-func (conf *Config) MainInit() error {
+func (conf *Config) MainInit(defaultcfg string) error {
 	Globals.App.ServerBootTime = time.Now()
 	Globals.App.ServerConfigTime = time.Now()
 
-	pflag.StringVar(&conf.Internal.CfgFile, "config", DefaultServerCfgFile, "config file path")
+	pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 	pflag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
 	pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	pflag.Parse()
@@ -156,8 +156,6 @@ func (conf *Config) MainInit() error {
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
 
-	log.Printf("*** MainInit: 1 ***")
-
 	if Globals.Debug {
 		log.Printf("*** MainInit: 5 ***")
 	}
@@ -208,10 +206,19 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
+	conf.Internal.HelloQ = make(chan AgentMsgReport, 100)
+	conf.Internal.HeartbeatQ = make(chan AgentMsgReport, 100)
 
-	switch Globals.App.Type {
-	case AppTypeAgent:
-		go HsyncEngine(conf, conf.Internal.StopCh) // Only used by agent
+	if Globals.App.Type == AppTypeAgent {
+		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
+		// the HsyncEngine starts listening for incoming connections
+		go HsyncEngine(conf, conf.Internal.HelloQ, conf.Internal.HeartbeatQ, conf.Internal.StopCh) // Only used by agent
+		syncrtr, err := SetupAgentSyncRouter(conf)
+		if err != nil {
+			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
+		}
+		log.Printf("TDNS %s (%s): starting agent-to-agent sync engine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		go APIdispatcherNG(conf, syncrtr, conf.Agent.Api.Addresses.Listen, conf.Agent.Api.CertFile, conf.Agent.Api.KeyFile, conf.Internal.APIStopCh)
 	}
 
 	switch Globals.App.Type {
