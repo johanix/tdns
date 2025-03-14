@@ -22,10 +22,10 @@ func main() {
 	tdns.Globals.App.Date = tdns.Globals.App.Date
 
 	// These are set here to enable various config reload functions to reload from the correct files.
-	tconf.Internal.CfgFile = tdns.DefaultCombinerCfgFile
+	// tconf.Internal.CfgFile = tdns.DefaultCombinerCfgFile
 	// tconf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
 
-	err := tconf.MainInit()
+	err := tconf.MainInit(tdns.DefaultCombinerCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
