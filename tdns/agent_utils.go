@@ -436,11 +436,11 @@ func (ar *AgentRegistry) IdentifyAgents(zd *ZoneData, ourIdentity string) ([]*Ag
 	for _, rr := range rrset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*HSYNC); ok {
-				if hsync.Target == ourIdentity {
+				if hsync.Identity == ourIdentity {
 					continue
 				}
 				// Found another agent, try to locate it
-				ar.LocateAgent(hsync.Target, "")
+				ar.LocateAgent(hsync.Identity, "")
 			}
 		}
 	}
@@ -525,14 +525,14 @@ func (ar *AgentRegistry) GetRemoteAgents(zonename string) ([]*Agent, error) {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*HSYNC); ok {
 				// Skip if this is our own identity
-				if hsync.Target == ar.LocalAgent.Identity {
+				if hsync.Identity == ar.LocalAgent.Identity {
 					continue
 				}
 				// Found an HSYNC record, try to locate the agent
-				agent, err := ar.GetAgentInfo(hsync.Target)
+				agent, err := ar.GetAgentInfo(hsync.Identity)
 				if err != nil {
 					agent = &Agent{
-						Identity:  hsync.Target,
+						Identity:  hsync.Identity,
 						State:     AgentStateError,
 						ErrorMsg:  fmt.Sprintf("error getting agent info: %v", err),
 						LastState: time.Now(),
@@ -567,7 +567,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId string, wannabe_agents map[string]*A
 			if hsync, ok := prr.Data.(*HSYNC); ok {
 				log.Printf("UpdateAgents: Zone %s: analysing HSYNC: %q", zonename, hsync.String())
 
-				if hsync.Target == ourId {
+				if hsync.Identity == ourId {
 					// We're the Target
 					if hsync.Upstream == "." {
 						// Special case: no upstream to sync with
@@ -578,9 +578,9 @@ func (ar *AgentRegistry) UpdateAgents(ourId string, wannabe_agents map[string]*A
 					// Need to sync with Upstream - do this asynchronously
 					ar.LocateAgent(hsync.Upstream, zonename)
 				} else {
-					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Target)
+					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Identity)
 					// Not our target, locate agent asynchronously
-					ar.LocateAgent(hsync.Target, zonename)
+					ar.LocateAgent(hsync.Identity, zonename)
 				}
 			}
 		}
@@ -590,18 +590,18 @@ func (ar *AgentRegistry) UpdateAgents(ourId string, wannabe_agents map[string]*A
 	for _, rr := range req.SyncStatus.HsyncRemoves {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*HSYNC); ok {
-				if hsync.Target == ourId {
+				if hsync.Identity == ourId {
 					// We're no longer involved in this zone's management
 					ar.CleanupZoneRelationships(zonename)
 				} else {
 					// Remote agent was removed, update registry
-					if agent, exists := ar.S.Get(hsync.Target); exists {
+					if agent, exists := ar.S.Get(hsync.Identity); exists {
 						for transport := range agent.Details {
 							if agent.Details[transport].Zones != nil {
 								delete(agent.Details[transport].Zones, zonename)
 							}
 						}
-						ar.RemoveRemoteAgent(zonename, hsync.Target)
+						ar.RemoveRemoteAgent(zonename, hsync.Identity)
 					}
 				}
 			}

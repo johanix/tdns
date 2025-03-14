@@ -106,7 +106,7 @@ type AgentBeatPost struct {
 type AgentBeatResponse struct {
 	Status      string // ok | error | ...
 	MyIdentity  string
-	YourIdenity string
+	YourIdentity string
 	Time        time.Time
 	Client      string
 	Msg         string
@@ -118,7 +118,7 @@ type AgentBeatReport struct {
 	Beat AgentBeatPost
 }
 
-type xxxAgentHelloPost struct {
+type AgentHelloPost struct {
 	MessageType string
 	Name        string
 	Identity    string
@@ -128,7 +128,7 @@ type xxxAgentHelloPost struct {
 	Zone        string // in the /hello we only send one zone, the one that triggered the /hello
 }
 
-type xxxxAgentHelloResponse struct {
+type AgentHelloResponse struct {
 	Status   string // ok | error | ...
 	Time     time.Time
 	Client   string
@@ -187,7 +187,9 @@ type AgentResponse struct {
 }
 
 type AgentMsgReport struct {
-	Transport string
-	Msg       *AgentMsgPost
+	Transport   string
+	MessageType string
+	Identity    string
+	Msg         interface{}
 	// Agent *Agent
 }

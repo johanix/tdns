@@ -823,7 +823,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 // is the complete set of actions that should be sent to the parent.
 
 func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (DelegationSyncStatus, error) {
-	log.Printf("*** Enter ZUCDDNGNG(). ur:\n%+v", ur)
+	// log.Printf("*** Enter ZUCDDNGNG(). ur:\n%+v", ur)
 	var dss = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
 		Time:     time.Now(),
@@ -831,7 +831,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	}
 
 	defer func() {
-		log.Printf("********* ZUCDDNGNG: returning")
+		// log.Printf("********* ZUCDDNGNG: returning")
 	}()
 
 	ddata, err := zd.DelegationData()
@@ -869,14 +869,14 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	}
 
 	for _, rr := range actions {
-		log.Printf("ZUCDDNG: checking action: %s", rr.String())
+		// log.Printf("ZUCDDNG: checking action: %s", rr.String())
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
 		rrtypestr := dns.TypeToString[rrtype]
 
 		if rrtype != dns.TypeNS && rrtype != dns.TypeA && rrtype != dns.TypeAAAA {
-			log.Printf("ZUCDDNG: Update does not affect delegation data: %s", rrtypestr)
+			//log.Printf("ZUCDDNG: Update does not affect delegation data: %s", rrtypestr)
 			continue
 		}
 
@@ -890,7 +890,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		// First check whether this update is allowed by the update-policy.
 		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
 		if !ok && !ur.InternalUpdate {
-			log.Printf("ZUCDDNG: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			// log.Printf("ZUCDDNG: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
 		}
 
@@ -902,7 +902,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			log.Printf("ZUCDDNG: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+			//log.Printf("ZUCDDNG: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 
 			// Is this a change to the NS RRset?
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
@@ -910,7 +910,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
 				ddata.Actions = append(ddata.Actions, rrcopy)
 				ddata.RemovedNS.RRs = append(ddata.RemovedNS.RRs, rrcopy)
-				log.Printf("ZUCDDNG: Removed NS: %s; now we need to remove any glue", rrcopy.String())
+				//log.Printf("ZUCDDNG: Removed NS: %s; now we need to remove any glue", rrcopy.String())
 				if nsrr, ok := rr.(*dns.NS); ok {
 					nsowner, err := zd.GetOwner(nsrr.Ns)
 					if err != nil {
@@ -951,14 +951,14 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset.
-			log.Printf("ZUCDDNG: Remove RRset: %s", rr.String())
+			//log.Printf("ZUCDDNG: Remove RRset: %s", rr.String())
 			switch rrtype {
 			case dns.TypeNS:
 				if ownerName == zd.ZoneName {
 					// XXX: It must not be allowed to remove the *entire* NS RRset for a zone.
 					// XXX: This should have been caught during approval. But here we are and we
 					// XXX: will complain, but ignore this update
-					log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
+					// log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
 				}
 
 			case dns.TypeA:
@@ -983,12 +983,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 		case dns.ClassINET:
 		default:
-			log.Printf("ZUCDDNG: Error: unknown class: %s", rr.String())
+			//log.Printf("ZUCDDNG: Error: unknown class: %s", rr.String())
 			continue
 		}
 
 		// Here we know that the actions has class == ClassINET
-		log.Printf("ZUCDDNG: Class is INET, this is an ADD: %s", rr.String())
+		//log.Printf("ZUCDDNG: Class is INET, this is an ADD: %s", rr.String())
 
 		dup := false
 		switch rrtype {
@@ -996,7 +996,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if ownerName == zd.ZoneName {
 				for _, rr := range ddata.CurrentNS.RRs {
 					if dns.IsDuplicate(rr, rrcopy) {
-						log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+						// log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
 						dup = true
 						break
 					}
@@ -1008,12 +1008,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					ddata.Actions = append(ddata.Actions, rrcopy)
 					// XXX: This is a new NS. Now we must locate any existing address RRs for this name.
 					if nsrr, ok := rr.(*dns.NS); ok {
-						log.Printf("ZUCDDNG: fetching owner for NS: %+v", nsrr.Ns)
+						//log.Printf("ZUCDDNG: fetching owner for NS: %+v", nsrr.Ns)
 						nsowner, err := zd.GetOwner(nsrr.Ns)
 						if err != nil || nsowner == nil {
-							log.Printf("ZUCDDNG: Error: owner %s of NS %s is unknown", nsrr.Ns, nsrr.String())
+							// log.Printf("ZUCDDNG: Error: owner %s of NS %s is unknown", nsrr.Ns, nsrr.String())
 						} else {
-							log.Printf("ZUCDDNG: nsowner: %+v", nsowner)
+							// log.Printf("ZUCDDNG: nsowner: %+v", nsowner)
 							if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 								for _, rr := range a_rrset.RRs {
 									dss.AAdds = append(dss.AAdds, rr)
@@ -1031,11 +1031,11 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 						for _, action := range actions {
 							if action.Header().Name == nsrr.Ns {
 								if action.Header().Rrtype == dns.TypeA {
-									log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
+									// log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
 									dss.AAdds = append(dss.AAdds, action)
 									ddata.Actions = append(ddata.Actions, action)
 								} else if action.Header().Rrtype == dns.TypeAAAA {
-									log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
+									// log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
 									dss.AAAAAdds = append(dss.AAAAAdds, action)
 									ddata.Actions = append(ddata.Actions, action)
 								}
@@ -1044,7 +1044,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					}
 				}
 			} else {
-				log.Printf("ZUCDDNG: Error: zone update tries to modify child delegation.")
+				// log.Printf("ZUCDDNG: Error: zone update tries to modify child delegation.")
 			}
 
 		case dns.TypeA:
@@ -1053,7 +1053,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if oldglue, exist := ddata.A_glue[ownerName]; exist {
 				for _, arr := range oldglue.RRs {
 					if dns.IsDuplicate(arr, rrcopy) {
-						log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+						// log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
 						dup = true
 						break
 					}
@@ -1076,7 +1076,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if oldglue, exist := ddata.AAAA_glue[ownerName]; exist {
 				for _, aaaa_rr := range oldglue.RRs {
 					if dns.IsDuplicate(aaaa_rr, rrcopy) {
-						log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+						// log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
 						dup = true
 						break
 					}

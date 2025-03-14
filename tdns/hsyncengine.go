@@ -81,7 +81,8 @@ func HsyncEngine(conf *Config, helloQ <-chan AgentMsgReport, heartbeatQ <-chan A
 
 	// Configure intervals
 	helloEvalInterval := configureInterval("syncengine.intervals.helloeval", 300, 1800)
-	heartbeatInterval := configureInterval("syncengine.intervals.heartbeat", 15, 1800)
+	// heartbeatInterval := configureInterval("syncengine.intervals.heartbeat", 15, 1800)
+	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
 	// fullHeartbeatInterval := configureInterval("syncengine.intervals.fullheartbeat", 60, 3600)
 
 	log.Printf("Starting HsyncEngine (heartbeat will run once every %d seconds)", heartbeatInterval)
@@ -187,24 +188,24 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId string, wannabe_agents map[str
 func (ar *AgentRegistry) HelloHandler(report AgentMsgReport, wannabe_agents map[string]*Agent) {
 	// log.Printf("HelloHandler: Received HELLO from %s", report.Msg.Identity)
 
-	switch report.Msg.MessageType {
+	switch report.MessageType {
 	case "HELLO":
-		log.Printf("HelloHandler: Received initial HELLO from %s", report.Msg.Identity)
+		log.Printf("HelloHandler: Received initial HELLO from %s", report.Identity)
 		// Store in wannabe_agents until we verify it shares zones with us
 		// wannabe_agents[report.Msg.Identity] = report.Agent
 
 	default:
-		log.Printf("HelloHandler: Unknown message type: %s", report.Msg.MessageType)
+		log.Printf("HelloHandler: Unknown message type: %s", report.MessageType)
 	}
 }
 
 func (ar *AgentRegistry) HeartbeatHandler(report AgentMsgReport, wannabe_agents map[string]*Agent) {
 	// log.Printf("HeartbeatHandler: Received %s from %s", report.Msg.MessageType, report.Msg.Identity)
 
-	switch report.Msg.MessageType {
+	switch report.MessageType {
 	case "BEAT":
-		log.Printf("HeartbeatHandler: Received BEAT from %s", report.Msg.Identity)
-		if agent, exists := ar.S.Get(report.Msg.Identity); exists {
+		log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
+		if agent, exists := ar.S.Get(report.Identity); exists {
 			//dump.P(report)
 			newDetails := agent.Details[report.Transport]
 			newDetails.LatestRBeat = time.Now()
@@ -213,8 +214,8 @@ func (ar *AgentRegistry) HeartbeatHandler(report AgentMsgReport, wannabe_agents 
 		}
 
 	case "FULLBEAT":
-		log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Msg.Identity)
-		if agent, exists := ar.S.Get(report.Msg.Identity); exists {
+		log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
+		if agent, exists := ar.S.Get(report.Identity); exists {
 			newDetails := agent.Details[report.Transport]
 			newDetails.LatestRBeat = time.Now()
 			newDetails.ReceivedBeats++
@@ -222,7 +223,7 @@ func (ar *AgentRegistry) HeartbeatHandler(report AgentMsgReport, wannabe_agents 
 		}
 
 	default:
-		log.Printf("HeartbeatHandler: Unknown message type: %s", report.Msg.MessageType)
+		log.Printf("HeartbeatHandler: Unknown message type: %s", report.MessageType)
 	}
 }
 
@@ -236,10 +237,12 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			log.Printf("HsyncEngine: Skipping heartbeat to %s (state %s)", agent.Identity, AgentStateToString[agent.State])
 			continue
 		}
-		status, resp, err := agent.SendApiMsg(&AgentMsgPost{
-			MessageType: "BEAT",
-			Identity:    ar.LocalAgent.Identity,
-			Zone:        "",
+		status, resp, err := agent.SendApiBeat(&AgentBeatPost{
+			MessageType:    "BEAT",
+			MyIdentity:     ar.LocalAgent.Identity,
+			YourIdentity:   agent.Identity,
+			MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
+			// Zone:        "",
 		})
 		details := agent.Details["api"]
 		switch {
@@ -252,13 +255,13 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			details.LatestError = fmt.Sprintf("status %d", status)
 
 		default:
-			var amr AgentMsgResponse
-			err = json.Unmarshal(resp, &amr)
+			var abr AgentBeatResponse
+			err = json.Unmarshal(resp, &abr)
 			if err != nil {
 				log.Printf("HsyncEngine: Error unmarshalling heartbeat response: %v", err)
 				details.LatestError = err.Error()
 			}
-			if amr.Status == "ok" {
+			if abr.Status == "ok" {
 				details.State = AgentStateOperational
 				details.LatestSBeat = time.Now()
 				details.LatestError = ""
@@ -370,6 +373,22 @@ func (agent *Agent) SendMsg(msgType, zone string) ([]byte, error) {
 
 // Helper methods for SendBeat
 func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (int, []byte, error) {
+	if agent.Api == nil {
+		return 0, nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
+	}
+
+	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/beat", msg, false)
+	if err != nil {
+		return 0, nil, fmt.Errorf("HTTPS beat failed: %v", err)
+	}
+	if status != http.StatusOK {
+		return 0, nil, fmt.Errorf("HTTPS beat returned status %d (%s)", status, http.StatusText(status))
+	}
+
+	return status, resp, nil
+}
+
+func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (int, []byte, error) {
 	if agent.Api == nil {
 		return 0, nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
 	}
