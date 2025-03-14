@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 )
 
 // canBeNil returns true if the given reflect.Value can be nil
@@ -34,6 +35,10 @@ func isUnsupportedType(v reflect.Value) bool {
 func deepCopyAndSanitize(v interface{}) interface{} {
 	if v == nil {
 		return nil
+	}
+
+	if _, ok := v.(time.Time); ok {
+		return v
 	}
 
 	// Special case for http.Request and http.Response which contain function fields
@@ -84,6 +89,9 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 		return copy.Interface()
 
 	case reflect.Struct:
+		if val.Type().String() == "time.Time" {
+			return val
+		}
 		copy := reflect.New(val.Type()).Elem()
 		for i := 0; i < val.NumField(); i++ {
 			field := val.Field(i)

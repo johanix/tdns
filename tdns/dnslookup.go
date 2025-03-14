@@ -365,7 +365,8 @@ func RecursiveDNSQueryWithServers(qname string, qtype uint16, timeout time.Durat
 		if err == nil {
 			return rrset, nil
 		}
-		log.Printf("failed to lookup %s record using server %s after %d attempts: %v", qname, server, retries, err)
+		log.Printf("failed to lookup %s record using server %s after %d attempts to %d resolvers: %v",
+			qname, server, retries, len(resolvers), err)
 	}
 
 	return nil, fmt.Errorf("failed to find any %s records after trying all resolvers", qname)

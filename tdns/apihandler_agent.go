@@ -12,7 +12,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 )
 
@@ -34,7 +33,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		}
 
 		defer func() {
-			dump.Print(resp)
 			w.Header().Set("Content-Type", "application/json")
 			sanitizedResp := SanitizeForJSON(resp)
 			err := json.NewEncoder(w).Encode(sanitizedResp)
@@ -43,15 +41,26 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 		}()
 
+		// XXX: hsync cmds should move to its own endpoint, not be mixed with agent
+		var zd *ZoneData
+		var exist bool
 		cp.Zone = dns.Fqdn(cp.Zone)
-		zd, exist := Zones.Get(cp.Zone)
-		if !exist {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
-			return
+		if cp.Command != "config" {
+			zd, exist = Zones.Get(cp.Zone)
+			if !exist {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
+				return
+			}
 		}
 
 		switch cp.Command {
+		case "config":
+			tmp := SanitizeForJSON(conf.Agent)
+			resp.AgentConfig = tmp.(LocalAgentConf)
+			resp.AgentConfig.Api.CertData = ""
+			resp.AgentConfig.Api.KeyData = ""
+
 		case "hsync-status":
 			// Get the apex owner object
 			owner, err := zd.GetOwner(zd.ZoneName)
@@ -156,11 +165,12 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch bp.MessageType {
 		case "BEAT", "FULLBEAT":
-			resp.Msg = "OK"
+			resp.Status = "ok"
 			conf.Internal.HeartbeatQ <- AgentMsgReport{
+				Transport: "api",
 				Msg: &AgentMsgPost{
 					MessageType: bp.MessageType,
-					Identity:    bp.Identity,
+					Identity:    bp.MyIdentity,
 					Time:        time.Now(),
 					Zones:       bp.Zones,
 				},
@@ -175,15 +185,14 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 // This is the agent-to-agent sync API hello handler.
 func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
-	if conf.Internal.HeartbeatQ == nil {
-		log.Println("APIhello: HeartbeatQ channel is not set. Cannot forward heartbeats. This is a fatal error.")
+	if conf.Internal.HelloQ == nil {
+		log.Println("APIhello: HelloQ channel is not set. Cannot forward HELLO msgs. This is a fatal error.")
 		os.Exit(1)
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		resp := AgentMsgResponse{
 			Time: time.Now(),
-			Msg:  fmt.Sprintf("Hello there! I'm a TDNS agent with identity %q.", conf.Agent.Identity),
 		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
@@ -206,9 +215,13 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q.", hp.Identity, conf.Agent.Identity)
+
 		switch hp.MessageType {
 		case "HELLO":
+			resp.Status = "ok" // important
 			conf.Internal.HelloQ <- AgentMsgReport{
+				Transport: "api",
 				Msg: &AgentMsgPost{
 					MessageType: "HELLO",
 					Identity:    hp.Identity,

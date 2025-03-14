@@ -312,6 +312,13 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 				cert.Subject.CommonName, conf.Agent.Identity)
 		}
 
+		// Add this before setting up the HTTP client
+		log.Printf("Client certificate loaded: Subject=%s",
+			cert.Subject.CommonName)
+
+		log.Printf("Client certificate valid from %s to %s",
+			cert.NotBefore, cert.NotAfter)
+
 		err = conf.SetupApiTransport()
 		if err != nil {
 			return fmt.Errorf("SetupAgent: failed to setup API transport: %v", err)
@@ -342,13 +349,17 @@ func (zd *ZoneData) AgentSig0KeyPrep(name string, kdb *KeyDB) error {
 	return zd.Sig0KeyPreparation(name, alg, kdb)
 }
 
-func (agent *Agent) NewAgentSyncApiClient() error {
+func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 	if agent == nil {
 		return fmt.Errorf("agent is nil")
 	}
 
 	if !agent.Methods["api"] || agent.Details["api"].TlsaRR == nil {
 		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
+	}
+
+	if localagent.Api.CertFile == "" || localagent.Api.KeyFile == "" {
+		return fmt.Errorf("local agent config missing either cert or key file")
 	}
 
 	if Globals.Debug {
@@ -359,7 +370,28 @@ func (agent *Agent) NewAgentSyncApiClient() error {
 		ApiClient: NewClient(agent.Identity, agent.Details["api"].BaseUri, "", "", "tlsa"),
 	}
 
-	tlsconfig := &tls.Config{}
+	//	func NewClientConfig(caFile string, keyFile string, certFile string) (*tls.Config, error) {
+	//        caCertPool, err := loadCertPool(caFile)
+	//        if err != nil {
+	// return nil, err
+	//        }
+
+	cert, err := tls.LoadX509KeyPair(localagent.Api.CertFile, localagent.Api.KeyFile)
+	if err != nil {
+		return err
+	}
+
+	//        config := &tls.Config{
+	//                Certificates: []tls.Certificate{cert},
+	//                RootCAs:      caCertPool,
+	//        }
+
+	//        return config, nil
+	//}
+
+	tlsconfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
 
 	//	if rootcafile == "insecure" {
 	//		tlsconfig.InsecureSkipVerify = true
@@ -368,7 +400,7 @@ func (agent *Agent) NewAgentSyncApiClient() error {
 	tlsconfig.InsecureSkipVerify = true
 	// use TLSA RR for verification
 	tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		log.Printf("NewAgentSyncApiClient: VerifyPeerCertificate called for %s (have TLSA: %s)", agent.Identity,
+		log.Printf("VerifyPeerCertificate called for %q (have TLSA: %s)", agent.Identity,
 			agent.Details["api"].TlsaRR.String())
 		for _, rawCert := range rawCerts {
 			cert, err := x509.ParseCertificate(rawCert)
@@ -383,6 +415,7 @@ func (agent *Agent) NewAgentSyncApiClient() error {
 			if err != nil {
 				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 			}
+			log.Printf("VerifyPeerCertificate: successfully verified cert for %q", agent.Identity)
 		}
 		// log.Printf("NewMusicSyncApiClient: VerifyPeerCertificate returning nil (all good)")
 		return nil

@@ -13,13 +13,18 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
+
+var syncTransport string
 
 func init() {
 	AgentCmd.AddCommand(hsyncCmd)
 	hsyncCmd.AddCommand(hsyncStatusCmd)
 	hsyncCmd.AddCommand(hsyncLocateCmd)
 	hsyncCmd.AddCommand(hsyncSendHelloCmd)
+
+	hsyncStatusCmd.Flags().StringVarP(&syncTransport, "transport", "T", "", "Transport to show, default both api and dns")
 }
 
 var hsyncCmd = &cobra.Command{
@@ -78,14 +83,22 @@ var hsyncStatusCmd = &cobra.Command{
 					continue
 				}
 				for transport, details := range agent.Details {
+					if syncTransport != "" && syncTransport != transport {
+						continue
+					}
 					displayTransport := transport
 					if transport == "https" {
 						displayTransport = "api"
 					}
-					fmt.Printf("Agent %q: transport %q, state %q, last contact %s\n", agent.Identity, displayTransport, details.State, details.LastHB.Format(time.RFC3339))
+					fmt.Printf("Agent %q: transport %q, state %q\n",
+						agent.Identity, displayTransport, tdns.AgentStateToString[details.State])
 					if details.LatestError != "" {
-						fmt.Printf("      Latest Error: %s\n", details.LatestError)
+						fmt.Printf(" - Latest Error: %s\n", details.LatestError)
+						fmt.Printf(" - Time of error: %s\n", details.LatestErrorTime.Format(time.RFC3339))
 					}
+					fmt.Printf(" * Sent heartbeats: %d (latest %s), received heartbeats: %d (latest %s)\n",
+						details.SentBeats, details.LatestSBeat.Format(time.RFC3339),
+						details.ReceivedBeats, details.LatestRBeat.Format(time.RFC3339))
 					if len(details.Addrs) > 0 {
 						// fmt.Printf("      Endpoints:\n")
 						//for _, addr := range details.Addrs {
@@ -229,8 +242,15 @@ var hsyncSendHelloCmd = &cobra.Command{
 		// Get the zone (agent identity) from flags
 		agentIdentity := tdns.Globals.Zonename
 
+		var conf tdns.Config
+		err := viper.Unmarshal(&conf)
+		if err != nil {
+			fmt.Printf("Error: failed to unmarshal agent config from viper\n")
+			return
+		}
+
 		// Create a new agent registry
-		registry := tdns.NewAgentRegistry("cli-temp-identity")
+		registry := conf.NewAgentRegistry()
 		if registry == nil {
 			fmt.Println("Error: failed to create agent registry")
 			return

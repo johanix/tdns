@@ -13,12 +13,32 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
+type AgentState uint8
+
 const (
-	AgentStateNeeded      = "needed"      // Agent is required but we don't have complete information
-	AgentStateKnown       = "known"       // We have complete information but haven't established communication
-	AgentStateOperational = "operational" // We have established successful communication
-	AgentStateError       = "error"       // We have tried to establish communication but failed
+	AgentStateNeeded      AgentState = iota + 1 // Agent is required but we don't have complete information
+	AgentStateKnown                             // We have complete information but haven't established communication
+	AgentStateHelloOK                           // We got a nice reply to our HELLO
+	AgentStateOperational                       // We got a nice reply to our (secure) BEAT
+	AgentStateError                             // We have tried to establish communication but failed
 )
+
+var AgentStateToString = map[AgentState]string{
+	AgentStateNeeded:      "needed",
+	AgentStateKnown:       "known",
+	AgentStateHelloOK:     "hello-ok",
+	AgentStateOperational: "operational",
+	AgentStateError:       "error",
+}
+
+// Remote agent states: first occurence of a remote agent identity is when it appears in a
+// HSYNC record for a zone where we also appear in the HSYNC RRset (i.e. we are both part of it).
+// Then the remote agent becomes NEEDED. Data collection starts. When all data (URI, SVCB,
+// TLSA, etc) has been collected (and verified) the state changes to KNOWN. At the tail end
+// of LocateAgent(), when the state changes to KNOWN, a HELLO message is sent to the remote agent.
+// If we get at positive response to that state changes to HELLOOK and we're ready to start
+// sending heartbeats. After the first positive response to a heartbeat that we sent is received
+// the state finally changes to OPERATIONAL.
 
 type Agent struct {
 	Identity  string
@@ -26,27 +46,31 @@ type Agent struct {
 	Details   map[string]AgentDetails
 	Methods   map[string]bool
 	Api       *AgentApi
-	State     string    // Agent state: needed, known, operational, error
-	LastState time.Time // When state last changed
-	ErrorMsg  string    // Error message if state is error
+	State     AgentState // Agent states: needed, known, hello-done, operational, error
+	LastState time.Time  // When state last changed
+	ErrorMsg  string     // Error message if state is error
 }
 
 type AgentDetails struct {
-	Addrs       []string
-	Port        uint16
-	BaseUri     string
-	UriRR       *dns.URI
-	Host        string
-	KeyRR       *dns.KEY  // for DNS transport
-	TlsaRR      *dns.TLSA // for HTTPS transport
-	LastHB      time.Time
-	Endpoint    string
-	ContactInfo string          // "none", "partial", "complete"
-	Zones       map[string]bool // zones we share with this agent
-	State       string          // "discovered", "contact_attempted", "connected", "failed"
-	LatestError string
-	Heartbeats  uint32
-	LatestBeat  time.Time
+	Addrs   []string
+	Port    uint16
+	BaseUri string
+	UriRR   *dns.URI
+	Host    string    // the host part of the BaseUri
+	KeyRR   *dns.KEY  // for DNS transport
+	TlsaRR  *dns.TLSA // for HTTPS transport
+	//	LastHB      time.Time
+	Endpoint        string
+	ContactInfo     string          // "none", "partial", "complete"
+	Zones           map[string]bool // zones we share with this agent
+	State           AgentState      // "discovered", "contact_attempted", "connected", "failed"
+	LatestError     string
+	LatestErrorTime time.Time
+	HelloTime       time.Time
+	SentBeats       uint32
+	ReceivedBeats   uint32
+	LatestSBeat     time.Time
+	LatestRBeat     time.Time
 }
 
 type AgentApi struct {
@@ -55,8 +79,8 @@ type AgentApi struct {
 	BaseUrl    string
 	ApiKey     string // TODO: to remove, but we still need it for a while
 	Authmethod string
-	Verbose    bool
-	Debug      bool
+	//	Verbose    bool
+	//	Debug      bool
 
 	// normal TDNS API client, we're using most of the tdns API client,
 	ApiClient *ApiClient
@@ -65,32 +89,36 @@ type AgentApi struct {
 type AgentRegistry struct {
 	S              cmap.ConcurrentMap[string, *Agent]
 	remoteAgents   map[string][]*Agent
-	mu             sync.RWMutex // protects remoteAgents
-	LocalIdentity  string       // our own identity
-	LocateInterval int          // seconds to wait between locating agents (until success)
+	mu             sync.RWMutex    // protects remoteAgents
+	LocalAgent     *LocalAgentConf // our own identity
+	LocateInterval int             // seconds to wait between locating agents (until success)
 }
 
 type AgentBeatPost struct {
-	MessageType string
-	Identity    string
-	Zones       []string // Zones that we share with the remote agent
-	Time        time.Time
+	MessageType    string
+	MyIdentity     string
+	YourIdentity   string
+	MyBeatInterval uint32   // intended, in seconds
+	Zones          []string // Zones that we share with the remote agent
+	Time           time.Time
 }
 
 type AgentBeatResponse struct {
-	Status   string // ok | error | ...
-	Time     time.Time
-	Client   string
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	Status      string // ok | error | ...
+	MyIdentity  string
+	YourIdenity string
+	Time        time.Time
+	Client      string
+	Msg         string
+	Error       bool
+	ErrorMsg    string
 }
 type AgentBeatReport struct {
 	Time time.Time
 	Beat AgentBeatPost
 }
 
-type AgentHelloPost struct {
+type xxxAgentHelloPost struct {
 	MessageType string
 	Name        string
 	Identity    string
@@ -100,7 +128,7 @@ type AgentHelloPost struct {
 	Zone        string // in the /hello we only send one zone, the one that triggered the /hello
 }
 
-type AgentHelloResponse struct {
+type xxxxAgentHelloResponse struct {
 	Status   string // ok | error | ...
 	Time     time.Time
 	Client   string
@@ -147,18 +175,19 @@ type AgentPost struct {
 }
 
 type AgentResponse struct {
-	Identity string
-	Status   int
-	Time     time.Time
-	Agents   []*Agent
-	HsyncRRs []string
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	Identity    string
+	Status      int
+	Time        time.Time
+	Agents      []*Agent
+	HsyncRRs    []string
+	AgentConfig LocalAgentConf
+	Msg         string
+	Error       bool
+	ErrorMsg    string
 }
 
-// XXX: Do we use this?
 type AgentMsgReport struct {
-	Msg   *AgentMsgPost
-	Agent *Agent
+	Transport string
+	Msg       *AgentMsgPost
+	// Agent *Agent
 }

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/miekg/dns"
@@ -49,8 +50,8 @@ func (ar *AgentRegistry) GetAgentsForZone(zone string) []*Agent {
 	return agents
 }
 
-func NewAgentRegistry(identity string) *AgentRegistry {
-	if identity == "" {
+func (conf *Config) NewAgentRegistry() *AgentRegistry {
+	if conf.Agent.Identity == "" {
 		log.Printf("NewAgentRegistry: error: identity is empty")
 		return nil
 	}
@@ -66,56 +67,63 @@ func NewAgentRegistry(identity string) *AgentRegistry {
 	return &AgentRegistry{
 		S:              cmap.New[*Agent](),
 		remoteAgents:   make(map[string][]*Agent),
-		LocalIdentity:  identity,
+		LocalAgent:     &conf.Agent,
 		LocateInterval: li,
 	}
 }
 
 // LocateAgent is completely asynchronous with no return values
-func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
-	log.Printf("LocateAgent: looking up agent %s", identity)
+func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
+	log.Printf("LocateAgent: looking up agent %s", remoteid)
 
 	// Skip if this is our own identity
-	if ar.LocalIdentity != "" && identity == ar.LocalIdentity {
-		log.Printf("LocateAgent: skipping self-identification for %s", identity)
+	if ar.LocalAgent.Identity != "" && remoteid == ar.LocalAgent.Identity {
+		log.Printf("LocateAgent: skipping self-identification for %s", remoteid)
 		return
 	}
 
 	// Check if we already know this agent and it's operational
-	agent, exists := ar.S.Get(identity)
-	if exists && agent.State == AgentStateOperational &&
-		agent.Details["dns"].LastHB.After(time.Now().Add(-1*time.Hour)) {
-		// Add zone if provided
+	agent, exists := ar.S.Get(remoteid)
+	if exists {
 		if zonename != "" {
-			ar.AddZoneToAgent(identity, zonename)
+			ar.AddZoneToAgent(remoteid, zonename)
 		}
+
+		// If the agent exists in the registry, then it is at least in the state "needed".
+		// That implies that either there is already a LocateAgent() running, or one has
+		// already completed. In neither case do we need a new LocateAgent(), so we just return.
 		return
 	}
 
-	log.Printf("LocateAgent: looking up agent %s for zone %s", identity, zonename)
+	log.Printf("LocateAgent: looking up agent %s for zone %s", remoteid, zonename)
 
 	// Initialize agent if needed
-	if !exists {
-		agent = &Agent{
-			Identity:  identity,
-			Details:   map[string]AgentDetails{},
-			Methods:   map[string]bool{},
-			State:     AgentStateNeeded,
-			LastState: time.Now(),
-		}
-		// Initialize Zones map for each transport
-		for _, transport := range []string{"dns", "api"} {
-			details := AgentDetails{
-				Zones:       make(map[string]bool),
-				State:       AgentStateNeeded,
-				ContactInfo: "none",
-			}
-			agent.Details[transport] = details
-		}
-		ar.S.Set(identity, agent)
+	agent = &Agent{
+		Identity:  remoteid,
+		Details:   map[string]AgentDetails{},
+		Methods:   map[string]bool{},
+		State:     AgentStateNeeded,
+		LastState: time.Now(),
 	}
+	// Initialize Zones map for each transport
+	for _, transport := range []string{"dns", "api"} {
+		details := AgentDetails{
+			Zones:       make(map[string]bool),
+			State:       AgentStateNeeded,
+			ContactInfo: "none",
+		}
+		agent.Details[transport] = details
+	}
+	ar.S.Set(remoteid, agent)
 
-	lagent := agent.CleanCopy()
+	// lagent := agent.CleanCopy()
+	tmp := SanitizeForJSON(agent)
+	var lagent *Agent
+	var ok bool
+	if lagent, ok = tmp.(*Agent); !ok {
+		log.Printf("LocateAgent: error: failed to assert tmp agent to *Agent: %v")
+		return
+	}
 
 	go func() {
 		// Create a loop that continues until agent is known
@@ -136,9 +144,9 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 
 				// Only look up URI if we don't have it
 				if details.UriRR == nil {
-					svcname := fmt.Sprintf("_%s._tcp.%s", transport, identity)
+					svcname := fmt.Sprintf("_%s._tcp.%s", transport, remoteid)
 					if transport == "api" {
-						svcname = fmt.Sprintf("_https._tcp.%s", identity)
+						svcname = fmt.Sprintf("_https._tcp.%s", remoteid)
 					}
 					svcname = dns.Fqdn(svcname)
 
@@ -188,6 +196,10 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 					}
 
 					// Process SVCB response
+					if rrset == nil {
+						log.Printf("LocateAgent: response to %s SVCB contained zero RRs", targetName)
+						continue
+					}
 					for _, rr := range rrset.RRs {
 						log.Printf("LocateAgent: SVCB record: %s", rr.String())
 					}
@@ -276,7 +288,7 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 				details.ContactInfo = "complete"
 				details.State = AgentStateKnown
 				lagent.Methods["api"] = true
-				log.Printf("LocateAgent: API transport details for remote agent %s are complete", identity)
+				log.Printf("LocateAgent: API transport details for remote agent %s are complete", remoteid)
 				lagent.Details["api"] = details
 			}
 
@@ -285,7 +297,7 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 				details.ContactInfo = "complete"
 				details.State = AgentStateKnown
 				lagent.Methods["dns"] = true
-				log.Printf("LocateAgent: DNS transport details for remote agent %s are complete", identity)
+				log.Printf("LocateAgent: DNS transport details for remote agent %s are complete", remoteid)
 				lagent.Details["dns"] = details
 			}
 
@@ -294,33 +306,43 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 				lagent.State = AgentStateKnown
 				lagent.LastState = time.Now()
 
-				err := lagent.NewAgentSyncApiClient()
+				err := lagent.NewAgentSyncApiClient(ar.LocalAgent)
 				if err != nil {
-					log.Printf("LocateAgent: error creating API client for remote agent %s: %v", identity, err)
+					log.Printf("LocateAgent: error creating API client for remote agent %s: %v", remoteid, err)
 					lagent.State = AgentStateError
 					lagent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
 					lagent.LastState = time.Now()
 				}
 
+				if len(lagent.Details["api"].Addrs) > 0 {
+					log.Printf("Remote agent %q has the API addresses %v", remoteid, lagent.Details["api"].Addrs)
+					var tmp []string
+					port := strconv.Itoa(int(lagent.Details["api"].Port))
+					for _, addr := range lagent.Details["api"].Addrs {
+						tmp = append(tmp, net.JoinHostPort(addr, port))
+					}
+					lagent.Api.ApiClient.Addresses = tmp
+				}
+
 				// Agent is now known, update and exit the loop
 				ar.mu.Lock()
-				ar.S.Set(identity, lagent)
+				ar.S.Set(remoteid, lagent)
 				ar.mu.Unlock()
-				log.Printf("LocateAgent: remote agent %s is now KNOWN, stopping retry loop", identity)
+				log.Printf("LocateAgent: remote agent %s is now KNOWN, stopping retry loop", remoteid)
 
 				// If we're in known state and have a zone, try to send hello
 				if zonename != "" {
-					ar.AddZoneToAgent(identity, zonename)
+					ar.AddZoneToAgent(remoteid, zonename)
 
 					// Try to send hello
 					go func() {
 						_, resp, err := lagent.SendApiHello(&AgentMsgPost{
 							MessageType: "HELLO",
-							Identity:    lagent.Identity,
+							Identity:    ar.LocalAgent.Identity, // our identity
 							Zone:        zonename,
 						})
 						if err != nil {
-							log.Printf("LocateAgent: error sending HELLO to %s: %v", identity, err)
+							log.Printf("LocateAgent: error sending HELLO to %s: %v", remoteid, err)
 							return
 						}
 
@@ -331,21 +353,23 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 							return
 						}
 
-						log.Printf("LocateAgent: HELLO to %s returned: %s", identity, amr.Msg)
+						log.Printf("LocateAgent: HELLO to %s returned: %s", remoteid, amr.Msg)
 
 						// Update state after successful hello
-						lagent.State = AgentStateOperational
-						lagent.LastState = time.Now()
-						ar.mu.Lock()
-						ar.S.Set(identity, lagent)
-						ar.mu.Unlock()
+						if amr.Status == "ok" {
+							lagent.State = AgentStateHelloOK
+							lagent.LastState = time.Now()
+							ar.mu.Lock()
+							ar.S.Set(remoteid, lagent)
+							ar.mu.Unlock()
+						}
 					}()
 				}
 				return
 			} else {
 				// Agent is not yet known, update and sleep before retrying
-				ar.S.Set(identity, agent)
-				log.Printf("LocateAgent: remote agent %s is not operational, will retry in %d seconds", identity, ar.LocateInterval)
+				ar.S.Set(remoteid, agent)
+				log.Printf("LocateAgent: remote agent %s is not operational, will retry in %d seconds", remoteid, ar.LocateInterval)
 				time.Sleep(time.Duration(ar.LocateInterval) * time.Second)
 				// Loop will continue
 			}
@@ -356,7 +380,7 @@ func (ar *AgentRegistry) LocateAgent(identity string, zonename string) {
 // Create a new synchronous function for code that needs immediate results
 func (ar *AgentRegistry) GetAgentInfo(identity string) (*Agent, error) {
 	// Skip if this is our own identity
-	if ar.LocalIdentity != "" && identity == ar.LocalIdentity {
+	if ar.LocalAgent.Identity != "" && identity == ar.LocalAgent.Identity {
 		return nil, fmt.Errorf("cannot get info for self as remote agent")
 	}
 
@@ -379,12 +403,12 @@ func (a *Agent) CleanCopy() *Agent {
 
 	for transport, details := range a.Details {
 		copyDetails := AgentDetails{
-			LastHB:      details.LastHB,
+			// LastHB:      details.LastHB,
 			Endpoint:    details.Endpoint,
 			State:       details.State,
 			LatestError: details.LatestError,
-			Heartbeats:  details.Heartbeats,
-			Zones:       make(map[string]bool),
+			// Heartbeats:  details.Heartbeats,
+			Zones: make(map[string]bool),
 		}
 		for zone := range details.Zones {
 			copyDetails.Zones[zone] = true
@@ -501,7 +525,7 @@ func (ar *AgentRegistry) GetRemoteAgents(zonename string) ([]*Agent, error) {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*HSYNC); ok {
 				// Skip if this is our own identity
-				if hsync.Target == ar.LocalIdentity {
+				if hsync.Target == ar.LocalAgent.Identity {
 					continue
 				}
 				// Found an HSYNC record, try to locate the agent

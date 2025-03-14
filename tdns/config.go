@@ -26,7 +26,7 @@ type Config struct {
 	Log        struct {
 		File string `validate:"required"`
 	}
-	Agent    AgentConf
+	Agent    LocalAgentConf
 	Internal InternalConf
 }
 
@@ -66,7 +66,7 @@ type ApiServerAppConf struct {
 	ApiKey    string
 }
 
-type AgentConf struct {
+type LocalAgentConf struct {
 	Identity string `validate:"required,hostname"`
 	Local    struct {
 		Notify []string // secondaries to notify for an agent autozone
@@ -74,11 +74,11 @@ type AgentConf struct {
 	Remote struct {
 		LocateInterval int // time in seconds
 	}
-	Api AgentApiConf
-	Dns AgentDnsConf
+	Api LocalAgentApiConf
+	Dns LocalAgentDnsConf
 }
 
-type AgentApiConf struct {
+type LocalAgentApiConf struct {
 	Addresses struct {
 		Publish []string
 		Listen  []string
@@ -91,7 +91,7 @@ type AgentApiConf struct {
 	KeyData  string
 }
 
-type AgentDnsConf struct {
+type LocalAgentDnsConf struct {
 	Addresses struct {
 		Publish []string
 		Listen  []string

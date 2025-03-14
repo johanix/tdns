@@ -231,7 +231,29 @@ func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {
 	if api.UseTLS {
 		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, api.BaseUrl+endpoint)
 	} else {
-		fmt.Printf("API%s: apiurl: %s\n", method, api.BaseUrl+endpoint)
+		fmt.Printf("API%s: apiurl: %s (not using TLS)\n", method, api.BaseUrl+endpoint)
+	}
+
+	if (method == http.MethodPost) || (method == http.MethodPut) {
+		var prettyJSON bytes.Buffer
+
+		error := json.Indent(&prettyJSON, data, "", "  ")
+		if error != nil {
+			log.Println("JSON parse error: ", error)
+		}
+		fmt.Printf("API%s: posting %d bytes of data: %s\n", method, len(data), prettyJSON.String())
+	}
+}
+
+func (api *ApiClient) UrlReportNG(method, fullurl string, data []byte) {
+	if !api.Debug {
+		return
+	}
+
+	if api.UseTLS {
+		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, fullurl)
+	} else {
+		fmt.Printf("API%s: apiurl: %s (not using TLS)\n", method, fullurl)
 	}
 
 	if (method == http.MethodPost) || (method == http.MethodPut) {
@@ -297,6 +319,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if Globals.Debug {
 			log.Printf("api.RequestNG: trying URL: %s\n", fullURL)
 		}
+		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
 
 		// Create the request
 		req, err := http.NewRequest(method, fullURL, bytebuf)
@@ -331,16 +354,16 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 	if lastErr != nil {
 		var msg string
-		if strings.Contains(err.Error(), "connection refused") {
+		if strings.Contains(lastErr.Error(), "connection refused") {
 			msg = "Connection refused. Server process probably not running."
 		} else {
-			msg = fmt.Sprintf("Error from API request %s: %v", method, err)
+			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
 		}
 		if dieOnError {
 			fmt.Printf("%s\n", msg)
 			os.Exit(1)
 		} else {
-			return 501, nil, err
+			return 501, nil, lastErr
 		}
 	}
 
@@ -359,8 +382,8 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if error != nil {
 			log.Println("JSON parse error: ", error)
 		}
-		fmt.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
-		fmt.Printf("API%s: end of response\n", method)
+		log.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
+		log.Printf("API%s: end of response\n", method)
 	}
 
 	// not bothering to copy buf, this is a one-off

@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -128,7 +129,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("secureRouter: %s", r.URL.Path)
+			log.Printf("secureRouter: received %s on URL %s", r.Method, r.URL.Path)
 			// Skip validation for /hello endpoint
 			if r.URL.Path == "/api/v1/hello" {
 				next.ServeHTTP(w, r)
@@ -137,6 +138,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 
 			// Get peer certificate from TLS connection
 			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				log.Printf("secureRouter: r.TLS: %+v", r.TLS)
 				http.Error(w, "Client certificate required", http.StatusUnauthorized)
 				return
 			}
@@ -246,13 +248,31 @@ func APIdispatcherNG(conf *Config, router *mux.Router, addrs []string, certFile 
 	WalkRoutes(router, addresses[0])
 	log.Println("")
 
+	// Load server certificate and key
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load server certificate: %v", err)
+	}
+
+	// Create TLS config that requests but doesn't require client certs
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequestClientCert,
+		// XXX: this is just for debugging:
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			log.Printf("TLS handshake from %s, SNI: %s", hello.Conn.RemoteAddr(), hello.ServerName)
+			return nil, nil
+		},
+	}
+
 	servers := make([]*http.Server, len(addresses))
 
 	for idx, address := range addresses {
 		idxCopy := idx
 		servers[idx] = &http.Server{
-			Addr:    address,
-			Handler: router,
+			Addr:      address,
+			Handler:   router,
+			TLSConfig: tlsConfig,
 		}
 
 		go func(srv *http.Server, idx int) {
