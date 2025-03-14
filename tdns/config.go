@@ -73,6 +73,7 @@ type LocalAgentConf struct {
 	}
 	Remote struct {
 		LocateInterval int // time in seconds
+                BeatInterval   uint32 // time between outgoing heartbeats to same destination
 	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf

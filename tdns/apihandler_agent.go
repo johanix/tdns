@@ -138,12 +138,10 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentMsgResponse{
+		resp := AgentBeatResponse{
 			Time: time.Now(),
 			Msg:  "Hi there!",
 		}
-		log.Printf("APIbeat: received /beat request from %s.\n", r.RemoteAddr)
-
 		decoder := json.NewDecoder(r.Body)
 		var bp AgentBeatPost
 		err := decoder.Decode(&bp)
@@ -163,22 +161,21 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		log.Printf("APIbeat: received /beat request from %s (identity: %s).\n", r.RemoteAddr, bp.MyIdentity)
+
 		switch bp.MessageType {
 		case "BEAT", "FULLBEAT":
 			resp.Status = "ok"
 			conf.Internal.HeartbeatQ <- AgentMsgReport{
-				Transport: "api",
-				Msg: &AgentMsgPost{
-					MessageType: bp.MessageType,
-					Identity:    bp.MyIdentity,
-					Time:        time.Now(),
-					Zones:       bp.Zones,
-				},
+				Transport:   "api",
+				MessageType: bp.MessageType,
+				Identity:    bp.MyIdentity,
+				Msg:         &bp,
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %s", bp.MessageType)
+			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %q from %s", bp.MessageType, bp.MyIdentity)
 		}
 	}
 }
@@ -191,13 +188,13 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentMsgResponse{
+		resp := AgentHelloResponse{
 			Time: time.Now(),
 		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
-		var hp AgentMsgPost
+		var hp AgentHelloPost
 		err := decoder.Decode(&hp)
 
 		defer func() {
@@ -209,30 +206,78 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err != nil {
-			log.Printf("APIhello: error decoding hello post: %+v", err)
+			log.Printf("APIhello: error decoding /hello post: %+v", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
 		}
 
-		resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q.", hp.Identity, conf.Agent.Identity)
+		// Now let's check if we need to know this agent
+		if hp.Zone == "" {
+			resp.Error = true
+			resp.ErrorMsg = "Error: No zone specified in HELLO message"
+			return
+		}
+
+		// Check if we have this zone
+		zd, exists := Zones.Get(hp.Zone)
+		if !exists {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", hp.Zone)
+			return
+		}
+
+		// Check if zone has HSYNC RRset
+		hsyncRR, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", hp.Zone, err)
+			return
+		}
+		if hsyncRR == nil {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error: Zone %q has no HSYNC RRset", hp.Zone)
+			return
+		}
+
+		// Check if both our identity and remote agent are in HSYNC RRset
+		foundUs := false
+		foundThem := false
+		for _, rr := range hsyncRR.RRs {
+			if prr, ok := rr.(*dns.PrivateRR); ok {
+				if hsync, ok := prr.Data.(*HSYNC); ok {
+					if hsync.Identity == conf.Agent.Identity {
+						foundUs = true
+					}
+					if hsync.Identity == hp.Identity {
+						foundThem = true
+					}
+				}
+			}
+		}
+
+		if !foundUs || !foundThem {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error: Zone %q HSYNC RRset does not include both our identities", hp.Zone)
+			return
+		}
+
+		resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
+			hp.Identity, conf.Agent.Identity, hp.Zone)
 
 		switch hp.MessageType {
 		case "HELLO":
 			resp.Status = "ok" // important
 			conf.Internal.HelloQ <- AgentMsgReport{
-				Transport: "api",
-				Msg: &AgentMsgPost{
-					MessageType: "HELLO",
-					Identity:    hp.Identity,
-					Time:        time.Now(),
-					Zone:        hp.Zone,
-				},
+				Transport:   "api",
+				MessageType: "HELLO",
+				Identity:    hp.Identity,
+				Msg:         &hp,
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %s", hp.MessageType)
+			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %q from %s", hp.MessageType, hp.Identity)
 		}
 	}
 }
