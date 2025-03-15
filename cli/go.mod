@@ -1,7 +1,6 @@
 module tdns-cli
 
-go 1.22.0
-toolchain go1.23.7
+go 1.23.2
 
 replace (
 	github.com/johanix/tdns/tdns => ../tdns

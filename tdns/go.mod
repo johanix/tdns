@@ -1,7 +1,7 @@
 module github.com/johanix/tdns/tdns
 
-go 1.22.0
-toolchain go1.23.7
+go 1.23.2
+toolchain go1.23.2
 
 require (
 	github.com/go-playground/validator/v10 v10.22.1
