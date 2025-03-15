@@ -72,8 +72,8 @@ type LocalAgentConf struct {
 		Notify []string // secondaries to notify for an agent autozone
 	}
 	Remote struct {
-		LocateInterval int // time in seconds
-                BeatInterval   uint32 // time between outgoing heartbeats to same destination
+		LocateInterval int    // time in seconds
+		BeatInterval   uint32 // time between outgoing heartbeats to same destination
 	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
@@ -107,6 +107,7 @@ type DbConf struct {
 
 type InternalConf struct {
 	CfgFile         string //
+	DebugMode       bool   // if true, may activate dangerous tests
 	ZonesCfgFile    string //
 	KeyDB           *KeyDB
 	DnssecPolicies  map[string]DnssecPolicy
@@ -126,10 +127,19 @@ type InternalConf struct {
 	AuthQueryQ      chan AuthQueryRequest
 	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ           chan SyncRequest
-	HeartbeatQ      chan AgentMsgReport // incoming /beat
-	HelloQ          chan AgentMsgReport // incoming /hello
-	SyncStatusQ     chan SyncStatus
-	Registry        *AgentRegistry
+	//	AgentBeatQ      chan AgentMsgReport // incoming /beat
+	//	AgentHelloQ     chan AgentMsgReport // incoming /hello
+	//	AgentMsgQ       chan AgentMsgReport // incoming /msg
+	AgentQs     AgentQs
+	SyncStatusQ chan SyncStatus
+	Registry    *AgentRegistry
+}
+
+type AgentQs struct {
+	Hello   chan AgentMsgReport // incoming /hello from other agents
+	Beat    chan AgentMsgReport // incoming /beat from other agents
+	Msg     chan AgentMsgReport // incoming /msg from other agents
+	Command chan AgentMsgPost   // local commands TO the agent, usually for passing on to other agents
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

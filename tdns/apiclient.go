@@ -302,7 +302,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		addressesToTry = []string{baseURL.Host}
 	}
 
-	if Globals.Debug {
+	if api.Debug {
 		log.Printf("api.RequestNG: trying addresses: %v\n", addressesToTry)
 	}
 
@@ -316,7 +316,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		urlCopy.Host = addr // addr must be in addr:port format
 		fullURL := fmt.Sprintf("%s%s", urlCopy.String(), endpoint)
 
-		if Globals.Debug {
+		if api.Debug {
 			log.Printf("api.RequestNG: trying URL: %s\n", fullURL)
 		}
 		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
