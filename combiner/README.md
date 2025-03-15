@@ -3,7 +3,7 @@
 Description
 
 TDNS-COMBINER is intended to be as small and simple as possible and
-only serve one single pupose: to control the four apex RRsets for
+only serve one single purpose: to control the four apex RRsets for
 DNSKEY, CDS, CSYNC and NS for zones that it receives via inbound zone
 transfer (from a zone owner) and (after possible modifications)
 publishes via outbound zone transfer (to a signer).

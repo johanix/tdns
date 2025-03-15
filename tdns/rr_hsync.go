@@ -22,10 +22,11 @@ func init() {
 const TypeHSYNC = 0x0F9D
 
 type HSYNC struct {
-	State  uint8 // 0=OFF, 1=ON
-	NSmgmt uint8 // 1=OWNER, 2=AGENT
-	Sign   uint8 // 1=YES, 2=NO
-	Target string
+	State    uint8 // 0=OFF, 1=ON
+	NSmgmt   uint8 // 1=OWNER, 2=AGENT
+	Sign     uint8 // 1=SIGN, 2=NOSIGN
+	Identity string
+	Upstream string
 }
 
 const (
@@ -58,25 +59,25 @@ var StringToHsyncNSmgmt = map[string]uint8{
 }
 
 var HsyncSignToString = map[uint8]string{
-	HsyncSignYES: "YES",
-	HsyncSignNO:  "NO",
+	HsyncSignYES: "SIGN",
+	HsyncSignNO:  "NOSIGN",
 }
 
 var StringToHsyncSign = map[string]uint8{
-	"YES": HsyncSignYES,
-	"NO":  HsyncSignNO,
+	"SIGN":   HsyncSignYES,
+	"NOSIGN": HsyncSignNO,
 }
 
 func NewHSYNC() dns.PrivateRdata { return new(HSYNC) }
 
 func (rd HSYNC) String() string {
-	return fmt.Sprintf("%-3s  %-3s  %-3s  %s", HsyncStateToString[rd.State], HsyncNSmgmtToString[rd.NSmgmt], HsyncSignToString[rd.Sign], rd.Target)
+	return fmt.Sprintf("%-3s  %-3s  %-3s  %s %s", HsyncStateToString[rd.State], HsyncNSmgmtToString[rd.NSmgmt], HsyncSignToString[rd.Sign], rd.Identity, rd.Upstream)
 }
 
 func (rd *HSYNC) Parse(txt []string) error {
 	log.Printf("parsing HSYNC: %v", txt)
-	if len(txt) != 4 {
-		return errors.New("HSYNC requires values for State, NSmgmt and Sign plus a target domain name")
+	if len(txt) != 5 {
+		return errors.New("HSYNC requires values for State, NSmgmt and Sign plus identity and upstream domain names")
 	}
 	state, exist := StringToHsyncState[txt[0]]
 	if !exist {
@@ -93,16 +94,21 @@ func (rd *HSYNC) Parse(txt []string) error {
 		return fmt.Errorf("invalid HSYNC Sign value: %s", txt[2])
 	}
 
-	tgt := dns.Fqdn(txt[3])
-	if _, ok := dns.IsDomainName(tgt); !ok {
-		return fmt.Errorf("invalid HSYNC target: %s", txt[3])
+	id := dns.Fqdn(txt[3])
+	if _, ok := dns.IsDomainName(id); !ok {
+		return fmt.Errorf("invalid HSYNC identity: %s", txt[3])
+	}
+
+	upstream := dns.Fqdn(txt[4])
+	if _, ok := dns.IsDomainName(upstream); !ok {
+		return fmt.Errorf("invalid HSYNC upstream: %s", txt[4])
 	}
 
 	rd.State = state
 	rd.NSmgmt = nsmgmt
 	rd.Sign = sign
-	rd.Target = tgt
-
+	rd.Identity = id
+	rd.Upstream = upstream
 	return nil
 }
 
@@ -123,7 +129,12 @@ func (rd *HSYNC) Pack(buf []byte) (int, error) {
 		return off, err
 	}
 
-	off, err = dns.PackDomainName(rd.Target, buf, off, nil, false)
+	off, err = dns.PackDomainName(rd.Identity, buf, off, nil, false)
+	if err != nil {
+		return off, err
+	}
+
+	off, err = dns.PackDomainName(rd.Upstream, buf, off, nil, false)
 	if err != nil {
 		return off, err
 	}
@@ -159,7 +170,12 @@ func (rd *HSYNC) Unpack(buf []byte) (int, error) {
 		return off, nil
 	}
 
-	rd.Target, off, err = dns.UnpackDomainName(buf, off)
+	rd.Identity, off, err = dns.UnpackDomainName(buf, off)
+	if err != nil {
+		return off, err
+	}
+
+	rd.Upstream, off, err = dns.UnpackDomainName(buf, off)
 	if err != nil {
 		return off, err
 	}
@@ -177,17 +193,17 @@ func (rd *HSYNC) Copy(dest dns.PrivateRdata) error {
 	d.State = rd.State
 	d.NSmgmt = rd.NSmgmt
 	d.Sign = rd.Sign
-	d.Target = rd.Target
+	d.Identity = rd.Identity
+	d.Upstream = rd.Upstream
 	return nil
 }
 
 func (rd *HSYNC) Len() int {
-	//	return 1 + 1 + 2 + len(rd.Target) + 1 // add 1 for terminating 0
-	return 1 + 1 + 1 + len(rd.Target) + 1 // add 1 for terminating 0
+	return 1 + 1 + 1 + len(rd.Identity) + len(rd.Upstream) + 2 // +2 for two terminating zeros
 }
 
 func RegisterHsyncRR() error {
 	dns.PrivateHandle("HSYNC", TypeHSYNC, NewHSYNC)
-	log.Printf("Registered HSYNC RR")
+	// log.Printf("Registered HSYNC RR")
 	return nil
 }

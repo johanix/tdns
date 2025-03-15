@@ -17,9 +17,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 )
 
-func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, debug bool) *ApiClient {
+func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient {
 	api := ApiClient{
 		Name:       name,
 		BaseUrl:    baseurl,
@@ -32,7 +33,8 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 	if rootcafile == "insecure" {
 		tlsconfig.InsecureSkipVerify = true
 	} else if rootcafile == "tlsa" {
-		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the MUSIC side afterwards.
+
+		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the Agent side afterwards.
 
 		// use TLSA RR for verification
 		//		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -60,8 +62,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 			log.Fatalf("reading cert failed : %v", err)
 		}
 		if Globals.Debug {
-			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
-				name, rootcafile)
+			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
 		}
 
 		rootCAPool.AppendCertsFromPEM(rootCA)
@@ -98,7 +99,7 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string, verbose, de
 	api.Verbose = Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
 
-	if debug {
+	if Globals.Debug {
 		log.Printf("Setting up %s API client:\n", name)
 		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
 			api.BaseUrl, api.apiKey, api.AuthMethod)
@@ -155,6 +156,9 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 }
 
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
+	if api == nil {
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer
@@ -227,7 +231,29 @@ func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {
 	if api.UseTLS {
 		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, api.BaseUrl+endpoint)
 	} else {
-		fmt.Printf("API%s: apiurl: %s\n", method, api.BaseUrl+endpoint)
+		fmt.Printf("API%s: apiurl: %s (not using TLS)\n", method, api.BaseUrl+endpoint)
+	}
+
+	if (method == http.MethodPost) || (method == http.MethodPut) {
+		var prettyJSON bytes.Buffer
+
+		error := json.Indent(&prettyJSON, data, "", "  ")
+		if error != nil {
+			log.Println("JSON parse error: ", error)
+		}
+		fmt.Printf("API%s: posting %d bytes of data: %s\n", method, len(data), prettyJSON.String())
+	}
+}
+
+func (api *ApiClient) UrlReportNG(method, fullurl string, data []byte) {
+	if !api.Debug {
+		return
+	}
+
+	if api.UseTLS {
+		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, fullurl)
+	} else {
+		fmt.Printf("API%s: apiurl: %s (not using TLS)\n", method, fullurl)
 	}
 
 	if (method == http.MethodPost) || (method == http.MethodPut) {
@@ -261,36 +287,83 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		fmt.Printf("api.RequestNG: %s %s dieOnError: %v\n", method, endpoint, dieOnError)
 	}
 
-	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
+	baseURL, err := url.Parse(api.BaseUrl)
 	if err != nil {
-		return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+		if dieOnError {
+			log.Fatalf("Failed to parse base URL: %v", err)
+		}
+		return 0, nil, fmt.Errorf("failed to parse base URL: %v", err)
 	}
-	req.Header.Add("Content-Type", "application/json")
-	if api.AuthMethod == "X-API-Key" {
-		req.Header.Add("X-API-Key", api.apiKey)
-	} else if api.AuthMethod == "Authorization" {
-		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
-	} else if api.AuthMethod == "none" {
-		// do not add any authentication header at all
-	}
-	resp, err := api.Client.Do(req)
 
-	if err != nil {
+	// Determine which addresses to try
+	addressesToTry := api.Addresses
+	if len(addressesToTry) == 0 {
+		// If no explicit addresses, use the hostname from BaseUrl
+		addressesToTry = []string{baseURL.Host}
+	}
+
+	if Globals.Debug {
+		log.Printf("api.RequestNG: trying addresses: %v\n", addressesToTry)
+	}
+
+	var resp *http.Response
+
+	// Try each address
+	var lastErr error
+	for _, addr := range addressesToTry {
+		// Create the full URL with the current address
+		urlCopy := *baseURL // Create a copy of the parsed URL
+		urlCopy.Host = addr // addr must be in addr:port format
+		fullURL := fmt.Sprintf("%s%s", urlCopy.String(), endpoint)
+
+		if Globals.Debug {
+			log.Printf("api.RequestNG: trying URL: %s\n", fullURL)
+		}
+		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
+
+		// Create the request
+		req, err := http.NewRequest(method, fullURL, bytebuf)
+		//	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
+		if err != nil {
+			// return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+			lastErr = err
+			continue // Try next address
+		}
+		req.Header.Add("Content-Type", "application/json")
+		if api.AuthMethod == "X-API-Key" {
+			req.Header.Add("X-API-Key", api.apiKey)
+		} else if api.AuthMethod == "Authorization" {
+			req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
+		} else if api.AuthMethod == "none" {
+			// do not add any authentication header at all
+		}
+		resp, err = api.Client.Do(req)
+
+		if err != nil {
+			lastErr = err
+			continue // Try next address
+		}
+
 		if api.Debug {
 			fmt.Printf("api.RequestNG: %s %s dieOnError: %v err: %v\n", method, endpoint, dieOnError, err)
 		}
 
+		lastErr = nil // success finally
+		break
+	}
+
+	if lastErr != nil {
 		var msg string
-		if strings.Contains(err.Error(), "connection refused") {
+		if strings.Contains(lastErr.Error(), "connection refused") {
 			msg = "Connection refused. Server process probably not running."
 		} else {
-			msg = fmt.Sprintf("Error from API request %s: %v", method, err)
+			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
 		}
 		if dieOnError {
 			fmt.Printf("%s\n", msg)
 			os.Exit(1)
 		} else {
-			return 501, nil, err
+			return 501, nil, lastErr
 		}
 	}
 
@@ -309,8 +382,8 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if error != nil {
 			log.Println("JSON parse error: ", error)
 		}
-		fmt.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
-		fmt.Printf("API%s: end of response\n", method)
+		log.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
+		log.Printf("API%s: end of response\n", method)
 	}
 
 	// not bothering to copy buf, this is a one-off

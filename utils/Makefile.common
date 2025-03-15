@@ -1,8 +1,10 @@
-COMMIT:=`git describe --dirty=+WiP --always`
 VERSION=`cat ../VERSION`
+BRANCH:=`git rev-parse --abbrev-ref HEAD`
+COMMIT:=`git describe --dirty=+WiP --always`
 APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
-GOFLAGS:=-v -ldflags "-X app.version=$(VERSION)-$(COMMIT)"
+# GOFLAGS:=-v -ldflags "-X app.version=$(VERSION)-$(BRANCH)-$(COMMIT)"
+GOFLAGS:=-v
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
@@ -13,13 +15,15 @@ ${PROG}: build
 PROGS_WITH_VERSION := tdns-server tdns-agent music-sidecar
 FOO := tdns-agent
 
-version.go:	../VERSION Makefile
-		/bin/sh ../utils/make-version.sh $(VERSION)-$(COMMIT) $(APPDATE) $(PROG) \
+# version.go:	../VERSION Makefile
+# 	/bin/sh ../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
-build:	version.go
+build:
+	/bin/sh ../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	$(GO) build $(GOFLAGS) -o ${PROG}
 
-netbsd:	version.go
+netbsd:
+	/bin/sh ../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
 # johaniaws: Sync local tdns source to remote AWS environment.

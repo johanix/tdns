@@ -16,24 +16,18 @@ func main() {
 	var tconf tdns.Config
 	// var mconf music.Config
 
-	tconf.App.Mode = "combiner"
-	tconf.App.Version = appVersion
-	tconf.App.Name = appName
-	tconf.App.Date = appDate
+	tdns.Globals.App.Type = tdns.AppTypeCombiner
+	tdns.Globals.App.Version = appVersion
+	tdns.Globals.App.Name = appName
+	tdns.Globals.App.Date = appDate
 
 	// These are set here to enable various config reload functions to reload from the correct files.
-	tconf.Internal.CfgFile = tdns.DefaultCombinerCfgFile
-	tconf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
+	// tconf.Internal.CfgFile = tdns.DefaultCombinerCfgFile
+	// tconf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
 
-	err := tdns.MainInit(&tconf)
+	err := tconf.MainInit(tdns.DefaultCombinerCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing TDNS: %v", err))
-	}
-
-	// ParseZones will read zone configs from the file specified in tconf.Internal.ZonesCfgFile
-	_, err = tdns.ParseZones(&tconf, tconf.Internal.RefreshZoneCh, false) // false = !reload, initial config
-	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error parsing zones: %v", err))
 	}
 
 	apirouter, err := tdns.SetupCombinerAPIRouter(&tconf) // sidecar mgmt API is a combo of TDNS and MUSIC

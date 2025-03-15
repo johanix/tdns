@@ -55,7 +55,7 @@ func (sc *Sidecar) NewMusicSyncApiClient(name, baseurl, apikey, authmethod, root
 	}
 
 	api := MusicApi{
-		ApiClient: tdns.NewClient(name, baseurl, apikey, authmethod, rootcafile, tdns.Globals.Verbose, tdns.Globals.Debug),
+		ApiClient: tdns.NewClient(name, baseurl, apikey, authmethod, rootcafile),
 	}
 
 	tlsconfig := &tls.Config{}

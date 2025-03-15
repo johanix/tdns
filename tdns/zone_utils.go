@@ -42,7 +42,6 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
 	case Secondary:
 		do_transfer, upstream_serial, err := zd.DoTransfer()
 		if err != nil {
-			zd.Logger.Printf("Error from DoZoneTransfer(%s): %v", zd.ZoneName, err)
 			return false, err
 		}
 
@@ -82,7 +81,15 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 
-	r, err := dns.Exchange(m, zd.Upstream)
+	upstream := zd.Upstream
+	if _, _, err := net.SplitHostPort(upstream); err != nil {
+		// If error, assume no port was specified
+		upstream = net.JoinHostPort(upstream, "53")
+		if Globals.Verbose {
+			zd.Logger.Printf("DoTransfer: zone %q: no port specified for upstream %q, using default port 53", zd.ZoneName, zd.Upstream)
+		}
+	}
+	r, err := dns.Exchange(m, upstream)
 	if err != nil {
 		log.Printf("Error from dns.Exchange(%s, SOA): %v", zd.ZoneName, err)
 		return false, 0, err
@@ -159,10 +166,10 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	}
 
 	var hsyncchanged, keyschanged bool
-	var mss *MusicSyncStatus
-	switch zd.AppType {
+	var hss *HsyncStatus
+	switch Globals.App.Type {
 	case AppTypeMSA, AppTypeCombiner:
-		hsyncchanged, mss, err = zd.HsyncChanged(&new_zd)
+		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
 			// return false, err
@@ -212,23 +219,24 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
 				// return false, err
 			}
-			zd.MusicSyncQ <- MusicSyncRequest{
+			zd.SyncQ <- SyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
 				ZoneName:   zd.ZoneName,
 				ZoneData:   zd,
 				OldDnskeys: oldkeys,
 				NewDnskeys: newkeys,
+				SyncStatus: nil,
 			}
 		}
 
 		if hsyncchanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: HSYNC RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
 
-			zd.MusicSyncQ <- MusicSyncRequest{
-				Command:         "RESET-HSYNC-GROUP",
-				ZoneName:        zd.ZoneName,
-				ZoneData:        zd,
-				MusicSyncStatus: mss,
+			zd.SyncQ <- SyncRequest{
+				Command:    "HSYNC-UPDATE",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				SyncStatus: hss,
 			}
 		}
 	}
@@ -266,6 +274,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 		Verbose:        zd.Verbose,
 		Debug:          zd.Debug,
 		Options:        zd.Options,
+		Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -296,10 +305,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	var hsyncchanged, dnskeyschanged bool
-	var mss *MusicSyncStatus
-	switch zd.AppType {
-	case AppTypeMSA, AppTypeCombiner:
-		hsyncchanged, mss, err = zd.HsyncChanged(&new_zd)
+	var hss *HsyncStatus
+	switch Globals.App.Type {
+	case AppTypeMSA, AppTypeAgent, AppTypeCombiner:
+		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
 			// return false, err
@@ -338,7 +347,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	if dnskeyschanged {
-		switch zd.AppType {
+		switch Globals.App.Type {
 		case AppTypeMSA:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
@@ -365,35 +374,42 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	}
 
 	if hsyncchanged {
-		switch zd.AppType {
-		case AppTypeMSA:
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
-			zd.MusicSyncQ <- MusicSyncRequest{
-				Command:         "RESET-HSYNC-GROUP",
-				ZoneName:        zd.ZoneName,
-				ZoneData:        zd,
-				MusicSyncStatus: mss,
+		switch Globals.App.Type {
+		case AppTypeMSA, AppTypeAgent:
+			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
+			zd.SyncQ <- SyncRequest{
+				Command:    "HSYNC-UPDATE",
+				ZoneName:   zd.ZoneName,
+				ZoneData:   zd,
+				SyncStatus: hss,
 			}
 		case AppTypeCombiner:
-			// A combiner needs to act on HSYNC changes, but only to verify whether itself is in the HSYNC
+			// A combiner needs to act on HSYNC changes, but only to verify whether itself is in the HSYNC RRset
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Verifying whether we are in the HSYNC RRset", zd.ZoneName)
+			// XXX: Kludge just for testing. Should be replaced by HSYNC RRset parsing
+			zd.Options[OptAllowCombine] = true
 			// TODO: Implement this
 		}
 	}
 
+	zd.Logger.Printf("FetchFromUpstream: Zone %q: Globals.App.Type: %q allow-combine: %v",
+		zd.ZoneName, AppTypeToString[Globals.App.Type], zd.Options[OptAllowCombine])
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
-	if zd.AppType == AppTypeCombiner && zd.Options[OptCombiner] {
+	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowCombine] {
 		// XXX: We are a combiner and this zone has a HSYNC RRset. Therefore we need to check whether there are
 		// any local changes to the zone that needs to be applied before we can send the zone to the downstreams.
 		// XXX: This MUST not be a request through a channel, but rather a direct call to something that does this.
+		zd.Logger.Printf("FetchFromUpstream: Zone %q: Combining with local changes", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {
-			zd.Logger.Printf("Error from CombineWithLocalChanges(%s): %v", zd.ZoneName, err)
+			zd.Logger.Printf("Error from CombineWithLocalChanges(%q): %v", zd.ZoneName, err)
 			return false, err
 		}
-		if !success {
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: Local changes to the zone have not been applied. Not sending to downstreams.", zd.ZoneName)
+		if success {
+			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have been applied. Sending to downstreams.", zd.ZoneName)
+		} else {
+			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have not been applied. Not sending to downstreams.", zd.ZoneName)
 		}
 	}
 
@@ -587,8 +603,8 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 
 // XXX: Is qname the name of a zone cut for a child zone?
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
-	// zd.Logger.Printf("IsChildDelegation: checking delegation of %s from %s",
-	// 	qname, zd.ZoneName)
+	zd.Logger.Printf("IsChildDelegation: checking delegation of %q from %q",
+		qname, zd.ZoneName)
 	owner, err := zd.GetOwner(qname)
 	if err != nil || owner == nil || qname == zd.ZoneName {
 		return false
@@ -716,7 +732,7 @@ func FindZone(qname string) (*ZoneData, bool) {
 			return zd, true
 		}
 	}
-	log.Printf("FindZone: no zone for qname=%s found", qname)
+	log.Printf("FindZone: no zone for qname=%q found", qname)
 	return nil, false
 }
 
@@ -742,6 +758,10 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
 	zd.mu.Lock()
 
+	defer func() {
+		zd.mu.Unlock()
+	}()
+
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
@@ -752,20 +772,23 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 		//			zd.mu.Unlock()
 		//			return resp, err
 		//		}
-		apex, _ := zd.GetOwner(zd.ZoneName)
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
+			return resp, err
+		}
 		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
+		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
 		if err != nil {
 			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
-			zd.mu.Unlock()
 			return resp, err
 		}
 	}
-	zd.mu.Unlock()
+	//	zd.mu.Unlock()
 
 	zd.NotifyDownstreams()
 
@@ -1114,27 +1137,39 @@ $TTL 86400
 }
 
 // Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
-func (tconf *Config) FindNameserverAddrs() ([]string, error) {
+func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
 	if Globals.Debug {
-		log.Printf("FindNameserverAddrs: dnsengine addresses: %v", tconf.DnsEngine.Addresses)
+		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Addresses)
 		// dump.P(tconf.DnsEngine)
 	}
-	for _, ns := range tconf.DnsEngine.Addresses {
+	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
-			return nil, fmt.Errorf("FindNameserverAddrs: failed to split host and port from address '%s': %v", ns, err)
+			return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
 		}
 		if port != "53" {
 			continue
 		}
-		if addr == "127.0.0.1" || addr == "::1" {
-			continue
-		}
+		// if addr == "127.0.0.1" || addr == "::1" {
+		// 	continue
+		// }
 		if addr == "" {
 			continue
 		}
 		addrs = append(addrs, addr)
 	}
 	return addrs, nil
+}
+
+type HsyncStatus struct {
+	Time         time.Time
+	ZoneName     string
+	Command      string
+	Status       bool
+	Error        bool
+	ErrorMsg     string
+	Msg          string
+	HsyncAdds    []dns.RR // Changed from Adds
+	HsyncRemoves []dns.RR // Changed from Removes
 }

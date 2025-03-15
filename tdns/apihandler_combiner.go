@@ -13,20 +13,19 @@ import (
 	"github.com/miekg/dns"
 )
 
-func APIzoneReplace(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func APICombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-
 		decoder := json.NewDecoder(r.Body)
-		var msp MultiSignerPost
-		err := decoder.Decode(&msp)
+		var cp CombinerPost
+		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APImultisigner: error decoding multisigner command post:", err)
+			log.Println("APICombiner: error decoding combiner command post:", err)
 		}
 
-		log.Printf("API: received /multisigner request (cmd: %s) from %s.\n",
-			msp.Command, r.RemoteAddr)
+		log.Printf("API: received /combiner request (cmd: %s) from %s.\n",
+			cp.Command, r.RemoteAddr)
 
-		resp := MultiSignerResponse{
+		resp := CombinerResponse{
 			Time: time.Now(),
 		}
 
@@ -38,25 +37,41 @@ func APIzoneReplace(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *Ke
 			}
 		}()
 
-		zd, exist := Zones.Get(msp.Zone)
-		if !exist && msp.Command != "list-zones" {
+		cp.Zone = dns.Fqdn(cp.Zone)
+		zd, exist := Zones.Get(cp.Zone)
+		if !exist {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", msp.Zone)
+			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", cp.Zone)
 			return
 		}
 
-		switch msp.Command {
-		case "fetch-rrset":
-			rrset, err := zd.GetRRset(msp.Name, msp.Type)
+		switch cp.Command {
+		case "add":
+			err := zd.AddCombinerDataNG(cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
-			resp.RRset = *rrset
-			resp.Msg = fmt.Sprintf("Zone %s: %s %s RRset as requested", msp.Zone, msp.Name, dns.TypeToString[msp.Type])
+			resp.Msg = fmt.Sprintf("Added local RRsets for zone %s", cp.Zone)
+
+		case "list":
+			if zd.CombinerData == nil {
+				resp.Msg = fmt.Sprintf("No local data for zone %s", cp.Zone)
+				return
+			}
+
+			resp.Data = zd.GetCombinerDataNG()
+			resp.Msg = fmt.Sprintf("Local data for zone %s", cp.Zone)
+
+		case "remove":
+			// TODO: Implement remove functionality
+			resp.Error = true
+			resp.ErrorMsg = "Remove operation not yet implemented"
+			return
 
 		default:
-			resp.ErrorMsg = fmt.Sprintf("Unknown multisigner command: %s", msp.Command)
+			resp.ErrorMsg = fmt.Sprintf("Unknown combiner command: %s", cp.Command)
 			resp.Error = true
 		}
 	}

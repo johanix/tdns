@@ -347,12 +347,26 @@ func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Durati
 		return nil, fmt.Errorf("no DNS servers found in client configuration")
 	}
 
+	rrset, err := RecursiveDNSQueryWithServers(qname, qtype, timeout, retries, resolvers)
+	if err != nil {
+		return nil, err
+	}
+	return rrset, nil
+}
+
+func RecursiveDNSQueryWithServers(qname string, qtype uint16, timeout time.Duration,
+	retries int, resolvers []string) (*RRset, error) {
+	if len(resolvers) == 0 {
+		return nil, fmt.Errorf("no DNS resolvers provided")
+	}
+
 	for _, server := range resolvers {
 		rrset, err := RecursiveDNSQuery(server, qname, qtype, timeout, retries)
 		if err == nil {
 			return rrset, nil
 		}
-		log.Printf("failed to lookup %s record using server %s after %d attempts: %v", qname, server, retries, err)
+		log.Printf("failed to lookup %s record using server %s after %d attempts to %d resolvers: %v",
+			qname, server, retries, len(resolvers), err)
 	}
 
 	return nil, fmt.Errorf("failed to find any %s records after trying all resolvers", qname)
@@ -367,16 +381,11 @@ func RecursiveDNSQueryWithResolvConf(qname string, qtype uint16, timeout time.Du
 		return nil, fmt.Errorf("no DNS servers found in client configuration")
 	}
 
-	var rrset *RRset
-	for _, server := range clientConfig.Servers {
-		rrset, err = RecursiveDNSQuery(server, qname, qtype, timeout, retries)
-		if err == nil {
-			return rrset, nil
-		}
-		log.Printf("failed to lookup %s record using server %s after %d attempts: %v", qname, server, retries, err)
+	rrset, err := RecursiveDNSQueryWithServers(qname, qtype, timeout, retries, clientConfig.Servers)
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, fmt.Errorf("failed to find any %s records after trying all resolvers", qname)
+	return rrset, nil
 }
 
 func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
@@ -386,9 +395,13 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 		Timeout: timeout,
 	}
 
-	if !strings.Contains(server, ":") {
-		server = net.JoinHostPort(server, "53")
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		// No port specified, use default DNS port
+		host = server
+		port = "53"
 	}
+	server = net.JoinHostPort(host, port)
 
 	var rrset RRset
 	var lastErr error

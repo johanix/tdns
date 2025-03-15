@@ -375,8 +375,9 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error) {
-	var mss = MusicSyncStatus{
+func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
+	var hss = HsyncStatus{
+		Time:     time.Now(),
 		ZoneName: zd.ZoneName,
 		Msg:      "No change",
 		Error:    false,
@@ -385,27 +386,75 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *MusicSyncStatus, error
 	}
 	var differ bool
 
-	oldapex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, nil, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
-	}
+	zd.Logger.Printf("*** HsyncChanged: enter (zone %q)", zd.ZoneName)
 
+	//	oldapex, err := zd.GetOwner(zd.ZoneName)
+	//	if err != nil {
+	//		return false, nil, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+	//	}
+	var oldapex *OwnerData
+	// ------------------------------------------------------------
+	// Inline version of zd.GetOwner() to get around the "ready" test:
+	var owner OwnerData
+	var ok bool
+	// zd.Logger.Printf("HsyncChanged: 1 ***")
+	switch zd.ZoneStore {
+	case SliceZone:
+		if len(zd.Owners) == 0 {
+			oldapex = nil
+		}
+		idx, _ := zd.OwnerIndex.Get(zd.ZoneName)
+		oldapex = &zd.Owners[idx]
+		// zd.Logger.Printf("HsyncChanged: 2 ***")
+
+	case MapZone:
+		// zd.Logger.Printf("HsyncChanged: 3 ***")
+		if zd.Data.IsEmpty() {
+			oldapex = nil
+		}
+		// zd.Logger.Printf("HsyncChanged: 4 ***")
+		if owner, ok = zd.Data.Get(zd.ZoneName); ok {
+			oldapex = &owner
+		} else {
+			oldapex = nil
+		}
+		// zd.Logger.Printf("HsyncChanged: 5 ***")
+
+	default:
+		zd.Logger.Printf("HsyncChanged: zone storage not supported: %q", ZoneStoreToString[zd.ZoneStore])
+	}
+	// ------
+
+	// zd.Logger.Printf("HsyncChanged: 6 ***")
 	newhsync, err := newzd.GetRRset(zd.ZoneName, TypeHSYNC)
 	if err != nil {
 		return false, nil, err
 	}
 
+	// zd.Logger.Printf("HsyncChanged: 7 ***")
+
 	if oldapex == nil {
 		log.Printf("HsyncChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		mss.MsignerAdds = newhsync.RRs
-		return true, &mss, nil // on initial load, we always return true, nil, nil to force a reset of the MSIGNER group
+		hss.HsyncAdds = newhsync.RRs
+		return true, &hss, nil
 	}
 
-	oldhsync, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
-	if err != nil {
-		return false, nil, err
-	}
+	// zd.Logger.Printf("HsyncChanged: 8 ***")
 
-	differ, mss.MsignerAdds, mss.MsignerRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
-	return differ, &mss, nil
+	var oldhsync *RRset
+	// oldhsync, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
+	// if err != nil {
+	// 	return false, nil, err
+	// }
+
+	if rrset, exists := oldapex.RRtypes.Get(TypeHSYNC); exists {
+		oldhsync = &rrset
+	} else {
+		oldhsync = nil
+	}
+	// zd.Logger.Printf("HsyncChanged: 9 ***")
+
+	differ, hss.HsyncAdds, hss.HsyncRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
+	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
+	return differ, &hss, nil
 }

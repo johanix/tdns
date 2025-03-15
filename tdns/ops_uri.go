@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -15,12 +16,19 @@ import (
 // target: ms1.music.axfr.net
 // baseurl: https://{TARGET}/api/v1
 // port: 443
-func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
+func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) error {
+	if Globals.Debug {
+		log.Printf("PublishUriRR: received request to publish URI record for %q, baseurl: %q, port: %d", target, baseurl, port)
+	}
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishUriRR: KeyDB.UpdateQ is nil")
 	}
 	if _, ok := dns.IsDomainName(target); !ok {
 		return fmt.Errorf("target must be a valid domain name")
+	}
+
+	if !strings.HasSuffix(owner, zd.ZoneName) {
+		return fmt.Errorf("owner must be a subdomain of the zone name")
 	}
 
 	if !strings.Contains(baseurl, "{TARGET}") {
@@ -40,7 +48,7 @@ func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
 	}
 
 	uri.Hdr = dns.RR_Header{
-		Name:   target,
+		Name:   owner,
 		Rrtype: dns.TypeURI,
 		Class:  dns.ClassINET,
 		Ttl:    7200,
@@ -61,13 +69,17 @@ func (zd *ZoneData) PublishUriRR(target, baseurl string, port uint16) error {
 	return nil
 }
 
-func (zd *ZoneData) UnpublishUriRR(target string) error {
+func (zd *ZoneData) UnpublishUriRR(owner, target string) error {
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("UnpublishUriRR: KeyDB.UpdateQ is nil")
 	}
 	if _, ok := dns.IsDomainName(target); !ok {
 		return fmt.Errorf("target must be a valid domain name")
 	}
+	if !strings.HasSuffix(owner, zd.ZoneName) {
+		return fmt.Errorf("owner must be a subdomain of the zone name")
+	}
+
 	var uri = dns.URI{
 		Priority: 0,
 		Weight:   0,
@@ -75,7 +87,7 @@ func (zd *ZoneData) UnpublishUriRR(target string) error {
 	}
 
 	uri.Hdr = dns.RR_Header{
-		Name:   target,
+		Name:   owner,
 		Rrtype: dns.TypeURI,
 		Class:  dns.ClassANY, // Delete URI RRset
 		Ttl:    0,

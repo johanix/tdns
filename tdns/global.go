@@ -19,6 +19,7 @@ type GlobalStuff struct {
 	ParentZone  string
 	Sig0Keyfile string
 	Api         *ApiClient
+	ApiClients  map[string]*ApiClient // tdns-cli has multiple clients
 	PingCount   int
 	Slurp       bool
 	Algorithm   string
@@ -27,12 +28,14 @@ type GlobalStuff struct {
 	BaseUri     string
 	Port        uint16
 	Address     string
+	App         AppDetails
 }
 
 var Globals = GlobalStuff{
 	//	IMR:     "8.8.8.8:53",
-	Verbose: false,
-	Debug:   false,
+	Verbose:    false,
+	Debug:      false,
+	ApiClients: map[string]*ApiClient{},
 }
 
 var Zones = cmap.New[*ZoneData]()

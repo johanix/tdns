@@ -12,12 +12,21 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {
+	if Globals.Debug {
+		log.Printf("PublishTlsaRR: received request to publish TLSA record for %q, port: %d", name, port)
+	}
+
+	if !strings.HasSuffix(name, zd.ZoneName) {
+		return fmt.Errorf("PublishTlsaRR: name %q is not a subdomain of %q", name, zd.ZoneName)
+	}
+
 	certData, err := parseCertificate(certPEM)
 	if err != nil {
 		return err
