@@ -1,7 +1,7 @@
 templates:
-   - name:		agent
-     type:		secondary
-     primary:		127.0.0.1:5355
+   - name:            agent
+     type:            secondary
+     primary:         127.0.0.1:5355
 
    - name: child-agent
      store:           map

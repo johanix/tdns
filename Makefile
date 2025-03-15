@@ -14,9 +14,8 @@ clean:
 	$(MAKE) -C ./agent/ clean
 	$(MAKE) -C ./dog/ clean
 	$(MAKE) -C ./combiner/ clean
-	$(MAKE) -C ./msa/ clean
-	$(MAKE) -C ./sidecar-cli/ clean
-	$(MAKE) -C ./msa/ clean
+#	$(MAKE) -C ./msa/ clean
+#	$(MAKE) -C ./sidecar-cli/ clean
 
 install:
 	$(MAKE) -C ./server/ install

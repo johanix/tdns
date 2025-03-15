@@ -207,19 +207,23 @@ func (ar *AgentRegistry) HeartbeatHandler(report AgentMsgReport, wannabe_agents 
 		log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
 			//dump.P(report)
+			agent.mu.Lock()
 			newDetails := agent.Details[report.Transport]
 			newDetails.LatestRBeat = time.Now()
 			newDetails.ReceivedBeats++
 			agent.Details[report.Transport] = newDetails
+			agent.mu.Unlock()
 		}
 
 	case "FULLBEAT":
 		log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
+			agent.mu.Lock()
 			newDetails := agent.Details[report.Transport]
 			newDetails.LatestRBeat = time.Now()
 			newDetails.ReceivedBeats++
 			agent.Details[report.Transport] = newDetails
+			agent.mu.Unlock()
 		}
 
 	default:
@@ -244,6 +248,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
 			// Zone:        "",
 		})
+		agent.mu.Lock()
 		details := agent.Details["api"]
 		switch {
 		case err != nil:
@@ -269,6 +274,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			}
 		}
 		agent.Details["api"] = details
+		agent.mu.Unlock()
 	}
 }
 
@@ -327,8 +333,12 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	agents := map[string]*Agent{}
 	for _, agent := range ar.S.Items() {
 		// Make a clean copy of the agent for the response
-		copy := *agent // Shallow copy
-		agents[agent.Identity] = &copy
+		sanitized := SanitizeForJSON(*agent) // Shallow copy
+		if foo, ok := sanitized.(*Agent); ok {
+			agents[agent.Identity] = foo
+		} else {
+			log.Printf("HsyncEngine: Failed to sanitize agent %s for JSON", agent.Identity)
+		}
 	}
 
 	// Send the response immediately with a timeout to avoid blocking

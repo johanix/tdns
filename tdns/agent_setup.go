@@ -354,7 +354,14 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 		return fmt.Errorf("agent is nil")
 	}
 
-	if !agent.Methods["api"] || agent.Details["api"].TlsaRR == nil {
+	var details AgentDetails
+	if _, exists := agent.Details["api"]; exists {
+		agent.mu.Lock()
+		details = agent.Details["api"]
+		agent.mu.Unlock()
+	}
+
+	if !agent.Methods["api"] || details.TlsaRR == nil {
 		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
 	}
 
@@ -364,10 +371,10 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 
 	if Globals.Debug {
 		log.Printf("NewAgentSyncApiClient: enter. identity: %s, baseurl: %s",
-			agent.Identity, agent.Details["api"].BaseUri)
+			agent.Identity, details.BaseUri)
 	}
 	api := AgentApi{
-		ApiClient: NewClient(agent.Identity, agent.Details["api"].BaseUri, "", "", "tlsa"),
+		ApiClient: NewClient(agent.Identity, details.BaseUri, "", "", "tlsa"),
 	}
 
 	//	func NewClientConfig(caFile string, keyFile string, certFile string) (*tls.Config, error) {

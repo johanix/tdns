@@ -87,7 +87,7 @@ func (zd *ZoneData) UnpublishUriRR(owner, target string) error {
 	}
 
 	uri.Hdr = dns.RR_Header{
-		Name:   target,
+		Name:   owner,
 		Rrtype: dns.TypeURI,
 		Class:  dns.ClassANY, // Delete URI RRset
 		Ttl:    0,

@@ -22,10 +22,6 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 		return fmt.Errorf("zone %q does not allow KEY RR publication", zd.ZoneName)
 	}
 
-	if !strings.HasSuffix(zd.ZoneName, zd.ZoneName) {
-		return fmt.Errorf("PublishKeyRRs: zone %q is not a subdomain of %q", zd.ZoneName, zd.ZoneName)
-	}
-
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishKeyRRs: KeyDB.UpdateQ is nil")
 	}

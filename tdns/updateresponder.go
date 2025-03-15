@@ -113,7 +113,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	}
 
 	if zd.Error {
-		log.Printf("UpdateResponder: zone %s is in %s error state: %s", qname, zd.ErrorType, zd.ErrorMsg)
+		log.Printf("UpdateResponder: zone %s is in %s error state: %s", qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		AttachEDEToResponse(m, dns.ExtendedErrorCodeNotReady)
 		w.WriteMsg(m)

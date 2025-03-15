@@ -105,10 +105,10 @@ type CliConf struct {
 }
 
 type ApiDetails struct {
-	Name       string `validate:"required", yaml:"name"`
-	BaseURL    string `validate:"required", yaml:"baseurl"`
-	ApiKey     string `validate:"required", yaml:"apikey"`
-	AuthMethod string `validate:"required", yaml:"authmethod"`
+	Name       string `validate:"required" yaml:"name"`
+	BaseURL    string `validate:"required" yaml:"baseurl"`
+	ApiKey     string `validate:"required" yaml:"apikey"`
+	AuthMethod string `validate:"required" yaml:"authmethod"`
 }
 
 func initApi() {

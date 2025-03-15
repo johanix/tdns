@@ -89,7 +89,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				if zd.Error {
 					if zd.ErrorType != RefreshError || zd.RefreshCount == 0 {
 						log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
-							qname, zd.ErrorType, zd.ErrorMsg)
+							qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 						m := new(dns.Msg)
 						m.SetRcode(r, dns.RcodeServerFailure)
 						w.WriteMsg(m)
@@ -199,7 +199,7 @@ func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 			if zd.Error && zd.ErrorType != RefreshError {
 				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
-					qname, zd.ErrorType, zd.ErrorMsg)
+					qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)

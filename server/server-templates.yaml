@@ -1,5 +1,5 @@
 templates:
-   - name: 	parent-primary:
+   - name:            parent-primary:
      store:           map
      type:            primary
      notify:          [ 127.0.0.1:5399 ]

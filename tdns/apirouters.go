@@ -153,7 +153,9 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 				return
 			}
 
+			agent.mu.Lock()
 			tlsaRR := agent.Details["api"].TlsaRR
+			agent.mu.Unlock()
 			if tlsaRR == nil {
 				log.Printf("secureRouter: No TLSA record available for client: %s", clientId)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)

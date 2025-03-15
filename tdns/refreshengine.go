@@ -64,8 +64,8 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
 					if zd.Error && zd.ErrorType != RefreshError {
-						log.Printf("RefreshEngine: Zone %s is in %s error state: %s", zone, zd.ErrorType, zd.ErrorMsg)
-						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, zd.ErrorType, zd.ErrorMsg)
+						log.Printf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 						if zr.Response != nil {
 							zr.Response <- resp
 						}

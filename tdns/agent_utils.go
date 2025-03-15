@@ -121,7 +121,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 	var lagent *Agent
 	var ok bool
 	if lagent, ok = tmp.(*Agent); !ok {
-		log.Printf("LocateAgent: error: failed to assert tmp agent to *Agent: %v")
+		log.Printf("LocateAgent: error: failed to assert tmp agent to *Agent")
 		return
 	}
 
@@ -157,8 +157,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 					}
 
 					// Process URI response
-					for _, rr := range rrset.RRs {
-						log.Printf("LocateAgent: URI record: %s", rr.String())
+					if rrset != nil && len(rrset.RRs) > 0 {
+						for _, rr := range rrset.RRs {
+							log.Printf("LocateAgent: URI record: %s", rr.String())
+						}
 					}
 					// dump.P(rrset)
 					if rrset != nil && len(rrset.RRs) > 0 {

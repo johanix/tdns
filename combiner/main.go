@@ -17,9 +17,9 @@ func main() {
 	// var mconf music.Config
 
 	tdns.Globals.App.Type = tdns.AppTypeCombiner
-	tdns.Globals.App.Version = tdns.Globals.App.Version
-	tdns.Globals.App.Name = tdns.Globals.App.Name
-	tdns.Globals.App.Date = tdns.Globals.App.Date
+	tdns.Globals.App.Version = appVersion
+	tdns.Globals.App.Name = appName
+	tdns.Globals.App.Date = appDate
 
 	// These are set here to enable various config reload functions to reload from the correct files.
 	// tconf.Internal.CfgFile = tdns.DefaultCombinerCfgFile

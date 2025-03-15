@@ -2,10 +2,10 @@ include:
    - combiner-zones.yaml
 
 apiserver:
-   addresses:	[ 127.0.0.1:8082 ]
-   apikey:	you-have-stolen-my-frotzblinger
-   certFile:	/etc/tdns/certs/localhost.crt
-   keyFile:	/etc/tdns/certs/localhost.key
+   addresses:           [ 127.0.0.1:8082 ]
+   apikey:              you-have-stolen-my-frotzblinger
+   certFile:            /etc/tdns/certs/localhost.crt
+   keyFile:             /etc/tdns/certs/localhost.key
 
 service:
    name:                TDNS-COMBINER
