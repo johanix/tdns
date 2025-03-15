@@ -75,7 +75,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	Globals.App.ServerConfigTime = time.Now()
 
 	pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
-	pflag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
+	pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 	pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	pflag.Parse()
 
@@ -206,13 +206,17 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
-	conf.Internal.HelloQ = make(chan AgentMsgReport, 100)
-	conf.Internal.HeartbeatQ = make(chan AgentMsgReport, 100)
+	conf.Internal.AgentQs = AgentQs{
+		Hello:   make(chan AgentMsgReport, 100),
+		Beat:    make(chan AgentMsgReport, 100),
+		Msg:     make(chan AgentMsgReport, 100),
+		Command: make(chan AgentMsgPost, 100),
+	}
 
 	if Globals.App.Type == AppTypeAgent {
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
-		go HsyncEngine(conf, conf.Internal.HelloQ, conf.Internal.HeartbeatQ, conf.Internal.StopCh) // Only used by agent
+		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
