@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var syncTransport string
+var syncTransport, syncIdentity string
 
 func init() {
 	AgentCmd.AddCommand(hsyncCmd)
@@ -25,6 +25,7 @@ func init() {
 	hsyncCmd.AddCommand(hsyncSendHelloCmd)
 
 	hsyncStatusCmd.Flags().StringVarP(&syncTransport, "transport", "T", "", "Transport to show, default both api and dns")
+	hsyncSendHelloCmd.Flags().StringVarP(&syncIdentity, "id", "I", "", "Identity to claim in the send hello")
 }
 
 var hsyncCmd = &cobra.Command{
@@ -67,9 +68,27 @@ var hsyncStatusCmd = &cobra.Command{
 		// fmt.Printf("HSYNC status for zone %s:\n", tdns.Globals.Zonename)
 		fmt.Printf("%s  HSYNC RRset:\n", tdns.Globals.Zonename)
 		var lines []string
-		for _, rr := range resp.HsyncRRs {
-			fields := strings.Fields(rr)
-			if strings.Contains(rr, resp.Identity) {
+		for _, rrstr := range resp.HsyncRRs {
+			rr, err := dns.NewRR(rrstr)
+			if err != nil {
+				log.Printf("Failed to parse HSYNC RR: %v", err)
+				continue
+			}
+
+			privRR, ok := rr.(*dns.PrivateRR)
+			if !ok {
+				log.Printf("RR is not a PrivateRR: %v", rr)
+				continue
+			}
+
+			hsyncRR, ok := privRR.Data.(*tdns.HSYNC)
+			if !ok {
+				log.Printf("PrivateRR does not contain HSYNC data: %v", privRR)
+				continue
+			}
+
+			fields := strings.Fields(rrstr)
+			if hsyncRR.Identity == resp.Identity {
 				fields = append(fields, "(local agent)")
 			}
 			lines = append(lines, strings.Join(fields, "|"))
@@ -83,18 +102,19 @@ var hsyncStatusCmd = &cobra.Command{
 					continue
 				}
 				for transport, details := range agent.Details {
-					if syncTransport != "" && syncTransport != transport {
+					if syncTransport != "" && strings.ToUpper(syncTransport) != transport {
 						continue
 					}
 					displayTransport := transport
 					if transport == "https" {
-						displayTransport = "api"
+						displayTransport = "API"
 					}
-					fmt.Printf("Agent %q: transport %q, state %q\n",
+					fmt.Printf("Agent %q: transport %s, state %s\n",
 						agent.Identity, displayTransport, tdns.AgentStateToString[details.State])
 					if details.LatestError != "" {
 						fmt.Printf(" - Latest Error: %s\n", details.LatestError)
-						fmt.Printf(" - Time of error: %s\n", details.LatestErrorTime.Format(time.RFC3339))
+						fmt.Printf(" - Time of error: %s (duration of outage: %v)\n",
+							details.LatestErrorTime.Format(time.RFC3339), time.Since(details.LatestErrorTime))
 					}
 					fmt.Printf(" * Sent heartbeats: %d (latest %s), received heartbeats: %d (latest %s)\n",
 						details.SentBeats, details.LatestSBeat.Format(time.RFC3339),
@@ -102,7 +122,7 @@ var hsyncStatusCmd = &cobra.Command{
 					if len(details.Addrs) > 0 {
 						// fmt.Printf("      Endpoints:\n")
 						//for _, addr := range details.Addrs {
-						if transport == "dns" {
+						if transport == "DNS" {
 							target := ""
 							if details.UriRR != nil {
 								target = details.UriRR.Target
@@ -132,7 +152,7 @@ var hsyncStatusCmd = &cobra.Command{
 									}
 								}
 							}
-						} else if transport == "api" {
+						} else if transport == "API" {
 							baseURL := ""
 							if details.UriRR != nil {
 								baseURL = details.UriRR.Target
@@ -242,6 +262,8 @@ var hsyncSendHelloCmd = &cobra.Command{
 		// Get the zone (agent identity) from flags
 		agentIdentity := tdns.Globals.Zonename
 
+		myid := dns.Fqdn(syncIdentity)
+
 		var conf tdns.Config
 		err := viper.Unmarshal(&conf)
 		if err != nil {
@@ -297,11 +319,11 @@ var hsyncSendHelloCmd = &cobra.Command{
 			fmt.Printf("Sending HELLO message to agent %s...\n", agentIdentity)
 
 			// Create hello message
-			helloMsg := &tdns.AgentMsgPost{
+			helloMsg := &tdns.AgentHelloPost{
 				MessageType: "HELLO",
-				Identity:    "cli-temp-identity",
-				Time:        time.Now(),
-				Zone:        cmd.Flag("zone").Value.String(),
+				MyIdentity:  myid,
+				// Time:        time.Now(),
+				Zone: cmd.Flag("zone").Value.String(),
 			}
 
 			// Send the hello message

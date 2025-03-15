@@ -108,6 +108,9 @@ func SetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
+	if conf.Internal.DebugMode {
+		sr.HandleFunc("/agent/debug", APIagentDebug(conf)).Methods("POST")
+	}
 
 	return r, nil
 }
@@ -129,7 +132,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
 	secureRouter.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("secureRouter: received %s on URL %s", r.Method, r.URL.Path)
+			// log.Printf("secureRouter: received %s on URL %s", r.Method, r.URL.Path)
 			// Skip validation for /hello endpoint
 			if r.URL.Path == "/api/v1/hello" {
 				next.ServeHTTP(w, r)
@@ -138,8 +141,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 
 			// Get peer certificate from TLS connection
 			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-				log.Printf("secureRouter: r.TLS: %+v", r.TLS)
-				http.Error(w, "Client certificate required", http.StatusUnauthorized)
+				http.Error(w, "AgentSyncApi: Client certificate required", http.StatusUnauthorized)
 				return
 			}
 			clientCert := r.TLS.PeerCertificates[0]
@@ -148,24 +150,24 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 			clientId := clientCert.Subject.CommonName
 			agent, ok := conf.Internal.Registry.S.Get(clientId)
 			if !ok {
-				log.Printf("secureRouter: Unknown remote agent identity: %s", clientId)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				log.Printf("AgentSyncApi: Unknown remote agent identity: %s", clientId)
+				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
 			agent.mu.Lock()
-			tlsaRR := agent.Details["api"].TlsaRR
+			tlsaRR := agent.Details["API"].TlsaRR
 			agent.mu.Unlock()
 			if tlsaRR == nil {
-				log.Printf("secureRouter: No TLSA record available for client: %s", clientId)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				log.Printf("AgentSyncApi: No TLSA record available for client: %s", clientId)
+				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
 			err := VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw)
 			if err != nil {
-				log.Printf("secureRouter: Certificate verification for client id '%s' failed: %v", clientId, err)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				log.Printf("AgentSyncApi: Certificate verification for client id '%s' failed: %v", clientId, err)
+				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
@@ -175,6 +177,9 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 
 	secureRouter.HandleFunc("/ping", APIping(conf)).Methods("POST")
 	secureRouter.HandleFunc("/beat", APIbeat(conf)).Methods("POST")
+	// secureRouter.HandleFunc("/notify", APIbeat(conf)).Methods("POST")
+	// secureRouter.HandleFunc("/query", APIbeat(conf)).Methods("POST")
+	secureRouter.HandleFunc("/msg", APIbeat(conf)).Methods("POST")
 
 	return r, nil
 }
@@ -261,10 +266,10 @@ func APIdispatcherNG(conf *Config, router *mux.Router, addrs []string, certFile 
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequestClientCert,
 		// XXX: this is just for debugging:
-		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			log.Printf("TLS handshake from %s, SNI: %s", hello.Conn.RemoteAddr(), hello.ServerName)
-			return nil, nil
-		},
+		// GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		// 	log.Printf("TLS handshake from %s, SNI: %s", hello.Conn.RemoteAddr(), hello.ServerName)
+		// 	return nil, nil
+		// },
 	}
 
 	servers := make([]*http.Server, len(addresses))

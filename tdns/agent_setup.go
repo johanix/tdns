@@ -355,13 +355,13 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 	}
 
 	var details AgentDetails
-	if _, exists := agent.Details["api"]; exists {
+	if _, exists := agent.Details["API"]; exists {
 		agent.mu.Lock()
-		details = agent.Details["api"]
+		details = agent.Details["API"]
 		agent.mu.Unlock()
 	}
 
-	if !agent.Methods["api"] || details.TlsaRR == nil {
+	if !agent.Methods["API"] || details.TlsaRR == nil {
 		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
 	}
 
@@ -408,7 +408,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 	// use TLSA RR for verification
 	tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		log.Printf("VerifyPeerCertificate called for %q (have TLSA: %s)", agent.Identity,
-			agent.Details["api"].TlsaRR.String())
+			agent.Details["API"].TlsaRR.String())
 		for _, rawCert := range rawCerts {
 			cert, err := x509.ParseCertificate(rawCert)
 			if err != nil {
@@ -418,7 +418,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 				return fmt.Errorf("unexpected certificate common name (should have been %s)", agent.Identity)
 			}
 
-			err = VerifyCertAgainstTlsaRR(agent.Details["api"].TlsaRR, rawCert)
+			err = VerifyCertAgainstTlsaRR(agent.Details["API"].TlsaRR, rawCert)
 			if err != nil {
 				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 			}

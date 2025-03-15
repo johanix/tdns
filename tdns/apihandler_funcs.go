@@ -369,7 +369,7 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 		var dp DebugPost
 		err := decoder.Decode(&dp)
 		if err != nil {
-			log.Println("APICdebug: error decoding debug post:", err)
+			log.Println("APIdebug: error decoding debug post:", err)
 		}
 
 		log.Printf("API: received /debug request (cmd: %s) from %s.\n",

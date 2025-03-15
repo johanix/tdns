@@ -43,7 +43,7 @@ func (ar *AgentRegistry) GetAgentsForZone(zone string) []*Agent {
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
 		// Check any transport method - they should all have the same zone info
-		if details, exists := agent.Details["dns"]; exists && details.Zones[zone] {
+		if details, exists := agent.Details["DNS"]; exists && details.Zones[zone] {
 			agents = append(agents, agent)
 		}
 	}
@@ -106,7 +106,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 		LastState: time.Now(),
 	}
 	// Initialize Zones map for each transport
-	for _, transport := range []string{"dns", "api"} {
+	for _, transport := range []string{"DNS", "API"} {
 		details := AgentDetails{
 			Zones:       make(map[string]bool),
 			State:       AgentStateNeeded,
@@ -138,14 +138,14 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 			retries := 3
 
 			// Look up URIs for both transports
-			for _, transport := range []string{"dns", "api"} {
+			for _, transport := range []string{"DNS", "API"} {
 				details := lagent.Details[transport]
 				var targetName string
 
 				// Only look up URI if we don't have it
 				if details.UriRR == nil {
 					svcname := fmt.Sprintf("_%s._tcp.%s", transport, remoteid)
-					if transport == "api" {
+					if transport == "API" {
 						svcname = fmt.Sprintf("_https._tcp.%s", remoteid)
 					}
 					svcname = dns.Fqdn(svcname)
@@ -235,7 +235,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 
 				// Only proceed with KEY/TLSA if we have addresses and a target name
 				if len(details.Addrs) > 0 && targetName != "" {
-					if transport == "dns" && details.KeyRR == nil {
+					if transport == "DNS" && details.KeyRR == nil {
 						// Look up KEY
 						rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeKEY, timeout, retries, resolvers)
 						if err != nil {
@@ -248,7 +248,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 								log.Printf("LocateAgent: KEY record: %s", rr.String())
 								if k, ok := rr.(*dns.KEY); ok {
 									details.KeyRR = k
-									lagent.Methods["dns"] = true
+									lagent.Methods["DNS"] = true
 									agent.mu.Lock()
 									agent.Details[transport] = details
 									agent.mu.Unlock()
@@ -256,7 +256,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 								}
 							}
 						}
-					} else if transport == "api" && details.TlsaRR == nil {
+					} else if transport == "API" && details.TlsaRR == nil {
 						// Look up TLSA
 						tlsaName := fmt.Sprintf("_%d._tcp.%s", details.Port, targetName)
 						rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
@@ -270,7 +270,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 								log.Printf("LocateAgent: TLSA record: %s", rr.String())
 								if t, ok := rr.(*dns.TLSA); ok {
 									details.TlsaRR = t
-									lagent.Methods["api"] = true
+									lagent.Methods["API"] = true
 									agent.mu.Lock()
 									agent.Details[transport] = details
 									agent.mu.Unlock()
@@ -285,26 +285,26 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 			}
 
 			// Check if API transport details are complete
-			details := lagent.Details["api"]
+			details := lagent.Details["API"]
 			if details.UriRR != nil && details.TlsaRR != nil && len(details.Addrs) > 0 {
 				details.ContactInfo = "complete"
 				details.State = AgentStateKnown
-				lagent.Methods["api"] = true
+				lagent.Methods["API"] = true
 				log.Printf("LocateAgent: API transport details for remote agent %s are complete", remoteid)
-				lagent.Details["api"] = details
+				lagent.Details["API"] = details
 			}
 
-			details = lagent.Details["dns"]
+			details = lagent.Details["DNS"]
 			if details.UriRR != nil && details.KeyRR != nil && len(details.Addrs) > 0 {
 				details.ContactInfo = "complete"
 				details.State = AgentStateKnown
-				lagent.Methods["dns"] = true
+				lagent.Methods["DNS"] = true
 				log.Printf("LocateAgent: DNS transport details for remote agent %s are complete", remoteid)
-				lagent.Details["dns"] = details
+				lagent.Details["DNS"] = details
 			}
 
 			// Update agent state based on available methods
-			if lagent.Details["dns"].ContactInfo == "complete" || lagent.Details["api"].ContactInfo == "complete" {
+			if lagent.Details["DNS"].ContactInfo == "complete" || lagent.Details["API"].ContactInfo == "complete" {
 				lagent.State = AgentStateKnown
 				lagent.LastState = time.Now()
 
@@ -315,12 +315,13 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 					lagent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
 					lagent.LastState = time.Now()
 				}
+				lagent.Api.ApiClient.Debug = false // disable debug logging for API client
 
-				if len(lagent.Details["api"].Addrs) > 0 {
-					log.Printf("Remote agent %q has the API addresses %v", remoteid, lagent.Details["api"].Addrs)
+				if len(lagent.Details["API"].Addrs) > 0 {
+					log.Printf("Remote agent %q has the API addresses %v", remoteid, lagent.Details["API"].Addrs)
 					var tmp []string
-					port := strconv.Itoa(int(lagent.Details["api"].Port))
-					for _, addr := range lagent.Details["api"].Addrs {
+					port := strconv.Itoa(int(lagent.Details["API"].Port))
+					for _, addr := range lagent.Details["API"].Addrs {
 						tmp = append(tmp, net.JoinHostPort(addr, port))
 					}
 					lagent.Api.ApiClient.Addresses = tmp
@@ -338,9 +339,9 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 
 					// Try to send hello
 					go func() {
-						_, resp, err := lagent.SendApiHello(&AgentMsgPost{
+						_, resp, err := lagent.SendApiHello(&AgentHelloPost{
 							MessageType: "HELLO",
-							Identity:    ar.LocalAgent.Identity, // our identity
+							MyIdentity:  ar.LocalAgent.Identity, // our identity
 							Zone:        zonename,
 						})
 						if err != nil {
@@ -348,7 +349,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 							return
 						}
 
-						var amr AgentMsgResponse
+						var amr AgentHelloResponse
 						err = json.Unmarshal(resp, &amr)
 						if err != nil {
 							log.Printf("LocateAgent: error unmarshalling HELLO response: %v", err)
@@ -358,13 +359,19 @@ func (ar *AgentRegistry) LocateAgent(remoteid string, zonename string) {
 						log.Printf("LocateAgent: HELLO to %s returned: %s", remoteid, amr.Msg)
 
 						// Update state after successful hello
+						ar.mu.Lock()
+						details := lagent.Details["API"]
 						if amr.Status == "ok" {
-							lagent.State = AgentStateHelloOK
-							lagent.LastState = time.Now()
-							ar.mu.Lock()
-							ar.S.Set(remoteid, lagent)
-							ar.mu.Unlock()
+							lagent.State = AgentStateIntroduced
+							details.LatestError = ""
+						} else {
+							details.LatestError = amr.ErrorMsg
+							lagent.InitialZone = zonename // need to store this for future retries
 						}
+						lagent.Details["API"] = details
+						lagent.LastState = time.Now()
+						ar.S.Set(remoteid, lagent)
+						ar.mu.Unlock()
 					}()
 				}
 				return
