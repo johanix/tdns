@@ -23,7 +23,10 @@ var configReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send config reload command to tdns-server",
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendConfigCommand(tdns.Globals.Api, tdns.ConfigPost{
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
+		resp, err := SendConfigCommand(api, tdns.ConfigPost{
 			Command: "reload",
 		})
 
@@ -32,7 +35,7 @@ var configReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -46,7 +49,10 @@ var configReloadZonesCmd = &cobra.Command{
 	Use:   "reload-zones",
 	Short: "Send reload-zones command to tdns-server",
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendConfigCommand(tdns.Globals.Api, tdns.ConfigPost{
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
+		resp, err := SendConfigCommand(api, tdns.ConfigPost{
 			Command: "reload-zones",
 		})
 
@@ -55,7 +61,7 @@ var configReloadZonesCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -69,7 +75,10 @@ var configStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Send config status command to tdns-server",
 	Run: func(cmd *cobra.Command, args []string) {
-		resp, err := SendConfigCommand(tdns.Globals.Api, tdns.ConfigPost{
+		prefixcmd, _ := getCommandContext("config")
+		api, _ := getApiClient(prefixcmd, true)
+
+		resp, err := SendConfigCommand(api, tdns.ConfigPost{
 			Command: "status",
 		})
 
@@ -78,11 +87,12 @@ var configStatusCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
 		if tdns.Globals.Verbose {
+			fmt.Printf("Status for %s:\n", resp.AppName)
 			if len(resp.DnsEngine.Addresses) > 0 {
 				fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
 			} else {

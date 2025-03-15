@@ -36,7 +36,7 @@ func init() {
 	cobra.OnInitialize(initConfig, initApi)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		fmt.Sprintf("config file (default is %s)", tdns.DefaultCfgFile))
+		fmt.Sprintf("config file (default is %s)", tdns.DefaultCliCfgFile))
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 
@@ -54,7 +54,7 @@ func initConfig() {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		viper.SetConfigFile(tdns.DefaultCfgFile)
+		viper.SetConfigFile(tdns.DefaultCliCfgFile)
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -66,7 +66,7 @@ func initConfig() {
 		}
 		cfgFileUsed = viper.ConfigFileUsed()
 	} else {
-		log.Fatalf("Could not load config %s: Error: %v", tdns.DefaultCfgFile, err)
+		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
 
 	LocalConfig = viper.GetString("cli.localconfig")
@@ -90,15 +90,40 @@ func initConfig() {
 	}
 
 	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
+	err := viper.Unmarshal(&cconf)
+	if err != nil {
+		log.Printf("Error from viper.UnMarshal(cfg): %v", err)
+	}
+}
+
+var cconf CliConf
+
+// var ApiClients = map[string]*tdns.ApiClient{}
+
+type CliConf struct {
+	ApiServers []ApiDetails
+}
+
+type ApiDetails struct {
+	Name       string `validate:"required" yaml:"name"`
+	BaseURL    string `validate:"required" yaml:"baseurl"`
+	ApiKey     string `validate:"required" yaml:"apikey"`
+	AuthMethod string `validate:"required" yaml:"authmethod"`
 }
 
 func initApi() {
-	baseurl := viper.GetString("cli.tdnsd.baseurl")
-	apikey := viper.GetString("cli.tdnsd.apikey")
-	authmethod := viper.GetString("cli.tdnsd.authmethod")
-
-	tdns.Globals.Api = tdns.NewClient("tdns-cli", baseurl, apikey, authmethod, "insecure", tdns.Globals.Verbose, tdns.Globals.Debug)
-	if tdns.Globals.Api == nil {
-		log.Fatalf("initApi: tdns.Globals.Api is nil. Exiting.")
+	for _, val := range cconf.ApiServers {
+		// XXX: here we should validate the conf for this apiserver
+		tmp := tdns.NewClient("tdns-cli", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
+		if tmp == nil {
+			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
+		}
+		tdns.Globals.ApiClients[val.Name] = tmp
+		if tdns.Globals.Debug {
+			fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
+		}
 	}
+
+	// for convenience we store the API client for "server" in the old place also
+	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-server"]
 }

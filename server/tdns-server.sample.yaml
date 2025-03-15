@@ -1,0 +1,173 @@
+# Main TDNS configuration
+include:
+  - server-templates.yaml
+  - server-zones.yaml
+
+cli:
+   tdnsd:
+      baseurl:          https://127.0.0.1:8989/api/v1
+      apikey:           winter-is-coming-santa-stuck-in-chimney
+      authmethod:       X-API-Key
+
+service:
+   name:		TDNSD
+   verbose:		true
+   debug:		true   # writes processed zone to disk
+   refresh:		true
+   maxrefresh:		1800    # seconds. Cap refresh counter to max this
+#   reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
+   resign:		true	# re-sign primary zones as needed
+
+dnsengine:
+   addresses:		[ 127.0.0.1:5355, '[::1]:5355']
+   zones:
+      config:		/etc/axfr.net/tdns-zones.yaml
+      filedir:		/etc/axfr.net/zones
+      filetmpl:		"%s/%s.zone.new"		# zonename.zone
+
+resignerengine:
+   interval:		300 # seconds between runs. Reasonable value is likely ~3600
+   keygen:
+      mode:		internal # internal | external
+      generator:	/opt/local/bin/dnssec-keygen
+#      algorithm:	ED25519	# moved to the dnssec policy
+   
+apiserver:
+   addresses:     	[ 127.0.0.1:8989 ]
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
+   certfile:		/etc/axfr.net/certs/servers/localhost..crt
+   keyfile:		/etc/axfr.net/certs/servers/localhost..key
+
+server:
+   id:			ooga booga boo
+   version:		tdnsd {version}
+   hostname:		there-is-no-place-like-127.0.0.1
+
+validator:
+   active:		true
+   verbose:		true
+   debug:		true
+   dnskey:
+      trusted:
+         file:		/etc/axfr.net/trust-anchors.yaml
+   sig0:
+      trusted:
+         file:		/etc/axfr.net/sig0-keys.yaml
+
+resolver:
+   address:		8.8.8.8:53 
+#   address:		172.16.1.11:53 
+#   address:		10.0.1.1:53
+
+delegationsync:
+   parent:
+      # in parent zones, we support these schemes, and will publish DSYNC RRs
+      # if allowed to:
+      schemes:		[ notify, update ]
+      notify:
+         types:		[ CDS, CSYNC ]
+         port:		5354				# MUST be a port the dnsengine listens on
+         target:	notifications.{ZONENAME}	# {ZONENAME} will be expanded at run-time
+         addresses:	[ 127.0.0.1, '::1' ]		# There must be no port and also no '[]' around v6 addresses here
+      update:
+         types:		[ ANY ]
+         port:		5354				# MUST be a port the dnsengine listens on
+         target:	updates.{ZONENAME}
+         addresses:	[ 127.0.0.1, '::1' ]
+         keygen:
+            mode:	internal # internal | external
+            generator:	/opt/local/bin/dnssec-keygen
+            algorithm:	ED25519
+
+   child:
+      # in child zones, we will attempt the following schemes, if the parent
+      # supports them and we're allowed to modify the child zone if needed
+      # (adding CDS, CSYNC, KEY RRs, re-signing, etc):
+      schemes:		[ notify, update ]
+      update:
+         keygen:
+            mode:	external # internal | external
+            generator:	/opt/local/bin/dnssec-keygen
+            algorithm:	ED25519
+
+keybootstrap:
+   consistent-lookup:
+      iterations:	3
+      interval:		60	# seconds between lookups
+      nameservers:	all	# one | all
+
+dnssecpolicies:
+   default:
+      algorithm:        ED25519
+      ksk:
+         lifetime:      forever
+         sigvalidity:   168h    # 24*7h = 1 week
+      zsk:
+         lifetime:      forever
+         sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
+
+   fastroll:
+      algorithm:        ED25519
+      ksk:
+         lifetime:      48h
+         sigvalidity:   5h
+      zsk:
+         lifetime:      12h
+         sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
+
+multisigner:
+   mstest:
+      controller:
+         notify:
+            target:		music.{ZONENAME}
+            addresses:		[ 127.0.0.1, '::1' ]	# must be no '[]' around v6 addresses here.
+            port:		"5355"
+            publish-dsync:	false # in a multi-signer sidecar setup, the zone should typically not publish any DSYNC DNSKEY RR
+         api:
+            baseurl:	http://127.0.0.1:8990/api/v1
+            apikey:	lets-make-some-noise
+            authmethod:	X-API-Key
+            usetls:	true
+   broken:
+      controller:
+         notify:
+            address:	127..0.0.1
+         api:
+            baseurl:	foo://bar.se/
+
+# scanner:
+#    interval:    	60
+
+db:
+   file:		/var/tmp/tdns.db
+
+log:
+   file:		/var/log/axfr.net/tdns-server.log
+
+common:
+   servername:		tdnsd
+   command:		/usr/local/libexec/tdnsd
+
+# This is where registrars are declared, including where they want notifications/updates.
+# There is a mapping from child zones (per parent zone) to these registrars and that will
+# (should) cause a runtime generation of a suitable DSYNC RRset in response to queries for
+# child._dsync.parent. DSYNC
+registrars:
+   ooga-reg:
+      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.ooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.ooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 updates.ooga-reg.axfr.net.
+   booga-reg:
+      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.booga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.booga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.booga-reg.axfr.net.
+   mooga-reg:
+      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.mooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.mooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.mooga-reg.axfr.net.

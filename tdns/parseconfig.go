@@ -18,91 +18,176 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
-type Zconfig struct {
-	Templates map[string]TemplateConf
-	Zones     map[string]ZoneConf
+// Add near the top of the file with other vars
+var Templates = make(map[string]ZoneConf)
+
+// OrderedConfig preserves the order of configuration entries
+type ConfigEntry struct {
+	Key   string
+	Value interface{}
 }
 
-// type TAtmp map[string]TmpAnchor
+// processConfigFile reads and processes a YAML config file and any included files.
+// IMPORTANT: All includes must be specified as a single array at the top level of the config:
+//
+//	include:
+//	  - file1.yaml
+//	  - file2.yaml
+//
+//	# Rest of configuration...
+//	stuff1: value1
+//	stuff2: value2
+//
+// The older style of multiple separate 'include' statements throughout the file
+// is not supported.
+func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, error) {
+	if depth > 10 {
+		return nil, errors.New("maximum include depth exceeded (10 levels)")
+	}
 
-// type TmpAnchor struct {
-// 	Name   string
-// 	Dnskey string
-// }
+	// Read the file
+	if Globals.Debug {
+		log.Printf("processConfigFile: Reading %q", file)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file %s: %v", file, err)
+	}
 
-// type Sig0tmp map[string]TmpSig0Key
+	// Parse YAML directly into a map
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		if Globals.Debug {
+			log.Printf("processConfigFile: error unmarshalling YAML from %q to struct", file)
+		}
+		return nil, fmt.Errorf("error parsing YAML: %v", err)
+	}
 
-// type TmpSig0Key struct {
-// 	Name string
-// 	Key  string
-// }
+	// Handle includes if present
+	if includes, ok := config["include"].([]interface{}); ok {
+		delete(config, "include")
+		for _, inc := range includes {
+			if includeFile, ok := inc.(string); ok {
+				var fullPath string
+				if filepath.IsAbs(includeFile) {
+					// If the included file path is absolute, use it as is
+					fullPath = includeFile
+				} else {
+					// If the included file path is relative, join it with the base directory
+					fullPath = filepath.Join(baseDir, includeFile)
+				}
+				fullPath = filepath.Clean(fullPath)
 
-func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
-	var lifetime_secs, sigvalidity_secs time.Duration
-	var err error
+				included, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1)
+				if err != nil {
+					return nil, err
+				}
 
-	switch lifetime {
-	case "forever":
-		lifetime_secs = time.Duration(10000) * time.Hour
-
-	case "none":
-		lifetime_secs = time.Duration(0)
-
-	default:
-		lifetime_secs, err = time.ParseDuration(lifetime)
-		if err != nil {
-			log.Fatalf("Error from ParseDuration: %v", err)
+				// Merge included config
+				for k, v := range included {
+					if existing, exists := config[k]; exists {
+						// If both are maps, merge them
+						if existingMap, ok1 := existing.(map[string]interface{}); ok1 {
+							if newMap, ok2 := v.(map[string]interface{}); ok2 {
+								for k2, v2 := range newMap {
+									existingMap[k2] = v2
+								}
+								continue
+							}
+						}
+					}
+					// Otherwise just override
+					config[k] = v
+				}
+			}
 		}
 	}
 
-	sigvalidity_secs, err = time.ParseDuration(sigvalidity)
-	if err != nil {
-		log.Fatalf("Error from ParseDuration: %v", err)
-	}
-	return KeyLifetime{
-		Lifetime:    uint32(lifetime_secs.Seconds()),
-		SigValidity: uint32(sigvalidity_secs.Seconds()),
-	}
+	return config, nil
 }
 
-func ParseConfig(conf *Config, reload bool) error {
+func (conf *Config) ParseConfig(reload bool) error {
 	if Globals.Debug {
 		log.Printf("Enter ParseConfig")
 	}
+
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
-		cfgfile = DefaultCfgFile
-	}
-	viper.SetConfigFile(cfgfile)
-
-	viper.AutomaticEnv() // read in environment variables that match
-
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
-	} else {
-		log.Fatalf("Could not load config %s: Error: %v", cfgfile, err)
+		log.Printf("No config file specified. Proceed at own risk.")
+		return nil
 	}
 
-	viper.WriteConfigAs(fmt.Sprintf("/tmp/%s.parsed.yaml", conf.App.Name))
-	Globals.IMR = viper.GetString("resolver.address")
-	if Globals.IMR == "" {
-		log.Fatalf("Error: IMR undefined.")
-	} else {
-		log.Printf("*** Using resolver: %s", Globals.IMR)
-	}
-
-	err := viper.Unmarshal(&conf)
+	// Process the config file and all includes
+	configMap, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
 	if err != nil {
-		log.Fatalf("Error unmarshalling config into struct: %v", err)
+		return fmt.Errorf("error processing config: %v", err)
 	}
 
-	if conf.App.Mode == "server" || conf.App.Mode == "sidecar" {
-		// dump.P(conf.DnssecPolicies)
+	// Configure mapstructure decoder to respect yaml tags
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  conf,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+
+	if Globals.Debug {
+		// log.Printf("Before decoding configuration")
+	}
+
+	// Decode the entire config at once
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding config: %v", err)
+	}
+
+	// After storing in configMap
+	if Globals.Debug {
+		// log.Printf("After decoding configuration")
+		// for _, tmpl := range conf.Templates {
+		// log.Printf("Template %q options: %+v", tmpl.Name, tmpl.OptionsStrs)
+		// }
+	}
+
+	// Build template map
+	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
+	for _, tmpl := range conf.Templates {
+		if tmpl.Name == "" {
+			return fmt.Errorf("template missing required 'name' field")
+		}
+		if _, exists := Templates[tmpl.Name]; exists {
+			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
+		}
+		Templates[tmpl.Name] = tmpl
+	}
+
+	// log.Printf("*** ParseConfig: 1")
+	// Set up viper with the same config for compatibility
+	processedConfig, err := yaml.Marshal(configMap)
+	if err != nil {
+		return fmt.Errorf("error marshaling processed config: %v", err)
+	}
+
+	if Globals.Debug {
+		// log.Printf("*** ParseConfig: 2")
+		// log.Printf("Processed config YAML:\n%s", string(processedConfig))
+	}
+
+	viper.SetConfigType("yaml")
+	if err := viper.ReadConfig(strings.NewReader(string(processedConfig))); err != nil {
+		return fmt.Errorf("error reading processed config: %v", err)
+	}
+
+	// log.Printf("*** ParseConfig: 3")
+
+	// Initialize KeyDB if needed
+	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeMSA || Globals.App.Type == AppTypeAgent {
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -117,101 +202,27 @@ func ParseConfig(conf *Config, reload bool) error {
 			}
 			if tmp.Algorithm == 0 {
 				log.Printf("Error: DnssecPolicy %s has unknown algorithm: %s. Policy ignored.", name, dp.Algorithm)
-				// if this is a reload, we ignore the policy from the config, i.e. we keep the old one
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
+			// log.Printf("*** ParseConfig: 5. DnssecPolicy: %q", name)
 		}
 
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			// log.Fatalf("Error: DnssecPolicy 'default' not defined. Default policy is required.")
 			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
 		}
-
-		// dump.P(conf.Internal.DnssecPolicies)
 	}
-
-	var dpn []string
-	for name := range conf.Internal.DnssecPolicies {
-		dpn = append(dpn, name)
-	}
-	log.Printf("*** ParseConfig: DnssecPolicy configs: %v", dpn)
-
-	// conf.Internal.MultiSignerConfigs = make(map[string]MultiSignerConf)
-	for msname, msconf := range conf.MultiSigner {
-		if len(msconf.Controller.Notify.Addresses) == 0 {
-			log.Printf("Error: MultiSigner config %s has no notify addresses specified. MultiSigner config ignored.", msname)
-			delete(conf.MultiSigner, msname)
-			continue
-		}
-		if msconf.Controller.Notify.Port == "" {
-			log.Printf("Error: MultiSigner config %s has no notify port specified. MultiSigner config ignored.", msname)
-			delete(conf.MultiSigner, msname)
-			continue
-		}
-		for _, addr := range msconf.Controller.Notify.Addresses {
-			target := net.JoinHostPort(string(addr), msconf.Controller.Notify.Port)
-			msconf.Controller.Notify.Targets = append(msconf.Controller.Notify.Targets, target)
-		}
-
-		if msconf.Controller.API.BaseURL == "" || msconf.Controller.API.ApiKey == "" {
-			log.Printf("Error: MultiSigner %s has no API base URL or API key. MultiSigner config ignored.", msname)
-			delete(conf.MultiSigner, msname)
-			continue
-		}
-	}
-
-	var msc []string
-	for name := range conf.MultiSigner {
-		msc = append(msc, name)
-	}
-	log.Printf("*** ParseConfig: MultiSigner configs: %v", msc)
-
-	// dump.P(conf.Registrars)
-	for reg, regdata := range conf.Registrars {
-		log.Printf("*** ParseConfig: Registrar %s has %d DSYNC records; parsing them for correctness", reg, len(regdata))
-		for _, regdsync := range regdata {
-			_, err := dns.NewRR(regdsync)
-			if err != nil {
-				log.Printf("*** ParseConfig: Error parsing registrar %s DSYNC: %v\nFailed DSYNC RR: \"%s\"", reg, err, regdsync)
-			}
-		}
-	}
-
-	// If a zone config file is found, read it in.
-	cfgdata, err := os.ReadFile(conf.Internal.ZonesCfgFile)
-	if err != nil {
-		log.Fatalf("Error from ReadFile: %v", err)
-	}
-
-	var zconf Zconfig
-
-	err = yaml.Unmarshal(cfgdata, &zconf)
-	if err != nil {
-		log.Fatalf("Error from yaml.Unmarshal(Zconfig): %v", err)
-	}
-
-	// This kludge is to allow the zones to be a map[string]ZoneConf,
-	// with the zone name as the key (which viper doesn't allow)
-	conf.Zones = zconf.Zones
-
-	fmt.Printf("YAML parsed. There are %d zones:", len(conf.Zones))
-	for key := range conf.Zones {
-		fmt.Printf(" [%s]", key)
-	}
-	fmt.Println()
+	// log.Printf("*** ParseConfig: 6")
 
 	kdb := conf.Internal.KeyDB
-	// fmt.Printf("DEBUG: conf.AppName: %s AppMode: %s\n", conf.AppName, conf.AppMode)
 	if !reload || kdb == nil {
-
 		dbFile := viper.GetString("db.file")
 		// Ensure the database file path is within allowed boundaries
 		dbFile = filepath.Clean(dbFile)
 		if strings.Contains(dbFile, "..") {
 			return errors.New("invalid database file path: must not contain directory traversal")
 		}
-		if conf.App.Name != "sidecar-cli" && conf.App.Name != "tdns-cli" {
+		if Globals.App.Name != "sidecar-cli" && Globals.App.Name != "tdns-cli" {
 			// Verify that we have a MUSIC DB file.
 			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
 			if _, err := os.Stat(dbFile); os.IsNotExist(err) {
@@ -228,97 +239,61 @@ func ParseConfig(conf *Config, reload bool) error {
 		conf.Internal.KeyDB = kdb
 	}
 
-	// XXX: I don't think we want this anymore.
-	//	if err != nil {
-	//		log.Fatalf("Error from LoadDnskeyTrustAnchors(): %v", err)
-	//	}
-	//	err = kdb.LoadSig0ChildKeys()
-	//	if err != nil {
-	//		log.Fatalf("Error from LoadSig0ChildKeys(): %v", err)
-	//	}
+	// log.Printf("*** ParseConfig: 7")
 
-	err = ValidateConfig(nil, DefaultCfgFile) // will terminate on error
+	err = ValidateConfig(nil, conf.Internal.CfgFile) // will terminate on error
 	if err != nil {
 		return err
 	}
 
 	if Globals.Debug {
-		log.Printf("ParseConfig: exit")
+		// dump.P(conf.Agent)
+		// log.Printf("** ParseConfig: exit")
 	}
 	return nil
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
-func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, error) {
+func (conf *Config) ParseZones(reload bool) ([]string, error) {
 	if Globals.Debug {
 		log.Printf("ParseZones: enter")
 	}
 	var all_zones []string
+	var primary_zones []string
 
-	zonescfgfile := conf.Internal.ZonesCfgFile
-	if zonescfgfile == "" {
-		zonescfgfile = ZonesCfgFile
-	}
-	log.Printf("ParseZones: using zone configs from file: %s\n", zonescfgfile)
+	// Process each zone configuration
+	for _, zconf := range conf.Zones {
+		zname := dns.Fqdn(zconf.Name)
+		zconf.Name = zname
 
-	// If a zone config file is found, read it in.
-	zonecfgs, err := os.ReadFile(zonescfgfile)
-	if err != nil {
-		log.Fatalf("Error from ReadFile: %v", err)
-	}
+		zd := ZoneData{
+			ZoneName: zname,
+			Zonefile: zconf.Zonefile,
+		}
 
-	var zconfig Zconfig
-
-	err = yaml.Unmarshal(zonecfgs, &zconfig)
-	if err != nil {
-		log.Fatalf("Error from yaml.Unmarshal(Zconfig): %v", err)
-	}
-
-	//	for name, data := range zconfig.Templates {
-	//		fmt.Printf("Template %s:\n%v\n", name, data)
-	//	}
-
-	zones := zconfig.Zones
-	primary_zones := []string{}
-
-	// The zone structure is a map[string]ZoneConf, with the zone name as the key.
-	// However, the config structure is
-	// zones:
-	//    zone_id:
-	//       name: zone_name
-	//       ...
-	// Therefore we need to ensure that we use the FQDN of the zone name as the key, regardless of the zone_id.
-	for zid, zconf := range zconfig.Zones {
 		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
 			log.Printf("ParseZones: Zone %s contains invalid characters. Ignoring.", zconf.Name)
-			delete(zones, zid)
+			zd.SetError(ConfigError, "zone name contains invalid characters: %q", zconf.Name)
 			continue
 		}
 
-		zname := dns.Fqdn(zconf.Name)
-		if zname != zid {
-			delete(zones, zid)
-			zconf.Name = zname
-			zones[zname] = zconf
-		}
-
-		var tmpl TemplateConf
-		var exist bool
-		var err error
-
+		// Handle template expansion if specified
 		if zconf.Template != "" {
-			if tmpl, exist = zconfig.Templates[zconf.Template]; exist {
-				fmt.Printf("Zone %s uses the existing template %s\n", zname, zconf.Template)
-				zconf, err = ExpandTemplate(zconf, tmpl, conf.App.Mode)
+			if tmpl, exist := Templates[zconf.Template]; exist {
+				var err error
+				//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
+				zconf, err = ExpandTemplate(zconf, &tmpl, Globals.App.Type)
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
-					os.Exit(1)
-				} else {
-					fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
-					// dump.P(zconf)
+					// return nil, err
+					zd.SetError(ConfigError, "template expansion error: %q: %v", zconf.Template, err)
+					continue
 				}
+				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
 			} else {
-				fmt.Printf("Zone %s refers to the NON-existing template %s. Ignored.\n", zname, zconf.Template)
+				zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
+				fmt.Printf("Zone %q refers to the non-existing template %q. Ignored.\n", zname, zconf.Template)
+				continue
 			}
 		}
 
@@ -333,9 +308,8 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 		case "slice":
 			zonestore = SliceZone
 		default:
-			log.Printf("Zone %s: Unknown zone store type: \"%s\". Zone ignored.", zname, zconf.Store)
-			delete(zones, zname)
-			continue
+			log.Printf("Zone %s: Unknown zone store type: %q. Using map store.", zname, zconf.Store)
+			zonestore = MapZone
 		}
 
 		var zonetype ZoneType
@@ -347,14 +321,21 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 		case "secondary":
 			zonetype = Secondary
 			if zconf.Primary == "" {
-				log.Printf("Error: Zone %s is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
-				delete(zones, zname)
+				log.Printf("Error: Zone %q is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
+				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
 				continue
+			}
+
+			// Check if primary has port specified
+			_, _, err := net.SplitHostPort(zconf.Primary)
+			if err != nil {
+				log.Printf("Warning: Zone %q: primary %q has no port specified, using default port :53", zname, zconf.Primary)
+				zconf.Primary = net.JoinHostPort(zconf.Primary, "53")
 			}
 
 		default:
 			log.Printf("Error: Zone %s: Unknown zone type: \"%s\". Zone ignored.", zname, zconf.Type)
-			delete(zones, zname)
+			zd.SetError(ConfigError, "unknown zone type: %s", zconf.Type)
 			continue
 		}
 
@@ -366,12 +347,13 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			zconf.DnssecPolicy = ""
 		}
 		if zconf.DnssecPolicy != "" {
-			_, exist = conf.DnssecPolicies[zconf.DnssecPolicy]
+			_, exist := conf.DnssecPolicies[zconf.DnssecPolicy]
 			if !exist {
 				log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Zone will not be signed.", zname, zconf.DnssecPolicy)
 				zconf.DnssecPolicy = ""
+				zd.SetError(DnssecError, "DNSSEC policy %q does not exist", zconf.DnssecPolicy)
 			}
-			log.Printf("ParseZones: zone %s: DNSSEC policy \"%s\" accepted", zname, zconf.DnssecPolicy)
+			log.Printf("ParseZones: zone %s: DNSSEC policy %q accepted", zname, zconf.DnssecPolicy)
 		}
 
 		log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
@@ -381,7 +363,8 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			option = strings.ToLower(option)
 			opt, exist := StringToZoneOption[option]
 			if !exist {
-				log.Printf("ParseZones: Zone %s: Unknown option: \"%s\". Ignored.", zname, option)
+				log.Printf("ParseZones: Zone %s: Unknown option: %q. Ignored.", zname, option)
+				zd.SetError(ConfigError, "unknown config option: %q", option)
 				continue
 			}
 
@@ -390,6 +373,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				OptDelSyncChild,      // as a child, try to sync with parent via DSYNC scheme
 				OptAllowUpdates,      // zone allows DNS UPDATEs to authoritiative data
 				OptAllowChildUpdates, // zone allows updates to child delegation information
+				OptAllowCombine,      // zone allows combine with local changes
 				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
 				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
 				OptDontPublishKey:    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
@@ -397,12 +381,12 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				cleanoptions = append(cleanoptions, opt)
 
 			case OptOnlineSigning: // zone may be signed (and re-signed) online as needed; only possible if dnssec policy is set
-				if conf.App.Mode == "agent" {
+				if Globals.App.Type == AppTypeAgent {
 					log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
 					continue
 				}
-				if conf.App.Mode == "sidecar" {
-					log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-SIDECAR does not allow online signing.", zname, ZoneOptionToString[opt])
+				if Globals.App.Type == AppTypeMSA {
+					log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-MSA does not allow online signing.", zname, ZoneOptionToString[opt])
 					continue
 				}
 				if zconf.DnssecPolicy != "" {
@@ -415,15 +399,18 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			case OptMultiSigner:
 				if zconf.MultiSigner == "" || zconf.MultiSigner == "none" {
 					log.Printf("Error: Zone %s: Option \"%s\" set without a corresponding multisigner config. Option ignored.", zname, ZoneOptionToString[opt])
+					zd.SetError(ConfigError, "option %s set without a corresponding multisigner config", ZoneOptionToString[opt])
 					continue
 				}
 				if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
 					log.Printf("Error: Zone %s: Option \"%s\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, ZoneOptionToString[opt], zconf.MultiSigner)
+					zd.SetError(ConfigError, "option %s set to non-existing multi-signer config \"%s\"", ZoneOptionToString[opt], zconf.MultiSigner)
 					continue
 				}
 				if conf.Internal.MusicSyncQ == nil {
 					log.Printf("Error: Zone %s: Option \"%s\" set but no multi-signer sync channel configured. This is a fatal error.", zname, ZoneOptionToString[opt])
-					return nil, errors.New("ParseZones: no multi-signer sync channel configured")
+					zd.SetError(ConfigError, "no multi-signer sync channel configured")
+					continue
 				}
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
@@ -431,12 +418,12 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 
 			default:
 				// Should not happen
-				log.Printf("Error: Zone %s: Unknown option: \"%s\". Zone ignored.", zname, ZoneOptionToString[opt])
-				delete(zones, zname)
+				log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])
+				zd.SetError(ConfigError, "unknown config option: %s", ZoneOptionToString[opt])
+				continue
 			}
 		}
 		zconf.Options = cleanoptions
-		zones[zname] = zconf
 		var outopts []string
 		for o, val := range options {
 			if val {
@@ -457,9 +444,12 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			// these are also ok, but imply that no updates are allowed
 			options[OptAllowChildUpdates] = false
 		default:
-			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Child.Type)
-			delete(zones, zname)
+			log.Printf("ParseZones: Error: zone %s has an unknown child update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Child.Type)
+			zd.SetError(ConfigError, "unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
+			continue
 		}
+
+		// log.Printf("*** ParseZones: 1")
 
 		switch zconf.UpdatePolicy.Zone.Type {
 		case "selfsub", "self":
@@ -469,11 +459,13 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			options[OptAllowUpdates] = false
 		default:
 			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Zone.Type)
-			delete(zones, zname)
+			zd.SetError(ConfigError, "unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
+			continue
 		}
 
+		// log.Printf("*** ParseZones: 2")
 		var rrt uint16
-		// var exist bool
+		var exist bool
 		childrrtypes := map[uint16]bool{}
 		for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
 			rrtype = strings.ToUpper(rrtype)
@@ -482,6 +474,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			}
 		}
 
+		// log.Printf("*** ParseZones: 3")
 		zonerrtypes := map[uint16]bool{}
 		for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
 			rrtype = strings.ToUpper(rrtype)
@@ -490,6 +483,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			}
 		}
 
+		// log.Printf("*** ParseZones: 4")
 		policy := UpdatePolicy{
 			Child: UpdatePolicyDetail{
 				Type:         zconf.UpdatePolicy.Child.Type,
@@ -502,9 +496,34 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 				RRtypes: zonerrtypes,
 			},
 		}
+
+		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
+			// Agent only supports primary zone if it matches its identity
+			if zname != conf.Agent.Identity {
+				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.Agent.Identity)
+				continue
+			} else {
+				// For agent's own zone, ensure required options are set
+				options[OptAllowUpdates] = true
+				options[OptOnlineSigning] = true
+			}
+		}
+
+		// log.Printf("*** ParseZones: 5. Refreshch: %v", conf.Internal.RefreshZoneCh)
+
+		// Validate this zone's configuration
+		var zones = make(map[string]interface{}, 1)
+		zones["zone:"+zname] = zconf
+		if errmsg, err := ValidateBySection(conf, zones, "foobar"); err != nil {
+			log.Printf("Error validating zone %s:\n%s", zname, errmsg)
+			zd.SetError(ConfigError, "config validation: %v", err)
+			continue
+		}
+
 		all_zones = append(all_zones, zname)
 
-		zrch <- ZoneRefresher{
+		// If validation passed, send to refresh channel
+		conf.Internal.RefreshZoneCh <- ZoneRefresher{
 			Name:         zname,
 			Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
 			ZoneType:     zonetype, // primary | secondary
@@ -516,17 +535,17 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 			UpdatePolicy: policy,
 			DnssecPolicy: zconf.DnssecPolicy,
 		}
+
+		// log.Printf("*** ParseZones: 6")
 	}
 
-	if conf.App.Mode == "agent" && len(primary_zones) > 0 {
-		fmt.Printf("Error: The TDNS agent does not support primary zones: %v\n", primary_zones)
-		log.Fatalf("Error: The TDNS agent does not support primary zones: %v", primary_zones)
-	}
+	// log.Printf("*** ParseZones: 7")
 
-	conf.Zones = zones
+	// ValidateZones(conf, ZonesCfgFile) // will terminate on error
+	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)",
+		all_zones, len(conf.Internal.RefreshZoneCh))
 
-	ValidateZones(conf, ZonesCfgFile) // will terminate on error
-	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)", all_zones, len(zrch))
+	// log.Printf("*** ParseZones: 9")
 
 	if Globals.Debug {
 		log.Print("ParseZones: exit")
@@ -534,7 +553,7 @@ func ParseZones(conf *Config, zrch chan ZoneRefresher, reload bool) ([]string, e
 	return all_zones, nil
 }
 
-func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf, error) {
+func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, error) {
 
 	// for each field in tmpl, check whether it contains any data
 	// and if so, then let that data overwrite the same field in zconf
@@ -571,11 +590,39 @@ func ExpandTemplate(zconf ZoneConf, tmpl TemplateConf, appMode string) (ZoneConf
 	}
 
 	// tdns-agent does not have DNSSEC policies, so we ignore them
-	if appMode != "agent" && tmpl.DnssecPolicy != "" {
+	if appMode != AppTypeAgent && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
 	zconf.MultiSigner = tmpl.MultiSigner
 
 	return zconf, nil
+}
+
+func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
+	var lifetime_secs, sigvalidity_secs time.Duration
+	var err error
+
+	switch lifetime {
+	case "forever":
+		lifetime_secs = time.Duration(10000) * time.Hour
+
+	case "none":
+		lifetime_secs = time.Duration(0)
+
+	default:
+		lifetime_secs, err = time.ParseDuration(lifetime)
+		if err != nil {
+			log.Fatalf("Error from ParseDuration: %v", err)
+		}
+	}
+
+	sigvalidity_secs, err = time.ParseDuration(sigvalidity)
+	if err != nil {
+		log.Fatalf("Error from ParseDuration: %v", err)
+	}
+	return KeyLifetime{
+		Lifetime:    uint32(lifetime_secs.Seconds()),
+		SigValidity: uint32(sigvalidity_secs.Seconds()),
+	}
 }

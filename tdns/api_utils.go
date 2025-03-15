@@ -41,7 +41,8 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			tls = "TLS "
 		}
 
-		log.Printf("APIping: received %s/ping request from %s. app.Name: %s, Globals.AppName: ", tls, r.RemoteAddr, conf.App.Name)
+		log.Printf("APIping: received %s/ping request from %s. app.Name: %s, Globals.AppName: %s",
+			tls, r.RemoteAddr, Globals.App.Name, Globals.App.Name)
 
 		decoder := json.NewDecoder(r.Body)
 		var pp PingPost
@@ -53,12 +54,12 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		hostname, _ := os.Hostname()
 		response := PingResponse{
 			Time:       time.Now(),
-			BootTime:   conf.App.ServerBootTime,
-			Version:    conf.App.Version,
-			Daemon:     conf.App.Name,
+			BootTime:   Globals.App.ServerBootTime,
+			Version:    Globals.App.Version,
+			Daemon:     Globals.App.Name,
 			ServerHost: hostname,
 			Client:     r.RemoteAddr,
-			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, conf.App.Name, hostname),
+			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, Globals.App.Name, hostname),
 			Pings:      pp.Pings + 1,
 			Pongs:      pongs,
 		}

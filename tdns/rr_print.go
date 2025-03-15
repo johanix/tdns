@@ -272,6 +272,15 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 			}
 		}
 	}
+	for _, rr := range m.Extra {
+		switch rr := rr.(type) {
+		case *dns.OPT:
+			fmt.Printf(";; EDNS: version: %d, flags: MRF, udp: %d\n", rr.Version(), rr.UDPSize())
+			for _, option := range rr.Option {
+				fmt.Printf(";; EDNS: option: %s\n", option.String())
+			}
+		}
+	}
 
 	fmt.Printf("\n;; QUESTION SECTION:\n")
 	for _, rr := range m.Question {

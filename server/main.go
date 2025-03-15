@@ -5,7 +5,6 @@
 package main
 
 import (
-	// "flag"
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -17,33 +16,50 @@ import (
 func main() {
 	var conf tdns.Config
 
-	conf.App.Mode = "server"
-	conf.App.Version = appVersion
-	conf.App.Name = appName
-	conf.App.Date = appDate
+	// Set application globals
+	tdns.Globals.App.Type = tdns.AppTypeServer
+	tdns.Globals.App.Version = appVersion
+	tdns.Globals.App.Name = appName
+	tdns.Globals.App.Date = appDate
 
-	// These are the defaults, but they are defined here to make it possible for eg. MUSIC to use a different defaul
-	conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
-	conf.Internal.CfgFile = tdns.DefaultCfgFile
+	// Define command-line flags
+	//	pflag.StringVar(&conf.Internal.CfgFile, "config", tdns.DefaultServerCfgFile, "config file path")
+	//	pflag.BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "verbose output")
+	//	pflag.BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "debug output")
 
-	err := tdns.MainInit(&conf)
+	// Parse command-line flags
+	//	pflag.Parse()
+
+	// Print help if requested
+	//	if pflag.NArg() > 0 && (pflag.Arg(0) == "help" || pflag.Arg(0) == "--help" || pflag.Arg(0) == "-h") {
+	//		fmt.Printf("Usage of %s:\n", os.Args[0])
+	//		pflag.PrintDefaults()
+	//		os.Exit(0)
+	//	}
+
+	// Display version information if in verbose mode
+	if tdns.Globals.Verbose {
+		fmt.Printf("%s %s (%s)\n", tdns.Globals.App.Name, tdns.Globals.App.Version, tdns.Globals.App.Date)
+	}
+
+	// Initialize the application
+	err := conf.MainInit(tdns.DefaultServerCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
-	_, err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, false) // false: not reload, initial parsing
-	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error parsing zones: %v", err))
-	}
-
+	// Set up API router
 	apirouter, err := tdns.SetupAPIRouter(&conf)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
+
+	// Start application threads
 	err = tdns.MainStartThreads(&conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
+	// Enter main loop
 	tdns.MainLoop(&conf)
 }

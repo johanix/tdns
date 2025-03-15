@@ -17,10 +17,10 @@ func main() {
 	var tconf tdns.Config
 	var mconf music.Config
 
-	tconf.App.Mode = "sidecar"
-	tconf.App.Version = appVersion
-	tconf.App.Name = appName
-	tconf.App.Date = appDate
+	Globals.App.Mode    = tdns.AppTypeMSA
+	Globals.App.Version = appVersion
+	Globals.App.Name    = appName
+	Globals.App.Date    = appDate
 
 	// These are set here to enable various config reload functions to reload from the correct files.
 	tconf.Internal.CfgFile = music.DefaultMSACfgFile

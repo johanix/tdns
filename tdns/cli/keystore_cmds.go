@@ -244,6 +244,8 @@ func Sig0KeyMgmt(cmd string) error {
 		SubCommand: cmd,
 	}
 
+	prefixcmd, _ := getCommandContext("keystore")
+	api, _ := getApiClient(prefixcmd, true)
 	switch cmd {
 	case "list":
 		// no action
@@ -300,7 +302,7 @@ func Sig0KeyMgmt(cmd string) error {
 		log.Printf("Sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
 	}
 
-	tr, err := SendKeystoreCmd(tdns.Globals.Api, data)
+	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -345,6 +347,9 @@ func DnssecKeyMgmt(cmd string) error {
 		Command:    "dnssec-mgmt",
 		SubCommand: cmd,
 	}
+
+	prefixcmd, _ := getCommandContext("keystore")
+	api, _ := getApiClient(prefixcmd, true)
 
 	switch cmd {
 	case "list":
@@ -397,7 +402,7 @@ func DnssecKeyMgmt(cmd string) error {
 		data.State = NewState
 	}
 
-	tr, err := SendKeystoreCmd(tdns.Globals.Api, data)
+	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)

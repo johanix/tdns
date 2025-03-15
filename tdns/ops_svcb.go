@@ -6,19 +6,31 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyValue) error {
+	if Globals.Debug {
+		log.Printf("PublishSvcbRR: received request to publish SVCB record for %q, port: %d, value: %+v", name, port, value)
+	}
 	name = dns.Fqdn(name)
 	if _, valid := dns.IsDomainName(name); !valid {
-		return fmt.Errorf("invalid domain name: %s (must be a FQDN)", name)
+		return fmt.Errorf("invalid domain name: %q (must be a FQDN)", name)
+	}
+
+	if !strings.HasSuffix(name, zd.ZoneName) {
+		return fmt.Errorf("PublishSvcbRR: name %q is not a subdomain of %q", name, zd.ZoneName)
 	}
 
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishSvcbRR: KeyDB.UpdateQ is nil")
+	}
+
+	if Globals.Debug {
+		log.Printf("PublishSvcbRR: DEBUG: name: %q, port: %d, value: %+v", name, port, value)
 	}
 
 	svcb := dns.SVCB{
