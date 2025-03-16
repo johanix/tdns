@@ -12,7 +12,7 @@ import (
 
 type SyncRequest struct {
 	Command    string
-	ZoneName   string
+	ZoneName   ZoneName
 	ZoneData   *ZoneData
 	SyncStatus *HsyncStatus
 	OldDnskeys *RRset
@@ -28,8 +28,8 @@ type SyncResponse struct {
 }
 
 type SyncStatus struct {
-	Identity string
-	Agents   map[string]*Agent
+	Identity AgentId
+	Agents   map[AgentId]*Agent
 	Error    bool
 	Response chan SyncStatus
 }
@@ -49,22 +49,22 @@ type DeferredTask struct {
 }
 
 func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
-	ourId := conf.Agent.Identity
+	ourId := AgentId(conf.Agent.Identity)
 
 	helloQ := agentQs.Hello
 	heartbeatQ := agentQs.Beat
 	msgQ := agentQs.Msg
 	commandQ := agentQs.Command
-
+	combinerUpdateQ := agentQs.CombinerUpdate
 	registry := conf.Internal.Registry
-	registry.LocalAgent.Identity = ourId // Make sure registry knows our identity
+	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
 
 	// wannabe_agents is a map of agents that we have received
 	// a HELLO message from, but have not yet verified
-	wannabe_agents := make(map[string]*Agent)
+	wannabe_agents := make(map[AgentId]*Agent)
 
 	// syncedZones maps zone names to the agents that share them with us
-	syncedZones := map[string][]*Agent{}
+	syncedZones := map[ZoneName][]*Agent{}
 
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
@@ -92,7 +92,7 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
 	// fullHeartbeatInterval := configureInterval("syncengine.intervals.fullheartbeat", 60, 3600)
 
-	log.Printf("Starting HsyncEngine (heartbeat will run once every %d seconds)", heartbeatInterval)
+	log.Printf("*** HsyncEngine starting (heartbeat will run once every %d seconds) ***", heartbeatInterval)
 
 	HelloEvalTicker := time.NewTicker(time.Duration(helloEvalInterval) * time.Second)
 	HBticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
@@ -115,7 +115,7 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 			registry.HeartbeatHandler(&msgReport, wannabe_agents)
 
 		case msgReport = <-msgQ:
-			registry.MsgHandler(&msgReport)
+			registry.MsgHandler(&msgReport, combinerUpdateQ)
 
 		case msgPost = <-commandQ:
 			registry.CommandHandler(&msgPost)
@@ -159,7 +159,7 @@ func configureInterval(key string, min, max int) int {
 	return interval
 }
 
-func (ar *AgentRegistry) SyncRequestHandler(ourId string, wannabe_agents map[string]*Agent, req SyncRequest) {
+func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, wannabe_agents map[AgentId]*Agent, req SyncRequest) {
 	log.Printf("*** handleSyncRequest: enter (zone %q)", req.ZoneName)
 	switch req.Command {
 	case "HSYNC-UPDATE":
@@ -202,8 +202,8 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId string, wannabe_agents map[str
 	}
 }
 
-func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport, wannabe_agents map[string]*Agent) {
-	// log.Printf("HelloHandler: Received HELLO from %s", report.Msg.Identity)
+func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport, wannabe_agents map[AgentId]*Agent) {
+	log.Printf("HelloHandler: Received HELLO from %s", report.Identity)
 
 	switch report.MessageType {
 	case "HELLO":
@@ -216,31 +216,22 @@ func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport, wannabe_agents map
 	}
 }
 
-func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport, wannabe_agents map[string]*Agent) {
+func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport, wannabe_agents map[AgentId]*Agent) {
 	// log.Printf("HeartbeatHandler: Received %s from %s", report.Msg.MessageType, report.Msg.Identity)
 
 	switch report.MessageType {
 	case "BEAT":
 		log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
-			//dump.P(report)
-			agent.mu.Lock()
-			newDetails := agent.Details[report.Transport]
-			newDetails.LatestRBeat = time.Now()
-			newDetails.ReceivedBeats++
-			agent.Details[report.Transport] = newDetails
-			agent.mu.Unlock()
+			agent.ApiDetails.LatestRBeat = time.Now()
+			agent.ApiDetails.ReceivedBeats++
 		}
 
 	case "FULLBEAT":
 		log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
-			agent.mu.Lock()
-			newDetails := agent.Details[report.Transport]
-			newDetails.LatestRBeat = time.Now()
-			newDetails.ReceivedBeats++
-			agent.Details[report.Transport] = newDetails
-			agent.mu.Unlock()
+			agent.ApiDetails.LatestRBeat = time.Now()
+			agent.ApiDetails.ReceivedBeats++
 		}
 
 	default:
@@ -249,8 +240,20 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport, wannabe_agents
 }
 
 // Handler for messages received from other agents
-func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport) {
+func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport, combinerUpdateQ chan *CombinerUpdate) {
 	log.Printf("MsgHandler: Received message from %s: %+v", report.Identity, report.Msg)
+
+	switch report.MessageType {
+	case "NOTIFY", "UPDATE", "MSG":
+		if amp, ok := report.Msg.(*AgentMsgPost); ok {
+			log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
+			combinerUpdateQ <- &CombinerUpdate{
+				Zone:    amp.Zone,
+				AgentId: amp.MyIdentity,
+				Update:  amp.Data,
+			}
+		}
+	}
 }
 
 // Handler for local commands from CLI or other components in the same organization
@@ -278,9 +281,10 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMsgPost) {
 	for _, agent := range agents {
 		status, resp, err := agent.SendApiMsg(&AgentMsgPost{
 			MessageType:  msg.MessageType,
-			MyIdentity:   ar.LocalAgent.Identity,
+			MyIdentity:   AgentId(ar.LocalAgent.Identity),
 			YourIdentity: agent.Identity,
 			Zone:         msg.Zone,
+			Data:         msg.Data, // ZoneUpdate
 			Time:         time.Now(),
 		})
 
@@ -290,7 +294,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMsgPost) {
 		}
 
 		if status != http.StatusOK {
-			log.Printf("CommandHandler: Message to agent %s returned status %d", agent.Identity, status)
+			log.Printf("CommandHandler: Message to agent %s returned status %d (%s)", agent.Identity, status, http.StatusText(status))
 			continue
 		}
 
@@ -309,13 +313,13 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMsgPost) {
 }
 
 func (ar *AgentRegistry) SendHeartbeats() {
-	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
+	log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
-		switch a.State {
+		switch a.ApiDetails.State {
 		case AgentStateIntroduced, AgentStateOperational:
-			// log.Printf("HsyncEngine: Sending heartbeat to %s", agent.Identity)
+			log.Printf("HsyncEngine: Sending heartbeat to %s", a.Identity)
 		default:
-			//log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", agent.Identity, AgentStateToString[agent.State])
+			log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.State])
 			continue
 		}
 
@@ -323,26 +327,25 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			agent := a
 			status, resp, err := agent.SendApiBeat(&AgentBeatPost{
 				MessageType:    "BEAT",
-				MyIdentity:     ar.LocalAgent.Identity,
+				MyIdentity:     AgentId(ar.LocalAgent.Identity),
 				YourIdentity:   agent.Identity,
 				MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
 				// Zone:        "",
 			})
 			agent.mu.Lock()
-			details := agent.Details["API"]
 			switch {
 			case err != nil:
 				log.Printf("HsyncEngine: Error sending heartbeat to %s: %v", agent.Identity, err)
-				if details.LatestError == "" {
-					details.LatestError = err.Error()
-					details.LatestErrorTime = time.Now()
+				if agent.ApiDetails.LatestError == "" {
+					agent.ApiDetails.LatestError = err.Error()
+					agent.ApiDetails.LatestErrorTime = time.Now()
 				}
 
 			case status != http.StatusOK:
 				log.Printf("HsyncEngine: Heartbeat to %s returned status %d", agent.Identity, status)
-				if details.LatestError == "" {
-					details.LatestError = fmt.Sprintf("status %d", status)
-					details.LatestErrorTime = time.Now()
+				if agent.ApiDetails.LatestError == "" {
+					agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
+					agent.ApiDetails.LatestErrorTime = time.Now()
 				}
 
 			default:
@@ -350,16 +353,18 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				err = json.Unmarshal(resp, &abr)
 				if err != nil {
 					log.Printf("HsyncEngine: Error unmarshalling heartbeat response: %v", err)
-					details.LatestError = err.Error()
+					if agent.ApiDetails.LatestError == "" {
+						agent.ApiDetails.LatestError = err.Error()
+					}
 				}
 				if abr.Status == "ok" {
-					details.State = AgentStateOperational
-					details.LatestSBeat = time.Now()
-					details.LatestError = ""
-					details.SentBeats++
+					agent.ApiDetails.State = AgentStateOperational
+					agent.ApiDetails.LatestSBeat = time.Now()
+					agent.ApiDetails.LatestError = ""
+					agent.ApiDetails.SentBeats++
 				}
 			}
-			agent.Details["API"] = details
+			ar.S.Set(agent.Identity, agent)
 			agent.mu.Unlock()
 		}(a)
 	}
@@ -383,50 +388,61 @@ func (ar *AgentRegistry) SendHeartbeats() {
 // }
 
 func (ar *AgentRegistry) HelloRetrier() {
-	log.Printf("HsyncEngine: Retrying HELLO to KNOWN agents")
+	var known_agents []AgentId
 	for _, agent := range ar.S.Items() {
-		switch agent.State {
+		switch agent.ApiDetails.State {
 		case AgentStateKnown:
-			log.Printf("HsyncEngine: Retrying HELLO to %s", agent.Identity)
+			known_agents = append(known_agents, agent.Identity)
+			go ar.SingleHello(agent)
+			// log.Printf("HsyncEngine: Retrying HELLO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 		default:
-			// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.State])
+			// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 			continue
 		}
-		status, resp, err := agent.SendApiHello(&AgentHelloPost{
-			MessageType:  "HELLO",
-			MyIdentity:   ar.LocalAgent.Identity,
-			YourIdentity: agent.Identity,
-			Zone:         agent.InitialZone,
-		})
-		agent.mu.Lock()
-		details := agent.Details["API"]
-		switch {
-		case err != nil:
-			log.Printf("HsyncEngine: Error sending HELLO to %s: %v", agent.Identity, err)
-			details.LatestError = err.Error()
-
-		case status != http.StatusOK:
-			log.Printf("HsyncEngine: HELLO to %s returned status %d", agent.Identity, status)
-			details.LatestError = fmt.Sprintf("status %d", status)
-
-		default:
-			var abr AgentHelloResponse
-			err = json.Unmarshal(resp, &abr)
-			if err != nil {
-				log.Printf("HsyncEngine: Error unmarshalling HELLO response: %v", err)
-				details.LatestError = err.Error()
-			}
-			if abr.Status == "ok" {
-				details.State = AgentStateIntroduced
-				details.LatestError = ""
-			}
-		}
-		agent.Details["API"] = details
-		agent.mu.Unlock()
+	}
+	if len(known_agents) > 0 {
+		log.Printf("HsyncEngine: Retried HELLO to %d remote agents in state KNOWN: %v", len(known_agents), known_agents)
+	} else {
+		log.Printf("HsyncEngine: No remote agents in state KNOWN to retry HELLO to")
 	}
 }
 
-func (ar *AgentRegistry) EvaluateHellos(wannabe_agents map[string]*Agent, syncedZones map[string][]*Agent) {
+func (ar *AgentRegistry) SingleHello(agent *Agent) {
+	log.Printf("HsyncEngine: Sending HELLO to %s (initial zone %q)", agent.Identity, agent.InitialZone)
+	status, resp, err := agent.SendApiHello(&AgentHelloPost{
+		MessageType:  "HELLO",
+		MyIdentity:   AgentId(ar.LocalAgent.Identity),
+		YourIdentity: agent.Identity,
+		Zone:         agent.InitialZone,
+	})
+	agent.mu.Lock()
+	switch {
+	case err != nil:
+		log.Printf("HsyncEngine: Error sending HELLO to %s: %v", agent.Identity, err)
+		agent.ApiDetails.LatestError = err.Error()
+
+	case status != http.StatusOK:
+		log.Printf("HsyncEngine: HELLO to %s returned status %d", agent.Identity, status)
+		agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
+
+	default:
+		var ahr AgentHelloResponse
+		err = json.Unmarshal(resp, &ahr)
+		if err != nil {
+			log.Printf("HsyncEngine: Error unmarshalling HELLO response: %v", err)
+			agent.ApiDetails.LatestError = err.Error()
+		}
+		log.Printf("HsyncEngine: Our HELLO to %s returned: %s", agent.Identity, ahr.Msg)
+		if ahr.Status == "ok" {
+			agent.ApiDetails.State = AgentStateIntroduced
+			agent.ApiDetails.LatestError = ""
+		}
+	}
+	ar.S.Set(agent.Identity, agent)
+	agent.mu.Unlock()
+}
+
+func (ar *AgentRegistry) EvaluateHellos(wannabe_agents map[AgentId]*Agent, syncedZones map[ZoneName][]*Agent) {
 	log.Printf("HsyncEngine: Evaluating agents that claim to share zones with us")
 
 	for identity, wannabe := range wannabe_agents {
@@ -453,6 +469,7 @@ func (ar *AgentRegistry) EvaluateHellos(wannabe_agents map[string]*Agent, synced
 	}
 }
 
+// XXX: Not used at the moment.
 func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	log.Printf("HsyncEngine: Received STATUS request")
 	if req.Response == nil {
@@ -461,7 +478,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	}
 
 	// Get current agents without waiting for any pending operations
-	agents := map[string]*Agent{}
+	agents := map[AgentId]*Agent{}
 	for _, agent := range ar.S.Items() {
 		// Make a clean copy of the agent for the response
 		sanitized := SanitizeForJSON(*agent) // Shallow copy
@@ -476,7 +493,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	select {
 	case req.Response <- SyncStatus{
 		Agents:   agents,
-		Identity: ar.LocalAgent.Identity,
+		Identity: AgentId(ar.LocalAgent.Identity),
 		Error:    false,
 	}:
 	case <-time.After(1 * time.Second): // Don't block forever
@@ -485,7 +502,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 }
 
 // XXX: This is fairly useless.
-func (agent *Agent) xxxSendMsg(msgType, zone string) ([]byte, error) {
+func (agent *Agent) xxxSendMsg(msgType string, zone ZoneName) ([]byte, error) {
 	msg := &AgentMsgPost{
 		MessageType: msgType,
 		MyIdentity:  agent.Identity,
@@ -494,7 +511,7 @@ func (agent *Agent) xxxSendMsg(msgType, zone string) ([]byte, error) {
 	}
 
 	// Try API first, fall back to DNS if needed
-	if agent.Methods["API"] {
+	if agent.ApiMethod {
 		status, resp, err := agent.SendApiMsg(msg)
 		if err == nil && status == http.StatusOK {
 			return resp, nil
@@ -502,7 +519,7 @@ func (agent *Agent) xxxSendMsg(msgType, zone string) ([]byte, error) {
 		log.Printf("API beat to %q failed: status: %d, error: %v, trying DNS", agent.Identity, status, err)
 	}
 
-	if agent.Methods["DNS"] {
+	if agent.DnsMethod {
 		_, resp, err := agent.SendDnsMsg(msg)
 		if err == nil {
 			return resp, nil

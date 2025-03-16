@@ -207,16 +207,18 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
 	conf.Internal.AgentQs = AgentQs{
-		Hello:   make(chan AgentMsgReport, 100),
-		Beat:    make(chan AgentMsgReport, 100),
-		Msg:     make(chan AgentMsgReport, 100),
-		Command: make(chan AgentMsgPost, 100),
+		Hello:          make(chan AgentMsgReport, 100),
+		Beat:           make(chan AgentMsgReport, 100),
+		Msg:            make(chan AgentMsgReport, 100),
+		Command:        make(chan AgentMsgPost, 100),
+		CombinerUpdate: make(chan *CombinerUpdate, 100),
 	}
 
 	if Globals.App.Type == AppTypeAgent {
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
 		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
+		go conf.CombinerUpdater(conf.Internal.AgentQs.CombinerUpdate, conf.Internal.StopCh)
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)

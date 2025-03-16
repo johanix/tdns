@@ -41,11 +41,14 @@ var AgentStateToString = map[AgentState]string{
 // the state finally changes to OPERATIONAL.
 
 type Agent struct {
-	Identity    string
+	Identity    AgentId
 	mu          sync.RWMutex
-	InitialZone string
-	Details     map[string]AgentDetails
-	Methods     map[string]bool
+	InitialZone ZoneName
+	ApiDetails  *AgentDetails
+	DnsDetails  *AgentDetails
+	ApiMethod   bool
+	DnsMethod   bool
+	Zones	    map[ZoneName]bool
 	Api         *AgentApi
 	State       AgentState // Agent states: needed, known, hello-done, operational, error
 	LastState   time.Time  // When state last changed
@@ -57,13 +60,14 @@ type AgentDetails struct {
 	Port    uint16
 	BaseUri string
 	UriRR   *dns.URI
+//	SvcbRR  *dns.SVCB
 	Host    string    // the host part of the BaseUri
 	KeyRR   *dns.KEY  // for DNS transport
 	TlsaRR  *dns.TLSA // for HTTPS transport
 	//	LastHB      time.Time
 	Endpoint        string
 	ContactInfo     string          // "none", "partial", "complete"
-	Zones           map[string]bool // zones we share with this agent
+//	Zones           map[ZoneName]bool // zones we share with this agent
 	State           AgentState      // "discovered", "contact_attempted", "connected", "failed"
 	LatestError     string
 	LatestErrorTime time.Time
@@ -88,8 +92,8 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S              cmap.ConcurrentMap[string, *Agent]
-	remoteAgents   map[string][]*Agent
+	S              cmap.ConcurrentMap[AgentId, *Agent]
+	remoteAgents   map[ZoneName][]*Agent
 	mu             sync.RWMutex    // protects remoteAgents
 	LocalAgent     *LocalAgentConf // our own identity
 	LocateInterval int             // seconds to wait between locating agents (until success)
@@ -97,8 +101,8 @@ type AgentRegistry struct {
 
 type AgentBeatPost struct {
 	MessageType    string
-	MyIdentity     string
-	YourIdentity   string
+	MyIdentity     AgentId
+	YourIdentity   AgentId
 	MyBeatInterval uint32   // intended, in seconds
 	Zones          []string // Zones that we share with the remote agent
 	Time           time.Time
@@ -106,8 +110,8 @@ type AgentBeatPost struct {
 
 type AgentBeatResponse struct {
 	Status       string // ok | error | ...
-	MyIdentity   string
-	YourIdentity string
+	MyIdentity   AgentId
+	YourIdentity AgentId
 	Time         time.Time
 	Client       string
 	Msg          string
@@ -122,18 +126,18 @@ type AgentBeatReport struct {
 type AgentHelloPost struct {
 	MessageType  string
 	Name         string
-	MyIdentity   string
-	YourIdentity string
+	MyIdentity   AgentId
+	YourIdentity AgentId
 	Addresses    []string
 	Port         uint16
 	TLSA         dns.TLSA
-	Zone         string // in the /hello we only send one zone, the one that triggered the /hello
+	Zone         ZoneName // in the /hello we only send one zone, the one that triggered the /hello
 }
 
 type AgentHelloResponse struct {
 	Status       string // ok | error | ...
-	MyIdentity   string
-	YourIdentity string
+	MyIdentity   AgentId
+	YourIdentity AgentId
 	Time         time.Time
 	Client       string
 	Msg          string
@@ -153,14 +157,16 @@ type xxxAgentMsg struct {
 type AgentMsgPost struct {
 	MessageType string // "HELLO", "BEAT", or "FULLBEAT"
 	//	Name        string
-	MyIdentity string
-	YourIdentity string
-	Addresses  []string
-	Port       uint16
-	TLSA       dns.TLSA
-	Zone       string // in the /hello we only send one zone, the one that triggered the /hello
-	Zones      []string
-	Time       time.Time
+	MyIdentity   AgentId
+	YourIdentity AgentId
+	Addresses    []string
+	Port         uint16
+	TLSA         dns.TLSA
+	Zone         ZoneName // in the /hello we only send one zone, the one that triggered the /hello
+	// Data	     map[AgentId]map[uint16]RRset
+	Data	     ZoneUpdate
+	Zones        []string
+	Time         time.Time
 }
 
 type AgentMsgResponse struct {
@@ -168,20 +174,20 @@ type AgentMsgResponse struct {
 	Time     time.Time
 	Client   string
 	Msg      string
-	Zone	 string
+	Zone     ZoneName
 	Error    bool
 	ErrorMsg string
 }
 
 // AgentPost/AgentResponse is used in the mgmt API
 type AgentPost struct {
-	Command string `json:"command"`
-	Zone    string `json:"zone"`
-	AgentId string `json:"agent_id"`
+	Command string   `json:"command"`
+	Zone    ZoneName `json:"zone"`
+	AgentId AgentId   `json:"agent_id"`
 }
 
 type AgentResponse struct {
-	Identity    string
+	Identity    AgentId
 	Status      int
 	Time        time.Time
 	Agents      []*Agent
@@ -195,8 +201,8 @@ type AgentResponse struct {
 type AgentMsgReport struct {
 	Transport   string
 	MessageType string
-	Zone	    string
-	Identity    string
+	Zone        ZoneName
+	Identity    AgentId
 	Msg         interface{}
 	// Agent *Agent
 }

@@ -145,19 +145,17 @@ type InternalConf struct {
 	AuthQueryQ      chan AuthQueryRequest
 	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ           chan SyncRequest
-	//	AgentBeatQ      chan AgentMsgReport // incoming /beat
-	//	AgentHelloQ     chan AgentMsgReport // incoming /hello
-	//	AgentMsgQ       chan AgentMsgReport // incoming /msg
-	AgentQs     AgentQs
-	SyncStatusQ chan SyncStatus
-	Registry    *AgentRegistry
+	AgentQs         AgentQs // aggregated channels for agent communication
+	SyncStatusQ     chan SyncStatus
+	Registry        *AgentRegistry
 }
 
 type AgentQs struct {
-	Hello   chan AgentMsgReport // incoming /hello from other agents
-	Beat    chan AgentMsgReport // incoming /beat from other agents
-	Msg     chan AgentMsgReport // incoming /msg from other agents
-	Command chan AgentMsgPost   // local commands TO the agent, usually for passing on to other agents
+	Hello          chan AgentMsgReport  // incoming /hello from other agents
+	Beat           chan AgentMsgReport  // incoming /beat from other agents
+	Msg            chan AgentMsgReport  // incoming /msg from other agents
+	Command        chan AgentMsgPost    // local commands TO the agent, usually for passing on to other agents
+	CombinerUpdate chan *CombinerUpdate // incoming combiner updates
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
