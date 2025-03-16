@@ -204,5 +204,5 @@ type AgentMsgReport struct {
 	Zone        ZoneName
 	Identity    AgentId
 	Msg         interface{}
-	// Agent *Agent
+	Response    chan *CombResponse
 }

@@ -211,7 +211,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 		Beat:           make(chan AgentMsgReport, 100),
 		Msg:            make(chan AgentMsgReport, 100),
 		Command:        make(chan AgentMsgPost, 100),
-		CombinerUpdate: make(chan *CombinerUpdate, 100),
+		CombinerUpdate: make(chan *CombUpdate, 100),
 	}
 
 	if Globals.App.Type == AppTypeAgent {
