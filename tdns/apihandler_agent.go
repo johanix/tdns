@@ -366,11 +366,34 @@ func APImsg(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch amp.MessageType {
 		case "NOTIFY", "QUERY", "STATUS":
 			resp.Status = "ok"
-			conf.Internal.AgentQs.Msg <- AgentMsgReport{
+			var cresp = make(chan *CombResponse, 1)
+			select {
+			case conf.Internal.AgentQs.Msg <- AgentMsgReport{
 				Transport:   "API",
 				MessageType: amp.MessageType,
 				Identity:    amp.MyIdentity,
 				Msg:         &amp,
+				Response:    cresp,
+			}:
+				select {
+				case r := <-cresp:
+					if r.Error {
+						log.Printf("APImsg: Error processing message from %s: %s", amp.MyIdentity, r.ErrorMsg)
+						resp.Error = true
+						resp.ErrorMsg = r.ErrorMsg
+						resp.Status = "error"
+					} else {
+						resp.Status = "ok"
+					}
+				case <-time.After(2 * time.Second):
+					log.Printf("APImsg: No response received for message from %s after waiting 2 seconds", amp.MyIdentity)
+					resp.Error = true
+					resp.ErrorMsg = "No response received within timeout period"
+				}
+			default:
+				log.Printf("APImsg: Msg channel is blocked, skipping message from %s", amp.MyIdentity)
+				resp.Error = true
+				resp.ErrorMsg = "Msg channel is blocked"
 			}
 
 		default:
