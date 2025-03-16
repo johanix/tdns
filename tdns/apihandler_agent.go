@@ -29,7 +29,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 		resp := AgentResponse{
 			Time:     time.Now(),
-			Identity: conf.Agent.Identity,
+			Identity: AgentId(conf.Agent.Identity),
 		}
 
 		defer func() {
@@ -44,9 +44,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		// XXX: hsync cmds should move to its own endpoint, not be mixed with agent
 		var zd *ZoneData
 		var exist bool
-		ap.Zone = dns.Fqdn(ap.Zone)
+		ap.Zone = ZoneName(dns.Fqdn(string(ap.Zone)))
 		if ap.Command != "config" {
-			zd, exist = Zones.Get(ap.Zone)
+			zd, exist = Zones.Get(string(ap.Zone))
 			if !exist {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", ap.Zone)
@@ -65,7 +65,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				conf.Internal.AgentQs.Command <- AgentMsgPost{
 					// Transport:   "API",
 					MessageType: "NOTIFY",
-					Zone:        ap.Zone,
+					Zone:        ZoneName(ap.Zone),
 					// Msg:         &ap,
 				}
 
@@ -75,7 +75,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				conf.Internal.AgentQs.Command <- AgentMsgPost{
 					//Transport:   "API",
 					MessageType: "NOTIFY",
-					Zone:        ap.Zone,
+					Zone:        ZoneName(ap.Zone),
 					// Identity:    ap.MyIdentity,
 					// Msg:         &ap,
 				}
@@ -133,7 +133,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				return
 			}
 
-			ap.AgentId = dns.Fqdn(ap.AgentId)
+			ap.AgentId = AgentId(dns.Fqdn(string(ap.AgentId)))
 			agent, err := conf.Internal.Registry.GetAgentInfo(ap.AgentId)
 			if err != nil {
 				// Start async lookup and return a message that lookup is in progress
@@ -195,7 +195,7 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.YourIdentity = abp.MyIdentity
-		resp.MyIdentity = conf.Agent.Identity
+		resp.MyIdentity = AgentId(conf.Agent.Identity)
 
 		// log.Printf("APIbeat: received /beat request from %s (identity: %s).\n", r.RemoteAddr, abp.MyIdentity)
 
@@ -249,18 +249,20 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.YourIdentity = ahp.MyIdentity
-		resp.MyIdentity = conf.Agent.Identity
+		resp.MyIdentity = AgentId(conf.Agent.Identity)
 
 		// Now let's check if we need to know this agent
 		if ahp.Zone == "" {
+			log.Printf("APIhello: Error: No zone specified in HELLO message")
 			resp.Error = true
 			resp.ErrorMsg = "Error: No zone specified in HELLO message"
 			return
 		}
 
 		// Check if we have this zone
-		zd, exists := Zones.Get(ahp.Zone)
+		zd, exists := Zones.Get(string(ahp.Zone))
 		if !exists {
+			log.Printf("APIhello: Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone)
 			return
@@ -269,11 +271,13 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		// Check if zone has HSYNC RRset
 		hsyncRR, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
 		if err != nil {
+			log.Printf("APIhello: Error: Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
 			return
 		}
 		if hsyncRR == nil {
+			log.Printf("APIhello: Error: Zone %q has no HSYNC RRset", ahp.Zone)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error: Zone %q has no HSYNC RRset", ahp.Zone)
 			return
@@ -288,7 +292,7 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					if hsync.Identity == conf.Agent.Identity {
 						foundUs = true
 					}
-					if hsync.Identity == ahp.MyIdentity {
+					if AgentId(hsync.Identity) == ahp.MyIdentity {
 						foundThem = true
 					}
 				}
@@ -304,6 +308,7 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		log.Printf("APIhello: Success: Zone %q HSYNC RRset includes both our identities. Sending nice response", ahp.Zone)
 		resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
 			ahp.MyIdentity, conf.Agent.Identity, ahp.Zone)
 
@@ -311,7 +316,7 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "HELLO":
 			resp.Status = "ok" // important
 			resp.YourIdentity = ahp.MyIdentity
-			resp.MyIdentity = conf.Agent.Identity
+			resp.MyIdentity = AgentId(conf.Agent.Identity)
 			conf.Internal.AgentQs.Hello <- AgentMsgReport{
 				Transport:   "API",
 				MessageType: "HELLO",
