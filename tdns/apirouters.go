@@ -148,16 +148,16 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 
 			// Get TLSA record for the client's identity and verify
 			clientId := clientCert.Subject.CommonName
-			agent, ok := conf.Internal.Registry.S.Get(clientId)
+			agent, ok := conf.Internal.Registry.S.Get(AgentId(clientId))
 			if !ok {
 				log.Printf("AgentSyncApi: Unknown remote agent identity: %s", clientId)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			agent.mu.Lock()
-			tlsaRR := agent.Details["API"].TlsaRR
-			agent.mu.Unlock()
+			// agent.mu.Lock()
+			tlsaRR := agent.ApiDetails.TlsaRR
+			// agent.mu.Unlock()
 			if tlsaRR == nil {
 				log.Printf("AgentSyncApi: No TLSA record available for client: %s", clientId)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
@@ -179,7 +179,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 	secureRouter.HandleFunc("/beat", APIbeat(conf)).Methods("POST")
 	// secureRouter.HandleFunc("/notify", APIbeat(conf)).Methods("POST")
 	// secureRouter.HandleFunc("/query", APIbeat(conf)).Methods("POST")
-	secureRouter.HandleFunc("/msg", APIbeat(conf)).Methods("POST")
+	secureRouter.HandleFunc("/msg", APImsg(conf)).Methods("POST")
 
 	return r, nil
 }
