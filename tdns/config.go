@@ -151,11 +151,11 @@ type InternalConf struct {
 }
 
 type AgentQs struct {
-	Hello          chan AgentMsgReport  // incoming /hello from other agents
-	Beat           chan AgentMsgReport  // incoming /beat from other agents
-	Msg            chan AgentMsgReport  // incoming /msg from other agents
-	Command        chan AgentMsgPost    // local commands TO the agent, usually for passing on to other agents
-	CombinerUpdate chan *CombinerUpdate // incoming combiner updates
+	Hello          chan AgentMsgReport // incoming /hello from other agents
+	Beat           chan AgentMsgReport // incoming /beat from other agents
+	Msg            chan AgentMsgReport // incoming /msg from other agents
+	Command        chan AgentMsgPost   // local commands TO the agent, usually for passing on to other agents
+	CombinerUpdate chan *CombUpdate    // incoming combiner updates
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

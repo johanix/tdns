@@ -240,17 +240,34 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport, wannabe_agents
 }
 
 // Handler for messages received from other agents
-func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport, combinerUpdateQ chan *CombinerUpdate) {
+func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport, combinerUpdateQ chan *CombUpdate) {
 	log.Printf("MsgHandler: Received message from %s: %+v", report.Identity, report.Msg)
 
 	switch report.MessageType {
 	case "NOTIFY", "UPDATE", "MSG":
 		if amp, ok := report.Msg.(*AgentMsgPost); ok {
 			log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
-			combinerUpdateQ <- &CombinerUpdate{
-				Zone:    amp.Zone,
-				AgentId: amp.MyIdentity,
-				Update:  amp.Data,
+			var cresp = make(chan *CombResponse, 1)
+			combinerUpdateQ <- &CombUpdate{
+				Zone:     amp.Zone,
+				AgentId:  amp.MyIdentity,
+				Update:   amp.Data,
+				Response: cresp,
+			}
+			select {
+			case resp := <-cresp:
+				if resp.Error {
+					log.Printf("MsgHandler: Error processing update from %s: %s", amp.MyIdentity, resp.ErrorMsg)
+				}
+				if report.Response != nil {
+					select {
+					case report.Response <- resp:
+					default:
+						log.Printf("MsgHandler: Response channel blocked, skipping response")
+					}
+				}
+			case <-time.After(2 * time.Second):
+				log.Printf("MsgHandler: No response from CombinerUpdaterreceived for update from %s after waiting 2 seconds", amp.MyIdentity)
 			}
 		}
 	}
