@@ -27,3 +27,70 @@ Design constraints for the TDNS Agent:
 5. Not having either of the options delegation-sync-parent and/or
    delegation-sync-child for a zone is an error, as then there is no
    point to the agent being configured to deal with that zone.
+
+```mermaid
+graph TD
+    subgraph AgentRegistry
+        A1[HelloHandler]
+        A2[HeartbeatHandler]
+        A3[MsgHandler]
+        A4[CommandHandler]
+        A5[HelloRetrier]
+        A6[SendHeartbeats]
+        A7[EvaluateHellos]
+    end
+
+    subgraph Channels
+        C1[HelloQ]
+        C2[BeatQ]
+        C3[MsgQ]
+        C4[CommandQ]
+        C5[DebugCommandQ]
+        C6[SyncQ]
+        C7[SyncStatusQ]
+    end
+
+    subgraph APIHandlers
+        H1[APIagent]
+        H2[APIagentDebug]
+        H3[APIbeat]
+        H4[APIhello]
+        H5[APImsg]
+    end
+
+    subgraph HsyncEngine
+        E1[HsyncEngine]
+    end
+
+    subgraph Config
+        F1[SetupAgent]
+        F2[SetupApiTransport]
+        F3[SetupDnsTransport]
+    end
+
+    E1 -->|uses| C1
+    E1 -->|uses| C2
+    E1 -->|uses| C3
+    E1 -->|uses| C4
+    E1 -->|uses| C5
+    E1 -->|uses| C6
+    E1 -->|uses| C7
+
+    C1 -->|sends to| A1
+    C2 -->|sends to| A2
+    C3 -->|sends to| A3
+    C4 -->|sends to| A4
+    C5 -->|sends to| A4
+    C6 -->|sends to| A4
+    C7 -->|sends to| A7
+
+    H1 -->|interacts with| A4
+    H2 -->|interacts with| A4
+    H3 -->|interacts with| A2
+    H4 -->|interacts with| A1
+    H5 -->|interacts with| A3
+
+    F1 -->|configures| E1
+    F2 -->|configures| E1
+    F3 -->|configures| E1
+```

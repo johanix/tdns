@@ -58,6 +58,10 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 
 	if Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		if Globals.Debug {
+			log.Printf("Setting up debug endpoint for agent API")
+			sr.HandleFunc("/agent/debug", APIagentDebug(conf)).Methods("POST")
+		}
 	}
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
@@ -92,7 +96,7 @@ func SetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	return r, nil
 }
 
-func SetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
+func xxxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	r := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
@@ -107,10 +111,7 @@ func SetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
-	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
-	if conf.Internal.DebugMode {
-		sr.HandleFunc("/agent/debug", APIagentDebug(conf)).Methods("POST")
-	}
+	// sr.HandleFunc("/show/api", APIshowAPI(r)).Methods("GET")
 
 	return r, nil
 }
