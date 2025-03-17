@@ -72,22 +72,41 @@ graph TD
         D2[QueryResponder]
         D3[NotifyResponder]
         D4[UpdateResponder]
-        D5[ZoneUpdater]
     end
+
+   subgraph ZoneUpdater
+        D5[ZoneUpdater]
+   end
+
+   subgraph RefreshEngine
+      D6[RefreshEngine]
+   end
 
     subgraph CombinerUpdater
         D10[CombinerUpdater]
+    end
+
+    subgraph Zones (global)
+      Z1 ConcurrentMap w/ zone data
     end
 
     subgraph Config
         F1[SetupAgent]
         F2[SetupApiTransport]
         F3[SetupDnsTransport]
+        F4[ParseConfig]
+        F5[ParseZones]
     end
 
     D1 -->|sends to| D2
    D1 -->|sends to| D3
    D1 -->|sends to| D4
+   D4 -->|sends to| D5
+   D1 --|uses| Z1
+   D5 --|updates| Z1
+   D6 --|updates| Z1
+   F6 -->|sends to| D6
+   D3 -->|sends to| D6
 
     E1 -->|calls| A1
     E1 -->|calls| A2
@@ -114,4 +133,7 @@ graph TD
     F1 -->|configures| E1
     F2 -->|configures| E1
     F3 -->|configures| E1
+
+    A3 -->|sends to| D10
+
 ```
