@@ -103,8 +103,8 @@ graph TD
    D1 -->|sends to| D4
    D4 -->|sends to| D5
    D1 --|uses| Z1
-   D5 --|updates| Z1
-   D6 --|updates| Z1
+   D5 --|uses| Z1
+   D6 --|uses| Z1
    F6 -->|sends to| D6
    D3 -->|sends to| D6
 
