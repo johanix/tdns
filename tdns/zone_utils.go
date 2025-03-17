@@ -221,7 +221,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 			}
 			zd.SyncQ <- SyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
-				ZoneName:   zd.ZoneName,
+				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				OldDnskeys: oldkeys,
 				NewDnskeys: newkeys,
@@ -234,7 +234,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
-				ZoneName:   zd.ZoneName,
+				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				SyncStatus: hss,
 			}
@@ -379,7 +379,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
-				ZoneName:   zd.ZoneName,
+				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				SyncStatus: hss,
 			}

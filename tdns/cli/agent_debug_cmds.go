@@ -48,8 +48,8 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 
 		req := tdns.AgentPost{
 			Command: notifyCmd,
-			Zone:    tdns.Globals.Zonename,
-			AgentId: myIdentity,
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			AgentId: tdns.AgentId(myIdentity),
 		}
 
 		_, buf, err := api.RequestNG("POST", "/agent", req, true)

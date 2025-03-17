@@ -411,7 +411,7 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 		r, _, err := c.Exchange(m, server)
 		if err != nil {
 			lastErr = err
-			log.Printf("attempt %d/%d: failed to lookup %s record using server %s: %v", attempt+1, retries, qname, server, err)
+			log.Printf("attempt %d/%d: failed to lookup %s %s record using server %s: %v", attempt+1, retries, qname, dns.TypeToString[qtype], server, err)
 			continue
 		}
 		if len(r.Answer) == 0 {

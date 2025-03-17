@@ -48,7 +48,7 @@ var hsyncStatusCmd = &cobra.Command{
 
 		req := tdns.AgentPost{
 			Command: "hsync-status",
-			Zone:    tdns.Globals.Zonename,
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
 		}
 
 		_, buf, err := api.RequestNG("POST", "/agent", req, true)
@@ -88,7 +88,7 @@ var hsyncStatusCmd = &cobra.Command{
 			}
 
 			fields := strings.Fields(rrstr)
-			if hsyncRR.Identity == resp.Identity {
+			if tdns.AgentId(hsyncRR.Identity) == resp.Identity {
 				fields = append(fields, "(local agent)")
 			}
 			lines = append(lines, strings.Join(fields, "|"))
@@ -101,7 +101,10 @@ var hsyncStatusCmd = &cobra.Command{
 				if agent.Identity == resp.Identity {
 					continue
 				}
-				for transport, details := range agent.Details {
+				for transport, details := range map[string]*tdns.AgentDetails{
+					"API": agent.ApiDetails,
+					"DNS": agent.DnsDetails,
+				} {
 					if syncTransport != "" && strings.ToUpper(syncTransport) != transport {
 						continue
 					}
@@ -216,8 +219,8 @@ var hsyncLocateCmd = &cobra.Command{
 
 		req := tdns.AgentPost{
 			Command: "hsync-locate",
-			AgentId: dns.Fqdn(args[0]),
-			Zone:    tdns.Globals.Zonename,
+			AgentId: tdns.AgentId(dns.Fqdn(args[0])),
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
 		}
 
 		_, buf, err := api.RequestNG("POST", "/agent", req, true)
@@ -238,7 +241,10 @@ var hsyncLocateCmd = &cobra.Command{
 		if len(resp.Agents) > 0 {
 			agent := resp.Agents[0] // Should only be one agent
 			fmt.Printf("Located agent: %s\n", agent.Identity)
-			for transport, details := range agent.Details {
+			for transport, details := range map[string]*tdns.AgentDetails{
+				"API": agent.ApiDetails,
+				"DNS": agent.DnsDetails,
+			} {
 				fmt.Printf("  Transport: %s\n", transport)
 				fmt.Printf("    State: %s\n", details.State)
 				if len(details.Addrs) > 0 {
@@ -260,9 +266,9 @@ var hsyncSendHelloCmd = &cobra.Command{
 		PrepArgs("zonename")
 
 		// Get the zone (agent identity) from flags
-		agentIdentity := tdns.Globals.Zonename
+		agentIdentity := tdns.AgentId(tdns.Globals.Zonename)
 
-		myid := dns.Fqdn(syncIdentity)
+		myid := tdns.AgentId(dns.Fqdn(syncIdentity))
 
 		var conf tdns.Config
 		err := viper.Unmarshal(&conf)
@@ -323,7 +329,8 @@ var hsyncSendHelloCmd = &cobra.Command{
 				MessageType: "HELLO",
 				MyIdentity:  myid,
 				// Time:        time.Now(),
-				Zone: cmd.Flag("zone").Value.String(),
+				// Zone: cmd.Flag("zone").Value.String(),
+				Zone: tdns.ZoneName(tdns.Globals.Zonename),
 			}
 
 			// Send the hello message
