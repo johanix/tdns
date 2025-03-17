@@ -87,7 +87,7 @@ graph TD
     end
 
     subgraph Zones (global)
-      Z1 ConcurrentMap w/ zone data
+      Z1[ConcurrentMap w/ zone data]
     end
 
     subgraph Config
