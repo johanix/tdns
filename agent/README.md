@@ -50,16 +50,33 @@ graph TD
         C7[SyncStatusQ]
     end
 
-    subgraph APIHandlers
+    subgraph APIrouter
         H1[APIagent]
         H2[APIagentDebug]
-        H3[APIbeat]
-        H4[APIhello]
-        H5[APImsg]
+        H3[APIkeystore]
+        H4[APItruststore]
+    end
+
+    subgraph APIAgentSyncRouter
+        H10[APIhello]
+        H11[APIbeat]
+        H12[APImsg]
     end
 
     subgraph HsyncEngine
         E1[HsyncEngine]
+    end
+
+    subgraph DNS
+        D1[DnsEngine]
+        D2[QueryResponder]
+        D3[NotifyResponder]
+        D4[UpdateResponder]
+        D5[ZoneUpdater]
+    end
+
+    subgraph CombinerUpdater
+        D10[CombinerUpdater]
     end
 
     subgraph Config
@@ -68,27 +85,31 @@ graph TD
         F3[SetupDnsTransport]
     end
 
-    E1 -->|uses| C1
-    E1 -->|uses| C2
-    E1 -->|uses| C3
-    E1 -->|uses| C4
-    E1 -->|uses| C5
-    E1 -->|uses| C6
-    E1 -->|uses| C7
+    D1 -->|sends to| D2
+   D1 -->|sends to| D3
+   D1 -->|sends to| D4
 
-    C1 -->|sends to| A1
-    C2 -->|sends to| A2
-    C3 -->|sends to| A3
-    C4 -->|sends to| A4
-    C5 -->|sends to| A4
-    C6 -->|sends to| A4
-    C7 -->|sends to| A7
+    E1 -->|calls| A1
+    E1 -->|calls| A2
+    E1 -->|calls| A3
+    E1 -->|calls| A4
+    E1 -->|calls| A5
+    E1 -->|calls| A6
+    E1 -->|calls| A7
 
-    H1 -->|interacts with| A4
-    H2 -->|interacts with| A4
-    H3 -->|interacts with| A2
-    H4 -->|interacts with| A1
-    H5 -->|interacts with| A3
+    C1 -->|sends to| E1
+    C2 -->|sends to| E1
+    C3 -->|sends to| E1
+    C4 -->|sends to| E1
+    C5 -->|sends to| E1
+    C6 -->|sends to| E1
+    C7 -->|sends to| E1
+
+    H1 -->|sends to| C4
+    H2 -->|sends to| C5
+    H10 -->|sends to| C1
+    H11 -->|sends to| C2
+    H12 -->|sends to| C3
 
     F1 -->|configures| E1
     F2 -->|configures| E1
