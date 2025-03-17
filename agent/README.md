@@ -86,7 +86,7 @@ graph TD
         D10[CombinerUpdater]
     end
 
-    subgraph Zones (global)
+    subgraph [Zones (global)]
       Z1[ConcurrentMap w/ zone data]
     end
 
