@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
@@ -55,6 +57,7 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 	heartbeatQ := agentQs.Beat
 	msgQ := agentQs.Msg
 	commandQ := agentQs.Command
+	debugCommandQ := agentQs.DebugCommand
 	combinerUpdateQ := agentQs.CombinerUpdate
 	registry := conf.Internal.Registry
 	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
@@ -69,8 +72,9 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
 
-	var msgReport AgentMsgReport
-	var msgPost AgentMsgPost
+	var msgReport *AgentMsgReport
+	var mgmtPost *AgentMgmtPostPlus
+	// var debugPost *AgentDebugPost
 	// msgQ := make(chan AgentMsgReport, 10)
 	// conf.Internal.HeartbeatQ = msgQ
 
@@ -109,16 +113,20 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 			registry.SyncRequestHandler(ourId, wannabe_agents, syncitem)
 
 		case msgReport = <-helloQ:
-			registry.HelloHandler(&msgReport, wannabe_agents)
+			registry.HelloHandler(msgReport, wannabe_agents)
 
 		case msgReport = <-heartbeatQ:
-			registry.HeartbeatHandler(&msgReport, wannabe_agents)
+			registry.HeartbeatHandler(msgReport, wannabe_agents)
 
 		case msgReport = <-msgQ:
-			registry.MsgHandler(&msgReport, combinerUpdateQ)
+			registry.MsgHandler(msgReport, combinerUpdateQ)
 
-		case msgPost = <-commandQ:
-			registry.CommandHandler(&msgPost)
+		case mgmtPost = <-commandQ:
+			registry.CommandHandler(mgmtPost)
+
+		// debug stuff arrive on separate channel, but use the same format and handler
+		case mgmtPost = <-debugCommandQ:
+			registry.CommandHandler(mgmtPost)
 
 		case <-HelloRetryTicker.C:
 			registry.HelloRetrier()
@@ -243,28 +251,62 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport, wannabe_agents
 func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport, combinerUpdateQ chan *CombUpdate) {
 	log.Printf("MsgHandler: Received message from %s: %+v", report.Identity, report.Msg)
 
+	var resp = CombResponse{
+		Time: time.Now(),
+		Msg:  "Message received",
+	}
+
+	defer func() {
+		if report.Response != nil {
+			select {
+			case report.Response <- &resp:
+			default:
+				log.Printf("MsgHandler: Response channel blocked, skipping response")
+			}
+		}
+	}()
+
 	switch report.MessageType {
 	case "NOTIFY", "UPDATE", "MSG":
 		if amp, ok := report.Msg.(*AgentMsgPost); ok {
 			log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
+
+			var zu = &ZoneUpdate{
+				Zone:   report.Zone,
+				RRsets: map[uint16]RRset{},
+			}
+			for _, rrstr := range amp.RRs {
+				rr, err := dns.NewRR(rrstr)
+				if err != nil {
+					log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
+					return
+				}
+				var rrset RRset
+				var ok bool
+				rrtype := rr.Header().Rrtype
+				if rrset, ok = zu.RRsets[rrtype]; !ok {
+					rrset = RRset{}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+				log.Printf("MsgHandler: RR: %s", rr)
+			}
+
 			var cresp = make(chan *CombResponse, 1)
 			combinerUpdateQ <- &CombUpdate{
 				Zone:     amp.Zone,
 				AgentId:  amp.MyIdentity,
-				Update:   amp.Data,
+				Update:   zu,
 				Response: cresp,
 			}
 			select {
-			case resp := <-cresp:
-				if resp.Error {
-					log.Printf("MsgHandler: Error processing update from %s: %s", amp.MyIdentity, resp.ErrorMsg)
-				}
-				if report.Response != nil {
-					select {
-					case report.Response <- resp:
-					default:
-						log.Printf("MsgHandler: Response channel blocked, skipping response")
-					}
+			case r := <-cresp:
+				if r.Error {
+					log.Printf("MsgHandler: Error processing update from %s: %s", amp.MyIdentity, r.ErrorMsg)
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
 				}
 			case <-time.After(2 * time.Second):
 				log.Printf("MsgHandler: No response from CombinerUpdaterreceived for update from %s after waiting 2 seconds", amp.MyIdentity)
@@ -274,25 +316,59 @@ func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport, combinerUpdateQ chan
 }
 
 // Handler for local commands from CLI or other components in the same organization
-func (ar *AgentRegistry) CommandHandler(msg *AgentMsgPost) {
-	log.Printf("CommandHandler: Received command from %s: %+v", msg.MyIdentity, msg)
+func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus) {
+
+	log.Printf("CommandHandler: Received mgmt command: %+v", msg)
+	resp := AgentMgmtResponse{
+		Time: time.Now(),
+		Msg:  "Command received",
+	}
+
+	defer func() {
+		if msg.Response != nil {
+			select {
+			case msg.Response <- &resp:
+			default:
+				log.Printf("CommandHandler: Response channel blocked, skipping response")
+			}
+		}
+	}()
 
 	// Extract zone from message
 	if msg.Zone == "" {
-		log.Printf("CommandHandler: No zone specified in command from %s", msg.MyIdentity)
+		log.Printf("CommandHandler: No zone specified in mgmt command")
+		resp.Error = true
+		resp.ErrorMsg = "No zone specified in mgmt command"
 		return
+	}
+
+	for _, rrstr := range msg.RRs {
+		rr, err := dns.NewRR(rrstr)
+		if err != nil {
+			log.Printf("CommandHandler: Error parsing RR: %s", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error parsing RR: %s", err)
+			return
+		}
+		log.Printf("CommandHandler: RR: %s", rr)
 	}
 
 	// Find remote agents for this zone
 	agents, err := ar.GetRemoteAgents(msg.Zone)
 	if err != nil {
 		log.Printf("CommandHandler: Error getting remote agents for zone %s: %v", msg.Zone, err)
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("Error getting remote agents for zone %s: %v", msg.Zone, err)
 		return
 	}
 	if len(agents) == 0 {
 		log.Printf("CommandHandler: No remote agents found for zone %s", msg.Zone)
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("No remote agents found for zone %s", msg.Zone)
 		return
 	}
+
+	var errstrs []string
 
 	// Send message to each agent
 	for _, agent := range agents {
@@ -301,17 +377,19 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMsgPost) {
 			MyIdentity:   AgentId(ar.LocalAgent.Identity),
 			YourIdentity: agent.Identity,
 			Zone:         msg.Zone,
-			Data:         msg.Data, // ZoneUpdate
+			RRs:          msg.RRs, // ZoneUpdate
 			Time:         time.Now(),
 		})
 
 		if err != nil {
 			log.Printf("CommandHandler: Error sending message to agent %s: %v", agent.Identity, err)
+			errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.Identity, err))
 			continue
 		}
 
 		if status != http.StatusOK {
 			log.Printf("CommandHandler: Message to agent %s returned status %d (%s)", agent.Identity, status, http.StatusText(status))
+			errstrs = append(errstrs, fmt.Sprintf("Message to agent %s returned status %d (%s)", agent.Identity, status, http.StatusText(status)))
 			continue
 		}
 
@@ -319,13 +397,19 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMsgPost) {
 		err = json.Unmarshal(resp, &amr)
 		if err != nil {
 			log.Printf("CommandHandler: Error unmarshalling message response: %v", err)
+			errstrs = append(errstrs, fmt.Sprintf("Error unmarshalling message response: %v", err))
 			continue
 		}
 		if amr.Status == "ok" {
-			log.Printf("CommandHandler: Successfully sent message to agent %s for zone %s", agent.Identity, msg.Zone)
+			log.Printf("CommandHandler: Message to agent %s for zone %s returned status OK: %s", agent.Identity, msg.Zone, amr.Msg)
 		} else {
-			log.Printf("CommandHandler: Message to agent %s returned status %d", agent.Identity, status)
+			log.Printf("CommandHandler: Message to agent %s for zone %s returned status %d: %s, ErrorMsg: %s", agent.Identity, msg.Zone, status, amr.Msg, amr.ErrorMsg)
+			errstrs = append(errstrs, fmt.Sprintf("Message to agent %s for zone %s returned status %d: %s, ErrorMsg: %s", agent.Identity, msg.Zone, status, amr.Msg, amr.ErrorMsg))
 		}
+	}
+	if len(errstrs) > 0 {
+		resp.Error = true
+		resp.ErrorMsg = strings.Join(errstrs, "\n")
 	}
 }
 

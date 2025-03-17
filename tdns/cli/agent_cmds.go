@@ -28,7 +28,7 @@ var agentLocalAgentCmd = &cobra.Command{
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		req := tdns.AgentPost{
+		req := tdns.AgentMgmtPost{
 			Command: "config",
 		}
 
@@ -37,7 +37,7 @@ var agentLocalAgentCmd = &cobra.Command{
 			log.Fatalf("API request failed: %v", err)
 		}
 
-		var resp tdns.AgentResponse
+		var resp tdns.AgentMgmtResponse
 		if err := json.Unmarshal(buf, &resp); err != nil {
 			log.Fatalf("Failed to parse response: %v", err)
 		}

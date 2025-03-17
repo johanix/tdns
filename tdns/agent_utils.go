@@ -180,7 +180,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName) {
 
 					for _, rr := range rrset.RRs {
 						if u, ok := rr.(*dns.URI); ok {
-							log.Printf("LocateAgent: URI record: %s", u.String())
+							log.Printf("LocateAgent: URI record for %q:\n%s", agent.Identity, u.String())
 							agent.mu.Lock()
 							agent.DnsDetails.UriRR = u
 							agent.DnsDetails.BaseUri = u.Target
@@ -243,7 +243,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName) {
 
 					for _, rr := range rrset.RRs {
 						if k, ok := rr.(*dns.KEY); ok {
-							log.Printf("LocateAgent: KEY record: %s", k.String())
+							log.Printf("LocateAgent: KEY record for %q:\n%s", agent.Identity, k.String())
 							agent.DnsDetails.KeyRR = k
 							agent.DnsMethod = true
 						}
@@ -269,7 +269,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName) {
 
 					for _, rr := range rrset.RRs {
 						if t, ok := rr.(*dns.TLSA); ok {
-							log.Printf("LocateAgent: TLSA record: %s", t.String())
+							log.Printf("LocateAgent: TLSA record for %q:\n%s", agent.Identity, t.String())
 							agent.ApiDetails.TlsaRR = t
 							agent.ApiMethod = true
 						}
@@ -317,36 +317,6 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName) {
 					// Try to send hello
 					agent.InitialZone = zonename
 					go ar.SingleHello(agent)
-					//					go func() {
-					//						_, resp, err := agent.SendApiHello(&AgentHelloPost{
-					//							MessageType: "HELLO",
-					//							MyIdentity:  ar.LocalAgent.Identity, // our identity
-					//							Zone:        zonename,
-					//						})
-					//						if err != nil {
-					//							log.Printf("LocateAgent: error sending HELLO to %s: %v", remoteid, err)
-					//							return
-					//						}
-
-					//						var amr AgentHelloResponse
-					//						err = json.Unmarshal(resp, &amr)
-					//						if err != nil {
-					//							log.Printf("LocateAgent: error unmarshalling HELLO response: %v", err)
-					//							return
-					//						}
-
-					//						log.Printf("LocateAgent: HELLO to %s returned: %s", remoteid, amr.Msg)
-
-					// Update state after successful hello
-					//						if amr.Status == "ok" {
-					//							agent.ApiDetails.State = AgentStateIntroduced
-					//							agent.ApiDetails.LatestError = ""
-					//						} else {
-					//							agent.ApiDetails.LatestError = amr.ErrorMsg
-					//							agent.InitialZone = zonename // need to store this for future retries
-					//						}
-					//						ar.S.Set(remoteid, agent)
-					//					}()
 				}
 				return
 			} else {
@@ -395,7 +365,7 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 
 	for _, rr := range rrset.RRs {
 		if svcb, ok := rr.(*dns.SVCB); ok {
-			log.Printf("LocateAgent: SVCB record: %s", svcb.String())
+			log.Printf("LocateAgent: SVCB record for %q:\n%s", targetName, svcb.String())
 			svcbrr = svcb
 			// Process SVCB record (addresses and port)
 			for _, kv := range svcb.Value {
