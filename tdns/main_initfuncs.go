@@ -145,6 +145,17 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10) // Only used by sidecar.
 	go RefreshEngine(conf, conf.Internal.StopCh)
 
+	if Globals.App.Type == AppTypeAgent {
+		conf.Internal.AgentQs = AgentQs{
+			Hello:          make(chan *AgentMsgReport, 100),
+			Beat:           make(chan *AgentMsgReport, 100),
+			Msg:            make(chan *AgentMsgReport, 100),
+			Command:        make(chan *AgentMgmtPostPlus, 100),
+			DebugCommand:   make(chan *AgentMgmtPostPlus, 100),
+			CombinerUpdate: make(chan *CombUpdate, 100),
+		}
+	}
+
 	switch Globals.App.Type {
 	case AppTypeCombiner, AppTypeAgent:
 		// don't start validator engine for combiner or agent
@@ -192,26 +203,19 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	stopch := conf.Internal.StopCh
 
-	// if Globals.App.Type != AppTypeMSA {
-	// The music sidecar has its own apihandler, so we must not start the TDNS apihandler here.
 	conf.Internal.APIStopCh = make(chan struct{})
-	// router := TdnsSetupRouter(conf)
-	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
-	if err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
-	// }
 
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
-	conf.Internal.AgentQs = AgentQs{
-		Hello:          make(chan AgentMsgReport, 100),
-		Beat:           make(chan AgentMsgReport, 100),
-		Msg:            make(chan AgentMsgReport, 100),
-		Command:        make(chan AgentMsgPost, 100),
-		CombinerUpdate: make(chan *CombUpdate, 100),
+
+	log.Printf("AgentQs: %+v", conf.Internal.AgentQs)
+
+	// Everyone has the mgmt API dispatcher
+	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
+	if err != nil {
+		return fmt.Errorf("Error starting API dispatcher: %v", err)
 	}
 
 	if Globals.App.Type == AppTypeAgent {
