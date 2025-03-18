@@ -22,7 +22,7 @@ import (
 
 const (
 	year68     = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
-	timelayout = "2006-01-02 15:04:05"
+	TimeLayout = "2006-01-02 15:04:05"
 )
 
 // TODO: Add support for TSIG zone transfers.

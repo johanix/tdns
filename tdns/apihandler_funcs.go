@@ -257,7 +257,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
-				Globals.App.Name, Globals.App.ServerBootTime.Format(timelayout), Globals.App.ServerConfigTime.Format(timelayout))
+				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
