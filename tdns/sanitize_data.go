@@ -27,7 +27,14 @@ func isUnsupportedType(v reflect.Value) bool {
 	default:
 		// Check for types that contain "http.Client" which often has function fields
 		typeName := v.Type().String()
-		return strings.Contains(typeName, "http.Client") || strings.Contains(typeName, "http.RoundTripper")
+		if strings.Contains(typeName, "http.Client") || strings.Contains(typeName, "http.RoundTripper") {
+			return true
+		}
+		// Check for sync.Mutex and similar types
+		if strings.HasPrefix(typeName, "sync.") {
+			return true
+		}
+		return false
 	}
 }
 

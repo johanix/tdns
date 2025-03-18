@@ -248,10 +248,11 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "BEAT", "FULLBEAT":
 			resp.Status = "ok"
 			conf.Internal.AgentQs.Beat <- &AgentMsgReport{
-				Transport:   "API",
-				MessageType: abp.MessageType,
-				Identity:    abp.MyIdentity,
-				Msg:         &abp,
+				Transport:    "API",
+				MessageType:  abp.MessageType,
+				Identity:     abp.MyIdentity,
+				BeatInterval: abp.MyBeatInterval,
+				Msg:          &abp,
 			}
 
 		default:
@@ -293,69 +294,24 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		resp.YourIdentity = ahp.MyIdentity
-		resp.MyIdentity = AgentId(conf.Agent.Identity)
-
-		// Now let's check if we need to know this agent
-		if ahp.Zone == "" {
-			log.Printf("APIhello: Error: No zone specified in HELLO message")
-			resp.Error = true
-			resp.ErrorMsg = "Error: No zone specified in HELLO message"
-			return
-		}
-
-		// Check if we have this zone
-		zd, exists := Zones.Get(string(ahp.Zone))
-		if !exists {
-			log.Printf("APIhello: Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone)
-			return
-		}
-
-		// Check if zone has HSYNC RRset
-		hsyncRR, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
+		needed, errmsg, err := conf.Internal.Registry.EvaluateHello(&ahp)
 		if err != nil {
-			log.Printf("APIhello: Error: Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
+			log.Printf("APIhello: error evaluating hello: %+v", err)
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
-			return
-		}
-		if hsyncRR == nil {
-			log.Printf("APIhello: Error: Zone %q has no HSYNC RRset", ahp.Zone)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error: Zone %q has no HSYNC RRset", ahp.Zone)
+			resp.ErrorMsg = errmsg
 			return
 		}
 
-		// Check if both our identity and remote agent are in HSYNC RRset
-		foundUs := false
-		foundThem := false
-		for _, rr := range hsyncRR.RRs {
-			if prr, ok := rr.(*dns.PrivateRR); ok {
-				if hsync, ok := prr.Data.(*HSYNC); ok {
-					if hsync.Identity == conf.Agent.Identity {
-						foundUs = true
-					}
-					if AgentId(hsync.Identity) == ahp.MyIdentity {
-						foundThem = true
-					}
-				}
-			}
-		}
-
-		if !foundUs || !foundThem {
-			resp.Error = true
+		if needed {
+			log.Printf("APIhello: Success: Zone %q HSYNC RRset includes both our identities. Sending nice response", ahp.Zone)
+			resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
+				ahp.MyIdentity, conf.Agent.Identity, ahp.Zone)
+		} else {
 			log.Printf("APIhello: Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone)
-			log.Printf("APIhello: HSYNC RRset: %+v", hsyncRR)
-			log.Printf("APIhello: your identity: %s, my identity: %s", ahp.MyIdentity, conf.Agent.Identity)
-			resp.ErrorMsg = fmt.Sprintf("Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone)
+			resp.Error = true
+			resp.ErrorMsg = errmsg
 			return
 		}
-
-		log.Printf("APIhello: Success: Zone %q HSYNC RRset includes both our identities. Sending nice response", ahp.Zone)
-		resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
-			ahp.MyIdentity, conf.Agent.Identity, ahp.Zone)
 
 		switch ahp.MessageType {
 		case "HELLO":

@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -67,7 +68,7 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 	wannabe_agents := make(map[AgentId]*Agent)
 
 	// syncedZones maps zone names to the agents that share them with us
-	syncedZones := map[ZoneName][]*Agent{}
+	// syncedZones := map[ZoneName][]*Agent{}
 
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
@@ -90,22 +91,17 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 	}
 
 	// Configure intervals
-	helloEvalInterval := configureInterval("syncengine.intervals.helloeval", 15, 1800)
+	// helloEvalInterval := configureInterval("syncengine.intervals.helloeval", 15, 1800)
 	helloRetryInterval := configureInterval("syncengine.intervals.helloretry", 15, 1800)
-	// heartbeatInterval := configureInterval("syncengine.intervals.heartbeat", 15, 1800)
 	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
-	// fullHeartbeatInterval := configureInterval("syncengine.intervals.fullheartbeat", 60, 3600)
 
 	log.Printf("*** HsyncEngine starting (heartbeat will run once every %d seconds) ***", heartbeatInterval)
 
-	HelloEvalTicker := time.NewTicker(time.Duration(helloEvalInterval) * time.Second)
 	HBticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
 	HelloRetryTicker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
-	// XXX: Unclear whether we need a separate "full" heartbeat
-	// fullHBticker := time.NewTicker(time.Duration(fullHeartbeatInterval) * time.Second)
 
 	// Add ticker for incomplete agent checks
-	incompleteAgentTicker := time.NewTicker(30 * time.Second)
+	// incompleteAgentTicker := time.NewTicker(30 * time.Second)
 
 	for {
 		select {
@@ -134,22 +130,15 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 		case <-HBticker.C:
 			registry.SendHeartbeats()
 
-		// case <-fullHBticker.C:
-		// 	registry.SendFullHeartbeats()
-
-		case <-HelloEvalTicker.C:
-			registry.EvaluateHellos(wannabe_agents, syncedZones)
-
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 
 		case <-stopch:
 			log.Printf("HsyncEngine shutting down")
 			// stop all tickers
-			HelloEvalTicker.Stop()
+			// HelloEvalTicker.Stop()
 			HBticker.Stop()
-			//fullHBticker.Stop()
-			incompleteAgentTicker.Stop()
+			// incompleteAgentTicker.Stop()
 			return
 		}
 	}
@@ -211,11 +200,13 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, wannabe_agents map[Ag
 }
 
 func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport, wannabe_agents map[AgentId]*Agent) {
-	log.Printf("HelloHandler: Received HELLO from %s", report.Identity)
+	// log.Printf("HelloHandler: Received HELLO from %s", report.Identity)
 
 	switch report.MessageType {
 	case "HELLO":
-		log.Printf("HelloHandler: Received initial HELLO from %s", report.Identity)
+		if Globals.Debug {
+			log.Printf("HelloHandler: Received initial HELLO from %s", report.Identity)
+		}
 		// Store in wannabe_agents until we verify it shares zones with us
 		// wannabe_agents[report.Msg.Identity] = report.Agent
 
@@ -229,14 +220,19 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport, wannabe_agents
 
 	switch report.MessageType {
 	case "BEAT":
-		log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
+		if Globals.Debug {
+			log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
+		}
 		if agent, exists := ar.S.Get(report.Identity); exists {
 			agent.ApiDetails.LatestRBeat = time.Now()
 			agent.ApiDetails.ReceivedBeats++
+			agent.ApiDetails.BeatInterval = report.BeatInterval
 		}
 
 	case "FULLBEAT":
-		log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
+		if Globals.Debug {
+			log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
+		}
 		if agent, exists := ar.S.Get(report.Identity); exists {
 			agent.ApiDetails.LatestRBeat = time.Now()
 			agent.ApiDetails.ReceivedBeats++
@@ -414,13 +410,19 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus) {
 }
 
 func (ar *AgentRegistry) SendHeartbeats() {
-	log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
+	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
 		switch a.ApiDetails.State {
 		case AgentStateIntroduced, AgentStateOperational:
-			log.Printf("HsyncEngine: Sending heartbeat to %s", a.Identity)
+			if Globals.Debug {
+				log.Printf("HsyncEngine: Sending heartbeat to %s", a.Identity)
+			}
+		case AgentStateDegraded, AgentStateInterrupted:
+			log.Printf("HsyncEngine: Sending heartbeat to degraded/interrupted agent %s", a.Identity)
 		default:
-			log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.State])
+			if Globals.Debug {
+				log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.State])
+			}
 			continue
 		}
 
@@ -443,7 +445,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				}
 
 			case status != http.StatusOK:
-				log.Printf("HsyncEngine: Heartbeat to %s returned status %d", agent.Identity, status)
+				log.Printf("HsyncEngine: Error: heartbeat to %s returned status %d", agent.Identity, status)
 				if agent.ApiDetails.LatestError == "" {
 					agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
 					agent.ApiDetails.LatestErrorTime = time.Now()
@@ -465,9 +467,32 @@ func (ar *AgentRegistry) SendHeartbeats() {
 					agent.ApiDetails.SentBeats++
 				}
 			}
+			agent.CheckState(ar.LocalAgent.Remote.BeatInterval)
 			ar.S.Set(agent.Identity, agent)
 			agent.mu.Unlock()
 		}(a)
+	}
+}
+
+func (agent *Agent) CheckState(ourBeatInterval uint32) {
+	timeSinceLastReceivedBeat := time.Since(agent.ApiDetails.LatestRBeat)
+	timeSinceLastSentBeat := time.Since(agent.ApiDetails.LatestSBeat)
+	remoteBeatInterval := time.Duration(agent.ApiDetails.BeatInterval) * time.Second
+	localBeatInterval := time.Duration(ourBeatInterval) * time.Second
+
+	switch agent.ApiDetails.State {
+	case AgentStateOperational, AgentStateDegraded, AgentStateInterrupted:
+		// proceed
+	default:
+		return
+	}
+
+	if timeSinceLastReceivedBeat > 10*remoteBeatInterval || timeSinceLastSentBeat > 10*localBeatInterval {
+		agent.ApiDetails.State = AgentStateInterrupted
+	} else if timeSinceLastReceivedBeat > 2*remoteBeatInterval || timeSinceLastSentBeat > 2*localBeatInterval {
+		agent.ApiDetails.State = AgentStateDegraded
+	} else {
+		agent.ApiDetails.State = AgentStateOperational
 	}
 }
 
@@ -504,7 +529,9 @@ func (ar *AgentRegistry) HelloRetrier() {
 	if len(known_agents) > 0 {
 		log.Printf("HsyncEngine: Retried HELLO to %d remote agents in state KNOWN: %v", len(known_agents), known_agents)
 	} else {
-		log.Printf("HsyncEngine: No remote agents in state KNOWN to retry HELLO to")
+		if Globals.Debug {
+			log.Printf("HsyncEngine: No remote agents in state KNOWN to retry HELLO to")
+		}
 	}
 }
 
@@ -543,31 +570,57 @@ func (ar *AgentRegistry) SingleHello(agent *Agent) {
 	agent.mu.Unlock()
 }
 
-func (ar *AgentRegistry) EvaluateHellos(wannabe_agents map[AgentId]*Agent, syncedZones map[ZoneName][]*Agent) {
-	log.Printf("HsyncEngine: Evaluating agents that claim to share zones with us")
+func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error) {
+	log.Printf("HsyncEngine: Evaluating agent %q that claims to share the zone %q with us", ahp.MyIdentity, ahp.Zone)
 
-	for identity, wannabe := range wannabe_agents {
-		// Check if this agent appears in any of our synced zones
-		found := false
-		for zonename, zoneAgents := range syncedZones {
-			for _, agent := range zoneAgents {
-				if agent.Identity == identity {
-					found = true
-					ar.S.Set(identity, wannabe)
-					delete(wannabe_agents, identity)
-					log.Printf("HsyncEngine: Confirmed agent %s shares zone %s with us", identity, zonename)
-					break
+	// Now let's check if we need to know this agent
+	if ahp.Zone == "" {
+		log.Printf("EvaluateHello: Error: No zone specified in HELLO message")
+		return false, "Error: No zone specified in HELLO message", nil
+	}
+
+	// Check if we have this zone
+	zd, exists := Zones.Get(string(ahp.Zone))
+	if !exists {
+		log.Printf("EvaluateHello: Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone)
+		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil
+	}
+
+	// Check if zone has HSYNC RRset
+	hsyncRR, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
+	if err != nil {
+		log.Printf("EvaluateHello: Error: Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
+		return false, fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err), nil
+	}
+	if hsyncRR == nil {
+		log.Printf("EvaluateHello: Error: Zone %q has no HSYNC RRset", ahp.Zone)
+		return false, fmt.Sprintf("Error: Zone %q has no HSYNC RRset", ahp.Zone), nil
+	}
+
+	// Check if both our identity and remote agent are in HSYNC RRset
+	foundMe := false
+	foundYou := false
+	for _, rr := range hsyncRR.RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if hsync, ok := prr.Data.(*HSYNC); ok {
+				if hsync.Identity == ar.LocalAgent.Identity {
+					foundMe = true
+				}
+				if AgentId(hsync.Identity) == ahp.MyIdentity {
+					foundYou = true
 				}
 			}
-			if found {
-				break
-			}
-		}
-
-		if !found {
-			log.Printf("HsyncEngine: Agent %s does not share any zones with us", identity)
 		}
 	}
+
+	if !foundMe || !foundYou {
+		log.Printf("EvaluateHello: Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone)
+		log.Printf("EvaluateHello: HSYNC RRset: %+v", hsyncRR)
+		log.Printf("EvaluateHello: your identity: %s, my identity: %s", ahp.MyIdentity, ar.LocalAgent.Identity)
+		return false, fmt.Sprintf("Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone), nil
+	}
+
+	return true, "", nil
 }
 
 // XXX: Not used at the moment.
@@ -653,12 +706,17 @@ func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (int, []byte, error) {
 		return 0, nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
 	}
 
-	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/beat", msg, false)
+	// Create a context with a 2-second timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Use the context with the RequestNG function
+	status, resp, err := agent.Api.ApiClient.RequestNGWithContext(ctx, "POST", "/beat", msg, false)
 	if err != nil {
 		return 0, nil, fmt.Errorf("HTTPS beat failed: %v", err)
 	}
 	if status != http.StatusOK {
-		return 0, nil, fmt.Errorf("HTTPS beat returned status %d (%s)", status, http.StatusText(status))
+		return status, resp, fmt.Errorf("HTTPS beat returned status %d (%s)", status, http.StatusText(status))
 	}
 
 	return status, resp, nil

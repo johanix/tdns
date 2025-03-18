@@ -78,6 +78,7 @@ type AgentDetails struct {
 	LatestError     string
 	LatestErrorTime time.Time
 	HelloTime       time.Time
+	BeatInterval    uint32
 	SentBeats       uint32
 	ReceivedBeats   uint32
 	LatestSBeat     time.Time
@@ -216,10 +217,11 @@ type AgentMgmtPostPlus struct {
 }
 
 type AgentMsgReport struct {
-	Transport   string
-	MessageType string
-	Zone        ZoneName
-	Identity    AgentId
-	Msg         interface{}
-	Response    chan *CombResponse
+	Transport    string
+	MessageType  string
+	Zone         ZoneName
+	Identity     AgentId
+	BeatInterval uint32
+	Msg          interface{}
+	Response     chan *CombResponse
 }

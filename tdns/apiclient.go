@@ -7,10 +7,12 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"io/ioutil"
 	"os"
 	"strings"
 
@@ -329,6 +331,146 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 			lastErr = err
 			continue // Try next address
 		}
+		req.Header.Add("Content-Type", "application/json")
+		if api.AuthMethod == "X-API-Key" {
+			req.Header.Add("X-API-Key", api.apiKey)
+		} else if api.AuthMethod == "Authorization" {
+			req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
+		} else if api.AuthMethod == "none" {
+			// do not add any authentication header at all
+		}
+		resp, err = api.Client.Do(req)
+
+		if err != nil {
+			lastErr = err
+			continue // Try next address
+		}
+
+		if api.Debug {
+			fmt.Printf("api.RequestNG: %s %s dieOnError: %v err: %v\n", method, endpoint, dieOnError, err)
+		}
+
+		lastErr = nil // success finally
+		break
+	}
+
+	if lastErr != nil {
+		var msg string
+		if strings.Contains(lastErr.Error(), "connection refused") {
+			msg = "Connection refused. Server process probably not running."
+		} else {
+			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
+		}
+		if dieOnError {
+			fmt.Printf("%s\n", msg)
+			os.Exit(1)
+		} else {
+			return 501, nil, lastErr
+		}
+	}
+
+	status := resp.StatusCode
+	defer resp.Body.Close()
+	if api.Debug {
+		fmt.Printf("Status from %s: %d\n", method, status)
+	}
+
+	buf, err := io.ReadAll(resp.Body)
+
+	if api.Debug {
+		var prettyJSON bytes.Buffer
+
+		error := json.Indent(&prettyJSON, buf, "", "  ")
+		if error != nil {
+			log.Println("JSON parse error: ", error)
+		}
+		log.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
+		log.Printf("API%s: end of response\n", method)
+	}
+
+	// not bothering to copy buf, this is a one-off
+	return status, buf, nil
+}
+
+func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
+	if api == nil {
+		log.Printf("api.RequestNG: api client is nil. Returning.")
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
+	bytebuf := new(bytes.Buffer)
+	err := json.NewEncoder(bytebuf).Encode(data)
+	if err != nil {
+		fmt.Printf("api.RequestNG: Error from json.NewEncoder: %v\n", err)
+		if dieOnError {
+			os.Exit(1)
+		}
+	}
+
+	// alternative to this:
+	// Set the request body if data is provided
+	var reqBody []byte
+	if data != nil {
+		reqBody, err = json.Marshal(data)
+		if err != nil {
+			log.Printf("api.RequestNGWithContext: failed to marshal data: %v", err)
+		}
+		if dieOnError {
+			os.Exit(1)
+		}
+	}
+
+	api.UrlReport(method, endpoint, bytebuf.Bytes())
+
+	if api.Debug {
+		fmt.Printf("api.RequestNG: %s %s dieOnError: %v\n", method, endpoint, dieOnError)
+	}
+
+	baseURL, err := url.Parse(api.BaseUrl)
+	if err != nil {
+		if dieOnError {
+			log.Fatalf("Failed to parse base URL: %v", err)
+		}
+		return 0, nil, fmt.Errorf("failed to parse base URL: %v", err)
+	}
+
+	// Determine which addresses to try
+	addressesToTry := api.Addresses
+	if len(addressesToTry) == 0 {
+		// If no explicit addresses, use the hostname from BaseUrl
+		addressesToTry = []string{baseURL.Host}
+	}
+
+	if api.Debug {
+		log.Printf("api.RequestNG: trying addresses: %v\n", addressesToTry)
+	}
+
+	var resp *http.Response
+
+	// Try each address
+	var lastErr error
+	for _, addr := range addressesToTry {
+		// Create the full URL with the current address
+		urlCopy := *baseURL // Create a copy of the parsed URL
+		urlCopy.Host = addr // addr must be in addr:port format
+		fullURL := fmt.Sprintf("%s%s", urlCopy.String(), endpoint)
+
+		if api.Debug {
+			log.Printf("api.RequestNG: trying URL: %s\n", fullURL)
+		}
+		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
+
+		// Create the request with context
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
+		if err != nil {
+			// return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+			lastErr = err
+			continue // Try next address
+		}
+
+		if data != nil {
+			req.Body = ioutil.NopCloser(bytes.NewReader(reqBody))
+		}
+
 		req.Header.Add("Content-Type", "application/json")
 		if api.AuthMethod == "X-API-Key" {
 			req.Header.Add("X-API-Key", api.apiKey)

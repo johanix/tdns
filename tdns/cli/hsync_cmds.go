@@ -117,79 +117,81 @@ var hsyncStatusCmd = &cobra.Command{
 					if details.LatestError != "" {
 						fmt.Printf(" - Latest Error: %s\n", details.LatestError)
 						fmt.Printf(" - Time of error: %s (duration of outage: %v)\n",
-							details.LatestErrorTime.Format(time.RFC3339), time.Since(details.LatestErrorTime))
+							details.LatestErrorTime.Format(tdns.TimeLayout), time.Since(details.LatestErrorTime))
 					}
-					fmt.Printf(" * Sent heartbeats: %d (latest %s), received heartbeats: %d (latest %s)\n",
-						details.SentBeats, details.LatestSBeat.Format(time.RFC3339),
-						details.ReceivedBeats, details.LatestRBeat.Format(time.RFC3339))
-					if len(details.Addrs) > 0 {
-						// fmt.Printf("      Endpoints:\n")
-						//for _, addr := range details.Addrs {
-						if transport == "DNS" {
-							target := ""
-							if details.UriRR != nil {
-								target = details.UriRR.Target
-							}
-							if target == "" {
-								target = details.Addrs[0] // fallback if URI target is not available
-							}
-							port := strconv.Itoa(int(details.Port))
-							var addrs []string
-							for _, a := range details.Addrs {
-								addrs = append(addrs, net.JoinHostPort(a, port))
-							}
+					fmt.Printf(" * Heartbeats: Sent: %d (latest %s), received: %d (latest %s)\n",
+						details.SentBeats, details.LatestSBeat.Format(tdns.TimeLayout),
+						details.ReceivedBeats, details.LatestRBeat.Format(tdns.TimeLayout))
+					if tdns.Globals.Verbose {
+						if len(details.Addrs) > 0 {
+							// fmt.Printf("      Endpoints:\n")
+							//for _, addr := range details.Addrs {
+							if transport == "DNS" {
+								target := ""
+								if details.UriRR != nil {
+									target = details.UriRR.Target
+								}
+								if target == "" {
+									target = details.Addrs[0] // fallback if URI target is not available
+								}
+								port := strconv.Itoa(int(details.Port))
+								var addrs []string
+								for _, a := range details.Addrs {
+									addrs = append(addrs, net.JoinHostPort(a, port))
+								}
 
-							fmt.Printf(" * Target: %s\n", target)
-							fmt.Printf(" * Addresses: %v\n", addrs)
-							if details.KeyRR != nil {
-								keyStr := details.KeyRR.String()
-								parts := strings.Fields(keyStr)
-								if len(parts) > 0 {
-									key := parts[len(parts)-1] // Get the last field which is the key data
-									if len(key) > 20 {
-										truncKey := key[:10] + "***" + key[len(key)-10:]
-										fmt.Printf(" * SIG(0) KEY RR: %s %s %s %s %s\n",
-											parts[0], parts[1], parts[2], parts[3], truncKey)
-									} else {
-										fmt.Printf(" * SIG(0) KEY RR: %s\n", keyStr)
+								fmt.Printf(" * Target: %s\n", target)
+								fmt.Printf(" * Addresses: %v\n", addrs)
+								if details.KeyRR != nil {
+									keyStr := details.KeyRR.String()
+									parts := strings.Fields(keyStr)
+									if len(parts) > 0 {
+										key := parts[len(parts)-1] // Get the last field which is the key data
+										if len(key) > 20 {
+											truncKey := key[:10] + "***" + key[len(key)-10:]
+											fmt.Printf(" * SIG(0) KEY RR: %s %s %s %s %s\n",
+												parts[0], parts[1], parts[2], parts[3], truncKey)
+										} else {
+											fmt.Printf(" * SIG(0) KEY RR: %s\n", keyStr)
+										}
 									}
 								}
-							}
-						} else if transport == "API" {
-							baseURL := ""
-							if details.UriRR != nil {
-								baseURL = details.UriRR.Target
-							}
-							if baseURL == "" {
-								baseURL = fmt.Sprintf("https://%s/api/v1", details.Addrs[0])
-							}
+							} else if transport == "API" {
+								baseURL := ""
+								if details.UriRR != nil {
+									baseURL = details.UriRR.Target
+								}
+								if baseURL == "" {
+									baseURL = fmt.Sprintf("https://%s/api/v1", details.Addrs[0])
+								}
 
-							port := strconv.Itoa(int(details.Port))
-							var addrs []string
-							for _, a := range details.Addrs {
-								addrs = append(addrs, net.JoinHostPort(a, port))
-							}
+								port := strconv.Itoa(int(details.Port))
+								var addrs []string
+								for _, a := range details.Addrs {
+									addrs = append(addrs, net.JoinHostPort(a, port))
+								}
 
-							fmt.Printf(" * Base URL: %s\n", baseURL)
-							fmt.Printf(" * Addresses: %v\n", addrs)
-							if details.TlsaRR != nil {
-								tlsaStr := details.TlsaRR.String()
-								parts := strings.Fields(tlsaStr)
-								if len(parts) > 0 {
-									hash := parts[len(parts)-1] // Get the last field which is the hash
-									if len(hash) > 20 {
-										truncHash := hash[:10] + "***" + hash[len(hash)-10:]
-										fmt.Printf(" * TLSA RR: %s %s %s %s %s\n",
-											parts[0], parts[1], parts[2], parts[3], truncHash)
-									} else {
-										fmt.Printf(" * TLSA RR: %s\n", tlsaStr)
+								fmt.Printf(" * Base URL: %s\n", baseURL)
+								fmt.Printf(" * Addresses: %v\n", addrs)
+								if details.TlsaRR != nil {
+									tlsaStr := details.TlsaRR.String()
+									parts := strings.Fields(tlsaStr)
+									if len(parts) > 0 {
+										hash := parts[len(parts)-1] // Get the last field which is the hash
+										if len(hash) > 20 {
+											truncHash := hash[:10] + "***" + hash[len(hash)-10:]
+											fmt.Printf(" * TLSA RR: %s %s %s %s %s\n",
+												parts[0], parts[1], parts[2], parts[3], truncHash)
+										} else {
+											fmt.Printf(" * TLSA RR: %s\n", tlsaStr)
+										}
 									}
 								}
+							} else {
+								fmt.Printf("Error: unknown transport: %q\n", transport)
 							}
-						} else {
-							fmt.Printf("Error: unknown transport: %q\n", transport)
+							// }
 						}
-						// }
 					}
 				}
 				fmt.Println()
