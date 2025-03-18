@@ -86,8 +86,20 @@ graph TD
         D10[CombinerUpdater]
     end
 
+    subgraph DelegationSyncher
+       D11[DelegationSyncher]
+    end
+
     subgraph Zones
       Z1[ConcurrentMap w/ zone data]
+    end
+
+    subgraph KeyStore
+      Z2[Database]
+    end
+
+    subgraph TrustStore
+      Z3[Database]
     end
 
     subgraph Config
