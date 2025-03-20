@@ -68,7 +68,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 }
 
 // LocateAgent is completely asynchronous with no return values
-func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName) {
+func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
 	log.Printf("LocateAgent: looking up agent %s", remoteid)
 
 	// Skip if this is our own identity
@@ -437,7 +437,7 @@ func (ar *AgentRegistry) GetAgentInfo(identity AgentId) (*Agent, error) {
 // }
 
 // IdentifyAgents looks for HSYNC records in a zone and identifies agents we need to sync with
-func (ar *AgentRegistry) IdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([]*Agent, error) {
+func (ar *AgentRegistry) xxxIdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([]*Agent, error) {
 	var agents []*Agent
 
 	rrset, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
@@ -453,7 +453,7 @@ func (ar *AgentRegistry) IdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([]*A
 					continue
 				}
 				// Found another agent, try to locate it
-				ar.LocateAgent(AgentId(hsync.Identity), "")
+				ar.LocateAgent(AgentId(hsync.Identity), "", nil)
 			}
 		}
 	}
@@ -569,9 +569,7 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 
 // UpdateAgents updates the registry based on the HSYNC records in the request. It has already been
 // split into "adds" and "removes" by zd.HsyncCHanged() so we can process them independently.
-func (ar *AgentRegistry) UpdateAgents(ourId AgentId, wannabe_agents map[AgentId]*Agent,
-	req SyncRequest, zonename ZoneName) error {
-
+func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName) error {
 	// Handle new HSYNC records
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
@@ -587,11 +585,20 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, wannabe_agents map[AgentId]
 					}
 
 					// Need to sync with Upstream - do this asynchronously
-					ar.LocateAgent(AgentId(hsync.Upstream), zonename)
+					ar.LocateAgent(AgentId(hsync.Upstream), zonename,
+						&DeferredAgentTask{
+							Precondition: func() bool {
+								return true
+							},
+							Action: func() (bool, error) {
+								return true, nil
+							},
+							Desc: fmt.Sprintf("Sync with %s", hsync.Upstream),
+						})
 				} else {
 					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Identity)
 					// Not our target, locate agent asynchronously
-					ar.LocateAgent(AgentId(hsync.Identity), zonename)
+					ar.LocateAgent(AgentId(hsync.Identity), zonename, nil)
 				}
 			}
 		}
@@ -616,4 +623,31 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, wannabe_agents map[AgentId]
 	}
 
 	return nil
+}
+
+func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
+	agent.DeferredTasks = append(agent.DeferredTasks, *task)
+}
+
+func (agent *Agent) CreateOperationalAgentTask(action func() (bool, error), desc string) *DeferredAgentTask {
+	return &DeferredAgentTask{
+		Precondition: func() bool {
+			return agent.State == AgentStateOperational
+		},
+		Action: action,
+		Desc:   desc,
+	}
+}
+
+func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
+	return &DeferredAgentTask{
+		Desc: "Create Upstream RFI",
+		Precondition: func() bool {
+			return agent.State == AgentStateOperational
+		},
+		Action: func() (bool, error) {
+
+			return true, nil
+		},
+	}
 }

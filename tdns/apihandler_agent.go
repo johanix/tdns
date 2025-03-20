@@ -104,7 +104,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			agent, err := conf.Internal.Registry.GetAgentInfo(amp.AgentId)
 			if err != nil {
 				// Start async lookup and return a message that lookup is in progress
-				conf.Internal.Registry.LocateAgent(amp.AgentId, "")
+				conf.Internal.Registry.LocateAgent(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent lookup in progress for %s", amp.AgentId)
 				return
@@ -112,7 +112,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			// If agent info is incomplete, start a new lookup
 			if agent.State == AgentStateNeeded {
-				conf.Internal.Registry.LocateAgent(amp.AgentId, "")
+				conf.Internal.Registry.LocateAgent(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent information is incomplete for %s, lookup in progress", amp.AgentId)
 				return
@@ -367,7 +367,7 @@ func APImsg(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch amp.MessageType {
 		case "NOTIFY", "QUERY", "STATUS":
 			resp.Status = "ok"
-			var cresp = make(chan *CombResponse, 1)
+			var cresp = make(chan *SynchedDataResponse, 1)
 			select {
 			case conf.Internal.AgentQs.Msg <- &AgentMsgReport{
 				Transport:   "API",
