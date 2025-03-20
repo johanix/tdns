@@ -295,7 +295,7 @@ var hsyncSendHelloCmd = &cobra.Command{
 		// Start a goroutine to locate the agent
 		go func() {
 			// First, try to locate the agent
-			registry.LocateAgent(agentIdentity, "")
+			registry.LocateAgent(agentIdentity, "", nil)
 
 			// Wait for the agent to be located (with timeout)
 			timeout := time.After(30 * time.Second)

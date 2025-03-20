@@ -47,18 +47,19 @@ var AgentStateToString = map[AgentState]string{
 // changes to INTERRUPTED.
 
 type Agent struct {
-	Identity    AgentId
-	mu          sync.RWMutex
-	InitialZone ZoneName
-	ApiDetails  *AgentDetails
-	DnsDetails  *AgentDetails
-	ApiMethod   bool
-	DnsMethod   bool
-	Zones       map[ZoneName]bool
-	Api         *AgentApi
-	State       AgentState // Agent states: needed, known, hello-done, operational, error
-	LastState   time.Time  // When state last changed
-	ErrorMsg    string     // Error message if state is error
+	Identity      AgentId
+	mu            sync.RWMutex
+	InitialZone   ZoneName
+	ApiDetails    *AgentDetails
+	DnsDetails    *AgentDetails
+	ApiMethod     bool
+	DnsMethod     bool
+	Zones         map[ZoneName]bool
+	Api           *AgentApi
+	State         AgentState // Agent states: needed, known, hello-done, operational, error
+	LastState     time.Time  // When state last changed
+	ErrorMsg      string     // Error message if state is error
+	DeferredTasks []DeferredAgentTask
 }
 
 type AgentDetails struct {
@@ -83,6 +84,16 @@ type AgentDetails struct {
 	ReceivedBeats   uint32
 	LatestSBeat     time.Time
 	LatestRBeat     time.Time
+}
+
+// AgentTask is a task that needs to be executed once the Precondition is met.
+// A typical case is when we need to talk to a remote agent regarding zone transfer
+// provisioning, but cannot do that until the remote agent is operational.
+// The Precondition is checked every time a heartbeat is received from the remote agent.
+type DeferredAgentTask struct {
+	Precondition func() bool
+	Action       func() (bool, error)
+	Desc         string
 }
 
 type AgentApi struct {
@@ -186,6 +197,7 @@ type AgentMgmtPost struct {
 	RRType      uint16
 	RR          string
 	RRs         []string
+	Upstream    AgentId `json:"-"`
 	// Response    chan *AgentMgmtResponse
 }
 
@@ -223,5 +235,5 @@ type AgentMsgReport struct {
 	Identity     AgentId
 	BeatInterval uint32
 	Msg          interface{}
-	Response     chan *CombResponse
+	Response     chan *SynchedDataResponse
 }

@@ -147,12 +147,12 @@ func (conf *Config) MainInit(defaultcfg string) error {
 
 	if Globals.App.Type == AppTypeAgent {
 		conf.Internal.AgentQs = AgentQs{
-			Hello:          make(chan *AgentMsgReport, 100),
-			Beat:           make(chan *AgentMsgReport, 100),
-			Msg:            make(chan *AgentMsgReport, 100),
-			Command:        make(chan *AgentMgmtPostPlus, 100),
-			DebugCommand:   make(chan *AgentMgmtPostPlus, 100),
-			CombinerUpdate: make(chan *CombUpdate, 100),
+			Hello:             make(chan *AgentMsgReport, 100),
+			Beat:              make(chan *AgentMsgReport, 100),
+			Msg:               make(chan *AgentMsgReport, 100),
+			Command:           make(chan *AgentMgmtPostPlus, 100),
+			DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
+			SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
 		}
 	}
 
@@ -186,10 +186,10 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		}
 		// Initialize AgentRegistry for agent mode only
 		conf.Internal.Registry = conf.NewAgentRegistry()
-	case AppTypeServer, AppTypeMSA, AppTypeCombiner:
-		// ... existing server/MSA/combiner setup ...
+	case AppTypeServer, AppTypeCombiner:
+		// ... existing server/combiner setup ...
 	default:
-		// ... existing server/MSA/combiner setup ...
+		// ... existing server/agent/combiner setup ...
 	}
 
 	if Globals.Debug {
@@ -222,7 +222,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
 		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
-		go conf.CombinerUpdater(conf.Internal.AgentQs.CombinerUpdate, conf.Internal.StopCh)
+		go conf.SynchedDataEngine(conf.Internal.AgentQs.SynchedDataUpdate, conf.Internal.StopCh)
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)

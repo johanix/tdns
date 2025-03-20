@@ -12,14 +12,14 @@ import (
 	"github.com/spf13/viper"
 )
 
-type CombUpdate struct {
+type SynchedDataUpdate struct {
 	Zone     ZoneName
 	AgentId  AgentId
 	Update   *ZoneUpdate
-	Response chan *CombResponse
+	Response chan *SynchedDataResponse
 }
 
-type CombResponse struct {
+type SynchedDataResponse struct {
 	Zone     ZoneName
 	AgentId  AgentId
 	Time     time.Time
@@ -103,16 +103,16 @@ func (zdr *ZoneDataRepo) Set(zone ZoneName, agentRepo *AgentRepo) {
 	zdr.Repo.Set(zone, agentRepo)
 }
 
-// CombinerUpdater is a component that updates the combiner with new information
+// SynchedDataEngine is a component that updates the combiner with new information
 // received from the agents that are sharing zones with us.
-func (conf *Config) CombinerUpdater(updateQ chan *CombUpdate, stopch chan struct{}) {
-	var combu *CombUpdate
+func (conf *Config) SynchedDataEngine(updateQ chan *SynchedDataUpdate, stopch chan struct{}) {
+	var synchedDataUpdate *SynchedDataUpdate
 
-	if !viper.GetBool("combinerupdater.active") {
-		log.Printf("CombinerUpdater is NOT active. No updates will be sent to the combiner.")
+	if !viper.GetBool("syncheddataengine.active") {
+		log.Printf("SynchedDataEngine is NOT active. No updates will be sent to the combiner.")
 		for range updateQ {
-			combu = <-updateQ
-			log.Printf("CombinerUpdater: NOT active, but received an update: %+v", combu)
+			synchedDataUpdate = <-updateQ
+			log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
 			continue
 		}
 	}
@@ -121,35 +121,35 @@ func (conf *Config) CombinerUpdater(updateQ chan *CombUpdate, stopch chan struct
 
 	zdr, err := NewZoneDataRepo()
 	if err != nil {
-		log.Printf("CombinerUpdater: Failed to create zone data repo: %v", err)
+		log.Printf("SynchedDataEngine: Failed to create zone data repo: %v", err)
 		return
 	}
 
-	log.Printf("*** CombinerUpdater starting ***")
+	log.Printf("*** SynchedDataEngine starting ***")
 
 	for {
 		select {
-		case combu = <-updateQ:
-			log.Printf("CombinerUpdater: Received update: %+v", combu)
+		case synchedDataUpdate = <-updateQ:
+			log.Printf("SynchedDataEngine: Received update: %+v", synchedDataUpdate)
 
 			// 1. Evaluate the update for applicability (valid zone, etc)
 			// 2. Evaluate the update according to policy.
 
 			// Prepare a response in case there is a response channel.
-			resp := CombResponse{
-				Zone:    combu.Zone,
-				AgentId: combu.AgentId,
+			resp := SynchedDataResponse{
+				Zone:    synchedDataUpdate.Zone,
+				AgentId: synchedDataUpdate.AgentId,
 			}
 
 			// agent_policy.go: EvaluateUpdate()
-			ok, msg, err := zdr.EvaluateUpdate(combu)
+			ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
 			if err != nil {
-				log.Printf("CombinerUpdater: Failed to evaluate update: %v", err)
+				log.Printf("SynchedDataEngine: Failed to evaluate update: %v", err)
 				continue
 			}
 
 			if !ok {
-				log.Printf("CombinerUpdater: Update not applicable, skipping")
+				log.Printf("SynchedDataEngine: Update not applicable, skipping")
 				resp.Error = true
 				resp.ErrorMsg = msg
 			} else {
@@ -157,18 +157,18 @@ func (conf *Config) CombinerUpdater(updateQ chan *CombUpdate, stopch chan struct
 
 				// 3. Add the update to the agent data repo.
 				// agent_policy.go: ProcessUpdate()
-				err = zdr.ProcessUpdate(combu)
+				err = zdr.ProcessUpdate(synchedDataUpdate)
 				if err != nil {
-					log.Printf("CombinerUpdater: Failed to add update to agent data repo: %v", err)
+					log.Printf("SynchedDataEngine: Failed to add update to agent data repo: %v", err)
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				}
 			}
-			if combu.Response != nil {
+			if synchedDataUpdate.Response != nil {
 				select {
-				case combu.Response <- &resp:
+				case synchedDataUpdate.Response <- &resp:
 				default:
-					log.Printf("CombinerUpdater: Response channel blocked, skipping response")
+					log.Printf("SynchedDataEngine: Response channel blocked, skipping response")
 				}
 			}
 
@@ -177,7 +177,7 @@ func (conf *Config) CombinerUpdater(updateQ chan *CombUpdate, stopch chan struct
 	}
 }
 
-func (zdr *ZoneDataRepo) SendUpdate(update *CombUpdate) error {
+func (zdr *ZoneDataRepo) SendUpdate(update *SynchedDataUpdate) error {
 	// 1. Send the update to the combiner.
 	return nil
 }
