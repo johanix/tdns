@@ -10,12 +10,13 @@ import (
 	"log"
 	"strings"
 
+	"github.com/gookit/goutil/dump"
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
-var myIdentity, notifyRRtype, dnsRecord string
+var myIdentity, notifyRRtype, dnsRecord, rfitype, rfiupstream, rfidownstream string
 
 var DebugAgentCmd = &cobra.Command{
 	Use:   "agent",
@@ -46,12 +47,6 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 
 		rrs := []string{rr.String()}
 
-		prefixcmd, _ := getCommandContext("debug")
-		api, err := getApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
 		rrtype := dns.StringToType[notifyRRtype]
 		if rrtype == 0 {
 			log.Fatalf("Error: Invalid RR type: %s", notifyRRtype)
@@ -59,41 +54,90 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 
 		req := tdns.AgentMgmtPost{
 			//Command:     "send-notify",
-			MessageType: "NOTIFY",
+			MessageType: tdns.AgentMsgNotify,
 			RRType:      rrtype,
 			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
 			AgentId:     tdns.AgentId(myIdentity),
 			RRs:         rrs,
 		}
 
-		_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
+		SendAgentDebugCmd(req)
+	},
+}
+
+var DebugAgentSendRfiCmd = &cobra.Command{
+	Use:   "send-rfi",
+	Short: "Tell agent to send an RFI message to another agent",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		rfitype = strings.ToUpper(rfitype)
+		if rfitype != "UPSTREAM" && rfitype != "DOWNSTREAM" {
+			log.Fatalf("Error: RFI type must be either UPSTREAM or DOWNSTREAM (is %q)", rfitype)
 		}
 
-		var resp tdns.AgentMgmtResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
+		// if rfiupstream == "" && rfidownstream == "" {
+		// 	log.Fatalf("Error: Either upstream or downstream agent identity must be provided")
+		// }
 
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
-		}
+		// rfiupstream = dns.Fqdn(rfiupstream)
+		// rfidownstream = dns.Fqdn(rfidownstream)
 
-		var prettyJSON bytes.Buffer
-
-		err = json.Indent(&prettyJSON, buf, "", "  ")
-		if err != nil {
-			log.Println("JSON parse error: ", err)
+		req := tdns.AgentMgmtPost{
+			//Command:     "send-notify",
+			MessageType: tdns.AgentMsgRfi,
+			RfiType:     rfitype,
+			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
+			AgentId:     tdns.AgentId(myIdentity),
+			Upstream:    tdns.AgentId(rfiupstream),
+			Downstream:  tdns.AgentId(rfidownstream),
 		}
-		fmt.Printf("Agent config:\n%s\n", prettyJSON.String())
+		dump.P(req)
+
+		SendAgentDebugCmd(req)
 	},
 }
 
 func init() {
 	DebugCmd.AddCommand(DebugAgentCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
+	DebugAgentCmd.AddCommand(DebugAgentSendRfiCmd)
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM)")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")
+}
+
+func SendAgentDebugCmd(req tdns.AgentMgmtPost) error {
+	prefixcmd, _ := getCommandContext("debug")
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error getting API client: %v", err)
+	}
+
+	dump.P(req)
+	_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
+	if err != nil {
+		log.Fatalf("API request failed: %v", err)
+	}
+
+	var resp tdns.AgentMgmtResponse
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if resp.Error {
+		log.Fatalf("API error: %s", resp.ErrorMsg)
+	}
+
+	var prettyJSON bytes.Buffer
+
+	err = json.Indent(&prettyJSON, buf, "", "  ")
+	if err != nil {
+		log.Println("JSON parse error: ", err)
+	}
+	fmt.Printf("Agent config:\n%s\n", prettyJSON.String())
+	return nil
 }

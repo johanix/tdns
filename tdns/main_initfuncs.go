@@ -149,7 +149,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		conf.Internal.AgentQs = AgentQs{
 			Hello:             make(chan *AgentMsgReport, 100),
 			Beat:              make(chan *AgentMsgReport, 100),
-			Msg:               make(chan *AgentMsgReport, 100),
+			Msg:               make(chan *AgentMsgPostPlus, 100),
 			Command:           make(chan *AgentMgmtPostPlus, 100),
 			DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
 			SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),

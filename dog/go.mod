@@ -2,10 +2,14 @@ module dog
 
 go 1.23.2
 
-replace github.com/johanix/tdns/tdns => ../tdns
+replace (
+	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cli => ../tdns/cli
+)
 
 require (
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns/cli v0.0.0-20250315051723-3a4d693f9b08
 	github.com/miekg/dns v1.1.62
 	github.com/spf13/cobra v1.8.1
 )
@@ -31,6 +35,7 @@ require (
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.50.1 // indirect
+	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect

@@ -283,6 +283,9 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		}
 	}
 
+	log.Printf("api.RequestNG: %s %s data: %+v", method, endpoint, data)
+	log.Printf("api.RequestNG: %s %s %d bytes of data: %s", method, endpoint, len(bytebuf.Bytes()), string(bytebuf.Bytes()))
+
 	api.UrlReport(method, endpoint, bytebuf.Bytes())
 
 	if api.Debug {

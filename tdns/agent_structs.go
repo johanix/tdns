@@ -35,6 +35,22 @@ var AgentStateToString = map[AgentState]string{
 	AgentStateError:       "ERROR",
 }
 
+type AgentMsg uint8
+
+const (
+	AgentMsgHello AgentMsg = iota + 1
+	AgentMsgBeat
+	AgentMsgNotify
+	AgentMsgRfi
+	AgentMsgStatus
+)
+
+var AgentMsgToString = map[AgentMsg]string{
+	AgentMsgNotify: "NOTIFY",
+	AgentMsgRfi:    "RFI",
+	AgentMsgStatus: "STATUS",
+}
+
 // Remote agent states: first occurence of a remote agent identity is when it appears in a
 // HSYNC record for a zone where we also appear in the HSYNC RRset (i.e. we are both part of it).
 // Then the remote agent becomes NEEDED. Data collection starts. When all data (URI, SVCB,
@@ -118,7 +134,7 @@ type AgentRegistry struct {
 }
 
 type AgentBeatPost struct {
-	MessageType    string
+	MessageType    AgentMsg
 	MyIdentity     AgentId
 	YourIdentity   AgentId
 	MyBeatInterval uint32   // intended, in seconds
@@ -142,7 +158,7 @@ type AgentBeatReport struct {
 }
 
 type AgentHelloPost struct {
-	MessageType  string
+	MessageType  AgentMsg
 	Name         string
 	MyIdentity   AgentId
 	YourIdentity AgentId
@@ -157,15 +173,15 @@ type AgentHelloResponse struct {
 	MyIdentity   AgentId
 	YourIdentity AgentId
 	Time         time.Time
-	Client       string
-	Msg          string
-	Error        bool
-	ErrorMsg     string
+	// Client       string
+	Msg      string
+	Error    bool
+	ErrorMsg string
 }
 
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
-	MessageType  string // "NOTIFY", ...
+	MessageType  AgentMsg // "NOTIFY", ...
 	MyIdentity   AgentId
 	YourIdentity AgentId
 	Addresses    []string
@@ -175,29 +191,50 @@ type AgentMsgPost struct {
 	// Data	     map[AgentId]map[uint16]RRset
 	RRs []string // cannot send more structured format, as dns.RR cannot be json marshalled.
 	// Zones []string
-	Time time.Time
+	Time    time.Time
+	RfiType string
+}
+
+type AgentMsgPostPlus struct {
+	AgentMsgPost
+	Response chan *AgentMsgResponse
 }
 
 type AgentMsgResponse struct {
-	Status   string // ok | error | ...
-	Time     time.Time
-	Client   string
-	Msg      string
-	Zone     ZoneName
-	Error    bool
-	ErrorMsg string
+	Status string // ok | error | ...
+	Time   time.Time
+	// Client      string
+	AgentId     AgentId
+	Msg         string
+	Zone        ZoneName
+	RfiResponse map[AgentId]*RfiData
+	Error       bool
+	ErrorMsg    string
+}
+
+type RfiData struct {
+	Status       string // ok | error | ...
+	Time         time.Time
+	Msg          string
+	Error        bool
+	ErrorMsg     string
+	ZoneXfrSrcs  []string
+	ZoneXfrAuths []string
+	ZoneXfrDsts  []string
 }
 
 // AgentMgmt{Post,Response} are used in the mgmt API
 type AgentMgmtPost struct {
 	Command     string `json:"command"`
-	MessageType string
+	MessageType AgentMsg
 	Zone        ZoneName `json:"zone"`
 	AgentId     AgentId  `json:"agent_id"`
 	RRType      uint16
 	RR          string
 	RRs         []string
-	Upstream    AgentId `json:"-"`
+	Upstream    AgentId
+	Downstream  AgentId
+	RfiType     string
 	// Response    chan *AgentMgmtResponse
 }
 
@@ -212,17 +249,20 @@ type AgentDebugPost struct {
 }
 
 type AgentMgmtResponse struct {
-	Identity    AgentId
-	Status      string
-	Time        time.Time
-	Agents      []*Agent
-	HsyncRRs    []string
-	AgentConfig LocalAgentConf
-	Msg         string
-	Error       bool
-	ErrorMsg    string
+	Identity      AgentId
+	Status        string
+	Time          time.Time
+	Agents        []*Agent // deprecated, use ZoneAgentData instead
+	ZoneAgentData *ZoneAgentData
+	HsyncRRs      []string
+	AgentConfig   LocalAgentConf
+	RfiResponse   map[AgentId]*RfiData
+	Msg           string
+	Error         bool
+	ErrorMsg      string
 }
 
+// The ...Plus structs are always the original struct + a response channel
 type AgentMgmtPostPlus struct {
 	AgentMgmtPost
 	Response chan *AgentMgmtResponse
@@ -230,10 +270,11 @@ type AgentMgmtPostPlus struct {
 
 type AgentMsgReport struct {
 	Transport    string
-	MessageType  string
+	MessageType  AgentMsg
 	Zone         ZoneName
 	Identity     AgentId
 	BeatInterval uint32
 	Msg          interface{}
+	RfiType      string
 	Response     chan *SynchedDataResponse
 }

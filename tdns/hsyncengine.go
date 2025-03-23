@@ -64,7 +64,7 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 
 	var msgReport *AgentMsgReport
 	var mgmtPost *AgentMgmtPostPlus
-
+	var msgPost *AgentMsgPostPlus
 	conf.Internal.SyncStatusQ = make(chan SyncStatus, 10)
 
 	if !viper.GetBool("syncengine.active") {
@@ -96,8 +96,8 @@ func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
 		case msgReport = <-heartbeatQ:
 			registry.HeartbeatHandler(msgReport)
 
-		case msgReport = <-msgQ:
-			registry.MsgHandler(msgReport, synchedDataUpdateQ)
+		case msgPost = <-msgQ:
+			registry.MsgHandler(msgPost, synchedDataUpdateQ)
 
 		case mgmtPost = <-commandQ:
 			registry.CommandHandler(mgmtPost)
@@ -141,12 +141,12 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest) {
 	log.Printf("*** handleSyncRequest: enter (zone %q)", req.ZoneName)
 	switch req.Command {
 	case "HSYNC-UPDATE":
-		log.Printf("HsyncEngine: Zone %s HSYNC RRset has changed. Updating sync group.", req.ZoneName)
+		log.Printf("HsyncEngine: Zone %s HSYNC RRset has changed. Updating agents.", req.ZoneName)
 		// Run UpdateAgents without waiting for completion
 		go func() {
 			err := ar.UpdateAgents(ourId, req, req.ZoneName)
 			if err != nil {
-				log.Printf("HsyncEngine: Error updating agents: %v", err)
+				log.Printf("HsyncEngine: Error updating agents for zone %q: %v", req.ZoneName, err)
 			}
 			// Send response if needed
 			if req.Response != nil {
@@ -184,7 +184,7 @@ func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {
 	// log.Printf("HelloHandler: Received HELLO from %s", report.Identity)
 
 	switch report.MessageType {
-	case "HELLO":
+	case AgentMsgHello:
 		if Globals.Debug {
 			log.Printf("HelloHandler: Received initial HELLO from %s", report.Identity)
 		}
@@ -192,7 +192,7 @@ func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {
 		// wannabe_agents[report.Msg.Identity] = report.Agent
 
 	default:
-		log.Printf("HelloHandler: Unknown message type: %s", report.MessageType)
+		log.Printf("HelloHandler: Unknown message type: %s", AgentMsgToString[report.MessageType])
 	}
 }
 
@@ -200,7 +200,7 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 	// log.Printf("HeartbeatHandler: Received %s from %s", report.Msg.MessageType, report.Msg.Identity)
 
 	switch report.MessageType {
-	case "BEAT":
+	case AgentMsgBeat:
 		if Globals.Debug {
 			log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
 		}
@@ -210,99 +210,184 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 			agent.ApiDetails.BeatInterval = report.BeatInterval
 		}
 
-	case "FULLBEAT":
-		if Globals.Debug {
-			log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
-		}
-		if agent, exists := ar.S.Get(report.Identity); exists {
-			agent.ApiDetails.LatestRBeat = time.Now()
-			agent.ApiDetails.ReceivedBeats++
-		}
+		//	case "FULLBEAT":
+		//		if Globals.Debug {
+		//			log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
+		//		}
+		//		if agent, exists := ar.S.Get(report.Identity); exists {
+		//			agent.ApiDetails.LatestRBeat = time.Now()
+		//			agent.ApiDetails.ReceivedBeats++
+		//		}
 
 	default:
-		log.Printf("HeartbeatHandler: Unknown message type: %s", report.MessageType)
+		log.Printf("HeartbeatHandler: Unknown message type: %s", AgentMsgToString[report.MessageType])
 	}
 }
 
 // Handler for messages received from other agents
-func (ar *AgentRegistry) MsgHandler(report *AgentMsgReport, synchedDataUpdateQ chan *SynchedDataUpdate) {
-	log.Printf("MsgHandler: Received message from %s: %+v", report.Identity, report.Msg)
+func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate) {
+	log.Printf("MsgHandler: Received %q message from %s: %+v", AgentMsgToString[ampp.MessageType], ampp.MyIdentity, ampp)
 
-	var resp = SynchedDataResponse{
-		Time: time.Now(),
-		Msg:  "Message received",
+	// var resp = SynchedDataResponse{
+	var resp = AgentMsgResponse{
+		Time:        time.Now(),
+		Msg:         "Message received",
+		RfiResponse: map[AgentId]*RfiData{},
 	}
 
 	defer func() {
-		if report.Response != nil {
+		if ampp.Response != nil {
 			select {
-			case report.Response <- &resp:
+			case ampp.Response <- &resp:
+				log.Printf("MsgHandler: Response %+v sent to API handler", resp, ampp.MyIdentity)
 			default:
 				log.Printf("MsgHandler: Response channel blocked, skipping response")
 			}
 		}
 	}()
 
-	switch report.MessageType {
-	case "NOTIFY", "UPDATE", "MSG":
-		if amp, ok := report.Msg.(*AgentMsgPost); ok {
-			log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
+	// Check if the zone exists (i.e. we have this zone under management)
+	_, exists := Zones.Get(string(ampp.Zone))
+	if !exists {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown zone: %s", ar.LocalAgent.Identity, ampp.Zone)
+		resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown zone: %s", ar.LocalAgent.Identity, ampp.Zone)
+		return
+	}
 
-			var zu = &ZoneUpdate{
-				Zone:   report.Zone,
-				RRsets: map[uint16]RRset{},
-			}
-			for _, rrstr := range amp.RRs {
-				rr, err := dns.NewRR(rrstr)
-				if err != nil {
-					log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
-					return
-				}
-				var rrset RRset
-				var ok bool
-				rrtype := rr.Header().Rrtype
-				if rrset, ok = zu.RRsets[rrtype]; !ok {
-					rrset = RRset{}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-				log.Printf("MsgHandler: RR: %s", rr)
-			}
+	// Check if we are present in the zone HSYNC RRset (i.e. we have an agent role in this zone)
+	zad, err := ar.GetZoneAgentData(ampp.Zone)
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Zone %s does not have a HSYNC RRset", ar.LocalAgent.Identity, ampp.Zone)
+		resp.Msg = fmt.Sprintf("MsgHandler for %s: Zone %s does not have a HSYNC RRset", ar.LocalAgent.Identity, ampp.Zone)
+		return
+	}
 
-			var cresp = make(chan *SynchedDataResponse, 1)
-			synchedDataUpdateQ <- &SynchedDataUpdate{
-				Zone:     amp.Zone,
-				AgentId:  amp.MyIdentity,
-				Update:   zu,
-				Response: cresp,
+	switch ampp.MessageType {
+	case AgentMsgNotify, AgentMsgStatus:
+		// if amp, ok := ampp.Msg.(*AgentMsgPost); ok {
+		//	log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
+
+		var zu = &ZoneUpdate{
+			Zone:   ampp.Zone,
+			RRsets: map[uint16]RRset{},
+		}
+		for _, rrstr := range ampp.RRs {
+			rr, err := dns.NewRR(rrstr)
+			if err != nil {
+				log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
+				return
 			}
-			select {
-			case r := <-cresp:
-				if r.Error {
-					log.Printf("MsgHandler: Error processing update from %s: %s", amp.MyIdentity, r.ErrorMsg)
-					resp.Error = true
-					resp.ErrorMsg = r.ErrorMsg
-				}
-			case <-time.After(2 * time.Second):
-				log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 2 seconds", amp.MyIdentity)
+			var rrset RRset
+			var ok bool
+			rrtype := rr.Header().Rrtype
+			if rrset, ok = zu.RRsets[rrtype]; !ok {
+				rrset = RRset{}
 			}
+			rrset.RRs = append(rrset.RRs, rr)
+			zu.RRsets[rrtype] = rrset
+			log.Printf("MsgHandler: RR: %s", rr)
 		}
 
-	case "UPSTREAM-RFI":
+		// var cresp = make(chan *SynchedDataResponse, 1)
+		var cresp = make(chan *AgentMsgResponse, 1)
+		synchedDataUpdateQ <- &SynchedDataUpdate{
+			Zone:     ampp.Zone,
+			AgentId:  ampp.MyIdentity,
+			Update:   zu,
+			Response: cresp,
+		}
+		select {
+		case r := <-cresp:
+			if r.Error {
+				log.Printf("MsgHandler: Error processing update from %s: %s", ampp.MyIdentity, r.ErrorMsg)
+				resp.Error = true
+				resp.ErrorMsg = r.ErrorMsg
+			}
+		case <-time.After(2 * time.Second):
+			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 2 seconds", ampp.MyIdentity)
+		}
+		// }
+
+	case AgentMsgRfi:
 		// Process the RFI
-		log.Printf("MsgHandler: Received UPSTREAM-RFI from %s", report.Identity)
-		// TODO: Process the RFI
-		resp.Error = true
-		resp.Msg = fmt.Sprintf("%s: UPSTREAM-RFI received, but not implemented", ar.LocalAgent.Identity)
-		resp.ErrorMsg = resp.Msg
+		log.Printf("MsgHandler: Received RFI request from %s", ampp.MyIdentity)
+
+		switch ampp.RfiType {
+		case "UPSTREAM":
+			// This is the case where a remote agent has us as upstream. Need to (a) verify that this is correct, (b) verify that we have
+			// data for xfr.outgoing, (c) send the data to the remote agent.
+			found := false
+			for _, aid := range zad.MyDownstreams {
+				if aid == ampp.MyIdentity {
+					found = true
+					break
+				}
+			}
+			if !found {
+				resp.Error = true
+				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.MyIdentity)
+				resp.ErrorMsg = resp.Msg
+				return
+			}
+			log.Printf("MsgHandler: RFI UPSTREAM request received from %q, which is a downstream agent (i.e. legitimate request)", ampp.MyIdentity)
+
+			if len(ar.LocalAgent.Xfr.Outgoing.Addresses) == 0 {
+				resp.Error = true
+				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but local agent %q has no config for outgoing zone transfers", ar.LocalAgent.Identity, ar.LocalAgent.Identity)
+				resp.ErrorMsg = resp.Msg
+				return
+			}
+
+			log.Printf("MsgHandler: Sending RFI UPSTREAM response to %q", ampp.MyIdentity)
+
+			resp.RfiResponse[ampp.MyIdentity] = &RfiData{
+				ZoneXfrSrcs:  ar.LocalAgent.Xfr.Outgoing.Addresses,
+				ZoneXfrAuths: ar.LocalAgent.Xfr.Outgoing.Auths,
+			}
+			log.Printf("MsgHandler: RFI UPSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
+
+		case "DOWNSTREAM":
+			// This is the case where a remote agent has us as downstream. Need to (a) verify that this is correct, (b) verify that we have
+			// data for xfr.incoming, (c) send the data to the remote agent.
+			if zad.MyUpstream != ampp.MyIdentity {
+				resp.Error = true
+				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.MyIdentity)
+				resp.ErrorMsg = resp.Msg
+				return
+			}
+
+			log.Printf("MsgHandler: RFI DOWNSTREAM request received from %q, which is our upstream agent (i.e. legitimate request)", ampp.MyIdentity)
+
+			if len(ar.LocalAgent.Xfr.Incoming.Addresses) == 0 {
+				resp.Error = true
+				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but local agent %q has no config for incoming zone transfers", ar.LocalAgent.Identity, ar.LocalAgent.Identity)
+				resp.ErrorMsg = resp.Msg
+				return
+			}
+
+			log.Printf("MsgHandler: Sending RFI DOWNSTREAM response to %q", ampp.MyIdentity)
+
+			resp.RfiResponse[ampp.MyIdentity] = &RfiData{
+				ZoneXfrDsts:  ar.LocalAgent.Xfr.Incoming.Addresses,
+				ZoneXfrAuths: ar.LocalAgent.Xfr.Incoming.Auths,
+			}
+			log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown RFI type: %s", ar.LocalAgent.Identity, ampp.RfiType)
+			resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown RFI type: %s", ar.LocalAgent.Identity, ampp.RfiType)
+		}
 
 	default:
-		log.Printf("MsgHandler: Unknown message type: %s", report.MessageType)
+		log.Printf("MsgHandler: Unknown message type: %s", ampp.MessageType)
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %s", ar.LocalAgent.Identity, report.MessageType)
-		resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %s", ar.LocalAgent.Identity, report.MessageType)
+		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %s", ar.LocalAgent.Identity, ampp.MessageType)
+		resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %s", ar.LocalAgent.Identity, ampp.MessageType)
 	}
 }
 
@@ -311,11 +396,15 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus) {
 
 	log.Printf("CommandHandler: Received mgmt command: %+v", msg)
 	resp := AgentMgmtResponse{
-		Time: time.Now(),
-		Msg:  "Command received",
+		Time:        time.Now(),
+		Msg:         "Command received",
+		RfiResponse: map[AgentId]*RfiData{},
 	}
 
 	defer func() {
+		if resp.ErrorMsg != "" {
+			log.Printf("CommandHandler: Error: %s", resp.ErrorMsg)
+		}
 		if msg.Response != nil {
 			select {
 			case msg.Response <- &resp:
@@ -327,42 +416,44 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus) {
 
 	// Extract zone from message
 	if msg.Zone == "" {
-		log.Printf("CommandHandler: No zone specified in mgmt command")
 		resp.Error = true
 		resp.ErrorMsg = "No zone specified in mgmt command"
+		// log.Printf("CommandHandler: No zone specified in mgmt command")
 		return
 	}
 
 	for _, rrstr := range msg.RRs {
 		rr, err := dns.NewRR(rrstr)
 		if err != nil {
-			log.Printf("CommandHandler: Error parsing RR: %s", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error parsing RR: %s", err)
+			// log.Printf("CommandHandler: Error parsing RR: %s", err)
 			return
 		}
 		log.Printf("CommandHandler: RR: %s", rr)
 	}
 
 	// Find remote agents for this zone
-	agents, err := ar.GetRemoteAgents(msg.Zone)
+	zad, err := ar.GetZoneAgentData(msg.Zone)
 	if err != nil {
-		log.Printf("CommandHandler: Error getting remote agents for zone %s: %v", msg.Zone, err)
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("Error getting remote agents for zone %s: %v", msg.Zone, err)
+		resp.ErrorMsg = fmt.Sprintf("Error getting zone agent data for zone %s: %v", msg.Zone, err)
+		// log.Printf("CommandHandler: Error getting remote agents for zone %s: %v", msg.Zone, err)
 		return
 	}
-	if len(agents) == 0 {
-		log.Printf("CommandHandler: No remote agents found for zone %s", msg.Zone)
+	if len(zad.Agents) == 0 {
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("No remote agents found for zone %s", msg.Zone)
+		// log.Printf("CommandHandler: No remote agents found for zone %s", msg.Zone)
 		return
 	}
 
 	// XXX: This is not quite clear: if one remote agent is unavailable for some reason,
 	//      should we skip the command or not? Or should we send the command to the other agents?
+	//      In most cases all agents must be operational, but for cases like UPSTREAM-RFI
+	//      only the upstream agent has to be operational.
 	var notOperationalAgents = map[AgentId]bool{}
-	for _, agent := range agents {
+	for _, agent := range zad.Agents {
 		if agent.ApiDetails.State != AgentStateOperational {
 			notOperationalAgents[agent.Identity] = true
 		}
@@ -372,18 +463,19 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus) {
 
 	switch msg.MessageType {
 
-	case "NOTIFY", "UPDATE", "MESSAGE":
+	case AgentMsgNotify, AgentMsgStatus:
+		log.Printf("CommandHandler: Sending %q message to %d agents", AgentMsgToString[msg.MessageType], len(zad.Agents))
 		// If any remote agent is not operational, we can't send the message
 		if len(notOperationalAgents) > 0 {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Agents %v are not operational, ignoring command for now", notOperationalAgents)
-			log.Printf("CommandHandler: %s", resp.ErrorMsg)
+			// log.Printf("CommandHandler: %s", resp.ErrorMsg)
 			return
 		}
 
 		// Send message to each agent
-		for _, agent := range agents {
-			status, resp2, err := agent.SendApiMsg(&AgentMsgPost{
+		for _, agent := range zad.Agents {
+			amr, err := agent.SendApiMsg(&AgentMsgPost{
 				MessageType:  msg.MessageType,
 				MyIdentity:   AgentId(ar.LocalAgent.Identity),
 				YourIdentity: agent.Identity,
@@ -398,88 +490,120 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus) {
 				continue
 			}
 
-			if status != http.StatusOK {
-				log.Printf("CommandHandler: Message to agent %s returned status %d (%s)", agent.Identity, status, http.StatusText(status))
-				errstrs = append(errstrs, fmt.Sprintf("Message to agent %s returned status %d (%s)", agent.Identity, status, http.StatusText(status)))
-				continue
-			}
-
-			var amr AgentMsgResponse
-			err = json.Unmarshal(resp2, &amr)
-			if err != nil {
-				log.Printf("CommandHandler: Error unmarshalling message response: %v", err)
-				errstrs = append(errstrs, fmt.Sprintf("Error unmarshalling message response: %v", err))
-				continue
-			}
-			if amr.Status == "ok" {
-				log.Printf("CommandHandler: Message to agent %s for zone %s returned status OK: %s", agent.Identity, msg.Zone, amr.Msg)
-			} else {
-				log.Printf("CommandHandler: Message to agent %s for zone %s returned status %d: %s, ErrorMsg: %s", agent.Identity, msg.Zone, status, amr.Msg, amr.ErrorMsg)
-				errstrs = append(errstrs, fmt.Sprintf("Message to agent %s for zone %s returned status %d: %s, ErrorMsg: %s", agent.Identity, msg.Zone, status, amr.Msg, amr.ErrorMsg))
-			}
+			resp.Msg = amr.Msg
+			resp.Error = amr.Error
+			resp.ErrorMsg = amr.ErrorMsg
 		}
 		if len(errstrs) > 0 {
 			resp.Error = true
 			resp.ErrorMsg = strings.Join(errstrs, "\n")
 		}
 
-	case "UPSTREAM-RFI":
-		// Send the RFI to the upstream agent
-		if notOperationalAgents[msg.Upstream] {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Upstream agent %s is not operational, ignoring command for now", msg.Upstream)
-			log.Printf("CommandHandler: %s", resp.ErrorMsg)
-			return
-		}
+	case AgentMsgRfi:
+		log.Printf("CommandHandler: Sending %s RFI message to %d agents", msg.RfiType, len(zad.Agents))
+		var remote AgentId
+		switch msg.RfiType {
+		case "UPSTREAM":
+			if notOperationalAgents[zad.MyUpstream] {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %q: Upstream agent %s is not operational, ignoring command for now", msg.Zone, zad.MyUpstream)
+				// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+				return
+			}
 
-		agent, exists := ar.S.Get(msg.Upstream)
-		if !exists {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Upstream agent %s not found", msg.Upstream)
-			log.Printf("CommandHandler: %s", resp.ErrorMsg)
-			return
-		}
+			agent, exists := ar.S.Get(zad.MyUpstream)
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %q: %s agent %q not found", msg.Zone, msg.RfiType, zad.MyUpstream)
+				// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+				return
+			}
 
-		// Send the RFI to the upstream agent
-		status, resp2, err := agent.SendApiMsg(&AgentMsgPost{
-			MessageType:  "UPSTREAM-RFI",
-			MyIdentity:   AgentId(ar.LocalAgent.Identity),
-			YourIdentity: msg.Upstream,
-			Zone:         msg.Zone,
-		})
+			// Send the RFI to the upstream agent
+			amr, err := agent.SendApiMsg(&AgentMsgPost{
+				MessageType:  AgentMsgRfi,
+				MyIdentity:   AgentId(ar.LocalAgent.Identity),
+				YourIdentity: agent.Identity,
+				Zone:         msg.Zone,
+				RfiType:      msg.RfiType,
+			})
 
-		if err != nil {
-			log.Printf("CommandHandler: Error sending UPSTREAM-RFI message to agent %s: %v", msg.Upstream, err)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error sending UPSTREAM-RFI message to agent %s: %v", msg.Upstream, err)
-			return
-		}
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Error sending RFI(%s) message to agent %s: %v", msg.RfiType, agent.Identity, err)
+				// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+				return
+			}
 
-		if status != http.StatusOK {
-			log.Printf("CommandHandler: UPSTREAM-RFI message to agent %s returned status %d (%s)", msg.Upstream, status, http.StatusText(status))
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("UPSTREAM-RFI message to agent %s returned status %d (%s)", msg.Upstream, status, http.StatusText(status))
-			return
-		}
+			if rfiresp, ok := amr.RfiResponse[zad.MyUpstream]; ok {
+				resp.RfiResponse[zad.MyUpstream] = rfiresp
+				resp.Status = "ok"
+				resp.Msg = fmt.Sprintf("RFI(%s) message to agent %s for zone %s returned status OK: %s", msg.RfiType, remote, msg.Zone, amr.Msg)
+				return
+			}
 
-		var amr AgentMsgResponse
-		err = json.Unmarshal(resp2, &amr)
-		if err != nil {
-			log.Printf("CommandHandler: Error unmarshalling UPSTREAM-RFI message response: %v", err)
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error unmarshalling UPSTREAM-RFI message response: %v", err)
+			resp.ErrorMsg = fmt.Sprintf("zone %q: UPSTREAM RFI message to agent %q returned strange response: %v",
+				msg.Zone, msg.RfiType, amr.RfiResponse)
 			return
-		}
-		if amr.Status == "ok" {
-			log.Printf("CommandHandler: UPSTREAM-RFI message to agent %s for zone %s returned status OK: %s", msg.Upstream, msg.Zone, amr.Msg)
-		} else {
-			log.Printf("CommandHandler: UPSTREAM-RFI message to agent %s for zone %s returned status %d: %s, ErrorMsg: %s", msg.Upstream, msg.Zone, status, amr.Msg, amr.ErrorMsg)
+
+		case "DOWNSTREAM":
+			for _, aid := range zad.MyDownstreams {
+				// Send the RFI to the upstream agent
+				if notOperationalAgents[aid] {
+					resp.RfiResponse[aid] = &RfiData{
+						Status:   "error",
+						Error:    true,
+						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational, ignoring command for now", msg.Zone, aid),
+					}
+					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+					return
+				}
+
+				agent, exists := ar.S.Get(remote)
+				if !exists {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("zone %q: %s agent %q not found", msg.Zone, msg.RfiType, remote)
+					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+					return
+				}
+
+				// Send the RFI to the upstream agent
+				amr, err := agent.SendApiMsg(&AgentMsgPost{
+					MessageType:  AgentMsgRfi,
+					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					YourIdentity: agent.Identity,
+					Zone:         msg.Zone,
+					RfiType:      msg.RfiType,
+				})
+
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Error sending RFI(%s) message to agent %s: %v", msg.RfiType, remote, err)
+					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+					return
+				}
+
+				if rfiresp, ok := amr.RfiResponse[aid]; ok {
+					resp.RfiResponse[aid] = rfiresp
+					continue
+				}
+
+				resp.RfiResponse[aid] = &RfiData{
+					Error:    true,
+					ErrorMsg: fmt.Sprintf("RFI(%s) message to agent %s for zone %s returned strange response: %v", msg.RfiType, remote, msg.Zone, amr.RfiResponse),
+				}
+			}
+
+		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("UPSTREAM-RFI message to agent %s for zone %s returned status %d: %s, ErrorMsg: %s", msg.Upstream, msg.Zone, status, amr.Msg, amr.ErrorMsg)
+			resp.ErrorMsg = fmt.Sprintf("Unknown RFI type: %q", msg.RfiType)
+			return
 		}
 
 	default:
-		log.Printf("CommandHandler: Unknown message type: %s", msg.MessageType)
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("Unknown message type: %s", msg.MessageType)
 	}
 }
 
@@ -503,7 +627,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 		go func(a *Agent) {
 			agent := a
 			status, resp, err := agent.SendApiBeat(&AgentBeatPost{
-				MessageType:    "BEAT",
+				MessageType:    AgentMsgBeat,
 				MyIdentity:     AgentId(ar.LocalAgent.Identity),
 				YourIdentity:   agent.Identity,
 				MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
@@ -632,7 +756,7 @@ func (ar *AgentRegistry) HelloRetrier() {
 func (ar *AgentRegistry) SingleHello(agent *Agent) {
 	log.Printf("HsyncEngine: Sending HELLO to %s (initial zone %q)", agent.Identity, agent.InitialZone)
 	status, resp, err := agent.SendApiHello(&AgentHelloPost{
-		MessageType:  "HELLO",
+		MessageType:  AgentMsgHello,
 		MyIdentity:   AgentId(ar.LocalAgent.Identity),
 		YourIdentity: agent.Identity,
 		Zone:         agent.InitialZone,
@@ -749,50 +873,33 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	}
 }
 
-// XXX: This is fairly useless.
-func (agent *Agent) xxxSendMsg(msgType string, zone ZoneName) ([]byte, error) {
-	msg := &AgentMsgPost{
-		MessageType: msgType,
-		MyIdentity:  agent.Identity,
-		Zone:        zone,
-		Time:        time.Now(),
-	}
-
-	// Try API first, fall back to DNS if needed
-	if agent.ApiMethod {
-		status, resp, err := agent.SendApiMsg(msg)
-		if err == nil && status == http.StatusOK {
-			return resp, nil
-		}
-		log.Printf("API beat to %q failed: status: %d, error: %v, trying DNS", agent.Identity, status, err)
-	}
-
-	if agent.DnsMethod {
-		_, resp, err := agent.SendDnsMsg(msg)
-		if err == nil {
-			return resp, nil
-		}
-		log.Printf("DNS beat to %s failed: %v", agent.Identity, err)
-	}
-
-	return nil, fmt.Errorf("no valid transport method available for agent %s", agent.Identity)
-}
-
 // Helper methods for SendBeat
-func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (int, []byte, error) {
+func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	if agent.Api == nil {
-		return 0, nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
+		return nil, fmt.Errorf("no API client configured for agent %q", agent.Identity)
 	}
 
 	status, resp, err := agent.Api.ApiClient.RequestNG("POST", "/msg", msg, false)
 	if err != nil {
-		return 0, nil, fmt.Errorf("API msg failed: %v", err)
-	}
-	if status != http.StatusOK {
-		return 0, nil, fmt.Errorf("API msg returned status %d (%s)", status, http.StatusText(status))
+		return nil, fmt.Errorf("API msg failed: %v", err)
 	}
 
-	return status, resp, nil
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("API msg returned status %d (%s)", status, http.StatusText(status))
+	}
+
+	var amr AgentMsgResponse
+	err = json.Unmarshal(resp, &amr)
+	if err != nil {
+		return nil, fmt.Errorf("Error unmarshalling message response: %v", err)
+	}
+
+	if amr.Status == "ok" {
+		log.Printf("SendApiMsg: message to agent %q for zone %q returned status OK: %s", agent.Identity, msg.Zone, amr.Msg)
+	} else {
+		return nil, fmt.Errorf("SendApiMsg: message to agent %q for zone %q returned status %d: %s, ErrorMsg: %q. Full response: %+v", agent.Identity, msg.Zone, status, amr.Msg, amr.ErrorMsg, amr)
+	}
+	return &amr, nil
 }
 
 func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (int, []byte, error) {

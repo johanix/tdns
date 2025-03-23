@@ -64,4 +64,6 @@ func init() {
 
 	// From ../tdns/cli/base32_cmds.go
 	rootCmd.AddCommand(cli.Base32Cmd)
+
+	rootCmd.AddCommand(cli.VersionCmd)
 }

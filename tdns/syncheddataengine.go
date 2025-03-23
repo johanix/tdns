@@ -13,19 +13,22 @@ import (
 )
 
 type SynchedDataUpdate struct {
-	Zone     ZoneName
-	AgentId  AgentId
-	Update   *ZoneUpdate
-	Response chan *SynchedDataResponse
+	Zone    ZoneName
+	AgentId AgentId
+	Update  *ZoneUpdate
+	// Response chan *SynchedDataResponse
+	Response chan *AgentMsgResponse
 }
 
 type SynchedDataResponse struct {
-	Zone     ZoneName
-	AgentId  AgentId
-	Time     time.Time
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	Zone    ZoneName
+	AgentId AgentId
+	Time    time.Time
+	Msg     string
+	// RfiType     string
+	RfiResponse RfiData
+	Error       bool
+	ErrorMsg    string
 }
 
 type ZoneUpdate struct {
@@ -136,7 +139,8 @@ func (conf *Config) SynchedDataEngine(updateQ chan *SynchedDataUpdate, stopch ch
 			// 2. Evaluate the update according to policy.
 
 			// Prepare a response in case there is a response channel.
-			resp := SynchedDataResponse{
+			// resp := SynchedDataResponse{
+			resp := AgentMsgResponse{
 				Zone:    synchedDataUpdate.Zone,
 				AgentId: synchedDataUpdate.AgentId,
 			}
