@@ -34,17 +34,17 @@ func WalkRoutes(router *mux.Router, address string) {
 
 func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
-	r := mux.NewRouter().StrictSlash(true)
+	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
-	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf, rtr)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
@@ -58,10 +58,11 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 
 	if Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-		if Globals.Debug {
-			log.Printf("Setting up debug endpoint for agent API")
-			sr.HandleFunc("/agent/debug", APIagentDebug(conf)).Methods("POST")
-		}
+		// XXX: Should be behind a debug requirement, but for now always present
+		// if Globals.Debug {
+		log.Printf("Setting up debug endpoint for agent API")
+		sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
+		// }
 	}
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
@@ -69,51 +70,51 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
-	return r, nil
+	return rtr, nil
 }
 
 // SetupCombinerAPIRouter sets up a router for the combiner API. It should
 // only support debugging functionality and a single endpoint for replacing
 // specific zone data with new data delivered via this API.
-func SetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
+func xxxSetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
-	r := mux.NewRouter().StrictSlash(true)
+	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
-	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf, rtr)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
-	return r, nil
+	return rtr, nil
 }
 
 func xxxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
-	r := mux.NewRouter().StrictSlash(true)
+	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
-	sr := r.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
 
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
-	sr.HandleFunc("/command", APIcommand(conf)).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf, rtr)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
 	// sr.HandleFunc("/show/api", APIshowAPI(r)).Methods("GET")
 
-	return r, nil
+	return rtr, nil
 }
 
 // This is the agent-to-agent sync API router.
@@ -127,7 +128,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 	sr := r.PathPrefix("/api/v1").Subrouter()
 
 	// Special case for /hello endpoint which validates against TLSA in payload
-	sr.HandleFunc("/hello", APIhello(conf)).Methods("POST")
+	sr.HandleFunc("/hello", conf.APIhello()).Methods("POST")
 
 	// All other endpoints require valid client cert matching TLSA record
 	secureRouter := r.PathPrefix("/api/v1").Subrouter()
@@ -177,10 +178,10 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 	})
 
 	secureRouter.HandleFunc("/ping", APIping(conf)).Methods("POST")
-	secureRouter.HandleFunc("/beat", APIbeat(conf)).Methods("POST")
+	secureRouter.HandleFunc("/beat", conf.APIbeat()).Methods("POST")
 	// secureRouter.HandleFunc("/notify", APIbeat(conf)).Methods("POST")
 	// secureRouter.HandleFunc("/query", APIbeat(conf)).Methods("POST")
-	secureRouter.HandleFunc("/msg", APImsg(conf)).Methods("POST")
+	secureRouter.HandleFunc("/msg", conf.APImsg()).Methods("POST")
 
 	return r, nil
 }

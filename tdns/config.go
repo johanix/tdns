@@ -57,8 +57,8 @@ type ApiServerConf struct {
 	UseTLS    bool
 	Server    ApiServerAppConf
 	Agent     ApiServerAppConf
-	MSA       ApiServerAppConf
-	Combiner  ApiServerAppConf
+	// MSA       ApiServerAppConf
+	Combiner ApiServerAppConf
 }
 
 type ApiServerAppConf struct {
@@ -77,6 +77,16 @@ type LocalAgentConf struct {
 	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
+	Xfr struct {
+		Outgoing struct {
+			Addresses []string
+			Auths     []string
+		}
+		Incoming struct {
+			Addresses []string
+			Auths     []string
+		}
+	}
 }
 
 type LocalAgentApiConf struct {
@@ -133,9 +143,10 @@ type InternalConf struct {
 }
 
 type AgentQs struct {
-	Hello             chan *AgentMsgReport    // incoming /hello from other agents
-	Beat              chan *AgentMsgReport    // incoming /beat from other agents
-	Msg               chan *AgentMsgReport    // incoming /msg from other agents
+	Hello chan *AgentMsgReport // incoming /hello from other agents
+	Beat  chan *AgentMsgReport // incoming /beat from other agents
+	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
+	Msg               chan *AgentMsgPostPlus  // incoming /msg from other agents
 	Command           chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
 	DebugCommand      chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
 	SynchedDataUpdate chan *SynchedDataUpdate // incoming combiner updates
