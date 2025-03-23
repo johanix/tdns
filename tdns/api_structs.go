@@ -72,15 +72,16 @@ type CommandPost struct {
 }
 
 type CommandResponse struct {
-	AppName  string
-	Time     time.Time
-	Status   string
-	Zone     string
-	Names    []string
-	Zones    map[string]ZoneConf
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	AppName      string
+	Time         time.Time
+	Status       string
+	Zone         string
+	Names        []string
+	Zones        map[string]ZoneConf
+	Msg          string
+	ApiEndpoints []string
+	Error        bool
+	ErrorMsg     string
 }
 
 type ZonePost struct {

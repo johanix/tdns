@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
-	// "github.com/miekg/dns"
 )
 
 func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +168,7 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 }
 
 // func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Request) {
-func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stopCh := conf.Internal.APIStopCh
 
@@ -203,6 +203,14 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(5000 * time.Millisecond)
 				stopCh <- struct{}{}
 			}()
+
+		case "api":
+			// XXX: Here we should return the defined API endpoints, as reported by ShowAPI().
+			resp.ApiEndpoints, err = ShowAPI(rtr)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("%s: Unknown command: %s", Globals.App.Name, cp.Command)
@@ -470,4 +478,30 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 			resp.Error = true
 		}
 	}
+}
+
+// Stolen from labstuff:apihandler_funcs.go
+func ShowAPI(rtr *mux.Router) ([]string, error) {
+	// resp := []string{fmt.Sprintf("API provided by %s listening on: %s\n",
+	//	Globals.App.Name, address)}
+	var resp []string
+
+	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+		path, _ := route.GetPathTemplate()
+		methods, _ := route.GetMethods()
+		for m := range methods {
+			resp = append(resp, fmt.Sprintf("%-6s %s", methods[m], path))
+		}
+		return nil
+	}
+	if err := rtr.Walk(walker); err != nil {
+		// log.Panicf("Logging err: %s\n", err.Error())
+		log.Printf("ShowAPI: Walking error: %v", err)
+		return nil, err
+	}
+	//	response := ApiResponse{
+	//		Status: 101,
+	//		Data:   resp,
+	//	}
+	return resp, nil
 }

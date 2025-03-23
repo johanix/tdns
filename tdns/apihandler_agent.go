@@ -85,7 +85,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.HsyncRRs = hsyncStrs
 
 			// Get the actual agents from the registry
-			resp.Agents, err = conf.Internal.Registry.GetRemoteAgents(amp.Zone)
+			resp.ZoneAgentData, err = conf.Internal.Registry.GetZoneAgentData(amp.Zone)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error getting remote agents: %v", err)
@@ -131,7 +131,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 	}
 }
 
-func (conf *Config) APIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) xxxAPIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -140,8 +140,7 @@ func (conf *Config) APIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 			log.Println("APIagentDebug: error decoding agent debug command post:", err)
 		}
 
-		log.Printf("API: received /agent/debug request (cmd: %s) from %s.\n",
-			amp.Command, r.RemoteAddr)
+		log.Printf("API: received /agent/debug request (cmd: %s) from %s.\n", amp.Command, r.RemoteAddr)
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
@@ -202,6 +201,28 @@ func (conf *Config) APIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
 			}
 
+		case "send-rfi":
+			log.Printf("APIagentDebug: received debug command send-rfi, will synthesize an API RFI for the given zone: %+v", amp)
+
+			rch := make(chan *AgentMgmtResponse, 1)
+
+			conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
+				amp,
+				rch,
+			}
+			select {
+			case r := <-rch:
+				log.Printf("APIagentDebug: received response from send-upstream-rfi: %+v", resp)
+				resp.Error = r.Error
+				resp.ErrorMsg = r.ErrorMsg
+				resp.Msg = r.Msg
+				resp.RfiResponse = r.RfiResponse
+			case <-time.After(10 * time.Second):
+				log.Printf("APIagentDebug: no response from send-upstream-rfi after 10 seconds")
+				resp.Error = true
+				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
+			}
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %s", amp.Command)
@@ -209,7 +230,69 @@ func (conf *Config) APIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 	}
 }
 
-func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request) {
+	if conf.Internal.AgentQs.DebugCommand == nil {
+		log.Println("APIagentDebug: DebugCommand channel is not set. Cannot forward debug commands. This is a fatal error.")
+		log.Printf("APIagentDebug: AgentQs: %+v", conf.Internal.AgentQs)
+		os.Exit(1)
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := AgentMgmtResponse{
+			Time: time.Now(),
+			Msg:  "Hi there!",
+		}
+		decoder := json.NewDecoder(r.Body)
+		var amp AgentMgmtPost
+		err := decoder.Decode(&amp)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode(resp)
+			if err != nil {
+				log.Printf("APIagentDebug: error encoding response: %v\n", err)
+			}
+		}()
+
+		if err != nil {
+			log.Printf("APIagentDebug: error decoding beat post: %+v", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
+		log.Printf("APIagentDebug: received /agent/debug request from %s.\n", r.RemoteAddr)
+
+		rch := make(chan *AgentMgmtResponse, 1)
+
+		// XXX: this is a bit bass-ackwards, in the debug case we're not using
+		// amp.Command but rather amp.MessageType.
+		switch amp.MessageType {
+		case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
+			resp.Status = "ok"
+			conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
+				amp,
+				rch,
+			}
+			select {
+			case r := <-rch:
+				resp.Error = r.Error
+				resp.ErrorMsg = r.ErrorMsg
+				resp.Msg = r.Msg
+			case <-time.After(10 * time.Second):
+				log.Printf("APIagentDebug: no response from send-notify after 10 seconds")
+				resp.Error = true
+				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
+			}
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Unknown debug message type: %q", AgentMsgToString[amp.MessageType])
+		}
+	}
+}
+
+func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.AgentQs.Beat == nil {
 		log.Println("APIbeat: AgentBeatQ channel is not set. Cannot forward heartbeats. This is a fatal error.")
 		os.Exit(1)
@@ -245,7 +328,7 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		// log.Printf("APIbeat: received /beat request from %s (identity: %s).\n", r.RemoteAddr, abp.MyIdentity)
 
 		switch abp.MessageType {
-		case "BEAT", "FULLBEAT":
+		case AgentMsgBeat:
 			resp.Status = "ok"
 			conf.Internal.AgentQs.Beat <- &AgentMsgReport{
 				Transport:    "API",
@@ -257,13 +340,13 @@ func APIbeat(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %q from %s", abp.MessageType, abp.MyIdentity)
+			resp.ErrorMsg = fmt.Sprintf("Unknown heartbeat type: %q from %s", AgentMsgToString[abp.MessageType], abp.MyIdentity)
 		}
 	}
 }
 
 // This is the agent-to-agent sync API hello handler.
-func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.AgentQs.Hello == nil {
 		log.Println("APIhello: HelloQ channel is not set. Cannot forward HELLO msgs. This is a fatal error.")
 		os.Exit(1)
@@ -314,25 +397,25 @@ func APIhello(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch ahp.MessageType {
-		case "HELLO":
+		case AgentMsgHello:
 			resp.Status = "ok" // important
 			resp.YourIdentity = ahp.MyIdentity
 			resp.MyIdentity = AgentId(conf.Agent.Identity)
 			conf.Internal.AgentQs.Hello <- &AgentMsgReport{
 				Transport:   "API",
-				MessageType: "HELLO",
+				MessageType: ahp.MessageType,
 				Identity:    ahp.MyIdentity,
 				Msg:         &ahp,
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %q from %s", ahp.MessageType, ahp.MyIdentity)
+			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %q from %s", AgentMsgToString[ahp.MessageType], ahp.MyIdentity)
 		}
 	}
 }
 
-func APImsg(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.AgentQs.Msg == nil {
 		log.Println("APImsg: msgQ channel is not set. Cannot forward API msgs. This is a fatal error.")
 		os.Exit(1)
@@ -349,6 +432,7 @@ func APImsg(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
+			log.Printf("APImsg: encoding response: %+v", resp)
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
 				log.Printf("APImsg: error encoding response: %v\n", err)
@@ -356,112 +440,52 @@ func APImsg(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err != nil {
-			log.Printf("APImsg: error decoding beat post: %+v", err)
+			log.Printf("APImsg: error decoding /msg post: %+v", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
 		}
 
-		log.Printf("APImsg: received /beat request from %s (identity: %s).\n", r.RemoteAddr, amp.MyIdentity)
+		log.Printf("APImsg: received /msg %q request from %s (identity: %s).\n", amp.MessageType, r.RemoteAddr, amp.MyIdentity)
 
 		switch amp.MessageType {
-		case "NOTIFY", "QUERY", "STATUS":
+		case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
 			resp.Status = "ok"
-			var cresp = make(chan *SynchedDataResponse, 1)
+			// var cresp = make(chan *SynchedDataResponse, 1)
+			var cresp = make(chan *AgentMsgResponse, 1)
+
 			select {
-			case conf.Internal.AgentQs.Msg <- &AgentMsgReport{
-				Transport:   "API",
-				MessageType: amp.MessageType,
-				Identity:    amp.MyIdentity,
-				Msg:         &amp,
-				Response:    cresp,
+			case conf.Internal.AgentQs.Msg <- &AgentMsgPostPlus{
+				AgentMsgPost: amp,
+				Response:     cresp,
 			}:
 				select {
 				case r := <-cresp:
+					log.Printf("APImsg: Received response from msg handler: %+v", r)
 					if r.Error {
 						log.Printf("APImsg: Error processing message from %s: %s", amp.MyIdentity, r.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = r.ErrorMsg
 						resp.Status = "error"
 					} else {
-						resp.Status = "ok"
+						resp = *r
 					}
+					return
+
 				case <-time.After(2 * time.Second):
 					log.Printf("APImsg: No response received for message from %s after waiting 2 seconds", amp.MyIdentity)
 					resp.Error = true
 					resp.ErrorMsg = "No response received within timeout period"
 				}
 			default:
-				log.Printf("APImsg: Msg channel is blocked, skipping message from %s", amp.MyIdentity)
+				log.Printf("APImsg: Msg response channel is blocked, skipping message from %s", amp.MyIdentity)
 				resp.Error = true
 				resp.ErrorMsg = "Msg channel is blocked"
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", amp.MessageType, amp.MyIdentity)
-		}
-	}
-}
-
-func APIagentDebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
-	if conf.Internal.AgentQs.DebugCommand == nil {
-		log.Println("APIagentDebug: DebugCommand channel is not set. Cannot forward debug commands. This is a fatal error.")
-		log.Printf("APIagentDebug: AgentQs: %+v", conf.Internal.AgentQs)
-		os.Exit(1)
-	}
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentMgmtResponse{
-			Time: time.Now(),
-			Msg:  "Hi there!",
-		}
-		decoder := json.NewDecoder(r.Body)
-		var amp AgentMgmtPost
-		err := decoder.Decode(&amp)
-
-		defer func() {
-			w.Header().Set("Content-Type", "application/json")
-			err := json.NewEncoder(w).Encode(resp)
-			if err != nil {
-				log.Printf("APIagentDebug: error encoding response: %v\n", err)
-			}
-		}()
-
-		if err != nil {
-			log.Printf("APIagentDebug: error decoding beat post: %+v", err)
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
-			return
-		}
-
-		log.Printf("APIagentDebug: received /agent/debug request from %s.\n", r.RemoteAddr)
-
-		rch := make(chan *AgentMgmtResponse, 1)
-
-		// XXX: this is a bit bass-ackwards, in the debug case we're not using
-		// amp.Command but rather amp.MessageType.
-		switch amp.MessageType {
-		case "NOTIFY", "QUERY", "STATUS":
-			resp.Status = "ok"
-			conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
-				amp,
-				rch,
-			}
-			select {
-			case r := <-rch:
-				resp.Error = r.Error
-				resp.ErrorMsg = r.ErrorMsg
-				resp.Msg = r.Msg
-			case <-time.After(10 * time.Second):
-				log.Printf("APIagentDebug: no response from send-notify after 10 seconds")
-				resp.Error = true
-				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
-			}
-
-		default:
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown debug message type: %q", amp.MessageType)
+			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", AgentMsgToString[amp.MessageType], amp.MyIdentity)
 		}
 	}
 }

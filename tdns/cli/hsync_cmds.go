@@ -95,9 +95,15 @@ var hsyncStatusCmd = &cobra.Command{
 		}
 		fmt.Println(columnize.SimpleFormat(lines))
 
-		if len(resp.Agents) > 0 {
+		if tdns.Globals.Verbose {
+			fmt.Printf("\nZone Agent Data:\n")
+			fmt.Printf("  My Upstream: %s\n", resp.ZoneAgentData.MyUpstream)
+			fmt.Printf("  My Downstreams: %v\n", resp.ZoneAgentData.MyDownstreams)
+		}
+
+		if len(resp.ZoneAgentData.Agents) > 0 {
 			fmt.Printf("\n%s Remote Agents:\n", tdns.Globals.Zonename)
-			for _, agent := range resp.Agents {
+			for _, agent := range resp.ZoneAgentData.Agents {
 				if agent.Identity == resp.Identity {
 					continue
 				}
@@ -328,7 +334,7 @@ var hsyncSendHelloCmd = &cobra.Command{
 
 			// Create hello message
 			helloMsg := &tdns.AgentHelloPost{
-				MessageType: "HELLO",
+				MessageType: tdns.AgentMsgHello,
 				MyIdentity:  myid,
 				// Time:        time.Now(),
 				// Zone: cmd.Flag("zone").Value.String(),

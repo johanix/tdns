@@ -202,9 +202,11 @@ func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
 
+			log.Printf("DnsHandler: query %q refers to zone %q", qname, zd.ZoneName)
+
 			log.Printf("DnsHandler: AppMode: \"%s\"", AppTypeToString[Globals.App.Type])
 			if Globals.App.Type == AppTypeAgent {
-				log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %s", qname)
+				log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %q", qname)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
 				w.WriteMsg(m)
@@ -223,8 +225,8 @@ func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if zd.Error && zd.ErrorType != RefreshError {
-				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
-					qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+				log.Printf("DnsHandler: Qname is %q, which is belongs to a known zone (%q), but it is in %s error state: %s",
+					qname, zd.ZoneName, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
@@ -232,7 +234,7 @@ func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if zd.RefreshCount == 0 {
-				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it has not been refreshed at least once yet", qname)
+				log.Printf("DnsHandler: Qname is %q, which belongs to a known zone (%q), but it has not been refreshed at least once yet", qname, zd.ZoneName)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)

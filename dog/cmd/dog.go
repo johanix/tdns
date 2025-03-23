@@ -16,6 +16,7 @@ import (
 	"crypto/tls"
 
 	"github.com/johanix/tdns/tdns"
+	// cli "github.com/johanix/tdns/tdns/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
@@ -197,6 +198,8 @@ func Execute() {
 }
 
 func init() {
+//	rootCmd.AddCommand(cli.VersionCmd)
+
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
