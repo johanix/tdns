@@ -1,16 +1,12 @@
 package tdns
 
-import (
-	cmap "github.com/orcaman/concurrent-map/v2"
-)
-
 type RRTypeStore struct {
-	data cmap.ConcurrentMap[uint16, RRset]
+	data ConcurrentMap[uint16, RRset]
 }
 
 func NewRRTypeStore() *RRTypeStore {
 	return &RRTypeStore{
-		data: cmap.NewWithCustomShardingFunction[uint16, RRset](func(key uint16) uint32 {
+		data: NewWithCustomShardingFunction[uint16, RRset](func(key uint16) uint32 {
 			return uint32(key)
 		}),
 	}

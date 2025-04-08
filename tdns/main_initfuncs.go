@@ -153,6 +153,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 			Command:           make(chan *AgentMgmtPostPlus, 100),
 			DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
 			SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
+			SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		}
 	}
 
@@ -185,7 +186,8 @@ func (conf *Config) MainInit(defaultcfg string) error {
 			return fmt.Errorf("Error setting up agent: %v", err)
 		}
 		// Initialize AgentRegistry for agent mode only
-		conf.Internal.Registry = conf.NewAgentRegistry()
+		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
+		// dump.P(conf.Internal.AgentRegistry)
 	case AppTypeServer, AppTypeCombiner:
 		// ... existing server/combiner setup ...
 	default:
@@ -222,7 +224,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
 		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
-		go conf.SynchedDataEngine(conf.Internal.AgentQs.SynchedDataUpdate, conf.Internal.StopCh)
+		go conf.SynchedDataEngine(conf.Internal.AgentQs, conf.Internal.StopCh)
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)

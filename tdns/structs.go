@@ -208,6 +208,7 @@ type OwnerData struct {
 
 type RRset struct {
 	Name   string
+	Class  uint16
 	RRtype uint16
 	RRs    []dns.RR
 	RRSIGs []dns.RR

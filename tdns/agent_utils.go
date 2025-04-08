@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 )
 
@@ -60,12 +59,34 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
-		S:              cmap.NewStringer[AgentId, *Agent](),
-		remoteAgents:   make(map[ZoneName][]*Agent),
+		S:              NewStringer[AgentId, *Agent](),
+		RemoteAgents:   make(map[ZoneName][]AgentId),
 		LocalAgent:     &conf.Agent,
 		LocateInterval: li,
 	}
 }
+
+// func (ar *AgentRegistry) MarshalJSON() ([]byte, error) {
+// 	log.Printf("AgentRegistry: entering MarshalJSON, converting to regular map")
+// 	regularS := make(map[AgentId]*Agent)
+// 	// for entry := range ar.S.IterBuffered() {
+// 	// 	regularS[k] = v
+// 	// }
+// 	regularS = ar.S.Items()
+
+// 	log.Printf("AgentRegistry: MarshalJSON: json marshalling regular map")
+// 	return json.Marshal(struct {
+// 		S              map[AgentId]*Agent
+// 		remoteAgents   map[ZoneName][]*Agent
+// 		LocalAgent     LocalAgentConf
+// 		LocateInterval int
+// 	}{
+// 		S:              regularS,
+// 		remoteAgents:   ar.remoteAgents,
+// 		LocalAgent:     *ar.LocalAgent,
+// 		LocateInterval: ar.LocateInterval,
+// 	})
+// }
 
 // LocateAgent is completely asynchronous with no return values
 func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
@@ -315,9 +336,16 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					ar.AddZoneToAgent(remoteid, zonename)
 
 					// Try to send hello
-					agent.InitialZone = zonename
-					go ar.SingleHello(agent)
+					// agent.InitialZone = zonename
+					go ar.HelloRetrierNG(agent)
 				}
+				// dump.P(ar.S)
+				// foo := SanitizeForJSON(ar.S)
+				// j, err := json.Marshal(foo)
+				// if err != nil {
+				// 	log.Printf("LocateAgent: error marshaling agent registry: %v", err)
+				// }
+				// log.Printf("LocateAgent: agent registry: %s", string(j))
 				return
 			} else {
 				// Agent is not yet known, update and sleep before retrying
@@ -442,10 +470,10 @@ func AgentToString(a *Agent) string {
 func (ar *AgentRegistry) AddRemoteAgent(zonename ZoneName, agent *Agent) {
 	ar.mu.Lock()
 	defer ar.mu.Unlock()
-	if ar.remoteAgents[zonename] == nil {
-		ar.remoteAgents[zonename] = make([]*Agent, 0)
+	if ar.RemoteAgents[zonename] == nil {
+		ar.RemoteAgents[zonename] = make([]AgentId, 0)
 	}
-	ar.remoteAgents[zonename] = append(ar.remoteAgents[zonename], agent)
+	ar.RemoteAgents[zonename] = append(ar.RemoteAgents[zonename], agent.Identity)
 }
 
 // RemoveRemoteAgent removes an agent from the list of remote agents for a zone
@@ -454,10 +482,10 @@ func (ar *AgentRegistry) RemoveRemoteAgent(zonename ZoneName, identity AgentId) 
 	defer ar.mu.Unlock()
 
 	// Remove from remoteAgents
-	agents := ar.remoteAgents[zonename]
-	for i, a := range agents {
-		if a.Identity == identity {
-			ar.remoteAgents[zonename] = append(agents[:i], agents[i+1:]...)
+	agentids := ar.RemoteAgents[zonename]
+	for i, a := range agentids {
+		if a == identity {
+			ar.RemoteAgents[zonename] = append(agentids[:i], agentids[i+1:]...)
 			break
 		}
 	}
@@ -488,7 +516,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	ar.mu.RLock()
 	defer ar.mu.RUnlock()
-	log.Printf("GetZoneAgentData: zone %s has %d remote agents", zonename, len(ar.remoteAgents[zonename]))
+	log.Printf("GetZoneAgentData: zone %s has %d remote agents", zonename, len(ar.RemoteAgents[zonename]))
 
 	zd, exists := Zones.Get(string(zonename))
 	if !exists {
@@ -559,7 +587,7 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 
 // XXX: This is likely not sufficient, we must also be able to deal with HSYNC RRs that simply
 // "change" (i.e. the same identity, but now roles). ADD+REMOVE doesn't deal with that.
-func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName) error {
+func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate) error {
 
 	var updatedIdentities = map[AgentId]bool{}
 	// Handle new HSYNC records
@@ -595,7 +623,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 									Upstream:    AgentId(hsync.Upstream),
 								}
 
-								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil})
+								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ)
 								return true, nil // cannot do much else
 							},
 							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync.Upstream),
@@ -619,7 +647,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 									Downstream:  AgentId(hsync.Identity),
 								}
 
-								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil})
+								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ)
 								return true, nil // cannot do much else
 							},
 							Desc: fmt.Sprintf("RFI for downstream data from %q", hsync.Identity),
@@ -662,6 +690,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	return nil
 }
 
+// XXX: The DeferredAgentTask functions are not yet fully thought out (and not in use yet).
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
 	agent.DeferredTasks = append(agent.DeferredTasks, *task)
 }

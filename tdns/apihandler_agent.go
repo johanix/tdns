@@ -24,8 +24,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			log.Println("APIagent: error decoding agent command post:", err)
 		}
 
-		log.Printf("API: received /agent request (cmd: %s) from %s.\n",
-			amp.Command, r.RemoteAddr)
+		log.Printf("API: received /agent request (cmd: %s) from %s.", amp.Command, r.RemoteAddr)
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
@@ -45,7 +44,11 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		var zd *ZoneData
 		var exist bool
 		amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
-		if amp.Command != "config" {
+
+		switch amp.Command {
+		case "config", "hsync-agentstatus":
+			// do nothing
+		default:
 			zd, exist = Zones.Get(string(amp.Zone))
 			if !exist {
 				resp.Error = true
@@ -54,6 +57,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 		}
 
+		rch := make(chan *AgentMgmtResponse, 1)
+
 		switch amp.Command {
 		case "config":
 			tmp := SanitizeForJSON(conf.Agent)
@@ -61,7 +66,27 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
 
-		case "hsync-status":
+		case "update-local-zonedata":
+			log.Printf("API: update-local-zonedata: added RRs: %+v", amp.AddedRRs)
+			log.Printf("API: update-local-zonedata: removed RRs: %+v", amp.RemovedRRs)
+
+			conf.Internal.AgentQs.Command <- &AgentMgmtPostPlus{
+				amp,
+				rch,
+			}
+			select {
+			case r := <-rch:
+				// log.Printf("APIagent: Received response from msg handler: %+v", r)
+				resp = *r
+				// resp.Status = "ok"
+
+			case <-time.After(10 * time.Second):
+				log.Printf("APIagent: no response from CommandHandler after 10 seconds")
+				resp.Error = true
+				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
+			}
+
+		case "hsync-zonestatus":
 			// Get the apex owner object
 			owner, err := zd.GetOwner(zd.ZoneName)
 			if err != nil {
@@ -85,13 +110,24 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.HsyncRRs = hsyncStrs
 
 			// Get the actual agents from the registry
-			resp.ZoneAgentData, err = conf.Internal.Registry.GetZoneAgentData(amp.Zone)
+			resp.ZoneAgentData, err = conf.Internal.AgentRegistry.GetZoneAgentData(amp.Zone)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("error getting remote agents: %v", err)
 				return
 			}
 			resp.Msg = fmt.Sprintf("HSYNC RRset and agents for zone %s", amp.Zone)
+
+		case "hsync-agentstatus":
+			// Get the apex owner object
+			agent, err := conf.Internal.AgentRegistry.GetAgentInfo(amp.AgentId)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("error getting agent info: %v", err)
+				return
+			}
+			resp.Agents = []*Agent{agent}
+			resp.Msg = fmt.Sprintf("Data for remote agent %q", amp.AgentId)
 
 		case "hsync-locate":
 			if amp.AgentId == "" {
@@ -101,10 +137,10 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
-			agent, err := conf.Internal.Registry.GetAgentInfo(amp.AgentId)
+			agent, err := conf.Internal.AgentRegistry.GetAgentInfo(amp.AgentId)
 			if err != nil {
 				// Start async lookup and return a message that lookup is in progress
-				conf.Internal.Registry.LocateAgent(amp.AgentId, "", nil)
+				conf.Internal.AgentRegistry.LocateAgent(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent lookup in progress for %s", amp.AgentId)
 				return
@@ -112,7 +148,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			// If agent info is incomplete, start a new lookup
 			if agent.State == AgentStateNeeded {
-				conf.Internal.Registry.LocateAgent(amp.AgentId, "", nil)
+				conf.Internal.AgentRegistry.LocateAgent(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent information is incomplete for %s, lookup in progress", amp.AgentId)
 				return
@@ -213,10 +249,9 @@ func (conf *Config) xxxAPIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *Ke
 			select {
 			case r := <-rch:
 				log.Printf("APIagentDebug: received response from send-upstream-rfi: %+v", resp)
-				resp.Error = r.Error
-				resp.ErrorMsg = r.ErrorMsg
-				resp.Msg = r.Msg
-				resp.RfiResponse = r.RfiResponse
+				resp = *r
+				resp.Status = "ok"
+
 			case <-time.After(10 * time.Second):
 				log.Printf("APIagentDebug: no response from send-upstream-rfi after 10 seconds")
 				resp.Error = true
@@ -239,8 +274,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		resp := AgentMgmtResponse{
-			Time: time.Now(),
-			Msg:  "Hi there!",
+			Time:     time.Now(),
+			Msg:      "Hi there! Using debug commands are we?",
+			Identity: AgentId(conf.Agent.Identity),
 		}
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -248,46 +284,111 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
-			err := json.NewEncoder(w).Encode(resp)
+			sanitizedResp := SanitizeForJSON(resp)
+			err := json.NewEncoder(w).Encode(sanitizedResp)
 			if err != nil {
 				log.Printf("APIagentDebug: error encoding response: %v\n", err)
 			}
 		}()
 
 		if err != nil {
-			log.Printf("APIagentDebug: error decoding beat post: %+v", err)
+			log.Printf("APIagentDebug: error decoding /agent/debugpost: %+v", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
 		}
 
-		log.Printf("APIagentDebug: received /agent/debug request from %s.\n", r.RemoteAddr)
+		log.Printf("APIagentDebug: received /agent/debug request (command: %q, messagetype: %q) from %s.\n", amp.Command, AgentMsgToString[amp.MessageType], r.RemoteAddr)
 
 		rch := make(chan *AgentMgmtResponse, 1)
 
-		// XXX: this is a bit bass-ackwards, in the debug case we're not using
-		// amp.Command but rather amp.MessageType.
-		switch amp.MessageType {
-		case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
-			resp.Status = "ok"
-			conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
-				amp,
-				rch,
-			}
-			select {
-			case r := <-rch:
-				resp.Error = r.Error
-				resp.ErrorMsg = r.ErrorMsg
-				resp.Msg = r.Msg
-			case <-time.After(10 * time.Second):
-				log.Printf("APIagentDebug: no response from send-notify after 10 seconds")
+		switch amp.Command {
+		case "send-notify", "send-rfi":
+			// XXX: this is a bit bass-ackwards, in the debug case we're not using
+			// amp.Command but rather amp.MessageType.
+			switch amp.MessageType {
+			case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
+				resp.Status = "ok"
+				conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
+					amp,
+					rch,
+				}
+				select {
+				case r := <-rch:
+					// log.Printf("APIagentDebug: Received response from msg handler: %+v", r)
+					resp = *r
+					resp.Status = "ok"
+
+				case <-time.After(10 * time.Second):
+					log.Printf("APIagentDebug: no response from send-notify after 10 seconds")
+					resp.Error = true
+					resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
+				}
+
+			default:
 				resp.Error = true
-				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
+				resp.ErrorMsg = fmt.Sprintf("Unknown debug message type: %q", AgentMsgToString[amp.MessageType])
+			}
+
+		// johani 20250324: This does not work, crashes in IterBuffered() with shards=0 for unknown reason
+		case "dump-agentregistry":
+			resp.Status = "ok"
+			// resp.Msg = fmt.Sprintf("Agent registry: %+v", conf.Internal.AgentRegistry)
+			// resp.AgentRegistry = conf.Internal.AgentRegistry
+			ar := conf.Internal.AgentRegistry
+			keys := ar.S.Keys()
+			log.Printf("APIagentDebug: dump-agentregistry: keys: %+v", keys)
+			for _, key := range keys {
+				if agent, exists := ar.S.Get(key); exists {
+					log.Printf("Agent registry: %s", agent.Identity)
+				}
+			}
+			log.Printf("APIagentDebug: dump-agentregistry: num shards: %d", ar.S.NumShards())
+			// dump.P(ar.S)
+			// tmpar := &AgentRegistry{
+			// RegularS:
+			// make(map[AgentId]*Agent),
+			// }
+
+			regs := map[AgentId]*Agent{}
+			for _, key := range keys {
+				if agent, exists := ar.S.Get(key); exists {
+					tmp := SanitizeForJSON(agent)
+					regs[key] = tmp.(*Agent)
+				}
+			}
+			// foo := SanitizeForJSON(ar.S)
+			resp.AgentRegistry = &AgentRegistry{
+				// S: foo.(ConcurrentMap[AgentId, *Agent]),
+				// S:              nil,
+				RegularS:       regs,
+				RemoteAgents:   ar.RemoteAgents,
+				LocalAgent:     ar.LocalAgent,
+				LocateInterval: ar.LocateInterval,
+			}
+
+		case "dump-zonedatarepo":
+			// johani 20250324: This does not work, crashes in IterBuffered() with shards=0 for unknown reason
+			// resp.Msg = fmt.Sprintf("Zone data repo: %+v", conf.Internal.ZoneDataRepo)
+			// resp.ZoneDataRepo = conf.Internal.ZoneDataRepo
+			sdcmd := &SynchedDataCmd{
+				Cmd:      "dump-zonedatarepo",
+				Zone:     "",
+				Response: make(chan *SynchedDataCmdResponse, 1),
+			}
+			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			select {
+			case response := <-sdcmd.Response:
+				resp.Msg = response.Msg
+				resp.ZoneDataRepo = response.ZDR
+			case <-time.After(2 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "No response from SynchedDataCmd after 2 seconds, state unknown"
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown debug message type: %q", AgentMsgToString[amp.MessageType])
+			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)
 		}
 	}
 }
@@ -353,14 +454,16 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp := AgentHelloResponse{
-			Time: time.Now(),
-		}
 		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
 		var ahp AgentHelloPost
 		err := decoder.Decode(&ahp)
+
+		resp := AgentHelloResponse{
+			Time:       time.Now(),
+			MyIdentity: AgentId(conf.Agent.Identity),
+		}
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
@@ -377,7 +480,10 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		needed, errmsg, err := conf.Internal.Registry.EvaluateHello(&ahp)
+		// Cannot use ahp.MyIdentity until we know that the JSON unmarshalling has succeeded.
+		resp.YourIdentity = ahp.MyIdentity
+
+		needed, errmsg, err := conf.Internal.AgentRegistry.EvaluateHello(&ahp)
 		if err != nil {
 			log.Printf("APIhello: error evaluating hello: %+v", err)
 			resp.Error = true
@@ -399,8 +505,6 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		switch ahp.MessageType {
 		case AgentMsgHello:
 			resp.Status = "ok" // important
-			resp.YourIdentity = ahp.MyIdentity
-			resp.MyIdentity = AgentId(conf.Agent.Identity)
 			conf.Internal.AgentQs.Hello <- &AgentMsgReport{
 				Transport:   "API",
 				MessageType: ahp.MessageType,
@@ -433,9 +537,17 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
 			log.Printf("APImsg: encoding response: %+v", resp)
-			err := json.NewEncoder(w).Encode(resp)
+			respData, err := json.Marshal(resp)
 			if err != nil {
-				log.Printf("APImsg: error encoding response: %v\n", err)
+				log.Printf("APImsg: error marshaling response: %v\n", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Error marshaling response: %v", err)
+				respData, _ = json.Marshal(resp) // Attempt to marshal the error response
+			}
+			log.Printf("APImsg: response data: %s", string(respData))
+			_, err = w.Write(respData)
+			if err != nil {
+				log.Printf("APImsg: error writing response: %v\n", err)
 			}
 		}()
 
@@ -469,6 +581,7 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 						resp.Status = "error"
 					} else {
 						resp = *r
+						resp.Status = "ok"
 					}
 					return
 
