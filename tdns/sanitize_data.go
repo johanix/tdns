@@ -44,6 +44,40 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 		return nil
 	}
 
+	// log.Printf("deepCopyAndSanitize: type of v: %T", v)
+
+	// Check if the value is a cmap.ConcurrentMap
+	// if cm, ok := v.(ConcurrentMap[interface{}, interface{}]); ok {
+	if strings.Contains(reflect.TypeOf(v).String(), "ConcurrentMap") {
+		log.Printf("deepCopyAndSanitize: ConcurrentMap found")
+		// Convert to a regular map for serialization
+		// regularMap := make(map[interface{}]interface{})
+		cMap := NewStringer[AgentId, *Agent]()
+		if cm, ok := v.(ConcurrentMap[AgentId, *Agent]); ok {
+			log.Printf("deepCopyAndSanitize: ConcurrentMap, len(m.shards)=%d", cm.NumShards())
+			if cm.NumShards() == 0 {
+				log.Printf("deepCopyAndSanitize: ConcurrentMap: num shards=0, returning empty map")
+				return cMap
+			}
+			// log.Printf("deepCopyAndSanitize: ConcurrentMap: %d keys: %v", len(cm.Keys()), cm.Keys())
+			for item := range cm.IterBuffered() {
+				// Recursively sanitize each value
+				// log.Printf("deepCopyAndSanitize: ConcurrentMap: copying item: %v (type %T)", item.Key, item)
+				if foo, ok := deepCopyAndSanitize(item.Val).(*Agent); ok {
+					cMap.Set(item.Key, foo)
+				}
+			}
+		} else {
+			log.Printf("*** Warning: deepCopyAndSanitize: ConcurrentMap: not a ConcurrentMap[AgentId,*Agent]")
+		}
+		// log.Printf("deepCopyAndSanitize: ConcurrentMap, len(m.shards)=%d", cm.NumShards())
+		// for item := range cm.IterBuffered() {
+		// 	// Recursively sanitize each value
+		// 	regularMap[item.Key] = deepCopyAndSanitize(item.Val)
+		// }
+		return cMap
+	}
+
 	if _, ok := v.(time.Time); ok {
 		return v
 	}
@@ -81,6 +115,7 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 
 	switch val.Kind() {
 	case reflect.Ptr:
+		// log.Printf("deepCopyAndSanitize: ptr: %s", val.Type().String())
 		if canBeNil(val) && val.IsNil() {
 			return nil
 		}
@@ -96,6 +131,7 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 		return copy.Interface()
 
 	case reflect.Struct:
+		// log.Printf("deepCopyAndSanitize: struct: %s", val.Type().String())
 		if val.Type().String() == "time.Time" {
 			return val
 		}
@@ -147,13 +183,17 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 				// If the sanitized value is nil, set to zero value
 				copyField.Set(reflect.Zero(field.Type()))
 			} else {
+				// log.Printf("deepCopyAndSanitize: struct: field: %v (type %T)", field, field.Type().String())
 				// Use a try-catch approach with defer/recover
 				func() {
+					// log.Printf("deepCopyAndSanitize: struct: field: %s", val.Type().Field(i).Name)
 					defer func() {
 						if r := recover(); r != nil {
-							log.Printf("Warning: Failed to set field %s: %v", val.Type().Field(i).Name, r)
+							log.Printf("*** Warning: struct: field type: %s", reflect.TypeOf(v).String())
+							log.Printf("*** Warning: Failed to set field #%d %s: %v", val.Type().Field(i).Name, i, r)
 							// Set to zero value as fallback
-							copyField.Set(reflect.Zero(field.Type()))
+							// copyField.Set(reflect.Zero(field.Type()))
+							copyField.Set(reflect.ValueOf(""))
 						}
 					}()
 					copyField.Set(reflect.ValueOf(fieldValue))
@@ -163,6 +203,7 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 		return copy.Interface()
 
 	case reflect.Slice:
+		// log.Printf("deepCopyAndSanitize: slice: %s", val.Type().String())
 		if canBeNil(val) && val.IsNil() {
 			return nil
 		}

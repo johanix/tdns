@@ -17,6 +17,7 @@ type GlobalStuff struct {
 	Verbose     bool
 	Debug       bool
 	Zonename    string
+	AgentId     AgentId
 	ParentZone  string
 	Sig0Keyfile string
 	Api         *ApiClient

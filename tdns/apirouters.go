@@ -150,7 +150,7 @@ func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 
 			// Get TLSA record for the client's identity and verify
 			clientId := clientCert.Subject.CommonName
-			agent, ok := conf.Internal.Registry.S.Get(AgentId(clientId))
+			agent, ok := conf.Internal.AgentRegistry.S.Get(AgentId(clientId))
 			if !ok {
 				log.Printf("AgentSyncApi: Unknown remote agent identity: %s", clientId)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)

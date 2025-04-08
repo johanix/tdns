@@ -168,7 +168,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	var hsyncchanged, keyschanged bool
 	var hss *HsyncStatus
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeCombiner:
+	case AppTypeAgent, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
@@ -307,7 +307,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	var hsyncchanged, dnskeyschanged bool
 	var hss *HsyncStatus
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAgent, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
@@ -375,7 +375,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	if hsyncchanged {
 		switch Globals.App.Type {
-		case AppTypeMSA, AppTypeAgent:
+		case AppTypeAgent:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",

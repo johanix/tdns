@@ -97,8 +97,8 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 			TLSClientConfig: tlsconfig,
 		},
 	}
-	api.Debug = Globals.Debug
-	api.Verbose = Globals.Verbose
+	// api.Debug = Globals.Debug
+	//api.Verbose = Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
 
 	if Globals.Debug {
@@ -283,8 +283,10 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		}
 	}
 
-	log.Printf("api.RequestNG: %s %s data: %+v", method, endpoint, data)
-	log.Printf("api.RequestNG: %s %s %d bytes of data: %s", method, endpoint, len(bytebuf.Bytes()), string(bytebuf.Bytes()))
+	if api.Debug {
+		log.Printf("api.RequestNG: %s %s data: %+v", method, endpoint, data)
+		log.Printf("api.RequestNG: %s %s %d bytes of data: %s", method, endpoint, len(bytebuf.Bytes()), string(bytebuf.Bytes()))
+	}
 
 	api.UrlReport(method, endpoint, bytebuf.Bytes())
 

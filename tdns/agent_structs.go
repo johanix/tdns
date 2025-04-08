@@ -5,12 +5,12 @@
 package tdns
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type AgentState uint8
@@ -46,7 +46,7 @@ const (
 )
 
 var AgentMsgToString = map[AgentMsg]string{
-	AgentMsgNotify: "NOTIFY",
+	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
 	AgentMsgRfi:    "RFI",
 	AgentMsgStatus: "STATUS",
 }
@@ -125,9 +125,22 @@ type AgentApi struct {
 	ApiClient *ApiClient
 }
 
+func (aapi *AgentApi) xxxMarshalJSON() ([]byte, error) {
+	tmp := &AgentApi{
+		Name:       aapi.Name,
+		Client:     nil,
+		BaseUrl:    aapi.BaseUrl,
+		ApiKey:     aapi.ApiKey,
+		Authmethod: aapi.Authmethod,
+		ApiClient:  nil,
+	}
+	return json.Marshal(tmp)
+}
+
 type AgentRegistry struct {
-	S              cmap.ConcurrentMap[AgentId, *Agent]
-	remoteAgents   map[ZoneName][]*Agent
+	S              ConcurrentMap[AgentId, *Agent]
+	RegularS       map[AgentId]*Agent
+	RemoteAgents   map[ZoneName][]AgentId
 	mu             sync.RWMutex    // protects remoteAgents
 	LocalAgent     *LocalAgentConf // our own identity
 	LocateInterval int             // seconds to wait between locating agents (until success)
@@ -213,14 +226,14 @@ type AgentMsgResponse struct {
 }
 
 type RfiData struct {
-	Status       string // ok | error | ...
-	Time         time.Time
-	Msg          string
-	Error        bool
-	ErrorMsg     string
-	ZoneXfrSrcs  []string
-	ZoneXfrAuths []string
-	ZoneXfrDsts  []string
+	Status      string // ok | error | ...
+	Time        time.Time
+	Msg         string
+	Error       bool
+	ErrorMsg    string
+	ZoneXfrSrcs []string
+	ZoneXfrAuth []string
+	ZoneXfrDsts []string
 }
 
 // AgentMgmt{Post,Response} are used in the mgmt API
@@ -232,6 +245,8 @@ type AgentMgmtPost struct {
 	RRType      uint16
 	RR          string
 	RRs         []string
+	AddedRRs    []string // for update-local-zonedata
+	RemovedRRs  []string // for update-local-zonedata
 	Upstream    AgentId
 	Downstream  AgentId
 	RfiType     string
@@ -252,14 +267,19 @@ type AgentMgmtResponse struct {
 	Identity      AgentId
 	Status        string
 	Time          time.Time
-	Agents        []*Agent // deprecated, use ZoneAgentData instead
+	Agents        []*Agent // used for hsync-agentstatus
 	ZoneAgentData *ZoneAgentData
 	HsyncRRs      []string
 	AgentConfig   LocalAgentConf
+	RfiType       string
 	RfiResponse   map[AgentId]*RfiData
-	Msg           string
-	Error         bool
-	ErrorMsg      string
+	AgentRegistry *AgentRegistry
+	// ZoneDataRepo  *ZoneDataRepo
+	// ZoneDataRepo map[ZoneName]map[AgentId]*OwnerData
+	ZoneDataRepo map[ZoneName]map[AgentId]map[uint16][]string
+	Msg          string
+	Error        bool
+	ErrorMsg     string
 }
 
 // The ...Plus structs are always the original struct + a response channel
