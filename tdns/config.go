@@ -80,11 +80,11 @@ type LocalAgentConf struct {
 	Xfr struct {
 		Outgoing struct {
 			Addresses []string
-			Auths     []string
+			Auth      []string
 		}
 		Incoming struct {
 			Addresses []string
-			Auths     []string
+			Auth      []string
 		}
 	}
 }
@@ -139,7 +139,8 @@ type InternalConf struct {
 	SyncQ           chan SyncRequest
 	AgentQs         AgentQs // aggregated channels for agent communication
 	SyncStatusQ     chan SyncStatus
-	Registry        *AgentRegistry
+	AgentRegistry   *AgentRegistry
+	ZoneDataRepo    *ZoneDataRepo
 }
 
 type AgentQs struct {
@@ -150,6 +151,7 @@ type AgentQs struct {
 	Command           chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
 	DebugCommand      chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
 	SynchedDataUpdate chan *SynchedDataUpdate // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd    // local commands TO the combiner
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

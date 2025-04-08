@@ -417,6 +417,11 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	}
 	// ------
 
+	// log.Printf("*** newzd.PrintOwnerNames()")
+	// newzd.PrintOwnerNames()
+	// log.Printf("*** newzd.PrintApexRRs()")
+	// newzd.PrintApexRRs()
+
 	newhsync, err := newzd.GetRRset(zd.ZoneName, TypeHSYNC)
 	if err != nil {
 		return false, nil, err
@@ -424,6 +429,10 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 
 	if oldapex == nil {
 		log.Printf("HsyncChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		if newhsync == nil {
+			log.Printf("HsyncChanged: Zone %s new apex has no HSYNC RRset. No action.", zd.ZoneName)
+			return false, &hss, nil
+		}
 		hss.HsyncAdds = newhsync.RRs
 		return true, &hss, nil
 	}
@@ -439,4 +448,32 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	differ, hss.HsyncAdds, hss.HsyncRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
 	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
 	return differ, &hss, nil
+}
+
+func (zd *ZoneData) PrintOwnerNames() error {
+	switch zd.ZoneStore {
+	case SliceZone:
+		for _, owner := range zd.Owners {
+			fmt.Printf("Owner: %s\n", owner.Name)
+		}
+	case MapZone:
+		for _, owner := range zd.Data.Keys() {
+			fmt.Printf("Owner: %s\n", owner)
+		}
+	}
+	return nil
+}
+
+func (zd *ZoneData) PrintApexRRs() error {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+	}
+
+	for _, rrtype := range apex.RRtypes.Keys() {
+		for _, rr := range apex.RRtypes.GetOnlyRRSet(rrtype).RRs {
+			fmt.Printf("%s: %s\n", dns.TypeToString[rrtype], rr.String())
+		}
+	}
+	return nil
 }
