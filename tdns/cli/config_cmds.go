@@ -93,11 +93,30 @@ var configStatusCmd = &cobra.Command{
 
 		if tdns.Globals.Verbose {
 			fmt.Printf("Status for %s:\n", resp.AppName)
-			if len(resp.DnsEngine.Addresses) > 0 {
-				fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
+			if len(resp.DnsEngine.Do53.Addresses) > 0 {
+				fmt.Printf("DnsEngine: listening for UDP/TCP on %v\n", resp.DnsEngine.Do53.Addresses)
 			} else {
-				fmt.Printf("DnsEngine: not listening on any addresses\n")
+				fmt.Printf("DnsEngine: not listening for UDP/TCP on any addresses\n")
 			}
+
+			if len(resp.DnsEngine.DoT.Addresses) > 0 {
+				fmt.Printf("DnsEngine: listening for DoT on %v\n", resp.DnsEngine.DoT.Addresses)
+			} else {
+				fmt.Printf("DnsEngine: not listening for DoT on any addresses\n")
+			}
+
+			if len(resp.DnsEngine.DoH.Addresses) > 0 {
+				fmt.Printf("DnsEngine: listening for DoH on %v\n", resp.DnsEngine.DoH.Addresses)
+			} else {
+				fmt.Printf("DnsEngine: not listening for DoH on any addresses\n")
+			}
+
+			if len(resp.DnsEngine.DoQ.Addresses) > 0 {
+				fmt.Printf("DnsEngine: listening on for DoQ on %v\n", resp.DnsEngine.DoQ.Addresses)
+			} else {
+				fmt.Printf("DnsEngine: not listening for DoQ on any addresses\n")
+			}
+
 			if len(resp.ApiServer.Addresses) > 0 {
 				fmt.Printf("ApiServer: listening on %v\n", resp.ApiServer.Addresses)
 			} else {
