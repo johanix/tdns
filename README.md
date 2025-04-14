@@ -33,13 +33,20 @@ the much more powerful tool "dig", which is part of the BIND9
 distribution from ISC. The primary raison d'etre for "dog" is that
 it understands the experimental new record types **DSYNC** **HSYNC** and **DELEG**.
 
-# tdns features:
+# General TDNS Features:
 
-## Automatic Delegations Synchronization via DNS UPDATE
+## SIG(0) key management (create, roll, use, remove) in the originator
+   end (the "keystore") and in the receiver end (the "truststore").
 
-## DNS Provider Configuration via the HSYNC RRset
+## Support for experimental new DNS record types (DSYNC, HSYNC, ...).
 
-## Distributed Multi-signer Synchronization
+## Support for new DNS transports (in addition to Do53): DoT, DoH, DoQ.
+
+## Automatic Delegations Synchronization via DNS UPDATE.
+
+## DNS Provider Configuration via the HSYNC RRset.
+
+## Distributed Multi-signer Synchronization.
 
 
 

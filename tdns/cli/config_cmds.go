@@ -100,21 +100,21 @@ var configStatusCmd = &cobra.Command{
 			}
 
 			if len(resp.DnsEngine.DoT.Addresses) > 0 {
-				fmt.Printf("DnsEngine: listening for DoT on %v\n", resp.DnsEngine.DoT.Addresses)
+				fmt.Printf("DnsEngine: listening for DoT connections on %v\n", resp.DnsEngine.DoT.Addresses)
 			} else {
-				fmt.Printf("DnsEngine: not listening for DoT on any addresses\n")
+				fmt.Printf("DnsEngine: not listening for DoT connections on any addresses\n")
 			}
 
 			if len(resp.DnsEngine.DoH.Addresses) > 0 {
-				fmt.Printf("DnsEngine: listening for DoH on %v\n", resp.DnsEngine.DoH.Addresses)
+				fmt.Printf("DnsEngine: listening for DoH connections on %v\n", resp.DnsEngine.DoH.Addresses)
 			} else {
-				fmt.Printf("DnsEngine: not listening for DoH on any addresses\n")
+				fmt.Printf("DnsEngine: not listening for DoH connections on any addresses\n")
 			}
 
 			if len(resp.DnsEngine.DoQ.Addresses) > 0 {
-				fmt.Printf("DnsEngine: listening on for DoQ on %v\n", resp.DnsEngine.DoQ.Addresses)
+				fmt.Printf("DnsEngine: listening for DoQ connections on %v\n", resp.DnsEngine.DoQ.Addresses)
 			} else {
-				fmt.Printf("DnsEngine: not listening for DoQ on any addresses\n")
+				fmt.Printf("DnsEngine: not listening for DoQ connections on any addresses\n")
 			}
 
 			if len(resp.ApiServer.Addresses) > 0 {

@@ -121,6 +121,10 @@ func handleDoQStream(stream quic.Stream, conn quic.Connection, dnsHandler func(w
 		conn:   conn,
 	}
 
+	if Globals.Debug {
+		log.Printf("*** DoQ received message opcode: %s qname: %s rrtype: %s", dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+	}
+
 	// Handle the DNS message
 	dnsHandler(rw, msg)
 }

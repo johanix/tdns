@@ -72,6 +72,10 @@ func DnsDoHEngine(conf *Config, dohaddrs []string,
 		var buf bytes.Buffer
 		rw := &dohResponseWriter{&buf}
 
+		if Globals.Debug {
+			log.Printf("*** DoH received message opcode: %s qname: %s rrtype: %s", dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		}
+
 		// Call your internal handler to process DNS query
 		ourDNSHandler(rw, msg)
 
