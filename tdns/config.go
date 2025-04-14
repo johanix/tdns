@@ -40,9 +40,10 @@ type AppDetails struct {
 }
 
 type ServiceConf struct {
-	Name    string `validate:"required"`
-	Debug   *bool
-	Verbose *bool
+	Name       string `validate:"required"`
+	Debug      *bool
+	Verbose    *bool
+	Identities []string // this is a strawman attempt at deciding on what name to publish the ALPN
 }
 
 type DnsEngineConf struct {

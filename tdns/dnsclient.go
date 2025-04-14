@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -83,6 +84,9 @@ func (c *DNSClient) exchangeDo53(msg *dns.Msg) (*dns.Msg, error) {
 	client := &dns.Client{
 		Timeout: c.Timeout,
 	}
+	if Globals.Debug {
+		log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s", c.Server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+	}
 	resp, _, err := client.Exchange(msg, c.Server)
 	return resp, err
 }
@@ -93,6 +97,9 @@ func (c *DNSClient) exchangeDoT(msg *dns.Msg) (*dns.Msg, error) {
 		Net:       "tcp-tls",
 		TLSConfig: c.TLSConfig,
 		Timeout:   c.Timeout,
+	}
+	if Globals.Debug {
+		fmt.Printf("*** DoT sending message to %s opcode: %s qname: %s rrtype: %s\n", c.Server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 	resp, _, err := client.Exchange(msg, c.Server)
 	return resp, err
@@ -107,6 +114,10 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg) (*dns.Msg, error) {
 
 	// Create HTTP request
 	url := fmt.Sprintf("https://%s/dns-query", c.Server)
+	if Globals.Debug {
+		fmt.Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s\n", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+	}
+
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(packed))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %v", err)
@@ -146,6 +157,10 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg) (*dns.Msg, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
+	if Globals.Debug {
+		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", c.Server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+	}
+
 	// Connect to the QUIC server
 	conn, err := quic.DialAddr(ctx, c.Server, c.TLSConfig, c.QUICConfig)
 	if err != nil {
@@ -158,7 +173,6 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg) (*dns.Msg, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open QUIC stream: %v", err)
 	}
-	defer stream.Close()
 
 	// Pack the DNS message
 	packed, err := msg.Pack()
@@ -188,6 +202,14 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg) (*dns.Msg, error) {
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
+	if Globals.Debug {
+		fmt.Printf("*** DoQ received response length: %d. Now closing stream\n", respLen)
+	}
+
+	// Properly close the stream
+	stream.CancelRead(0)
+	stream.Close()
+
 	// Unpack the response
 	response := new(dns.Msg)
 	if err := response.Unpack(respBuf); err != nil {
@@ -200,15 +222,15 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg) (*dns.Msg, error) {
 // StringToTransport converts a string transport name to Transport type
 func StringToTransport(s string) (Transport, error) {
 	switch s {
-	case "do53":
+	case "do53", "Do53", "Do53-TCP":
 		return TransportDo53, nil
-	case "tcp":
+	case "tcp", "TCP":
 		return TransportDo53, nil // TCP is still Do53, just forced TCP
-	case "dot":
+	case "dot", "DoT", "DoT-TCP":
 		return TransportDoT, nil
-	case "doh":
+	case "doh", "DoH", "DoH-TCP":
 		return TransportDoH, nil
-	case "doq":
+	case "doq", "DoQ", "DoQ-TCP":
 		return TransportDoQ, nil
 	default:
 		return TransportDo53, fmt.Errorf("unknown transport: %s", s)

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 
+	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
@@ -29,6 +30,7 @@ type GlobalStuff struct {
 	Port        uint16
 	Address     string
 	App         AppDetails
+	ServerALPN  *dns.SVCB // ALPN for DoH/DoQ
 }
 
 var Globals = GlobalStuff{

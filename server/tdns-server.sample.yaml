@@ -10,12 +10,12 @@ cli:
       authmethod:       X-API-Key
 
 service:
-   name:		TDNSD
+   name:		TDNS-SERVER
+   identities:		[ ns.axfr.net., nsa.johani.org., foo.com. ]
    verbose:		true
    debug:		true   # writes processed zone to disk
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
-#   reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
    resign:		true	# re-sign primary zones as needed
 
 dnsengine:

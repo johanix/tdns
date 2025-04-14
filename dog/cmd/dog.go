@@ -92,6 +92,10 @@ var rootCmd = &cobra.Command{
 			options["server"] = server
 		}
 
+		//		if tdns.Globals.Debug {
+		//			fmt.Printf("*** Options: %+v\n", options)
+		//		}
+
 		if rrtype == 0 {
 			rrtype = dns.TypeA
 		}
@@ -103,14 +107,14 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		if options["opcode"] == "" {
+			options["opcode"] = "QUERY"
+		}
+
 		// server = net.JoinHostPort(server, port)
 
 		if tdns.Globals.Verbose {
-			fmt.Printf("*** Will send %s to server %s\n", options["opcode"], options["server"])
-		}
-
-		if tdns.Globals.Debug {
-			fmt.Printf("*** Options: %+v\n", options)
+			fmt.Printf("*** Will send %s to server %s using transport %s\n", options["opcode"], options["server"], options["transport"])
 		}
 
 		for _, qname := range cleanArgs {
@@ -121,7 +125,12 @@ var rootCmd = &cobra.Command{
 
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
-				tdns.ZoneTransferPrint(qname, server, serial, rrtype, options)
+				if options["transport"] == "Do53" {
+					tdns.ZoneTransferPrint(qname, server, serial, rrtype, options)
+				} else {
+					fmt.Printf("Zone transfer only supported for transport Do53 (TCP), this is %s\n", options["transport"])
+					os.Exit(1)
+				}
 
 			default:
 
@@ -147,6 +156,10 @@ var rootCmd = &cobra.Command{
 				if transport, ok := options["transport"]; ok && transport != "do53" {
 					tlsConfig = &tls.Config{
 						InsecureSkipVerify: true,
+					}
+					// Add ALPN for DoQ
+					if transport == "DoQ" {
+						tlsConfig.NextProtos = []string{"doq"}
 					}
 				}
 
@@ -212,23 +225,23 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 		}
 		options["transport"] = "tcp"
 		return options
-	case "+TLS":
+	case "+TLS", "+DOT":
 		if _, exists := options["transport"]; exists {
 			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
-		options["transport"] = "dot"
+		options["transport"] = "DoT"
 		return options
-	case "+HTTPS":
+	case "+HTTPS", "+DOH":
 		if _, exists := options["transport"]; exists {
 			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
-		options["transport"] = "doh"
+		options["transport"] = "DoH"
 		return options
-	case "+QUIC":
+	case "+QUIC", "+DOQ":
 		if _, exists := options["transport"]; exists {
 			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
-		options["transport"] = "doq"
+		options["transport"] = "DoQ"
 		return options
 	case "+OPCODE=":
 		parts := strings.Split(ucarg, "=")
@@ -248,6 +261,8 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 			}
 		}
 		return options
+	default:
+		log.Fatalf("Error: Unknown option: %s", ucarg)
 	}
 
 	return options
@@ -282,13 +297,13 @@ func ParseResolvConf() (string, error) {
 func queryWithTransport(msg *dns.Msg, server string, transport string, tlsConfig *tls.Config) (*dns.Msg, error) {
 	var t tdns.Transport
 	switch transport {
-	case "do53":
+	case "do53", "Do53", "Do53-TCP":
 		t = tdns.TransportDo53
-	case "dot":
+	case "dot", "DoT":
 		t = tdns.TransportDoT
-	case "doh":
+	case "doh", "DoH":
 		t = tdns.TransportDoH
-	case "doq":
+	case "doq", "DoQ":
 		t = tdns.TransportDoQ
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", transport)
@@ -310,11 +325,11 @@ func ParseServer(serverArg string, options map[string]string) (host, port, trans
 
 	// Default ports for each transport
 	defaultPorts := map[string]string{
-		"do53": "53",
-		"tcp":  "53",
-		"dot":  "853",
-		"doh":  "443",
-		"doq":  "8853",
+		"Do53":     "53",
+		"Do53-TCP": "53",
+		"DoT":      "853",
+		"DoH":      "443",
+		"DoQ":      "8853",
 	}
 
 	// Check if we have a scheme
@@ -326,15 +341,15 @@ func ParseServer(serverArg string, options map[string]string) (host, port, trans
 		// Map scheme to transport
 		switch scheme {
 		case "dns":
-			transport = "do53"
+			transport = "Do53"
 		case "tcp":
-			transport = "tcp"
+			transport = "Do53-TCP"
 		case "tls":
-			transport = "dot"
+			transport = "DoT"
 		case "https":
-			transport = "doh"
+			transport = "DoH"
 		case "quic":
-			transport = "doq"
+			transport = "DoQ"
 		default:
 			return "", "", "", fmt.Errorf("unsupported scheme: %s", scheme)
 		}

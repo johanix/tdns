@@ -78,25 +78,43 @@ func DnsDoQEngine(conf *Config, doqaddrs []string,
 }
 
 func handleDoQConnection(conn quic.Connection, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
+	defer conn.CloseWithError(0, "")
+
 	for {
+		if Globals.Debug {
+			log.Printf("DoQ: waiting for stream on connection from %v", conn.RemoteAddr())
+		}
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
-			log.Printf("Failed to accept QUIC stream: %s", err.Error())
+			// Log all errors, but with different levels of detail
+			if err.Error() == "Application error 0x0 (remote)" {
+				if Globals.Debug {
+					log.Printf("DoQ: client %v closed connection: %v", conn.RemoteAddr(), err)
+				}
+			} else {
+				log.Printf("DoQ: failed to accept stream: %v", err)
+			}
 			return
 		}
 
+		if Globals.Debug {
+			log.Printf("DoQ: accepted stream %v from %v", stream.StreamID(), conn.RemoteAddr())
+		}
 		go handleDoQStream(stream, conn, dnsHandler)
 	}
 }
 
 func handleDoQStream(stream quic.Stream, conn quic.Connection, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
-	defer stream.Close()
+	if Globals.Debug {
+		log.Printf("DoQ: handling stream %v from %v", stream.StreamID(), conn.RemoteAddr())
+	}
 
 	// Read the DNS message length (2 bytes)
 	lenBuf := make([]byte, 2)
 	_, err := io.ReadFull(stream, lenBuf)
 	if err != nil {
 		log.Printf("Failed to read message length: %s", err.Error())
+		stream.Close()
 		return
 	}
 	msgLen := binary.BigEndian.Uint16(lenBuf)
@@ -106,12 +124,14 @@ func handleDoQStream(stream quic.Stream, conn quic.Connection, dnsHandler func(w
 	_, err = io.ReadFull(stream, msgBuf)
 	if err != nil {
 		log.Printf("Failed to read DNS message: %s", err.Error())
+		stream.Close()
 		return
 	}
 
 	msg := new(dns.Msg)
 	if err := msg.Unpack(msgBuf); err != nil {
 		log.Printf("Failed to unpack DNS message: %s", err.Error())
+		stream.Close()
 		return
 	}
 
@@ -127,15 +147,29 @@ func handleDoQStream(stream quic.Stream, conn quic.Connection, dnsHandler func(w
 
 	// Handle the DNS message
 	dnsHandler(rw, msg)
+
+	if Globals.Debug {
+		log.Printf("DoQ: finished handling stream %v from %v", stream.StreamID(), conn.RemoteAddr())
+	}
 }
 
 // DoQ Response Writer implementation
 type doqResponseWriter struct {
 	stream quic.Stream
 	conn   quic.Connection
+	wrote  bool // Add this field to track if we've written
 }
 
 func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
+	if w.wrote {
+		return fmt.Errorf("response already written")
+	}
+	w.wrote = true
+
+	if Globals.Debug {
+		log.Printf("DoQ: writing response on stream %v", w.stream.StreamID())
+	}
+
 	packed, err := m.Pack()
 	if err != nil {
 		return err
@@ -149,8 +183,17 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	}
 
 	// Write DNS message
-	_, err = w.stream.Write(packed)
-	return err
+	if _, err = w.stream.Write(packed); err != nil {
+		return err
+	}
+
+	// Just signal that we're done writing
+	w.stream.Close()
+
+	if Globals.Debug {
+		log.Printf("DoQ: finished writing response on stream %v", w.stream.StreamID())
+	}
+	return nil
 }
 
 func (w *doqResponseWriter) Close() error              { return w.stream.Close() }
