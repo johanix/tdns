@@ -5,7 +5,9 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 
@@ -338,6 +340,9 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 						v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 						m.Extra = append(m.Extra, v4glue.RRs...)
 						m.Extra = append(m.Extra, v6glue.RRs...)
+						if zd.ServerALPN != nil && len(zd.ServerALPN.RRs) > 0 {
+							m.Extra = append(m.Extra, zd.ServerALPN.RRs...)
+						}
 						if dnssec_ok {
 							tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
 							m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
@@ -346,6 +351,13 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 							m.Extra = append(m.Extra, v4glue.RRSIGs...)
 							m.Extra = append(m.Extra, v6glue.RRSIGs...)
+							if zd.ServerALPN != nil {
+								if len(zd.ServerALPN.RRSIGs) == 0 {
+									tmp := MaybeSignRRset(RRset{RRs: zd.ServerALPN.RRs}, zd.ServerALPN.Name)
+									zd.ServerALPN = &tmp
+								}
+								m.Extra = append(m.Extra, zd.ServerALPN.RRSIGs...)
+							}
 						}
 					}
 					w.WriteMsg(m)
@@ -393,6 +405,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
+			if zd.ServerALPN != nil && len(zd.ServerALPN.RRs) > 0 {
+				log.Printf("Adding ALPN: %s", zd.ServerALPN.RRs[0].String())
+				m.Extra = append(m.Extra, zd.ServerALPN.RRs...)
+			}
 			if dnssec_ok {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
@@ -410,6 +426,13 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 				m.Extra = append(m.Extra, v4glue.RRSIGs...)
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
+				if zd.ServerALPN != nil {
+					if len(zd.ServerALPN.RRSIGs) == 0 {
+						tmp := MaybeSignRRset(RRset{RRs: zd.ServerALPN.RRs}, zd.ServerALPN.Name)
+						zd.ServerALPN = &tmp
+					}
+					m.Extra = append(m.Extra, zd.ServerALPN.RRSIGs...)
+				}
 			}
 		} else {
 			log.Printf("---> No exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
@@ -441,12 +464,18 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
+		if zd.ServerALPN != nil && len(zd.ServerALPN.RRs) > 0 {
+			m.Extra = append(m.Extra, zd.ServerALPN.RRs...)
+		}
 		if dnssec_ok {
 			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
 			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 			m.Extra = append(m.Extra, v4glue.RRSIGs...)
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
+			if zd.ServerALPN != nil {
+				m.Extra = append(m.Extra, zd.ServerALPN.RRSIGs...)
+			}
 		}
 	}
 
@@ -476,6 +505,99 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	w.WriteMsg(m)
 
 	_ = origqname
+
+	return nil
+}
+
+func (zd *ZoneData) AddALPN(conf *Config) error {
+	// Get the NS RRset for the zone apex
+	apex, exists := zd.Data.Get(zd.ZoneName)
+	if !exists {
+		return fmt.Errorf("zone apex not found")
+	}
+
+	nsRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
+	if len(nsRRset.RRs) == 0 {
+		return fmt.Errorf("no NS records found at zone apex")
+	}
+
+	// First check if any NS names match service identities
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			nsName := ns.Ns
+
+			// Check if this NS name is in service.identities
+			if slices.Contains(conf.Service.Identities, nsName) {
+				// Create SVCB record for this NS name
+				tmp := &dns.SVCB{
+					Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+					Priority: 1,
+					Target:   nsName,
+					Value:    Globals.ServerALPN.Value,
+				}
+				zd.ServerALPN = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+
+				log.Printf("Adding server ALPN to zone %s using identity NS %s", zd.ZoneName, nsName)
+				log.Printf("ALPN: %s", tmp.String())
+				return nil
+			}
+		}
+	}
+
+	// Next look for in-bailiwick NS records and their addresses
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			nsName := ns.Ns
+			if dns.IsSubDomain(zd.ZoneName, nsName) {
+				// This is an in-bailiwick NS
+				if nsData, exists := zd.Data.Get(nsName); exists {
+					// Check A/AAAA records
+					aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
+					aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+
+					// Helper to check if address matches any configured addresses
+					checkAddrs := func(addrs []string, rrset *RRset) bool {
+						if rrset == nil {
+							return false
+						}
+						for _, rr := range rrset.RRs {
+							var ip string
+							switch r := rr.(type) {
+							case *dns.A:
+								ip = r.A.String()
+							case *dns.AAAA:
+								ip = r.AAAA.String()
+							}
+							for _, addr := range addrs {
+								if strings.HasPrefix(addr, ip) {
+									tmp := &dns.SVCB{
+										Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+										Priority: 1,
+										Target:   nsName,
+										Value:    Globals.ServerALPN.Value,
+									}
+									zd.ServerALPN = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+									log.Printf("Adding server ALPN to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
+									log.Printf("ALPN: %s", tmp.String())
+									return true
+								}
+							}
+						}
+						return false
+					}
+
+					// Check against all configured secure transport addresses
+					allAddrs := append([]string{}, conf.DnsEngine.DoT.Addresses...)
+					allAddrs = append(allAddrs, conf.DnsEngine.DoH.Addresses...)
+					allAddrs = append(allAddrs, conf.DnsEngine.DoQ.Addresses...)
+
+					if checkAddrs(allAddrs, &aRRset) || checkAddrs(allAddrs, &aaaaRRset) {
+						return nil
+					}
+				}
+			}
+		}
+	}
 
 	return nil
 }

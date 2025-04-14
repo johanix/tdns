@@ -138,7 +138,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	rightmargin := 78
 
 	transfer := new(dns.Transfer)
-	answerChan, err := transfer.In(msg, upstream)
+	answerChan, err := transfer.In(msg, options["server"])
 	if err != nil {
 		fmt.Printf("Error from transfer.In: %v\n", err)
 		return err
@@ -300,12 +300,21 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 	}
 
 	transport := "UDP"
-	if options["tcp"] == "true" {
+	switch options["transport"] {
+	case "tcp", "Do53-TCP":
 		transport = "TCP"
+	case "dot", "DoT":
+		transport = "DoT"
+	case "doh", "DoH":
+		transport = "DoH"
+		server = fmt.Sprintf("https://%s/dns-query", server)
+	case "doq", "DoQ":
+		transport = "DoQ"
 	}
+
 	fmt.Printf("\n;; Query time: %d msec\n", elapsed.Milliseconds())
 	fmt.Printf(";; SERVER: %s (%s)\n", server, transport)
-	fmt.Printf(";; WHEN: %s\n", time.Now().Format(time.RFC3339))
+	fmt.Printf(";; WHEN: %s\n", time.Now().Format(timelayout))
 
 	buf, err := m.Pack()
 	if err != nil {

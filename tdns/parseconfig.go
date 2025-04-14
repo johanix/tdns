@@ -187,7 +187,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// log.Printf("*** ParseConfig: 3")
 
 	// Initialize KeyDB if needed
-	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeMSA || Globals.App.Type == AppTypeAgent {
+	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeAgent {
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -244,6 +244,29 @@ func (conf *Config) ParseConfig(reload bool) error {
 	err = ValidateConfig(nil, conf.Internal.CfgFile) // will terminate on error
 	if err != nil {
 		return err
+	}
+
+	if Globals.App.Type == AppTypeServer && len(conf.Service.Identities) > 0 {
+		transports := []string{}
+		if len(conf.DnsEngine.DoT.Addresses) > 0 {
+			transports = append(transports, "dot")
+		}
+		if len(conf.DnsEngine.DoH.Addresses) > 0 {
+			transports = append(transports, "doh")
+		}
+		if len(conf.DnsEngine.DoQ.Addresses) > 0 {
+			transports = append(transports, "doq")
+		}
+		if len(transports) > 0 {
+			alpn := []dns.SVCBKeyValue{
+				&dns.SVCBAlpn{Alpn: transports},
+			}
+			Globals.ServerALPN = &dns.SVCB{
+				Priority: 1,
+				Target:   dns.Fqdn(conf.Service.Identities[0]),
+				Value:    alpn,
+			}
+		}
 	}
 
 	if Globals.Debug {

@@ -40,13 +40,31 @@ type AppDetails struct {
 }
 
 type ServiceConf struct {
-	Name    string `validate:"required"`
-	Debug   *bool
-	Verbose *bool
+	Name       string `validate:"required"`
+	Debug      *bool
+	Verbose    *bool
+	Identities []string // this is a strawman attempt at deciding on what name to publish the ALPN
 }
 
 type DnsEngineConf struct {
-	Addresses []string `validate:"required"`
+	Do53 struct {
+		Addresses []string `validate:"required"`
+	}
+	DoT struct {
+		Addresses []string
+		CertFile  string
+		KeyFile   string
+	}
+	DoH struct {
+		Addresses []string
+		CertFile  string
+		KeyFile   string
+	}
+	DoQ struct {
+		Addresses []string
+		CertFile  string
+		KeyFile   string
+	}
 }
 
 type ApiServerConf struct {
@@ -72,8 +90,8 @@ type LocalAgentConf struct {
 		Notify []string // secondaries to notify for an agent autozone
 	}
 	Remote struct {
-		LocateInterval int // time in seconds
-                BeatInterval   uint32 // time between outgoing heartbeats to same destination
+		LocateInterval int    // time in seconds
+		BeatInterval   uint32 // time between outgoing heartbeats to same destination
 	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf

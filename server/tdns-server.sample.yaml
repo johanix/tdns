@@ -10,16 +10,30 @@ cli:
       authmethod:       X-API-Key
 
 service:
-   name:		TDNSD
+   name:		TDNS-SERVER
+   identities:		[ ns.axfr.net., nsa.johani.org., foo.com. ]
    verbose:		true
    debug:		true   # writes processed zone to disk
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
-#   reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
    resign:		true	# re-sign primary zones as needed
 
 dnsengine:
-   addresses:		[ 127.0.0.1:5355, '[::1]:5355']
+   do53:
+      addresses:	[ 127.0.0.1:5355, '[::1]:5355']
+   dot:
+      addresses:	[ 127.0.0.1:853, '[::1]:853']
+      certfile:		/etc/axfr.net/certs/servers/localhost..crt
+      keyfile:		/etc/axfr.net/certs/servers/localhost..key
+   doh:
+      addresses:	[ 127.0.0.1:443, '[::1]:443']
+      certfile:		/etc/axfr.net/certs/servers/localhost..crt
+      keyfile:		/etc/axfr.net/certs/servers/localhost..key
+   doq:
+      addresses:	[ 127.0.0.1:8853, '[::1]:8853']
+      certfile:		/etc/axfr.net/certs/servers/localhost..crt
+      keyfile:		/etc/axfr.net/certs/servers/localhost..key
+
    zones:
       config:		/etc/axfr.net/tdns-zones.yaml
       filedir:		/etc/axfr.net/zones

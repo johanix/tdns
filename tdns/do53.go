@@ -15,13 +15,14 @@ import (
 )
 
 func DnsEngine(conf *Config) error {
-	addresses := viper.GetStringSlice("dnsengine.addresses")
 
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
-	dns.HandleFunc(".", createHandler(conf))
+	ourDNSHandler := createDnsHandler(conf)
+	dns.HandleFunc(".", ourDNSHandler)
 
-	log.Printf("DnsEngine: addresses: %v", addresses)
+	addresses := viper.GetStringSlice("dnsengine.do53.addresses")
+	log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
 	for _, addr := range addresses {
 		for _, net := range []string{"udp", "tcp"} {
 			go func(addr, net string) {
@@ -36,17 +37,41 @@ func DnsEngine(conf *Config) error {
 				// may be much larger then queries
 				server.UDPSize = dns.DefaultMsgSize // 4096
 				if err := server.ListenAndServe(); err != nil {
-					log.Printf("Failed to setup the %s server: %s\n", net, err.Error())
+					log.Printf("Failed to setup the %s server: %s", net, err.Error())
 				} else {
-					log.Printf("DnsEngine: listening on %s/%s\n", addr, net)
+					log.Printf("DnsEngine: listening on %s/%s", addr, net)
 				}
 			}(addr, net)
+		}
+	}
+
+	dotaddrs := viper.GetStringSlice("dnsengine.dot.addresses")
+	if len(dotaddrs) > 0 {
+		err := DnsDoTEngine(conf, dotaddrs, ourDNSHandler)
+		if err != nil {
+			log.Printf("Failed to setup the DoT server: %s\n", err.Error())
+		}
+	}
+
+	dohaddrs := viper.GetStringSlice("dnsengine.doh.addresses")
+	if len(dohaddrs) > 0 {
+		err := DnsDoHEngine(conf, dohaddrs, ourDNSHandler)
+		if err != nil {
+			log.Printf("Failed to setup the DoH server: %s\n", err.Error())
+		}
+	}
+
+	doqaddrs := viper.GetStringSlice("dnsengine.doq.addresses")
+	if len(doqaddrs) > 0 {
+		err := DnsDoQEngine(conf, doqaddrs, ourDNSHandler)
+		if err != nil {
+			log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
 		}
 	}
 	return nil
 }
 
-func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
+func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	kdb := conf.Internal.KeyDB

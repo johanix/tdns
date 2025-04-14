@@ -174,6 +174,11 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams: downstreams,
 					})
 
+					err = zd.AddALPN(conf)
+					if err != nil {
+						log.Printf("Error from AddALPN(%s): %v", zone, err)
+					}
+
 					Zones.Set(zone, zd)
 
 					if Globals.App.Type != AppTypeAgent {
