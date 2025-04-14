@@ -71,11 +71,13 @@ var rootCmd = &cobra.Command{
 					log.Fatalf("Error: %v", err)
 				}
 				serial = uint32(tmp)
-				fmt.Printf("RRtype is ixfr, using base serial %d\n", serial)
+				fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
 			}
 
 			if strings.HasPrefix(ucarg, "+") {
-				fmt.Printf("processing dog option: %s\n", ucarg)
+				if tdns.Globals.Debug {
+					fmt.Printf("processing dog option: %s\n", ucarg)
+				}
 				options = ProcessOptions(options, ucarg)
 				continue
 			}
@@ -92,10 +94,6 @@ var rootCmd = &cobra.Command{
 			options["server"] = server
 		}
 
-		//		if tdns.Globals.Debug {
-		//			fmt.Printf("*** Options: %+v\n", options)
-		//		}
-
 		if rrtype == 0 {
 			rrtype = dns.TypeA
 		}
@@ -111,9 +109,7 @@ var rootCmd = &cobra.Command{
 			options["opcode"] = "QUERY"
 		}
 
-		// server = net.JoinHostPort(server, port)
-
-		if tdns.Globals.Verbose {
+		if tdns.Globals.Debug {
 			fmt.Printf("*** Will send %s to server %s using transport %s\n", options["opcode"], options["server"], options["transport"])
 		}
 
@@ -246,18 +242,23 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 	case "+OPCODE=":
 		parts := strings.Split(ucarg, "=")
 		if len(parts) > 1 {
-			opcode, err := strconv.Atoi(parts[1])
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				return options
-			}
-			switch opcode {
-			case dns.OpcodeQuery:
-				options["opcode"] = "QUERY"
-			case dns.OpcodeNotify:
-				options["opcode"] = "NOTIFY"
-			case dns.OpcodeUpdate:
-				options["opcode"] = "UPDATE"
+			switch parts[1] {
+			case "QUERY", "NOTIFY", "UPDATE":
+				options["opcode"] = parts[1]
+			default:
+				opcode, err := strconv.Atoi(parts[1])
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					return options
+				}
+				switch opcode {
+				case dns.OpcodeQuery:
+					options["opcode"] = "QUERY"
+				case dns.OpcodeNotify:
+					options["opcode"] = "NOTIFY"
+				case dns.OpcodeUpdate:
+					options["opcode"] = "UPDATE"
+				}
 			}
 		}
 		return options
