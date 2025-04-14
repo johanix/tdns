@@ -18,7 +18,7 @@ func DnsEngine(conf *Config) error {
 
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
-	ourDNSHandler := createHandler(conf)
+	ourDNSHandler := createDnsHandler(conf)
 	dns.HandleFunc(".", ourDNSHandler)
 
 	addresses := viper.GetStringSlice("dnsengine.do53.addresses")
@@ -60,10 +60,18 @@ func DnsEngine(conf *Config) error {
 			log.Printf("Failed to setup the DoH server: %s\n", err.Error())
 		}
 	}
+
+	doqaddrs := viper.GetStringSlice("dnsengine.doq.addresses")
+	if len(doqaddrs) > 0 {
+		err := DnsDoQEngine(conf, doqaddrs, ourDNSHandler)
+		if err != nil {
+			log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
+		}
+	}
 	return nil
 }
 
-func createHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
+func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	kdb := conf.Internal.KeyDB
