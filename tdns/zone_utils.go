@@ -348,7 +348,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	if dnskeyschanged {
 		switch Globals.App.Type {
-		case AppTypeMSA:
+		case AppTypeAgent:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
 			if err != nil {
@@ -1140,10 +1140,10 @@ $TTL 86400
 func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
 	if Globals.Debug {
-		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Do53.Addresses)
+		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Addresses)
 		// dump.P(tconf.DnsEngine)
 	}
-	for _, ns := range conf.DnsEngine.Do53.Addresses {
+	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
 			return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)

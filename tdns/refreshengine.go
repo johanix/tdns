@@ -174,9 +174,11 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams: downstreams,
 					})
 
-					err = zd.AddALPN(conf)
-					if err != nil {
-						log.Printf("Error from AddALPN(%s): %v", zone, err)
+					if zd.Options[OptServerSvcb] {
+						err = zd.CreateServerSvcbRRs(conf)
+						if err != nil {
+							log.Printf("Error from CreateServerSvcbRRs(%s): %v", zone, err)
+						}
 					}
 
 					Zones.Set(zone, zd)

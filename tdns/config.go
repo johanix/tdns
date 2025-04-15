@@ -47,24 +47,32 @@ type ServiceConf struct {
 }
 
 type DnsEngineConf struct {
-	Do53 struct {
-		Addresses []string `validate:"required"`
-	}
-	DoT struct {
-		Addresses []string
-		CertFile  string
-		KeyFile   string
-	}
-	DoH struct {
-		Addresses []string
-		CertFile  string
-		KeyFile   string
-	}
-	DoQ struct {
-		Addresses []string
-		CertFile  string
-		KeyFile   string
-	}
+	Addresses  []string `validate:"required"`
+	CertFile   string
+	KeyFile    string
+	Transports []string `validate:"required"` // "do53", "dot", "doh", "doq"
+
+	//	Do53 struct {
+	//		Addresses []string
+	//	}
+	//
+	//	DoT struct {
+	//		Addresses []string
+	//		CertFile  string
+	//		KeyFile   string
+	//	}
+	//
+	//	DoH struct {
+	//		Addresses []string
+	//		CertFile  string
+	//		KeyFile   string
+	//	}
+	//
+	//	DoQ struct {
+	//		Addresses []string
+	//		CertFile  string
+	//		KeyFile   string
+	//	}
 }
 
 type ApiServerConf struct {

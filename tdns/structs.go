@@ -93,7 +93,7 @@ type ZoneData struct {
 	LatestError     time.Time // time of latest error
 	RefreshCount    int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	LatestRefresh   time.Time // time of latest successful refresh
-	ServerALPN      *RRset    // ALPN for DoT/DoH/DoQ
+	ServerSVCB      *RRset    // ALPN for DoT/DoH/DoQ
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data

@@ -88,7 +88,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeMSA, AppTypeCombiner:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -250,7 +250,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	go DnsEngine(conf)
 
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeServer:
+	case AppTypeServer:
 		conf.Internal.ResignQ = make(chan *ZoneData, 10)
 		go ResignerEngine(conf.Internal.ResignQ, stopch)
 	default:

@@ -247,21 +247,34 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.App.Type == AppTypeServer && len(conf.Service.Identities) > 0 {
-		transports := []string{}
-		if len(conf.DnsEngine.DoT.Addresses) > 0 {
-			transports = append(transports, "dot")
+		// transports := []string{}
+		// if len(conf.DnsEngine.DoT.Addresses) > 0 {
+		// 	transports = append(transports, "dot")
+		// }
+		// if len(conf.DnsEngine.DoH.Addresses) > 0 {
+		// 	transports = append(transports, "doh")
+		// }
+		// if len(conf.DnsEngine.DoQ.Addresses) > 0 {
+		// 	transports = append(transports, "doq")
+		// }
+		var transports []string
+		for _, t := range conf.DnsEngine.Transports {
+			t = strings.ToLower(t)
+			switch t {
+			case "do53":
+				continue
+			case "dot", "doh", "doq":
+				transports = append(transports, t)
+			default:
+				log.Printf("Error: Unknown transport: %s", t)
+			}
 		}
-		if len(conf.DnsEngine.DoH.Addresses) > 0 {
-			transports = append(transports, "doh")
-		}
-		if len(conf.DnsEngine.DoQ.Addresses) > 0 {
-			transports = append(transports, "doq")
-		}
+
 		if len(transports) > 0 {
 			alpn := []dns.SVCBKeyValue{
 				&dns.SVCBAlpn{Alpn: transports},
 			}
-			Globals.ServerALPN = &dns.SVCB{
+			Globals.ServerSVCB = &dns.SVCB{
 				Priority: 1,
 				Target:   dns.Fqdn(conf.Service.Identities[0]),
 				Value:    alpn,
@@ -384,9 +397,11 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 		var cleanoptions []ZoneOption
 		for _, option := range zconf.OptionsStrs {
 			option = strings.ToLower(option)
+			log.Printf("ParseZones: zone %s: checking option: %q", zname, option)
 			opt, exist := StringToZoneOption[option]
 			if !exist {
 				log.Printf("ParseZones: Zone %s: Unknown option: %q. Ignored.", zname, option)
+				log.Printf("ParseZones: zone %s: defined options: %v", zname, StringToZoneOption)
 				zd.SetError(ConfigError, "unknown config option: %q", option)
 				continue
 			}
@@ -399,7 +414,8 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				OptAllowCombine,      // zone allows combine with local changes
 				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
 				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
-				OptDontPublishKey:    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				OptDontPublishKey,    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				OptServerSvcb:        // create SVCB records for auth NS in the zone
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
 
@@ -408,10 +424,10 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 					log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
 					continue
 				}
-				if Globals.App.Type == AppTypeMSA {
-					log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-MSA does not allow online signing.", zname, ZoneOptionToString[opt])
-					continue
-				}
+				// if Globals.App.Type == AppTypeMSA {
+				// 	log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-MSA does not allow online signing.", zname, ZoneOptionToString[opt])
+				// 	continue
+				// }
 				if zconf.DnssecPolicy != "" {
 					options[opt] = true
 					cleanoptions = append(cleanoptions, opt)

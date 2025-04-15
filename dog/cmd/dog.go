@@ -31,6 +31,15 @@ var cfgFile string
 
 var options = make(map[string]string, 2)
 
+// Default ports for each transport
+var defaultPorts = map[string]string{
+	"Do53":     "53",
+	"Do53-TCP": "53",
+	"DoT":      "853",
+	"DoH":      "443",
+	"DoQ":      "8853",
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
@@ -44,17 +53,7 @@ var rootCmd = &cobra.Command{
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				serverArg := arg[1:]
-				host, port, transport, err := ParseServer(serverArg, options)
-				if err != nil {
-					log.Fatalf("Error parsing server specification: %v", err)
-				}
-				options["server"] = net.JoinHostPort(host, port)
-				if transport != "do53" {
-					if existingTransport, exists := options["transport"]; exists && existingTransport != transport {
-						log.Fatalf("Conflicting transport specifications: %s vs %s", existingTransport, transport)
-					}
-					options["transport"] = transport
-				}
+				options = ParseServer(serverArg, options)
 				continue
 			}
 
@@ -85,6 +84,10 @@ var rootCmd = &cobra.Command{
 			cleanArgs = append(cleanArgs, arg)
 		}
 
+		if _, exists := options["transport"]; !exists {
+			options["transport"] = "Do53"
+		}
+
 		if options["server"] == "" {
 			server, err = ParseResolvConf()
 			if err != nil {
@@ -94,16 +97,27 @@ var rootCmd = &cobra.Command{
 			options["server"] = server
 		}
 
+		if options["port"] == "" {
+			options["port"] = defaultPorts[options["transport"]]
+			if options["port"] == "" {
+				fmt.Printf("Error: port for transport %s not specified\n", options["transport"])
+				os.Exit(1)
+			}
+		}
+
 		if rrtype == 0 {
 			rrtype = dns.TypeA
 		}
 
-		if port != "53" {
-			_, err := strconv.Atoi(port)
+		if options["port"] != "53" {
+			_, err := strconv.Atoi(options["port"])
 			if err != nil {
-				fmt.Printf("Error: port \"%s\" is not valid: %v\n", port, err)
+				fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
 			}
 		}
+
+		// All args parsed, join server and port
+		options["server"] = net.JoinHostPort(options["server"], options["port"])
 
 		if options["opcode"] == "" {
 			options["opcode"] = "QUERY"
@@ -248,7 +262,7 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 		if _, exists := options["transport"]; exists {
 			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
-		options["transport"] = "tcp"
+		options["transport"] = "Do53"
 		return options
 	case "+TLS", "+DOT":
 		if _, exists := options["transport"]; exists {
@@ -346,20 +360,11 @@ func queryWithTransport(msg *dns.Msg, server string, transport string, tlsConfig
 // ParseServer parses a server specification like "tls://1.2.3.4:853" or "quic://1.2.3.4"
 // and returns the host, port, and transport. If no scheme is specified, defaults to Do53.
 // If no port is specified, uses the default port for the transport.
-func ParseServer(serverArg string, options map[string]string) (host, port, transport string, err error) {
+func ParseServer(serverArg string, options map[string]string) map[string]string {
 	// Default transport if no scheme is specified
-	transport = options["transport"]
+	transport := options["transport"]
 	if transport == "" {
 		transport = "do53"
-	}
-
-	// Default ports for each transport
-	defaultPorts := map[string]string{
-		"Do53":     "53",
-		"Do53-TCP": "53",
-		"DoT":      "853",
-		"DoH":      "443",
-		"DoQ":      "8853",
 	}
 
 	// Check if we have a scheme
@@ -381,27 +386,39 @@ func ParseServer(serverArg string, options map[string]string) (host, port, trans
 		case "quic":
 			transport = "DoQ"
 		default:
-			return "", "", "", fmt.Errorf("unsupported scheme: %s", scheme)
+			fmt.Printf("unsupported scheme: %s\n", scheme)
+			os.Exit(1)
 		}
+		if _, exists := options["transport"]; exists && options["transport"] != transport {
+			fmt.Printf("Conflicting transport specifications: %s vs %s\n", options["transport"], transport)
+			os.Exit(1)
+		}
+		options["transport"] = transport
 	}
 
 	// Split host and port
-	host = serverArg
 	if strings.Contains(serverArg, ":") {
 		var portErr error
-		host, port, portErr = net.SplitHostPort(serverArg)
+		options["server"], options["port"], portErr = net.SplitHostPort(serverArg)
 		if portErr != nil {
-			return "", "", "", fmt.Errorf("invalid host:port format: %v", portErr)
+			fmt.Printf("%s is not in host:port format: %v\n", serverArg, portErr)
+			os.Exit(1)
 		}
 	} else {
-		// No port specified, use default
-		port = defaultPorts[transport]
+		options["server"] = serverArg
 	}
+
+	if strings.HasSuffix(options["server"], "/") {
+		options["server"] = options["server"][:len(options["server"])-1]
+	}
+
+	fmt.Printf("ParseServer: server: %s, port: %s, transport: %s\n", options["server"], options["port"], options["transport"])
 
 	// Basic validation
-	if host == "" {
-		return "", "", "", fmt.Errorf("empty host specified")
+	if options["server"] == "" {
+		fmt.Printf("empty host specified\n")
+		os.Exit(1)
 	}
 
-	return host, port, transport, nil
+	return options
 }
