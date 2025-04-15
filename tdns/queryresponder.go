@@ -521,28 +521,30 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 		return fmt.Errorf("no NS records found at zone apex")
 	}
 
-	kdb := conf.Internal.KeyDB
+	// kdb := conf.Internal.KeyDB
 
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		log.Printf("AddALPN: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
-	}
+	// dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	// if err != nil {
+	// 	log.Printf("AddALPN: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
+	// }
 
-	MaybeSignRRset := func(rrset RRset, qname string) RRset {
-		if dak == nil {
-			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
+	/*
+		MaybeSignRRset := func(rrset RRset, qname string) RRset {
+			if dak == nil {
+				log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
+				return rrset
+			}
+			if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+				_, err := zd.SignRRset(&rrset, qname, dak, false)
+				if err != nil {
+					log.Printf("Error signing %s: %v", qname, err)
+				} else {
+					log.Printf("Signed %s: %v", qname, err)
+				}
+			}
 			return rrset
 		}
-		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			_, err := zd.SignRRset(&rrset, qname, dak, false)
-			if err != nil {
-				log.Printf("Error signing %s: %v", qname, err)
-			} else {
-				log.Printf("Signed %s: %v", qname, err)
-			}
-		}
-		return rrset
-	}
+	*/
 
 	// First check if any NS names match service identities
 	for _, rr := range nsRRset.RRs {
