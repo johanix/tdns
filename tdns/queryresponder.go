@@ -608,11 +608,11 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 									log.Printf("Adding server ALPN to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
 									log.Printf("ALPN: %s", tmp.String())
 
-									_, err := zd.SignRRset(&rrset, qname, dak, false)
+									_, err := zd.SignRRset(zd.ServerALPN, "", nil, false)
 									if err != nil {
-										log.Printf("Error signing %s: %v", qname, err)
+										log.Printf("Error signing %s: %v", nsName, err)
 									} else {
-										log.Printf("Signed %s: %v", qname, err)
+										log.Printf("Signed %s: %v", nsName, err)
 									}
 									return true
 								}
