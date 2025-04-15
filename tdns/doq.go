@@ -78,7 +78,7 @@ func DnsDoQEngine(conf *Config, doqaddrs []string,
 }
 
 func handleDoQConnection(conn quic.Connection, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
-	defer conn.CloseWithError(0, "")
+	defer conn.CloseWithError(0, "") // Add this to ensure clean connection closure
 
 	for {
 		if Globals.Debug {

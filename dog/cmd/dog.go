@@ -38,7 +38,6 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 
 		var cleanArgs []string
-		var do_bit = false
 		var err error
 		var serial uint32
 
@@ -140,8 +139,29 @@ var rootCmd = &cobra.Command{
 				} else {
 					m.SetQuestion(qname, rrtype)
 				}
-				do_bit = options["do_bit"] == "true"
-				m.SetEdns0(4096, do_bit)
+				// do_bit = options["do_bit"] == "true"
+				// m.SetEdns0(4096, do_bit)
+				opt := &dns.OPT{
+					Hdr: dns.RR_Header{
+						Name:   ".",
+						Rrtype: dns.TypeOPT,
+						Class:  4096, // This is the UDP buffer size
+						Ttl:    0,    // Extended RCODE and flags
+					},
+				}
+				if options["do_bit"] == "true" {
+					// Set DO bit (bit 15)
+					opt.Hdr.Ttl |= 1 << 15
+				}
+				if options["compact"] == "true" {
+					// Set CO bit (bit 14)
+					opt.Hdr.Ttl |= 1 << 14
+				}
+				if options["deleg"] == "true" {
+					// Set DE bit (bit 13)
+					opt.Hdr.Ttl |= 1 << 13
+				}
+				m.Extra = append(m.Extra, opt)
 				start := time.Now()
 
 				server, ok := options["server"]
@@ -198,7 +218,7 @@ func Execute() {
 }
 
 func init() {
-//	rootCmd.AddCommand(cli.VersionCmd)
+	//	rootCmd.AddCommand(cli.VersionCmd)
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
@@ -214,6 +234,12 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 	switch ucarg {
 	case "+DNSSEC":
 		options["do_bit"] = "true"
+		return options
+	case "+COMPACT":
+		options["compact"] = "true"
+		return options
+	case "+DELEG":
+		options["deleg"] = "true"
 		return options
 	case "+MULTI":
 		options["multi"] = "true"

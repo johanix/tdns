@@ -521,6 +521,29 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 		return fmt.Errorf("no NS records found at zone apex")
 	}
 
+	kdb := conf.Internal.KeyDB
+
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	if err != nil {
+		log.Printf("AddALPN: failed to get DNSSEC active keys for zone %s", zd.ZoneName)
+	}
+
+	MaybeSignRRset := func(rrset RRset, qname string) RRset {
+		if dak == nil {
+			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
+			return rrset
+		}
+		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			_, err := zd.SignRRset(&rrset, qname, dak, false)
+			if err != nil {
+				log.Printf("Error signing %s: %v", qname, err)
+			} else {
+				log.Printf("Signed %s: %v", qname, err)
+			}
+		}
+		return rrset
+	}
+
 	// First check if any NS names match service identities
 	for _, rr := range nsRRset.RRs {
 		if ns, ok := rr.(*dns.NS); ok {
@@ -532,10 +555,15 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 				tmp := &dns.SVCB{
 					Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 					Priority: 1,
-					Target:   nsName,
+					Target:   ".",
 					Value:    Globals.ServerALPN.Value,
 				}
 				zd.ServerALPN = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+
+				// To be able to sign this SVCB we need to know that we are authoritative for the zone that the
+				// NS name is in and that we have the DNSSEC keys for that zone. As we get here during the initial
+				// zone load we don't necessarily know that yet, so this would turn into a deferred operation.
+				// Skipping this for now.
 
 				log.Printf("Adding server ALPN to zone %s using identity NS %s", zd.ZoneName, nsName)
 				log.Printf("ALPN: %s", tmp.String())
@@ -573,12 +601,19 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 									tmp := &dns.SVCB{
 										Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 										Priority: 1,
-										Target:   nsName,
+										Target:   ".",
 										Value:    Globals.ServerALPN.Value,
 									}
 									zd.ServerALPN = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 									log.Printf("Adding server ALPN to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
 									log.Printf("ALPN: %s", tmp.String())
+
+									_, err := zd.SignRRset(&rrset, qname, dak, false)
+									if err != nil {
+										log.Printf("Error signing %s: %v", qname, err)
+									} else {
+										log.Printf("Signed %s: %v", qname, err)
+									}
 									return true
 								}
 							}
