@@ -12,61 +12,39 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
-	"github.com/spf13/viper"
 )
 
-func DnsDoQEngine(conf *Config, doqaddrs []string,
+func DnsDoQEngine(conf *Config, doqaddrs []string, cert *tls.Certificate,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
-	certFile := viper.GetString("dnsengine.doq.certfile")
-	keyFile := viper.GetString("dnsengine.doq.keyfile")
-
-	if certFile == "" || keyFile == "" {
-		log.Println("DnsDoQEngine: no certificate file or key file provided. Not starting.")
-		return fmt.Errorf("no certificate file or key file provided")
-	}
-
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		log.Printf("DnsDoQEngine: certificate file %q does not exist. Not starting.", certFile)
-		return fmt.Errorf("certificate file %q does not exist", certFile)
-	}
-
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		log.Printf("DnsDoQEngine: key file %q does not exist. Not starting.", keyFile)
-		return fmt.Errorf("key file %q does not exist", keyFile)
-	}
 
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{"doq"},
 	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return fmt.Errorf("failed to load certificate: %v", err)
-	}
-	tlsConfig.Certificates = []tls.Certificate{cert}
+	tlsConfig.Certificates = []tls.Certificate{*cert}
 
 	for _, addr := range doqaddrs {
 		go func(addr string) {
-			log.Printf("DnsEngine: serving on %s (DoQ)\n", addr)
-			listener, err := quic.ListenAddr(addr, tlsConfig, &quic.Config{
+			hostport := net.JoinHostPort(addr, "8853") // At the moment, we only support port 8853
+			log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
+			listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
 				MaxIdleTimeout:  time.Duration(30) * time.Second,
 				KeepAlivePeriod: time.Duration(15) * time.Second,
 			})
 			if err != nil {
-				log.Printf("Failed to setup the DoQ listener: %s", err.Error())
+				log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
 				return
 			}
 
 			for {
 				conn, err := listener.Accept(context.Background())
 				if err != nil {
-					log.Printf("Failed to accept QUIC connection: %s", err.Error())
+					log.Printf("Failed to accept QUIC connection on %s: %s", hostport, err.Error())
 					continue
 				}
 

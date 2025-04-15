@@ -8,37 +8,17 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"os"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
-func DnsDoHEngine(conf *Config, dohaddrs []string,
+func DnsDoHEngine(conf *Config, dohaddrs []string, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
-	certFile := viper.GetString("dnsengine.doh.certfile")
-	keyFile := viper.GetString("dnsengine.doh.keyfile")
-
-	if certFile == "" || keyFile == "" {
-		log.Println("DnSDoTEngine: no certificate file or key file provided. Not starting.")
-		return fmt.Errorf("no certificate file or key file provided")
-	}
-
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		log.Printf("DnSDoTEngine: certificate file %q does not exist. Not starting.", certFile)
-		return fmt.Errorf("certificate file %q does not exist", certFile)
-	}
-
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		log.Printf("DnSDoTEngine: key file %q does not exist. Not starting.", keyFile)
-		return fmt.Errorf("key file %q does not exist", keyFile)
-	}
 
 	log.Printf("DnsEngine: DoH addresses: %v", dohaddrs)
 	http.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
@@ -86,13 +66,14 @@ func DnsDoHEngine(conf *Config, dohaddrs []string,
 
 	for _, addr := range dohaddrs {
 		go func(addr string) {
-			log.Printf("DnsEngine: setting up DoH server on %s", addr)
-			if err := http.ListenAndServeTLS(addr, certFile, keyFile, nil); err != nil {
-				log.Printf("Failed to setup the DoH server: %s", err.Error())
+			hostport := net.JoinHostPort(addr, "443") // At the moment, we only support port 443
+			log.Printf("DnsEngine: setting up DoH server on %s", hostport)
+			if err := http.ListenAndServeTLS(hostport, certFile, keyFile, nil); err != nil {
+				log.Printf("Failed to setup the DoH server on %s: %s", hostport, err.Error())
 			} else {
-				log.Printf("DnsEngine: listening on %s/DoH", addr)
+				log.Printf("DnsEngine: listening on %s/DoH", hostport)
 			}
-			log.Printf("DnsEngine: done setting up DoH server on %s", addr)
+			log.Printf("DnsEngine: done setting up DoH server on %s", hostport)
 		}(addr)
 	}
 	return nil
