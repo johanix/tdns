@@ -18,7 +18,7 @@ func init() {
 	RegisterHsyncRR()
 }
 
-const TypeHSYNC = 0x0F9D
+//const TypeHSYNC = 0x0F9D
 
 type HSYNC struct {
 	State    uint8 // 0=OFF, 1=ON
