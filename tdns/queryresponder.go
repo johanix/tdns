@@ -22,6 +22,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	TypeMSIGNER: true,
 	TypeDELEG:   true,
 	TypeHSYNC:   true,
+	TypeHSYNC2:  true,
 }
 
 var standardDNSTypes = map[uint16]bool{
