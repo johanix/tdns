@@ -186,6 +186,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 	// var resp = SynchedDataResponse{
 	var resp = AgentMsgResponse{
 		Time:        time.Now(),
+		Status:      "ok",
 		Msg:         "Message received",
 		RfiResponse: map[AgentId]*RfiData{},
 	}
