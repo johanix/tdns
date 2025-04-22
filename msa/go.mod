@@ -2,8 +2,6 @@ module tdns-msa
 
 go 1.23.2
 
-toolchain go1.24.1
-
 replace (
 	github.com/johanix/tdns/music => ../music
 	github.com/johanix/tdns/music/fsm => ../music/fsm

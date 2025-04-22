@@ -4,7 +4,7 @@ go 1.23.2
 
 replace (
 	github.com/johanix/tdns/music => ../
-	github.com/johanix/tdns/music/mocks => ../mocks
+//	github.com/johanix/tdns/music/mocks => ../mocks
 	github.com/johanix/tdns/tdns => ../../tdns
 )
 
