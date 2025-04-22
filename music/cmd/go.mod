@@ -24,6 +24,8 @@ require (
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.22.1 // indirect
+	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
+	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
@@ -32,8 +34,10 @@ require (
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
+	github.com/quic-go/quic-go v0.50.1 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
@@ -44,14 +48,15 @@ require (
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.uber.org/atomic v1.9.0 // indirect
+	go.uber.org/mock v0.5.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
-	golang.org/x/crypto v0.35.0 // indirect
-	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
+	golang.org/x/crypto v0.36.0 // indirect
+	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.21.0 // indirect
-	golang.org/x/net v0.36.0 // indirect
-	golang.org/x/sync v0.11.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/sync v0.12.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 	golang.org/x/tools v0.25.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
