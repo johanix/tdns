@@ -328,6 +328,188 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	return &rrset, rcode, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[rrtype])
 }
 
+func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers []string,
+	lg *log.Logger, verbose bool) (*RRset, int, error) {
+
+	crrset := rrcache.Get(qname, qtype)
+	if crrset != nil {
+		lg.Printf("AuthDNSQuery: found %s %s in cache", qname, dns.TypeToString[qtype])
+		return crrset.RRset, int(crrset.Rcode), nil
+	}
+	lg.Printf("AuthDNSQuery: answer not present in cache")
+	var rrset RRset
+	var rcode int
+
+	// c := dns.Client{Net: "tcp"}
+
+	m := new(dns.Msg)
+	m.SetQuestion(qname, qtype)
+	m.SetEdns0(4096, true)
+	for _, ns := range nameservers {
+		if ns[len(ns)-3:] != ":53" {
+			ns = net.JoinHostPort(ns, "53")
+		}
+		if verbose {
+			lg.Printf("AuthDNSQuery: using nameserver %s for <%s, %s> query\n",
+				ns, qname, dns.TypeToString[qtype])
+		}
+		r, err := dns.Exchange(m, ns)
+		// r, _, err := c.Exchange(m, ns)
+		if err != nil && verbose {
+			lg.Printf("AuthDNSQuery: Error from dns.Exchange: %v", err)
+			continue // go to next server
+		}
+
+		if r == nil {
+			continue
+		}
+		rcode = r.MsgHdr.Rcode
+		if len(r.Answer) != 0 {
+			lg.Printf("*** AuthDNSQuery: there is stuff in Answer section")
+			for _, rr := range r.Answer {
+				switch t := rr.Header().Rrtype; t {
+				case qtype:
+					rrset.RRs = append(rrset.RRs, rr)
+				case dns.TypeRRSIG:
+					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				default:
+					lg.Printf("Got a %s RR when looking for %s %s",
+						dns.TypeToString[t], qname,
+						dns.TypeToString[qtype])
+				}
+			}
+
+			RRsetCache.Set(qname, qtype, &CachedRRset{
+				Name:       qname,
+				RRtype:     qtype,
+				Rcode:      uint8(rcode),
+				RRset:      &rrset,
+				Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+			})
+			return &rrset, rcode, nil
+		} else if len(r.Ns) != 0 {
+			// This is likely either a negative response or a referral
+			lg.Printf("*** AuthDNSQuery: there is stuff in Authority section")
+			switch rcode {
+			case dns.RcodeSuccess:
+				// this is a referral
+				var rrset RRset
+				var zonename string
+
+				// 1. Collect the NS RRset from the Authority section
+				lg.Printf("*** AuthDNSQ: rcode=NOERROR, this is a referral")
+				nsMap := map[string]bool{}
+				for _, rr := range r.Ns {
+					switch rr.(type) {
+					case *dns.NS:
+						rrset.RRs = append(rrset.RRs, rr)
+						nsMap[rr.(*dns.NS).Ns] = true
+					default:
+					}
+				}
+				if len(rrset.RRs) != 0 {
+					zonename = rrset.RRs[0].Header().Name
+					rrset.Name = zonename
+					rrset.Class = dns.ClassINET
+					rrset.RRtype = dns.TypeNS
+					RRsetCache.Set(zonename, dns.TypeNS, &CachedRRset{
+						Name:       zonename,
+						RRtype:     dns.TypeNS,
+						Rcode:      uint8(rcode),
+						RRset:      &rrset,
+						Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+					})
+				}
+
+				// 2. Collect any glue from Additional
+				glue4Map := map[string]RRset{}
+				glue6Map := map[string]RRset{}
+				var servers []string
+				for _, rr := range r.Extra {
+					name := rr.Header().Name
+					if _, exist := nsMap[name]; !exist {
+						log.Printf("*** AuthDNSQuery: non-glue record in Additional: %q", rr.String())
+						continue
+					}
+					switch rr.(type) {
+					case *dns.A:
+						addr := net.JoinHostPort(rr.(*dns.A).A.String(), "53")
+						servers = append(servers, addr)
+						tmp := glue4Map[name]
+						tmp.RRs = append(tmp.RRs, rr)
+						glue4Map[name] = tmp
+
+					case *dns.AAAA:
+						addr := net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53")
+						servers = append(servers, addr)
+						tmp := glue6Map[name]
+						tmp.RRs = append(tmp.RRs, rr)
+						glue6Map[name] = tmp
+
+					default:
+					}
+				}
+
+				log.Printf("*** AuthDNSQuery: adding servers %v for zone %q to cache", servers, zonename)
+				RRsetCache.Servers.Set(zonename, servers)
+
+				for nsname, rrset := range glue4Map {
+					if len(rrset.RRs) == 0 {
+						continue
+					}
+					rr := rrset.RRs[0]
+					RRsetCache.Set(nsname, dns.TypeA, &CachedRRset{
+						Name:       nsname,
+						RRtype:     dns.TypeA,
+						RRset:      &rrset,
+						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+					})
+				}
+
+				for nsname, rrset := range glue6Map {
+					if len(rrset.RRs) == 0 {
+						continue
+					}
+					rr := rrset.RRs[0]
+					RRsetCache.Set(nsname, dns.TypeAAAA, &CachedRRset{
+						Name:       nsname,
+						RRtype:     dns.TypeAAAA,
+						RRset:      &rrset,
+						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+					})
+				}
+
+				return nil, rcode, nil
+
+			case dns.RcodeNameError:
+				// this is a negative response
+				// For NXDOMAIN, verify SOA exists in authority section
+				var foundSOA bool
+				for _, rr := range r.Ns {
+					if rr.Header().Rrtype == dns.TypeSOA {
+						foundSOA = true
+						break
+					}
+				}
+				if !foundSOA {
+					// Invalid NXDOMAIN response without SOA
+					continue // try next server
+				}
+				// Now we know this is an NXDOMAIN
+				return nil, rcode, nil
+			default:
+				log.Printf("*** AuthDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
+			}
+		} else {
+			if rcode == dns.RcodeSuccess {
+				return &rrset, rcode, nil // no point in continuing
+			}
+			continue // go to next server
+		}
+	}
+	return &rrset, rcode, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+}
+
 func getMinTTL(rrs []dns.RR) time.Duration {
 	if len(rrs) == 0 {
 		return 0

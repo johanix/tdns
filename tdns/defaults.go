@@ -8,10 +8,11 @@ const (
 	DogCfgFile = "/etc/axfr.net/dog.yaml"
 	//	ZonesCfgFile   = "/etc/axfr.net/tdns-zones.yaml"
 
-	DefaultCliCfgFile = "/etc/tdns/tdns-cli.yaml"
+	DefaultCliCfgFile      = "/etc/tdns/tdns-cli.yaml"
+	DefaultLookupCfgFile   = "/etc/tdns/tdns-lookup.yaml"
 
 	DefaultServerCfgFile   = "/etc/tdns/tdns-server.yaml"
 	DefaultAgentCfgFile    = "/etc/tdns/tdns-agent.yaml"
-	DefaultMSACfgFile      = "/etc/tdns/tdns-msa.yaml"
+//	DefaultMSACfgFile      = "/etc/tdns/tdns-msa.yaml"
 	DefaultCombinerCfgFile = "/etc/tdns/tdns-combiner.yaml"
 )

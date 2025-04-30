@@ -347,7 +347,9 @@ type CachedRRset struct {
 }
 
 type RRsetCacheT struct {
-	Map cmap.ConcurrentMap[string, CachedRRset]
+	RRsets  ConcurrentMap[string, CachedRRset]
+	Servers ConcurrentMap[string, []string]
+	Primed  bool
 }
 
 type DelegationSyncRequest struct {

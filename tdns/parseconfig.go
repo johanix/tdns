@@ -222,7 +222,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		if strings.Contains(dbFile, "..") {
 			return errors.New("invalid database file path: must not contain directory traversal")
 		}
-		if Globals.App.Name != "sidecar-cli" && Globals.App.Name != "tdns-cli" {
+		if dbFile == "" {
+			return fmt.Errorf("invalid database file: '%s'", dbFile)
+		}
+		if Globals.App.Name != "sidecar-cli" && Globals.App.Name != "tdns-cli" && Globals.App.Name != "tdns-lookup" {
 			// Verify that we have a MUSIC DB file.
 			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
 			if _, err := os.Stat(dbFile); os.IsNotExist(err) {
@@ -230,13 +233,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 				log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
 				return errors.New("ParseConfig: TDNS DB file does not exist")
 			}
+			kdb, err := NewKeyDB(dbFile, false)
+			if err != nil {
+				log.Fatalf("Error from NewKeyDB: %v", err)
+			}
+			conf.Internal.KeyDB = kdb
 		}
-
-		kdb, err := NewKeyDB(dbFile, false)
-		if err != nil {
-			log.Fatalf("Error from NewKeyDB: %v", err)
-		}
-		conf.Internal.KeyDB = kdb
 	}
 
 	// log.Printf("*** ParseConfig: 7")

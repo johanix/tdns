@@ -471,10 +471,10 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-rrsetcache":
 			log.Printf("tdnsd debug show-rrsetcache")
-			resp.Msg = fmt.Sprintf("RRsetCache: %v", RRsetCache.Map.Keys())
+			resp.Msg = fmt.Sprintf("RRsetCache: %v", RRsetCache.RRsets.Keys())
 			rrsets := []CachedRRset{}
-			for _, rrsetkey := range RRsetCache.Map.Keys() {
-				rrset, ok := RRsetCache.Map.Get(rrsetkey)
+			for _, rrsetkey := range RRsetCache.RRsets.Keys() {
+				rrset, ok := RRsetCache.RRsets.Get(rrsetkey)
 				if !ok {
 					continue
 				}

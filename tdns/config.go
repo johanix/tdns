@@ -152,6 +152,7 @@ type InternalConf struct {
 	RefreshZoneCh   chan ZoneRefresher
 	BumpZoneCh      chan BumperData
 	ValidatorCh     chan ValidatorRequest
+	RecursorCh      chan RecursorRequest
 	ScannerQ        chan ScanRequest
 	UpdateQ         chan UpdateRequest
 	DeferredUpdateQ chan DeferredUpdate

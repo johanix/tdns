@@ -74,13 +74,15 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	Globals.App.ServerBootTime = time.Now()
 	Globals.App.ServerConfigTime = time.Now()
 
-	pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
-	pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
-	pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
-	pflag.Parse()
+	if Globals.App.Type != AppTypeLookup {
+		pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
+		pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
+		pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
+		pflag.Parse()
 
-	flag.Usage = func() {
-		flag.PrintDefaults()
+		flag.Usage = func() {
+			flag.PrintDefaults()
+		}
 	}
 
 	// if Globals.Debug {
@@ -88,7 +90,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	// }
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeLookup:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -107,12 +109,15 @@ func (conf *Config) MainInit(defaultcfg string) error {
 
 	// Initialize channels and start engines
 	kdb := conf.Internal.KeyDB
-	kdb.UpdateQ = make(chan UpdateRequest, 10)
-	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
-	conf.Internal.UpdateQ = kdb.UpdateQ
-	conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+	if kdb != nil {
+		// kdb *may* be nil in some cases, like for tdns-lookup that has no DB.
+		kdb.UpdateQ = make(chan UpdateRequest, 10)
+		kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
+		conf.Internal.UpdateQ = kdb.UpdateQ
+		conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+	}
 
-	conf.Internal.KeyDB = kdb
+	// conf.Internal.KeyDB = kdb
 
 	// if Globals.Debug {
 	//	log.Printf("*** MainInit: 3 ***")

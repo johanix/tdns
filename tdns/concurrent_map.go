@@ -41,7 +41,7 @@ func create[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V
 }
 
 // Creates a new concurrent map.
-func New[V any]() *ConcurrentMap[string, V] {
+func NewCmap[V any]() ConcurrentMap[string, V] {
 	cm := create[string, V](fnv32)
 	return &cm
 }
@@ -236,7 +236,7 @@ func snapshot[K comparable, V any](m *ConcurrentMap[K, V]) (chans []chan Tuple[K
 	//When you access map items before initializing.
 	if len(m.shards) == 0 {
 		dump.P(m)
-		panic(`cmap.ConcurrentMap is not initialized. Should run New() before usage.`)
+		panic(`cmap.ConcurrentMap is not initialized. Should run NewCmap() before usage.`)
 	}
 	chans = make([]chan Tuple[K, V], shardCount)
 	wg := sync.WaitGroup{}

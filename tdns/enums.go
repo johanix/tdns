@@ -65,6 +65,7 @@ const (
 	AppTypeAgent
 	// AppTypeMSA
 	AppTypeCombiner
+	AppTypeLookup // simplified recursor
 )
 
 var AppTypeToString = map[AppType]string{
@@ -72,6 +73,7 @@ var AppTypeToString = map[AppType]string{
 	AppTypeAgent:  "agent",
 	// AppTypeMSA:      "msa",
 	AppTypeCombiner: "combiner",
+	AppTypeLookup:   "recursor",
 }
 
 var StringToAppType = map[string]AppType{
