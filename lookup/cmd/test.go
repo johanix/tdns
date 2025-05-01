@@ -19,6 +19,10 @@ func init() {
 		Long:  `Query DNS records for a given name and type`,
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) != 2 {
+				fmt.Printf("The query command required exactly two args: qname and qtype\n")
+				return
+			}
 			fmt.Printf("Querying %s for %s records\n", args[0], args[1])
 
 			qname := dns.Fqdn(args[0])
@@ -86,38 +90,30 @@ func init() {
 
 			// Get all keys from the concurrent map
 			for item := range tdns.RRsetCache.RRsets.IterBuffered() {
-				parts := strings.Split(item.Key, "::")
-				if len(parts) != 2 {
-					fmt.Printf("foo")
-					return
-				}
-				tmp, err := strconv.Atoi(parts[1])
-				if err != nil {
-					fmt.Printf("Atoi error for %q: %v", parts[1], err)
-					return
-				}
+				PrintCacheItem(item, ".")
+			}
+		},
+	}
 
-				rrtype := dns.TypeToString[uint16(tmp)]
-				fmt.Printf("\nOwner: %s RRtype: %s\n", parts[0], rrtype)
+	dumpSuffixCmd := &cobra.Command{
+		Use:   "dump-only-suffix",
+		Short: "Dump records with owner names ending in suffix from the RRsetCache",
+		// Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if tdns.RRsetCache == nil {
+				fmt.Println("RRsetCache is nil")
+				return
+			}
+			var suffix string
 
-				// Get all RR types for this owner
-				// for _, rrtype := range ownerData.RRtypes.Keys() {
-				//	rrset, ok := ownerData.RRtypes.Get(rrtype)
-				//	if !ok {
-				//		continue
-				//	}
-				// if rrset == nil {
-				// 	continue
-				// }
+			if len(args) == 1 {
+				suffix = dns.Fqdn(args[0])
+			}
+			fmt.Printf("Listing records in the RRsetCache with owner names ending in %q\n", suffix)
 
-				// Print each RR in the RRset
-				for _, rr := range item.Val.RRset.RRs {
-					fmt.Printf("%v\n", rr)
-				}
-				for _, rr := range item.Val.RRset.RRSIGs {
-					fmt.Printf("%v\n", rr)
-				}
-				// }
+			// Get all keys from the concurrent map
+			for item := range tdns.RRsetCache.RRsets.IterBuffered() {
+				PrintCacheItem(item, suffix)
 			}
 		},
 	}
@@ -141,7 +137,7 @@ func init() {
 		},
 	}
 
-	rootCmd.AddCommand(dumpCmd)
+	rootCmd.AddCommand(dumpCmd, dumpSuffixCmd)
 	dumpCmd.AddCommand(dumpServersCmd)
 	rootCmd.AddCommand(dumpServersCmd)
 
@@ -230,4 +226,42 @@ func init() {
 		},
 	}
 	rootCmd.AddCommand(compareCmd)
+}
+
+func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
+
+	parts := strings.Split(item.Key, "::")
+	if len(parts) != 2 {
+		fmt.Printf("foo")
+		return
+	}
+	tmp, err := strconv.Atoi(parts[1])
+	if err != nil {
+		fmt.Printf("Atoi error for %q: %v", parts[1], err)
+		return
+	}
+
+	if !strings.HasSuffix(item.Val.Name, suffix) {
+		return
+	}
+
+	rrtype := dns.TypeToString[uint16(tmp)]
+	fmt.Printf("\nOwner: %s RRtype: %s\n", parts[0], rrtype)
+
+	switch item.Val.QueryResult {
+	case tdns.ResultNXDOMAIN:
+		fmt.Printf("NXDOMAIN (negative response type 3)\n")
+	case tdns.ResultNoErrNoAns:
+		fmt.Printf("negative response type 0\n")
+	case tdns.ResultAnswer, tdns.ResultGlue, tdns.ResultPriming, tdns.ResultReferral:
+		// Print each RR in the RRset
+		for _, rr := range item.Val.RRset.RRs {
+			fmt.Printf("%v (%s)\n", rr, tdns.QueryResultToString[item.Val.QueryResult])
+		}
+		for _, rr := range item.Val.RRset.RRSIGs {
+			fmt.Printf("%v\n", rr)
+		}
+	default:
+		fmt.Printf("QueryResult=%s (which we don't know what to do with)", tdns.QueryResultToString[item.Val.QueryResult])
+	}
 }

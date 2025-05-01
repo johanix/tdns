@@ -124,6 +124,7 @@ func (rsc *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 	if len(nsRecords) > 0 {
 		log.Printf("Found %d NS RRs", len(nsRecords))
 		rsc.Set(".", dns.TypeNS, &CachedRRset{
+			QueryResult: ResultPriming,
 			RRset: &RRset{
 				Name:   ".",
 				Class:  dns.ClassINET,
@@ -168,6 +169,7 @@ func (rsc *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 		// Create RRset for each type
 		for rrtype, records := range typeGroups {
 			rsc.Set(name, rrtype, &CachedRRset{
+				QueryResult: ResultPriming,
 				RRset: &RRset{
 					Name:   name,
 					Class:  dns.ClassINET,

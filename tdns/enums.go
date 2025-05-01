@@ -5,6 +5,28 @@ package tdns
 
 import "fmt"
 
+type QueryResult uint8
+
+const (
+	ResultAnswer QueryResult = iota + 1
+	ResultPriming
+	ResultReferral
+	ResultNXDOMAIN
+	ResultNoErrNoAns
+	ResultGlue    // from additional section
+	ResultFailure // some sort of general failure that we cannot sort out
+)
+
+var QueryResultToString = map[QueryResult]string{
+	ResultAnswer:     "answer",
+	ResultPriming:    "priming",
+	ResultReferral:   "referral",
+	ResultNXDOMAIN:   "NXDOMAIN",
+	ResultNoErrNoAns: "negative response type 0",
+	ResultGlue:       "glue",
+	ResultFailure:    "failure",
+}
+
 type ZoneOption uint8
 
 const (

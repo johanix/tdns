@@ -329,12 +329,12 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 }
 
 func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers []string,
-	lg *log.Logger, verbose bool) (*RRset, int, error) {
+	lg *log.Logger, verbose bool) (*RRset, int, QueryResult, error) {
 
 	crrset := rrcache.Get(qname, qtype)
 	if crrset != nil {
-		lg.Printf("AuthDNSQuery: found %s %s in cache", qname, dns.TypeToString[qtype])
-		return crrset.RRset, int(crrset.Rcode), nil
+		lg.Printf("AuthDNSQuery: found %s %s in cache (result=%s)", qname, dns.TypeToString[qtype], QueryResultToString[crrset.QueryResult])
+		return crrset.RRset, int(crrset.Rcode), crrset.QueryResult, nil
 	}
 	lg.Printf("AuthDNSQuery: answer not present in cache")
 	var rrset RRset
@@ -380,30 +380,45 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 			}
 
 			RRsetCache.Set(qname, qtype, &CachedRRset{
-				Name:       qname,
-				RRtype:     qtype,
-				Rcode:      uint8(rcode),
-				RRset:      &rrset,
-				Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+				Name:        qname,
+				RRtype:      qtype,
+				Rcode:       uint8(rcode),
+				RRset:       &rrset,
+				QueryResult: ResultAnswer,
+				Expiration:  time.Now().Add(getMinTTL(rrset.RRs)),
 			})
-			return &rrset, rcode, nil
+			return &rrset, rcode, ResultAnswer, nil
 		} else if len(r.Ns) != 0 {
 			// This is likely either a negative response or a referral
 			lg.Printf("*** AuthDNSQuery: there is stuff in Authority section")
 			switch rcode {
 			case dns.RcodeSuccess:
-				// this is a referral
+				// this is either a referral or a negative response
 				var rrset RRset
 				var zonename string
 
 				// 1. Collect the NS RRset from the Authority section
-				lg.Printf("*** AuthDNSQ: rcode=NOERROR, this is a referral")
+				lg.Printf("*** AuthDNSQ: rcode=NOERROR, this is a referral or neg resp")
 				nsMap := map[string]bool{}
 				for _, rr := range r.Ns {
 					switch rr.(type) {
 					case *dns.NS:
+						// this is a referral
 						rrset.RRs = append(rrset.RRs, rr)
 						nsMap[rr.(*dns.NS).Ns] = true
+					case *dns.SOA:
+						// this is a negative response
+						log.Printf("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
+						RRsetCache.Set(qname, qtype, &CachedRRset{
+							Name:        qname,
+							RRtype:      qtype,
+							Rcode:       uint8(rcode),
+							RRset:       nil,
+							QueryResult: ResultNoErrNoAns,
+							Expiration:  time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						})
+						return nil, rcode, ResultNoErrNoAns, nil
+						log.Printf("should never get here")
 					default:
 					}
 				}
@@ -413,11 +428,12 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					rrset.Class = dns.ClassINET
 					rrset.RRtype = dns.TypeNS
 					RRsetCache.Set(zonename, dns.TypeNS, &CachedRRset{
-						Name:       zonename,
-						RRtype:     dns.TypeNS,
-						Rcode:      uint8(rcode),
-						RRset:      &rrset,
-						Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+						Name:        zonename,
+						RRtype:      dns.TypeNS,
+						Rcode:       uint8(rcode),
+						RRset:       &rrset,
+						QueryResult: ResultReferral,
+						Expiration:  time.Now().Add(getMinTTL(rrset.RRs)),
 					})
 				}
 
@@ -450,7 +466,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					}
 				}
 
-				log.Printf("*** AuthDNSQuery: adding servers %v for zone %q to cache", servers, zonename)
+				log.Printf("*** AuthDNSQuery: adding %d servers for zone %q to cache", len(servers), zonename)
 				RRsetCache.Servers.Set(zonename, servers)
 
 				for nsname, rrset := range glue4Map {
@@ -459,10 +475,11 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					}
 					rr := rrset.RRs[0]
 					RRsetCache.Set(nsname, dns.TypeA, &CachedRRset{
-						Name:       nsname,
-						RRtype:     dns.TypeA,
-						RRset:      &rrset,
-						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						Name:        nsname,
+						RRtype:      dns.TypeA,
+						RRset:       &rrset,
+						QueryResult: ResultGlue,
+						Expiration:  time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 					})
 				}
 
@@ -472,22 +489,25 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					}
 					rr := rrset.RRs[0]
 					RRsetCache.Set(nsname, dns.TypeAAAA, &CachedRRset{
-						Name:       nsname,
-						RRtype:     dns.TypeAAAA,
-						RRset:      &rrset,
-						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						Name:        nsname,
+						RRtype:      dns.TypeAAAA,
+						RRset:       &rrset,
+						QueryResult: ResultGlue,
+						Expiration:  time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 					})
 				}
 
-				return nil, rcode, nil
+				return nil, rcode, ResultReferral, nil
 
 			case dns.RcodeNameError:
 				// this is a negative response
 				// For NXDOMAIN, verify SOA exists in authority section
 				var foundSOA bool
+				var ttl uint32
 				for _, rr := range r.Ns {
 					if rr.Header().Rrtype == dns.TypeSOA {
 						foundSOA = true
+						ttl = rr.Header().Ttl
 						break
 					}
 				}
@@ -496,18 +516,26 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					continue // try next server
 				}
 				// Now we know this is an NXDOMAIN
-				return nil, rcode, nil
+				RRsetCache.Set(qname, qtype, &CachedRRset{
+					Name:        qname,
+					RRtype:      qtype,
+					RRset:       nil,
+					QueryResult: ResultNXDOMAIN,
+					Expiration:  time.Now().Add(time.Duration(ttl) * time.Second),
+				})
+
+				return nil, rcode, ResultNXDOMAIN, nil
 			default:
 				log.Printf("*** AuthDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
 			}
 		} else {
 			if rcode == dns.RcodeSuccess {
-				return &rrset, rcode, nil // no point in continuing
+				return &rrset, rcode, ResultFailure, nil // no point in continuing
 			}
 			continue // go to next server
 		}
 	}
-	return &rrset, rcode, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+	return &rrset, rcode, ResultNoErrNoAns, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
 }
 
 func getMinTTL(rrs []dns.RR) time.Duration {
