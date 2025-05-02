@@ -338,13 +338,13 @@ type DnssecKey struct {
 }
 
 type CachedRRset struct {
-	Name        string
-	RRtype      uint16
-	Rcode       uint8
-	RRset       *RRset
-	QueryResult QueryResult
-	Validated   bool
-	Expiration  time.Time
+	Name       string
+	RRtype     uint16
+	Rcode      uint8
+	RRset      *RRset
+	Context    CacheContext
+	Validated  bool
+	Expiration time.Time
 }
 
 type RRsetCacheT struct {

@@ -9,7 +9,7 @@ const (
 	//	ZonesCfgFile   = "/etc/axfr.net/tdns-zones.yaml"
 
 	DefaultCliCfgFile      = "/etc/tdns/tdns-cli.yaml"
-	DefaultLookupCfgFile   = "/etc/tdns/tdns-lookup.yaml"
+	DefaultImrCfgFile      = "/etc/tdns/tdns-imr.yaml"
 
 	DefaultServerCfgFile   = "/etc/tdns/tdns-server.yaml"
 	DefaultAgentCfgFile    = "/etc/tdns/tdns-agent.yaml"

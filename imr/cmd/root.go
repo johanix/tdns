@@ -19,19 +19,27 @@ var cfgFile, cfgFileUsed string
 var StopCh chan struct{}
 var LocalConfig string
 
+var daemonflag bool
+
 var conf tdns.Config
 
 // var api *tdns.ApiClient
 
 var rootCmd = &cobra.Command{
-	Use:   "tdns-lookup",
+	Use:   "tdns-cli",
 	Short: "Interactive DNS lookup tool",
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) == 0 {
-			startInteractiveMode() // old go-prompt version
-			// startReadlineMode() // new readline version
-			return
+			if !daemonflag {
+				startInteractiveMode() // old go-prompt version
+				// startReadlineMode() // new readline version
+				return
+			} else {
+				fmt.Printf("tdns-cli: Starting in daemon mode, no CLI\n")
+				done := make(chan struct{}, 1)
+				<-done
+			}
 		}
 	},
 }
@@ -46,12 +54,13 @@ func init() {
 	cobra.OnInitialize(initConfig, initRecursor)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		fmt.Sprintf("config file (default is %s)", tdns.DefaultLookupCfgFile))
+		fmt.Sprintf("config file (default is %s)", tdns.DefaultImrCfgFile))
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
 		false, "debug output")
+	rootCmd.PersistentFlags().BoolVarP(&daemonflag, "daemon", "", false, "daemon mode (no CLI)")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
 		false, "verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
@@ -68,7 +77,7 @@ func initConfig() {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		viper.SetConfigFile(tdns.DefaultLookupCfgFile)
+		viper.SetConfigFile(tdns.DefaultImrCfgFile)
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -135,15 +144,20 @@ type ApiDetails struct {
 //}
 
 func initRecursor() {
-	log.Printf("initRecursor: Calling conf.MainInit()")
+	log.Printf("initRecursor: Calling conf.MainInit(%q)", tdns.DefaultImrCfgFile)
 	// Conf.Internal.RecursorCh = make(chan tdns.RecursorRequest, 10)
-	err := conf.MainInit(tdns.DefaultLookupCfgFile)
+	err := conf.MainInit(tdns.DefaultImrCfgFile)
 	log.Printf("initRecursor: Back from conf.MainInit()")
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing tdns-lookup: %v", err))
+		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}
 
-	conf.Internal.RecursorCh = make(chan tdns.RecursorRequest, 10)
-	stopCh := make(chan struct{}, 10)
-	go tdns.RecursorEngine(&conf, stopCh)
+	// conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
+	// stopCh := make(chan struct{}, 10)
+	// go tdns.RecursorEngine(&conf, stopCh)
+
+	err = tdns.MainStartThreads(&conf, nil)
+	if err != nil {
+		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting threads: %v", err))
+	}
 }

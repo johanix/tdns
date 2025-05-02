@@ -195,7 +195,13 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 
 	if len(addresses) == 0 {
 		log.Println("APIdispatcher: no addresses to listen on (key 'apiserver.addresses' not set). Not starting.")
-		return fmt.Errorf("no addresses to listen on")
+		// return fmt.Errorf("no addresses to listen on")
+		return nil
+	}
+
+	if router == nil {
+		log.Println("APIdispatcher: API router is nil. Not starting.")
+		return nil
 	}
 
 	WalkRoutes(router, addresses[0])

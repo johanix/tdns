@@ -1,4 +1,4 @@
-module tdns-lookup
+module tdns-imr
 
 go 1.23.2
 

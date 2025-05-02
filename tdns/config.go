@@ -15,6 +15,7 @@ type Config struct {
 	// OBE App            AppDetails
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
+	ImrEngine      ImrEngineConf
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
@@ -51,28 +52,13 @@ type DnsEngineConf struct {
 	CertFile   string   `yaml:"certfile,omitempty"`
 	KeyFile    string   `yaml:"keyfile,omitempty"`
 	Transports []string `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
+}
 
-	//	Do53 struct {
-	//		Addresses []string
-	//	}
-	//
-	//	DoT struct {
-	//		Addresses []string
-	//		CertFile  string
-	//		KeyFile   string
-	//	}
-	//
-	//	DoH struct {
-	//		Addresses []string
-	//		CertFile  string
-	//		KeyFile   string
-	//	}
-	//
-	//	DoQ struct {
-	//		Addresses []string
-	//		CertFile  string
-	//		KeyFile   string
-	//	}
+type ImrEngineConf struct {
+	Addresses  []string `validate:"required"`
+	CertFile   string
+	KeyFile    string
+	Transports []string `validate:"required"` // "do53", "dot", "doh", "doq"
 }
 
 type ApiServerConf struct {
@@ -152,7 +138,7 @@ type InternalConf struct {
 	RefreshZoneCh   chan ZoneRefresher
 	BumpZoneCh      chan BumperData
 	ValidatorCh     chan ValidatorRequest
-	RecursorCh      chan RecursorRequest
+	RecursorCh      chan ImrRequest
 	ScannerQ        chan ScanRequest
 	UpdateQ         chan UpdateRequest
 	DeferredUpdateQ chan DeferredUpdate

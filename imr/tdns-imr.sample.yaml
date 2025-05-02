@@ -1,0 +1,14 @@
+recursorengine:
+   active:	true
+   root-hints:  "/etc/tdns/root.hints"
+
+imrengine:
+   addresses:           [ 127.0.0.1:99, '[::1]:99']
+   transports:          [ do53, dot, doq ]
+   certfile:            /etc/hsync-test/certs/hoola.bandoola..crt
+   keyfile:             /etc/hsync-test/certs/hoola.bandoola..key
+
+log:
+   file:	/var/log/tdns/tdns-imr.log
+
+

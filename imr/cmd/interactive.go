@@ -65,10 +65,10 @@ func startInteractiveMode() {
 	p := prompt.New(
 		executor,
 		completer,
-		prompt.OptionPrefix("tdns> "),
-		prompt.OptionTitle("TDNS Interactive Shell"),
+		prompt.OptionPrefix("tdns-imr> "),
+		prompt.OptionTitle("TDNS-IMR Interactive Shell"),
 		// prompt.OptionInputTextColor(prompt.Black),
-		prompt.OptionMaxSuggestion(2),
+		prompt.OptionMaxSuggestion(5),
 	)
 	p.Run()
 }

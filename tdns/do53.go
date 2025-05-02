@@ -30,8 +30,8 @@ func DnsEngine(conf *Config) error {
 
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
-	ourDNSHandler := createDnsHandler(conf)
-	dns.HandleFunc(".", ourDNSHandler)
+	authDNSHandler := createAuthDnsHandler(conf)
+	dns.HandleFunc(".", authDNSHandler)
 
 	addresses := viper.GetStringSlice("dnsengine.addresses")
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
@@ -100,21 +100,21 @@ func DnsEngine(conf *Config) error {
 		addresses = tmp
 
 		if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
-			err := DnsDoTEngine(conf, addresses, &cert, ourDNSHandler)
+			err := DnsDoTEngine(conf, addresses, &cert, authDNSHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
 			}
 		}
 
 		if CaseFoldContains(conf.DnsEngine.Transports, "doh") {
-			err := DnsDoHEngine(conf, addresses, certFile, keyFile, ourDNSHandler)
+			err := DnsDoHEngine(conf, addresses, certFile, keyFile, authDNSHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
 			}
 		}
 
 		if CaseFoldContains(conf.DnsEngine.Transports, "doq") {
-			err := DnsDoQEngine(conf, addresses, &cert, ourDNSHandler)
+			err := DnsDoQEngine(conf, addresses, &cert, authDNSHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
 			}
@@ -123,7 +123,7 @@ func DnsEngine(conf *Config) error {
 	return nil
 }
 
-func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
+func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	kdb := conf.Internal.KeyDB

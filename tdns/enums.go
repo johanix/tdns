@@ -5,26 +5,28 @@ package tdns
 
 import "fmt"
 
-type QueryResult uint8
+type CacheContext uint8
 
 const (
-	ResultAnswer QueryResult = iota + 1
-	ResultPriming
-	ResultReferral
-	ResultNXDOMAIN
-	ResultNoErrNoAns
-	ResultGlue    // from additional section
-	ResultFailure // some sort of general failure that we cannot sort out
+	ContextAnswer CacheContext = iota + 1
+	ContextHint
+	ContextPriming
+	ContextReferral
+	ContextNXDOMAIN
+	ContextNoErrNoAns
+	ContextGlue    // from additional section
+	ContextFailure // some sort of general failure that we cannot sort out
 )
 
-var QueryResultToString = map[QueryResult]string{
-	ResultAnswer:     "answer",
-	ResultPriming:    "priming",
-	ResultReferral:   "referral",
-	ResultNXDOMAIN:   "NXDOMAIN",
-	ResultNoErrNoAns: "negative response type 0",
-	ResultGlue:       "glue",
-	ResultFailure:    "failure",
+var CacheContextToString = map[CacheContext]string{
+	ContextAnswer:     "answer",
+	ContextHint:       "hint",
+	ContextPriming:    "priming",
+	ContextReferral:   "referral",
+	ContextNXDOMAIN:   "NXDOMAIN",
+	ContextNoErrNoAns: "negative response type 0",
+	ContextGlue:       "glue",
+	ContextFailure:    "failure",
 }
 
 type ZoneOption uint8
@@ -85,17 +87,17 @@ type AppType uint8
 const (
 	AppTypeServer AppType = iota + 1
 	AppTypeAgent
-	// AppTypeMSA
 	AppTypeCombiner
-	AppTypeLookup // simplified recursor
+	AppTypeImr // simplified recursor
+	AppTypeCli
 )
 
 var AppTypeToString = map[AppType]string{
-	AppTypeServer: "server",
-	AppTypeAgent:  "agent",
-	// AppTypeMSA:      "msa",
+	AppTypeServer:   "server",
+	AppTypeAgent:    "agent",
 	AppTypeCombiner: "combiner",
-	AppTypeLookup:   "recursor",
+	AppTypeImr:      "imr",
+	AppTypeCli:	 "cli",
 }
 
 var StringToAppType = map[string]AppType{

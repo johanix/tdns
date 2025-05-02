@@ -42,8 +42,8 @@ func init() {
 				return
 			}
 
-			resp := make(chan tdns.RecursorResponse, 1)
-			conf.Internal.RecursorCh <- tdns.RecursorRequest{
+			resp := make(chan tdns.ImrResponse, 1)
+			conf.Internal.RecursorCh <- tdns.ImrRequest{
 				Qname:      qname,
 				Qclass:     dns.ClassINET,
 				Qtype:      qtype,
@@ -248,20 +248,21 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	rrtype := dns.TypeToString[uint16(tmp)]
 	fmt.Printf("\nOwner: %s RRtype: %s\n", parts[0], rrtype)
 
-	switch item.Val.QueryResult {
-	case tdns.ResultNXDOMAIN:
+	switch item.Val.Context {
+	case tdns.ContextNXDOMAIN:
 		fmt.Printf("NXDOMAIN (negative response type 3)\n")
-	case tdns.ResultNoErrNoAns:
+	case tdns.ContextNoErrNoAns:
 		fmt.Printf("negative response type 0\n")
-	case tdns.ResultAnswer, tdns.ResultGlue, tdns.ResultPriming, tdns.ResultReferral:
+	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
 		// Print each RR in the RRset
 		for _, rr := range item.Val.RRset.RRs {
-			fmt.Printf("%v (%s)\n", rr, tdns.QueryResultToString[item.Val.QueryResult])
+			fmt.Printf("%v (%s)\n", rr, tdns.CacheContextToString[item.Val.Context])
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("%v\n", rr)
 		}
 	default:
-		fmt.Printf("QueryResult=%s (which we don't know what to do with)", tdns.QueryResultToString[item.Val.QueryResult])
+		fmt.Printf("Context: %q (which we don't know what to do with)",
+			tdns.CacheContextToString[item.Val.Context])
 	}
 }

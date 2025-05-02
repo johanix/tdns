@@ -4,12 +4,12 @@
 package main
 
 import (
-	"tdns-lookup/cmd"
+	"tdns-imr/cmd"
 	tdns "github.com/johanix/tdns/tdns"
 )
 
 func main() {
-	tdns.Globals.App.Type = tdns.AppTypeLookup
+	tdns.Globals.App.Type = tdns.AppTypeImr
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Date = appDate

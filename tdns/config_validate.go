@@ -41,7 +41,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 
 	var configsections = make(map[string]interface{}, 5)
 
-	if Globals.App.Type != AppTypeLookup {
+	if Globals.App.Type != AppTypeImr {
 		configsections["log"] = config.Log
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
