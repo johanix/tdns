@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/viper"
 
@@ -67,78 +66,31 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 		if Globals.Debug {
 			log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 		}
-		resp := ImrResponse{
-			Validated: false,
-			Msg:       "RecursorEngine: request to look up a RRset",
-		}
+		// resp := ImrResponse{
+		//			Validated: false,
+		// Msg:       "RecursorEngine: request to look up a RRset",
+		// }
+		var resp *ImrResponse
 
 		// 1. Is the answer in the cache?
 		crrset := RRsetCache.Get(rrq.Qname, rrq.Qtype)
 		if crrset != nil {
 			resp.RRset = crrset.RRset
 		} else {
+			var err error
 			log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			maxiter := 12
-		outerLoop:
-			for {
-				if maxiter <= 0 {
-					log.Printf("*** Recursor: max iterations reached. Giving up.")
-					break
-				} else {
-					maxiter--
-				}
-				bestmatch, servers, err := RRsetCache.FindClosestKnownZone(rrq.Qname)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
-					break
-				}
-				log.Printf("Recursor: best zone match for qname %q seems to be %q", rrq.Qname, bestmatch)
-				ss := servers
-				if len(servers) > 4 {
-					ss = servers[:3]
-					ss = append(ss, "...")
-				}
-				log.Printf("Recursor: sending query to %d servers: %v", len(servers), ss)
-				rrset, rcode, context, err := RRsetCache.AuthDNSQuery(rrq.Qname, rrq.Qtype, servers, log.Default(), true)
-				// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Error from AuthDNSQuery: %v", err)
-					break
-				}
-				if rrset != nil {
-					log.Printf("Recursor: received response from AuthDNSQuery:")
-					for _, rr := range rrset.RRs {
-						log.Printf("Recursor: %s", rr.String())
-					}
-					resp.RRset = rrset
-					break
-				}
-				if rcode == dns.RcodeNameError {
-					// this is a negative response, which we need to figure out how to represent
-					log.Printf("Recursor: received NXDOMAIN for qname %q, no point in continuing", rrq.Qname)
-					resp.Msg = "NXDOMAIN (negative response type 3)"
-					break
-				}
-				switch context {
-				case ContextReferral:
-					continue // if all is good we will now hit the new referral and get further
-				case ContextNoErrNoAns:
-					resp.Msg = "negative response type 0"
-					break outerLoop
-				}
-				time.Sleep(1 * time.Second)
+			resp, err = IterateOverQuery(rrq.Qname, rrq.Qtype, rrq.Qclass)
+			if err != nil {
+				log.Printf("Error from IterateOverQuery: %v", err)
 			}
 		}
-
 		if rrq.ResponseCh != nil {
-			rrq.ResponseCh <- resp
+			rrq.ResponseCh <- *resp
 		}
 	}
 }
 
-func IterateOverQuery(qname string, qtype uint16, qclass uint16) {
+func IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
 	log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 	maxiter := 12
 
@@ -146,11 +98,11 @@ func IterateOverQuery(qname string, qtype uint16, qclass uint16) {
 		Validated: false,
 		Msg:       "ImrEngine: request to look up a RRset",
 	}
-outerLoop:
+
 	for {
 		if maxiter <= 0 {
 			log.Printf("*** Recursor: max iterations reached. Giving up.")
-			return
+			return nil, fmt.Errorf("Max iterations reached. Giving up.")
 		} else {
 			maxiter--
 		}
@@ -158,7 +110,7 @@ outerLoop:
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
-			return
+			return &resp, err
 		}
 		log.Printf("Recursor: best zone match for qname %q seems to be %q", qname, bestmatch)
 		ss := servers
@@ -172,7 +124,7 @@ outerLoop:
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from AuthDNSQuery: %v", err)
-			break
+			return &resp, err
 		}
 		if rrset != nil {
 			log.Printf("Recursor: received response from AuthDNSQuery:")
@@ -180,22 +132,21 @@ outerLoop:
 				log.Printf("Recursor: %s", rr.String())
 			}
 			resp.RRset = rrset
-			break
+			return &resp, nil
 		}
 		if rcode == dns.RcodeNameError {
 			// this is a negative response, which we need to figure out how to represent
 			log.Printf("Recursor: received NXDOMAIN for qname %q, no point in continuing", qname)
 			resp.Msg = "NXDOMAIN (negative response type 3)"
-			break
+			return &resp, nil
 		}
 		switch context {
 		case ContextReferral:
 			continue // if all is good we will now hit the new referral and get further
 		case ContextNoErrNoAns:
 			resp.Msg = "negative response type 0"
-			break outerLoop
+			return &resp, nil
 		}
-		time.Sleep(1 * time.Second)
 	}
 }
 
