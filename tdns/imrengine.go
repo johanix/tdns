@@ -379,7 +379,7 @@ func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWri
 		// log.Printf("DNSSEC OK: %v", dnssec_ok)
 
 		qtype := r.Question[0].Qtype
-		log.Printf("ImrHandler: qname: %s qtype: %s opcode: %s (%d)", qname, dns.OpcodeToString[r.Opcode], r.Opcode)
+		log.Printf("ImrHandler: qname: %s qtype: %s opcode: %s (%d)", qname, dns.TypeToString[qtype], dns.OpcodeToString[r.Opcode], r.Opcode)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify, dns.OpcodeUpdate:
@@ -389,7 +389,7 @@ func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWri
 			return
 
 		case dns.OpcodeQuery:
-			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
+			log.Printf("Lookup request for %s %s from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
 
 			qname = strings.ToLower(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
