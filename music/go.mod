@@ -2,9 +2,7 @@ module music
 
 go 1.23.2
 
-// go 1.18
-
-replace github.com/johanix/tdns/tdns => ../tdns
+// replace github.com/johanix/tdns/tdns => ../tdns
 
 require (
 	github.com/go-playground/validator/v10 v10.22.1

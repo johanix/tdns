@@ -366,7 +366,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 	}
 }
 
-func APIdebug() func(w http.ResponseWriter, r *http.Request) {
+func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		resp := DebugResponse{
@@ -394,7 +394,7 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 
 		switch dp.Command {
 		case "rrset":
-			log.Printf("tdnsd debug rrset inquiry")
+			log.Printf("%s debug rrset inquiry", Globals.App.Name)
 			if zd, ok := Zones.Get(dp.Zone); ok {
 				//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
 				//				if owner := &zd.Owners[idx]; owner != nil {
@@ -470,11 +470,11 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 			resp.TrustedDnskeys = tas
 
 		case "show-rrsetcache":
-			log.Printf("tdnsd debug show-rrsetcache")
-			resp.Msg = fmt.Sprintf("RRsetCache: %v", RRsetCache.RRsets.Keys())
+			log.Printf("%s debug show-rrsetcache", Globals.App.Name)
+			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []CachedRRset{}
-			for _, rrsetkey := range RRsetCache.RRsets.Keys() {
-				rrset, ok := RRsetCache.RRsets.Get(rrsetkey)
+			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
+				rrset, ok := conf.Internal.RRsetCache.RRsets.Get(rrsetkey)
 				if !ok {
 					continue
 				}

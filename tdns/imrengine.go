@@ -53,14 +53,18 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 	// 1. Create the cache
 	var err error
 	// RecursorCache, err = NewRRsetCacheNG(viper.GetString("recursorengine.root-hints"))
-	if !RRsetCache.Primed {
-		RRsetCache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
+	rrcache := NewRRsetCache()
+	if !rrcache.Primed {
+		rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
 		if err != nil {
 			Shutdowner(conf, fmt.Sprintf("RecursorEngine: failed to initialize RecursorCache w/ root hints: %v", err))
 		}
 	}
 
-	// var DnskeyCache = NewRRsetCache()
+	conf.Internal.RRsetCache = rrcache
+
+	// Start the ImrEngine
+	go rrcache.ImrEngine(conf, stopch)
 
 	for rrq := range recursorch {
 		if Globals.Debug {
@@ -73,13 +77,13 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 		var resp *ImrResponse
 
 		// 1. Is the answer in the cache?
-		crrset := RRsetCache.Get(rrq.Qname, rrq.Qtype)
+		crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
 		if crrset != nil {
 			resp.RRset = crrset.RRset
 		} else {
 			var err error
 			log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			resp, err = IterateOverQuery(rrq.Qname, rrq.Qtype, rrq.Qclass)
+			resp, err = rrcache.IterateOverQuery(rrq.Qname, rrq.Qtype, rrq.Qclass)
 			if err != nil {
 				log.Printf("Error from IterateOverQuery: %v", err)
 			}
@@ -90,7 +94,7 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 	}
 }
 
-func IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
+func (rrcache *RRsetCacheT) IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
 	log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 	maxiter := 12
 
@@ -106,7 +110,7 @@ func IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, 
 		} else {
 			maxiter--
 		}
-		bestmatch, servers, err := RRsetCache.FindClosestKnownZone(qname)
+		bestmatch, servers, err := rrcache.FindClosestKnownZone(qname)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -119,7 +123,7 @@ func IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, 
 			ss = append(ss, "...")
 		}
 		log.Printf("Recursor: sending query to %d servers: %v", len(servers), ss)
-		rrset, rcode, context, err := RRsetCache.AuthDNSQuery(qname, qtype, servers, log.Default(), true)
+		rrset, rcode, context, err := rrcache.AuthDNSQuery(qname, qtype, servers, log.Default(), true)
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -150,7 +154,7 @@ func IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, 
 	}
 }
 
-func ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
+func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
 	//	qname := r.Question[0].Name
 	//	qtype := r.Question[0].Rrtype
 	//	var dnssec_ok bool
@@ -163,7 +167,7 @@ func ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, 
 	m.SetRcode(r, dns.RcodeSuccess)
 	m.RecursionAvailable = true
 
-	crrset := RRsetCache.Get(qname, qtype)
+	crrset := rrcache.Get(qname, qtype)
 	if crrset != nil {
 		m.SetRcode(r, dns.RcodeSuccess)
 		// resp.RRset = crrset.RRset
@@ -185,7 +189,7 @@ func ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, 
 			} else {
 				maxiter--
 			}
-			bestmatch, servers, err := RRsetCache.FindClosestKnownZone(qname)
+			bestmatch, servers, err := rrcache.FindClosestKnownZone(qname)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -200,7 +204,7 @@ func ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, 
 				ss = append(ss, "...")
 			}
 			log.Printf("Recursor: sending query to %d servers: %v", len(servers), ss)
-			rrset, rcode, context, err := RRsetCache.AuthDNSQuery(qname, qtype, servers, log.Default(), true)
+			rrset, rcode, context, err := rrcache.AuthDNSQuery(qname, qtype, servers, log.Default(), true)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
 				// resp.Error = true
@@ -259,8 +263,8 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, []string
 	return bestmatch, servers, nil
 }
 
-func ImrEngine(conf *Config, done chan struct{}) error {
-	ImrHandler := createImrHandler(conf)
+func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
+	ImrHandler := createImrHandler(conf, rrcache)
 	dns.HandleFunc(".", ImrHandler)
 
 	addresses := viper.GetStringSlice("imrengine.addresses")
@@ -360,7 +364,7 @@ func ImrEngine(conf *Config, done chan struct{}) error {
 	return nil
 }
 
-func createImrHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
+func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWriter, r *dns.Msg) {
 	//	dnsupdateq := conf.Internal.DnsUpdateQ
 	//	dnsnotifyq := conf.Internal.DnsNotifyQ
 	//	kdb := conf.Internal.KeyDB
@@ -393,7 +397,7 @@ func createImrHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				return
 			}
 
-			go ImrResponder(w, r, qname, qtype, dnssec_ok)
+			go rrcache.ImrResponder(w, r, qname, qtype, dnssec_ok)
 			return
 
 		default:

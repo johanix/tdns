@@ -5,8 +5,8 @@ go 1.23.2
 replace github.com/johanix/tdns/tdns => ../tdns
 
 require (
-	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
-	github.com/mattn/go-sqlite3 v1.14.16
+	github.com/johanix/tdns/tdns v0.0.0-20250422095619-c770a62254d9
+	github.com/mattn/go-sqlite3 v1.14.28
 )
 
 require (

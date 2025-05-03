@@ -154,6 +154,7 @@ type InternalConf struct {
 	SyncStatusQ     chan SyncStatus
 	AgentRegistry   *AgentRegistry
 	ZoneDataRepo    *ZoneDataRepo
+	RRsetCache      *RRsetCacheT // ConcurrentMap of cached RRsets from queries
 }
 
 type AgentQs struct {

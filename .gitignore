@@ -10,11 +10,13 @@
 
 server/tdns-server
 agent/tdns-agent
+combiner/tdns-combiner
+imr/tdns-imr
 cli/tdns-cli
 dog/dog
+# old stuff; going away:
 sidecar/music-sidecar
 sidecar-cli/sidecar-cli
-combiner/tdns-combiner
 msa/tdns-msa
 
 */version.go

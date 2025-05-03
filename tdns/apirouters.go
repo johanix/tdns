@@ -12,7 +12,6 @@ import (
 	"os"
 
 	"github.com/gorilla/mux"
-	// "github.com/miekg/dns"
 )
 
 func WalkRoutes(router *mux.Router, address string) {
@@ -47,7 +46,7 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/command", APIcommand(conf, rtr)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
+	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 
 	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
@@ -77,6 +76,7 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 // only support debugging functionality and a single endpoint for replacing
 // specific zone data with new data delivered via this API.
 // DEPRECATED: Use SetupAPIRouter instead.
+/*
 func xxxSetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	rtr := mux.NewRouter().StrictSlash(true)
@@ -92,7 +92,7 @@ func xxxSetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-	sr.HandleFunc("/debug", APIdebug()).Methods("POST")
+	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
 	return rtr, nil
@@ -118,6 +118,7 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 
 	return rtr, nil
 }
+*/
 
 // This is the agent-to-agent sync API router.
 func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {

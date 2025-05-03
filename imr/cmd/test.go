@@ -83,13 +83,13 @@ func init() {
 		// Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("Listing records in the RRsetCache\n")
-			if tdns.RRsetCache == nil {
+			if conf.Internal.RRsetCache == nil {
 				fmt.Println("RRsetCache is nil")
 				return
 			}
 
 			// Get all keys from the concurrent map
-			for item := range tdns.RRsetCache.RRsets.IterBuffered() {
+			for item := range conf.Internal.RRsetCache.RRsets.IterBuffered() {
 				PrintCacheItem(item, ".")
 			}
 		},
@@ -100,7 +100,7 @@ func init() {
 		Short: "Dump records with owner names ending in suffix from the RRsetCache",
 		// Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			if tdns.RRsetCache == nil {
+			if conf.Internal.RRsetCache == nil {
 				fmt.Println("RRsetCache is nil")
 				return
 			}
@@ -112,7 +112,7 @@ func init() {
 			fmt.Printf("Listing records in the RRsetCache with owner names ending in %q\n", suffix)
 
 			// Get all keys from the concurrent map
-			for item := range tdns.RRsetCache.RRsets.IterBuffered() {
+			for item := range conf.Internal.RRsetCache.RRsets.IterBuffered() {
 				PrintCacheItem(item, suffix)
 			}
 		},
@@ -124,13 +124,13 @@ func init() {
 		// Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("Listing servers in the RecursorCache\n")
-			if tdns.RRsetCache == nil {
+			if conf.Internal.RRsetCache == nil {
 				fmt.Println("RecursorCache is nil")
 				return
 			}
 
 			// Get all keys from the concurrent map
-			for item := range tdns.RRsetCache.Servers.IterBuffered() {
+			for item := range conf.Internal.RRsetCache.Servers.IterBuffered() {
 				fmt.Printf("\nZone: %s\n", item.Key)
 				fmt.Printf("Servers: %v\n", item.Val)
 			}

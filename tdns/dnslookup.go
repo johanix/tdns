@@ -264,11 +264,11 @@ func ChildGlueRRsToAddrs(v4glue, v6glue []dns.RR) ([]string, error) {
 func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	rrtype uint16, verbose bool) (*RRset, int, error) {
 
-	crrset := RRsetCache.Get(qname, rrtype)
-	if crrset != nil {
-		lg.Printf("AuthDNSQuery: found %s %s in cache", qname, dns.TypeToString[rrtype])
-		return crrset.RRset, int(crrset.Rcode), nil
-	}
+	// crrset := RRsetCache.Get(qname, rrtype)
+	// if crrset != nil {
+	//	lg.Printf("AuthDNSQuery: found %s %s in cache", qname, dns.TypeToString[rrtype])
+	//	return crrset.RRset, int(crrset.Rcode), nil
+	// }
 	var rrset RRset
 	var rcode int
 
@@ -310,13 +310,13 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 				}
 			}
 
-			RRsetCache.Set(qname, rrtype, &CachedRRset{
-				Name:       qname,
-				RRtype:     rrtype,
-				Rcode:      uint8(rcode),
-				RRset:      &rrset,
-				Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
-			})
+			// RRsetCache.Set(qname, rrtype, &CachedRRset{
+			//	Name:       qname,
+			//	RRtype:     rrtype,
+			//	Rcode:      uint8(rcode),
+			//	RRset:      &rrset,
+			//	Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+			// })
 			return &rrset, rcode, nil
 		} else {
 			if rcode == dns.RcodeSuccess {
@@ -379,7 +379,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 				}
 			}
 
-			RRsetCache.Set(qname, qtype, &CachedRRset{
+			rrcache.Set(qname, qtype, &CachedRRset{
 				Name:       qname,
 				RRtype:     qtype,
 				Rcode:      uint8(rcode),
@@ -407,18 +407,23 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 						rrset.RRs = append(rrset.RRs, rr)
 						nsMap[rr.(*dns.NS).Ns] = true
 					case *dns.SOA:
-						// this is a negative response
-						log.Printf("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
-						RRsetCache.Set(qname, qtype, &CachedRRset{
-							Name:       qname,
-							RRtype:     qtype,
-							Rcode:      uint8(rcode),
-							RRset:      nil,
-							Context:    ContextNoErrNoAns,
-							Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
-						})
-						return nil, rcode, ContextNoErrNoAns, nil
-						log.Printf("should never get here")
+						// this is a negative response, but is the SOA right?
+						if strings.HasSuffix(qname, rr.Header().Name) {
+							// Yes, this SOA may auth a negative response for qname
+							log.Printf("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
+							rrcache.Set(qname, qtype, &CachedRRset{
+								Name:       qname,
+								RRtype:     qtype,
+								Rcode:      uint8(rcode),
+								RRset:      nil,
+								Context:    ContextNoErrNoAns,
+								Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							})
+							return nil, rcode, ContextNoErrNoAns, nil
+						} else {
+							log.Printf("*** The SOA %q is not correct to speak for qname %q", rr.Header().Name, qname)
+							log.Printf("should never get here")
+						}
 					default:
 					}
 				}
@@ -427,7 +432,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					rrset.Name = zonename
 					rrset.Class = dns.ClassINET
 					rrset.RRtype = dns.TypeNS
-					RRsetCache.Set(zonename, dns.TypeNS, &CachedRRset{
+					rrcache.Set(zonename, dns.TypeNS, &CachedRRset{
 						Name:       zonename,
 						RRtype:     dns.TypeNS,
 						Rcode:      uint8(rcode),
@@ -462,19 +467,21 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 						tmp.RRs = append(tmp.RRs, rr)
 						glue6Map[name] = tmp
 
+					case *dns.SVCB:
+						log.Printf("Additional contains an SVCB, here we should collect the ALPN")
 					default:
 					}
 				}
 
 				log.Printf("*** AuthDNSQuery: adding %d servers for zone %q to cache", len(servers), zonename)
-				RRsetCache.Servers.Set(zonename, servers)
+				rrcache.Servers.Set(zonename, servers)
 
 				for nsname, rrset := range glue4Map {
 					if len(rrset.RRs) == 0 {
 						continue
 					}
 					rr := rrset.RRs[0]
-					RRsetCache.Set(nsname, dns.TypeA, &CachedRRset{
+					rrcache.Set(nsname, dns.TypeA, &CachedRRset{
 						Name:       nsname,
 						RRtype:     dns.TypeA,
 						RRset:      &rrset,
@@ -488,7 +495,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 						continue
 					}
 					rr := rrset.RRs[0]
-					RRsetCache.Set(nsname, dns.TypeAAAA, &CachedRRset{
+					rrcache.Set(nsname, dns.TypeAAAA, &CachedRRset{
 						Name:       nsname,
 						RRtype:     dns.TypeAAAA,
 						RRset:      &rrset,
@@ -516,7 +523,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					continue // try next server
 				}
 				// Now we know this is an NXDOMAIN
-				RRsetCache.Set(qname, qtype, &CachedRRset{
+				rrcache.Set(qname, qtype, &CachedRRset{
 					Name:       qname,
 					RRtype:     qtype,
 					RRset:      nil,
