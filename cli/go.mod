@@ -11,7 +11,7 @@ require (
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/tdns/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
-	github.com/spf13/viper v1.14.0
+	github.com/spf13/viper v1.16.0
 )
 
 require (
@@ -28,21 +28,20 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/magiconair/properties v1.8.6 // indirect
+	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/miekg/dns v1.1.62 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
-	github.com/pelletier/go-toml v1.9.5 // indirect
-	github.com/pelletier/go-toml/v2 v2.0.5 // indirect
+	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.50.1 // indirect
 	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
-	github.com/spf13/afero v1.9.2 // indirect
-	github.com/spf13/cast v1.5.0 // indirect
+	github.com/spf13/afero v1.9.5 // indirect
+	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
-	github.com/subosito/gotenv v1.4.1 // indirect
+	github.com/spf13/pflag v1.0.6 // indirect
+	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.uber.org/mock v0.5.0 // indirect
@@ -54,8 +53,8 @@ require (
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
 	golang.org/x/tools v0.25.0 // indirect
+	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
