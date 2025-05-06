@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/miekg/dns"
@@ -473,7 +474,9 @@ func (ar *AgentRegistry) AddRemoteAgent(zonename ZoneName, agent *Agent) {
 	if ar.RemoteAgents[zonename] == nil {
 		ar.RemoteAgents[zonename] = make([]AgentId, 0)
 	}
-	ar.RemoteAgents[zonename] = append(ar.RemoteAgents[zonename], agent.Identity)
+	if !slices.Contains(ar.RemoteAgents[zonename], agent.Identity) {
+		ar.RemoteAgents[zonename] = append(ar.RemoteAgents[zonename], agent.Identity)
+	}
 }
 
 // RemoveRemoteAgent removes an agent from the list of remote agents for a zone
@@ -712,7 +715,7 @@ func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
 			return agent.State == AgentStateOperational
 		},
 		Action: func() (bool, error) {
-
+			log.Printf("CreateAgentUpstreamRFI: Sending RFI to upstream agent %q (NYI)", agent.Upstream)
 			return true, nil
 		},
 	}

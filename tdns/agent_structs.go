@@ -46,6 +46,8 @@ const (
 )
 
 var AgentMsgToString = map[AgentMsg]string{
+	AgentMsgHello:  "HELLO",
+	AgentMsgBeat:   "BEAT",
 	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
 	AgentMsgRfi:    "RFI",
 	AgentMsgStatus: "STATUS",

@@ -76,6 +76,7 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 // SetupCombinerAPIRouter sets up a router for the combiner API. It should
 // only support debugging functionality and a single endpoint for replacing
 // specific zone data with new data delivered via this API.
+// DEPRECATED: Use SetupAPIRouter instead.
 func xxxSetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	rtr := mux.NewRouter().StrictSlash(true)
@@ -97,6 +98,7 @@ func xxxSetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 	return rtr, nil
 }
 
+// DEPRECATED: Use SetupAPIRouter instead.
 func xxxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	rtr := mux.NewRouter().StrictSlash(true)

@@ -126,7 +126,7 @@ on the instructions decide to reject the update (due to local policy),
 it must send back a response clearly stating both the rejection and a
 reason for the rejection.
 
-## Synchronizing the contents of the NS RRset
+## NS RRset Synchronization Process
 
 When an agent receives internal information (i.e. information from
 inside its own provider) that the local contributions to the NS RRset
@@ -149,6 +149,8 @@ Ensuring correct semantics is the responsibility of the provider
 contributing the information.
 
 ## Synchronizing the contents of the DNSKEY RRset
+
+NYI.
 
 ## Adding a new DNS provider that provides authoritative DNS service 
 

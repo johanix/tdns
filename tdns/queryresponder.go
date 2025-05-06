@@ -625,9 +625,9 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 
 									_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
 									if err != nil {
-										log.Printf("Error signing %s: %v", nsName, err)
+										log.Printf("Error signing SVCB RR for %s: %v", nsName, err)
 									} else {
-										log.Printf("Signed %s: %v", nsName, err)
+										log.Printf("Successfully signed SVCB RR for %s: %v", nsName, err)
 									}
 									// check whether we have any SVCB records for this NS name and if not add this to the zone
 									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)

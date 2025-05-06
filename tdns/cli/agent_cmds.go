@@ -153,8 +153,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	var err error
 
 	if dnsRecord == "" {
-		fmt.Printf("Error: DNS record is required\n")
-		os.Exit(1)
+		return fmt.Errorf("Error: DNS record is required")
 	}
 
 	if rr, err = dns.NewRR(dnsRecord); err != nil {

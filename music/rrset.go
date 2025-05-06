@@ -14,7 +14,7 @@ import (
 )
 
 // Add adds a RR to the RRset if it is not already present.
-func (rrset RRset) Add(rr dns.RR) {
+func (rrset *RRset) Add(rr dns.RR) {
 	for _, rr2 := range rrset.RRs {
 		if dns.IsDuplicate(rr, rr2) {
 			return
@@ -24,7 +24,7 @@ func (rrset RRset) Add(rr dns.RR) {
 }
 
 // Delete deletes a RR from the RRset if it is present.
-func (rrset RRset) Delete(rr dns.RR) {
+func (rrset *RRset) Delete(rr dns.RR) {
 	for i, rr2 := range rrset.RRs {
 		if dns.IsDuplicate(rr, rr2) {
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)

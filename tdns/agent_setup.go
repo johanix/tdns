@@ -384,6 +384,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 	// Configure TLS with client certificate
 	tlsconfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
 	}
 
 	// Configure certificate verification using TLSA record

@@ -8,7 +8,7 @@ import (
 	"github.com/gookit/goutil/dump"
 )
 
-var SHARD_COUNT = 3
+const shardCount = 3
 
 type Stringer interface {
 	fmt.Stringer
@@ -32,9 +32,9 @@ type ConcurrentMapShared[K comparable, V any] struct {
 func create[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V] {
 	m := ConcurrentMap[K, V]{
 		sharding: sharding,
-		shards:   make([]*ConcurrentMapShared[K, V], SHARD_COUNT),
+		shards:   make([]*ConcurrentMapShared[K, V], shardCount),
 	}
-	for i := 0; i < SHARD_COUNT; i++ {
+	for i := 0; i < shardCount; i++ {
 		m.shards[i] = &ConcurrentMapShared[K, V]{items: make(map[K]V)}
 	}
 	// log.Printf("ConcurrentMap:create: created concurrent map with %d shards", len(m.shards))
@@ -58,7 +58,7 @@ func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uin
 
 // GetShard returns shard under given key
 func (m ConcurrentMap[K, V]) GetShard(key K) *ConcurrentMapShared[K, V] {
-	return m.shards[uint(m.sharding(key))%uint(SHARD_COUNT)]
+	return m.shards[uint(m.sharding(key))%uint(shardCount)]
 }
 
 func (m ConcurrentMap[K, V]) NumShards() int {
@@ -127,7 +127,7 @@ func (m ConcurrentMap[K, V]) Get(key K) (V, bool) {
 // Count returns the number of elements within the map.
 func (m ConcurrentMap[K, V]) Count() int {
 	count := 0
-	for i := 0; i < SHARD_COUNT; i++ {
+	for i := 0; i < shardCount; i++ {
 		shard := m.shards[i]
 		shard.RLock()
 		count += len(shard.items)
@@ -240,9 +240,9 @@ func snapshot[K comparable, V any](m ConcurrentMap[K, V]) (chans []chan Tuple[K,
 		dump.P(m)
 		panic(`cmap.ConcurrentMap is not initialized. Should run New() before usage.`)
 	}
-	chans = make([]chan Tuple[K, V], SHARD_COUNT)
+	chans = make([]chan Tuple[K, V], shardCount)
 	wg := sync.WaitGroup{}
-	wg.Add(SHARD_COUNT)
+	wg.Add(shardCount)
 	// Foreach shard.
 	for index, shard := range m.shards {
 		go func(index int, shard *ConcurrentMapShared[K, V]) {
@@ -315,7 +315,7 @@ func (m ConcurrentMap[K, V]) Keys() []K {
 	go func() {
 		// Foreach shard.
 		wg := sync.WaitGroup{}
-		wg.Add(SHARD_COUNT)
+		wg.Add(shardCount)
 		for _, shard := range m.shards {
 			go func(shard *ConcurrentMapShared[K, V]) {
 				// Foreach key, value pair.

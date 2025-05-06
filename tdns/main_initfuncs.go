@@ -212,8 +212,6 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
 
-	log.Printf("AgentQs: %+v", conf.Internal.AgentQs)
-
 	// Everyone has the mgmt API dispatcher
 	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
 	if err != nil {

@@ -9,7 +9,6 @@ replace (
 
 require (
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/tdns/cli v0.0.0-20250315051723-3a4d693f9b08
 	github.com/miekg/dns v1.1.62
 	github.com/spf13/cobra v1.8.1
 )
@@ -35,7 +34,6 @@ require (
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.50.1 // indirect
-	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
@@ -53,7 +51,6 @@ require (
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
 	golang.org/x/tools v0.25.0 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

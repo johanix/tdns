@@ -371,5 +371,6 @@ func (conf *Config) SynchedDataEngine(agentQs AgentQs, stopch chan struct{}) {
 
 func (zdr *ZoneDataRepo) SendUpdate(update *SynchedDataUpdate) error {
 	// 1. Send the update to the combiner.
+	log.Printf("SynchedDataEngine: Sending update to combiner (NYI)")
 	return nil
 }
