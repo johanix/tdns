@@ -118,11 +118,9 @@ var rootCmd = &cobra.Command{
 			rrtype = dns.TypeA
 		}
 
-		if options["port"] != "53" {
-			_, err := strconv.Atoi(options["port"])
-			if err != nil {
-				fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
-			}
+		_, err := strconv.Atoi(options["port"])
+		if err != nil {
+			fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
 		}
 
 		// All args parsed, join server and port

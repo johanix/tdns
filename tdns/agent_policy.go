@@ -106,11 +106,17 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 				switch rr.Header().Class {
 				case dns.ClassANY:
 					// ANY = delete entire RRset
-					msg = fmt.Sprintf("Removing %s %s RRset from agent %q",
-						synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
-					log.Printf("SynchedDataEngine: %s", msg)
-					nod.RRtypes.Delete(rrtype)
-					changed = true
+					if !ok {
+						msg = fmt.Sprintf("Removing %s %s RRset from agent %q: RRset does not exist",
+							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
+						log.Printf("SynchedDataEngine: %s", msg)
+					} else {
+						msg = fmt.Sprintf("Removing %s %s RRset from agent %q",
+							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
+						log.Printf("SynchedDataEngine: %s", msg)
+						nod.RRtypes.Delete(rrtype)
+						changed = true
+					}
 				case dns.ClassNONE:
 					// NONE = delete this RR from the RRset
 					if !ok {
