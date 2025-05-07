@@ -116,7 +116,7 @@ func (rd *HSYNC2) Parse(txt []string) error {
 	}
 
 	// Parse State
-	state, exist := StringToHsync2State[txt[0]]
+	state, exist := StringToHsync2State[strings.ToUpper(txt[0])]
 	if !exist {
 		return fmt.Errorf("invalid HSYNC2 state: %s", txt[0])
 	}

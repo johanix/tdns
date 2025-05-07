@@ -190,10 +190,10 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 					defer func() {
 						if r := recover(); r != nil {
 							log.Printf("*** Warning: struct: field type: %s", reflect.TypeOf(v).String())
-							log.Printf("*** Warning: Failed to set field #%d %s: %v", val.Type().Field(i).Name, i, r)
+							log.Printf("*** Warning: Failed to set field #%s %s: %v", val.Type().Field(i).Name, i, r)
 							// Set to zero value as fallback
-							// copyField.Set(reflect.Zero(field.Type()))
-							copyField.Set(reflect.ValueOf(""))
+							copyField.Set(reflect.Zero(field.Type()))
+							// copyField.Set(reflect.ValueOf(""))
 						}
 					}()
 					copyField.Set(reflect.ValueOf(fieldValue))

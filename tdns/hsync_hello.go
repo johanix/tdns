@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -48,14 +49,26 @@ func (ar *AgentRegistry) HelloRetrier() {
 	}
 }
 
-func (ar *AgentRegistry) HelloRetrierNG(agent *Agent) {
+// XXX: This is a modified version of HelloRetrier that uses a context to stop the retrier
+// (suggested by the coderabbit)when the agent is no longer in state KNOWN. Not sure if this is
+// what we want.
+func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 	helloRetryInterval := configureInterval("syncengine.intervals.helloretry", 15, 1800)
 	go func(agent *Agent) {
+		ticker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
+		defer ticker.Stop()
 		if agent.ApiDetails.State != AgentStateKnown {
 			log.Printf("HelloRetrierNG: agent %q is not in state KNOWN, stopping", agent.Identity)
 			return
 		}
 		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("HelloRetrierNG: context done, stopping")
+				return
+			case <-ticker.C:
+			}
+
 			log.Printf("HelloRetrierNG: with agent %q we share the zones: %v", agent.Identity, agent.Zones)
 			for zone := range agent.Zones {
 				log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q", agent.Identity, zone)
@@ -68,9 +81,9 @@ func (ar *AgentRegistry) HelloRetrierNG(agent *Agent) {
 					// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 					break
 				}
-				if agent.ApiDetails.State == AgentStateKnown {
-					time.Sleep(time.Duration(helloRetryInterval) * time.Second)
-				} else {
+				if agent.ApiDetails.State != AgentStateKnown {
+					//					time.Sleep(time.Duration(helloRetryInterval) * time.Second)
+					//				} else {
 					log.Printf("HelloRetrierNG: agent %q no longer in state KNOWN (now %s), stopping", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 					return
 				}

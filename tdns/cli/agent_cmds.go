@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var localRRtype, dnsRecord string
+var dnsRecord string
 
 var AgentCmd = &cobra.Command{
 	Use:   "agent",
@@ -121,7 +121,7 @@ func init() {
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataRemoveRRCmd)
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataRemoveRRsetCmd)
 
-	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
+	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
 	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
 
 }
@@ -166,7 +166,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	}
 
 	switch rr.(type) {
-	// let's only support NS and DNSKEY for now
+	// let's only support NS, DNSKEY and KEYfor now
 	case *dns.NS, *dns.DNSKEY, *dns.KEY:
 		// all good
 	default:
@@ -175,7 +175,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 	switch cmd {
 	case "add-rr":
-		// This is a delete RR, signaled by the CLASS=NONE
+		// This is a normal add RR, signaled by the CLASS=IN
 		rr.Header().Class = dns.ClassINET
 	case "remove-rr":
 		// This is a delete RR, signaled by the CLASS=NONE

@@ -12,7 +12,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -285,7 +284,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 	if api.Debug {
 		log.Printf("api.RequestNG: %s %s data: %+v", method, endpoint, data)
-		log.Printf("api.RequestNG: %s %s %d bytes of data: %s", method, endpoint, len(bytebuf.Bytes()), string(bytebuf.Bytes()))
+		log.Printf("api.RequestNG: %s %s %d bytes of data: %s", method, endpoint, bytebuf.Len(), bytebuf.String())
 	}
 
 	api.UrlReport(method, endpoint, bytebuf.Bytes())
@@ -381,6 +380,13 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	}
 
 	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("api.RequestNG: Error from io.ReadAll: %v", err)
+		if dieOnError {
+			os.Exit(1)
+		}
+		return 501, nil, fmt.Errorf("Error from io.ReadAll: %v", err)
+	}
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer
@@ -422,6 +428,9 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		if dieOnError {
 			os.Exit(1)
 		}
+		// This would be the correct way to do it, but it's not working:
+		// reqBytes := bytebuf.Bytes()
+		// reqBody = io.NopCloser(bytes.NewReader(reqBytes))
 	}
 
 	api.UrlReport(method, endpoint, bytebuf.Bytes())
@@ -473,7 +482,7 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		}
 
 		if data != nil {
-			req.Body = ioutil.NopCloser(bytes.NewReader(reqBody))
+			req.Body = io.NopCloser(bytes.NewReader(reqBody))
 		}
 
 		req.Header.Add("Content-Type", "application/json")

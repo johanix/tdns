@@ -81,7 +81,15 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		oldhsync = nil
 	}
 
-	differ, hss.HsyncAdds, hss.HsyncRemoves = RRsetDiffer(zd.ZoneName, newhsync.RRs, oldhsync.RRs, TypeHSYNC, zd.Logger)
+	var newRRs, oldRRs []dns.RR
+	if newhsync != nil {
+		newRRs = newhsync.RRs
+	}
+	if oldhsync != nil {
+		oldRRs = oldhsync.RRs
+	}
+
+	differ, hss.HsyncAdds, hss.HsyncRemoves = RRsetDiffer(zd.ZoneName, newRRs, oldRRs, TypeHSYNC, zd.Logger)
 	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
 	return differ, &hss, nil
 }
@@ -94,8 +102,8 @@ func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 		return false, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	hsyncrrset := apex.RRtypes.GetOnlyRRSet(TypeHSYNC)
-	if len(hsyncrrset.RRs) == 0 {
+	hsyncrrset, exists := apex.RRtypes.Get(TypeHSYNC)
+	if !exists || len(hsyncrrset.RRs) == 0 {
 		return false, nil
 	}
 

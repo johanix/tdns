@@ -99,7 +99,7 @@ func xxxSetupCombinerAPIRouter(conf *Config) (*mux.Router, error) {
 }
 
 // DEPRECATED: Use SetupAPIRouter instead.
-func xxxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
+func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
@@ -269,6 +269,7 @@ func APIdispatcherNG(conf *Config, router *mux.Router, addrs []string, certFile 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequestClientCert,
+		MinVersion:   tls.VersionTLS13,
 		// XXX: this is just for debugging:
 		// GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		// 	log.Printf("TLS handshake from %s, SNI: %s", hello.Conn.RemoteAddr(), hello.ServerName)

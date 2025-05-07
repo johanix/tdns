@@ -22,6 +22,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		err := decoder.Decode(&amp)
 		if err != nil {
 			log.Println("APIagent: error decoding agent command post:", err)
+			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
+			return
 		}
 
 		log.Printf("API: received /agent request (cmd: %s) from %s.", amp.Command, r.RemoteAddr)
@@ -163,104 +165,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
 			resp.Error = true
-		}
-	}
-}
-
-func (conf *Config) xxxAPIagentDebug(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		decoder := json.NewDecoder(r.Body)
-		var amp AgentMgmtPost
-		err := decoder.Decode(&amp)
-		if err != nil {
-			log.Println("APIagentDebug: error decoding agent debug command post:", err)
-		}
-
-		log.Printf("API: received /agent/debug request (cmd: %s) from %s.\n", amp.Command, r.RemoteAddr)
-
-		resp := AgentMgmtResponse{
-			Time:     time.Now(),
-			Identity: AgentId(conf.Agent.Identity),
-		}
-
-		defer func() {
-			w.Header().Set("Content-Type", "application/json")
-			sanitizedResp := SanitizeForJSON(resp)
-			err := json.NewEncoder(w).Encode(sanitizedResp)
-			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
-			}
-		}()
-
-		// XXX: hsync cmds should move to its own endpoint, not be mixed with agent
-		// var zd *ZoneData
-		var exist bool
-		amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
-		if amp.Command != "config" {
-			_, exist = Zones.Get(string(amp.Zone))
-			if !exist {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", amp.Zone)
-				return
-			}
-		}
-
-		if !Globals.Debug {
-			resp.Error = true
-			resp.ErrorMsg = "Not running in debug mode, debug commands are not available"
-			return
-		}
-
-		log.Printf("APIagentDebug: debug mode, also checking for debug commands: received /agent/debug request (cmd: %s) from %s",
-			amp.Command, r.RemoteAddr)
-
-		switch amp.Command {
-		case "send-notify":
-			log.Printf("APIagentDebug: received debug command send-notify, will synthesize an API NOTIFY for the given zone: %+v", amp)
-
-			rch := make(chan *AgentMgmtResponse, 1)
-			// amp.Response = rch // insert response channel
-
-			conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
-				amp,
-				rch,
-			}
-			select {
-			case r := <-rch:
-				log.Printf("APIagentDebug: received response from send-notify: %+v", resp)
-				resp.Error = r.Error
-				resp.ErrorMsg = r.ErrorMsg
-				resp.Msg = r.Msg
-			case <-time.After(10 * time.Second):
-				log.Printf("APIagentDebug: no response from send-notify after 10 seconds")
-				resp.Error = true
-				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
-			}
-
-		case "send-rfi":
-			log.Printf("APIagentDebug: received debug command send-rfi, will synthesize an API RFI for the given zone: %+v", amp)
-
-			rch := make(chan *AgentMgmtResponse, 1)
-
-			conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
-				amp,
-				rch,
-			}
-			select {
-			case r := <-rch:
-				log.Printf("APIagentDebug: received response from send-upstream-rfi: %+v", resp)
-				resp = *r
-				resp.Status = "ok"
-
-			case <-time.After(10 * time.Second):
-				log.Printf("APIagentDebug: no response from send-upstream-rfi after 10 seconds")
-				resp.Error = true
-				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
-			}
-
-		default:
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %s", amp.Command)
 		}
 	}
 }

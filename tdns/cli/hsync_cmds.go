@@ -300,8 +300,11 @@ func PrintAgent(agent *tdns.Agent, showZones bool) error {
 		"API": agent.ApiDetails,
 		"DNS": agent.DnsDetails,
 	} {
+		if details == nil {
+			continue
+		}
 		if syncTransport != "" && strings.ToUpper(syncTransport) != transport {
-			return nil
+			continue
 		}
 		displayTransport := transport
 		if transport == "https" {

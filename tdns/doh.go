@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 func DnsDoHEngine(conf *Config, dohaddrs []string, certFile, keyFile string,
@@ -64,17 +65,23 @@ func DnsDoHEngine(conf *Config, dohaddrs []string, certFile, keyFile string,
 		w.Write(buf.Bytes())
 	})
 
+	ports := viper.GetStringSlice("dnsengine.ports.doh")
+	if len(ports) == 0 {
+		ports = []string{"443"}
+	}
 	for _, addr := range dohaddrs {
-		go func(addr string) {
-			hostport := net.JoinHostPort(addr, "443") // At the moment, we only support port 443
-			log.Printf("DnsEngine: setting up DoH server on %s", hostport)
-			if err := http.ListenAndServeTLS(hostport, certFile, keyFile, nil); err != nil {
-				log.Printf("Failed to setup the DoH server on %s: %s", hostport, err.Error())
-			} else {
-				log.Printf("DnsEngine: listening on %s/DoH", hostport)
-			}
-			log.Printf("DnsEngine: done setting up DoH server on %s", hostport)
-		}(addr)
+		for _, port := range ports {
+			hostport := net.JoinHostPort(addr, port)
+			go func(hostport string) {
+				log.Printf("DnsEngine: setting up DoH server on %s", hostport)
+				if err := http.ListenAndServeTLS(hostport, certFile, keyFile, nil); err != nil {
+					log.Printf("Failed to setup the DoH server on %s: %s", hostport, err.Error())
+				} else {
+					log.Printf("DnsEngine: listening on %s/DoH", hostport)
+				}
+				log.Printf("DnsEngine: done setting up DoH server on %s", hostport)
+			}(hostport)
+		}
 	}
 	return nil
 }

@@ -937,7 +937,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 		return nil // this zone does not allow any modifications
 	}
 
-	if zd.Options[OptAgent] {
+	if Globals.App.Type == AppTypeAgent {
 		return nil // this zone does not allow any modifications
 	}
 
@@ -1146,7 +1146,9 @@ func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
-			return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
+			// return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
+			// Assume error was missing port, so add it
+			addr, port = ns, "53"
 		}
 		if port != "53" {
 			continue

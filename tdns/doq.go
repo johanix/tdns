@@ -17,6 +17,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+	"github.com/spf13/viper"
 )
 
 func DnsDoQEngine(conf *Config, doqaddrs []string, cert *tls.Certificate,
@@ -28,29 +29,35 @@ func DnsDoQEngine(conf *Config, doqaddrs []string, cert *tls.Certificate,
 	}
 	tlsConfig.Certificates = []tls.Certificate{*cert}
 
+	ports := viper.GetStringSlice("dnsengine.ports.doq")
+	if len(ports) == 0 {
+		ports = []string{"8853"}
+	}
 	for _, addr := range doqaddrs {
-		go func(addr string) {
-			hostport := net.JoinHostPort(addr, "8853") // At the moment, we only support port 8853
-			log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
-			listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
-				MaxIdleTimeout:  time.Duration(30) * time.Second,
-				KeepAlivePeriod: time.Duration(15) * time.Second,
-			})
-			if err != nil {
-				log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
-				return
-			}
-
-			for {
-				conn, err := listener.Accept(context.Background())
+		for _, port := range ports {
+			go func(addr string) {
+				hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 8853
+				log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
+				listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
+					MaxIdleTimeout:  time.Duration(30) * time.Second,
+					KeepAlivePeriod: time.Duration(15) * time.Second,
+				})
 				if err != nil {
-					log.Printf("Failed to accept QUIC connection on %s: %s", hostport, err.Error())
-					continue
+					log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
+					return
 				}
 
-				go handleDoQConnection(conn, ourDNSHandler)
-			}
-		}(addr)
+				for {
+					conn, err := listener.Accept(context.Background())
+					if err != nil {
+						log.Printf("Failed to accept QUIC connection on %s: %s", hostport, err.Error())
+						continue
+					}
+
+					go handleDoQConnection(conn, ourDNSHandler)
+				}
+			}(addr)
+		}
 	}
 	return nil
 }

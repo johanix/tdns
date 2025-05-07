@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -25,12 +26,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 
 	switch synchedDataUpdate.UpdateType {
 	case "remote":
-		var rrsets []RRset
 		for _, rrset := range synchedDataUpdate.Update.RRsets {
-			rrsets = append(rrsets, rrset)
-		}
-
-		for _, rrset := range rrsets {
 			for _, rr := range rrset.RRs {
 				if !validRRtype[rr.Header().Rrtype] {
 					log.Printf("SynchedDataEngine: Invalid RR type: %s", rr.String())
@@ -58,7 +54,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR type: %s",
 					synchedDataUpdate.Zone, rr.String()), nil
 			}
-			if rr.Header().Name != string(synchedDataUpdate.Zone) {
+			if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
 				log.Printf("SynchedDataEngine: Invalid RR name (outside apex): %s", rr.String())
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR name (outside apex): %s",
 					synchedDataUpdate.Zone, rr.String()), nil

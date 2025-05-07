@@ -18,9 +18,11 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 			log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
 		}
 		if agent, exists := ar.S.Get(report.Identity); exists {
+			agent.mu.Lock()
 			agent.ApiDetails.LatestRBeat = time.Now()
 			agent.ApiDetails.ReceivedBeats++
 			agent.ApiDetails.BeatInterval = report.BeatInterval
+			agent.mu.Unlock()
 		}
 
 		//	case "FULLBEAT":
@@ -49,7 +51,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			log.Printf("HsyncEngine: Sending heartbeat to degraded/interrupted agent %s", a.Identity)
 		default:
 			if Globals.Debug {
-				log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.State])
+				log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.ApiDetails.State])
 			}
 			continue
 		}
@@ -122,7 +124,13 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 	timeSinceLastReceivedBeat := time.Since(agent.ApiDetails.LatestRBeat)
 	timeSinceLastSentBeat := time.Since(agent.ApiDetails.LatestSBeat)
 	remoteBeatInterval := time.Duration(agent.ApiDetails.BeatInterval) * time.Second
+	if remoteBeatInterval == 0 {
+		remoteBeatInterval = 30 * time.Second
+	}
 	localBeatInterval := time.Duration(ourBeatInterval) * time.Second
+	if localBeatInterval == 0 {
+		localBeatInterval = 30 * time.Second
+	}
 
 	switch agent.ApiDetails.State {
 	case AgentStateOperational, AgentStateDegraded, AgentStateInterrupted:

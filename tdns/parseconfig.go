@@ -257,7 +257,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// if len(conf.DnsEngine.DoQ.Addresses) > 0 {
 		// 	transports = append(transports, "doq")
 		// }
-		var transports []string
+		var transports = []string{"do53"} // not optional
 		for _, t := range conf.DnsEngine.Transports {
 			t = strings.ToLower(t)
 			switch t {
@@ -270,6 +270,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			}
 		}
 
+		transports = slices.Compact(transports)
 		if len(transports) > 0 {
 			alpn := []dns.SVCBKeyValue{
 				&dns.SVCBAlpn{Alpn: transports},

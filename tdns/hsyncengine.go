@@ -46,7 +46,7 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
-func HsyncEngine(conf *Config, agentQs AgentQs, stopch chan struct{}) {
+func HsyncEngine(conf *Config, agentQs *AgentQs, stopch chan struct{}) {
 	ourId := AgentId(conf.Agent.Identity)
 
 	helloQ := agentQs.Hello
@@ -264,7 +264,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.Error = true
 				resp.ErrorMsg = r.ErrorMsg
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(3 * time.Second):
 			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 2 seconds", ampp.MyIdentity)
 		}
 
@@ -340,10 +340,10 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		}
 
 	default:
-		log.Printf("MsgHandler: Unknown message type: %s", ampp.MessageType)
+		log.Printf("MsgHandler: Unknown message type: %+v", ampp.MessageType)
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %s", ar.LocalAgent.Identity, ampp.MessageType)
-		resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %s", ar.LocalAgent.Identity, ampp.MessageType)
+		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %+v", ar.LocalAgent.Identity, ampp.MessageType)
+		resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %+v", ar.LocalAgent.Identity, ampp.MessageType)
 	}
 }
 
@@ -522,7 +522,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational, ignoring command for now", msg.Zone, aid),
 					}
 					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
-					return
+					continue
 				}
 
 				agent, exists := ar.S.Get(aid)
@@ -530,7 +530,12 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("zone %q: DOWNSTREAM RFI message to agent %q: Agent not found", msg.Zone, aid)
 					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
-					return
+					resp.RfiResponse[aid] = &RfiData{
+						Status:   "error",
+						Error:    true,
+						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q not found, ignoring command for now", msg.Zone, aid),
+					}
+					continue
 				}
 
 				// Send the RFI to the upstream agent
@@ -614,7 +619,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 	default:
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("Unknown message type: %s", msg.MessageType)
+		resp.ErrorMsg = fmt.Sprintf("Unknown message type: %+v", msg.MessageType)
 	}
 }
 

@@ -293,6 +293,13 @@ func PrepArgs(required ...string) {
 				os.Exit(1)
 			}
 
+		case "identity":
+			if myIdentity == "" {
+				fmt.Printf("Error: agent id not specified using --id flag\n")
+				os.Exit(1)
+			}
+			tdns.Globals.AgentId = tdns.AgentId(dns.Fqdn(myIdentity))
+
 		default:
 			fmt.Printf("Unknown required argument: \"%s\"\n", arg)
 			os.Exit(1)

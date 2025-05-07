@@ -17,11 +17,10 @@ const (
 	OptBlackLies
 	OptDontPublishKey
 	OptOnlineSigning
-	OptMultiSigner
+	OptMultiSigner // OBE?
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
-	OptAgent // XXX: Hmm. Is this needed?
 	OptServerSvcb
 )
 
@@ -35,11 +34,10 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptBlackLies:         "black-lies",
 	OptDontPublishKey:    "dont-publish-key",
 	OptOnlineSigning:     "online-signing",
-	OptMultiSigner:       "multisigner",
+	OptMultiSigner:       "multisigner", // OBE?
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
-	OptAgent:             "agent",
 	OptServerSvcb:        "create-server-svcb",
 }
 
@@ -53,11 +51,10 @@ var StringToZoneOption = map[string]ZoneOption{
 	"black-lies":             OptBlackLies,
 	"dont-publish-key":       OptDontPublishKey,
 	"online-signing":         OptOnlineSigning,
-	"multisigner":            OptMultiSigner,
+	"multisigner":            OptMultiSigner, // OBE?
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
-	"agent":                  OptAgent,
 	"create-server-svcb":     OptServerSvcb,
 }
 

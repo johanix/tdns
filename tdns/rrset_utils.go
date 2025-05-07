@@ -348,11 +348,11 @@ func (rrset *RRset) Copy() *RRset {
 func (rrset *RRset) Add(rr dns.RR) {
 	for _, rr2 := range rrset.RRs {
 		if dns.IsDuplicate(rr, rr2) {
-			log.Printf("rrset.Add: RR already present: %s", rr.String())
+			// log.Printf("rrset.Add: RR already present: %s", rr.String())
 			return
 		}
 	}
-	log.Printf("rrset.Add: Adding RR: %s to RRset\n%v", rr.String(), rrset.RRs)
+	// log.Printf("rrset.Add: Adding RR: %s to RRset\n%v", rr.String(), rrset.RRs)
 	rrset.RRs = append(rrset.RRs, rr)
 }
 
@@ -360,10 +360,10 @@ func (rrset *RRset) Add(rr dns.RR) {
 func (rrset *RRset) Delete(rr dns.RR) {
 	for i, rr2 := range rrset.RRs {
 		if dns.IsDuplicate(rr, rr2) {
-			log.Printf("rrset.Delete: Found RR: %s in RRset\n%v", rr.String(), rrset.RRs)
+			// log.Printf("rrset.Delete: Found RR: %s in RRset\n%v", rr.String(), rrset.RRs)
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			return
 		}
 	}
-	log.Printf("rrset.Delete: RR not found: %s", rr.String())
+	// log.Printf("rrset.Delete: RR not found: %s", rr.String())
 }

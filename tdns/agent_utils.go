@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -64,6 +65,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		RemoteAgents:   make(map[ZoneName][]AgentId),
 		LocalAgent:     &conf.Agent,
 		LocateInterval: li,
+		helloContexts:  make(map[AgentId]context.CancelFunc),
 	}
 }
 
@@ -125,10 +127,12 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 		LastState:  time.Now(),
 	}
 
+	agent.mu.Lock()
 	agent.ApiDetails.State = AgentStateNeeded
 	agent.DnsDetails.State = AgentStateNeeded
 	agent.ApiDetails.ContactInfo = "none"
 	agent.DnsDetails.ContactInfo = "none"
+	agent.mu.Unlock()
 
 	ar.S.Set(remoteid, agent)
 
@@ -159,7 +163,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			// var targetName string
 
 			// Only look up URI if we don't have it
-			if agent.ApiDetails.UriRR == nil {
+			agent.mu.RLock()
+			tmpurirrr := agent.ApiDetails.UriRR
+			agent.mu.RUnlock()
+			if tmpurirrr == nil {
 				go func() {
 					qname := string("_https._tcp." + remoteid)
 					rrset, err := RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
@@ -186,7 +193,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				}()
 			}
 
-			if agent.DnsDetails.UriRR == nil {
+			agent.mu.RLock()
+			tmpurirrr = agent.DnsDetails.UriRR
+			agent.mu.RUnlock()
+			if tmpurirrr == nil {
 				go func() {
 					qname := string("_dns._tcp." + remoteid)
 					rrset, err := RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
@@ -214,7 +224,11 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			}
 
 			// Only proceed with SVCB if we have URI
-			if agent.ApiDetails.UriRR != nil && len(agent.ApiDetails.Addrs) == 0 {
+			agent.mu.RLock()
+			tmpurirrr = agent.ApiDetails.UriRR
+			tmpaddrs := agent.ApiDetails.Addrs
+			agent.mu.RUnlock()
+			if tmpurirrr != nil && len(tmpaddrs) == 0 {
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.ApiDetails.BaseUri, resolvers, timeout, retries)
 					if err != nil {
@@ -231,7 +245,11 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				}()
 			}
 
-			if agent.DnsDetails.UriRR != nil && len(agent.DnsDetails.Addrs) == 0 {
+			agent.mu.RLock()
+			tmpurirrr = agent.DnsDetails.UriRR
+			tmpaddrs = agent.DnsDetails.Addrs
+			agent.mu.RUnlock()
+			if tmpurirrr != nil && len(tmpaddrs) == 0 {
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.DnsDetails.BaseUri, resolvers, timeout, retries)
 					if err != nil {
@@ -249,35 +267,46 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			}
 
 			// Only proceed with KEY if we have the target name
-			if agent.DnsDetails.KeyRR == nil && agent.DnsDetails.Host != "" {
+			agent.mu.RLock()
+			tmpkeyrr := agent.DnsDetails.KeyRR
+			tmphost := agent.DnsDetails.Host
+			agent.mu.RUnlock()
+			if tmpkeyrr == nil && tmphost != "" {
 				go func() {
 					// Look up KEY
-					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(agent.DnsDetails.Host), dns.TypeKEY, timeout, retries, resolvers)
+					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tmphost), dns.TypeKEY, timeout, retries, resolvers)
 					if err != nil {
 						log.Printf("LocateAgent: error response to KEY query: %v", err)
 						return
 					}
 
 					if rrset == nil {
-						log.Printf("LocateAgent: no KEY record found for %s", agent.DnsDetails.Host)
+						log.Printf("LocateAgent: no KEY record found for %s", tmphost)
 						return
 					}
 
 					for _, rr := range rrset.RRs {
 						if k, ok := rr.(*dns.KEY); ok {
 							log.Printf("LocateAgent: KEY record for %q:\n%s", agent.Identity, k.String())
+							agent.mu.Lock()
 							agent.DnsDetails.KeyRR = k
 							agent.DnsMethod = true
+							agent.mu.Unlock()
 						}
 					}
 				}()
 			}
 
 			// Only proceed with TLSA if we have the target name
-			if agent.ApiDetails.TlsaRR == nil && agent.ApiDetails.Host != "" {
+			agent.mu.RLock()
+			tmptlsarr := agent.ApiDetails.TlsaRR
+			tmpport := agent.ApiDetails.Port
+			tmphost = agent.ApiDetails.Host
+			agent.mu.RUnlock()
+			if tmptlsarr == nil && tmphost != "" {
 				go func() {
 					// Look up TLSA
-					tlsaName := fmt.Sprintf("_%d._tcp.%s", agent.ApiDetails.Port, agent.ApiDetails.Host)
+					tlsaName := fmt.Sprintf("_%d._tcp.%s", tmpport, tmphost)
 					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
 					if err != nil {
 						log.Printf("LocateAgent: error response to TLSA query: %v", err)
@@ -292,14 +321,21 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					for _, rr := range rrset.RRs {
 						if t, ok := rr.(*dns.TLSA); ok {
 							log.Printf("LocateAgent: TLSA record for %q:\n%s", agent.Identity, t.String())
+							agent.mu.Lock()
 							agent.ApiDetails.TlsaRR = t
 							agent.ApiMethod = true
+							agent.mu.Unlock()
 						}
 					}
 				}()
 			}
 
 			// Check if API transport details are complete
+			agent.mu.Lock()
+			// tmpurirrr = agent.ApiDetails.UriRR
+			//tmptlsarr = agent.ApiDetails.TlsaRR
+			tmpaddrs = agent.ApiDetails.Addrs
+
 			if agent.ApiDetails.UriRR != nil && agent.ApiDetails.TlsaRR != nil && len(agent.ApiDetails.Addrs) > 0 {
 				agent.ApiDetails.ContactInfo = "complete"
 				agent.ApiDetails.State = AgentStateKnown
@@ -313,18 +349,26 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				agent.DnsMethod = true
 				log.Printf("LocateAgent: DNS transport details for remote agent %s are complete", remoteid)
 			}
+			agent.mu.Unlock()
 
 			// Update agent state based on available methods
-			if agent.ApiDetails.State == AgentStateKnown {
+			agent.mu.RLock()
+			tmpstate := agent.ApiDetails.State
+			agent.mu.RUnlock()
+			if tmpstate == AgentStateKnown {
+				agent.mu.Lock()
 				agent.State = AgentStateKnown
 				agent.LastState = time.Now()
+				agent.mu.Unlock()
 
 				err := agent.NewAgentSyncApiClient(ar.LocalAgent)
 				if err != nil {
 					log.Printf("LocateAgent: error creating API client for remote agent %s: %v", remoteid, err)
+					agent.mu.Lock()
 					agent.State = AgentStateError
 					agent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
 					agent.LastState = time.Now()
+					agent.mu.Unlock()
 				}
 				agent.Api.ApiClient.Debug = false // disable debug logging for API client
 
@@ -336,17 +380,21 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				if zonename != "" {
 					ar.AddZoneToAgent(remoteid, zonename)
 
-					// Try to send hello
-					// agent.InitialZone = zonename
-					go ar.HelloRetrierNG(agent)
+					// Create a new context for this hello retrier
+					ctx, cancel := context.WithCancel(context.Background())
+
+					// Store the cancel function
+					ar.mu.Lock()
+					if existingCancel, exists := ar.helloContexts[remoteid]; exists {
+						existingCancel() // Cancel any existing hello retrier
+					}
+					ar.helloContexts[remoteid] = cancel
+					ar.mu.Unlock()
+
+					// Start the hello retrier with the new context
+					go ar.HelloRetrierNG(ctx, agent)
 				}
-				// dump.P(ar.S)
-				// foo := SanitizeForJSON(ar.S)
-				// j, err := json.Marshal(foo)
-				// if err != nil {
-				// 	log.Printf("LocateAgent: error marshaling agent registry: %v", err)
-				// }
-				// log.Printf("LocateAgent: agent registry: %s", string(j))
+
 				return
 			} else {
 				// Agent is not yet known, update and sleep before retrying
@@ -635,6 +683,9 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					// Need to sync with Upstream - do this asynchronously
 					ar.LocateAgent(AgentId(hsync.Identity), zonename,
 						&DeferredAgentTask{
+							// XXX: This is not complete, as there is no check for the Precondition
+							// XXX: some sort of periodic check is needed to ensure that the agent is still
+							// operational.
 							Precondition: func() bool {
 								if agent, exists := ar.S.Get(AgentId(hsync.Identity)); exists {
 									return agent.State == AgentStateOperational
@@ -715,7 +766,7 @@ func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
 			return agent.State == AgentStateOperational
 		},
 		Action: func() (bool, error) {
-			log.Printf("CreateAgentUpstreamRFI: Sending RFI to upstream agent %q (NYI)", agent.Upstream)
+			log.Printf("CreateAgentUpstreamRFI: Sending RFI to upstream agent %q (NYI)", agent.Identity)
 			return true, nil
 		},
 	}

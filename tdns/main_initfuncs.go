@@ -146,7 +146,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	go RefreshEngine(conf, conf.Internal.StopCh)
 
 	if Globals.App.Type == AppTypeAgent {
-		conf.Internal.AgentQs = AgentQs{
+		conf.Internal.AgentQs = &AgentQs{
 			Hello:             make(chan *AgentMsgReport, 100),
 			Beat:              make(chan *AgentMsgReport, 100),
 			Msg:               make(chan *AgentMsgPostPlus, 100),

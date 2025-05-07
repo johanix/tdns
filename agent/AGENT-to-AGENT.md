@@ -1,14 +1,18 @@
 # AGENT-to-AGENT (or provider-to-provider) Synchronization Processes
 
-There are a number of different synchronization tasks between providers. In some cases the zone owner will also be involved, depending on the zone owners intent regarding delegation (or designation) of various responsibilities.
+There are a number of different synchronization tasks between
+providers. In some cases, the zone owner will also be involved,
+depending on the zone owners intent regarding delegation (or
+designation) of various responsibilities.
 
-The following list is intended to be as complete as possible, but isn't necessarily compleete yet.
+The following list is intended to be as complete as possible, but
+isn't necessarily complete yet.
 
 ## Assumptions
 
 A framework for secure communication between all DNS providers (and,
 if wanted, also the zone owner) exists. On top if this communication
-layer there is a messaging layer where different types of messages may
+layer, there is a messaging layer where different types of messages may
 be defined and exchanged. All communication consists of a pair of
 messages: the outgoing message from one provider to another and the
 response back to the originator of the initial message. Both messsages
@@ -47,8 +51,8 @@ Once introduced, communication switches to mTLS, i.e. all messages are
 signed by the sender and will be discarded by the recipient if they do
 not validate. The local agent now starts sending heartbeat messages
 according to a local configuration for how often. The heartbeat also
-includes the intended frequency, so that the remote agent knws what to
-expect. On receipt of a positive reponse to an HELLO, the remote agent
+includes the intended frequency, so that the remote agent knows what to
+expect. On receipt of a positive response to an HELLO, the remote agent
 is moved to the state "OPERATIONAL".
 
 Should, at some late time, multiple outgoing heartbeats not get
@@ -60,7 +64,7 @@ normal interval).
 
 When a remote agent is DEGRADED or INTERRUPTED the local agent
 continues to send heartbeats according to schedule. On receipt of a
-positive response to such a heartbeat, the remote agent is againg
+positive response to such a heartbeat, the remote agent is again
 moved back to "OPERATIONAL".
 
 ## Defined Message Types

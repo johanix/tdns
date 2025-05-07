@@ -47,10 +47,10 @@ type ServiceConf struct {
 }
 
 type DnsEngineConf struct {
-	Addresses  []string `validate:"required"`
-	CertFile   string
-	KeyFile    string
-	Transports []string `validate:"required"` // "do53", "dot", "doh", "doq"
+	Addresses  []string `yaml:"addresses" validate:"required"`
+	CertFile   string   `yaml:"certfile,omitempty"`
+	KeyFile    string   `yaml:"keyfile,omitempty"`
+	Transports []string `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
 
 	//	Do53 struct {
 	//		Addresses []string
@@ -105,12 +105,12 @@ type LocalAgentConf struct {
 	Dns LocalAgentDnsConf
 	Xfr struct {
 		Outgoing struct {
-			Addresses []string
-			Auth      []string
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
 		}
 		Incoming struct {
-			Addresses []string
-			Auth      []string
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
 		}
 	}
 }
@@ -163,7 +163,7 @@ type InternalConf struct {
 	AuthQueryQ      chan AuthQueryRequest
 	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ           chan SyncRequest
-	AgentQs         AgentQs // aggregated channels for agent communication
+	AgentQs         *AgentQs // aggregated channels for agent communication
 	SyncStatusQ     chan SyncStatus
 	AgentRegistry   *AgentRegistry
 	ZoneDataRepo    *ZoneDataRepo

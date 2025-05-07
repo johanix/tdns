@@ -5,7 +5,7 @@
 package tdns
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -20,8 +20,8 @@ const (
 	AgentStateKnown                             // We have complete information but haven't established communication
 	AgentStateIntroduced                        // We got a nice reply to our HELLO
 	AgentStateOperational                       // We got a nice reply to our (secure) BEAT
-	AgentStateDegraded                          // Last successfull heartbeat (in eith direction) was more than 2x normal interval ago
-	AgentStateInterrupted                       // Last successfull heartbeat (in eith direction) was more than 10x normal interval ago
+	AgentStateDegraded                          // Last successful heartbeat (in either direction) was more than 2x normal interval ago
+	AgentStateInterrupted                       // Last successful heartbeat (in either direction) was more than 10x normal interval ago
 	AgentStateError                             // We have tried to establish communication but failed
 )
 
@@ -127,18 +127,6 @@ type AgentApi struct {
 	ApiClient *ApiClient
 }
 
-func (aapi *AgentApi) xxxMarshalJSON() ([]byte, error) {
-	tmp := &AgentApi{
-		Name:       aapi.Name,
-		Client:     nil,
-		BaseUrl:    aapi.BaseUrl,
-		ApiKey:     aapi.ApiKey,
-		Authmethod: aapi.Authmethod,
-		ApiClient:  nil,
-	}
-	return json.Marshal(tmp)
-}
-
 type AgentRegistry struct {
 	S              ConcurrentMap[AgentId, *Agent]
 	RegularS       map[AgentId]*Agent
@@ -146,6 +134,7 @@ type AgentRegistry struct {
 	mu             sync.RWMutex    // protects remoteAgents
 	LocalAgent     *LocalAgentConf // our own identity
 	LocateInterval int             // seconds to wait between locating agents (until success)
+	helloContexts  map[AgentId]context.CancelFunc
 }
 
 type AgentBeatPost struct {

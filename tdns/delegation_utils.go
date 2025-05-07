@@ -371,7 +371,7 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 		return false, err
 	}
 
-	log.Printf("DnskeysChanged: newkeys: %+v oldkeys: %+v")
+	log.Printf("DnskeysChanged: newkeys: %+v oldkeys: %+v", newkeys.RRs, oldkeys.RRs)
 	differ, _, _ = RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger)
 	return differ, nil
 }

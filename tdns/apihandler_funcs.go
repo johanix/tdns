@@ -169,6 +169,14 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 
 // func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Request) {
 func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *http.Request) {
+	if rtr == nil {
+		log.Printf("APIcommand: rtr is nil")
+		return func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("APIcommand: rtr is nil")
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		stopCh := conf.Internal.APIStopCh
 

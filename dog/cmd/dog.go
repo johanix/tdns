@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -282,30 +283,33 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 		}
 		options["transport"] = "DoQ"
 		return options
-	case "+OPCODE=":
-		parts := strings.Split(ucarg, "=")
-		if len(parts) > 1 {
-			switch parts[1] {
-			case "QUERY", "NOTIFY", "UPDATE":
-				options["opcode"] = parts[1]
-			default:
-				opcode, err := strconv.Atoi(parts[1])
-				if err != nil {
-					fmt.Printf("Error: %v\n", err)
-					return options
-				}
-				switch opcode {
-				case dns.OpcodeQuery:
-					options["opcode"] = "QUERY"
-				case dns.OpcodeNotify:
-					options["opcode"] = "NOTIFY"
-				case dns.OpcodeUpdate:
-					options["opcode"] = "UPDATE"
+	default:
+		// Cannot match on "+OPCODE=", as the string would be "+OPCODE=QUERY", etc.
+		if strings.HasPrefix(ucarg, "+OPCODE=") {
+			parts := strings.Split(ucarg, "=")
+			if len(parts) > 1 {
+				switch parts[1] {
+				case "QUERY", "NOTIFY", "UPDATE":
+					options["opcode"] = parts[1]
+				default:
+					opcode, err := strconv.Atoi(parts[1])
+					if err != nil {
+						fmt.Printf("Error: %v\n", err)
+						return options
+					}
+					switch opcode {
+					case dns.OpcodeQuery:
+						options["opcode"] = "QUERY"
+					case dns.OpcodeNotify:
+						options["opcode"] = "NOTIFY"
+					case dns.OpcodeUpdate:
+						options["opcode"] = "UPDATE"
+					}
 				}
 			}
+			return options
 		}
-		return options
-	default:
+
 		log.Fatalf("Error: Unknown option: %s", ucarg)
 	}
 
@@ -364,55 +368,80 @@ func ParseServer(serverArg string, options map[string]string) map[string]string 
 	// Default transport if no scheme is specified
 	transport := options["transport"]
 	if transport == "" {
-		transport = "do53"
-	}
-
-	// Check if we have a scheme
-	if strings.Contains(serverArg, "://") {
-		parts := strings.SplitN(serverArg, "://", 2)
-		scheme := strings.ToLower(parts[0])
-		serverArg = parts[1]
-
-		// Map scheme to transport
-		switch scheme {
-		case "dns":
-			transport = "Do53"
-		case "tcp":
-			transport = "Do53-TCP"
-		case "tls":
-			transport = "DoT"
-		case "https":
-			transport = "DoH"
-		case "quic":
-			transport = "DoQ"
-		default:
-			fmt.Printf("unsupported scheme: %s\n", scheme)
-			os.Exit(1)
-		}
-		if _, exists := options["transport"]; exists && options["transport"] != transport {
-			fmt.Printf("Conflicting transport specifications: %s vs %s\n", options["transport"], transport)
-			os.Exit(1)
-		}
+		transport = "Do53"
 		options["transport"] = transport
 	}
 
-	// Split host and port
-	if strings.Contains(serverArg, ":") {
-		var portErr error
-		options["server"], options["port"], portErr = net.SplitHostPort(serverArg)
-		if portErr != nil {
-			fmt.Printf("%s is not in host:port format: %v\n", serverArg, portErr)
+	var u *url.URL
+	var err error
+
+	// Try to parse as URL if it contains "://"
+	if strings.Contains(serverArg, "://") {
+		u, err = url.Parse(serverArg)
+		if err != nil {
+			fmt.Printf("Invalid server URL: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
-		options["server"] = serverArg
+		// If no scheme, treat as host[:port]
+		u = &url.URL{
+			Scheme: "dns",
+			Host:   serverArg,
+		}
+	}
+
+	// Map scheme to transport
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "dns":
+		transport = "Do53"
+	case "tcp":
+		transport = "Do53-TCP"
+	case "tls":
+		transport = "DoT"
+	case "https":
+		transport = "DoH"
+	case "quic":
+		transport = "DoQ"
+	default:
+		fmt.Printf("unsupported scheme: %s\n", scheme)
+		os.Exit(1)
+	}
+	if _, exists := options["transport"]; exists && options["transport"] != transport {
+		fmt.Printf("Conflicting transport specifications: %s vs %s\n", options["transport"], transport)
+		os.Exit(1)
+	}
+	options["transport"] = transport
+
+	// Extract host and port
+	host := u.Host
+	port := ""
+	if strings.Contains(host, ":") {
+		var portErr error
+		host, port, portErr = net.SplitHostPort(host)
+		if portErr != nil {
+			fmt.Printf("%s is not in host:port format: %v\n", u.Host, portErr)
+			os.Exit(1)
+		}
+	}
+	options["server"] = host
+	if port != "" {
+		options["port"] = port
+	} else if u.Port() != "" {
+		options["port"] = u.Port()
+	}
+
+	// For DoH, DoQ, etc., the path may be important
+	if u.Path != "" && u.Path != "/" {
+		options["path"] = u.Path
 	}
 
 	if strings.HasSuffix(options["server"], "/") {
 		options["server"] = options["server"][:len(options["server"])-1]
 	}
 
-	fmt.Printf("ParseServer: server: %s, port: %s, transport: %s\n", options["server"], options["port"], options["transport"])
+	fmt.Printf("ParseServer: server: %s, port: %s, transport: %s, path: %s\n",
+		options["server"], options["port"], options["transport"], options["path"])
 
 	// Basic validation
 	if options["server"] == "" {

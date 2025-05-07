@@ -356,6 +356,9 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 	}
 
 	// Check if API method is supported and TLSA record exists
+	if agent.ApiDetails == nil {
+		return fmt.Errorf("agent %s: ApiDetails not initialized", agent.Identity)
+	}
 	if !agent.ApiMethod || agent.ApiDetails.TlsaRR == nil {
 		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
 	}

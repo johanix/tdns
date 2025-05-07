@@ -29,7 +29,7 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 	Use:   "send-notify",
 	Short: "Tell agent to send a NOTIFY message to the other agents",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+		PrepArgs("zonename", "identity")
 
 		notifyRRtype = strings.ToUpper(notifyRRtype)
 		if notifyRRtype != "NS" && notifyRRtype != "DNSKEY" {
@@ -59,11 +59,14 @@ var DebugAgentSendNotifyCmd = &cobra.Command{
 			MessageType: tdns.AgentMsgNotify,
 			RRType:      rrtype,
 			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
-			AgentId:     tdns.AgentId(myIdentity),
+			AgentId:     tdns.Globals.AgentId,
 			RRs:         rrs,
 		}
 
-		SendAgentDebugCmd(req, true)
+		_, err = SendAgentDebugCmd(req, true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
 	},
 }
 
@@ -71,7 +74,7 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 	Use:   "send-rfi",
 	Short: "Tell agent to send an RFI message to another agent",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+		PrepArgs("zonename", "identity")
 
 		rfitype = strings.ToUpper(rfitype)
 		if rfitype != "UPSTREAM" && rfitype != "DOWNSTREAM" {
@@ -83,7 +86,7 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 			MessageType: tdns.AgentMsgRfi,
 			RfiType:     rfitype,
 			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
-			AgentId:     tdns.AgentId(myIdentity),
+			AgentId:     tdns.Globals.AgentId,
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -100,7 +103,7 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		if len(amr.RfiResponse) > 0 {
 			var out []string
 			if tdns.Globals.ShowHeaders {
-				out = append(out, fmt.Sprintf("Zone|Provider|Where|XFR src|XFR dst|XFR auth"))
+				out = append(out, "Zone|Provider|Where|XFR src|XFR dst|XFR auth")
 			}
 			for aid, rfidata := range amr.RfiResponse {
 				if len(rfidata.ZoneXfrSrcs) > 0 {
@@ -229,8 +232,9 @@ var DebugAgentRegistryCmd = &cobra.Command{
 		fmt.Printf("Agent registry:\ntype=%T\n", ar.S)
 		fmt.Printf("Agent registry:\n%d shards\n", ar.S.NumShards())
 		for item := range ar.S.IterBuffered() {
+			// agent, _ := item.Val.(*tdns.Agent)
 			fmt.Printf("Agent registry:\n%s\n", item.Key)
-			fmt.Printf("Agent registry:\n%v\n", item.Val)
+			fmt.Printf("Agent registry:\n%+v\n", item.Val)
 		}
 	},
 }

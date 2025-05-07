@@ -341,7 +341,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 						v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 						m.Extra = append(m.Extra, v4glue.RRs...)
 						m.Extra = append(m.Extra, v6glue.RRs...)
-						if zd.ServerSVCB != nil {
+						if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
 							m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
 						}
 						if dnssec_ok {
@@ -352,7 +352,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 							m.Extra = append(m.Extra, v4glue.RRSIGs...)
 							m.Extra = append(m.Extra, v6glue.RRSIGs...)
-							if zd.ServerSVCB != nil {
+							if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
 								m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
 							}
 						}
@@ -402,7 +402,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
-			if zd.ServerSVCB != nil {
+			if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
 				log.Printf("Adding SVCB: %s", zd.ServerSVCB.RRs[0].String())
 				m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
 			}
@@ -606,7 +606,8 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 							}
 							for _, addr := range addrs {
 								if strings.HasPrefix(addr, ip) {
-									values := Globals.ServerSVCB.Value
+									// Make a copy of the existing SVCB keyvalue slice
+									values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
 									if len(ipv4s) > 0 {
 										values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
 									}
@@ -638,7 +639,7 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 										log.Printf("CreateServerSvcbRRs: Added server SVCB to existing SVCB RRset for zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
 									}
 
-									// return true
+									return true
 								}
 							}
 						}

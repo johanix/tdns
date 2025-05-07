@@ -18,9 +18,8 @@ import (
 )
 
 func CaseFoldContains(slice []string, str string) bool {
-	str = strings.ToLower(str)
 	for _, s := range slice {
-		if strings.ToLower(s) == str {
+		if strings.EqualFold(s, str) {
 			return true
 		}
 	}
@@ -35,28 +34,29 @@ func DnsEngine(conf *Config) error {
 	dns.HandleFunc(".", ourDNSHandler)
 
 	addresses := viper.GetStringSlice("dnsengine.addresses")
-	if CaseFoldContains(conf.DnsEngine.Transports, "do53") {
-		log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
-		for _, addr := range addresses {
-			for _, net := range []string{"udp", "tcp"} {
-				go func(addr, net string) {
-					log.Printf("DnsEngine: serving on %s (%s)\n", addr, net)
-					server := &dns.Server{
-						Addr:          addr,
-						Net:           net,
-						MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-					}
+	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
+		log.Printf("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory. Still configuring: %v", addresses)
+	}
+	log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
+	for _, addr := range addresses {
+		for _, transport := range []string{"udp", "tcp"} {
+			go func(addr, transport string) {
+				log.Printf("DnsEngine: serving on %s (%s)\n", addr, transport)
+				server := &dns.Server{
+					Addr:          addr,
+					Net:           transport,
+					MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				}
 
-					// Must bump the buffer size of incoming UDP msgs, as updates
-					// may be much larger then queries
-					server.UDPSize = dns.DefaultMsgSize // 4096
-					if err := server.ListenAndServe(); err != nil {
-						log.Printf("Failed to setup the %s server: %s", net, err.Error())
-					} else {
-						log.Printf("DnsEngine: listening on %s/%s", addr, net)
-					}
-				}(addr, net)
-			}
+				// Must bump the buffer size of incoming UDP msgs, as updates
+				// may be much larger then queries
+				server.UDPSize = dns.DefaultMsgSize // 4096
+				if err := server.ListenAndServe(); err != nil {
+					log.Printf("Failed to setup the %s server: %s", transport, err.Error())
+				} else {
+					log.Printf("DnsEngine: listening on %s/%s", addr, transport)
+				}
+			}(addr, transport)
 		}
 	}
 
