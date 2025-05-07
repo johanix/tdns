@@ -419,19 +419,20 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 
 	// alternative to this:
 	// Set the request body if data is provided
-	var reqBody []byte
-	if data != nil {
-		reqBody, err = json.Marshal(data)
-		if err != nil {
-			log.Printf("api.RequestNGWithContext: failed to marshal data: %v", err)
-		}
-		if dieOnError {
-			os.Exit(1)
-		}
-		// This would be the correct way to do it, but it's not working:
-		// reqBytes := bytebuf.Bytes()
-		// reqBody = io.NopCloser(bytes.NewReader(reqBytes))
-	}
+	//var reqBody []byte
+	// if data != nil {
+	// 	reqBody, err = json.Marshal(data)
+	// 	if err != nil {
+	// 		log.Printf("api.RequestNGWithContext: failed to marshal data: %v", err)
+	// 	}
+	// }
+	// if dieOnError {
+	// 	os.Exit(1)
+	// }
+	// This would be the correct way to do it, but it's not working:
+	// reqBytes := bytebuf.Bytes()
+	// reqBody = io.NopCloser(bytes.NewReader(reqBytes))
+	// }
 
 	api.UrlReport(method, endpoint, bytebuf.Bytes())
 
@@ -474,16 +475,17 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
 
 		// Create the request with context
-		req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
+		// req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(bytebuf.Bytes()))
 		if err != nil {
 			// return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
 			lastErr = err
 			continue // Try next address
 		}
 
-		if data != nil {
-			req.Body = io.NopCloser(bytes.NewReader(reqBody))
-		}
+		// if data != nil {
+		// 	req.Body = io.NopCloser(bytes.NewReader(reqBody))
+		// }
 
 		req.Header.Add("Content-Type", "application/json")
 		if api.AuthMethod == "X-API-Key" {

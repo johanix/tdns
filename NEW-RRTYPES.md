@@ -37,6 +37,10 @@ parentsync:  one of the four values: OWNER | NOTIFY | UPDATE | API
 identity:    a domain name identifying a DNS provider agent
 upstream:    a domain name identifying a DNS provider agent
 
+Example:
+
+foo.example. IN HSYNC2 ON "nsmgmt=agent; sign=sign; audit=yes; parentsync=notify" agent.foo.example.
+
 The k/v pairs in the string are not case-sensitive and will be
 presented in lower case. They may come in any order in the string. All
 four keys are mandatory; none may be skipped and there are no defaults

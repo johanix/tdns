@@ -123,7 +123,7 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "Root endpoint is not allowed", http.StatusForbidden)
+		http.Error(w, "AgentSyncApi: Root endpoint is not allowed", http.StatusForbidden)
 	})
 
 	// Create base subrouter without auth header requirement

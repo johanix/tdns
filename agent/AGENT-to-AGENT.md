@@ -11,7 +11,7 @@ isn't necessarily complete yet.
 ## Assumptions
 
 A framework for secure communication between all DNS providers (and,
-if wanted, also the zone owner) exists. On top if this communication
+if wanted, also the zone owner) exists. On top of this communication
 layer, there is a messaging layer where different types of messages may
 be defined and exchanged. All communication consists of a pair of
 messages: the outgoing message from one provider to another and the
@@ -19,7 +19,7 @@ response back to the originator of the initial message. Both messsages
 are authenticated and trusted.
 
 Each provider operates under its own policy which determines what
-changes to the customer's (i.e the zone owner's) zone are acceptable.
+changes to the customer's (i.e. the zone owner's) zone are acceptable.
 Responses must include information that make it clear whether the
 contents of a message were accepted or rejected according to the local
 policy of the recipient.
@@ -126,7 +126,7 @@ a NOTIFY message to all others containing a set of "ADD [record]" and
 information to other downstream providers, but need to be acted upon
 by either the "primary provider" (for an unsigned zone) or all
 "signing providers" (for a signed zone). If a provider that must act
-on the instructions decide to reject the update (due to local policy),
+on the instructions decides to reject the update (due to local policy),
 it must send back a response clearly stating both the rejection and a
 reason for the rejection.
 
@@ -184,7 +184,7 @@ a rejection message that clearly states the reason for the rejection.
 
 At this time only IP addresses are included in the information
 exchange. XFR-over-TLS (RFC9103) is likely a good alternative to be
-able to provide confidentiality given that mTLS is already setup, but
+able to provide confidentiality given that mTLS is already set up, but
 this has not yet been tested.
 
 ## Adding a new "signer" (a DNS provider that signs the zone) 

@@ -83,9 +83,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		flag.PrintDefaults()
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 1 ***")
-	}
+	// if Globals.Debug {
+	//		log.Printf("*** MainInit: 1 ***")
+	// }
 
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
@@ -101,9 +101,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		return fmt.Errorf("Error parsing config %q: %v", conf.Internal.CfgFile, err)
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 2 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 2 ***")
+	// }
 
 	// Initialize channels and start engines
 	kdb := conf.Internal.KeyDB
@@ -114,9 +114,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 
 	conf.Internal.KeyDB = kdb
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 3 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 3 ***")
+	// }
 
 	logfile := viper.GetString("log.file")
 	err = SetupLogging(logfile)
@@ -125,9 +125,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 4 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 4 ***")
+	// }
 
 	err = Globals.Validate()
 	if err != nil {
@@ -168,9 +168,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 5 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 5 ***")
+	// }
 
 	// Parse all configured zones
 	all_zones, err := conf.ParseZones(false) // false = initial load, not reload

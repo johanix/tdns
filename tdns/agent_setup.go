@@ -428,7 +428,9 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 
 	// Configure API addresses if available
 	if len(agent.ApiDetails.Addrs) > 0 {
-		log.Printf("Remote agent %q has the API addresses %v", agent.Identity, agent.ApiDetails.Addrs)
+		if Globals.Debug {
+			log.Printf("Remote agent %q has the API addresses %v", agent.Identity, agent.ApiDetails.Addrs)
+		}
 		var addressesWithPort []string
 		port := strconv.Itoa(int(agent.ApiDetails.Port))
 

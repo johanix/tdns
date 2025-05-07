@@ -218,6 +218,7 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				break
 			}
 
 		default:
@@ -495,13 +496,22 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	var resp []string
 
 	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
-		path, _ := route.GetPathTemplate()
-		methods, _ := route.GetMethods()
-		for m := range methods {
-			resp = append(resp, fmt.Sprintf("%-6s %s", methods[m], path))
+		path, err := route.GetPathTemplate()
+		if err != nil {
+			log.Printf("ShowAPI: error getting path template: %v", err)
+			return err
+		}
+		methods, err := route.GetMethods()
+		if err != nil {
+			log.Printf("ShowAPI: error getting methods: %v", err)
+			return err
+		}
+		for _, m := range methods {
+			resp = append(resp, fmt.Sprintf("%-6s %s", m, path))
 		}
 		return nil
 	}
+
 	if err := rtr.Walk(walker); err != nil {
 		// log.Panicf("Logging err: %s\n", err.Error())
 		log.Printf("ShowAPI: Walking error: %v", err)

@@ -68,23 +68,10 @@ func (name ZoneName) String() string {
 	return string(name)
 }
 
-// XXX: this was likely the wrong idea
-// type AgentDataRepo struct {
-// 	// Repo map[ZoneName]ZoneRepo // map[zonename]ZoneRepo
-// 	Repo cmap.ConcurrentMap[ZoneName, ZoneRepo] // map[zonename]ZoneRepo
-// }
-
 type ZoneDataRepo struct {
 	// Repo map[ZoneName]ZoneRepo // map[zonename]ZoneRepo
 	Repo ConcurrentMap[ZoneName, *AgentRepo] // map[zonename]ZoneRepo
 }
-
-// XXX: this was also wrong
-//
-//	type ZoneRepo struct {
-//		// Data map[AgentId]OwnerData // map[agentid]data
-//		Data cmap.ConcurrentMap[AgentId, OwnerData] // map[agentid]data
-//	}
 type AgentRepo struct {
 	// Data map[AgentId]OwnerData // map[agentid]data
 	Data ConcurrentMap[AgentId, *OwnerData] // map[agentid]data
@@ -104,12 +91,6 @@ func NewAgentRepo() (*AgentRepo, error) {
 		Data: NewStringer[AgentId, *OwnerData](),
 	}, nil
 }
-
-// func (conf *Config) NewAgentDataRepo() (*AgentDataRepo, error) {
-// 	return &AgentDataRepo{
-// 		Repo: cmap.NewStringer[ZoneName, ZoneRepo](),
-// 	}, nil
-// }
 
 func NewZoneDataRepo() (*ZoneDataRepo, error) {
 	return &ZoneDataRepo{

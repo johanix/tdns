@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -164,9 +165,9 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 
 			// Only look up URI if we don't have it
 			agent.mu.RLock()
-			tmpurirrr := agent.ApiDetails.UriRR
+			tmpniluri := agent.ApiDetails.UriRR == nil
 			agent.mu.RUnlock()
-			if tmpurirrr == nil {
+			if tmpniluri {
 				go func() {
 					qname := string("_https._tcp." + remoteid)
 					rrset, err := RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
@@ -194,9 +195,9 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			}
 
 			agent.mu.RLock()
-			tmpurirrr = agent.DnsDetails.UriRR
+			tmpniluri = agent.DnsDetails.UriRR == nil
 			agent.mu.RUnlock()
-			if tmpurirrr == nil {
+			if tmpniluri {
 				go func() {
 					qname := string("_dns._tcp." + remoteid)
 					rrset, err := RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
@@ -225,10 +226,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 
 			// Only proceed with SVCB if we have URI
 			agent.mu.RLock()
-			tmpurirrr = agent.ApiDetails.UriRR
+			tmpniluri = agent.ApiDetails.UriRR == nil
 			tmpaddrs := agent.ApiDetails.Addrs
 			agent.mu.RUnlock()
-			if tmpurirrr != nil && len(tmpaddrs) == 0 {
+			if tmpniluri && len(tmpaddrs) == 0 {
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.ApiDetails.BaseUri, resolvers, timeout, retries)
 					if err != nil {
@@ -246,10 +247,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			}
 
 			agent.mu.RLock()
-			tmpurirrr = agent.DnsDetails.UriRR
+			tmpniluri = agent.DnsDetails.UriRR == nil
 			tmpaddrs = agent.DnsDetails.Addrs
 			agent.mu.RUnlock()
-			if tmpurirrr != nil && len(tmpaddrs) == 0 {
+			if tmpniluri && len(tmpaddrs) == 0 {
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.DnsDetails.BaseUri, resolvers, timeout, retries)
 					if err != nil {
@@ -268,10 +269,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 
 			// Only proceed with KEY if we have the target name
 			agent.mu.RLock()
-			tmpkeyrr := agent.DnsDetails.KeyRR
+			tmpnilkey := agent.DnsDetails.KeyRR == nil
 			tmphost := agent.DnsDetails.Host
 			agent.mu.RUnlock()
-			if tmpkeyrr == nil && tmphost != "" {
+			if tmpnilkey && tmphost != "" {
 				go func() {
 					// Look up KEY
 					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tmphost), dns.TypeKEY, timeout, retries, resolvers)
@@ -299,11 +300,11 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 
 			// Only proceed with TLSA if we have the target name
 			agent.mu.RLock()
-			tmptlsarr := agent.ApiDetails.TlsaRR
+			tmpniltlsa := agent.ApiDetails.TlsaRR == nil
 			tmpport := agent.ApiDetails.Port
 			tmphost = agent.ApiDetails.Host
 			agent.mu.RUnlock()
-			if tmptlsarr == nil && tmphost != "" {
+			if tmpniltlsa && tmphost != "" {
 				go func() {
 					// Look up TLSA
 					tlsaName := fmt.Sprintf("_%d._tcp.%s", tmpport, tmphost)
@@ -770,4 +771,32 @@ func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
 			return true, nil
 		},
 	}
+}
+
+func (agent *Agent) MarshalJSON() ([]byte, error) {
+	// Create a temporary struct without non-JSON-friendly fields
+	type AgentJSON struct {
+		Identity    AgentId
+		InitialZone ZoneName
+		ApiMethod   bool
+		DnsMethod   bool
+		Zones       map[ZoneName]bool
+		State       AgentState
+		LastState   time.Time
+		ErrorMsg    string
+	}
+
+	aj := AgentJSON{
+		Identity:    agent.Identity,
+		InitialZone: agent.InitialZone,
+		ApiMethod:   agent.ApiMethod,
+		DnsMethod:   agent.DnsMethod,
+		Zones:       agent.Zones,
+		State:       agent.State,
+		LastState:   agent.LastState,
+		ErrorMsg:    agent.ErrorMsg,
+	}
+
+	log.Printf("Using local agent.MarshalJSON() function for agent %q: %+v", agent.Identity, aj)
+	return json.Marshal(aj)
 }

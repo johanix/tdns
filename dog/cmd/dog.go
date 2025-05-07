@@ -54,7 +54,11 @@ var rootCmd = &cobra.Command{
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				serverArg := arg[1:]
-				options = ParseServer(serverArg, options)
+				options, err = ParseServer(serverArg, options)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
 				continue
 			}
 
@@ -78,7 +82,11 @@ var rootCmd = &cobra.Command{
 				if tdns.Globals.Debug {
 					fmt.Printf("processing dog option: %s\n", ucarg)
 				}
-				options = ProcessOptions(options, ucarg)
+				options, err = ProcessOptions(options, ucarg)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
 				continue
 			}
 
@@ -241,7 +249,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 }
 
-func ProcessOptions(options map[string]string, ucarg string) map[string]string {
+func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {
 	if options == nil {
 		options = make(map[string]string)
 	}
@@ -249,40 +257,40 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 	switch ucarg {
 	case "+DNSSEC":
 		options["do_bit"] = "true"
-		return options
+		return options, nil
 	case "+COMPACT":
 		options["compact"] = "true"
-		return options
+		return options, nil
 	case "+DELEG":
 		options["deleg"] = "true"
-		return options
+		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
-		return options
+		return options, nil
 	case "+TCP":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "Do53"
-		return options
+		return options, nil
 	case "+TLS", "+DOT":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "DoT"
-		return options
+		return options, nil
 	case "+HTTPS", "+DOH":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "DoH"
-		return options
+		return options, nil
 	case "+QUIC", "+DOQ":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "DoQ"
-		return options
+		return options, nil
 	default:
 		// Cannot match on "+OPCODE=", as the string would be "+OPCODE=QUERY", etc.
 		if strings.HasPrefix(ucarg, "+OPCODE=") {
@@ -295,7 +303,7 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 					opcode, err := strconv.Atoi(parts[1])
 					if err != nil {
 						fmt.Printf("Error: %v\n", err)
-						return options
+						return options, nil
 					}
 					switch opcode {
 					case dns.OpcodeQuery:
@@ -307,13 +315,13 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 					}
 				}
 			}
-			return options
+			return options, nil
 		}
 
-		log.Fatalf("Error: Unknown option: %s", ucarg)
+		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)
 	}
 
-	return options
+	return options, nil
 }
 
 func ParseResolvConf() (string, error) {
@@ -364,7 +372,7 @@ func queryWithTransport(msg *dns.Msg, server string, transport string, tlsConfig
 // ParseServer parses a server specification like "tls://1.2.3.4:853" or "quic://1.2.3.4"
 // and returns the host, port, and transport. If no scheme is specified, defaults to Do53.
 // If no port is specified, uses the default port for the transport.
-func ParseServer(serverArg string, options map[string]string) map[string]string {
+func ParseServer(serverArg string, options map[string]string) (map[string]string, error) {
 	// Default transport if no scheme is specified
 	transport := options["transport"]
 	if transport == "" {
@@ -379,8 +387,7 @@ func ParseServer(serverArg string, options map[string]string) map[string]string 
 	if strings.Contains(serverArg, "://") {
 		u, err = url.Parse(serverArg)
 		if err != nil {
-			fmt.Printf("Invalid server URL: %v\n", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("Invalid server URL: %v", err)
 		}
 	} else {
 		// If no scheme, treat as host[:port]
@@ -404,12 +411,10 @@ func ParseServer(serverArg string, options map[string]string) map[string]string 
 	case "quic":
 		transport = "DoQ"
 	default:
-		fmt.Printf("unsupported scheme: %s\n", scheme)
-		os.Exit(1)
+		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
 	if _, exists := options["transport"]; exists && options["transport"] != transport {
-		fmt.Printf("Conflicting transport specifications: %s vs %s\n", options["transport"], transport)
-		os.Exit(1)
+		return nil, fmt.Errorf("Conflicting transport specifications: %s vs %s", options["transport"], transport)
 	}
 	options["transport"] = transport
 
@@ -420,8 +425,7 @@ func ParseServer(serverArg string, options map[string]string) map[string]string 
 		var portErr error
 		host, port, portErr = net.SplitHostPort(host)
 		if portErr != nil {
-			fmt.Printf("%s is not in host:port format: %v\n", u.Host, portErr)
-			os.Exit(1)
+			return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
 		}
 	}
 	options["server"] = host
@@ -440,14 +444,15 @@ func ParseServer(serverArg string, options map[string]string) map[string]string 
 		options["server"] = options["server"][:len(options["server"])-1]
 	}
 
-	fmt.Printf("ParseServer: server: %s, port: %s, transport: %s, path: %s\n",
-		options["server"], options["port"], options["transport"], options["path"])
+	if tdns.Globals.Debug {
+		fmt.Printf("ParseServer: server: %s, port: %s, transport: %s, path: %s\n",
+			options["server"], options["port"], options["transport"], options["path"])
+	}
 
 	// Basic validation
 	if options["server"] == "" {
-		fmt.Printf("empty host specified\n")
-		os.Exit(1)
+		return nil, fmt.Errorf("empty host specified")
 	}
 
-	return options
+	return options, nil
 }

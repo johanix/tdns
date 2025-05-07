@@ -583,14 +583,6 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 						log.Printf("CreateServerSvcbRRs: Zone %s: Found %d AAAA records for in-bailiwick NS %s: %v", zd.ZoneName, len(ipv6s), nsName, ipv6s)
 					}
 
-					// Convert to SVCBKeyValue if we have any addresses
-					// if len(ipv4s) > 0 {
-					//	svcbRRset.RRs = append(svcbRRset.RRs, &dns.SVCBIPv4Hint{Hint: ipv4s})
-					// }
-					// if len(ipv6s) > 0 {
-					//	svcbRRset.RRs = append(svcbRRset.RRs, &dns.SVCBIPv6Hint{Hint: ipv6s})
-					// }
-
 					// Helper to check if address matches any configured addresses
 					checkAddrs := func(addrs []string, rrset *RRset) bool {
 						if rrset == nil {

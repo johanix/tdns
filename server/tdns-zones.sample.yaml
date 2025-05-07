@@ -15,8 +15,8 @@
 #
 
 templates:
-   - name:	      foobar
-     options:	      [ delegation-sync-child, allow-updates, online-signing, create-server-svcb ]
+   - name:            foobar
+     options:         [ delegation-sync-child, allow-updates, online-signing, create-server-svcb ]
 zones:
    - name:            test.net
      zonefile:        /etc/axfr.net/zones/test.net
