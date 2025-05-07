@@ -5,14 +5,26 @@
 package tdns
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
+	"os"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
+
+func CaseFoldContains(slice []string, str string) bool {
+	for _, s := range slice {
+		if strings.EqualFold(s, str) {
+			return true
+		}
+	}
+	return false
+}
 
 func DnsEngine(conf *Config) error {
 
@@ -21,15 +33,18 @@ func DnsEngine(conf *Config) error {
 	ourDNSHandler := createDnsHandler(conf)
 	dns.HandleFunc(".", ourDNSHandler)
 
-	addresses := viper.GetStringSlice("dnsengine.do53.addresses")
+	addresses := viper.GetStringSlice("dnsengine.addresses")
+	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
+		log.Printf("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory. Still configuring: %v", addresses)
+	}
 	log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
 	for _, addr := range addresses {
-		for _, net := range []string{"udp", "tcp"} {
-			go func(addr, net string) {
-				log.Printf("DnsEngine: serving on %s (%s)\n", addr, net)
+		for _, transport := range []string{"udp", "tcp"} {
+			go func(addr, transport string) {
+				log.Printf("DnsEngine: serving on %s (%s)\n", addr, transport)
 				server := &dns.Server{
 					Addr:          addr,
-					Net:           net,
+					Net:           transport,
 					MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 				}
 
@@ -37,35 +52,72 @@ func DnsEngine(conf *Config) error {
 				// may be much larger then queries
 				server.UDPSize = dns.DefaultMsgSize // 4096
 				if err := server.ListenAndServe(); err != nil {
-					log.Printf("Failed to setup the %s server: %s", net, err.Error())
+					log.Printf("Failed to setup the %s server: %s", transport, err.Error())
 				} else {
-					log.Printf("DnsEngine: listening on %s/%s", addr, net)
+					log.Printf("DnsEngine: listening on %s/%s", addr, transport)
 				}
-			}(addr, net)
+			}(addr, transport)
 		}
 	}
 
-	dotaddrs := viper.GetStringSlice("dnsengine.dot.addresses")
-	if len(dotaddrs) > 0 {
-		err := DnsDoTEngine(conf, dotaddrs, ourDNSHandler)
-		if err != nil {
-			log.Printf("Failed to setup the DoT server: %s\n", err.Error())
-		}
+	certFile := viper.GetString("dnsengine.certfile")
+	keyFile := viper.GetString("dnsengine.keyfile")
+	certKey := true
+
+	if certFile == "" || keyFile == "" {
+		log.Println("DnsEngine: no certificate file or key file provided. Not starting DoT, DoH or DoQ service.")
+		certKey = false
 	}
 
-	dohaddrs := viper.GetStringSlice("dnsengine.doh.addresses")
-	if len(dohaddrs) > 0 {
-		err := DnsDoHEngine(conf, dohaddrs, ourDNSHandler)
-		if err != nil {
-			log.Printf("Failed to setup the DoH server: %s\n", err.Error())
-		}
+	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		log.Printf("DnsEngine: certificate file %q does not exist. Not starting DoT, DoH or DoQ service.", certFile)
+		certKey = false
 	}
 
-	doqaddrs := viper.GetStringSlice("dnsengine.doq.addresses")
-	if len(doqaddrs) > 0 {
-		err := DnsDoQEngine(conf, doqaddrs, ourDNSHandler)
-		if err != nil {
-			log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
+	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+		log.Printf("DnsEngine: key file %q does not exist. Not starting DoT, DoH or DoQ service.", keyFile)
+		certKey = false
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Printf("DnsEngine: failed to load certificate: %v. Not starting DoT, DoH or DoQ service.", err)
+		certKey = false
+	}
+
+	if certKey {
+		// Strip port numbers from addresses before proceeding to modern transports
+		tmp := make([]string, len(addresses))
+		for i, addr := range addresses {
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				log.Printf("Failed to parse address %s: %v", addr, err)
+				tmp[i] = addr // Keep original if parsing fails
+			} else {
+				tmp[i] = host
+			}
+		}
+		addresses = tmp
+
+		if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
+			err := DnsDoTEngine(conf, addresses, &cert, ourDNSHandler)
+			if err != nil {
+				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
+			}
+		}
+
+		if CaseFoldContains(conf.DnsEngine.Transports, "doh") {
+			err := DnsDoHEngine(conf, addresses, certFile, keyFile, ourDNSHandler)
+			if err != nil {
+				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
+			}
+		}
+
+		if CaseFoldContains(conf.DnsEngine.Transports, "doq") {
+			err := DnsDoQEngine(conf, addresses, &cert, ourDNSHandler)
+			if err != nil {
+				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
+			}
 		}
 	}
 	return nil
@@ -202,9 +254,11 @@ func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}
 
+			log.Printf("DnsHandler: query %q refers to zone %q", qname, zd.ZoneName)
+
 			log.Printf("DnsHandler: AppMode: \"%s\"", AppTypeToString[Globals.App.Type])
 			if Globals.App.Type == AppTypeAgent {
-				log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %s", qname)
+				log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %q", qname)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
 				w.WriteMsg(m)
@@ -223,8 +277,8 @@ func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if zd.Error && zd.ErrorType != RefreshError {
-				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
-					qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+				log.Printf("DnsHandler: Qname is %q, which is belongs to a known zone (%q), but it is in %s error state: %s",
+					qname, zd.ZoneName, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
@@ -232,7 +286,7 @@ func createDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if zd.RefreshCount == 0 {
-				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it has not been refreshed at least once yet", qname)
+				log.Printf("DnsHandler: Qname is %q, which belongs to a known zone (%q), but it has not been refreshed at least once yet", qname, zd.ZoneName)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)

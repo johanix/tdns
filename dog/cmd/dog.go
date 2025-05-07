@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"crypto/tls"
 
 	"github.com/johanix/tdns/tdns"
+	// cli "github.com/johanix/tdns/tdns/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +32,15 @@ var cfgFile string
 
 var options = make(map[string]string, 2)
 
+// Default ports for each transport
+var defaultPorts = map[string]string{
+	"Do53":     "53",
+	"Do53-TCP": "53",
+	"DoT":      "853",
+	"DoH":      "443",
+	"DoQ":      "8853",
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
@@ -37,23 +48,16 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 
 		var cleanArgs []string
-		var do_bit = false
 		var err error
 		var serial uint32
 
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "@") {
 				serverArg := arg[1:]
-				host, port, transport, err := ParseServer(serverArg, options)
+				options, err = ParseServer(serverArg, options)
 				if err != nil {
-					log.Fatalf("Error parsing server specification: %v", err)
-				}
-				options["server"] = net.JoinHostPort(host, port)
-				if transport != "do53" {
-					if existingTransport, exists := options["transport"]; exists && existingTransport != transport {
-						log.Fatalf("Conflicting transport specifications: %s vs %s", existingTransport, transport)
-					}
-					options["transport"] = transport
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
 				}
 				continue
 			}
@@ -78,11 +82,19 @@ var rootCmd = &cobra.Command{
 				if tdns.Globals.Debug {
 					fmt.Printf("processing dog option: %s\n", ucarg)
 				}
-				options = ProcessOptions(options, ucarg)
+				options, err = ProcessOptions(options, ucarg)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
 				continue
 			}
 
 			cleanArgs = append(cleanArgs, arg)
+		}
+
+		if _, exists := options["transport"]; !exists {
+			options["transport"] = "Do53"
 		}
 
 		if options["server"] == "" {
@@ -94,16 +106,25 @@ var rootCmd = &cobra.Command{
 			options["server"] = server
 		}
 
+		if options["port"] == "" {
+			options["port"] = defaultPorts[options["transport"]]
+			if options["port"] == "" {
+				fmt.Printf("Error: port for transport %s not specified\n", options["transport"])
+				os.Exit(1)
+			}
+		}
+
 		if rrtype == 0 {
 			rrtype = dns.TypeA
 		}
 
-		if port != "53" {
-			_, err := strconv.Atoi(port)
-			if err != nil {
-				fmt.Printf("Error: port \"%s\" is not valid: %v\n", port, err)
-			}
+		_, err := strconv.Atoi(options["port"])
+		if err != nil {
+			fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
 		}
+
+		// All args parsed, join server and port
+		options["server"] = net.JoinHostPort(options["server"], options["port"])
 
 		if options["opcode"] == "" {
 			options["opcode"] = "QUERY"
@@ -139,8 +160,29 @@ var rootCmd = &cobra.Command{
 				} else {
 					m.SetQuestion(qname, rrtype)
 				}
-				do_bit = options["do_bit"] == "true"
-				m.SetEdns0(4096, do_bit)
+				// do_bit = options["do_bit"] == "true"
+				// m.SetEdns0(4096, do_bit)
+				opt := &dns.OPT{
+					Hdr: dns.RR_Header{
+						Name:   ".",
+						Rrtype: dns.TypeOPT,
+						Class:  4096, // This is the UDP buffer size
+						Ttl:    0,    // Extended RCODE and flags
+					},
+				}
+				if options["do_bit"] == "true" {
+					// Set DO bit (bit 15)
+					opt.Hdr.Ttl |= 1 << 15
+				}
+				if options["compact"] == "true" {
+					// Set CO bit (bit 14)
+					opt.Hdr.Ttl |= 1 << 14
+				}
+				if options["deleg"] == "true" {
+					// Set DE bit (bit 13)
+					opt.Hdr.Ttl |= 1 << 13
+				}
+				m.Extra = append(m.Extra, opt)
 				start := time.Now()
 
 				server, ok := options["server"]
@@ -197,13 +239,15 @@ func Execute() {
 }
 
 func init() {
+	//	rootCmd.AddCommand(cli.VersionCmd)
+
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 }
 
-func ProcessOptions(options map[string]string, ucarg string) map[string]string {
+func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {
 	if options == nil {
 		options = make(map[string]string)
 	}
@@ -211,62 +255,71 @@ func ProcessOptions(options map[string]string, ucarg string) map[string]string {
 	switch ucarg {
 	case "+DNSSEC":
 		options["do_bit"] = "true"
-		return options
+		return options, nil
+	case "+COMPACT":
+		options["compact"] = "true"
+		return options, nil
+	case "+DELEG":
+		options["deleg"] = "true"
+		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
-		return options
+		return options, nil
 	case "+TCP":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
-		options["transport"] = "tcp"
-		return options
+		options["transport"] = "Do53"
+		return options, nil
 	case "+TLS", "+DOT":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "DoT"
-		return options
+		return options, nil
 	case "+HTTPS", "+DOH":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "DoH"
-		return options
+		return options, nil
 	case "+QUIC", "+DOQ":
 		if _, exists := options["transport"]; exists {
-			log.Fatalf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
 		}
 		options["transport"] = "DoQ"
-		return options
-	case "+OPCODE=":
-		parts := strings.Split(ucarg, "=")
-		if len(parts) > 1 {
-			switch parts[1] {
-			case "QUERY", "NOTIFY", "UPDATE":
-				options["opcode"] = parts[1]
-			default:
-				opcode, err := strconv.Atoi(parts[1])
-				if err != nil {
-					fmt.Printf("Error: %v\n", err)
-					return options
-				}
-				switch opcode {
-				case dns.OpcodeQuery:
-					options["opcode"] = "QUERY"
-				case dns.OpcodeNotify:
-					options["opcode"] = "NOTIFY"
-				case dns.OpcodeUpdate:
-					options["opcode"] = "UPDATE"
+		return options, nil
+	default:
+		// Cannot match on "+OPCODE=", as the string would be "+OPCODE=QUERY", etc.
+		if strings.HasPrefix(ucarg, "+OPCODE=") {
+			parts := strings.Split(ucarg, "=")
+			if len(parts) > 1 {
+				switch parts[1] {
+				case "QUERY", "NOTIFY", "UPDATE":
+					options["opcode"] = parts[1]
+				default:
+					opcode, err := strconv.Atoi(parts[1])
+					if err != nil {
+						fmt.Printf("Error: %v\n", err)
+						return options, nil
+					}
+					switch opcode {
+					case dns.OpcodeQuery:
+						options["opcode"] = "QUERY"
+					case dns.OpcodeNotify:
+						options["opcode"] = "NOTIFY"
+					case dns.OpcodeUpdate:
+						options["opcode"] = "UPDATE"
+					}
 				}
 			}
+			return options, nil
 		}
-		return options
-	default:
-		log.Fatalf("Error: Unknown option: %s", ucarg)
+
+		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)
 	}
 
-	return options
+	return options, nil
 }
 
 func ParseResolvConf() (string, error) {
@@ -317,62 +370,87 @@ func queryWithTransport(msg *dns.Msg, server string, transport string, tlsConfig
 // ParseServer parses a server specification like "tls://1.2.3.4:853" or "quic://1.2.3.4"
 // and returns the host, port, and transport. If no scheme is specified, defaults to Do53.
 // If no port is specified, uses the default port for the transport.
-func ParseServer(serverArg string, options map[string]string) (host, port, transport string, err error) {
+func ParseServer(serverArg string, options map[string]string) (map[string]string, error) {
 	// Default transport if no scheme is specified
-	transport = options["transport"]
+	transport := options["transport"]
 	if transport == "" {
-		transport = "do53"
+		transport = "Do53"
+		options["transport"] = transport
 	}
 
-	// Default ports for each transport
-	defaultPorts := map[string]string{
-		"Do53":     "53",
-		"Do53-TCP": "53",
-		"DoT":      "853",
-		"DoH":      "443",
-		"DoQ":      "8853",
-	}
+	var u *url.URL
+	var err error
 
-	// Check if we have a scheme
+	// Try to parse as URL if it contains "://"
 	if strings.Contains(serverArg, "://") {
-		parts := strings.SplitN(serverArg, "://", 2)
-		scheme := strings.ToLower(parts[0])
-		serverArg = parts[1]
-
-		// Map scheme to transport
-		switch scheme {
-		case "dns":
-			transport = "Do53"
-		case "tcp":
-			transport = "Do53-TCP"
-		case "tls":
-			transport = "DoT"
-		case "https":
-			transport = "DoH"
-		case "quic":
-			transport = "DoQ"
-		default:
-			return "", "", "", fmt.Errorf("unsupported scheme: %s", scheme)
-		}
-	}
-
-	// Split host and port
-	host = serverArg
-	if strings.Contains(serverArg, ":") {
-		var portErr error
-		host, port, portErr = net.SplitHostPort(serverArg)
-		if portErr != nil {
-			return "", "", "", fmt.Errorf("invalid host:port format: %v", portErr)
+		u, err = url.Parse(serverArg)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid server URL: %v", err)
 		}
 	} else {
-		// No port specified, use default
-		port = defaultPorts[transport]
+		// If no scheme, treat as host[:port]
+		u = &url.URL{
+			Scheme: "dns",
+			Host:   serverArg,
+		}
+	}
+
+	// Map scheme to transport
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "dns":
+		transport = "Do53"
+	case "tcp":
+		transport = "Do53-TCP"
+	case "tls":
+		transport = "DoT"
+	case "https":
+		transport = "DoH"
+	case "quic":
+		transport = "DoQ"
+	default:
+		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
+	}
+	if _, exists := options["transport"]; exists && options["transport"] != transport {
+		return nil, fmt.Errorf("Conflicting transport specifications: %s vs %s", options["transport"], transport)
+	}
+	options["transport"] = transport
+
+	// Extract host and port
+	host := u.Host
+	port := ""
+	if strings.Contains(host, ":") {
+		var portErr error
+		host, port, portErr = net.SplitHostPort(host)
+		if portErr != nil {
+			return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+		}
+	}
+	options["server"] = host
+	if port != "" {
+		options["port"] = port
+	} else if u.Port() != "" {
+		options["port"] = u.Port()
+	}
+
+	// For DoH, DoQ, etc., the path may be important
+	if u.Path != "" && u.Path != "/" {
+		options["path"] = u.Path
+	}
+
+	if strings.HasSuffix(options["server"], "/") {
+		options["server"] = options["server"][:len(options["server"])-1]
+	}
+
+	if tdns.Globals.Debug {
+		fmt.Printf("ParseServer: server: %s, port: %s, transport: %s, path: %s\n",
+			options["server"], options["port"], options["transport"], options["path"])
 	}
 
 	// Basic validation
-	if host == "" {
-		return "", "", "", fmt.Errorf("empty host specified")
+	if options["server"] == "" {
+		return nil, fmt.Errorf("empty host specified")
 	}
 
-	return host, port, transport, nil
+	return options, nil
 }

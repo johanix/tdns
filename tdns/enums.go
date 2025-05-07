@@ -17,11 +17,11 @@ const (
 	OptBlackLies
 	OptDontPublishKey
 	OptOnlineSigning
-	OptMultiSigner
+	OptMultiSigner // OBE?
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
-	OptAgent // XXX: Hmm. Is this needed?
+	OptServerSvcb
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -29,16 +29,16 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptDelSyncChild:      "delegation-sync-child",
 	OptAllowUpdates:      "allow-updates",
 	OptAllowChildUpdates: "allow-child-updates",
+	OptAllowCombine:      "allow-combine", // Dynamically et if app=combiner and zone contains a HSYNC RRset
 	OptFoldCase:          "fold-case",
 	OptBlackLies:         "black-lies",
 	OptDontPublishKey:    "dont-publish-key",
 	OptOnlineSigning:     "online-signing",
-	OptMultiSigner:       "multisigner",
+	OptMultiSigner:       "multisigner", // OBE?
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
-	OptAgent:             "agent",
-	OptAllowCombine:      "allow-combine", // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	OptServerSvcb:        "create-server-svcb",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -51,11 +51,11 @@ var StringToZoneOption = map[string]ZoneOption{
 	"black-lies":             OptBlackLies,
 	"dont-publish-key":       OptDontPublishKey,
 	"online-signing":         OptOnlineSigning,
-	"multisigner":            OptMultiSigner,
+	"multisigner":            OptMultiSigner, // OBE?
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
-	"agent":                  OptAgent,
+	"create-server-svcb":     OptServerSvcb,
 }
 
 type AppType uint8
@@ -63,21 +63,21 @@ type AppType uint8
 const (
 	AppTypeServer AppType = iota + 1
 	AppTypeAgent
-	AppTypeMSA
+	// AppTypeMSA
 	AppTypeCombiner
 )
 
 var AppTypeToString = map[AppType]string{
-	AppTypeServer:   "server",
-	AppTypeAgent:    "agent",
-	AppTypeMSA:      "msa",
+	AppTypeServer: "server",
+	AppTypeAgent:  "agent",
+	// AppTypeMSA:      "msa",
 	AppTypeCombiner: "combiner",
 }
 
 var StringToAppType = map[string]AppType{
-	"server":   AppTypeServer,
-	"agent":    AppTypeAgent,
-	"msa":      AppTypeMSA,
+	"server": AppTypeServer,
+	"agent":  AppTypeAgent,
+	//"msa":      AppTypeMSA,
 	"combiner": AppTypeCombiner,
 }
 

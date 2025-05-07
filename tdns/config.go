@@ -47,24 +47,32 @@ type ServiceConf struct {
 }
 
 type DnsEngineConf struct {
-	Do53 struct {
-		Addresses []string `validate:"required"`
-	}
-	DoT struct {
-		Addresses []string
-		CertFile  string
-		KeyFile   string
-	}
-	DoH struct {
-		Addresses []string
-		CertFile  string
-		KeyFile   string
-	}
-	DoQ struct {
-		Addresses []string
-		CertFile  string
-		KeyFile   string
-	}
+	Addresses  []string `yaml:"addresses" validate:"required"`
+	CertFile   string   `yaml:"certfile,omitempty"`
+	KeyFile    string   `yaml:"keyfile,omitempty"`
+	Transports []string `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
+
+	//	Do53 struct {
+	//		Addresses []string
+	//	}
+	//
+	//	DoT struct {
+	//		Addresses []string
+	//		CertFile  string
+	//		KeyFile   string
+	//	}
+	//
+	//	DoH struct {
+	//		Addresses []string
+	//		CertFile  string
+	//		KeyFile   string
+	//	}
+	//
+	//	DoQ struct {
+	//		Addresses []string
+	//		CertFile  string
+	//		KeyFile   string
+	//	}
 }
 
 type ApiServerConf struct {
@@ -75,8 +83,8 @@ type ApiServerConf struct {
 	UseTLS    bool
 	Server    ApiServerAppConf
 	Agent     ApiServerAppConf
-	MSA       ApiServerAppConf
-	Combiner  ApiServerAppConf
+	// MSA       ApiServerAppConf
+	Combiner ApiServerAppConf
 }
 
 type ApiServerAppConf struct {
@@ -95,6 +103,16 @@ type LocalAgentConf struct {
 	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
+	Xfr struct {
+		Outgoing struct {
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
+		}
+		Incoming struct {
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
+		}
+	}
 }
 
 type LocalAgentApiConf struct {
@@ -125,6 +143,7 @@ type DbConf struct {
 
 type InternalConf struct {
 	CfgFile         string //
+	DebugMode       bool   // if true, may activate dangerous tests
 	ZonesCfgFile    string //
 	KeyDB           *KeyDB
 	DnssecPolicies  map[string]DnssecPolicy
@@ -144,10 +163,21 @@ type InternalConf struct {
 	AuthQueryQ      chan AuthQueryRequest
 	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ           chan SyncRequest
-	HeartbeatQ      chan AgentMsgReport // incoming /beat
-	HelloQ          chan AgentMsgReport // incoming /hello
+	AgentQs         *AgentQs // aggregated channels for agent communication
 	SyncStatusQ     chan SyncStatus
-	Registry        *AgentRegistry
+	AgentRegistry   *AgentRegistry
+	ZoneDataRepo    *ZoneDataRepo
+}
+
+type AgentQs struct {
+	Hello chan *AgentMsgReport // incoming /hello from other agents
+	Beat  chan *AgentMsgReport // incoming /beat from other agents
+	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
+	Msg               chan *AgentMsgPostPlus  // incoming /msg from other agents
+	Command           chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
+	DebugCommand      chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
+	SynchedDataUpdate chan *SynchedDataUpdate // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd    // local commands TO the combiner
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

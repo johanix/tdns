@@ -75,7 +75,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	Globals.App.ServerConfigTime = time.Now()
 
 	pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
-	pflag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
+	pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 	pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	pflag.Parse()
 
@@ -83,12 +83,12 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		flag.PrintDefaults()
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 1 ***")
-	}
+	// if Globals.Debug {
+	//		log.Printf("*** MainInit: 1 ***")
+	// }
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeMSA, AppTypeCombiner:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -101,9 +101,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		return fmt.Errorf("Error parsing config %q: %v", conf.Internal.CfgFile, err)
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 2 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 2 ***")
+	// }
 
 	// Initialize channels and start engines
 	kdb := conf.Internal.KeyDB
@@ -114,9 +114,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 
 	conf.Internal.KeyDB = kdb
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 3 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 3 ***")
+	// }
 
 	logfile := viper.GetString("log.file")
 	err = SetupLogging(logfile)
@@ -125,9 +125,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 4 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 4 ***")
+	// }
 
 	err = Globals.Validate()
 	if err != nil {
@@ -145,6 +145,18 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10) // Only used by sidecar.
 	go RefreshEngine(conf, conf.Internal.StopCh)
 
+	if Globals.App.Type == AppTypeAgent {
+		conf.Internal.AgentQs = &AgentQs{
+			Hello:             make(chan *AgentMsgReport, 100),
+			Beat:              make(chan *AgentMsgReport, 100),
+			Msg:               make(chan *AgentMsgPostPlus, 100),
+			Command:           make(chan *AgentMgmtPostPlus, 100),
+			DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
+			SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
+			SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
+		}
+	}
+
 	switch Globals.App.Type {
 	case AppTypeCombiner, AppTypeAgent:
 		// don't start validator engine for combiner or agent
@@ -156,9 +168,9 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 5 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 5 ***")
+	// }
 
 	// Parse all configured zones
 	all_zones, err := conf.ParseZones(false) // false = initial load, not reload
@@ -174,11 +186,12 @@ func (conf *Config) MainInit(defaultcfg string) error {
 			return fmt.Errorf("Error setting up agent: %v", err)
 		}
 		// Initialize AgentRegistry for agent mode only
-		conf.Internal.Registry = conf.NewAgentRegistry()
-	case AppTypeServer, AppTypeMSA, AppTypeCombiner:
-		// ... existing server/MSA/combiner setup ...
+		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
+		// dump.P(conf.Internal.AgentRegistry)
+	case AppTypeServer, AppTypeCombiner:
+		// ... existing server/combiner setup ...
 	default:
-		// ... existing server/MSA/combiner setup ...
+		// ... existing server/agent/combiner setup ...
 	}
 
 	if Globals.Debug {
@@ -192,27 +205,24 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	stopch := conf.Internal.StopCh
 
-	// if Globals.App.Type != AppTypeMSA {
-	// The music sidecar has its own apihandler, so we must not start the TDNS apihandler here.
 	conf.Internal.APIStopCh = make(chan struct{})
-	// router := TdnsSetupRouter(conf)
-	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
-	if err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
-	// }
 
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
-	conf.Internal.HelloQ = make(chan AgentMsgReport, 100)
-	conf.Internal.HeartbeatQ = make(chan AgentMsgReport, 100)
+
+	// Everyone has the mgmt API dispatcher
+	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
+	if err != nil {
+		return fmt.Errorf("Error starting API dispatcher: %v", err)
+	}
 
 	if Globals.App.Type == AppTypeAgent {
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
-		go HsyncEngine(conf, conf.Internal.HelloQ, conf.Internal.HeartbeatQ, conf.Internal.StopCh) // Only used by agent
+		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
+		go conf.SynchedDataEngine(conf.Internal.AgentQs, conf.Internal.StopCh)
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
@@ -238,7 +248,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	go DnsEngine(conf)
 
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeServer:
+	case AppTypeServer:
 		conf.Internal.ResignQ = make(chan *ZoneData, 10)
 		go ResignerEngine(conf.Internal.ResignQ, stopch)
 	default:

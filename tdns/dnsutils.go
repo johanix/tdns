@@ -22,7 +22,7 @@ import (
 
 const (
 	year68     = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
-	timelayout = "2006-01-02 15:04:05"
+	TimeLayout = "2006-01-02 15:04:05"
 )
 
 // TODO: Add support for TSIG zone transfers.
@@ -327,6 +327,11 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	}
 
 	var tmp RRset
+
+	if !strings.HasSuffix(rr.Header().Name, zd.ZoneName) {
+		zd.Logger.Printf("*** SortFunc: zone %s: RR %s is not in zone. Ignored.", zd.ZoneName, rr.String())
+		return firstSoaSeen
+	}
 
 	switch v := rr.(type) {
 	case *dns.SOA:

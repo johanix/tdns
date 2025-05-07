@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -354,110 +355,98 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 		return fmt.Errorf("agent is nil")
 	}
 
-	var details AgentDetails
-	if _, exists := agent.Details["api"]; exists {
-		agent.mu.Lock()
-		details = agent.Details["api"]
-		agent.mu.Unlock()
+	// Check if API method is supported and TLSA record exists
+	if agent.ApiDetails == nil {
+		return fmt.Errorf("agent %s: ApiDetails not initialized", agent.Identity)
 	}
-
-	if !agent.Methods["api"] || details.TlsaRR == nil {
+	if !agent.ApiMethod || agent.ApiDetails.TlsaRR == nil {
 		return fmt.Errorf("agent %s does not support the API Method", agent.Identity)
 	}
 
+	// Verify local agent has necessary certificates
 	if localagent.Api.CertFile == "" || localagent.Api.KeyFile == "" {
 		return fmt.Errorf("local agent config missing either cert or key file")
 	}
 
 	if Globals.Debug {
 		log.Printf("NewAgentSyncApiClient: enter. identity: %s, baseurl: %s",
-			agent.Identity, details.BaseUri)
+			agent.Identity, agent.ApiDetails.BaseUri)
 	}
+
+	// Create API client
 	api := AgentApi{
-		ApiClient: NewClient(agent.Identity, details.BaseUri, "", "", "tlsa"),
+		ApiClient: NewClient(string(agent.Identity), agent.ApiDetails.BaseUri, "", "", "tlsa"),
 	}
 
-	//	func NewClientConfig(caFile string, keyFile string, certFile string) (*tls.Config, error) {
-	//        caCertPool, err := loadCertPool(caFile)
-	//        if err != nil {
-	// return nil, err
-	//        }
-
+	// Load client certificate
 	cert, err := tls.LoadX509KeyPair(localagent.Api.CertFile, localagent.Api.KeyFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load client certificate: %v", err)
 	}
 
-	//        config := &tls.Config{
-	//                Certificates: []tls.Certificate{cert},
-	//                RootCAs:      caCertPool,
-	//        }
-
-	//        return config, nil
-	//}
-
+	// Configure TLS with client certificate
 	tlsconfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
 	}
 
-	//	if rootcafile == "insecure" {
-	//		tlsconfig.InsecureSkipVerify = true
-	//	} else if rootcafile == "tlsa" {
-	// use TLSA RR for verification; InsecureSkipVerify must still be true
+	// Configure certificate verification using TLSA record
 	tlsconfig.InsecureSkipVerify = true
-	// use TLSA RR for verification
 	tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		log.Printf("VerifyPeerCertificate called for %q (have TLSA: %s)", agent.Identity,
-			agent.Details["api"].TlsaRR.String())
+		// log.Printf("VerifyPeerCertificate called for %q (have TLSA: %s)", agent.Identity,
+		// 	agent.ApiDetails.TlsaRR.String())
+
 		for _, rawCert := range rawCerts {
 			cert, err := x509.ParseCertificate(rawCert)
 			if err != nil {
 				return fmt.Errorf("failed to parse certificate: %v", err)
 			}
-			if cert.Subject.CommonName != agent.Identity {
+
+			if cert.Subject.CommonName != string(agent.Identity) {
 				return fmt.Errorf("unexpected certificate common name (should have been %s)", agent.Identity)
 			}
 
-			err = VerifyCertAgainstTlsaRR(agent.Details["api"].TlsaRR, rawCert)
+			err = VerifyCertAgainstTlsaRR(agent.ApiDetails.TlsaRR, rawCert)
 			if err != nil {
 				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 			}
-			log.Printf("VerifyPeerCertificate: successfully verified cert for %q", agent.Identity)
+
+			log.Printf("VerifyPeerCertificate: successfully verified cert for %q against TLSA record", agent.Identity)
 		}
-		// log.Printf("NewMusicSyncApiClient: VerifyPeerCertificate returning nil (all good)")
+
 		return nil
 	}
-	//	} else {
-	//		rootCAPool := x509.NewCertPool()
-	//		// rootCA, err := ioutil.ReadFile(viper.GetString("musicd.rootCApem"))
-	//		rootCA, err := os.ReadFile(rootcafile)
-	//		if err != nil {
-	//			log.Fatalf("reading cert failed : %v", err)
-	//		}
-	//		if Globals.Debug {
-	//			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n",
-	//				name, rootcafile)
-	//		}
 
-	//		rootCAPool.AppendCertsFromPEM(rootCA)
-	//		tlsconfig.RootCAs = rootCAPool
-	//	}
-
-	// api.Client = &http.Client{}
+	// Create HTTP client with TLS config
 	api.ApiClient.Client = &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsconfig},
 	}
 
+	// Set debug flags
 	api.ApiClient.Debug = Globals.Debug
 	api.ApiClient.Verbose = Globals.Verbose
-	// log.Printf("client is a: %T\n", api.Client)
 
-	// dump.P(tlsconfig)
+	// Configure API addresses if available
+	if len(agent.ApiDetails.Addrs) > 0 {
+		if Globals.Debug {
+			log.Printf("Remote agent %q has the API addresses %v", agent.Identity, agent.ApiDetails.Addrs)
+		}
+		var addressesWithPort []string
+		port := strconv.Itoa(int(agent.ApiDetails.Port))
+
+		for _, addr := range agent.ApiDetails.Addrs {
+			addressesWithPort = append(addressesWithPort, net.JoinHostPort(addr, port))
+		}
+
+		api.ApiClient.Addresses = addressesWithPort
+	}
 
 	if Globals.Debug {
 		fmt.Printf("Setting up AGENT-TO-AGENT Sync API client: %s\n", agent.Identity)
 		fmt.Printf("* baseurl is: %s \n* authmethod is: %s \n", api.ApiClient.BaseUrl, api.ApiClient.AuthMethod)
 	}
+
+	// Assign the API client to the agent
 	agent.Api = &api
 
 	return nil

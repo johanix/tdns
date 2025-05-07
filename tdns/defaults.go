@@ -4,11 +4,11 @@
 package tdns
 
 const (
-//	DefaultCfgFile = "/etc/axfr.net/tdns.yaml"
-	DogCfgFile     = "/etc/axfr.net/dog.yaml"
-//	ZonesCfgFile   = "/etc/axfr.net/tdns-zones.yaml"
+	//	DefaultCfgFile = "/etc/axfr.net/tdns.yaml"
+	DogCfgFile = "/etc/axfr.net/dog.yaml"
+	//	ZonesCfgFile   = "/etc/axfr.net/tdns-zones.yaml"
 
-	DefaultCliCfgFile      = "/etc/tdns/tdns-cli.yaml"
+	DefaultCliCfgFile = "/etc/tdns/tdns-cli.yaml"
 
 	DefaultServerCfgFile   = "/etc/tdns/tdns-server.yaml"
 	DefaultAgentCfgFile    = "/etc/tdns/tdns-agent.yaml"

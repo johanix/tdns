@@ -168,7 +168,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	var hsyncchanged, keyschanged bool
 	var hss *HsyncStatus
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeCombiner:
+	case AppTypeAgent, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
@@ -221,7 +221,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 			}
 			zd.SyncQ <- SyncRequest{
 				Command:    "SYNC-DNSKEY-RRSET",
-				ZoneName:   zd.ZoneName,
+				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				OldDnskeys: oldkeys,
 				NewDnskeys: newkeys,
@@ -234,7 +234,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
-				ZoneName:   zd.ZoneName,
+				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				SyncStatus: hss,
 			}
@@ -307,7 +307,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	var hsyncchanged, dnskeyschanged bool
 	var hss *HsyncStatus
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAgent, AppTypeCombiner:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
@@ -348,7 +348,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	if dnskeyschanged {
 		switch Globals.App.Type {
-		case AppTypeMSA:
+		case AppTypeAgent:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
 			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
 			if err != nil {
@@ -375,11 +375,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 
 	if hsyncchanged {
 		switch Globals.App.Type {
-		case AppTypeMSA, AppTypeAgent:
+		case AppTypeAgent:
 			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
-				ZoneName:   zd.ZoneName,
+				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				SyncStatus: hss,
 			}
@@ -937,7 +937,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 		return nil // this zone does not allow any modifications
 	}
 
-	if zd.Options[OptAgent] {
+	if Globals.App.Type == AppTypeAgent {
 		return nil // this zone does not allow any modifications
 	}
 
@@ -1140,13 +1140,15 @@ $TTL 86400
 func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
 	if Globals.Debug {
-		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Do53.Addresses)
+		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Addresses)
 		// dump.P(tconf.DnsEngine)
 	}
-	for _, ns := range conf.DnsEngine.Do53.Addresses {
+	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
-			return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
+			// return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
+			// Assume error was missing port, so add it
+			addr, port = ns, "53"
 		}
 		if port != "53" {
 			continue

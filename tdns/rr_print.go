@@ -314,7 +314,7 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 
 	fmt.Printf("\n;; Query time: %d msec\n", elapsed.Milliseconds())
 	fmt.Printf(";; SERVER: %s (%s)\n", server, transport)
-	fmt.Printf(";; WHEN: %s\n", time.Now().Format(timelayout))
+	fmt.Printf(";; WHEN: %s\n", time.Now().Format(TimeLayout))
 
 	buf, err := m.Pack()
 	if err != nil {

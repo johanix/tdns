@@ -17,6 +17,7 @@ type GlobalStuff struct {
 	Verbose     bool
 	Debug       bool
 	Zonename    string
+	AgentId     AgentId
 	ParentZone  string
 	Sig0Keyfile string
 	Api         *ApiClient
@@ -30,7 +31,7 @@ type GlobalStuff struct {
 	Port        uint16
 	Address     string
 	App         AppDetails
-	ServerALPN  *dns.SVCB // ALPN for DoH/DoQ
+	ServerSVCB  *dns.SVCB // ALPN for DoH/DoQ
 }
 
 var Globals = GlobalStuff{

@@ -23,6 +23,8 @@ func init() {
 
 	// From ../tdns/cli/debug_cmds.go:
 	rootCmd.AddCommand(cli.DebugCmd)
+	cli.AgentCmd.AddCommand(cli.DebugCmd)
+	cli.CombinerCmd.AddCommand(cli.DebugCmd)
 
 	// From ../tdns/cli/keystore_cmds.go:
 	rootCmd.AddCommand(cli.KeystoreCmd)
@@ -62,4 +64,6 @@ func init() {
 
 	// From ../tdns/cli/base32_cmds.go
 	rootCmd.AddCommand(cli.Base32Cmd)
+
+	rootCmd.AddCommand(cli.VersionCmd)
 }
