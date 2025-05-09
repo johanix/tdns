@@ -186,7 +186,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// log.Printf("*** ParseConfig: 3")
 
-	// Initialize KeyDB if needed
+	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent:
 		if conf.Internal.DnssecPolicies == nil {
@@ -212,44 +212,22 @@ func (conf *Config) ParseConfig(reload bool) error {
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
 			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
 		}
-		fallthrough
+	}
 
-	case AppTypeCombiner:
-		// Note that AppTypeServer and AppTypeAgent feel though into here as well.
-		kdb := conf.Internal.KeyDB
-		if !reload || kdb == nil {
-			dbFile := viper.GetString("db.file")
-			// Ensure the database file path is within allowed boundaries
-			dbFile = filepath.Clean(dbFile)
-			if strings.Contains(dbFile, "..") {
-				return errors.New("invalid database file path: must not contain directory traversal")
-			}
-			if dbFile == "" {
-				return fmt.Errorf("invalid database file: '%s'", dbFile)
-			}
-			switch Globals.App.Type {
-			case AppTypeServer, AppTypeAgent, AppTypeCombiner:
-
-				// Verify that we have a MUSIC DB file.
-				fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
-				if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-					log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
-					log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
-					return errors.New("ParseConfig: TDNS DB file does not exist")
-				}
-				kdb, err := NewKeyDB(dbFile, false)
-				if err != nil {
-					log.Fatalf("Error from NewKeyDB: %v", err)
-				}
-				conf.Internal.KeyDB = kdb
-
-			default:
-				// do nothing for tdns-imr, tdns-cli
+	// XXX: Hmm. Should not initialize KeyDB on reload?
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		// kdb := conf.Internal.KeyDB
+		if !reload { // || kdb == nil {
+			err = conf.InitializeKeyDB()
+			if err != nil {
+				return err
 			}
 		}
 
-	default:
-		log.Printf("TDNS %s (%s): not initalizing KeyDB", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		// default:
+		// log.Printf("TDNS %s (%s): not initializing KeyDB", Globals.App.Name, AppTypeToString[Globals.App.Type])
+
 	}
 
 	// log.Printf("*** ParseConfig: 7")
@@ -260,16 +238,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.App.Type == AppTypeServer && len(conf.Service.Identities) > 0 {
-		// transports := []string{}
-		// if len(conf.DnsEngine.DoT.Addresses) > 0 {
-		// 	transports = append(transports, "dot")
-		// }
-		// if len(conf.DnsEngine.DoH.Addresses) > 0 {
-		// 	transports = append(transports, "doh")
-		// }
-		// if len(conf.DnsEngine.DoQ.Addresses) > 0 {
-		// 	transports = append(transports, "doq")
-		// }
 		var transports = []string{"do53"} // not optional
 		for _, t := range conf.DnsEngine.Transports {
 			t = strings.ToLower(t)
@@ -303,10 +271,48 @@ func (conf *Config) ParseConfig(reload bool) error {
 	return nil
 }
 
+func (conf *Config) InitializeKeyDB() error {
+	// dbFile := viper.GetString("db.file")
+	dbFile := conf.Db.File
+	// Ensure the database file path is within allowed boundaries
+	dbFile = filepath.Clean(dbFile)
+	if strings.Contains(dbFile, "..") {
+		return errors.New("invalid database file path: must not contain directory traversal")
+	}
+	if dbFile == "" {
+		return fmt.Errorf("invalid database file: '%s'", dbFile)
+	}
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+
+		// Verify that we have a MUSIC DB file.
+		fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+			log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
+			log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
+			return errors.New("ParseConfig: TDNS DB file does not exist")
+		}
+		kdb, err := NewKeyDB(dbFile, false)
+		if err != nil {
+			return fmt.Errorf("Error from NewKeyDB: %v", err)
+		}
+		conf.Internal.KeyDB = kdb
+
+	default:
+		// do nothing for tdns-imr, tdns-cli
+	}
+	return nil
+}
+
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 func (conf *Config) ParseZones(reload bool) ([]string, error) {
+	if len(conf.Zones) == 0 {
+		log.Printf("ParseZones: no authoritative zones defined.")
+		return nil, nil
+	}
+
 	if Globals.Debug {
-		log.Printf("ParseZones: enter")
+		log.Printf("ParseZones: %d authoritative zones defined. Parsing...", len(conf.Zones))
 	}
 	var all_zones []string
 	var primary_zones []string
@@ -588,17 +594,11 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			UpdatePolicy: policy,
 			DnssecPolicy: zconf.DnssecPolicy,
 		}
-
-		// log.Printf("*** ParseZones: 6")
 	}
 
-	// log.Printf("*** ParseZones: 7")
-
 	// ValidateZones(conf, ZonesCfgFile) // will terminate on error
-	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)",
-		all_zones, len(conf.Internal.RefreshZoneCh))
-
-	// log.Printf("*** ParseZones: 9")
+	log.Printf("ParseZones: %d zones parsed and are now refreshing: %v (queued for refresh: %d zones)",
+		len(all_zones), all_zones, len(conf.Internal.RefreshZoneCh))
 
 	if Globals.Debug {
 		log.Print("ParseZones: exit")

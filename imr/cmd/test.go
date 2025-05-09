@@ -56,11 +56,14 @@ func init() {
 					// fmt.Printf("%v\n", r.RRset)
 					for _, rr := range r.RRset.RRs {
 						switch rr.Header().Rrtype {
-						case qtype:
+						case qtype, dns.TypeCNAME:
 							fmt.Printf("%s\n", rr.String())
 						default:
 							fmt.Printf("Not printing: %q\n", rr.String())
 						}
+					}
+					for _, rr := range r.RRset.RRSIGs {
+						fmt.Printf("%s\n", rr.String())
 					}
 				} else {
 					fmt.Printf("No records found: %s\n", r.Msg)
@@ -137,8 +140,24 @@ func init() {
 		},
 	}
 
+	dumpKeysCmd := &cobra.Command{
+		Use:   "keys",
+		Short: "List keys in the RecursorCache",
+		// Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("Listing keys in the RecursorCache\n")
+			if conf.Internal.RRsetCache == nil {
+				fmt.Println("RecursorCache is nil")
+				return
+			}
+
+			// Get all keys from the concurrent map
+			fmt.Printf("%v\n", conf.Internal.RRsetCache.RRsets.Keys())
+		},
+	}
+
 	rootCmd.AddCommand(dumpCmd, dumpSuffixCmd)
-	dumpCmd.AddCommand(dumpServersCmd)
+	dumpCmd.AddCommand(dumpServersCmd, dumpKeysCmd)
 	rootCmd.AddCommand(dumpServersCmd)
 
 	// List command - takes zone name
@@ -242,6 +261,7 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	}
 
 	if !strings.HasSuffix(item.Val.Name, suffix) {
+		fmt.Printf("skipping item with name %q\n", item.Val.Name)
 		return
 	}
 

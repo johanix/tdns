@@ -19,7 +19,7 @@ var cfgFile, cfgFileUsed string
 var StopCh chan struct{}
 var LocalConfig string
 
-var daemonflag bool
+var cliflag bool
 
 var conf tdns.Config
 
@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) == 0 {
-			if !daemonflag {
+			if cliflag {
 				startInteractiveMode() // old go-prompt version
 				// startReadlineMode() // new readline version
 				return
@@ -51,7 +51,7 @@ func Execute() {
 }
 
 func init() {
-	cobra.OnInitialize(initConfig, initRecursor)
+	cobra.OnInitialize(initConfig, initImr)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s)", tdns.DefaultImrCfgFile))
@@ -60,7 +60,7 @@ func init() {
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
 		false, "debug output")
-	rootCmd.PersistentFlags().BoolVarP(&daemonflag, "daemon", "", false, "daemon mode (no CLI)")
+	rootCmd.PersistentFlags().BoolVarP(&cliflag, "cli", "", false, "CLI mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
 		false, "verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
@@ -143,19 +143,19 @@ type ApiDetails struct {
 //	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-server"]
 //}
 
-func initRecursor() {
-	log.Printf("initRecursor: Calling conf.MainInit(%q)", tdns.DefaultImrCfgFile)
-	// Conf.Internal.RecursorCh = make(chan tdns.RecursorRequest, 10)
+func initImr() {
+	if tdns.Globals.Debug {
+		fmt.Printf("initImr: Calling conf.MainInit(%q)\n", tdns.DefaultImrCfgFile)
+	}
+
 	err := conf.MainInit(tdns.DefaultImrCfgFile)
-	log.Printf("initRecursor: Back from conf.MainInit()")
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}
 
-	// conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
-	// stopCh := make(chan struct{}, 10)
-	// go tdns.RecursorEngine(&conf, stopCh)
-
+	if tdns.Globals.Debug {
+		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
+	}
 	err = tdns.MainStartThreads(&conf, nil)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting threads: %v", err))

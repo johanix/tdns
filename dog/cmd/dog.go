@@ -118,7 +118,7 @@ var rootCmd = &cobra.Command{
 			rrtype = dns.TypeA
 		}
 
-		_, err := strconv.Atoi(options["port"])
+		_, err = strconv.Atoi(options["port"])
 		if err != nil {
 			fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
 		}

@@ -6,6 +6,7 @@ package tdns
 
 import (
 	// "flag"
+
 	"fmt"
 	"log"
 	"os"
@@ -107,16 +108,62 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		return fmt.Errorf("Error parsing config %q: %v", conf.Internal.CfgFile, err)
 	}
 
-	// if Globals.Debug {
-	//	log.Printf("*** MainInit: 2 ***")
-	// }
-
 	logfile := viper.GetString("log.file")
 	err = SetupLogging(logfile)
 	if err != nil {
 		return fmt.Errorf("Error setting up logging: %v", err)
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
+
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		// Note that AppTypeServer and AppTypeAgent feel though into here as well.
+		kdb := conf.Internal.KeyDB
+		if kdb == nil {
+			err = conf.InitializeKeyDB()
+			if err != nil {
+				return fmt.Errorf("Error initializing KeyDB: %v", err)
+			}
+			/*
+				// dbFile := viper.GetString("db.file")
+				dbFile := conf.Db.File
+				// Ensure the database file path is within allowed boundaries
+				dbFile = filepath.Clean(dbFile)
+				if strings.Contains(dbFile, "..") {
+					return errors.New("invalid database file path: must not contain directory traversal")
+				}
+				if dbFile == "" {
+					return fmt.Errorf("invalid database file: '%s'", dbFile)
+				}
+				switch Globals.App.Type {
+				case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+
+					// Verify that we have a MUSIC DB file.
+					fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+					if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+						log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
+						log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
+						return errors.New("ParseConfig: TDNS DB file does not exist")
+					}
+					kdb, err := NewKeyDB(dbFile, false)
+					if err != nil {
+						log.Fatalf("Error from NewKeyDB: %v", err)
+					}
+					conf.Internal.KeyDB = kdb
+
+				default:
+					// do nothing for tdns-imr, tdns-cli
+				}
+			*/
+		}
+
+	default:
+		log.Printf("TDNS %s (%s): not initializing KeyDB", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	}
+
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 2 ***")
+	// }
 
 	// if Globals.Debug {
 	//	log.Printf("*** MainInit: 4 ***")

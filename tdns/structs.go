@@ -348,9 +348,13 @@ type CachedRRset struct {
 }
 
 type RRsetCacheT struct {
-	RRsets  ConcurrentMap[string, CachedRRset]
-	Servers ConcurrentMap[string, []string]
+	RRsets  *ConcurrentMap[string, CachedRRset]
+	Servers *ConcurrentMap[string, []string]
+	// Servers *ConcurrentMap[string, map[string][]string]
 	Primed  bool
+	Logger  *log.Logger
+	Verbose bool
+	Debug   bool
 }
 
 type DelegationSyncRequest struct {

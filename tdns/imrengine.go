@@ -53,9 +53,9 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 	// 1. Create the cache
 	var err error
 	// RecursorCache, err = NewRRsetCacheNG(viper.GetString("recursorengine.root-hints"))
-	rrcache := NewRRsetCache()
+	rrcache := NewRRsetCache(log.Default(), conf.ImrEngine.Verbose, conf.ImrEngine.Debug)
 	if !rrcache.Primed {
-		rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
+		err = rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
 		if err != nil {
 			Shutdowner(conf, fmt.Sprintf("RecursorEngine: failed to initialize RecursorCache w/ root hints: %v", err))
 		}
@@ -63,7 +63,7 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 
 	conf.Internal.RRsetCache = rrcache
 
-	// Start the ImrEngine
+	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
 	go rrcache.ImrEngine(conf, stopch)
 
 	for rrq := range recursorch {
@@ -79,11 +79,13 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 		// 1. Is the answer in the cache?
 		crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
 		if crrset != nil {
-			resp.RRset = crrset.RRset
+			resp = &ImrResponse{
+				RRset: crrset.RRset,
+			}
 		} else {
 			var err error
-			log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			resp, err = rrcache.IterateOverQuery(rrq.Qname, rrq.Qtype, rrq.Qclass)
+			// log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
+			resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 			if err != nil {
 				log.Printf("Error from IterateOverQuery: %v", err)
 			}
@@ -94,8 +96,8 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 	}
 }
 
-func (rrcache *RRsetCacheT) IterateOverQuery(qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
-	log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
+func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+	log.Printf("ImrQuery: <%s, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 	maxiter := 12
 
 	resp := ImrResponse{
@@ -103,9 +105,22 @@ func (rrcache *RRsetCacheT) IterateOverQuery(qname string, qtype uint16, qclass 
 		Msg:       "ImrEngine: request to look up a RRset",
 	}
 
+	// If a response channel is provided, use it to send responses
+	if respch != nil {
+		defer func() {
+			respch <- &resp
+		}()
+	}
+
+	crrset := rrcache.Get(qname, qtype)
+	if crrset != nil {
+		resp.RRset = crrset.RRset
+		return &resp, nil
+	}
+
 	for {
 		if maxiter <= 0 {
-			log.Printf("*** Recursor: max iterations reached. Giving up.")
+			log.Printf("*** ImrQuery: max iterations reached. Giving up.")
 			return nil, fmt.Errorf("Max iterations reached. Giving up.")
 		} else {
 			maxiter--
@@ -116,31 +131,115 @@ func (rrcache *RRsetCacheT) IterateOverQuery(qname string, qtype uint16, qclass 
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
 			return &resp, err
 		}
-		log.Printf("Recursor: best zone match for qname %q seems to be %q", qname, bestmatch)
-		ss := servers
-		if len(servers) > 4 {
-			ss = servers[:3]
-			ss = append(ss, "...")
+		log.Printf("ImrQuery: best zone match for qname %q seems to be %q", qname, bestmatch)
+		// ss := servers
+
+		switch {
+		case len(servers) == 0:
+			log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
+			cnsrrset := rrcache.Get(bestmatch, dns.TypeNS)
+			if cnsrrset == nil {
+				log.Printf("*** ImrResponder: we also have no nameservers for zone %q, giving up", bestmatch)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
+				return &resp, nil
+			}
+
+			log.Printf("*** but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
+
+			// Create response channel for A and AAAA queries
+			respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
+			// Note: We don't need to close the channel here as it will be garbage collected
+			// when it goes out of scope, even if there are still pending writes to it
+
+			// Launch parallel queries for each nameserver
+			err := rrcache.CollectNSAddresses(cnsrrset.RRset, respch)
+			if err != nil {
+				log.Printf("Error from CollectNSAddresses: %v", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Error from CollectNSAddresses: %v", err)
+				return &resp, err
+			}
+
+			// Process responses until we get a usable address
+			for rrresp := range respch {
+				if rrresp == nil || rrresp.RRset == nil {
+					continue
+				}
+
+				for _, rr := range rrresp.RRset.RRs {
+					switch rr := rr.(type) {
+					case *dns.A:
+						servers = []string{rr.A.String()}
+						// ss = servers
+						log.Printf("ImrResponder: using resolved A address: %v", servers)
+					case *dns.AAAA:
+						servers = []string{rr.AAAA.String()}
+						// ss = servers
+						log.Printf("ImrResponder: using resolved AAAA address: %v", servers)
+					}
+					rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
+					if err != nil {
+						log.Printf("Error from IterativeDNSQuery: %v", err)
+						continue
+					}
+					if rrset != nil {
+						log.Printf("ImrQuery: received response from IterativeDNSQuery:")
+						for _, rr := range rrset.RRs {
+							log.Printf("ImrQuery: %s", rr.String())
+						}
+						resp.RRset = rrset
+						return &resp, nil
+					}
+					if rcode == dns.RcodeNameError {
+						// this is a negative response, which we need to figure out how to represent
+						log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
+						resp.Msg = "NXDOMAIN (negative response type 3)"
+						return &resp, nil
+					}
+					switch context {
+					case ContextReferral:
+						continue // if all is good we will now hit the new referral and get further
+					case ContextNoErrNoAns:
+						resp.Msg = "negative response type 0"
+						return &resp, nil
+					}
+				}
+			}
+
+			// If we get here, we tried all responses without finding a usable address
+			log.Printf("*** ImrQuery: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
+			return &resp, nil
+
+		case len(servers) < 4:
+			// ss = servers
+		default:
+			// ss = servers[:3]
+			// ss = append(servers, "...")
 		}
-		log.Printf("Recursor: sending query to %d servers: %v", len(servers), ss)
-		rrset, rcode, context, err := rrcache.AuthDNSQuery(qname, qtype, servers, log.Default(), true)
+
+		log.Printf("ImrQuery: sending query to %d servers: %v", len(servers), servers)
+		rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error from AuthDNSQuery: %v", err)
+			resp.ErrorMsg = fmt.Sprintf("Error from IterativeDNSQuery: %v", err)
 			return &resp, err
 		}
+
 		if rrset != nil {
-			log.Printf("Recursor: received response from AuthDNSQuery:")
+			log.Printf("ImrQuery: received response from IterativeDNSQuery:")
 			for _, rr := range rrset.RRs {
-				log.Printf("Recursor: %s", rr.String())
+				log.Printf("ImrQuery: %s", rr.String())
 			}
 			resp.RRset = rrset
 			return &resp, nil
 		}
 		if rcode == dns.RcodeNameError {
 			// this is a negative response, which we need to figure out how to represent
-			log.Printf("Recursor: received NXDOMAIN for qname %q, no point in continuing", qname)
+			log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
 			resp.Msg = "NXDOMAIN (negative response type 3)"
 			return &resp, nil
 		}
@@ -155,16 +254,8 @@ func (rrcache *RRsetCacheT) IterateOverQuery(qname string, qtype uint16, qclass 
 }
 
 func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
-	//	qname := r.Question[0].Name
-	//	qtype := r.Question[0].Rrtype
-	//	var dnssec_ok bool
-	//	opt := r.IsEdns0()
-	//	if opt != nil {
-	//		dnssec_ok = opt.Do()
-	//	}
-
+	rd_bit := r.MsgHdr.RecursionDesired
 	m := new(dns.Msg)
-	m.SetRcode(r, dns.RcodeSuccess)
 	m.RecursionAvailable = true
 
 	crrset := rrcache.Get(qname, qtype)
@@ -178,13 +269,16 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 		// XXX: need to fill in more things in the response msg
 		w.WriteMsg(m)
 		return
-	} else {
-		log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
+	}
+
+	m.SetRcode(r, dns.RcodeServerFailure)
+	if rd_bit {
+		log.Printf("ImrResponder: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 		maxiter := 12
 
 		for {
 			if maxiter <= 0 {
-				log.Printf("*** Recursor: max iterations reached. Giving up.")
+				log.Printf("*** ImrResponder: max iterations reached. Giving up.")
 				return
 			} else {
 				maxiter--
@@ -193,58 +287,152 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
-				m.SetRcode(r, dns.RcodeServerFailure)
+				// m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
 				return
 			}
-			log.Printf("Recursor: best zone match for qname %q seems to be %q", qname, bestmatch)
+			log.Printf("ImrResponder: best zone match for qname %q seems to be %q", qname, bestmatch)
 			ss := servers
-			if len(servers) > 4 {
+			switch {
+			case len(servers) == 0:
+				log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
+				cnsrrset := rrcache.Get(bestmatch, dns.TypeNS)
+				if cnsrrset == nil {
+					log.Printf("*** ImrResponder: we also have no nameservers for zone %q, giving up", bestmatch)
+					// m.SetRcode(r, dns.RcodeServerFailure)
+					w.WriteMsg(m)
+					return
+				}
+
+				log.Printf("*** but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
+
+				// Create response channel for A and AAAA queries
+				respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
+				// Note: We don't need to close the channel here as it will be garbage collected
+				// when it goes out of scope, even if there are still pending writes to it
+
+				// Launch parallel queries for each nameserver
+				err := rrcache.CollectNSAddresses(cnsrrset.RRset, respch)
+				if err != nil {
+					log.Printf("Error from CollectNSAddresses: %v", err)
+					// m.SetRcode(r, dns.RcodeServerFailure)
+					w.WriteMsg(m)
+					return
+				}
+
+				// Process responses until we get a usable address
+				for resp := range respch {
+					if resp == nil || resp.RRset == nil {
+						continue
+					}
+
+					for _, rr := range resp.RRset.RRs {
+						switch rr := rr.(type) {
+						case *dns.A:
+							servers = []string{rr.A.String()}
+							log.Printf("ImrResponder: using resolved A address: %v", servers)
+						case *dns.AAAA:
+							servers = []string{rr.AAAA.String()}
+							log.Printf("ImrResponder: using resolved AAAA address: %v", servers)
+						}
+						rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
+						if err != nil {
+							log.Printf("Error from IterativeDNSQuery: %v", err)
+							continue
+						}
+						done, err := ProcessAuthDNSResponse(qname, rrset, rcode, context, dnssec_ok, m, w, r)
+						if err != nil {
+							return
+						}
+						if done {
+							return
+						}
+						continue // try next nameserver
+					}
+				}
+
+				// If we get here, we tried all responses without finding a usable address
+				log.Printf("*** ImrResponder: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
+				// m.SetRcode(r, dns.RcodeServerFailure)
+				w.WriteMsg(m)
+				return
+
+			case len(servers) < 4:
+				ss = servers
+			default:
 				ss = servers[:3]
 				ss = append(ss, "...")
 			}
-			log.Printf("Recursor: sending query to %d servers: %v", len(servers), ss)
-			rrset, rcode, context, err := rrcache.AuthDNSQuery(qname, qtype, servers, log.Default(), true)
+
+			log.Printf("ImrResponder: sending query to %d servers: %v", len(servers), ss)
+			rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from AuthDNSQuery: %v", err)
-				m.SetRcode(r, dns.RcodeServerFailure)
+				// m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
 				return
 			}
-			if rrset != nil {
-				log.Printf("Recursor: received response from AuthDNSQuery:")
-				for _, rr := range rrset.RRs {
-					log.Printf("Recursor: %s", rr.String())
-				}
-				m.Answer = rrset.RRs
-				if dnssec_ok {
-					m.Answer = append(m.Answer, rrset.RRSIGs...)
-				}
-				w.WriteMsg(m)
+			done, err := ProcessAuthDNSResponse(qname, rrset, rcode, context, dnssec_ok, m, w, r)
+			if err != nil {
 				return
 			}
-			if rcode == dns.RcodeNameError {
-				// this is a negative response, which we need to figure out how to represent
-				log.Printf("Recursor: received NXDOMAIN for qname %q, no point in continuing", qname)
-				// resp.Msg = "NXDOMAIN (negative response type 3)"
-				m.SetRcode(r, rcode)
-				// XXX: we need the contents of the Authority section here
-				w.WriteMsg(m)
-			}
-			switch context {
-			case ContextReferral:
-				continue // if all is good we will now hit the new referral and get further
-			case ContextNoErrNoAns:
-				// resp.Msg = "negative response type 0"
-				// break outerLoop
-				m.SetRcode(r, dns.RcodeSuccess)
-				w.WriteMsg(m)
+			if done {
 				return
 			}
+			continue
 		}
+	} else {
+		log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for but RD bit is not set", qname, dns.TypeToString[qtype])
+		m.SetRcode(r, dns.RcodeRefused)
+		m.Ns = append(m.Ns, &dns.TXT{
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+			Txt: []string{"not in cache, and RD bit not set"},
+		})
+		w.WriteMsg(m)
+		return
 	}
+}
+
+// returns true if we have a response (i.e. we're done), false if we have an error
+// all errors are treated as "done"
+func ProcessAuthDNSResponse(qname string, rrset *RRset, rcode int, context CacheContext, dnssec_ok bool, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
+	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, dnssec_ok: %v", qname, rrset, rcode, context, dnssec_ok)
+	m.SetRcode(r, rcode)
+	if rrset != nil {
+		log.Printf("ImrResponder: received response from IterativeDNSQuery:")
+		for _, rr := range rrset.RRs {
+			log.Printf("ImrResponder: %s", rr.String())
+		}
+		m.Answer = rrset.RRs
+		if dnssec_ok {
+			m.Answer = append(m.Answer, rrset.RRSIGs...)
+		}
+		w.WriteMsg(m)
+		return true, nil
+	}
+	if rcode == dns.RcodeNameError {
+		// this is a negative response, which we need to figure out how to represent
+		log.Printf("ImrResponder: received NXDOMAIN for qname %q, no point in continuing", qname)
+		// resp.Msg = "NXDOMAIN (negative response type 3)"
+		// m.SetRcode(r, rcode)
+		// XXX: we need the contents of the Authority section here
+		w.WriteMsg(m)
+		return true, nil
+	}
+	switch context {
+	case ContextReferral:
+		// continue // if all is good we will now hit the new referral and get further
+		return false, nil
+	case ContextNoErrNoAns:
+		// resp.Msg = "negative response type 0"
+		// break outerLoop
+		m.SetRcode(r, dns.RcodeSuccess)
+		w.WriteMsg(m)
+		return true, nil
+	}
+	return false, nil
 }
 
 func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, []string, error) {
@@ -275,14 +463,14 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 				go func(addr, net string) {
 					log.Printf("ImrEngine: serving on %s (%s)\n", addr, net)
 					server := &dns.Server{
-						Addr:          addr,
-						Net:           net,
-						MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+						Addr: addr,
+						Net:  net,
+						// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 					}
 
 					// Must bump the buffer size of incoming UDP msgs, as updates
 					// may be much larger then queries
-					server.UDPSize = dns.DefaultMsgSize // 4096
+					// server.UDPSize = dns.DefaultMsgSize // 4096
 					if err := server.ListenAndServe(); err != nil {
 						log.Printf("Failed to setup the %s server: %s", net, err.Error())
 					} else {
@@ -376,6 +564,8 @@ func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWri
 		if opt != nil {
 			dnssec_ok = opt.Do()
 		}
+		rd := r.MsgHdr.RecursionDesired
+		log.Printf("RecursionDesired: %v", rd)
 		// log.Printf("DNSSEC OK: %v", dnssec_ok)
 
 		qtype := r.Question[0].Qtype
@@ -393,7 +583,7 @@ func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWri
 
 			qname = strings.ToLower(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
-				ServerTldResponse(qname, w, r)
+				DotServerQnameResponse(qname, w, r)
 				return
 			}
 
@@ -406,7 +596,7 @@ func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWri
 	}
 }
 
-func ServerTldResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
+func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeRefused)
 	qname = strings.ToLower(qname)
@@ -437,7 +627,11 @@ func ServerTldResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 		m.SetRcode(r, dns.RcodeSuccess)
 		m.Answer = append(m.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-			Txt: []string{"Johan Stenstam <johan.stenstam@internetstiftelsen.se>", "Erik Bergström <erik.bergstrom@internetstiftelsen.se>"},
+			Txt: []string{
+				"Johan Stenstam <johan.stenstam@internetstiftelsen.se>",
+				"Erik Bergström <erik.bergstrom@internetstiftelsen.se>",
+				"Leon Fernandez <leon.fernandez@internetstiftelsen.se>",
+			},
 		})
 
 	case "hostname.server.":
@@ -453,5 +647,4 @@ func ServerTldResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	}
 	w.WriteMsg(m)
 	return
-	// }
 }

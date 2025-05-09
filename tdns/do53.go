@@ -6,7 +6,6 @@ package tdns
 
 import (
 	"crypto/tls"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -207,49 +206,11 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				m.SetRcode(r, dns.RcodeRefused)
 				qname = strings.ToLower(qname)
 				if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
-					log.Printf("DnsHandler: Qname is '%s', which is not a known zone, but likely a query for the .server CH tld", qname)
-					switch qname {
-					case "id.server.":
-						m.SetRcode(r, dns.RcodeSuccess)
-						v := viper.GetString("server.id")
-						if v == "" {
-							v = "tdnsd - an authoritative name server for experiments and POCs"
-						}
-						m.Answer = append(m.Answer, &dns.TXT{
-							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
-						})
-					case "version.server.":
-						m.SetRcode(r, dns.RcodeSuccess)
-						v := viper.GetString("server.version")
-						if v == "" {
-							v = fmt.Sprintf("%s version %s", Globals.App.Name, Globals.App.Version)
-						} else if strings.Contains(v, "{version}") {
-							v = strings.Replace(v, "{version}", Globals.App.Version, -1)
-						}
-						m.Answer = append(m.Answer, &dns.TXT{
-							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
-						})
-					case "authors.server.":
-						m.SetRcode(r, dns.RcodeSuccess)
-						m.Answer = append(m.Answer, &dns.TXT{
-							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-							Txt: []string{"Johan Stenstam <johani@johani.org>"},
-						})
-
-					case "hostname.server.":
-						m.SetRcode(r, dns.RcodeSuccess)
-						v := viper.GetString("server.hostname")
-						if v == "" {
-							v = "a.random.internet.host."
-						}
-						m.Answer = append(m.Answer, &dns.TXT{
-							Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
-						})
-					default:
-					}
-					w.WriteMsg(m)
+					DotServerQnameResponse(qname, w, r)
 					return
 				}
+
+				// We don't have the zone, and it's not a .server CH tld query, so we return a REFUSED
 				w.WriteMsg(m)
 				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
 			}

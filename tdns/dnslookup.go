@@ -333,10 +333,10 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 
 	crrset := rrcache.Get(qname, qtype)
 	if crrset != nil {
-		lg.Printf("AuthDNSQuery: found %s %s in cache (result=%s)", qname, dns.TypeToString[qtype], CacheContextToString[crrset.Context])
+		lg.Printf("AuthDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], CacheContextToString[crrset.Context])
 		return crrset.RRset, int(crrset.Rcode), crrset.Context, nil
 	}
-	lg.Printf("AuthDNSQuery: answer not present in cache")
+	lg.Printf("AuthDNSQuery: answer to <%s, %s> not present in cache", qname, dns.TypeToString[qtype])
 	var rrset RRset
 	var rcode int
 
@@ -372,6 +372,56 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					rrset.RRs = append(rrset.RRs, rr)
 				case dns.TypeRRSIG:
 					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				case dns.TypeCNAME:
+					rrset.RRs = append(rrset.RRs, rr)
+					// This is a CNAME RR, we need to look up the target of the CNAME
+					target := rr.(*dns.CNAME).Target
+					maxchase := 10
+					for i := 0; i < maxchase; i++ {
+						lg.Printf("*** AuthDNSQuery: found CNAME for %s: %s. Chasing it.", qname, target)
+						// We need to look up the target of the CNAME
+						tmprrset, rcode, context, err := rrcache.AuthDNSQuery(target, qtype, nameservers, lg, verbose)
+						if err != nil {
+							lg.Printf("*** AuthDNSQuery: Error from AuthDNSQuery: %v", err)
+							return nil, rcode, context, err
+						}
+						switch {
+						case tmprrset != nil && len(tmprrset.RRs) != 0:
+							rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
+							if tmprrset.RRs[0].Header().Rrtype == dns.TypeCNAME {
+								// Another CNAME; continue chasing
+								target = tmprrset.RRs[0].(*dns.CNAME).Target
+								continue
+							} else {
+								// seems that we have found the answer; cache it and return
+								rrcache.Set(qname, qtype, &CachedRRset{
+									Name:       qname,
+									RRtype:     qtype,
+									Rcode:      uint8(rcode),
+									RRset:      &rrset,
+									Context:    ContextAnswer,
+									Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+								})
+								return &rrset, rcode, ContextAnswer, nil
+							}
+
+						case rcode == dns.RcodeNameError:
+							// This is a negative response, and <target, qtype> has already been cached
+							// now we only need to cache <qname, qtype>
+							// XXX: Is this correct? This is when we have a CNAME -> NXDOMAIN chain
+							rrcache.Set(qname, qtype, &CachedRRset{
+								Name:    qname,
+								RRtype:  qtype,
+								RRset:   nil,
+								Context: ContextNXDOMAIN,
+							})
+							return nil, rcode, context, nil
+
+						default:
+							// XXX: Here we should also deal with ContextReferral and ContextNoErrNoAns
+							break
+						}
+					}
 				default:
 					lg.Printf("Got a %s RR when looking for %s %s",
 						dns.TypeToString[t], qname,
@@ -543,6 +593,389 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 		}
 	}
 	return &rrset, rcode, ContextNoErrNoAns, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+}
+
+// force is true if we should force a lookup even if the answer is in the cache
+func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, nameservers []string, force bool) (*RRset, int, CacheContext, error) {
+	lg := rrcache.Logger
+
+	lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d nameservers: %v", qname, dns.TypeToString[qtype], len(nameservers), nameservers)
+
+	if !force {
+		crrset := rrcache.Get(qname, qtype)
+		if crrset != nil {
+			lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], CacheContextToString[crrset.Context])
+			return crrset.RRset, int(crrset.Rcode), crrset.Context, nil
+		} else {
+			lg.Printf("IterativeDNSQuery: answer to <%s, %s> not present in cache", qname, dns.TypeToString[qtype])
+		}
+	} else {
+		lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
+	}
+	var rrset RRset
+	var rcode int
+
+	m := new(dns.Msg)
+	m.SetQuestion(qname, qtype)
+	m.SetEdns0(4096, true)
+	for _, ns := range nameservers {
+		if ns[len(ns)-3:] != ":53" {
+			ns = net.JoinHostPort(ns, "53")
+		}
+		if rrcache.Verbose {
+			lg.Printf("IterativeDNSQuery: using nameserver %s for <%s, %s> query\n",
+				ns, qname, dns.TypeToString[qtype])
+		}
+		r, err := dns.Exchange(m, ns)
+		if err != nil && rrcache.Verbose {
+			lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v", err)
+			continue // go to next server
+		}
+
+		if r == nil {
+			continue
+		}
+		rcode = r.MsgHdr.Rcode
+
+		switch {
+		case len(r.Answer) != 0:
+			lg.Printf("*** IterativeDNSQuery: there is stuff in Answer section")
+			for _, rr := range r.Answer {
+				switch t := rr.Header().Rrtype; t {
+				case qtype:
+					rrset.RRs = append(rrset.RRs, rr)
+				case dns.TypeRRSIG:
+					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				case dns.TypeCNAME:
+					rrset.RRs = append(rrset.RRs, rr)
+					// This is a CNAME RR, we need to look up the target of the CNAME
+					target := rr.(*dns.CNAME).Target
+					maxchase := 10
+					for i := 0; i < maxchase; i++ {
+						lg.Printf("*** IterativeDNSQuery: found CNAME for %s: %s, Chasing it.", qname, target)
+						// We need to look up the target of the CNAME
+						bestmatch, tmpservers, err := rrcache.FindClosestKnownZone(target)
+						if err != nil {
+							lg.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZone: %v", err)
+							return nil, dns.RcodeServerFailure, ContextFailure, err
+						}
+						lg.Printf("*** IterativeDNSQuery: best match for target %s is %s, using %d servers", target, bestmatch, len(tmpservers))
+						tmprrset, rcode, context, err := rrcache.IterativeDNSQuery(target, qtype, tmpservers, false)
+						if err != nil {
+							lg.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
+							return nil, rcode, context, err
+						}
+
+						switch {
+						case tmprrset != nil && len(tmprrset.RRs) != 0:
+							rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
+							if tmprrset.RRs[0].Header().Rrtype == dns.TypeCNAME {
+								// Another CNAME; continue chasing
+								target = tmprrset.RRs[0].(*dns.CNAME).Target
+								continue
+							} else {
+								// seems that we have found the answer; cache it and return
+								rrcache.Set(qname, qtype, &CachedRRset{
+									Name:       qname,
+									RRtype:     qtype,
+									Rcode:      uint8(rcode),
+									RRset:      &rrset,
+									Context:    ContextAnswer,
+									Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+								})
+								return &rrset, rcode, ContextAnswer, nil
+							}
+
+						case rcode == dns.RcodeNameError:
+							// This is a negative response, and <target, qtype> has already been cached
+							// now we only need to cache <qname, qtype>
+							// XXX: Is this correct? This is when we have a CNAME -> NXDOMAIN chain
+							rrcache.Set(qname, qtype, &CachedRRset{
+								Name:    qname,
+								RRtype:  qtype,
+								Rcode:   uint8(rcode),
+								RRset:   nil,
+								Context: ContextNXDOMAIN,
+								// XXX: this is wrong. we should use the TTL from the SOA
+								Expiration: time.Now().Add(time.Duration(15*60) * time.Second),
+							})
+							return nil, rcode, context, nil
+
+						default:
+							// XXX: Here we should also deal with ContextReferral and ContextNoErrNoAns
+							// XXX: ContextReferral should already be covered below (in the recursive
+							// call to IterativeDNSQuery)
+							break
+						}
+					}
+				default:
+					lg.Printf("Got a %s RR when looking for %s %s",
+						dns.TypeToString[t], qname,
+						dns.TypeToString[qtype])
+				}
+			}
+
+			rrcache.Set(qname, qtype, &CachedRRset{
+				Name:       qname,
+				RRtype:     qtype,
+				Rcode:      uint8(rcode),
+				RRset:      &rrset,
+				Context:    ContextAnswer,
+				Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+			})
+
+			// 2. Collect the NS RRset from Authority section (if qname=NS then from Answer section)
+			nsMap := map[string]bool{}
+			zonename := ""
+			nsrrs := []dns.RR{}
+			switch qtype {
+			case dns.TypeNS:
+				nsrrs = r.Answer
+			default:
+				nsrrs = r.Ns
+			}
+
+			for _, rr := range nsrrs {
+				switch rr.(type) {
+				case *dns.NS:
+					nsMap[rr.(*dns.NS).Ns] = true
+					zonename = rr.Header().Name
+				}
+			}
+
+			// 3. Collect the glue from Additional section
+			_, err := rrcache.CollectNSAddressesFromAdditional(&rrset, zonename, nsMap, r)
+			if err != nil {
+				log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
+				return nil, rcode, ContextFailure, err
+			}
+
+			return &rrset, rcode, ContextAnswer, nil
+
+		case len(r.Ns) != 0:
+			// This is likely either a negative response or a referral
+			lg.Printf("*** IterativeDNSQuery: there is stuff in Authority section")
+			switch rcode {
+			case dns.RcodeSuccess:
+				// this is either a referral or a negative response
+				var rrset RRset
+				var zonename string
+
+				// 1. Collect the NS RRset from the Authority section
+				lg.Printf("*** IterativeDNSQuery: rcode=NOERROR, this is a referral or neg resp")
+				nsMap := map[string]bool{}
+				for _, rr := range r.Ns {
+					switch rr.(type) {
+					case *dns.NS:
+						// this is a referral
+						rrset.RRs = append(rrset.RRs, rr)
+						nsMap[rr.(*dns.NS).Ns] = true
+					case *dns.SOA:
+						// this is a negative response, but is the SOA right?
+						if strings.HasSuffix(qname, rr.Header().Name) {
+							// Yes, this SOA may auth a negative response for qname
+							log.Printf("*** IterativeDNSQuery: found SOA in Auth, it was a neg resp:\n%s", rr.String())
+							rrcache.Set(qname, qtype, &CachedRRset{
+								Name:       qname,
+								RRtype:     qtype,
+								Rcode:      uint8(rcode),
+								RRset:      nil,
+								Context:    ContextNoErrNoAns,
+								Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							})
+							return nil, rcode, ContextNoErrNoAns, nil
+						} else {
+							log.Printf("*** The SOA %q is not correct to speak for qname %q", rr.Header().Name, qname)
+							log.Printf("*** should never get here ***")
+						}
+					default:
+					}
+				}
+
+				// Now we know that this is a referral; ensure we collect all the NS addresses
+				err := rrcache.CollectNSAddresses(&rrset, nil) // nil respch, we don't need the results here
+				if err != nil {
+					log.Printf("*** IterativeDNSQuery: Error from CollectNSAddresses: %v", err)
+					return nil, rcode, ContextFailure, err
+				}
+
+				if len(rrset.RRs) != 0 {
+					zonename = rrset.RRs[0].Header().Name
+					rrset.Name = zonename
+					rrset.Class = dns.ClassINET
+					rrset.RRtype = dns.TypeNS
+					rrcache.Set(zonename, dns.TypeNS, &CachedRRset{
+						Name:       zonename,
+						RRtype:     dns.TypeNS,
+						Rcode:      uint8(rcode),
+						RRset:      &rrset,
+						Context:    ContextReferral,
+						Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+					})
+				}
+
+				// 2. Collect any glue from Additional
+				servers, err := rrcache.CollectNSAddressesFromAdditional(&rrset, zonename, nsMap, r)
+				if err != nil {
+					log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
+					return nil, rcode, ContextFailure, err
+				}
+
+				switch {
+				case len(servers) == 0:
+					// we have no servers to try
+					return nil, rcode, ContextReferral, nil
+				default:
+					// we have a small number of servers to try
+					// XXX: here we should collect all the server addresses and reissue the query
+					tmprrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, force)
+					if err != nil {
+						return nil, rcode, context, err
+					}
+					return tmprrset, rcode, context, nil
+				}
+
+				return nil, rcode, ContextReferral, nil
+
+			case dns.RcodeNameError:
+				// this is a negative response
+				// For NXDOMAIN, verify SOA exists in authority section
+				var foundSOA bool
+				var ttl uint32
+				for _, rr := range r.Ns {
+					if rr.Header().Rrtype == dns.TypeSOA {
+						foundSOA = true
+						ttl = rr.Header().Ttl
+						break
+					}
+				}
+				if !foundSOA {
+					// Invalid NXDOMAIN response without SOA
+					continue // try next server
+				}
+				// Now we know this is an NXDOMAIN
+				rrcache.Set(qname, qtype, &CachedRRset{
+					Name:       qname,
+					RRtype:     qtype,
+					RRset:      nil,
+					Context:    ContextNXDOMAIN,
+					Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
+				})
+
+				return nil, rcode, ContextNXDOMAIN, nil
+			default:
+				log.Printf("*** IterativeDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
+			}
+		default:
+			if rcode == dns.RcodeSuccess {
+				return &rrset, rcode, ContextFailure, nil // no point in continuing
+			}
+			continue // go to next server
+		}
+	}
+	return &rrset, rcode, ContextNoErrNoAns, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+}
+
+func (rrcache *RRsetCacheT) CollectNSAddresses(rrset *RRset, respch chan *ImrResponse) error {
+	if rrset == nil || len(rrset.RRs) == 0 {
+		return fmt.Errorf("rrset is nil or empty")
+	}
+
+	for _, rr := range rrset.RRs {
+		ns := rr.(*dns.NS).Ns
+		// Query for A records
+		go func(nsname string) {
+			log.Printf("CollectNSAddresses: querying for %s A records", nsname)
+			_, err := rrcache.ImrQuery(nsname, dns.TypeA, dns.ClassINET, respch)
+			if err != nil {
+				log.Printf("Error querying A for %s: %v", nsname, err)
+			}
+		}(ns)
+
+		// Query for AAAA records
+		go func(nsname string) {
+			log.Printf("CollectNSAddresses: querying for %s AAAA records", nsname)
+			_, err := rrcache.ImrQuery(nsname, dns.TypeAAAA, dns.ClassINET, respch)
+			if err != nil {
+				log.Printf("Error querying AAAA for %s: %v", nsname, err)
+			}
+		}(ns)
+	}
+	return nil
+}
+
+func (rrcache *RRsetCacheT) CollectNSAddressesFromAdditional(nsrrset *RRset, zonename string, nsMap map[string]bool, r *dns.Msg) ([]string, error) {
+	if r == nil {
+		return nil, fmt.Errorf("message is nil")
+	}
+
+	if Globals.Debug {
+		log.Printf("*** CollectNSAddrsFromAdditional: zonename: %q", zonename)
+		log.Printf("*** CollectNSAddrsFromAdditional: nsMap: %+v", nsMap)
+	}
+
+	// 2. Collect any glue from Additional
+	glue4Map := map[string]RRset{}
+	glue6Map := map[string]RRset{}
+	var servers []string
+	for _, rr := range r.Extra {
+		name := rr.Header().Name
+		if _, exist := nsMap[name]; !exist {
+			log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
+			continue
+		}
+		switch rr.(type) {
+		case *dns.A:
+			addr := net.JoinHostPort(rr.(*dns.A).A.String(), "53")
+			servers = append(servers, addr)
+			tmp := glue4Map[name]
+			tmp.RRs = append(tmp.RRs, rr)
+			glue4Map[name] = tmp
+
+		case *dns.AAAA:
+			addr := net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53")
+			servers = append(servers, addr)
+			tmp := glue6Map[name]
+			tmp.RRs = append(tmp.RRs, rr)
+			glue6Map[name] = tmp
+
+		case *dns.SVCB:
+			log.Printf("Additional contains an SVCB, here we should collect the ALPN")
+		default:
+		}
+	}
+
+	log.Printf("*** CollectNSAddrsFromAdditional: adding %d servers for zone %q to cache", len(servers), zonename)
+	rrcache.Servers.Set(zonename, servers)
+
+	for nsname, rrset := range glue4Map {
+		if len(rrset.RRs) == 0 {
+			continue
+		}
+		rr := rrset.RRs[0]
+		rrcache.Set(nsname, dns.TypeA, &CachedRRset{
+			Name:       nsname,
+			RRtype:     dns.TypeA,
+			RRset:      &rrset,
+			Context:    ContextGlue,
+			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+		})
+	}
+
+	for nsname, rrset := range glue6Map {
+		if len(rrset.RRs) == 0 {
+			continue
+		}
+		rr := rrset.RRs[0]
+		rrcache.Set(nsname, dns.TypeAAAA, &CachedRRset{
+			Name:       nsname,
+			RRtype:     dns.TypeAAAA,
+			RRset:      &rrset,
+			Context:    ContextGlue,
+			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+		})
+	}
+	return servers, nil
 }
 
 func getMinTTL(rrs []dns.RR) time.Duration {

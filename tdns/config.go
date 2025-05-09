@@ -59,6 +59,8 @@ type ImrEngineConf struct {
 	CertFile   string
 	KeyFile    string
 	Transports []string `validate:"required"` // "do53", "dot", "doh", "doq"
+	Verbose    bool
+	Debug      bool
 }
 
 type ApiServerConf struct {

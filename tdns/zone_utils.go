@@ -205,7 +205,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		}
 	}
 
-	// If this is a multi-signer zone, check for changes to the MSIGNER and DNSKEY RRsets; notify MultiSignerSyncEngine if needed
+	// If this is a multi-signer zone, check for changes to the HSYNC and DNSKEY RRsets; notify MultiSignerSyncEngine if needed
 	if zd.Options[OptMultiSigner] {
 		if keyschanged {
 			zd.Logger.Printf("FetchFromFile: Zone %s: DNSKEY RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
@@ -230,7 +230,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 		}
 
 		if hsyncchanged {
-			zd.Logger.Printf("FetchFromFile: Zone %s: HSYNC RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
+			zd.Logger.Printf("FetchFromFile: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
 
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",

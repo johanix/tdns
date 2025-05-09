@@ -41,7 +41,7 @@ func create[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V
 }
 
 // Creates a new concurrent map.
-func NewCmap[V any]() ConcurrentMap[string, V] {
+func NewCmap[V any]() *ConcurrentMap[string, V] {
 	cm := create[string, V](fnv32)
 	return &cm
 }

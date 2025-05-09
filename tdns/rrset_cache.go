@@ -44,33 +44,37 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
 
 // var RRsetCache = NewRRsetCache()
 
-func NewRRsetCache() *RRsetCacheT {
+func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	return &RRsetCacheT{
 		RRsets:  NewCmap[CachedRRset](),
-		Servers: NewCmap[[]string](),
+		Servers: NewCmap[[]string](), // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
+		// Servers: NewCmap[map[string][]string](), // servers stored as map[string][]string{} a la map[addr][]string{"dot", "doq", "do53"}
+		Logger:  lg,
+		Verbose: verbose,
+		Debug:   debug,
 	}
 }
 
-func (rsc *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
+func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
-	tmp, ok := rsc.RRsets.Get(lookupKey)
+	tmp, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
 		return nil
 	}
 	if tmp.Expiration.Before(time.Now()) {
-		rsc.RRsets.Remove(lookupKey)
+		rrcache.RRsets.Remove(lookupKey)
 		log.Printf("RRsetCache: Removed expired key %s", lookupKey)
 		return nil
 	}
 	return &tmp
 }
 
-func (rsc *RRsetCacheT) Set(qname string, qtype uint16, rrset *CachedRRset) {
+func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, rrset *CachedRRset) {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
-	rsc.RRsets.Set(lookupKey, *rrset)
+	rrcache.RRsets.Set(lookupKey, *rrset)
 }
 
-func (rsc *RRsetCacheT) PrimeWithHints(hintsfile string) error {
+func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 	// Verify root hints file exists
 	if _, err := os.Stat(hintsfile); err != nil {
 		return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
@@ -123,15 +127,18 @@ func (rsc *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 	// Store NS records for root
 	if len(nsRecords) > 0 {
 		log.Printf("Found %d NS RRs", len(nsRecords))
-		rsc.Set(".", dns.TypeNS, &CachedRRset{
+		rrcache.Set(".", dns.TypeNS, &CachedRRset{
+			Name:    ".",
+			RRtype:  dns.TypeNS,
 			Context: ContextHint,
 			RRset: &RRset{
 				Name:   ".",
-				Class:  dns.ClassINET,
 				RRtype: dns.TypeNS,
+				Class:  dns.ClassINET,
 				RRs:    nsRecords,
 				RRSIGs: nil, // No DNSSEC in root hints
 			},
+			Expiration: time.Now().Add(time.Duration(nsRecords[0].Header().Ttl) * time.Second),
 		})
 	} else {
 		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
@@ -168,7 +175,9 @@ func (rsc *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 
 		// Create RRset for each type
 		for rrtype, records := range typeGroups {
-			rsc.Set(name, rrtype, &CachedRRset{
+			rrcache.Set(name, rrtype, &CachedRRset{
+				Name:    name,
+				RRtype:  rrtype,
 				Context: ContextHint,
 				RRset: &RRset{
 					Name:   name,
@@ -177,23 +186,26 @@ func (rsc *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 					RRs:    records,
 					RRSIGs: nil, // No DNSSEC in root hints
 				},
+				Expiration: time.Now().Add(time.Duration(records[0].Header().Ttl) * time.Second),
 			})
 		}
 
 		// cache.Data[name] = ownerData
 	}
 
-	rsc.Servers.Set(".", servers)
+	rrcache.Servers.Set(".", servers)
 
-	// var keys []string
-	// for k, _ := range cache.Data {
-	// 	keys = append(keys, k)
-	// }
-	// log.Printf("Keys: %v", rsc.RRsets.Keys())
+	rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
+	if err != nil {
+		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
+	}
+	if rrset == nil {
+		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
+	}
 
 	log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
 
-	rsc.Primed = true
+	rrcache.Primed = true
 
 	return nil
 }
