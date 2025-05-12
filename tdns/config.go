@@ -58,10 +58,22 @@ type ImrEngineConf struct {
 	Addresses  []string `validate:"required"`
 	CertFile   string
 	KeyFile    string
-	Transports []string `validate:"required"` // "do53", "dot", "doh", "doq"
+	Transports []string      `validate:"required"` // "do53", "dot", "doh", "doq"
+	Stubs      []ImrStubConf `yaml:"stubs"`
 	Verbose    bool
 	Debug      bool
 }
+type ImrStubConf struct {
+	Zone string `validate:"required"`
+	// Servers []StubServerConf `validate:"required"`
+	Servers []AuthServer `validate:"required"`
+}
+
+// type StubServerConf struct {
+// 	Name  string   `validate:"required"`
+// 	Addrs []string `validate:"required"`
+// 	Alpn  []string `validate:"required"`
+// }
 
 type ApiServerConf struct {
 	Addresses []string `validate:"required"` // Must be in addr:port format

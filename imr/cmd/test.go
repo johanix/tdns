@@ -139,6 +139,25 @@ func init() {
 			}
 		},
 	}
+	dumpAuthServersCmd := &cobra.Command{
+		Use:   "auth-servers",
+		Short: "List auth servers in the RecursorCache",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("Listing auth servers in the RecursorCache\n")
+			if conf.Internal.RRsetCache == nil {
+				fmt.Println("RecursorCache is nil")
+				return
+			}
+
+			// Get all keys from the concurrent map
+			for item := range conf.Internal.RRsetCache.ServerMap.IterBuffered() {
+				fmt.Printf("\nZone: %s\n", item.Key)
+				for _, server := range item.Val {
+					fmt.Printf("Server: %q (%s)\tAddrs: %v\tAlpn: %v\tPrefTransport: %q\n", server.Name, server.Src, server.Addrs, server.Alpn, server.PrefTransport)
+				}
+			}
+		},
+	}
 
 	dumpKeysCmd := &cobra.Command{
 		Use:   "keys",
@@ -157,7 +176,7 @@ func init() {
 	}
 
 	rootCmd.AddCommand(dumpCmd, dumpSuffixCmd)
-	dumpCmd.AddCommand(dumpServersCmd, dumpKeysCmd)
+	dumpCmd.AddCommand(dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd)
 	rootCmd.AddCommand(dumpServersCmd)
 
 	// List command - takes zone name

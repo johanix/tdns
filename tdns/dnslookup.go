@@ -496,6 +496,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 				glue4Map := map[string]RRset{}
 				glue6Map := map[string]RRset{}
 				var servers []string
+				// serverMap := map[string][]string{}
 				for _, rr := range r.Extra {
 					name := rr.Header().Name
 					if _, exist := nsMap[name]; !exist {
@@ -504,15 +505,17 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 					}
 					switch rr.(type) {
 					case *dns.A:
-						addr := net.JoinHostPort(rr.(*dns.A).A.String(), "53")
-						servers = append(servers, addr)
+						addr := rr.(*dns.A).A.String()
+						// serverMap[addr] = append(serverMap[addr], "do53")
+						servers = append(servers, net.JoinHostPort(addr, "53"))
 						tmp := glue4Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue4Map[name] = tmp
 
 					case *dns.AAAA:
-						addr := net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53")
-						servers = append(servers, addr)
+						addr := rr.(*dns.AAAA).AAAA.String()
+						// serverMap[addr] = append(serverMap[addr], "do53")
+						servers = append(servers, net.JoinHostPort(addr, "53"))
 						tmp := glue6Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue6Map[name] = tmp
@@ -744,7 +747,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, namese
 			}
 
 			// 3. Collect the glue from Additional section
-			_, err := rrcache.CollectNSAddressesFromAdditional(&rrset, zonename, nsMap, r)
+			_, err := rrcache.ParseAdditionalForNSAddrs("answer", &rrset, zonename, nsMap, r)
 			if err != nil {
 				log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
 				return nil, rcode, ContextFailure, err
@@ -815,7 +818,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, namese
 				}
 
 				// 2. Collect any glue from Additional
-				servers, err := rrcache.CollectNSAddressesFromAdditional(&rrset, zonename, nsMap, r)
+				servers, err := rrcache.ParseAdditionalForNSAddrs("authority", &rrset, zonename, nsMap, r)
 				if err != nil {
 					log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
 					return nil, rcode, ContextFailure, err
@@ -904,7 +907,7 @@ func (rrcache *RRsetCacheT) CollectNSAddresses(rrset *RRset, respch chan *ImrRes
 	return nil
 }
 
-func (rrcache *RRsetCacheT) CollectNSAddressesFromAdditional(nsrrset *RRset, zonename string, nsMap map[string]bool, r *dns.Msg) ([]string, error) {
+func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset, zonename string, nsMap map[string]bool, r *dns.Msg) ([]string, error) {
 	if r == nil {
 		return nil, fmt.Errorf("message is nil")
 	}
@@ -918,23 +921,42 @@ func (rrcache *RRsetCacheT) CollectNSAddressesFromAdditional(nsrrset *RRset, zon
 	glue4Map := map[string]RRset{}
 	glue6Map := map[string]RRset{}
 	var servers []string
+	serverMap := map[string]*AuthServer{}
 	for _, rr := range r.Extra {
 		name := rr.Header().Name
 		if _, exist := nsMap[name]; !exist {
 			log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
 			continue
 		}
+		serversrc := ""
+		_, exist := serverMap[name]
+		if !exist {
+			switch src {
+			case "answer":
+				serversrc = "answer"
+			case "authority":
+				serversrc = "referral"
+			}
+			serverMap[name] = &AuthServer{
+				Name: name,
+				Alpn: []string{"do53"},
+				Src:  serversrc,
+			}
+		}
+
 		switch rr.(type) {
 		case *dns.A:
-			addr := net.JoinHostPort(rr.(*dns.A).A.String(), "53")
-			servers = append(servers, addr)
+			addr := rr.(*dns.A).A.String()
+			servers = append(servers, net.JoinHostPort(addr, "53"))
+			serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
 			tmp := glue4Map[name]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[name] = tmp
 
 		case *dns.AAAA:
-			addr := net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53")
-			servers = append(servers, addr)
+			addr := rr.(*dns.AAAA).AAAA.String()
+			servers = append(servers, net.JoinHostPort(addr, "53"))
+			serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
 			tmp := glue6Map[name]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[name] = tmp
@@ -975,6 +997,9 @@ func (rrcache *RRsetCacheT) CollectNSAddressesFromAdditional(nsrrset *RRset, zon
 			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 		})
 	}
+
+	rrcache.AddServers(zonename, serverMap)
+
 	return servers, nil
 }
 

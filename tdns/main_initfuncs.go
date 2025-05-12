@@ -319,7 +319,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	case AppTypeImr:
 		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
 		stopCh := make(chan struct{}, 10)
-		go RecursorEngine(conf, stopCh)
+		go conf.RecursorEngine(stopCh)
 		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
 		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 

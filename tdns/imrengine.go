@@ -37,7 +37,7 @@ type ImrResponse struct {
 
 // var RecursorCache *RRsetCacheNG
 
-func RecursorEngine(conf *Config, stopch chan struct{}) {
+func (conf *Config) RecursorEngine(stopch chan struct{}) {
 	var recursorch = conf.Internal.RecursorCh
 
 	if !viper.GetBool("recursorengine.active") {
@@ -58,6 +58,12 @@ func RecursorEngine(conf *Config, stopch chan struct{}) {
 		err = rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
 		if err != nil {
 			Shutdowner(conf, fmt.Sprintf("RecursorEngine: failed to initialize RecursorCache w/ root hints: %v", err))
+		}
+		if len(conf.ImrEngine.Stubs) > 0 {
+			for _, stub := range conf.ImrEngine.Stubs {
+				log.Printf("RecursorEngine: adding stub %q with servers %+v", stub.Zone, stub.Servers)
+				rrcache.AddStub(stub.Zone, stub.Servers)
+			}
 		}
 	}
 

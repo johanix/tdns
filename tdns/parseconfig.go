@@ -155,6 +155,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// }
 	}
 
+	if Globals.Debug {
+		log.Printf("Templates: %+v", conf.Templates)
+	}
+
 	// Build template map
 	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
 	for _, tmpl := range conf.Templates {
@@ -165,6 +169,41 @@ func (conf *Config) ParseConfig(reload bool) error {
 			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
 		}
 		Templates[tmpl.Name] = tmpl
+	}
+
+	// Handle template expansion if specified
+	for _, t := range conf.Templates {
+		if t.Template != "" && t.Template != t.Name {
+			log.Printf("Template %q depends on template %q: expanding", t.Name, t.Template)
+			if tmpl, exist := Templates[t.Template]; exist {
+				if tmpl.Template != "" && tmpl.Template == t.Name {
+					log.Printf("Template %q: circular dependency via %q. Ignoring template.", t.Name, t.Template)
+					delete(Templates, t.Name)
+					delete(Templates, t.Template)
+					continue
+				}
+				var err error
+				//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
+				t, err = ExpandTemplate(t, &tmpl, Globals.App.Type)
+				if err != nil {
+					fmt.Printf("Error expanding template %q for other template %q. Aborting.\n", t.Template, t.Name)
+					// return nil, err
+					// zd.SetError(ConfigError, "template expansion error: %q: %v", t.Template, err)
+					delete(Templates, t.Name)
+					continue
+				}
+				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
+			} else {
+				//zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
+				fmt.Printf("Template %q refers to non-existing template %q. Ignored.\n", t.Name, t.Template)
+				delete(Templates, t.Name)
+				continue
+			}
+		}
+	}
+
+	if Globals.Debug {
+		log.Printf("Templates: %+v", Templates)
 	}
 
 	// log.Printf("*** ParseConfig: 1")
@@ -183,8 +222,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := viper.ReadConfig(strings.NewReader(string(processedConfig))); err != nil {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
-
-	// log.Printf("*** ParseConfig: 3")
 
 	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
@@ -206,7 +243,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
-			// log.Printf("*** ParseConfig: 5. DnssecPolicy: %q", name)
 		}
 
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
@@ -217,20 +253,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
-		// kdb := conf.Internal.KeyDB
 		if !reload { // || kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
 				return err
 			}
 		}
-
-		// default:
-		// log.Printf("TDNS %s (%s): not initializing KeyDB", Globals.App.Name, AppTypeToString[Globals.App.Type])
-
 	}
-
-	// log.Printf("*** ParseConfig: 7")
 
 	err = ValidateConfig(nil, conf.Internal.CfgFile) // will terminate on error
 	if err != nil {
