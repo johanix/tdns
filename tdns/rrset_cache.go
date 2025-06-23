@@ -46,12 +46,12 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
 // var RRsetCache = NewRRsetCache()
 
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
-	var client = map[Transport]*DNSClientNG{}
+	var client = map[Transport]*DNSClient{}
 	var t Transport
 
-	client[TransportDo53] = NewDNSClientNG(TransportDo53, nil)
+	client[TransportDo53] = NewDNSClient(TransportDo53, nil)
 	for _, t = range []Transport{TransportDoT, TransportDoH, TransportDoQ} {
-		client[t] = NewDNSClientNG(t, nil)
+		client[t] = NewDNSClient(t, nil)
 	}
 
 	return &RRsetCacheT{

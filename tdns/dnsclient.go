@@ -27,7 +27,7 @@ const (
 )
 
 // DNSClient represents a DNS client that supports multiple transport protocols
-type DNSClientNG struct {
+type DNSClient struct {
 	Transport Transport
 	// Server     string
 	TLSConfig  *tls.Config
@@ -38,7 +38,7 @@ type DNSClientNG struct {
 }
 
 // NewDNSClient creates a new DNS client with the specified transport
-func NewDNSClientNG(transport Transport, tlsConfig *tls.Config) *DNSClientNG {
+func NewDNSClient(transport Transport, tlsConfig *tls.Config) *DNSClient {
 	if tlsConfig == nil {
 		switch transport {
 		case TransportDoT, TransportDoH:
@@ -55,7 +55,7 @@ func NewDNSClientNG(transport Transport, tlsConfig *tls.Config) *DNSClientNG {
 		}
 	}
 
-	client := &DNSClientNG{
+	client := &DNSClient{
 		Transport: transport,
 		// Server:    server,
 		TLSConfig: tlsConfig,
@@ -93,7 +93,7 @@ func NewDNSClientNG(transport Transport, tlsConfig *tls.Config) *DNSClientNG {
 }
 
 // Exchange sends a DNS message and returns the response
-func (c *DNSClientNG) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+func (c *DNSClient) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
 	if Globals.Debug {
 		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
 			TransportToString[c.Transport], server, dns.OpcodeToString[msg.Opcode],
@@ -128,7 +128,7 @@ func (c *DNSClientNG) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Dura
 // }
 
 // exchangeDoH handles DNS over HTTPS
-func (c *DNSClientNG) exchangeDoH(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
 	packed, err := msg.Pack()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
@@ -175,7 +175,7 @@ func (c *DNSClientNG) exchangeDoH(msg *dns.Msg, server string) (*dns.Msg, time.D
 }
 
 // exchangeDoQ handles DNS over QUIC
-func (c *DNSClientNG) exchangeDoQ(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 

@@ -361,7 +361,7 @@ type RRsetCacheT struct {
 	RRsets    *ConcurrentMap[string, CachedRRset]
 	Servers   *ConcurrentMap[string, []string]
 	ServerMap *ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	DNSClient map[Transport]*DNSClientNG
+	DNSClient map[Transport]*DNSClient
 	Primed    bool
 	Logger    *log.Logger
 	Verbose   bool

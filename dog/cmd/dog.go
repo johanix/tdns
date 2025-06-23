@@ -130,7 +130,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// All args parsed, join server and port
-		options["server"] = net.JoinHostPort(options["server"], options["port"])
+		// options["server"] = net.JoinHostPort(options["server"], options["port"])
 
 		if options["opcode"] == "" {
 			options["opcode"] = "QUERY"
@@ -216,13 +216,9 @@ var rootCmd = &cobra.Command{
 				if err != nil {
 					log.Fatalf("Error: %v", err)
 				}
-				client := tdns.NewDNSClient(t, server, tlsConfig)
-				res, err := client.Exchange(m)
-				// if err != nil {
-				// log.Fatalf("Error: %v", err)
-				// }
+				client := tdns.NewDNSClient(t, tlsConfig)
+				res, _, err := client.Exchange(m, server) // FIXME: duration is always zero
 
-				// res, err := dns.Exchange(m, server)
 				elapsed := time.Since(start)
 				if err != nil {
 					fmt.Printf("Error from %s: %v\n", server, err)
@@ -351,26 +347,6 @@ func ParseResolvConf() (string, error) {
 		return "", fmt.Errorf("Error: No nameserver entry found in /etc/resolv.conf and no nameserver specified")
 	}
 	return server, nil
-}
-
-// Example usage in dog CLI
-func queryWithTransport(msg *dns.Msg, server string, transport string, tlsConfig *tls.Config) (*dns.Msg, error) {
-	var t tdns.Transport
-	switch transport {
-	case "do53", "Do53", "Do53-TCP":
-		t = tdns.TransportDo53
-	case "dot", "DoT":
-		t = tdns.TransportDoT
-	case "doh", "DoH":
-		t = tdns.TransportDoH
-	case "doq", "DoQ":
-		t = tdns.TransportDoQ
-	default:
-		return nil, fmt.Errorf("unsupported transport: %s", transport)
-	}
-
-	client := tdns.NewDNSClient(t, server, tlsConfig)
-	return client.Exchange(msg)
 }
 
 // ParseServer parses a server specification like "tls://1.2.3.4:853" or "quic://1.2.3.4"
