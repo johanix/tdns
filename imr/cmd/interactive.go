@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/c-bata/go-prompt"
@@ -82,6 +83,7 @@ func executor(input string) {
 	if input == "exit" || input == "quit" {
 		fmt.Println("Goodbye!")
 		// return // XXX: not enough to terminate
+		exec.Command("stty", "sane").Run()
 		os.Exit(0)
 	}
 

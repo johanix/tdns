@@ -43,11 +43,12 @@ johaniaws:
 	rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
 
 johaninbsd:
+	echo foo
 	@if [ -n "$$TDNS_NBSD_DIR" ]; then \
-	   echo rsyncing to ${TDNS_NBSD_DIR} \
-	   (cd ${TDNS_SRC} ; rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC} ${TDNS_NBSD_DIR}/ ) \
+	   echo rsyncing to ${TDNS_NBSD_DIR} ; \
+	   (cd ${TDNS_SRC} ; rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore -avx ${TDNS_SRC}/ ${TDNS_NBSD_DIR}/ );\
 	else \
-	   echo TDNS_NBSD_DIR is unset, rsync not possible \
+	   echo "TDNS_NBSD_DIR is unset (should be user@host:/dir), rsync not possible" ; \
 	fi
 
 test:

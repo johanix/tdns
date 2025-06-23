@@ -52,8 +52,14 @@ var rootCmd = &cobra.Command{
 		var serial uint32
 
 		for _, arg := range args {
-			if strings.HasPrefix(arg, "@") {
-				serverArg := arg[1:]
+			if tdns.Globals.Debug {
+				fmt.Printf("processing arg: %s, options: %+v\n", arg, options)
+			}
+			if strings.HasPrefix(arg, "@") || strings.Contains(arg, "://") {
+				serverArg := arg
+				if strings.HasPrefix(arg, "@") {
+					serverArg = arg[1:]
+				}
 				options, err = ParseServer(serverArg, options)
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
@@ -266,26 +272,26 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		options["multi"] = "true"
 		return options, nil
 	case "+TCP":
-		if _, exists := options["transport"]; exists {
-			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+		if transport, exists := options["transport"]; exists {
+			return nil, fmt.Errorf("Error: multiple transport options specified (%s and TCP)", transport)
 		}
 		options["transport"] = "Do53"
 		return options, nil
 	case "+TLS", "+DOT":
-		if _, exists := options["transport"]; exists {
-			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+		if transport, exists := options["transport"]; exists {
+			return nil, fmt.Errorf("Error: multiple transport options specified (%s and DoT)", transport)
 		}
 		options["transport"] = "DoT"
 		return options, nil
 	case "+HTTPS", "+DOH":
-		if _, exists := options["transport"]; exists {
-			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+		if transport, exists := options["transport"]; exists {
+			return nil, fmt.Errorf("Error: multiple transport options specified (%s and DoH)", transport)
 		}
 		options["transport"] = "DoH"
 		return options, nil
 	case "+QUIC", "+DOQ":
-		if _, exists := options["transport"]; exists {
-			return nil, fmt.Errorf("Error: multiple transport options specified (+TCP/+TLS/+HTTPS/+QUIC)")
+		if transport, exists := options["transport"]; exists {
+			return nil, fmt.Errorf("Error: multiple transport options specified (%s and DoQ)", transport)
 		}
 		options["transport"] = "DoQ"
 		return options, nil
@@ -371,16 +377,9 @@ func queryWithTransport(msg *dns.Msg, server string, transport string, tlsConfig
 // and returns the host, port, and transport. If no scheme is specified, defaults to Do53.
 // If no port is specified, uses the default port for the transport.
 func ParseServer(serverArg string, options map[string]string) (map[string]string, error) {
-	// Default transport if no scheme is specified
-	transport := options["transport"]
-	if transport == "" {
-		transport = "Do53"
-		options["transport"] = transport
-	}
-
 	var u *url.URL
 	var err error
-
+	var transport string
 	// Try to parse as URL if it contains "://"
 	if strings.Contains(serverArg, "://") {
 		u, err = url.Parse(serverArg)
@@ -398,21 +397,28 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Map scheme to transport
 	scheme := strings.ToLower(u.Scheme)
 	switch scheme {
-	case "dns":
+	case "dns", "do53":
 		transport = "Do53"
 	case "tcp":
 		transport = "Do53-TCP"
-	case "tls":
+	case "tls", "dot":
 		transport = "DoT"
-	case "https":
+	case "https", "doh":
 		transport = "DoH"
-	case "quic":
+	case "quic", "doq":
 		transport = "DoQ"
 	default:
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
-	if _, exists := options["transport"]; exists && options["transport"] != transport {
-		return nil, fmt.Errorf("Conflicting transport specifications: %s vs %s", options["transport"], transport)
+
+	// Only signal error if there are two explicit transport specifications that conflict
+	// A transport is explicit if it comes from a flag or a non-default URI scheme
+	if existingTransport, exists := options["transport"]; exists {
+		if scheme != "dns" && existingTransport != transport {
+			return nil, fmt.Errorf("Conflicting transport specifications: %s (from flag) vs %s (from URI)", existingTransport, transport)
+		}
+		// If we have a flag-specified transport, keep it
+		transport = existingTransport
 	}
 	options["transport"] = transport
 

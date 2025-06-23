@@ -153,7 +153,8 @@ func init() {
 			for item := range conf.Internal.RRsetCache.ServerMap.IterBuffered() {
 				fmt.Printf("\nZone: %s\n", item.Key)
 				for _, server := range item.Val {
-					fmt.Printf("Server: %q (%s)\tAddrs: %v\tAlpn: %v\tPrefTransport: %q\n", server.Name, server.Src, server.Addrs, server.Alpn, server.PrefTransport)
+					fmt.Printf("Server: %q (%s)\tAddrs: %v\tAlpn: %v \tPrefTransport: %q\n",
+					server.Name, server.Src, server.Addrs, server.Alpn, tdns.TransportToString[server.PrefTransport])
 				}
 			}
 		},
@@ -280,7 +281,7 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	}
 
 	if !strings.HasSuffix(item.Val.Name, suffix) {
-		fmt.Printf("skipping item with name %q\n", item.Val.Name)
+		// fmt.Printf("skipping item with name %q\n", item.Val.Name)
 		return
 	}
 

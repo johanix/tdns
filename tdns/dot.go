@@ -32,6 +32,17 @@ func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
 		NextProtos: []string{"dot"}, // important for DoT
 	}
 
+	// Wrap the DNS handler to add logging
+	loggingHandler := func(w dns.ResponseWriter, r *dns.Msg) {
+		if Globals.Debug {
+			log.Printf("*** DoT received message opcode: %s qname: %s rrtype: %s", 
+				dns.OpcodeToString[r.Opcode], 
+				r.Question[0].Name, 
+				dns.TypeToString[r.Question[0].Qtype])
+		}
+		ourDNSHandler(w, r)
+	}
+
 	ports := viper.GetStringSlice("dnsengine.ports.dot")
 	if len(ports) == 0 {
 		ports = []string{"853"}
@@ -44,7 +55,7 @@ func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
 				Net:           "tcp-tls",
 				TLSConfig:     tlsConfig,
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-				Handler:       dns.HandlerFunc(ourDNSHandler),
+				Handler:       dns.HandlerFunc(loggingHandler),
 			}
 			go func() {
 				log.Printf("DnsEngine: serving on %s (DoT)\n", hostport)

@@ -267,17 +267,19 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.App.Type == AppTypeServer && len(conf.Service.Identities) > 0 {
-		var transports = []string{"do53"} // not optional
+		var transports []string
 		for _, t := range conf.DnsEngine.Transports {
 			t = strings.ToLower(t)
 			switch t {
-			case "do53":
-				continue
-			case "dot", "doh", "doq":
+			case "do53", "dot", "doh", "doq":
 				transports = append(transports, t)
 			default:
 				log.Printf("Error: Unknown transport: %s", t)
 			}
+		}
+		// Add do53 if not already present
+		if !slices.Contains(transports, "do53") {
+			transports = append(transports, "do53")
 		}
 
 		transports = slices.Compact(transports)

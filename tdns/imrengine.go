@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 
@@ -131,7 +132,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 		} else {
 			maxiter--
 		}
-		bestmatch, servers, err := rrcache.FindClosestKnownZone(qname)
+		bestmatch, authservers, err := rrcache.FindClosestKnownZone(qname)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -141,7 +142,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 		// ss := servers
 
 		switch {
-		case len(servers) == 0:
+		case len(authservers) == 0:
 			log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
 			cnsrrset := rrcache.Get(bestmatch, dns.TypeNS)
 			if cnsrrset == nil {
@@ -176,15 +177,32 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 				for _, rr := range rrresp.RRset.RRs {
 					switch rr := rr.(type) {
 					case *dns.A:
-						servers = []string{rr.A.String()}
-						// ss = servers
-						log.Printf("ImrResponder: using resolved A address: %v", servers)
+						// servers = []]string{rr.A.String()}
+						authservers[rr.Header().Name] = &AuthServer{
+							Name:	rr.Header().Name,
+							Addrs:	[]string{rr.A.String()},
+							Alpn:	[]string{"do53"},
+							Transports: []Transport{TransportDo53},
+							PrefTransport: TransportDo53,
+							Src:	"answer",
+							Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						}
+						log.Printf("ImrResponder: using resolved A address: %+v", authservers)
 					case *dns.AAAA:
-						servers = []string{rr.AAAA.String()}
-						// ss = servers
-						log.Printf("ImrResponder: using resolved AAAA address: %v", servers)
+						// servers = []string{rr.AAAA.String()}
+						authservers[rr.Header().Name] = &AuthServer{
+							Name:	rr.Header().Name,
+							Addrs:	[]string{rr.AAAA.String()},
+							Alpn:	[]string{"do53"},
+							Transports: []Transport{TransportDo53},
+							PrefTransport: TransportDo53,
+							Src:	"answer",
+							Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						}
+						log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
 					}
-					rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
+
+					rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
 					if err != nil {
 						log.Printf("Error from IterativeDNSQuery: %v", err)
 						continue
@@ -219,15 +237,15 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 			resp.ErrorMsg = fmt.Sprintf("Failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
 			return &resp, nil
 
-		case len(servers) < 4:
+		case len(authservers) < 4:
 			// ss = servers
 		default:
 			// ss = servers[:3]
 			// ss = append(servers, "...")
 		}
 
-		log.Printf("ImrQuery: sending query to %d servers: %v", len(servers), servers)
-		rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
+		log.Printf("ImrQuery: sending query to %d auth servers: %+v", len(authservers), authservers)
+		rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -289,7 +307,7 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 			} else {
 				maxiter--
 			}
-			bestmatch, servers, err := rrcache.FindClosestKnownZone(qname)
+			bestmatch, authservers, err := rrcache.FindClosestKnownZone(qname)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -298,9 +316,9 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 				return
 			}
 			log.Printf("ImrResponder: best zone match for qname %q seems to be %q", qname, bestmatch)
-			ss := servers
+
 			switch {
-			case len(servers) == 0:
+			case len(authservers) == 0:
 				log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
 				cnsrrset := rrcache.Get(bestmatch, dns.TypeNS)
 				if cnsrrset == nil {
@@ -333,15 +351,34 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 					}
 
 					for _, rr := range resp.RRset.RRs {
+						nsname := rr.Header().Name
 						switch rr := rr.(type) {
 						case *dns.A:
-							servers = []string{rr.A.String()}
-							log.Printf("ImrResponder: using resolved A address: %v", servers)
+							// servers = []]string{rr.A.String()}
+							authservers[nsname] = &AuthServer{
+								Name:	nsname,
+								Addrs:	[]string{rr.A.String()},
+								Alpn:	[]string{"do53"},
+								Transports: []Transport{TransportDo53},
+								PrefTransport: TransportDo53,
+								Src:	"answer",
+								Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							}
+							log.Printf("ImrResponder: using resolved A address: %+v", authservers[nsname])
 						case *dns.AAAA:
-							servers = []string{rr.AAAA.String()}
-							log.Printf("ImrResponder: using resolved AAAA address: %v", servers)
+							// servers = []string{rr.AAAA.String()}
+							authservers[nsname] = &AuthServer{
+								Name:	nsname,
+								Addrs:	[]string{rr.AAAA.String()},
+								Alpn:	[]string{"do53"},
+								Transports: []Transport{TransportDo53},
+								PrefTransport: TransportDo53,
+								Src:	"answer",
+								Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							}
+							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
 						}
-						rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
+						rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
 						if err != nil {
 							log.Printf("Error from IterativeDNSQuery: %v", err)
 							continue
@@ -362,21 +399,12 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 				// m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
 				return
-
-			case len(servers) < 4:
-				ss = servers
-			default:
-				ss = servers[:3]
-				ss = append(ss, "...")
 			}
 
-			log.Printf("ImrResponder: sending query to %d servers: %v", len(servers), ss)
-			rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, servers, false)
+			log.Printf("ImrResponder: sending query to %d authservers: %+v", len(authservers), authservers)
+			rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
-				// resp.Error = true
-				// resp.ErrorMsg = fmt.Sprintf("Error from AuthDNSQuery: %v", err)
-				// m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
 				return
 			}
@@ -441,12 +469,21 @@ func ProcessAuthDNSResponse(qname string, rrset *RRset, rcode int, context Cache
 	return false, nil
 }
 
-func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, []string, error) {
+func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[string]*AuthServer, error) {
 	// Iterate through known zone names and return the longest match.
 	var bestmatch string
-	var servers []string
+	// var servers []string
+	var servers map[string]*AuthServer
 	log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
-	for item := range rrcache.Servers.IterBuffered() {
+	// for item := range rrcache.Servers.IterBuffered() {
+	//	z := item.Key
+	//	ss := item.Val
+	//	if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
+	//		bestmatch = z
+	//		servers = ss
+	//	}
+	// }
+	for item := range rrcache.ServerMap.IterBuffered() {
 		z := item.Key
 		ss := item.Val
 		if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
@@ -454,6 +491,8 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, []string
 			servers = ss
 		}
 	}
+
+	log.Printf("FindClosestKnownZone: authservers for zone %q: %+v", qname, servers)
 	return bestmatch, servers, nil
 }
 

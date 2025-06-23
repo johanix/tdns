@@ -351,7 +351,8 @@ type AuthServer struct {
 	Name          string
 	Addrs         []string
 	Alpn          []string // {"do53", "doq", "dot", "doh"}
-	PrefTransport string   // "doq" | "dot" | "doh" | "do53"
+	Transports    []Transport
+	PrefTransport Transport   // "doq" | "dot" | "doh" | "do53"
 	Src           string   // "answer", "glue", "hint", "priming", "stub", ...
 	Expire        time.Time
 }
@@ -360,6 +361,7 @@ type RRsetCacheT struct {
 	RRsets    *ConcurrentMap[string, CachedRRset]
 	Servers   *ConcurrentMap[string, []string]
 	ServerMap *ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
+	DNSClient map[Transport]*DNSClientNG
 	Primed    bool
 	Logger    *log.Logger
 	Verbose   bool

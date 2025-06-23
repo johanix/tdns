@@ -46,13 +46,22 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
 // var RRsetCache = NewRRsetCache()
 
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
+	var client = map[Transport]*DNSClientNG{}
+	var t Transport
+
+	client[TransportDo53] = NewDNSClientNG(TransportDo53, nil)
+	for _, t = range []Transport{TransportDoT, TransportDoH, TransportDoQ} {
+		client[t] = NewDNSClientNG(t, nil)
+	}
+
 	return &RRsetCacheT{
 		RRsets:    NewCmap[CachedRRset](),
 		Servers:   NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
-		ServerMap: NewCmap[map[string]*AuthServer](), // servers stored as map[string][]string{} a la map[addr][]string{"dot", "doq", "do53"}
+		ServerMap: NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
 		Logger:    lg,
 		Verbose:   verbose,
 		Debug:     debug,
+		DNSClient: client,
 	}
 }
 
@@ -77,18 +86,8 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, rrset *CachedRRset) 
 
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
-	addrlist := []string{}
 	authservers := map[string]*AuthServer{}
 	for _, server := range servers {
-		for _, addr := range server.Addrs {
-			var tmpaddr string
-			if !strings.HasSuffix(addr, ":53") {
-				tmpaddr = net.JoinHostPort(addr, "53")
-			} else {
-				tmpaddr = addr
-			}
-			addrlist = append(addrlist, tmpaddr)
-		}
 		tmpauthserver := &AuthServer{
 			Name:  server.Name,
 			Addrs: server.Addrs,
@@ -97,16 +96,34 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		}
 		if len(server.Alpn) == 0 {
 			tmpauthserver.Alpn = []string{"do53"}
+			tmpauthserver.Transports = []Transport{TransportDo53}
+			tmpauthserver.PrefTransport = TransportDo53
+		} else {
+			// Keep the server's ALPN order
+			tmpauthserver.Alpn = server.Alpn
+			
+			// Convert ALPN strings to Transport values in the same order
+			var transports []Transport
+			for _, alpn := range server.Alpn {
+				if t, err := StringToTransport(alpn); err == nil {
+					transports = append(transports, t)
+				}
+			}
+			tmpauthserver.Transports = transports
+			
+			// Set the first transport as preferred (server's preference)
+			if len(transports) > 0 {
+				tmpauthserver.PrefTransport = transports[0]
+			}
 		}
-		tmpauthserver.PrefTransport = tmpauthserver.Alpn[0]
 		authservers[server.Name] = tmpauthserver
 	}
-	rrcache.Servers.Set(zone, addrlist)
 	rrcache.ServerMap.Set(zone, authservers)
 	return nil
 }
 
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
+	var err error
 	serverMap, ok := rrcache.ServerMap.Get(zone)
 	if !ok {
 		serverMap = map[string]*AuthServer{}
@@ -121,12 +138,22 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				}
 			}
 			for _, alpn := range server.Alpn {
+				t, err := StringToTransport(alpn)
+				if err != nil {
+					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
+				}
 				if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}
+				if !slices.Contains(serverMap[name].Transports, t) {
+					serverMap[name].Transports = append(serverMap[name].Transports, t)
+				}
 			}
 		}
-		serverMap[name].PrefTransport = serverMap[name].Alpn[0]
+		serverMap[name].PrefTransport, err = StringToTransport(serverMap[name].Alpn[0])
+		if err != nil {
+			log.Printf("error from StringToTransport: %v", err)
+		}
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil
@@ -147,11 +174,6 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 	zp := dns.NewZoneParser(strings.NewReader(string(data)), ".", hintsfile)
 	zp.SetIncludeAllowed(true)
 
-	//	rootData := &OwnerData{
-	//		Name:    ".",
-	//		RRtypes: NewRRTypeStore(),
-	//	}
-
 	// Maps to collect NS and A/AAAA records
 	nsRecords := []dns.RR{}
 	glueRecords := map[string][]dns.RR{}
@@ -169,14 +191,17 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 				continue
 			}
 			nsRecords = append(nsRecords, rr)
-			nsMap[rr.(*dns.NS).Ns] = true
-			authMap[rr.(*dns.NS).Ns] = &AuthServer{
-				Name:          rr.(*dns.NS).Ns,
-				Alpn:          []string{"do53"},
+			nsname := rr.(*dns.NS).Ns
+			nsMap[nsname] = true
+			authMap[nsname] = &AuthServer{
+				Name:          nsname,
+				Alpn:     		[]string{"do53"},     
+				Transports:	   []Transport{TransportDo53},
 				Src:           "hint",
-				PrefTransport: "do53",
+				PrefTransport: TransportDo53,
 			}
-			rootns = append(rootns, rr.(*dns.NS).Ns)
+			rootns = append(rootns, nsname)
+			log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
 
 		case dns.TypeA, dns.TypeAAAA:
 			// log.Printf("PWH: read address RR: %s", rr.String())
@@ -237,6 +262,8 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 			}
 		}
 		authMap[name] = tmpsrv
+		log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
+
 
 		// Create RRset for each type
 		for rrtype, records := range typeGroups {
@@ -261,7 +288,15 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 	rrcache.ServerMap.Set(".", authMap)
 	rrcache.Servers.Set(".", servers)
 
-	rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
+	log.Printf("PrimeWithHints: serverMap:")
+	for k, v := range authMap {
+		log.Printf("server: %q data: %+v", k, v)
+	}
+
+	// dump.P(authMap)
+
+	// rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
+	rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, authMap, true) // force re-query bypassing cache
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}

@@ -196,6 +196,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		}
 		return rrset
 	}
+
 	// AddCDEResponse adds a compact-denial-of-existence response to the message
 	AddCDEResponse := func(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16) {
 		m.MsgHdr.Rcode = dns.RcodeSuccess
@@ -254,6 +255,51 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	var v4glue, v6glue *RRset
 	var wildqname string
 	origqname := qname
+
+	// 0. Is this a DS query? If so, trap it ASAP and try to find the parent zone
+	if qtype == dns.TypeDS {
+		zd.Logger.Printf("QueryResponder: DS query for %s. Trying to find parent zone.", qname)
+		SetupIMR()
+		m := new(dns.Msg)
+		m.SetReply(r)
+		parent, err := ParentZone(zd.ZoneName, Globals.IMR)
+		if err != nil {
+			log.Printf("QueryResponder: failed to find parent zone for %s to handle DS query", qname)
+			m.MsgHdr.Rcode = dns.RcodeServerFailure
+			w.WriteMsg(m)
+			return nil
+		}
+		pzd, ok := FindZone(parent)
+		if !ok {
+			// we don't have the parent zone
+			m.MsgHdr.Rcode = dns.RcodeSuccess
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+			w.WriteMsg(m)
+			return nil
+		}
+		// We have the parent zone, so let's try to find the DS record
+		zd = pzd
+		apex, err = zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
+		}
+		if dnssec_ok {
+			apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+			apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
+		}
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+		dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
+		if err != nil {
+			log.Printf("QueryResponder: failed to get DS record for %s", qname)
+		}
+		m.Answer = append(m.Answer, dsRRset.RRs...)
+		if dnssec_ok {
+			m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+		}
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+		w.WriteMsg(m)
+		return nil
+	}
 
 	// log.Printf("---> Checking for existence of qname %s", qname)
 	if !zd.NameExists(qname) {
@@ -317,7 +363,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		return nil
 	}
 
-	// 2. Check for qname + CNAME
+	if len(qname) > len(zd.ZoneName) {
+		// 2. Check for qname + CNAME
 	log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
 	if owner.RRtypes.Count() == 1 {
 		for _, k := range owner.RRtypes.Keys() {
@@ -364,19 +411,20 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		}
 	}
 
-	// 1. Check for child delegation
+	// 1. If qname is below the zone apex, check for child delegation
 	// log.Printf("---> Checking for child delegation for %s", qname)
-	cdd := zd.FindDelegation(qname, dnssec_ok)
+		cdd := zd.FindDelegation(qname, dnssec_ok)
 
-	// If there is delegation data and an NS RRset is present, return a referral
-	if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
-		log.Printf("---> Sending referral for %s", qname)
-		m.MsgHdr.Authoritative = false
-		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
-		m.Extra = append(m.Extra, cdd.A_glue...)
-		m.Extra = append(m.Extra, cdd.AAAA_glue...)
-		w.WriteMsg(m)
-		return nil
+		// If there is delegation data and an NS RRset is present, return a referral
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
+			log.Printf("---> Sending referral for %s", qname)
+		    m.MsgHdr.Authoritative = false
+		    m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
+			m.Extra = append(m.Extra, cdd.A_glue...)
+			m.Extra = append(m.Extra, cdd.AAAA_glue...)
+			w.WriteMsg(m)
+			return nil
+		}
 	}
 
 	// 2. Check for exact match qname+qtype
