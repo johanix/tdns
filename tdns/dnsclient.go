@@ -28,7 +28,7 @@ const (
 
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClientNG struct {
-	Transport  Transport
+	Transport Transport
 	// Server     string
 	TLSConfig  *tls.Config
 	HTTPClient *http.Client
@@ -48,7 +48,7 @@ func NewDNSClientNG(transport Transport, tlsConfig *tls.Config) *DNSClientNG {
 		case TransportDoQ:
 			tlsConfig = &tls.Config{
 				InsecureSkipVerify: true,
-			    NextProtos: []string{"doq"},
+				NextProtos:         []string{"doq"},
 			}
 		default:
 			tlsConfig = &tls.Config{}
@@ -66,7 +66,7 @@ func NewDNSClientNG(transport Transport, tlsConfig *tls.Config) *DNSClientNG {
 	switch transport {
 	case TransportDo53:
 		client.DNSClient = &dns.Client{
-			Timeout:	client.Timeout,
+			Timeout: client.Timeout,
 		}
 	case TransportDoT:
 		client.DNSClient = &dns.Client{
@@ -95,15 +95,15 @@ func NewDNSClientNG(transport Transport, tlsConfig *tls.Config) *DNSClientNG {
 // Exchange sends a DNS message and returns the response
 func (c *DNSClientNG) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
 	if Globals.Debug {
-		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n", 
-			TransportToString[c.Transport], server, dns.OpcodeToString[msg.Opcode], 
+		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
+			TransportToString[c.Transport], server, dns.OpcodeToString[msg.Opcode],
 			msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	switch c.Transport {
 	case TransportDo53:
 		if Globals.Debug {
-			log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s", 
+			log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s",
 				net.JoinHostPort(server, "53"), dns.OpcodeToString[msg.Opcode],
 				msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 		}
@@ -269,8 +269,8 @@ func StringToTransport(s string) (Transport, error) {
 }
 
 var TransportToString = map[Transport]string{
-	TransportDo53:	"do53",
-	TransportDoT:	"dot",
-	TransportDoH:	"doh",
-	TransportDoQ:	"doq",
+	TransportDo53: "do53",
+	TransportDoT:  "dot",
+	TransportDoH:  "doh",
+	TransportDoQ:  "doq",
 }

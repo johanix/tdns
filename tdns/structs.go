@@ -352,8 +352,8 @@ type AuthServer struct {
 	Addrs         []string
 	Alpn          []string // {"do53", "doq", "dot", "doh"}
 	Transports    []Transport
-	PrefTransport Transport   // "doq" | "dot" | "doh" | "do53"
-	Src           string   // "answer", "glue", "hint", "priming", "stub", ...
+	PrefTransport Transport // "doq" | "dot" | "doh" | "do53"
+	Src           string    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire        time.Time
 }
 

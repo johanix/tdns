@@ -179,25 +179,25 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 					case *dns.A:
 						// servers = []]string{rr.A.String()}
 						authservers[rr.Header().Name] = &AuthServer{
-							Name:	rr.Header().Name,
-							Addrs:	[]string{rr.A.String()},
-							Alpn:	[]string{"do53"},
-							Transports: []Transport{TransportDo53},
+							Name:          rr.Header().Name,
+							Addrs:         []string{rr.A.String()},
+							Alpn:          []string{"do53"},
+							Transports:    []Transport{TransportDo53},
 							PrefTransport: TransportDo53,
-							Src:	"answer",
-							Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							Src:           "answer",
+							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						}
 						log.Printf("ImrResponder: using resolved A address: %+v", authservers)
 					case *dns.AAAA:
 						// servers = []string{rr.AAAA.String()}
 						authservers[rr.Header().Name] = &AuthServer{
-							Name:	rr.Header().Name,
-							Addrs:	[]string{rr.AAAA.String()},
-							Alpn:	[]string{"do53"},
-							Transports: []Transport{TransportDo53},
+							Name:          rr.Header().Name,
+							Addrs:         []string{rr.AAAA.String()},
+							Alpn:          []string{"do53"},
+							Transports:    []Transport{TransportDo53},
 							PrefTransport: TransportDo53,
-							Src:	"answer",
-							Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							Src:           "answer",
+							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						}
 						log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
 					}
@@ -271,7 +271,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 		case ContextReferral:
 			continue // if all is good we will now hit the new referral and get further
 		case ContextNoErrNoAns:
-			resp.Msg = "negative response type 0"
+			resp.Msg = CacheContextToString[context]
 			return &resp, nil
 		}
 	}
@@ -356,25 +356,25 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 						case *dns.A:
 							// servers = []]string{rr.A.String()}
 							authservers[nsname] = &AuthServer{
-								Name:	nsname,
-								Addrs:	[]string{rr.A.String()},
-								Alpn:	[]string{"do53"},
-								Transports: []Transport{TransportDo53},
+								Name:          nsname,
+								Addrs:         []string{rr.A.String()},
+								Alpn:          []string{"do53"},
+								Transports:    []Transport{TransportDo53},
 								PrefTransport: TransportDo53,
-								Src:	"answer",
-								Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+								Src:           "answer",
+								Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 							}
 							log.Printf("ImrResponder: using resolved A address: %+v", authservers[nsname])
 						case *dns.AAAA:
 							// servers = []string{rr.AAAA.String()}
 							authservers[nsname] = &AuthServer{
-								Name:	nsname,
-								Addrs:	[]string{rr.AAAA.String()},
-								Alpn:	[]string{"do53"},
-								Transports: []Transport{TransportDo53},
+								Name:          nsname,
+								Addrs:         []string{rr.AAAA.String()},
+								Alpn:          []string{"do53"},
+								Transports:    []Transport{TransportDo53},
 								PrefTransport: TransportDo53,
-								Src:	"answer",
-								Expire: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+								Src:           "answer",
+								Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 							}
 							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
 						}

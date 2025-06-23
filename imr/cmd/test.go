@@ -65,6 +65,8 @@ func init() {
 					for _, rr := range r.RRset.RRSIGs {
 						fmt.Printf("%s\n", rr.String())
 					}
+				} else if r.Error {
+					fmt.Printf("Error: %s\n", r.ErrorMsg)
 				} else {
 					fmt.Printf("No records found: %s\n", r.Msg)
 				}
@@ -154,7 +156,7 @@ func init() {
 				fmt.Printf("\nZone: %s\n", item.Key)
 				for _, server := range item.Val {
 					fmt.Printf("Server: %q (%s)\tAddrs: %v\tAlpn: %v \tPrefTransport: %q\n",
-					server.Name, server.Src, server.Addrs, server.Alpn, tdns.TransportToString[server.PrefTransport])
+						server.Name, server.Src, server.Addrs, server.Alpn, tdns.TransportToString[server.PrefTransport])
 				}
 			}
 		},

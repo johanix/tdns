@@ -101,7 +101,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		} else {
 			// Keep the server's ALPN order
 			tmpauthserver.Alpn = server.Alpn
-			
+
 			// Convert ALPN strings to Transport values in the same order
 			var transports []Transport
 			for _, alpn := range server.Alpn {
@@ -110,7 +110,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 			}
 			tmpauthserver.Transports = transports
-			
+
 			// Set the first transport as preferred (server's preference)
 			if len(transports) > 0 {
 				tmpauthserver.PrefTransport = transports[0]
@@ -195,8 +195,8 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 			nsMap[nsname] = true
 			authMap[nsname] = &AuthServer{
 				Name:          nsname,
-				Alpn:     		[]string{"do53"},     
-				Transports:	   []Transport{TransportDo53},
+				Alpn:          []string{"do53"},
+				Transports:    []Transport{TransportDo53},
 				Src:           "hint",
 				PrefTransport: TransportDo53,
 			}
@@ -263,7 +263,6 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 		}
 		authMap[name] = tmpsrv
 		log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
-
 
 		// Create RRset for each type
 		for rrtype, records := range typeGroups {

@@ -509,10 +509,10 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 						addr := rr.(*dns.A).A.String()
 						servers = append(servers, net.JoinHostPort(addr, "53"))
 						serverMap[name] = &AuthServer{
-							Name: name,
-							Alpn: []string{"do53"},
+							Name:       name,
+							Alpn:       []string{"do53"},
 							Transports: []Transport{TransportDo53},
-							Src:  "answer",
+							Src:        "answer",
 						}
 						tmp := glue4Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
@@ -522,10 +522,10 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 						addr := rr.(*dns.AAAA).AAAA.String()
 						servers = append(servers, net.JoinHostPort(addr, "53"))
 						serverMap[name] = &AuthServer{
-							Name: name,
-							Alpn: []string{"do53"},
-							Transports:	[]Transport{TransportDo53},
-							Src:  "answer",
+							Name:       name,
+							Alpn:       []string{"do53"},
+							Transports: []Transport{TransportDo53},
+							Src:        "answer",
 						}
 						tmp := glue6Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
@@ -537,23 +537,23 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 						for _, kv := range svcb.Value {
 							if kv.Key() == dns.SVCB_ALPN {
 								if alpn, ok := kv.(*dns.SVCBAlpn); ok {
-								var transports []Transport
-								for _, t := range alpn.Alpn {
-									switch t {
-									case "dot":
-										transports = append(transports, TransportDoT)
-									case "doh":
-										transports = append(transports, TransportDoH)
-									case "doq":
-										transports = append(transports, TransportDoQ)
+									var transports []Transport
+									for _, t := range alpn.Alpn {
+										switch t {
+										case "dot":
+											transports = append(transports, TransportDoT)
+										case "doh":
+											transports = append(transports, TransportDoH)
+										case "doq":
+											transports = append(transports, TransportDoQ)
+										}
+									}
+									if alpn, ok := kv.(*dns.SVCBAlpn); ok {
+										serverMap[name].Alpn = alpn.Alpn
+										serverMap[name].Transports = transports
+										log.Printf("Found ALPN values for %s: %v", name, alpn.Alpn)
 									}
 								}
-								if alpn, ok := kv.(*dns.SVCBAlpn); ok {
-									serverMap[name].Alpn = alpn.Alpn
-									serverMap[name].Transports = transports
-									log.Printf("Found ALPN values for %s: %v", name, alpn.Alpn)
-								}
-							}
 							}
 						}
 					default:
@@ -678,7 +678,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 			}
 
 			log.Printf("calling c.Exchange with PrefTransport=%q, server=%+v, addr=%q, qname=%q, qtype=%q", TransportToString[server.PrefTransport], server, addr,
-					qname, dns.TypeToString[qtype])
+				qname, dns.TypeToString[qtype])
 			r, rtt, err := c.Exchange(m, addr)
 			if err != nil && rrcache.Verbose {
 				lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
@@ -974,7 +974,7 @@ func (rrcache *RRsetCacheT) CollectNSAddresses(rrset *RRset, respch chan *ImrRes
 	return nil
 }
 
-func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset, zonename string, 
+func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset, zonename string,
 	nsMap map[string]bool, r *dns.Msg) (map[string]*AuthServer, error) {
 	if r == nil {
 		return nil, fmt.Errorf("message is nil")
@@ -1045,7 +1045,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 					if alpn, ok := kv.(*dns.SVCBAlpn); ok {
 						// Keep the server's ALPN order
 						serverMap[name].Alpn = alpn.Alpn
-						
+
 						// Convert ALPN strings to Transport values in the same order
 						var transports []Transport
 						for _, t := range alpn.Alpn {
@@ -1054,13 +1054,13 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 							}
 						}
 						serverMap[name].Transports = transports
-						
+
 						// Set the first transport as preferred (server's preference)
 						if len(transports) > 0 {
 							serverMap[name].PrefTransport = transports[0]
 						}
-						
-						log.Printf("Found ALPN values for %s: %v (preferred: %s)", 
+
+						log.Printf("Found ALPN values for %s: %v (preferred: %s)",
 							name, alpn.Alpn, TransportToString[serverMap[name].PrefTransport])
 					}
 				}

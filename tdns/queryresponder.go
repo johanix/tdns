@@ -365,61 +365,61 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 	if len(qname) > len(zd.ZoneName) {
 		// 2. Check for qname + CNAME
-	log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
-	if owner.RRtypes.Count() == 1 {
-		for _, k := range owner.RRtypes.Keys() {
-			v := owner.RRtypes.GetOnlyRRSet(k)
-			if k == dns.TypeCNAME {
-				if len(v.RRs) > 1 {
-					// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
-					log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)
-				}
-				m.Answer = append(m.Answer, v.RRs...)
-				if dnssec_ok {
-					owner.RRtypes.Set(k, MaybeSignRRset(v, qname))
-					m.Answer = append(m.Answer, v.RRSIGs...)
-				}
-				tgt := v.RRs[0].(*dns.CNAME).Target
-				if strings.HasSuffix(tgt, zd.ZoneName) {
-					tgtowner, _ := zd.GetOwner(tgt)
-					if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
-						m.Answer = append(m.Answer, tgtrrset.RRs...)
-						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-						v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
-						m.Extra = append(m.Extra, v4glue.RRs...)
-						m.Extra = append(m.Extra, v6glue.RRs...)
-						if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-							m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
-						}
-						if dnssec_ok {
-							tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
-							m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
+		log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
+		if owner.RRtypes.Count() == 1 {
+			for _, k := range owner.RRtypes.Keys() {
+				v := owner.RRtypes.GetOnlyRRSet(k)
+				if k == dns.TypeCNAME {
+					if len(v.RRs) > 1 {
+						// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
+						log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)
+					}
+					m.Answer = append(m.Answer, v.RRs...)
+					if dnssec_ok {
+						owner.RRtypes.Set(k, MaybeSignRRset(v, qname))
+						m.Answer = append(m.Answer, v.RRSIGs...)
+					}
+					tgt := v.RRs[0].(*dns.CNAME).Target
+					if strings.HasSuffix(tgt, zd.ZoneName) {
+						tgtowner, _ := zd.GetOwner(tgt)
+						if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
+							m.Answer = append(m.Answer, tgtrrset.RRs...)
+							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
+							m.Extra = append(m.Extra, v4glue.RRs...)
+							m.Extra = append(m.Extra, v6glue.RRs...)
+							if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+								m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+							}
+							if dnssec_ok {
+								tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
+								m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
 
-							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
+								m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 
-							m.Extra = append(m.Extra, v4glue.RRSIGs...)
-							m.Extra = append(m.Extra, v6glue.RRSIGs...)
-							if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
-								m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+								m.Extra = append(m.Extra, v4glue.RRSIGs...)
+								m.Extra = append(m.Extra, v6glue.RRSIGs...)
+								if zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
+									m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+								}
 							}
 						}
+						w.WriteMsg(m)
+						return nil
 					}
-					w.WriteMsg(m)
-					return nil
 				}
 			}
 		}
-	}
 
-	// 1. If qname is below the zone apex, check for child delegation
-	// log.Printf("---> Checking for child delegation for %s", qname)
+		// 1. If qname is below the zone apex, check for child delegation
+		// log.Printf("---> Checking for child delegation for %s", qname)
 		cdd := zd.FindDelegation(qname, dnssec_ok)
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
 			log.Printf("---> Sending referral for %s", qname)
-		    m.MsgHdr.Authoritative = false
-		    m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
+			m.MsgHdr.Authoritative = false
+			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 			m.Extra = append(m.Extra, cdd.A_glue...)
 			m.Extra = append(m.Extra, cdd.AAAA_glue...)
 			w.WriteMsg(m)

@@ -24,7 +24,7 @@ var CacheContextToString = map[CacheContext]string{
 	ContextPriming:    "priming",
 	ContextReferral:   "referral",
 	ContextNXDOMAIN:   "NXDOMAIN",
-	ContextNoErrNoAns: "negative response type 0",
+	ContextNoErrNoAns: "NOERROR, NODATA (negative response type 0)",
 	ContextGlue:       "glue",
 	ContextFailure:    "failure",
 }
@@ -97,7 +97,7 @@ var AppTypeToString = map[AppType]string{
 	AppTypeAgent:    "agent",
 	AppTypeCombiner: "combiner",
 	AppTypeImr:      "imr",
-	AppTypeCli:	 "cli",
+	AppTypeCli:      "cli",
 }
 
 var StringToAppType = map[string]AppType{

@@ -35,9 +35,9 @@ func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
 	// Wrap the DNS handler to add logging
 	loggingHandler := func(w dns.ResponseWriter, r *dns.Msg) {
 		if Globals.Debug {
-			log.Printf("*** DoT received message opcode: %s qname: %s rrtype: %s", 
-				dns.OpcodeToString[r.Opcode], 
-				r.Question[0].Name, 
+			log.Printf("*** DoT received message opcode: %s qname: %s rrtype: %s",
+				dns.OpcodeToString[r.Opcode],
+				r.Question[0].Name,
 				dns.TypeToString[r.Question[0].Qtype])
 		}
 		ourDNSHandler(w, r)
