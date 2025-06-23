@@ -11,12 +11,12 @@
 #   - online-signing:		sign zone on-the-fly as needed; will create DNSSEC keypair if needed
 #   - multisigner:		OBE
 #   - automatic-zone:		[not a zone option, but rather a zone property; not configurable]
-#   - create-server-svcb:	automatically syntetisize SVCB RRs to put in Additional section
+#   - add-transport-signal:	automatically syntetisize SVCB RRs to put in Additional section
 #
 
 templates:
    - name:            foobar
-     options:         [ delegation-sync-child, allow-updates, online-signing, create-server-svcb ]
+     options:         [ delegation-sync-child, allow-updates, online-signing, add-transport-signal ]
 zones:
    - name:            test.net
      zonefile:        /etc/axfr.net/zones/test.net

@@ -174,7 +174,7 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams: downstreams,
 					})
 
-					if zd.Options[OptServerSvcb] {
+					if zd.Options[OptAddTransportSignal] {
 						err = zd.CreateServerSvcbRRs(conf)
 						if err != nil {
 							log.Printf("Error from CreateServerSvcbRRs(%s): %v", zone, err)

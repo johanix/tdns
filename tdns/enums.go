@@ -45,7 +45,8 @@ const (
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
-	OptServerSvcb
+	// OptServerSvcb
+	OptAddTransportSignal
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -62,7 +63,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
-	OptServerSvcb:        "create-server-svcb",
+	// OptServerSvcb:        "create-server-svcb",
+	OptAddTransportSignal: "add-transport-signal",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -79,7 +81,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
-	"create-server-svcb":     OptServerSvcb,
+	"add-transport-signal":   OptAddTransportSignal,
 }
 
 type AppType uint8

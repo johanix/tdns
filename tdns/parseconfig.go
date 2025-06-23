@@ -466,7 +466,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
 				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
 				OptDontPublishKey,    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
-				OptServerSvcb:        // create SVCB records for auth NS in the zone
+				OptAddTransportSignal: // add a transport signal to the zone
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
 
