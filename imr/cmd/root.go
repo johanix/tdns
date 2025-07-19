@@ -66,6 +66,9 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
 		false, "show headers")
 
+	// Add exit and quit commands for interactive mode
+	rootCmd.AddCommand(exitCmd)
+
 	SetRootCommand(rootCmd)
 }
 
@@ -73,7 +76,7 @@ func init() {
 func initConfig() {
 	cfgFile = conf.Internal.CfgFile // this gets populated from MainInit()
 	if cfgFile != "" {
-		fmt.Printf("tdns-lookup: config file is '%s'\n", cfgFile)
+		fmt.Printf("tdns-imr: config file is '%s'\n", cfgFile)
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {

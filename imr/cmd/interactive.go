@@ -18,6 +18,34 @@ func SetRootCommand(cmd *cobra.Command) {
 	cmdRoot = cmd
 }
 
+// Global channel to signal termination
+var exitCh chan struct{}
+
+// exitCmd represents the exit command
+var exitCmd = &cobra.Command{
+	Use:   "exit",
+	Short: "Exit the interactive shell",
+	Run: func(cmd *cobra.Command, args []string) {
+		Terminate()
+	},
+}
+
+// quitCmd represents the quit command
+// var quitCmd = &cobra.Command{
+// 	Use:   "quit",
+// 	Short: "Exit the interactive shell",
+// 	Run: func(cmd *cobra.Command, args []string) {
+// 		Terminate()
+// 	},
+// }
+
+func Terminate() {
+	fmt.Println("Goodbye!")
+	// Clean up terminal and exit immediately
+	exec.Command("stty", "sane").Run()
+	os.Exit(0)
+}
+
 // Track current input and guide state
 type promptState struct {
 	input string
@@ -71,6 +99,7 @@ func startInteractiveMode() {
 		// prompt.OptionInputTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(5),
 	)
+	
 	p.Run()
 	exec.Command("stty", "sane").Run()
 	os.Exit(0)
@@ -81,12 +110,6 @@ func executor(input string) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return
-	}
-	if input == "exit" || input == "quit" {
-		fmt.Println("Goodbye!")
-		return // XXX: not enough to terminate
-		// exec.Command("stty", "sane").Run()
-		// os.Exit(0)
 	}
 
 	// Split the input into args and execute via Cobra
@@ -132,73 +155,142 @@ func findCommonPrefix(matches []string) string {
 
 // completer provides completion suggestions
 func completer(d prompt.Document) []prompt.Suggest {
-	// fmt.Printf("[comp: arg: '%+v']", d)
-
 	input := d.TextBeforeCursor()
 	words := strings.Fields(input)
-	word := d.GetWordBeforeCursor()
-
-	// fmt.Printf("\nDEBUG: TAB pressed")
-	// fmt.Printf("\n  input: '%s'", input)
-	// fmt.Printf("\n  word: '%s'", word)
-	// fmt.Printf("\n  words: %v", words)
-	// fmt.Printf("\n  line: '%s'", d.Text)
-	// fmt.Printf("\n")
+	
+	// Determine the word being completed
+	var word string
+	if len(words) > 0 {
+		// If we have words, the last word is what we're completing
+		word = words[len(words)-1]
+	} else {
+		// If no words, we're at the start of the line
+		word = ""
+	}
 
 	// If we have a complete command and hit tab again, show the guide
 	if len(words) > 0 && strings.HasSuffix(input, " ") {
-		// fmt.Printf("[comp: calling updateGuide]")
 		guide := updateGuide(input)
 		if guide != "" {
-			// fmt.Printf("[comp: there is a guide: '%s']", guide)
 			// Keep the existing input and show guide
 			return []prompt.Suggest{{Text: input, Description: guide}}
 		}
+		// If no guide, show subcommand suggestions instead
+		return getSubcommandSuggestions(words, "")
 	}
 
-	// If we're at the start of the line or completing first word
+	// Handle top-level command completion (when we're at the start or completing the first word)
 	if len(words) == 0 || (len(words) == 1 && !strings.HasSuffix(input, " ")) {
-		// Find all matching commands
-		matches := []string{}
-		for _, cmd := range cmdRoot.Commands() {
-			if strings.HasPrefix(cmd.Name(), word) {
-				matches = append(matches, cmd.Name())
-			}
-		}
+		return getTopLevelCommands(word)
+	}
 
-		// If no matches, return empty
-		if len(matches) == 0 {
-			return []prompt.Suggest{}
-		}
-
-		// If one match, return it with a space and guide
-		if len(matches) == 1 {
-			return []prompt.Suggest{{
-				Text:        matches[0] + " ",
-				Description: updateGuide(matches[0] + " "),
-			}}
-		}
-
-		// Multiple matches: find common prefix and show all possibilities
-		prefix := findCommonPrefix(matches)
-		if len(prefix) > len(word) {
-			// We can complete partially
-			return []prompt.Suggest{{Text: prefix, Description: ""}}
-		}
-
-		// Show all possibilities
-		suggestions := []prompt.Suggest{}
-		for _, match := range matches {
-			cmd, _, _ := cmdRoot.Find([]string{match})
-			suggestions = append(suggestions, prompt.Suggest{
-				Text:        match,
-				Description: cmd.Short,
-			})
-		}
-		return suggestions
+	// Handle subcommand completion (when we have a complete command and are adding more)
+	if len(words) >= 1 {
+		return getSubcommandSuggestions(words, word)
 	}
 
 	return []prompt.Suggest{}
+}
+
+// getTopLevelCommands returns suggestions for top-level commands
+func getTopLevelCommands(word string) []prompt.Suggest {
+	matches := []string{}
+	
+	if word == "" {
+		// When word is empty, show all commands except completion
+		for _, cmd := range cmdRoot.Commands() {
+			if cmd.Name() != "completion" {
+				matches = append(matches, cmd.Name())
+			}
+		}
+	} else {
+		// When word has a value, filter commands that start with it
+		for _, cmd := range cmdRoot.Commands() {
+			if cmd.Name() != "completion" && strings.HasPrefix(cmd.Name(), word) {
+				matches = append(matches, cmd.Name())
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return []prompt.Suggest{}
+	}
+
+	if len(matches) == 1 {
+		return []prompt.Suggest{{
+			Text:        matches[0] + " ",
+			Description: updateGuide(matches[0] + " "),
+		}}
+	}
+
+	// Multiple matches: show all possibilities
+	suggestions := []prompt.Suggest{}
+	for _, match := range matches {
+		cmd, _, _ := cmdRoot.Find([]string{match})
+		suggestions = append(suggestions, prompt.Suggest{
+			Text:        match,
+			Description: cmd.Short,
+		})
+	}
+	return suggestions
+}
+
+// getSubcommandSuggestions returns suggestions for subcommands
+func getSubcommandSuggestions(words []string, word string) []prompt.Suggest {
+	// Find the parent command
+	var parentCmd *cobra.Command
+	var err error
+	
+	if word == "" {
+		// When word is empty, we want to show all subcommands of the current command
+		parentCmd, _, err = cmdRoot.Find(words)
+	} else {
+		// Find the parent command (all words except the last one)
+		parentWords := words[:len(words)-1]
+		parentCmd, _, err = cmdRoot.Find(parentWords)
+	}
+	
+	if err != nil {
+		return []prompt.Suggest{}
+	}
+
+	// Get subcommands of the parent command
+	matches := []string{}
+	for _, subcmd := range parentCmd.Commands() {
+		if strings.HasPrefix(subcmd.Name(), word) {
+			matches = append(matches, subcmd.Name())
+		}
+	}
+
+	if len(matches) == 0 {
+		return []prompt.Suggest{}
+	}
+
+	if len(matches) == 1 {
+		// Return just the subcommand name with a space
+		return []prompt.Suggest{{
+			Text:        matches[0] + " ",
+			Description: updateGuide(strings.Join(words, " ") + " " + matches[0] + " "),
+		}}
+	}
+
+	// Multiple matches: find common prefix
+	prefix := findCommonPrefix(matches)
+	if len(prefix) > len(word) {
+		// We can complete partially - return just the prefix
+		return []prompt.Suggest{{Text: prefix, Description: ""}}
+	}
+
+	// Show all possibilities - return just the subcommand names
+	suggestions := []prompt.Suggest{}
+	for _, match := range matches {
+		subcmd, _, _ := parentCmd.Find([]string{match})
+		suggestions = append(suggestions, prompt.Suggest{
+			Text:        match,
+			Description: subcmd.Short,
+		})
+	}
+	return suggestions
 }
 
 // changeLivePrefix updates the prompt prefix including the guide

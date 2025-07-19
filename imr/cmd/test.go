@@ -97,7 +97,7 @@ func init() {
 	}
 
 	dumpSuffixCmd := &cobra.Command{
-		Use:   "dump-only-suffix",
+		Use:   "suffix",
 		Short: "Dump records with owner names ending in suffix from the RRsetCache",
 		// Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -174,9 +174,8 @@ func init() {
 		},
 	}
 
-	rootCmd.AddCommand(dumpCmd, dumpSuffixCmd)
-	dumpCmd.AddCommand(dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd)
-	rootCmd.AddCommand(dumpServersCmd)
+	rootCmd.AddCommand(dumpCmd)
+	dumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd)
 
 	// List command - takes zone name
 	listCmd := &cobra.Command{
@@ -192,29 +191,6 @@ func init() {
 		"guide": "(zone or car)",
 	}
 
-	listZoneCmd := &cobra.Command{
-		Use:   "zone",
-		Short: "List records in zone",
-		Long:  `List all records in a DNS zone`,
-		// Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("Listing records in zone: %s\n", args[0])
-		},
-	}
-
-	listCarCmd := &cobra.Command{
-		Use:   "car",
-		Short: "List cars",
-		Long:  `List all cars in a DNS zone`,
-		// Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("Listing cars in zone: %s\n", args[0])
-		},
-	}
-
-	rootCmd.AddCommand(listCmd)
-	listCmd.AddCommand(listZoneCmd, listCarCmd)
-
 	// Server command - takes address and port
 	serverCmd := &cobra.Command{
 		Use:   "server [address] [port]",
@@ -228,17 +204,22 @@ func init() {
 	rootCmd.AddCommand(serverCmd)
 
 	// Check command - takes filename
-	checkCmd := &cobra.Command{
+	XXXcheckCmd := &cobra.Command{
 		Use:   "check [filename]",
 		Short: "Check zone file",
 		Long:  `Check a zone file for syntax errors`,
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("Checking zone file: %s\n", args[0])
+			if len(args) == 0 {
+				fmt.Println("Error: no zone file argument")
+			} else {
+				fmt.Printf("Checking zone file: %s [NYI]\n", args[0])
+			}
 		},
 	}
 
-	rootCmd.AddCommand(checkCmd)
+	_ = XXXcheckCmd
+	// rootCmd.AddCommand(checkCmd)
 
 	// Stats command - no arguments
 	statsCmd := &cobra.Command{
@@ -253,7 +234,7 @@ func init() {
 	rootCmd.AddCommand(statsCmd)
 
 	// Compare command - takes two files
-	compareCmd := &cobra.Command{
+	XXXcompareCmd := &cobra.Command{
 		Use:   "compare [file1] [file2]",
 		Short: "Compare zone files",
 		Long:  `Compare two zone files and show differences`,
@@ -262,7 +243,8 @@ func init() {
 			fmt.Printf("Comparing %s with %s\n", args[0], args[1])
 		},
 	}
-	rootCmd.AddCommand(compareCmd)
+	_ = XXXcompareCmd
+	// rootCmd.AddCommand(compareCmd)
 }
 
 func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
