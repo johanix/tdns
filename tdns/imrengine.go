@@ -76,6 +76,7 @@ func (conf *Config) RecursorEngine(stopch chan struct{}) {
 	for rrq := range recursorch {
 		if Globals.Debug {
 			log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+			fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 		}
 		// resp := ImrResponse{
 		//			Validated: false,
@@ -86,12 +87,16 @@ func (conf *Config) RecursorEngine(stopch chan struct{}) {
 		// 1. Is the answer in the cache?
 		crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
 		if crrset != nil {
+			if Globals.Debug {
+				fmt.Printf("RecursorEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+			}
 			resp = &ImrResponse{
 				RRset: crrset.RRset,
 			}
 		} else {
 			var err error
-			// log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
+			log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
+			fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
 			resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 			if err != nil {
 				log.Printf("Error from IterateOverQuery: %v", err)

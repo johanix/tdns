@@ -21,8 +21,6 @@ var LocalConfig string
 
 var cliflag bool
 
-var conf tdns.Config
-
 var rootCmd = &cobra.Command{
 	Use:   "tdns-imr",
 	Short: "Interactive DNS lookup tool",
@@ -30,7 +28,8 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) == 0 {
 			if cliflag {
-				startInteractiveMode() // old go-prompt version
+				cli.StartInteractiveMode() // old go-prompt version
+				// StartInteractiveMode() // old go-prompt version
 				// startReadlineMode() // new readline version
 				return
 			} else {
@@ -65,14 +64,15 @@ func init() {
 		false, "show headers")
 
 	// Add exit and quit commands for interactive mode
-	rootCmd.AddCommand(exitCmd)
+	// rootCmd.AddCommand(exitCmd)
 
-	SetRootCommand(rootCmd)
+	cli.SetRootCommand(rootCmd)
+	// SetRootCommand(rootCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	cfgFile = conf.Internal.CfgFile // this gets populated from MainInit()
+	cfgFile = cli.Conf.Internal.CfgFile // this gets populated from MainInit()
 	if cfgFile != "" {
 		fmt.Printf("tdns-imr: config file is '%s'\n", cfgFile)
 		// Use config file from the flag.
@@ -114,27 +114,29 @@ func initConfig() {
 	}
 
 	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
-	err := viper.Unmarshal(&conf)
+	err := viper.Unmarshal(&cli.Conf)
 	if err != nil {
 		log.Printf("Error from viper.UnMarshal(cfg): %v", err)
 	}
 }
 
 func initImr() {
+	// conf := cli.Conf
+
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling conf.MainInit(%q)\n", tdns.DefaultImrCfgFile)
 	}
 
-	err := conf.MainInit(tdns.DefaultImrCfgFile)
+	err := cli.Conf.MainInit(tdns.DefaultImrCfgFile)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
+		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}
 
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
 	}
-	err = tdns.MainStartThreads(&conf, nil)
+	err = tdns.MainStartThreads(&cli.Conf, nil)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting threads: %v", err))
+		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}
 }

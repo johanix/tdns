@@ -98,6 +98,11 @@ func NewDNSClient(transport Transport, tlsConfig *tls.Config) *DNSClient {
 
 // Exchange sends a DNS message and returns the response
 func (c *DNSClient) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+	if !Globals.Debug {
+		fmt.Printf("*** Exchange: Globals.Debug is NOT set\n")
+	} else {
+		fmt.Printf("*** Exchange: Globals.Debug is set\n")
+	}
 	if Globals.Debug {
 		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
 			TransportToString[c.Transport], server, dns.OpcodeToString[msg.Opcode],

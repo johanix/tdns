@@ -1,4 +1,9 @@
-package cmd
+package cli
+
+/*
+ * XXX: Note that nothing here is in prod use; it is all experimental. The code currently
+ *      used in the IMR CLI is found in cli/interactive.go
+ */
 
 import (
 	"fmt"

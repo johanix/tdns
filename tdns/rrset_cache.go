@@ -81,6 +81,9 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, rrset *CachedRRset) {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	if Globals.Debug {
+		fmt.Printf("rrcache: Adding key %s to cache\n", lookupKey)
+	}
 	rrcache.RRsets.Set(lookupKey, *rrset)
 }
 
@@ -117,6 +120,9 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 			}
 		}
 		authservers[server.Name] = tmpauthserver
+	}
+	if Globals.Debug {
+		fmt.Printf("rrcache: Adding stubs for zone %s to cache\n", zone)
 	}
 	rrcache.ServerMap.Set(zone, authservers)
 	return nil
@@ -158,6 +164,9 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				return fmt.Errorf("failed to set preferred transport: %w", err)
 			}
 		}
+	}
+	if Globals.Debug {
+		fmt.Printf("rrcache: Adding servers for zone %s to cache\n", zone)
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil

@@ -636,12 +636,18 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(qname string, qtype uint16, nameservers
 func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, serverMap map[string]*AuthServer, force bool) (*RRset, int, CacheContext, error) {
 	lg := rrcache.Logger
 
-	lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
+	if Globals.Debug {
+		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
+		fmt.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers\n", qname, dns.TypeToString[qtype], len(serverMap))
+	}
 	var servernames []string
 	for k, _ := range serverMap {
 		servernames = append(servernames, k)
 	}
-	lg.Printf("IterativeDNSQuery: servers for %q: %+v", qname, servernames)
+	if Globals.Debug {
+		lg.Printf("IterativeDNSQuery: servers for %q: %+v", qname, servernames)
+		fmt.Printf("IterativeDNSQuery: servers for %q: %+v\n", qname, servernames)
+	}
 
 	if !force {
 		crrset := rrcache.Get(qname, qtype)
@@ -862,6 +868,9 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 						rrset.Name = zonename
 						rrset.Class = dns.ClassINET
 						rrset.RRtype = dns.TypeNS
+						if Globals.Debug {
+							fmt.Printf("IterativeDNSQuery: Calling rrcache.Set for <%s, NS>\n", zonename)
+						}
 						rrcache.Set(zonename, dns.TypeNS, &CachedRRset{
 							Name:       zonename,
 							RRtype:     dns.TypeNS,
@@ -977,8 +986,10 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 	}
 
 	if Globals.Debug {
-		log.Printf("*** CollectNSAddrsFromAdditional: zonename: %q", zonename)
-		log.Printf("*** CollectNSAddrsFromAdditional: nsMap: %+v", nsMap)
+		log.Printf("*** ParseAdditionalForNSAddrs: zonename: %q", zonename)
+		log.Printf("*** ParseAdditionalForNSAddrs: nsMap: %+v", nsMap)
+		fmt.Printf("*** ParseAdditionalForNSAddrs: zonename: %q\n", zonename)
+		fmt.Printf("*** ParseAdditionalForNSAddrs: nsMap: %+v\n", nsMap)
 	}
 
 	// 2. Collect any glue from Additional
@@ -1070,6 +1081,9 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			continue
 		}
 		rr := rrset.RRs[0]
+		if Globals.Debug {
+			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue)\n", nsname)
+		}
 		rrcache.Set(nsname, dns.TypeA, &CachedRRset{
 			Name:       nsname,
 			RRtype:     dns.TypeA,
@@ -1084,6 +1098,9 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			continue
 		}
 		rr := rrset.RRs[0]
+		if Globals.Debug {
+			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue)\n", nsname)
+		}
 		rrcache.Set(nsname, dns.TypeAAAA, &CachedRRset{
 			Name:       nsname,
 			RRtype:     dns.TypeAAAA,

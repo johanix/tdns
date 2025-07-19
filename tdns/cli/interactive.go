@@ -1,4 +1,4 @@
-package cmd
+package cli
 
 import (
 	"fmt"
@@ -19,10 +19,10 @@ func SetRootCommand(cmd *cobra.Command) {
 }
 
 // Global channel to signal termination
-var exitCh chan struct{}
+// var exitCh chan struct{}
 
 // exitCmd represents the exit command
-var exitCmd = &cobra.Command{
+var ExitCmd = &cobra.Command{
 	Use:   "exit",
 	Short: "Exit the interactive shell",
 	Run: func(cmd *cobra.Command, args []string) {
@@ -31,13 +31,15 @@ var exitCmd = &cobra.Command{
 }
 
 // quitCmd represents the quit command
-// var quitCmd = &cobra.Command{
-// 	Use:   "quit",
-// 	Short: "Exit the interactive shell",
-// 	Run: func(cmd *cobra.Command, args []string) {
-// 		Terminate()
-// 	},
-// }
+var QuitCmd = &cobra.Command{
+	Use:   "quit",
+	Short: "Exit the interactive shell",
+	Long:  `Exit the interactive shell`,
+	Hidden: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		Terminate()
+	},
+}
 
 func Terminate() {
 	fmt.Println("Goodbye!")
@@ -90,7 +92,7 @@ func updateGuide(input string) string {
 	return ""
 }
 
-func startInteractiveMode() {
+func StartInteractiveMode() {
 	p := prompt.New(
 		executor,
 		completer,
@@ -208,14 +210,14 @@ func getTopLevelCommands(word string) []prompt.Suggest {
 	if word == "" {
 		// When word is empty, show all commands except completion
 		for _, cmd := range cmdRoot.Commands() {
-			if cmd.Name() != "completion" {
+			if cmd.Name() != "completion" && cmd.Hidden == false {
 				matches = append(matches, cmd.Name())
 			}
 		}
 	} else {
 		// When word has a value, filter commands that start with it
 		for _, cmd := range cmdRoot.Commands() {
-			if cmd.Name() != "completion" && strings.HasPrefix(cmd.Name(), word) {
+			if cmd.Name() != "completion" && cmd.Hidden == false && strings.HasPrefix(cmd.Name(), word) {
 				matches = append(matches, cmd.Name())
 			}
 		}
