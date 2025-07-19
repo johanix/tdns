@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  */
 package cmd
 
@@ -22,8 +22,6 @@ var LocalConfig string
 var cliflag bool
 
 var conf tdns.Config
-
-// var api *tdns.ApiClient
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-imr",
@@ -121,30 +119,6 @@ func initConfig() {
 		log.Printf("Error from viper.UnMarshal(cfg): %v", err)
 	}
 }
-
-type ApiDetails struct {
-	Name       string `validate:"required" yaml:"name"`
-	BaseURL    string `validate:"required" yaml:"baseurl"`
-	ApiKey     string `validate:"required" yaml:"apikey"`
-	AuthMethod string `validate:"required" yaml:"authmethod"`
-}
-
-// func initApi() {
-//	for _, val := range cconf.ApiServers {
-//		// XXX: here we should validate the conf for this apiserver
-//		tmp := tdns.NewClient("tdns-imr", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
-//		if tmp == nil {
-//			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
-//		}
-//		tdns.Globals.ApiClients[val.Name] = tmp
-//		if tdns.Globals.Debug {
-//			fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
-//		}
-//	}
-
-// for convenience we store the API client for "server" in the old place also
-//	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-server"]
-//}
 
 func initImr() {
 	if tdns.Globals.Debug {
