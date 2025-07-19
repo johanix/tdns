@@ -33,7 +33,7 @@ func init() {
 
 			qtype, exist := dns.StringToType[strings.ToUpper(args[1])]
 			if !exist {
-				fmt.Printf("Not a valide DNS RR type: '%s'\n", args[1])
+				fmt.Printf("Not a valid DNS RR type: '%s'\n", args[1])
 				return
 			}
 
@@ -273,12 +273,12 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 
 	parts := strings.Split(item.Key, "::")
 	if len(parts) != 2 {
-		fmt.Printf("foo")
+		fmt.Printf("Invalid cache key format: %s (expected format: name::rrtype)\n", item.Key)
 		return
 	}
 	tmp, err := strconv.Atoi(parts[1])
 	if err != nil {
-		fmt.Printf("Atoi error for %q: %v", parts[1], err)
+		fmt.Printf("ATOI error for %q: %v", parts[1], err)
 		return
 	}
 

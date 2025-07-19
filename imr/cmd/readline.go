@@ -50,9 +50,6 @@ func BuildCommandTree(cmd *cobra.Command, parent *CommandNode) *CommandNode {
 		case subCmd.Hidden:
 			continue
 		}
-		if subCmd.Name() == "help" || subCmd.Hidden {
-			continue
-		}
 		node.SubCommands[subCmd.Name()] = BuildCommandTree(subCmd, node)
 	}
 

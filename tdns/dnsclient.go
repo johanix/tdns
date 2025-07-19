@@ -44,14 +44,18 @@ func NewDNSClient(transport Transport, tlsConfig *tls.Config) *DNSClient {
 		case TransportDoT, TransportDoH:
 			tlsConfig = &tls.Config{
 				InsecureSkipVerify: true,
+				MinVersion:	    tls.VersionTLS12,
 			}
 		case TransportDoQ:
 			tlsConfig = &tls.Config{
 				InsecureSkipVerify: true,
 				NextProtos:         []string{"doq"},
+				MinVersion:	    tls.VersionTLS12,
 			}
 		default:
-			tlsConfig = &tls.Config{}
+			tlsConfig = &tls.Config{
+				MinVersion:	    tls.VersionTLS12,
+			}
 		}
 	}
 

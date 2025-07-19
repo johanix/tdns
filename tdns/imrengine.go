@@ -691,5 +691,4 @@ func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	default:
 	}
 	w.WriteMsg(m)
-	return
 }

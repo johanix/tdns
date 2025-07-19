@@ -1,6 +1,6 @@
 recursorengine:
-   active:	true
-   root-hints:  "/etc/tdns/root.hints"
+   active:              true
+   root-hints:          "/etc/tdns/root.hints"
 
 imrengine:
    addresses:           [ 127.0.0.1:99, '[::1]:99']
@@ -9,6 +9,6 @@ imrengine:
    keyfile:             /etc/hsync-test/certs/hoola.bandoola..key
 
 log:
-   file:	/var/log/tdns/tdns-imr.log
+   file:                /var/log/tdns/tdns-imr.log
 
 

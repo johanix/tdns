@@ -183,7 +183,9 @@ var DebugAgentDumpZoneDataRepoCmd = &cobra.Command{
 			log.Fatalf("Error: %s", amr.ErrorMsg)
 		}
 
-		dump.P(amr.ZoneDataRepo)
+		if tdns.Globals.Debug {
+			dump.P(amr.ZoneDataRepo)
+		}
 
 		if len(amr.ZoneDataRepo) > 0 {
 			for zone, agentRepo := range amr.ZoneDataRepo {

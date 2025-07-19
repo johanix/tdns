@@ -775,7 +775,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 				// 2. Collect the NS RRset from Authority section (if qname=NS then from Answer section)
 				nsMap := map[string]bool{}
 				zonename := ""
-				nsrrs := []dns.RR{}
+				var nsrrs []dns.RR
 				switch qtype {
 				case dns.TypeNS:
 					nsrrs = r.Answer
@@ -810,7 +810,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 					return tmprrset, rcode, context, nil
 				}
 
-				return nil, rcode, ContextReferral, nil
+				// return nil, rcode, ContextReferral, nil
 
 			case len(r.Ns) != 0:
 				// This is likely either a negative response or a referral
@@ -903,7 +903,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 						return tmprrset, rcode, context, nil
 					}
 
-					return nil, rcode, ContextReferral, nil
+					// return nil, rcode, ContextReferral, nil
 
 				case dns.RcodeNameError:
 					// this is a negative response

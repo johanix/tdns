@@ -265,7 +265,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.ErrorMsg = r.ErrorMsg
 			}
 		case <-time.After(3 * time.Second):
-			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 2 seconds", ampp.MyIdentity)
+			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 3 seconds", ampp.MyIdentity)
 		}
 
 	case AgentMsgRfi:

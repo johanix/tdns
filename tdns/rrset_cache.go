@@ -141,8 +141,9 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				t, err := StringToTransport(alpn)
 				if err != nil {
 					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
-				}
-				if !slices.Contains(serverMap[name].Alpn, alpn) {
+					// Skip invalid ALPN value
+					continue 
+				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}
 				if !slices.Contains(serverMap[name].Transports, t) {
@@ -150,9 +151,12 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				}
 			}
 		}
-		serverMap[name].PrefTransport, err = StringToTransport(serverMap[name].Alpn[0])
-		if err != nil {
-			log.Printf("error from StringToTransport: %v", err)
+		// Only set preferred transport if we have valid transports
+		if len(serverMap[name].Alpn) > 0 {
+			serverMap[name].PrefTransport, err = StringToTransport(serverMap[name].Alpn[0])
+			if err != nil {
+				return fmt.Errorf("failed to set preferred transport: %w", err)
+			}
 		}
 	}
 	rrcache.ServerMap.Set(zone, serverMap)

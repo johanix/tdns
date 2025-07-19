@@ -166,6 +166,9 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 // }
 
 func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) {
+	if agent == nil {
+		return nil, fmt.Errorf("agent is nil")
+	}
 	if agent.Api == nil {
 		return nil, fmt.Errorf("no API client configured for agent %s", agent.Identity)
 	}
