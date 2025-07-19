@@ -155,32 +155,41 @@ func findCommonPrefix(matches []string) string {
 
 // completer provides completion suggestions
 func completer(d prompt.Document) []prompt.Suggest {
-	input := d.TextBeforeCursor()
-	words := strings.Fields(input)
+	// Get the full text and current word being completed
+	fullText := d.Text
+	currentWord := d.GetWordBeforeCursor()
 	
-	// Determine the word being completed
+	// Split the full text into words
+	words := strings.Fields(fullText)
+	
+	// Determine what we're completing
 	var word string
 	if len(words) > 0 {
-		// If we have words, the last word is what we're completing
-		word = words[len(words)-1]
+		// If we have words, use the current word being typed
+		word = currentWord
 	} else {
 		// If no words, we're at the start of the line
 		word = ""
 	}
 
-	// If we have a complete command and hit tab again, show the guide
-	if len(words) > 0 && strings.HasSuffix(input, " ") {
-		guide := updateGuide(input)
+	// If we have a complete command and hit tab again, show subcommands first, then guide
+	if len(words) > 0 && currentWord == "" && strings.HasSuffix(fullText, " ") {
+		// First try to show subcommand suggestions
+		subSuggestions := getSubcommandSuggestions(words, "")
+		if len(subSuggestions) > 0 {
+			return subSuggestions
+		}
+		
+		// If no subcommands, show the guide
+		guide := updateGuide(fullText)
 		if guide != "" {
 			// Keep the existing input and show guide
-			return []prompt.Suggest{{Text: input, Description: guide}}
+			return []prompt.Suggest{{Text: fullText, Description: guide}}
 		}
-		// If no guide, show subcommand suggestions instead
-		return getSubcommandSuggestions(words, "")
 	}
 
 	// Handle top-level command completion (when we're at the start or completing the first word)
-	if len(words) == 0 || (len(words) == 1 && !strings.HasSuffix(input, " ")) {
+	if len(words) == 0 || (len(words) == 1 && !strings.HasSuffix(fullText, " ")) {
 		return getTopLevelCommands(word)
 	}
 
@@ -217,6 +226,23 @@ func getTopLevelCommands(word string) []prompt.Suggest {
 	}
 
 	if len(matches) == 1 {
+		// Check if this command has subcommands
+		cmd, _, _ := cmdRoot.Find([]string{matches[0]})
+		if len(cmd.Commands()) > 0 {
+			// If the command has subcommands, return them with the parent command prefix
+			subSuggestions := []prompt.Suggest{}
+			for _, subcmd := range cmd.Commands() {
+				subSuggestions = append(subSuggestions, prompt.Suggest{
+					Text:        matches[0] + " " + subcmd.Name(),
+					Description: subcmd.Short,
+				})
+			}
+			if len(subSuggestions) > 0 {
+				return subSuggestions
+			}
+		}
+		
+		// If no subcommands, return the command with a space
 		return []prompt.Suggest{{
 			Text:        matches[0] + " ",
 			Description: updateGuide(matches[0] + " "),

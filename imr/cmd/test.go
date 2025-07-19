@@ -176,6 +176,7 @@ func init() {
 
 	rootCmd.AddCommand(dumpCmd)
 	dumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd)
+	dumpAuthServersCmd.AddCommand(dumpKeysCmd, dumpServersCmd)
 
 	// List command - takes zone name
 	listCmd := &cobra.Command{
