@@ -810,8 +810,6 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 					return tmprrset, rcode, context, nil
 				}
 
-				// return nil, rcode, ContextReferral, nil
-
 			case len(r.Ns) != 0:
 				// This is likely either a negative response or a referral
 				lg.Printf("*** IterativeDNSQuery: there is stuff in Authority section")
@@ -902,8 +900,6 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 						}
 						return tmprrset, rcode, context, nil
 					}
-
-					// return nil, rcode, ContextReferral, nil
 
 				case dns.RcodeNameError:
 					// this is a negative response

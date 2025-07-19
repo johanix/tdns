@@ -26,7 +26,7 @@ var conf tdns.Config
 // var api *tdns.ApiClient
 
 var rootCmd = &cobra.Command{
-	Use:   "tdns-cli",
+	Use:   "tdns-imr",
 	Short: "Interactive DNS lookup tool",
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -36,7 +36,7 @@ var rootCmd = &cobra.Command{
 				// startReadlineMode() // new readline version
 				return
 			} else {
-				fmt.Printf("tdns-cli: Starting in daemon mode, no CLI\n")
+				fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
 				done := make(chan struct{}, 1)
 				<-done
 			}
@@ -129,7 +129,7 @@ type ApiDetails struct {
 // func initApi() {
 //	for _, val := range cconf.ApiServers {
 //		// XXX: here we should validate the conf for this apiserver
-//		tmp := tdns.NewClient("tdns-cli", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
+//		tmp := tdns.NewClient("tdns-imr", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
 //		if tmp == nil {
 //			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
 //		}

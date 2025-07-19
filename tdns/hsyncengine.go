@@ -76,13 +76,11 @@ func HsyncEngine(conf *Config, agentQs *AgentQs, stopch chan struct{}) {
 	}
 
 	// Configure intervals
-	// helloRetryInterval := configureInterval("syncengine.intervals.helloretry", 15, 1800)
 	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
 
 	log.Printf("*** HsyncEngine starting (heartbeat will run once every %d seconds) ***", heartbeatInterval)
 
 	HBticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
-	// HelloRetryTicker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
 
 	for {
 		select {
@@ -105,9 +103,6 @@ func HsyncEngine(conf *Config, agentQs *AgentQs, stopch chan struct{}) {
 		case mgmtPost = <-debugCommandQ:
 			registry.CommandHandler(mgmtPost, synchedDataUpdateQ)
 
-		// case <-HelloRetryTicker.C:
-		//			registry.HelloRetrier()
-
 		case <-HBticker.C:
 			registry.SendHeartbeats()
 
@@ -118,7 +113,6 @@ func HsyncEngine(conf *Config, agentQs *AgentQs, stopch chan struct{}) {
 			log.Printf("HsyncEngine shutting down")
 			// stop all tickers
 			HBticker.Stop()
-			// HelloRetryTicker.Stop()
 			return
 		}
 	}

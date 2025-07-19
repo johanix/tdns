@@ -19,10 +19,6 @@ func init() {
 		Long:  `Query DNS records for a given name and type`,
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
-			if len(args) != 2 {
-				fmt.Printf("The query command required exactly two args: qname and qtype\n")
-				return
-			}
 			fmt.Printf("Querying %s for %s records\n", args[0], args[1])
 
 			qname := dns.Fqdn(args[0])

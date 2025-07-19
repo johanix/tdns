@@ -72,6 +72,8 @@ func startInteractiveMode() {
 		prompt.OptionMaxSuggestion(5),
 	)
 	p.Run()
+	exec.Command("stty", "sane").Run()
+	os.Exit(0)
 }
 
 // executor handles command execution
@@ -82,9 +84,9 @@ func executor(input string) {
 	}
 	if input == "exit" || input == "quit" {
 		fmt.Println("Goodbye!")
-		// return // XXX: not enough to terminate
-		exec.Command("stty", "sane").Run()
-		os.Exit(0)
+		return // XXX: not enough to terminate
+		// exec.Command("stty", "sane").Run()
+		// os.Exit(0)
 	}
 
 	// Split the input into args and execute via Cobra

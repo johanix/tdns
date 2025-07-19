@@ -24,6 +24,9 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 		return
 	}
 
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
 	if agent.Zones == nil {
 		agent.Zones = make(map[ZoneName]bool)
 	}
@@ -333,9 +336,6 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 
 			// Check if API transport details are complete
 			agent.mu.Lock()
-			// tmpurirrr = agent.ApiDetails.UriRR
-			// tmptlsarr = agent.ApiDetails.TlsaRR
-			// tmpaddrs = agent.ApiDetails.Addrs
 
 			if agent.ApiDetails.UriRR != nil && agent.ApiDetails.TlsaRR != nil && len(agent.ApiDetails.Addrs) > 0 {
 				agent.ApiDetails.ContactInfo = "complete"

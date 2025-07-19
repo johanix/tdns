@@ -1,17 +1,16 @@
-# TDNS-COMBINER
+# **tdns-combiner**
 
 Description
 
-**tdns-combiner** is intended to be as small and simple as possible and
-only serve one single purpose: to control the four apex RRsets for
-NS, DNSKEY, CDS and CSYNC for zones that it receives via inbound zone
-transfer (typically from a zone owner) and (after possible modifications)
-publishes via outbound zone transfer (to a signer).
+**tdns-combiner** is a small, single-purpose service that controls the four
+apex RRsets — NS, DNSKEY, CDS and CSYNC for zones that it receives via
+inbound zone transfer (typically from a zone owner) and (after possible
+modifications) publishes via outbound zone transfer (to a signer).
 
 The replacement data for the four RRsets is received via an API
 connection from a nearby **tdns-agent**.
 
-## Design Constraints for **tdns-combiner**:
+## Design Constraints for **tdns-combiner**
 
 1. Essentially all configuration errors should be fatal. There is no
    point to a **tdns-combiner** that is running on a partially broken config.
