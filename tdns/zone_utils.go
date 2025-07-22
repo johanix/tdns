@@ -856,11 +856,6 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		return nil
 	}
 	zd.Logger.Printf("SetupZoneSync: Zone %s requests delegation sync", zd.ZoneName)
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
-		return err
-	}
 
 	// Is this a parent zone and should we then publish a DSYNC RRset?
 	if zd.Options[OptDelSyncParent] {
