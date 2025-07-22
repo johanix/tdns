@@ -17,6 +17,16 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		Name: zd.ZoneName,
 	}
 
+	// Verify that there is no DSYNC RRset already present
+	owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
+	if owner != nil {
+		rrset.RRs = owner.RRtypes.GetOnlyRRSet(TypeDSYNC).RRs
+		if len(rrset.RRs) > 0 {
+			zd.Logger.Printf("PublishDsyncRRs: zone: %s DSYNC RRset already present; not synthesizing DSYNC RRset", zd.ZoneName)
+			return nil
+		}
+	}
+
 	ttl := 7200
 	addr_rrs := []dns.RR{}
 	dsync_added := false

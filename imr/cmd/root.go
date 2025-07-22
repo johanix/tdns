@@ -93,7 +93,7 @@ func initConfig() {
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
 
-	LocalConfig = viper.GetString("cli.localconfig")
+	LocalConfig = viper.GetString("imr.localconfig")
 	if LocalConfig != "" {
 		_, err := os.Stat(LocalConfig)
 		if err != nil {

@@ -867,7 +867,8 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
-		dsync_rrset, exist := apex.RRtypes.Get(TypeDSYNC)
+		owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
+		dsync_rrset, exist := owner.RRtypes.Get(TypeDSYNC)
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)

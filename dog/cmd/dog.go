@@ -149,7 +149,8 @@ var rootCmd = &cobra.Command{
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
 				if options["transport"] == "Do53" {
-					tdns.ZoneTransferPrint(qname, server, serial, rrtype, options)
+					upstream := net.JoinHostPort(options["server"], options["port"])
+					tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options)
 				} else {
 					fmt.Printf("Zone transfer only supported for transport Do53 (TCP), this is %s\n", options["transport"])
 					os.Exit(1)
@@ -188,7 +189,25 @@ var rootCmd = &cobra.Command{
 					// Set DE bit (bit 13)
 					opt.Hdr.Ttl |= 1 << 13
 				}
+				if ots, ok := options["ots"]; ok {
+					var otsValue uint8
+					switch ots {
+					case "opt_in":
+						otsValue = tdns.OTS_OPT_IN
+					case "opt_out":
+						otsValue = tdns.OTS_OPT_OUT
+					}
+					err := tdns.AddOTSOption(opt, otsValue)
+					if err != nil {
+						fmt.Printf("Error from AddOTSOption: %v", err)
+						os.Exit(1)
+					}
+				}
 				m.Extra = append(m.Extra, opt)
+
+				if tdns.Globals.Debug {
+					fmt.Printf("*** Outbound DNS message: %s\n", m.String())
+				}
 				start := time.Now()
 
 				server, ok := options["server"]
@@ -316,6 +335,24 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 				}
 			}
 			return options, nil
+		}
+
+		// Add support for +OTS=opt_in, +OTS=opt_out, +OTS=1, +OTS=2, and +OTS (default to opt_in)
+		if strings.HasPrefix(strings.ToUpper(ucarg), "+OTS") {
+			otsArg := ""
+			if strings.Contains(ucarg, "=") {
+				parts := strings.SplitN(ucarg, "=", 2)
+				otsArg = strings.ToLower(parts[1])
+			}
+			if otsArg == "" || otsArg == "opt_in" || otsArg == "1" {
+				options["ots"] = "opt_in"
+				return options, nil
+			} else if otsArg == "opt_out" || otsArg == "2" {
+				options["ots"] = "opt_out"
+				return options, nil
+			} else {
+				return nil, fmt.Errorf("Error: Unknown OTS option: %s", otsArg)
+			}
 		}
 
 		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)

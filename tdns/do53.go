@@ -16,6 +16,12 @@ import (
 	"github.com/spf13/viper"
 )
 
+type MsgOptions struct {
+	DnssecOK bool
+	OtsOptIn bool
+	OtsOptOut bool
+}
+
 func CaseFoldContains(slice []string, str string) bool {
 	for _, s := range slice {
 		if strings.EqualFold(s, str) {
@@ -129,23 +135,35 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
-		var dnssec_ok bool
+		// var dnssec_ok, ots_opt_in, ots_opt_out bool
+		var msgoptions MsgOptions
 		opt := r.IsEdns0()
 		if opt != nil {
-			dnssec_ok = opt.Do()
+			msgoptions.DnssecOK = opt.Do()
+			ots_val, ots_ok := ExtractOTSOption(opt)
+			if ots_ok {
+				msgoptions.OtsOptIn = ots_val == OTS_OPT_IN
+				msgoptions.OtsOptOut = ots_val == OTS_OPT_OUT
+			}
+			if msgoptions.OtsOptIn {
+				log.Printf("OTS OPT_IN: %v", msgoptions.OtsOptIn)
+			}
+			if msgoptions.OtsOptOut {
+				log.Printf("OTS OPT_OUT: %v", msgoptions.OtsOptOut)
+			}
 		}
 		// log.Printf("DNSSEC OK: %v", dnssec_ok)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsnotifyq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok, len(dnsnotifyq))
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsnotifyq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DnssecOK, len(dnsnotifyq))
 			// A DNS NOTIFY may trigger time consuming outbound queries
 			dnsnotifyq <- DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeUpdate:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok, len(dnsupdateq))
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DnssecOK, len(dnsupdateq))
 			// A DNS Update may trigger time consuming outbound queries
 			dnsupdateq <- DnsUpdateRequest{
 				ResponseWriter: w,
@@ -157,7 +175,7 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			return
 
 		case dns.OpcodeQuery:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, dnssec_ok)
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DnssecOK)
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
 
@@ -174,7 +192,7 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				}
 
 				log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
-				err := zd.QueryResponder(w, r, qname, qtype, dnssec_ok, kdb)
+				err := zd.QueryResponder(w, r, qname, qtype, msgoptions, kdb)
 				if err != nil {
 					log.Printf("Error in QueryResponder: %v", err)
 				}
@@ -255,7 +273,7 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)
-			err := zd.QueryResponder(w, r, qname, qtype, dnssec_ok, kdb)
+			err := zd.QueryResponder(w, r, qname, qtype, msgoptions, kdb)
 			if err != nil {
 				log.Printf("Error in QueryResponder: %v", err)
 			}

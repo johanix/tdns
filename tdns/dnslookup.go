@@ -666,6 +666,14 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.SetEdns0(4096, true)
+	err := AddOTSToMessage(m, OTS_OPT_IN)
+	if err != nil {
+		lg.Printf("IterativeDNSQuery: Error from AddOTSToMessage: %v", err)
+		return nil, 0, ContextFailure, err
+	}
+	if Globals.Debug {
+		fmt.Printf("IterativeDNSQuery: message after AddOTSToMessage: %s", m.String())
+	}
 
 	// Try each server in the map
 	for nsname, server := range serverMap {

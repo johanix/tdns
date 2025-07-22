@@ -138,7 +138,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	rightmargin := 78
 
 	transfer := new(dns.Transfer)
-	answerChan, err := transfer.In(msg, options["server"])
+	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		fmt.Printf("Error from transfer.In: %v\n", err)
 		return err
