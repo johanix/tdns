@@ -72,15 +72,16 @@ type CommandPost struct {
 }
 
 type CommandResponse struct {
-	AppName  string
-	Time     time.Time
-	Status   string
-	Zone     string
-	Names    []string
-	Zones    map[string]ZoneConf
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	AppName      string
+	Time         time.Time
+	Status       string
+	Zone         string
+	Names        []string
+	Zones        map[string]ZoneConf
+	Msg          string
+	ApiEndpoints []string
+	Error        bool
+	ErrorMsg     string
 }
 
 type ZonePost struct {
@@ -185,7 +186,7 @@ type ApiClient struct {
 	Name       string
 	Client     *http.Client
 	BaseUrl    string
-        Addresses  []string  // if non-empty, replace the host part of the BaseUrl with each of these
+	Addresses  []string // if non-empty, replace the host part of the BaseUrl with each of these
 	apiKey     string
 	AuthMethod string
 	UseTLS     bool

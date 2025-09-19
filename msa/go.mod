@@ -2,13 +2,11 @@ module tdns-msa
 
 go 1.23.2
 
-toolchain go1.24.1
-
-replace (
-	github.com/johanix/tdns/music => ../music
-	github.com/johanix/tdns/music/fsm => ../music/fsm
-	github.com/johanix/tdns/tdns => ../tdns
-)
+// replace (
+//	github.com/johanix/tdns/music => ../music
+//	github.com/johanix/tdns/music/fsm => ../music/fsm
+//	github.com/johanix/tdns/tdns => ../tdns
+// )
 
 require (
 	github.com/go-playground/validator/v10 v10.22.1 // indirect

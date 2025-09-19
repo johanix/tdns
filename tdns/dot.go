@@ -8,65 +8,64 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
-	"os"
+	"net"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
-func DnsDoTEngine(conf *Config, dotaddrs []string,
+func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
-	certFile := viper.GetString("dnsengine.dot.certfile")
-	keyFile := viper.GetString("dnsengine.dot.keyfile")
 
-	if certFile == "" || keyFile == "" {
-		log.Println("DnSDoTEngine: no certificate file or key file provided. Not starting.")
-		return fmt.Errorf("no certificate file or key file provided")
-	}
-
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		log.Printf("DnSDoTEngine: certificate file %q does not exist. Not starting.", certFile)
-		return fmt.Errorf("certificate file %q does not exist", certFile)
-	}
-
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		log.Printf("DnSDoTEngine: key file %q does not exist. Not starting.", keyFile)
-		return fmt.Errorf("key file %q does not exist", keyFile)
+	if cert == nil {
+		return fmt.Errorf("DnsDoTEngine:DoT certificate is not set")
 	}
 
 	log.Printf("DnsEngine: DoT addresses: %v", dotaddrs)
-	tlsConfig := DoTTLSConfig(certFile, keyFile)
-	for _, addr := range dotaddrs {
-		server := &dns.Server{
-			Addr:          addr,
-			Net:           "tcp-tls",
-			TLSConfig:     tlsConfig,
-			MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-			Handler:       dns.HandlerFunc(ourDNSHandler),
-		}
-		go func(addr string) {
-			log.Printf("DnsEngine: serving on %s (DoT)\n", addr)
-			if err := server.ListenAndServe(); err != nil {
-				log.Printf("Failed to setup the DoT server: %s", err.Error())
-			} else {
-				log.Printf("DnsEngine: listening on %s/DoT", addr)
-			}
-		}(addr)
-	}
-	return nil
-}
+	// tlsConfig := DoTTLSConfig(certFile, keyFile)
 
-func DoTTLSConfig(certFile, keyFile string) *tls.Config {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		log.Fatalf("failed to load TLS cert/key: %v", err)
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS13, // or TLS12 if you need broader support
 		// ClientAuth: tls.NoClientCert, // optional: change if you want client certs
 		NextProtos: []string{"dot"}, // important for DoT
 	}
+
+	// Wrap the DNS handler to add logging
+	loggingHandler := func(w dns.ResponseWriter, r *dns.Msg) {
+		if Globals.Debug {
+			log.Printf("*** DoT received message opcode: %s qname: %s rrtype: %s",
+				dns.OpcodeToString[r.Opcode],
+				r.Question[0].Name,
+				dns.TypeToString[r.Question[0].Qtype])
+		}
+		ourDNSHandler(w, r)
+	}
+
+	ports := viper.GetStringSlice("dnsengine.ports.dot")
+	if len(ports) == 0 {
+		ports = []string{"853"}
+	}
+	for _, addr := range dotaddrs {
+		for _, port := range ports {
+			hostport := net.JoinHostPort(addr, port)
+			server := &dns.Server{
+				Addr:          hostport,
+				Net:           "tcp-tls",
+				TLSConfig:     tlsConfig,
+				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				Handler:       dns.HandlerFunc(loggingHandler),
+			}
+			go func() {
+				log.Printf("DnsEngine: serving on %s (DoT)\n", hostport)
+				if err := server.ListenAndServe(); err != nil {
+					log.Printf("Failed to setup the DoT server on %s: %s", hostport, err.Error())
+				} else {
+					log.Printf("DnsEngine: listening on %s/DoT", hostport)
+				}
+			}()
+		}
+	}
+	return nil
 }

@@ -5,6 +5,30 @@ package tdns
 
 import "fmt"
 
+type CacheContext uint8
+
+const (
+	ContextAnswer CacheContext = iota + 1
+	ContextHint
+	ContextPriming
+	ContextReferral
+	ContextNXDOMAIN
+	ContextNoErrNoAns
+	ContextGlue    // from additional section
+	ContextFailure // some sort of general failure that we cannot sort out
+)
+
+var CacheContextToString = map[CacheContext]string{
+	ContextAnswer:     "answer",
+	ContextHint:       "hint",
+	ContextPriming:    "priming",
+	ContextReferral:   "referral",
+	ContextNXDOMAIN:   "NXDOMAIN",
+	ContextNoErrNoAns: "NOERROR, NODATA (negative response type 0)",
+	ContextGlue:       "glue",
+	ContextFailure:    "failure",
+}
+
 type ZoneOption uint8
 
 const (
@@ -17,11 +41,12 @@ const (
 	OptBlackLies
 	OptDontPublishKey
 	OptOnlineSigning
-	OptMultiSigner
+	OptMultiSigner // OBE?
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
-	OptAgent // XXX: Hmm. Is this needed?
+	// OptServerSvcb
+	OptAddTransportSignal
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -29,16 +54,17 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptDelSyncChild:      "delegation-sync-child",
 	OptAllowUpdates:      "allow-updates",
 	OptAllowChildUpdates: "allow-child-updates",
+	OptAllowCombine:      "allow-combine", // Dynamically et if app=combiner and zone contains a HSYNC RRset
 	OptFoldCase:          "fold-case",
 	OptBlackLies:         "black-lies",
 	OptDontPublishKey:    "dont-publish-key",
 	OptOnlineSigning:     "online-signing",
-	OptMultiSigner:       "multisigner",
+	OptMultiSigner:       "multisigner", // OBE?
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
-	OptAgent:             "agent",
-	OptAllowCombine:      "allow-combine", // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	// OptServerSvcb:        "create-server-svcb",
+	OptAddTransportSignal: "add-transport-signal",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -51,11 +77,11 @@ var StringToZoneOption = map[string]ZoneOption{
 	"black-lies":             OptBlackLies,
 	"dont-publish-key":       OptDontPublishKey,
 	"online-signing":         OptOnlineSigning,
-	"multisigner":            OptMultiSigner,
+	"multisigner":            OptMultiSigner, // OBE?
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
-	"agent":                  OptAgent,
+	"add-transport-signal":   OptAddTransportSignal,
 }
 
 type AppType uint8
@@ -63,21 +89,23 @@ type AppType uint8
 const (
 	AppTypeServer AppType = iota + 1
 	AppTypeAgent
-	AppTypeMSA
 	AppTypeCombiner
+	AppTypeImr // simplified recursor
+	AppTypeCli
 )
 
 var AppTypeToString = map[AppType]string{
 	AppTypeServer:   "server",
 	AppTypeAgent:    "agent",
-	AppTypeMSA:      "msa",
 	AppTypeCombiner: "combiner",
+	AppTypeImr:      "imr",
+	AppTypeCli:      "cli",
 }
 
 var StringToAppType = map[string]AppType{
-	"server":   AppTypeServer,
-	"agent":    AppTypeAgent,
-	"msa":      AppTypeMSA,
+	"server": AppTypeServer,
+	"agent":  AppTypeAgent,
+	//"msa":      AppTypeMSA,
 	"combiner": AppTypeCombiner,
 }
 

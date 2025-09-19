@@ -41,11 +41,13 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 
 	var configsections = make(map[string]interface{}, 5)
 
-	configsections["log"] = config.Log
-	configsections["service"] = config.Service
-	configsections["db"] = config.Db
-	configsections["apiserver"] = config.ApiServer
-	configsections["dnsengine"] = config.DnsEngine
+	if Globals.App.Type != AppTypeImr {
+		configsections["log"] = config.Log
+		configsections["service"] = config.Service
+		configsections["db"] = config.Db
+		configsections["apiserver"] = config.ApiServer
+		configsections["dnsengine"] = config.DnsEngine
+	}
 
 	if _, err := ValidateBySection(&config, configsections, cfgfile); err != nil {
 		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v", cfgfile, err)

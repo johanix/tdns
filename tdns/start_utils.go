@@ -284,15 +284,30 @@ type ShowAPIresponse struct {
 }
 
 func (api *ApiClient) ShowApi() {
-	_, buf, _ := api.RequestNG(http.MethodGet, "/show/api", nil, true)
+	//	_, buf, _ := api.RequestNG(http.MethodGet, "/show/api", nil, true)
 
-	var sar ShowAPIresponse
-	err := json.Unmarshal(buf, &sar)
+	//	var sar ShowAPIresponse
+	var cr CommandResponse
+	status, buf, err := api.RequestNG(http.MethodPost, "/command", CommandPost{Command: "api"}, true)
 	if err != nil {
-		log.Printf("Error parsing JSON for ShowAPIResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal of ShowAPIresponse: %v\n", err)
+		if strings.Contains(err.Error(), "connection refused") {
+			fmt.Printf("Connection refused\n")
+		} else {
+			fmt.Printf("Error: %v\n", err)
+		}
 	}
-	for _, ep := range sar.Data[1:] {
+
+	if status != 200 {
+		fmt.Printf("Error: %v\n", status)
+	}
+
+	err = json.Unmarshal(buf, &cr)
+	if err != nil {
+		log.Printf("Error parsing JSON for CommandResponse: %s", string(buf))
+		log.Fatalf("Error from unmarshal CommandResponse: %v\n", err)
+	}
+
+	for _, ep := range cr.ApiEndpoints {
 		fmt.Printf("%s\n", ep)
 	}
 }

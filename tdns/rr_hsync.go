@@ -7,7 +7,6 @@ package tdns
 import (
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/miekg/dns"
 )
@@ -19,7 +18,7 @@ func init() {
 	RegisterHsyncRR()
 }
 
-const TypeHSYNC = 0x0F9D
+//const TypeHSYNC = 0x0F9D
 
 type HSYNC struct {
 	State    uint8 // 0=OFF, 1=ON
@@ -75,7 +74,7 @@ func (rd HSYNC) String() string {
 }
 
 func (rd *HSYNC) Parse(txt []string) error {
-	log.Printf("parsing HSYNC: %v", txt)
+	// log.Printf("parsing HSYNC: %v", txt)
 	if len(txt) != 5 {
 		return errors.New("HSYNC requires values for State, NSmgmt and Sign plus identity and upstream domain names")
 	}

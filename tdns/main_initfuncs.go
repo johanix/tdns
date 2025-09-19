@@ -6,6 +6,7 @@ package tdns
 
 import (
 	// "flag"
+
 	"fmt"
 	"log"
 	"os"
@@ -74,21 +75,27 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	Globals.App.ServerBootTime = time.Now()
 	Globals.App.ServerConfigTime = time.Now()
 
-	pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
-	pflag.BoolVarP(&Globals.Debug, "debug", "d", false, "Debug mode")
-	pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
-	pflag.Parse()
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
+		pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
+		pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
+		pflag.Parse()
 
-	flag.Usage = func() {
-		flag.PrintDefaults()
+		flag.Usage = func() {
+			flag.PrintDefaults()
+		}
+
+	case AppTypeImr:
+		conf.Internal.CfgFile = defaultcfg
 	}
 
 	if Globals.Debug {
-		log.Printf("*** MainInit: 1 ***")
+		log.Printf("*** MainInit: 1. defaultcfg: %q conf.Internal.CfgFile: %q ***", defaultcfg, conf.Internal.CfgFile)
 	}
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeMSA, AppTypeCombiner:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeImr:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -101,23 +108,6 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		return fmt.Errorf("Error parsing config %q: %v", conf.Internal.CfgFile, err)
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 2 ***")
-	}
-
-	// Initialize channels and start engines
-	kdb := conf.Internal.KeyDB
-	kdb.UpdateQ = make(chan UpdateRequest, 10)
-	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
-	conf.Internal.UpdateQ = kdb.UpdateQ
-	conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
-
-	conf.Internal.KeyDB = kdb
-
-	if Globals.Debug {
-		log.Printf("*** MainInit: 3 ***")
-	}
-
 	logfile := viper.GetString("log.file")
 	err = SetupLogging(logfile)
 	if err != nil {
@@ -125,9 +115,59 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 4 ***")
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		// Note that AppTypeServer and AppTypeAgent feel though into here as well.
+		kdb := conf.Internal.KeyDB
+		if kdb == nil {
+			err = conf.InitializeKeyDB()
+			if err != nil {
+				return fmt.Errorf("Error initializing KeyDB: %v", err)
+			}
+			/*
+				// dbFile := viper.GetString("db.file")
+				dbFile := conf.Db.File
+				// Ensure the database file path is within allowed boundaries
+				dbFile = filepath.Clean(dbFile)
+				if strings.Contains(dbFile, "..") {
+					return errors.New("invalid database file path: must not contain directory traversal")
+				}
+				if dbFile == "" {
+					return fmt.Errorf("invalid database file: '%s'", dbFile)
+				}
+				switch Globals.App.Type {
+				case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+
+					// Verify that we have a MUSIC DB file.
+					fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+					if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+						log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
+						log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
+						return errors.New("ParseConfig: TDNS DB file does not exist")
+					}
+					kdb, err := NewKeyDB(dbFile, false)
+					if err != nil {
+						log.Fatalf("Error from NewKeyDB: %v", err)
+					}
+					conf.Internal.KeyDB = kdb
+
+				default:
+					// do nothing for tdns-imr, tdns-cli
+				}
+			*/
+		}
+
+	default:
+		log.Printf("TDNS %s (%s): not initializing KeyDB", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
+
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 2 ***")
+	// }
+
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 4 ***")
+	// }
 
 	err = Globals.Validate()
 	if err != nil {
@@ -145,20 +185,33 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10) // Only used by sidecar.
 	go RefreshEngine(conf, conf.Internal.StopCh)
 
+	if Globals.App.Type == AppTypeAgent {
+		conf.Internal.AgentQs = &AgentQs{
+			Hello:             make(chan *AgentMsgReport, 100),
+			Beat:              make(chan *AgentMsgReport, 100),
+			Msg:               make(chan *AgentMsgPostPlus, 100),
+			Command:           make(chan *AgentMgmtPostPlus, 100),
+			DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
+			SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
+			SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
+		}
+	}
+
 	switch Globals.App.Type {
-	case AppTypeCombiner, AppTypeAgent:
-		// don't start validator engine for combiner or agent
-	default:
+	case AppTypeImr, AppTypeServer:
 		conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 		go ValidatorEngine(conf, conf.Internal.StopCh)
+		log.Printf("TDNS %s (%s): starting: validatorengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	default:
+		log.Printf("TDNS %s (%s): not starting: validatorengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
 
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 5 ***")
-	}
+	// if Globals.Debug {
+	//	log.Printf("*** MainInit: 5 ***")
+	// }
 
 	// Parse all configured zones
 	all_zones, err := conf.ParseZones(false) // false = initial load, not reload
@@ -174,11 +227,12 @@ func (conf *Config) MainInit(defaultcfg string) error {
 			return fmt.Errorf("Error setting up agent: %v", err)
 		}
 		// Initialize AgentRegistry for agent mode only
-		conf.Internal.Registry = conf.NewAgentRegistry()
-	case AppTypeServer, AppTypeMSA, AppTypeCombiner:
-		// ... existing server/MSA/combiner setup ...
+		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
+		// dump.P(conf.Internal.AgentRegistry)
+	case AppTypeServer, AppTypeCombiner:
+		// ... existing server/combiner setup ...
 	default:
-		// ... existing server/MSA/combiner setup ...
+		// ... existing server/agent/combiner setup ...
 	}
 
 	if Globals.Debug {
@@ -192,58 +246,85 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	stopch := conf.Internal.StopCh
 
-	// if Globals.App.Type != AppTypeMSA {
-	// The music sidecar has its own apihandler, so we must not start the TDNS apihandler here.
 	conf.Internal.APIStopCh = make(chan struct{})
-	// router := TdnsSetupRouter(conf)
-	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
-	if err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
-	// }
 
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
-	conf.Internal.HelloQ = make(chan AgentMsgReport, 100)
-	conf.Internal.HeartbeatQ = make(chan AgentMsgReport, 100)
 
-	if Globals.App.Type == AppTypeAgent {
+	// Everyone has the mgmt API dispatcher
+	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
+	if err != nil {
+		return fmt.Errorf("Error starting API dispatcher: %v", err)
+	}
+
+	switch Globals.App.Type {
+	case AppTypeAgent:
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
-		go HsyncEngine(conf, conf.Internal.HelloQ, conf.Internal.HeartbeatQ, conf.Internal.StopCh) // Only used by agent
+		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
+		go conf.SynchedDataEngine(conf.Internal.AgentQs, conf.Internal.StopCh)
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
 		}
 		log.Printf("TDNS %s (%s): starting agent-to-agent sync engine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 		go APIdispatcherNG(conf, syncrtr, conf.Agent.Api.Addresses.Listen, conf.Agent.Api.CertFile, conf.Agent.Api.KeyFile, conf.Internal.APIStopCh)
+		log.Printf("TDNS %s (%s): starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	default:
+		log.Printf("TDNS %s (%s): not starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
 
 	switch Globals.App.Type {
-	case AppTypeCombiner:
-		log.Printf("TDNS %s (%s): not starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	default:
+	case AppTypeServer, AppTypeAgent:
 		go AuthQueryEngine(conf.Internal.AuthQueryQ)
 		go ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+
+		kdb.UpdateQ = make(chan UpdateRequest, 10)
+		conf.Internal.UpdateQ = kdb.UpdateQ
+		kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
+		conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
 
 		go kdb.ZoneUpdaterEngine(stopch)
 		go kdb.DeferredUpdaterEngine(stopch)
 
 		go UpdateHandler(conf)
 		go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+		log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	default:
+		log.Printf("TDNS %s (%s): not starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
-	go NotifyHandler(conf)
-	go DnsEngine(conf)
 
 	switch Globals.App.Type {
-	case AppTypeMSA, AppTypeServer:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		go NotifyHandler(conf)
+		go DnsEngine(conf)
+		log.Printf("TDNS %s (%s): starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	default:
+		log.Printf("TDNS %s (%s): not starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	}
+
+	switch Globals.App.Type {
+	case AppTypeServer:
+		// Only tdns-server runs the resigner engine
 		conf.Internal.ResignQ = make(chan *ZoneData, 10)
 		go ResignerEngine(conf.Internal.ResignQ, stopch)
+		log.Printf("TDNS %s (%s): starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	default:
-		// agent does not resign zones
-		log.Printf("TDNS %s (%s): not starting resigner engine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		log.Printf("TDNS %s (%s): not starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	}
+
+	switch Globals.App.Type {
+	case AppTypeImr:
+		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
+		stopCh := make(chan struct{}, 10)
+		go conf.RecursorEngine(stopCh)
+		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
+		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+
+	default:
+		log.Printf("TDNS %s (%s): not starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
 
 	return nil

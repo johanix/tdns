@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
-	// "github.com/miekg/dns"
 )
 
 func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +168,15 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 }
 
 // func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Request) {
-func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *http.Request) {
+	if rtr == nil {
+		log.Printf("APIcommand: rtr is nil")
+		return func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("APIcommand: rtr is nil")
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		stopCh := conf.Internal.APIStopCh
 
@@ -203,6 +211,15 @@ func APIcommand(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(5000 * time.Millisecond)
 				stopCh <- struct{}{}
 			}()
+
+		case "api":
+			// XXX: Here we should return the defined API endpoints, as reported by ShowAPI().
+			resp.ApiEndpoints, err = ShowAPI(rtr)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				break
+			}
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("%s: Unknown command: %s", Globals.App.Name, cp.Command)
@@ -257,7 +274,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
-				Globals.App.Name, Globals.App.ServerBootTime.Format(timelayout), Globals.App.ServerConfigTime.Format(timelayout))
+				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
@@ -349,7 +366,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 	}
 }
 
-func APIdebug() func(w http.ResponseWriter, r *http.Request) {
+func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		resp := DebugResponse{
@@ -369,7 +386,7 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 		var dp DebugPost
 		err := decoder.Decode(&dp)
 		if err != nil {
-			log.Println("APICdebug: error decoding debug post:", err)
+			log.Println("APIdebug: error decoding debug post:", err)
 		}
 
 		log.Printf("API: received /debug request (cmd: %s) from %s.\n",
@@ -377,7 +394,7 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 
 		switch dp.Command {
 		case "rrset":
-			log.Printf("tdnsd debug rrset inquiry")
+			log.Printf("%s debug rrset inquiry", Globals.App.Name)
 			if zd, ok := Zones.Get(dp.Zone); ok {
 				//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
 				//				if owner := &zd.Owners[idx]; owner != nil {
@@ -453,11 +470,11 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 			resp.TrustedDnskeys = tas
 
 		case "show-rrsetcache":
-			log.Printf("tdnsd debug show-rrsetcache")
-			resp.Msg = fmt.Sprintf("RRsetCache: %v", RRsetCache.Map.Keys())
+			log.Printf("%s debug show-rrsetcache", Globals.App.Name)
+			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []CachedRRset{}
-			for _, rrsetkey := range RRsetCache.Map.Keys() {
-				rrset, ok := RRsetCache.Map.Get(rrsetkey)
+			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
+				rrset, ok := conf.Internal.RRsetCache.RRsets.Get(rrsetkey)
 				if !ok {
 					continue
 				}
@@ -470,4 +487,39 @@ func APIdebug() func(w http.ResponseWriter, r *http.Request) {
 			resp.Error = true
 		}
 	}
+}
+
+// Stolen from labstuff:apihandler_funcs.go
+func ShowAPI(rtr *mux.Router) ([]string, error) {
+	// resp := []string{fmt.Sprintf("API provided by %s listening on: %s\n",
+	//	Globals.App.Name, address)}
+	var resp []string
+
+	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+		path, err := route.GetPathTemplate()
+		if err != nil {
+			log.Printf("ShowAPI: error getting path template: %v", err)
+			return err
+		}
+		methods, err := route.GetMethods()
+		if err != nil {
+			log.Printf("ShowAPI: error getting methods: %v", err)
+			return err
+		}
+		for _, m := range methods {
+			resp = append(resp, fmt.Sprintf("%-6s %s", m, path))
+		}
+		return nil
+	}
+
+	if err := rtr.Walk(walker); err != nil {
+		// log.Panicf("Logging err: %s\n", err.Error())
+		log.Printf("ShowAPI: Walking error: %v", err)
+		return nil, err
+	}
+	//	response := ApiResponse{
+	//		Status: 101,
+	//		Data:   resp,
+	//	}
+	return resp, nil
 }

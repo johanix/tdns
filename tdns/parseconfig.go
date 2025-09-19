@@ -155,6 +155,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// }
 	}
 
+	if Globals.Debug {
+		log.Printf("Templates: %+v", conf.Templates)
+	}
+
 	// Build template map
 	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
 	for _, tmpl := range conf.Templates {
@@ -165,6 +169,41 @@ func (conf *Config) ParseConfig(reload bool) error {
 			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
 		}
 		Templates[tmpl.Name] = tmpl
+	}
+
+	// Handle template expansion if specified
+	for _, t := range conf.Templates {
+		if t.Template != "" && t.Template != t.Name {
+			log.Printf("Template %q depends on template %q: expanding", t.Name, t.Template)
+			if tmpl, exist := Templates[t.Template]; exist {
+				if tmpl.Template != "" && tmpl.Template == t.Name {
+					log.Printf("Template %q: circular dependency via %q. Ignoring template.", t.Name, t.Template)
+					delete(Templates, t.Name)
+					delete(Templates, t.Template)
+					continue
+				}
+				var err error
+				//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
+				t, err = ExpandTemplate(t, &tmpl, Globals.App.Type)
+				if err != nil {
+					fmt.Printf("Error expanding template %q for other template %q. Aborting.\n", t.Template, t.Name)
+					// return nil, err
+					// zd.SetError(ConfigError, "template expansion error: %q: %v", t.Template, err)
+					delete(Templates, t.Name)
+					continue
+				}
+				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
+			} else {
+				//zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
+				fmt.Printf("Template %q refers to non-existing template %q. Ignored.\n", t.Name, t.Template)
+				delete(Templates, t.Name)
+				continue
+			}
+		}
+	}
+
+	if Globals.Debug {
+		log.Printf("Templates: %+v", Templates)
 	}
 
 	// log.Printf("*** ParseConfig: 1")
@@ -184,10 +223,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
 
-	// log.Printf("*** ParseConfig: 3")
-
-	// Initialize KeyDB if needed
-	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeAgent {
+	// Initialize DnssecPolicies if needed
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent:
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -205,41 +243,23 @@ func (conf *Config) ParseConfig(reload bool) error {
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
-			// log.Printf("*** ParseConfig: 5. DnssecPolicy: %q", name)
 		}
 
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
 			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
 		}
 	}
-	// log.Printf("*** ParseConfig: 6")
 
-	kdb := conf.Internal.KeyDB
-	if !reload || kdb == nil {
-		dbFile := viper.GetString("db.file")
-		// Ensure the database file path is within allowed boundaries
-		dbFile = filepath.Clean(dbFile)
-		if strings.Contains(dbFile, "..") {
-			return errors.New("invalid database file path: must not contain directory traversal")
-		}
-		if Globals.App.Name != "sidecar-cli" && Globals.App.Name != "tdns-cli" {
-			// Verify that we have a MUSIC DB file.
-			fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
-			if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-				log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
-				log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
-				return errors.New("ParseConfig: TDNS DB file does not exist")
+	// XXX: Hmm. Should not initialize KeyDB on reload?
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		if !reload { // || kdb == nil {
+			err = conf.InitializeKeyDB()
+			if err != nil {
+				return err
 			}
 		}
-
-		kdb, err := NewKeyDB(dbFile, false)
-		if err != nil {
-			log.Fatalf("Error from NewKeyDB: %v", err)
-		}
-		conf.Internal.KeyDB = kdb
 	}
-
-	// log.Printf("*** ParseConfig: 7")
 
 	err = ValidateConfig(nil, conf.Internal.CfgFile) // will terminate on error
 	if err != nil {
@@ -247,21 +267,27 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.App.Type == AppTypeServer && len(conf.Service.Identities) > 0 {
-		transports := []string{}
-		if len(conf.DnsEngine.DoT.Addresses) > 0 {
-			transports = append(transports, "dot")
+		var transports []string
+		for _, t := range conf.DnsEngine.Transports {
+			t = strings.ToLower(t)
+			switch t {
+			case "do53", "dot", "doh", "doq":
+				transports = append(transports, t)
+			default:
+				log.Printf("Error: Unknown transport: %s", t)
+			}
 		}
-		if len(conf.DnsEngine.DoH.Addresses) > 0 {
-			transports = append(transports, "doh")
+		// Add do53 if not already present
+		if !slices.Contains(transports, "do53") {
+			transports = append(transports, "do53")
 		}
-		if len(conf.DnsEngine.DoQ.Addresses) > 0 {
-			transports = append(transports, "doq")
-		}
+
+		transports = slices.Compact(transports)
 		if len(transports) > 0 {
 			alpn := []dns.SVCBKeyValue{
 				&dns.SVCBAlpn{Alpn: transports},
 			}
-			Globals.ServerALPN = &dns.SVCB{
+			Globals.ServerSVCB = &dns.SVCB{
 				Priority: 1,
 				Target:   dns.Fqdn(conf.Service.Identities[0]),
 				Value:    alpn,
@@ -276,10 +302,48 @@ func (conf *Config) ParseConfig(reload bool) error {
 	return nil
 }
 
+func (conf *Config) InitializeKeyDB() error {
+	// dbFile := viper.GetString("db.file")
+	dbFile := conf.Db.File
+	// Ensure the database file path is within allowed boundaries
+	dbFile = filepath.Clean(dbFile)
+	if strings.Contains(dbFile, "..") {
+		return errors.New("invalid database file path: must not contain directory traversal")
+	}
+	if dbFile == "" {
+		return fmt.Errorf("invalid database file: '%s'", dbFile)
+	}
+	switch Globals.App.Type {
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+
+		// Verify that we have a MUSIC DB file.
+		fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+			log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
+			log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
+			return errors.New("ParseConfig: TDNS DB file does not exist")
+		}
+		kdb, err := NewKeyDB(dbFile, false)
+		if err != nil {
+			return fmt.Errorf("Error from NewKeyDB: %v", err)
+		}
+		conf.Internal.KeyDB = kdb
+
+	default:
+		// do nothing for tdns-imr, tdns-cli
+	}
+	return nil
+}
+
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 func (conf *Config) ParseZones(reload bool) ([]string, error) {
+	if len(conf.Zones) == 0 {
+		log.Printf("ParseZones: no authoritative zones defined.")
+		return nil, nil
+	}
+
 	if Globals.Debug {
-		log.Printf("ParseZones: enter")
+		log.Printf("ParseZones: %d authoritative zones defined. Parsing...", len(conf.Zones))
 	}
 	var all_zones []string
 	var primary_zones []string
@@ -384,9 +448,11 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 		var cleanoptions []ZoneOption
 		for _, option := range zconf.OptionsStrs {
 			option = strings.ToLower(option)
+			log.Printf("ParseZones: zone %s: checking option: %q", zname, option)
 			opt, exist := StringToZoneOption[option]
 			if !exist {
 				log.Printf("ParseZones: Zone %s: Unknown option: %q. Ignored.", zname, option)
+				log.Printf("ParseZones: zone %s: defined options: %v", zname, StringToZoneOption)
 				zd.SetError(ConfigError, "unknown config option: %q", option)
 				continue
 			}
@@ -399,7 +465,8 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				OptAllowCombine,      // zone allows combine with local changes
 				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
 				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
-				OptDontPublishKey:    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				OptDontPublishKey,    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				OptAddTransportSignal: // add a transport signal to the zone
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
 
@@ -408,10 +475,10 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 					log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
 					continue
 				}
-				if Globals.App.Type == AppTypeMSA {
-					log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-MSA does not allow online signing.", zname, ZoneOptionToString[opt])
-					continue
-				}
+				// if Globals.App.Type == AppTypeMSA {
+				// 	log.Printf("Error: Zone %s: Option \"%s\" is ignored because MUSIC-MSA does not allow online signing.", zname, ZoneOptionToString[opt])
+				// 	continue
+				// }
 				if zconf.DnssecPolicy != "" {
 					options[opt] = true
 					cleanoptions = append(cleanoptions, opt)
@@ -558,17 +625,11 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			UpdatePolicy: policy,
 			DnssecPolicy: zconf.DnssecPolicy,
 		}
-
-		// log.Printf("*** ParseZones: 6")
 	}
 
-	// log.Printf("*** ParseZones: 7")
-
 	// ValidateZones(conf, ZonesCfgFile) // will terminate on error
-	log.Printf("All configured zones now refreshing: %v (queued for refresh: %d zones)",
-		all_zones, len(conf.Internal.RefreshZoneCh))
-
-	// log.Printf("*** ParseZones: 9")
+	log.Printf("ParseZones: %d zones parsed and are now refreshing: %v (queued for refresh: %d zones)",
+		len(all_zones), all_zones, len(conf.Internal.RefreshZoneCh))
 
 	if Globals.Debug {
 		log.Print("ParseZones: exit")

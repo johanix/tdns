@@ -188,6 +188,13 @@ func PrepArgs(required ...string) {
 			}
 			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
+		case "agentid":
+			if tdns.Globals.AgentId == "" {
+				fmt.Printf("Error: agent id not specified using --agentid flag\n")
+				os.Exit(1)
+			}
+			tdns.Globals.AgentId = tdns.AgentId(dns.Fqdn(string(tdns.Globals.AgentId)))
+
 		case "keyid":
 			if keyid == 0 {
 				fmt.Printf("Error: key id not specified using --keyid flag\n")
@@ -285,6 +292,13 @@ func PrepArgs(required ...string) {
 				fmt.Printf("Error: roll action \"%s\" is not known\n", rollaction)
 				os.Exit(1)
 			}
+
+		case "identity":
+			if myIdentity == "" {
+				fmt.Printf("Error: agent id not specified using --id flag\n")
+				os.Exit(1)
+			}
+			tdns.Globals.AgentId = tdns.AgentId(dns.Fqdn(myIdentity))
 
 		default:
 			fmt.Printf("Unknown required argument: \"%s\"\n", arg)

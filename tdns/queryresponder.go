@@ -7,7 +7,7 @@ package tdns
 import (
 	"fmt"
 	"log"
-	"slices"
+	"net"
 	"sort"
 	"strings"
 
@@ -22,6 +22,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	TypeMSIGNER: true,
 	TypeDELEG:   true,
 	TypeHSYNC:   true,
+	TypeHSYNC2:  true,
 }
 
 var standardDNSTypes = map[uint16]bool{
@@ -47,125 +48,6 @@ var standardDNSTypes = map[uint16]bool{
 	dns.TypeCDNSKEY:    true,
 }
 
-func (zd *ZoneData) xxxApexResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		log.Printf("ApexResponder: failed to get dnssec key for zone %s", zd.ZoneName)
-	}
-
-	MaybeSignRRset := func(rrset RRset, qname string) RRset {
-		if dak == nil {
-			log.Printf("ApexResponder: MaybeSignRRset: Warning: dak is nil")
-			return rrset
-		}
-		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
-			_, err := zd.SignRRset(&rrset, qname, dak, false)
-			if err != nil {
-				log.Printf("Error signing %s: %v", qname, err)
-			} else {
-				log.Printf("Signed %s: %v", qname, err)
-			}
-		}
-		return rrset
-	}
-
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
-		if err != nil {
-			log.Printf("ApexResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
-			return err
-		} else {
-			log.Printf("ApexResponder: failed to get apex data for zone %s", zd.ZoneName)
-		}
-	}
-
-	if dnssec_ok {
-		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
-		apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
-	}
-
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
-
-	var v4glue, v6glue *RRset
-
-	switch qtype {
-	case dns.TypeAXFR, dns.TypeIXFR:
-		log.Printf("We are AUTH for %s %s, so let's try to serve it", ZoneStoreToString[zd.ZoneStore], qname)
-		zd.ZoneTransferOut(w, r)
-		return nil
-
-	case dns.TypeSOA:
-		zd.Logger.Printf("There are %d SOA RRs in %s. rrset: %v", len(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs),
-			zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
-
-		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-
-		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
-		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
-		m.Extra = append(m.Extra, v4glue.RRs...)
-		m.Extra = append(m.Extra, v6glue.RRs...)
-		if dnssec_ok {
-			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
-			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
-			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
-			m.Extra = append(m.Extra, v4glue.RRSIGs...)
-			m.Extra = append(m.Extra, v6glue.RRSIGs...)
-		}
-
-	default:
-		// Check if qtype is in our known types
-		if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
-			if rrset, ok := apex.RRtypes.Get(qtype); ok {
-				if len(rrset.RRs) > 0 {
-					m.Answer = append(m.Answer, rrset.RRs...)
-					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-					v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
-					m.Extra = append(m.Extra, v4glue.RRs...)
-					m.Extra = append(m.Extra, v6glue.RRs...)
-					if dnssec_ok {
-						apex.RRtypes.Set(qtype, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(qtype), zd.ZoneName))
-						apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
-
-						m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
-						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
-						m.Extra = append(m.Extra, v4glue.RRSIGs...)
-						m.Extra = append(m.Extra, v6glue.RRSIGs...)
-					}
-				} else {
-					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-					if dnssec_ok {
-						apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
-						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
-					}
-				}
-			} else {
-				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-				if dnssec_ok {
-					apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
-					m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
-				}
-			}
-
-			// Special handling for certain types
-			if qtype == dns.TypeNS {
-				m.Ns = []dns.RR{} // authority not needed when querying for zone NS
-			}
-		} else {
-			// every apex query we don't want to deal with
-			m.MsgHdr.Rcode = dns.RcodeRefused
-			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
-		}
-	}
-	w.WriteMsg(m)
-	return nil
-}
-
 // 0. Check for *any* existence of qname
 // 1. [OK] For a qname below zone, first check if there is a delegation. If so--> send referral
 // 2. If no delegation, check for exact match
@@ -173,7 +55,8 @@ func (zd *ZoneData) xxxApexResponder(w dns.ResponseWriter, r *dns.Msg, qname str
 // 4. If no CNAME match, check for wild card match
 // 5. Give up.
 
-func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool, kdb *KeyDB) error {
+func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, 
+	qname string, qtype uint16, msgoptions MsgOptions, kdb *KeyDB) error {
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
@@ -195,6 +78,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		}
 		return rrset
 	}
+
 	// AddCDEResponse adds a compact-denial-of-existence response to the message
 	AddCDEResponse := func(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16) {
 		m.MsgHdr.Rcode = dns.RcodeSuccess
@@ -240,7 +124,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		log.Fatalf("QueryResponder: failed to get apex data for zone %s", zd.ZoneName)
 	}
 
-	if dnssec_ok {
+	if msgoptions.DnssecOK {
 		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
 		apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
 	}
@@ -254,13 +138,58 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	var wildqname string
 	origqname := qname
 
+	// 0. Is this a DS query? If so, trap it ASAP and try to find the parent zone
+	if qtype == dns.TypeDS {
+		zd.Logger.Printf("QueryResponder: DS query for %s. Trying to find parent zone.", qname)
+		SetupIMR()
+		m := new(dns.Msg)
+		m.SetReply(r)
+		parent, err := ParentZone(zd.ZoneName, Globals.IMR)
+		if err != nil {
+			log.Printf("QueryResponder: failed to find parent zone for %s to handle DS query", qname)
+			m.MsgHdr.Rcode = dns.RcodeServerFailure
+			w.WriteMsg(m)
+			return nil
+		}
+		pzd, ok := FindZone(parent)
+		if !ok {
+			// we don't have the parent zone
+			m.MsgHdr.Rcode = dns.RcodeSuccess
+			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+			w.WriteMsg(m)
+			return nil
+		}
+		// We have the parent zone, so let's try to find the DS record
+		zd = pzd
+		apex, err = zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
+		}
+		if msgoptions.DnssecOK {
+			apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+			apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
+		}
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+		dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
+		if err != nil {
+			log.Printf("QueryResponder: failed to get DS record for %s", qname)
+		}
+		m.Answer = append(m.Answer, dsRRset.RRs...)
+		if msgoptions.DnssecOK {
+			m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+		}
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+		w.WriteMsg(m)
+		return nil
+	}
+
 	// log.Printf("---> Checking for existence of qname %s", qname)
 	if !zd.NameExists(qname) {
 		log.Printf("---> No exact match for %s in zone %s", qname, zd.ZoneName)
 
 		// 1. Check for child delegation
 		log.Printf("---> Checking for child delegation for %s", qname)
-		cdd := zd.FindDelegation(qname, dnssec_ok)
+		cdd := zd.FindDelegation(qname, msgoptions.DnssecOK)
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
@@ -285,7 +214,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-			if dnssec_ok {
+			if msgoptions.DnssecOK {
 				AddCDEResponse(m, qname, apex, nil)
 			}
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
@@ -309,77 +238,75 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		// ensure correct serial
 		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-		if dnssec_ok {
+		if msgoptions.DnssecOK {
 			AddCDEResponse(m, origqname, apex, nil)
 		}
 		w.WriteMsg(m)
 		return nil
 	}
 
-	// 2. Check for qname + CNAME
-	log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
-	if owner.RRtypes.Count() == 1 {
-		for _, k := range owner.RRtypes.Keys() {
-			v := owner.RRtypes.GetOnlyRRSet(k)
-			if k == dns.TypeCNAME {
-				if len(v.RRs) > 1 {
-					// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
-					log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)
-				}
-				m.Answer = append(m.Answer, v.RRs...)
-				if dnssec_ok {
-					owner.RRtypes.Set(k, MaybeSignRRset(v, qname))
-					m.Answer = append(m.Answer, v.RRSIGs...)
-				}
-				tgt := v.RRs[0].(*dns.CNAME).Target
-				if strings.HasSuffix(tgt, zd.ZoneName) {
-					tgtowner, _ := zd.GetOwner(tgt)
-					if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
-						m.Answer = append(m.Answer, tgtrrset.RRs...)
-						m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-						v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
-						m.Extra = append(m.Extra, v4glue.RRs...)
-						m.Extra = append(m.Extra, v6glue.RRs...)
-						if zd.ServerALPN != nil && len(zd.ServerALPN.RRs) > 0 {
-							m.Extra = append(m.Extra, zd.ServerALPN.RRs...)
-						}
-						if dnssec_ok {
-							tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
-							m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
+	if len(qname) > len(zd.ZoneName) {
+		// 2. Check for qname + CNAME
+		log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
+		if owner.RRtypes.Count() == 1 {
+			for _, k := range owner.RRtypes.Keys() {
+				v := owner.RRtypes.GetOnlyRRSet(k)
+				if k == dns.TypeCNAME {
+					if len(v.RRs) > 1 {
+						// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
+						log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)
+					}
+					m.Answer = append(m.Answer, v.RRs...)
+					if msgoptions.DnssecOK {
+						owner.RRtypes.Set(k, MaybeSignRRset(v, qname))
+						m.Answer = append(m.Answer, v.RRSIGs...)
+					}
+					tgt := v.RRs[0].(*dns.CNAME).Target
+					if strings.HasSuffix(tgt, zd.ZoneName) {
+						tgtowner, _ := zd.GetOwner(tgt)
+						if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
+							m.Answer = append(m.Answer, tgtrrset.RRs...)
+							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
+							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
+							m.Extra = append(m.Extra, v4glue.RRs...)
+							m.Extra = append(m.Extra, v6glue.RRs...)
+							if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+								m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+							}
+							if msgoptions.DnssecOK {
+								tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
+								m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
 
-							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
+								m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 
-							m.Extra = append(m.Extra, v4glue.RRSIGs...)
-							m.Extra = append(m.Extra, v6glue.RRSIGs...)
-							if zd.ServerALPN != nil {
-								if len(zd.ServerALPN.RRSIGs) == 0 {
-									tmp := MaybeSignRRset(RRset{RRs: zd.ServerALPN.RRs}, zd.ServerALPN.Name)
-									zd.ServerALPN = &tmp
+								m.Extra = append(m.Extra, v4glue.RRSIGs...)
+								m.Extra = append(m.Extra, v6glue.RRSIGs...)
+								if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
+									m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
 								}
-								m.Extra = append(m.Extra, zd.ServerALPN.RRSIGs...)
 							}
 						}
+						w.WriteMsg(m)
+						return nil
 					}
-					w.WriteMsg(m)
-					return nil
 				}
 			}
 		}
-	}
 
-	// 1. Check for child delegation
-	// log.Printf("---> Checking for child delegation for %s", qname)
-	cdd := zd.FindDelegation(qname, dnssec_ok)
+		// 1. If qname is below the zone apex, check for child delegation
+		// log.Printf("---> Checking for child delegation for %s", qname)
+		cdd := zd.FindDelegation(qname, msgoptions.DnssecOK)
 
-	// If there is delegation data and an NS RRset is present, return a referral
-	if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
-		log.Printf("---> Sending referral for %s", qname)
-		m.MsgHdr.Authoritative = false
-		m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
-		m.Extra = append(m.Extra, cdd.A_glue...)
-		m.Extra = append(m.Extra, cdd.AAAA_glue...)
-		w.WriteMsg(m)
-		return nil
+		// If there is delegation data and an NS RRset is present, return a referral
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
+			log.Printf("---> Sending referral for %s", qname)
+			m.MsgHdr.Authoritative = false
+			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
+			m.Extra = append(m.Extra, cdd.A_glue...)
+			m.Extra = append(m.Extra, cdd.AAAA_glue...)
+			w.WriteMsg(m)
+			return nil
+		}
 	}
 
 	// 2. Check for exact match qname+qtype
@@ -402,14 +329,14 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 				m.Answer = append(m.Answer, tmp...)
 			}
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
+			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
-			if zd.ServerALPN != nil && len(zd.ServerALPN.RRs) > 0 {
-				log.Printf("Adding ALPN: %s", zd.ServerALPN.RRs[0].String())
-				m.Extra = append(m.Extra, zd.ServerALPN.RRs...)
+			if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+				log.Printf("Adding SVCB: %s", zd.ServerSVCB.RRs[0].String())
+				m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
 			}
-			if dnssec_ok {
+			if msgoptions.DnssecOK {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
@@ -426,12 +353,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 				m.Extra = append(m.Extra, v4glue.RRSIGs...)
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
-				if zd.ServerALPN != nil {
-					if len(zd.ServerALPN.RRSIGs) == 0 {
-						tmp := MaybeSignRRset(RRset{RRs: zd.ServerALPN.RRs}, zd.ServerALPN.Name)
-						zd.ServerALPN = &tmp
-					}
-					m.Extra = append(m.Extra, zd.ServerALPN.RRSIGs...)
+				if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
+					m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
 				}
 			}
 		} else {
@@ -441,7 +364,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 			soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-			if dnssec_ok {
+			if msgoptions.DnssecOK {
 				rrtypeList := []uint16{}
 				rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
 
@@ -452,6 +375,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 		return nil
 	}
 
+	log.Printf("---> Checking for SOA query for zone %s", zd.ZoneName)
 	if qtype == dns.TypeSOA && qname == zd.ZoneName {
 		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
@@ -461,20 +385,20 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 
 		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
+		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
-		if zd.ServerALPN != nil && len(zd.ServerALPN.RRs) > 0 {
-			m.Extra = append(m.Extra, zd.ServerALPN.RRs...)
+		if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+			m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
 		}
-		if dnssec_ok {
+		if msgoptions.DnssecOK {
 			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
 			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 			m.Extra = append(m.Extra, v4glue.RRSIGs...)
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
-			if zd.ServerALPN != nil {
-				m.Extra = append(m.Extra, zd.ServerALPN.RRSIGs...)
+			if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
+				m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
 			}
 		}
 	}
@@ -495,10 +419,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	// Final catch everything we don't want to deal with
 	m.MsgHdr.Rcode = dns.RcodeRefused
 	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), dnssec_ok)
+	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 	m.Extra = append(m.Extra, v4glue.RRs...)
 	m.Extra = append(m.Extra, v6glue.RRs...)
-	if dnssec_ok {
+	if msgoptions.DnssecOK {
 		m.Extra = append(m.Extra, v4glue.RRSIGs...)
 		m.Extra = append(m.Extra, v6glue.RRSIGs...)
 	}
@@ -509,7 +433,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, qname strin
 	return nil
 }
 
-func (zd *ZoneData) AddALPN(conf *Config) error {
+func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 	// Get the NS RRset for the zone apex
 	apex, exists := zd.Data.Get(zd.ZoneName)
 	if !exists {
@@ -527,33 +451,67 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 			nsName := ns.Ns
 
 			// Check if this NS name is in service.identities
-			if slices.Contains(conf.Service.Identities, nsName) {
+			if CaseFoldContains(conf.Service.Identities, nsName) {
+				if strings.HasSuffix(nsName, zd.ZoneName) {
+					continue // we'll deal with this below
+				}
+				log.Printf("CreateServerSvcbRRs: Zone %s: Found identity NS %s", zd.ZoneName, nsName)
 				// Create SVCB record for this NS name
 				tmp := &dns.SVCB{
 					Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 					Priority: 1,
-					Target:   nsName,
-					Value:    Globals.ServerALPN.Value,
+					Target:   ".",
+					Value:    Globals.ServerSVCB.Value,
 				}
-				zd.ServerALPN = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+				zd.ServerSVCB = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 
-				log.Printf("Adding server ALPN to zone %s using identity NS %s", zd.ZoneName, nsName)
-				log.Printf("ALPN: %s", tmp.String())
+				// To be able to sign this SVCB we need to know that we are authoritative for the zone that the
+				// NS name is in and that we have the DNSSEC keys for that zone. As we get here during the initial
+				// zone load we don't necessarily know that yet, so this would turn into a deferred operation.
+				// Skipping this for now.
+
+				log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using identity NS %s", zd.ZoneName, nsName)
+				log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
 				return nil
 			}
 		}
 	}
+
+	// var svcbRRsets = map[string]*RRset{} // map[nsname]*RRset
 
 	// Next look for in-bailiwick NS records and their addresses
 	for _, rr := range nsRRset.RRs {
 		if ns, ok := rr.(*dns.NS); ok {
 			nsName := ns.Ns
 			if dns.IsSubDomain(zd.ZoneName, nsName) {
+				// var svcbRRset = RRset{}
 				// This is an in-bailiwick NS
 				if nsData, exists := zd.Data.Get(nsName); exists {
 					// Check A/AAAA records
 					aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
 					aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+
+					// Convert A/AAAA records to string slices
+					var ipv4s []net.IP
+					var ipv6s []net.IP
+
+					if aRRset.RRs != nil {
+						for _, rr := range aRRset.RRs {
+							if a, ok := rr.(*dns.A); ok {
+								ipv4s = append(ipv4s, a.A)
+							}
+						}
+						log.Printf("CreateServerSvcbRRs: Zone %s: Found %d A records for in-bailiwick NS %s: %v", zd.ZoneName, len(ipv4s), nsName, ipv4s)
+					}
+
+					if aaaaRRset.RRs != nil {
+						for _, rr := range aaaaRRset.RRs {
+							if aaaa, ok := rr.(*dns.AAAA); ok {
+								ipv6s = append(ipv6s, aaaa.AAAA)
+							}
+						}
+						log.Printf("CreateServerSvcbRRs: Zone %s: Found %d AAAA records for in-bailiwick NS %s: %v", zd.ZoneName, len(ipv6s), nsName, ipv6s)
+					}
 
 					// Helper to check if address matches any configured addresses
 					checkAddrs := func(addrs []string, rrset *RRset) bool {
@@ -570,15 +528,39 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 							}
 							for _, addr := range addrs {
 								if strings.HasPrefix(addr, ip) {
+									// Make a copy of the existing SVCB keyvalue slice
+									values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
+									if len(ipv4s) > 0 {
+										values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
+									}
+									if len(ipv6s) > 0 {
+										values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
+									}
 									tmp := &dns.SVCB{
 										Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 										Priority: 1,
-										Target:   nsName,
-										Value:    Globals.ServerALPN.Value,
+										Target:   ".",
+										Value:    values,
 									}
-									zd.ServerALPN = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-									log.Printf("Adding server ALPN to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
-									log.Printf("ALPN: %s", tmp.String())
+									zd.ServerSVCB = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+									log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
+									log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
+
+									_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
+									if err != nil {
+										log.Printf("Error signing SVCB RR for %s: %v", nsName, err)
+									} else {
+										log.Printf("Successfully signed SVCB RR for %s: %v", nsName, err)
+									}
+									// check whether we have any SVCB records for this NS name and if not add this to the zone
+									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+									if len(serversvcbs.RRs) == 0 {
+										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: []dns.RR{tmp}})
+									} else {
+										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: append(serversvcbs.RRs, tmp)})
+										log.Printf("CreateServerSvcbRRs: Added server SVCB to existing SVCB RRset for zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
+									}
+
 									return true
 								}
 							}
@@ -586,12 +568,7 @@ func (zd *ZoneData) AddALPN(conf *Config) error {
 						return false
 					}
 
-					// Check against all configured secure transport addresses
-					allAddrs := append([]string{}, conf.DnsEngine.DoT.Addresses...)
-					allAddrs = append(allAddrs, conf.DnsEngine.DoH.Addresses...)
-					allAddrs = append(allAddrs, conf.DnsEngine.DoQ.Addresses...)
-
-					if checkAddrs(allAddrs, &aRRset) || checkAddrs(allAddrs, &aaaaRRset) {
+					if checkAddrs(conf.DnsEngine.Addresses, &aRRset) || checkAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
 						return nil
 					}
 				}

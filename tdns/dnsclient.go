@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -16,10 +17,10 @@ import (
 )
 
 // Transport represents the DNS transport protocol
-type Transport int
+type Transport uint8
 
 const (
-	TransportDo53 Transport = iota
+	TransportDo53 Transport = iota + 1
 	TransportDoT
 	TransportDoH
 	TransportDoQ
@@ -27,25 +28,56 @@ const (
 
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
-	Transport  Transport
-	Server     string
+	Transport Transport
+	// Server     string
 	TLSConfig  *tls.Config
 	HTTPClient *http.Client
 	QUICConfig *quic.Config
 	Timeout    time.Duration
+	DNSClient  *dns.Client
 }
 
 // NewDNSClient creates a new DNS client with the specified transport
-func NewDNSClient(transport Transport, server string, tlsConfig *tls.Config) *DNSClient {
+func NewDNSClient(transport Transport, tlsConfig *tls.Config) *DNSClient {
+	if tlsConfig == nil {
+		switch transport {
+		case TransportDoT, TransportDoH:
+			tlsConfig = &tls.Config{
+				InsecureSkipVerify: true,
+				MinVersion:	    tls.VersionTLS12,
+			}
+		case TransportDoQ:
+			tlsConfig = &tls.Config{
+				InsecureSkipVerify: true,
+				NextProtos:         []string{"doq"},
+				MinVersion:	    tls.VersionTLS12,
+			}
+		default:
+			tlsConfig = &tls.Config{
+				MinVersion:	    tls.VersionTLS12,
+			}
+		}
+	}
+
 	client := &DNSClient{
 		Transport: transport,
-		Server:    server,
+		// Server:    server,
 		TLSConfig: tlsConfig,
 		Timeout:   5 * time.Second,
 	}
 
 	// Initialize transport-specific configurations
 	switch transport {
+	case TransportDo53:
+		client.DNSClient = &dns.Client{
+			Timeout: client.Timeout,
+		}
+	case TransportDoT:
+		client.DNSClient = &dns.Client{
+			Net:       "tcp-tls",
+			TLSConfig: tlsConfig,
+			Timeout:   client.Timeout,
+		}
 	case TransportDoH:
 		client.HTTPClient = &http.Client{
 			Transport: &http.Transport{
@@ -60,67 +92,66 @@ func NewDNSClient(transport Transport, server string, tlsConfig *tls.Config) *DN
 		}
 	}
 
+	// dump.P(client)
 	return client
 }
 
 // Exchange sends a DNS message and returns the response
-func (c *DNSClient) Exchange(msg *dns.Msg) (*dns.Msg, error) {
-	switch c.Transport {
-	case TransportDo53:
-		return c.exchangeDo53(msg)
-	case TransportDoT:
-		return c.exchangeDoT(msg)
-	case TransportDoH:
-		return c.exchangeDoH(msg)
-	case TransportDoQ:
-		return c.exchangeDoQ(msg)
-	default:
-		return nil, fmt.Errorf("unsupported transport protocol")
-	}
-}
-
-// exchangeDo53 handles traditional DNS over UDP/TCP
-func (c *DNSClient) exchangeDo53(msg *dns.Msg) (*dns.Msg, error) {
-	client := &dns.Client{
-		Timeout: c.Timeout,
+func (c *DNSClient) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+	if !Globals.Debug {
+		fmt.Printf("*** Exchange: Globals.Debug is NOT set\n")
+	} else {
+		fmt.Printf("*** Exchange: Globals.Debug is set\n")
 	}
 	if Globals.Debug {
-		log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s", c.Server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
+			TransportToString[c.Transport], server, dns.OpcodeToString[msg.Opcode],
+			msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
-	resp, _, err := client.Exchange(msg, c.Server)
-	return resp, err
+
+	switch c.Transport {
+	case TransportDo53:
+		if Globals.Debug {
+			log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s",
+				net.JoinHostPort(server, "53"), dns.OpcodeToString[msg.Opcode],
+				msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		}
+		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, "53"))
+	case TransportDoT:
+		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, "853"))
+	case TransportDoH:
+		return c.exchangeDoH(msg, server)
+	case TransportDoQ:
+		return c.exchangeDoQ(msg, net.JoinHostPort(server, "8853"))
+	default:
+		return nil, 0, fmt.Errorf("unsupported transport protocol: %d", c.Transport)
+	}
 }
 
 // exchangeDoT handles DNS over TLS
-func (c *DNSClient) exchangeDoT(msg *dns.Msg) (*dns.Msg, error) {
-	client := &dns.Client{
-		Net:       "tcp-tls",
-		TLSConfig: c.TLSConfig,
-		Timeout:   c.Timeout,
-	}
-	if Globals.Debug {
-		fmt.Printf("*** DoT sending message to %s opcode: %s qname: %s rrtype: %s\n", c.Server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
-	}
-	resp, _, err := client.Exchange(msg, c.Server)
-	return resp, err
-}
+// func (c *DNSClientNG) exchangeDoT(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+//	if Globals.Debug {
+//		fmt.Printf("*** DoT sending message to %s opcode: %s qname: %s rrtype: %s\n", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+//	}
+//	return c.DNSClient.Exchange(msg, net.JoinHostPort(server, "853"))
+// }
 
 // exchangeDoH handles DNS over HTTPS
-func (c *DNSClient) exchangeDoH(msg *dns.Msg) (*dns.Msg, error) {
+func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
 	packed, err := msg.Pack()
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack DNS message: %v", err)
+		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
 	}
 
 	// Create HTTP request
-	url := fmt.Sprintf("https://%s/dns-query", c.Server)
+	url := fmt.Sprintf("https://%s/dns-query", server)
 	if Globals.Debug {
 		fmt.Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s\n", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(packed))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %v", err)
+		return nil, 0, fmt.Errorf("failed to create HTTP request: %v", err)
 	}
 
 	req.Header.Set("Content-Type", "application/dns-message")
@@ -129,94 +160,103 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg) (*dns.Msg, error) {
 	// Send request
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %v", err)
+		return nil, 0, fmt.Errorf("HTTP request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP request failed with status: %s", resp.Status)
+		return nil, 0, fmt.Errorf("HTTP request failed with status: %s", resp.Status)
 	}
 
 	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read HTTP response: %v", err)
+		return nil, 0, fmt.Errorf("failed to read HTTP response: %v", err)
 	}
 
 	// Unpack DNS message
 	response := new(dns.Msg)
 	if err := response.Unpack(body); err != nil {
-		return nil, fmt.Errorf("failed to unpack DNS response: %v", err)
+		return nil, 0, fmt.Errorf("failed to unpack DNS response: %v", err)
 	}
 
-	return response, nil
+	return response, 0, nil
 }
 
 // exchangeDoQ handles DNS over QUIC
-func (c *DNSClient) exchangeDoQ(msg *dns.Msg) (*dns.Msg, error) {
+func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
 	if Globals.Debug {
-		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", c.Server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	// Connect to the QUIC server
-	conn, err := quic.DialAddr(ctx, c.Server, c.TLSConfig, c.QUICConfig)
+	conn, err := quic.DialAddr(ctx, server, c.TLSConfig, c.QUICConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to QUIC server: %v", err)
+		log.Printf("*** DoQ failed to connect to QUIC server: %v", err)
+		return nil, 0, fmt.Errorf("failed to connect to QUIC server: %v", err)
 	}
 	defer conn.CloseWithError(0, "")
 
 	// Open a new stream
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open QUIC stream: %v", err)
+		log.Printf("*** DoQ failed to open QUIC stream: %v", err)
+		return nil, 0, fmt.Errorf("failed to open QUIC stream: %v", err)
 	}
 
 	// Pack the DNS message
 	packed, err := msg.Pack()
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack DNS message: %v", err)
+		log.Printf("*** DoQ failed to pack DNS message: %v", err)
+		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
 	}
 
 	// Write the length prefix (2 bytes) and the message
 	lenBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(lenBuf, uint16(len(packed)))
 	if _, err := stream.Write(lenBuf); err != nil {
-		return nil, fmt.Errorf("failed to write message length: %v", err)
+		log.Printf("*** DoQ failed to write message length: %v", err)
+		return nil, 0, fmt.Errorf("failed to write message length: %v", err)
 	}
 	if _, err := stream.Write(packed); err != nil {
-		return nil, fmt.Errorf("failed to write DNS message: %v", err)
+		log.Printf("*** DoQ failed to write DNS message: %v", err)
+		return nil, 0, fmt.Errorf("failed to write DNS message: %v", err)
 	}
 
 	// Read the response length
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
-		return nil, fmt.Errorf("failed to read response length: %v", err)
+		log.Printf("*** DoQ failed to read response length: %v", err)
+		return nil, 0, fmt.Errorf("failed to read response length: %v", err)
 	}
 	respLen := binary.BigEndian.Uint16(lenBuf)
 
 	// Read the response
 	respBuf := make([]byte, respLen)
 	if _, err := io.ReadFull(stream, respBuf); err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		log.Printf("*** DoQ failed to read response: %v", err)
+		return nil, 0, fmt.Errorf("failed to read response: %v", err)
 	}
 
 	if Globals.Debug {
 		fmt.Printf("*** DoQ received response length: %d. Now closing stream\n", respLen)
 	}
 
-	// Properly close the stream
-	stream.CancelRead(0)
-	stream.Close()
-
 	// Unpack the response
 	response := new(dns.Msg)
 	if err := response.Unpack(respBuf); err != nil {
-		return nil, fmt.Errorf("failed to unpack response: %v", err)
+		log.Printf("*** DoQ failed to unpack response: %v", err)
+		stream.Close()
+		return nil, 0, fmt.Errorf("failed to unpack response: %v", err)
 	}
 
-	return response, nil
+	// Properly close the stream after we're done with it
+	stream.CancelRead(0)
+	stream.Close()
+
+	return response, 0, nil
 }
 
 // StringToTransport converts a string transport name to Transport type
@@ -235,4 +275,11 @@ func StringToTransport(s string) (Transport, error) {
 	default:
 		return TransportDo53, fmt.Errorf("unknown transport: %s", s)
 	}
+}
+
+var TransportToString = map[Transport]string{
+	TransportDo53: "do53",
+	TransportDoT:  "dot",
+	TransportDoH:  "doh",
+	TransportDoQ:  "doq",
 }

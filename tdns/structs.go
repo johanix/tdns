@@ -93,7 +93,7 @@ type ZoneData struct {
 	LatestError     time.Time // time of latest error
 	RefreshCount    int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	LatestRefresh   time.Time // time of latest successful refresh
-	ServerALPN      *RRset    // ALPN for DoT/DoH/DoQ
+	ServerSVCB      *RRset    // ALPN for DoT/DoH/DoQ
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -208,6 +208,7 @@ type OwnerData struct {
 
 type RRset struct {
 	Name   string
+	Class  uint16
 	RRtype uint16
 	RRs    []dns.RR
 	RRSIGs []dns.RR
@@ -341,12 +342,30 @@ type CachedRRset struct {
 	RRtype     uint16
 	Rcode      uint8
 	RRset      *RRset
+	Context    CacheContext
 	Validated  bool
 	Expiration time.Time
 }
 
+type AuthServer struct {
+	Name          string
+	Addrs         []string
+	Alpn          []string // {"do53", "doq", "dot", "doh"}
+	Transports    []Transport
+	PrefTransport Transport // "doq" | "dot" | "doh" | "do53"
+	Src           string    // "answer", "glue", "hint", "priming", "stub", ...
+	Expire        time.Time
+}
+
 type RRsetCacheT struct {
-	Map cmap.ConcurrentMap[string, CachedRRset]
+	RRsets    *ConcurrentMap[string, CachedRRset]
+	Servers   *ConcurrentMap[string, []string]
+	ServerMap *ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
+	DNSClient map[Transport]*DNSClient
+	Primed    bool
+	Logger    *log.Logger
+	Verbose   bool
+	Debug     bool
 }
 
 type DelegationSyncRequest struct {

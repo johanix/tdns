@@ -13,6 +13,26 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Add adds a RR to the RRset if it is not already present.
+func (rrset *RRset) Add(rr dns.RR) {
+	for _, rr2 := range rrset.RRs {
+		if dns.IsDuplicate(rr, rr2) {
+			return
+		}
+	}
+	rrset.RRs = append(rrset.RRs, rr)
+}
+
+// Delete deletes a RR from the RRset if it is present.
+func (rrset *RRset) Delete(rr dns.RR) {
+	for i, rr2 := range rrset.RRs {
+		if dns.IsDuplicate(rr, rr2) {
+			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
+			return
+		}
+	}
+}
+
 // RRsetEqual compares two RRsets and returns if they are equal or not,
 // include the non-matching RRs in a slice per RRset.
 func RRsetEqual(rrset1, rrset2 []dns.RR) (bool, []dns.RR, []dns.RR) {

@@ -18,7 +18,7 @@ func init() {
 	RegisterMsignerRR()
 }
 
-const TypeMSIGNER = 0x0F9C
+// const TypeMSIGNER = 0x0F9C
 
 type MSIGNER struct {
 	State  uint8         // 0=OFF, 1=ON

@@ -9,7 +9,7 @@ replace (
 
 require (
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/tdns/cli v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns/cli v0.0.0-20250315051723-3a4d693f9b08
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.16.0
 )

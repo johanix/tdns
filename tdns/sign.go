@@ -114,7 +114,7 @@ func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force 
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
 			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now().UTC(), 3600*24*30) // 30 days
-			rrsig.SignerName = name
+			rrsig.SignerName = zd.ZoneName                                                // name
 
 			err := rrsig.Sign(key.CS, rrset.RRs)
 			if err != nil {

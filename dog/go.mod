@@ -2,7 +2,10 @@ module dog
 
 go 1.23.2
 
-replace github.com/johanix/tdns/tdns => ../tdns
+replace (
+	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cli => ../tdns/cli
+)
 
 require (
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000

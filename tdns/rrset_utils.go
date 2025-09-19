@@ -343,3 +343,27 @@ func (rrset *RRset) Copy() *RRset {
 	new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
 	return &new_rrset
 }
+
+// Add adds a RR to the RRset if it is not already present.
+func (rrset *RRset) Add(rr dns.RR) {
+	for _, rr2 := range rrset.RRs {
+		if dns.IsDuplicate(rr, rr2) {
+			// log.Printf("rrset.Add: RR already present: %s", rr.String())
+			return
+		}
+	}
+	// log.Printf("rrset.Add: Adding RR: %s to RRset\n%v", rr.String(), rrset.RRs)
+	rrset.RRs = append(rrset.RRs, rr)
+}
+
+// Delete deletes a RR from the RRset if it is present.
+func (rrset *RRset) Delete(rr dns.RR) {
+	for i, rr2 := range rrset.RRs {
+		if dns.IsDuplicate(rr, rr2) {
+			// log.Printf("rrset.Delete: Found RR: %s in RRset\n%v", rr.String(), rrset.RRs)
+			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
+			return
+		}
+	}
+	// log.Printf("rrset.Delete: RR not found: %s", rr.String())
+}

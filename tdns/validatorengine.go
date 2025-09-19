@@ -6,25 +6,11 @@ package tdns
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/spf13/viper"
 
 	"github.com/miekg/dns"
 )
-
-type CacheRRset struct {
-	RRset     *RRset
-	Validated bool
-	Expires   time.Time
-}
-
-// type RRsetCache cmap.ConcurrentMap[string, CacheRRset]
-
-// func NewRRsetCache() *RRsetCache {
-// 	cache := cmap.New[CacheRRset]()
-// 	return (*RRsetCache)(&cache)
-// }
 
 // The ValidatorEngine is responsible for validating RRsets on request. The reason to have it as a separate
 // goroutine is to easier be able to keep state and minimize complexity in other parts of the code. Note that

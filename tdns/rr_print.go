@@ -138,7 +138,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	rightmargin := 78
 
 	transfer := new(dns.Transfer)
-	answerChan, err := transfer.In(msg, options["server"])
+	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		fmt.Printf("Error from transfer.In: %v\n", err)
 		return err
@@ -314,7 +314,7 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 
 	fmt.Printf("\n;; Query time: %d msec\n", elapsed.Milliseconds())
 	fmt.Printf(";; SERVER: %s (%s)\n", server, transport)
-	fmt.Printf(";; WHEN: %s\n", time.Now().Format(timelayout))
+	fmt.Printf(";; WHEN: %s\n", time.Now().Format(TimeLayout))
 
 	buf, err := m.Pack()
 	if err != nil {

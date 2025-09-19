@@ -5,12 +5,12 @@
 package tdns
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type AgentState uint8
@@ -18,17 +18,39 @@ type AgentState uint8
 const (
 	AgentStateNeeded      AgentState = iota + 1 // Agent is required but we don't have complete information
 	AgentStateKnown                             // We have complete information but haven't established communication
-	AgentStateHelloOK                           // We got a nice reply to our HELLO
+	AgentStateIntroduced                        // We got a nice reply to our HELLO
 	AgentStateOperational                       // We got a nice reply to our (secure) BEAT
+	AgentStateDegraded                          // Last successful heartbeat (in either direction) was more than 2x normal interval ago
+	AgentStateInterrupted                       // Last successful heartbeat (in either direction) was more than 10x normal interval ago
 	AgentStateError                             // We have tried to establish communication but failed
 )
 
 var AgentStateToString = map[AgentState]string{
-	AgentStateNeeded:      "needed",
-	AgentStateKnown:       "known",
-	AgentStateHelloOK:     "hello-ok",
-	AgentStateOperational: "operational",
-	AgentStateError:       "error",
+	AgentStateNeeded:      "NEEDED",
+	AgentStateKnown:       "KNOWN",
+	AgentStateIntroduced:  "INTRODUCED",
+	AgentStateOperational: "OPERATIONAL",
+	AgentStateDegraded:    "DEGRADED",
+	AgentStateInterrupted: "INTERRUPTED",
+	AgentStateError:       "ERROR",
+}
+
+type AgentMsg uint8
+
+const (
+	AgentMsgHello AgentMsg = iota + 1
+	AgentMsgBeat
+	AgentMsgNotify
+	AgentMsgRfi
+	AgentMsgStatus
+)
+
+var AgentMsgToString = map[AgentMsg]string{
+	AgentMsgHello:  "HELLO",
+	AgentMsgBeat:   "BEAT",
+	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
+	AgentMsgRfi:    "RFI",
+	AgentMsgStatus: "STATUS",
 }
 
 // Remote agent states: first occurence of a remote agent identity is when it appears in a
@@ -36,19 +58,26 @@ var AgentStateToString = map[AgentState]string{
 // Then the remote agent becomes NEEDED. Data collection starts. When all data (URI, SVCB,
 // TLSA, etc) has been collected (and verified) the state changes to KNOWN. At the tail end
 // of LocateAgent(), when the state changes to KNOWN, a HELLO message is sent to the remote agent.
-// If we get at positive response to that state changes to HELLOOK and we're ready to start
+// If we get at positive response to that state changes to INTRODUCED and we're ready to start
 // sending heartbeats. After the first positive response to a heartbeat that we sent is received
-// the state finally changes to OPERATIONAL.
+// the state finally changes to OPERATIONAL. Should subsequent heartbeats fail, the state changes
+// to DEGRADED. If the heartbeats have failed for more than 10x the normal interval, the state
+// changes to INTERRUPTED.
 
 type Agent struct {
-	Identity  string
-	mu        sync.RWMutex
-	Details   map[string]AgentDetails
-	Methods   map[string]bool
-	Api       *AgentApi
-	State     AgentState // Agent states: needed, known, hello-done, operational, error
-	LastState time.Time  // When state last changed
-	ErrorMsg  string     // Error message if state is error
+	Identity      AgentId
+	mu            sync.RWMutex
+	InitialZone   ZoneName
+	ApiDetails    *AgentDetails
+	DnsDetails    *AgentDetails
+	ApiMethod     bool
+	DnsMethod     bool
+	Zones         map[ZoneName]bool
+	Api           *AgentApi
+	State         AgentState // Agent states: needed, known, hello-done, operational, error
+	LastState     time.Time  // When state last changed
+	ErrorMsg      string     // Error message if state is error
+	DeferredTasks []DeferredAgentTask
 }
 
 type AgentDetails struct {
@@ -56,21 +85,33 @@ type AgentDetails struct {
 	Port    uint16
 	BaseUri string
 	UriRR   *dns.URI
-	Host    string    // the host part of the BaseUri
-	KeyRR   *dns.KEY  // for DNS transport
-	TlsaRR  *dns.TLSA // for HTTPS transport
+	//	SvcbRR  *dns.SVCB
+	Host   string    // the host part of the BaseUri
+	KeyRR  *dns.KEY  // for DNS transport
+	TlsaRR *dns.TLSA // for HTTPS transport
 	//	LastHB      time.Time
-	Endpoint        string
-	ContactInfo     string          // "none", "partial", "complete"
-	Zones           map[string]bool // zones we share with this agent
-	State           AgentState      // "discovered", "contact_attempted", "connected", "failed"
+	Endpoint    string
+	ContactInfo string // "none", "partial", "complete"
+	//	Zones           map[ZoneName]bool // zones we share with this agent
+	State           AgentState // "discovered", "contact_attempted", "connected", "failed"
 	LatestError     string
 	LatestErrorTime time.Time
 	HelloTime       time.Time
+	BeatInterval    uint32
 	SentBeats       uint32
 	ReceivedBeats   uint32
 	LatestSBeat     time.Time
 	LatestRBeat     time.Time
+}
+
+// AgentTask is a task that needs to be executed once the Precondition is met.
+// A typical case is when we need to talk to a remote agent regarding zone transfer
+// provisioning, but cannot do that until the remote agent is operational.
+// The Precondition is checked every time a heartbeat is received from the remote agent.
+type DeferredAgentTask struct {
+	Precondition func() bool
+	Action       func() (bool, error)
+	Desc         string
 }
 
 type AgentApi struct {
@@ -87,31 +128,33 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S              cmap.ConcurrentMap[string, *Agent]
-	remoteAgents   map[string][]*Agent
+	S              ConcurrentMap[AgentId, *Agent]
+	RegularS       map[AgentId]*Agent
+	RemoteAgents   map[ZoneName][]AgentId
 	mu             sync.RWMutex    // protects remoteAgents
 	LocalAgent     *LocalAgentConf // our own identity
 	LocateInterval int             // seconds to wait between locating agents (until success)
+	helloContexts  map[AgentId]context.CancelFunc
 }
 
 type AgentBeatPost struct {
-	MessageType    string
-	MyIdentity     string
-	YourIdentity   string
+	MessageType    AgentMsg
+	MyIdentity     AgentId
+	YourIdentity   AgentId
 	MyBeatInterval uint32   // intended, in seconds
 	Zones          []string // Zones that we share with the remote agent
 	Time           time.Time
 }
 
 type AgentBeatResponse struct {
-	Status      string // ok | error | ...
-	MyIdentity  string
-	YourIdentity string
-	Time        time.Time
-	Client      string
-	Msg         string
-	Error       bool
-	ErrorMsg    string
+	Status       string // ok | error | ...
+	MyIdentity   AgentId
+	YourIdentity AgentId
+	Time         time.Time
+	Client       string
+	Msg          string
+	Error        bool
+	ErrorMsg     string
 }
 type AgentBeatReport struct {
 	Time time.Time
@@ -119,77 +162,130 @@ type AgentBeatReport struct {
 }
 
 type AgentHelloPost struct {
-	MessageType string
-	Name        string
-	Identity    string
-	Addresses   []string
-	Port        uint16
-	TLSA        dns.TLSA
-	Zone        string // in the /hello we only send one zone, the one that triggered the /hello
+	MessageType  AgentMsg
+	Name         string
+	MyIdentity   AgentId
+	YourIdentity AgentId
+	Addresses    []string
+	Port         uint16
+	TLSA         dns.TLSA
+	Zone         ZoneName // in the /hello we only send one zone, the one that triggered the /hello
 }
 
 type AgentHelloResponse struct {
-	Status   string // ok | error | ...
-	Time     time.Time
-	Client   string
+	Status       string // ok | error | ...
+	MyIdentity   AgentId
+	YourIdentity AgentId
+	Time         time.Time
+	// Client       string
 	Msg      string
 	Error    bool
 	ErrorMsg string
 }
 
-type xxxAgentMsg struct {
-	MessageType string // "HELLO", "BEAT", or "FULLBEAT"
-	Identity    string
-	ZoneName    string
-	Zone        string // in the /hello we only send one zone, the one that triggered the /hello
-	SharedZones []string
-	Time        time.Time
+// AgentMsg{Post,Response} are intended for agent-to-agent messaging
+type AgentMsgPost struct {
+	MessageType  AgentMsg // "NOTIFY", ...
+	MyIdentity   AgentId
+	YourIdentity AgentId
+	Addresses    []string
+	Port         uint16
+	TLSA         dns.TLSA
+	Zone         ZoneName // An AgentMsgPost should always only refer to one zone.
+	// Data	     map[AgentId]map[uint16]RRset
+	RRs []string // cannot send more structured format, as dns.RR cannot be json marshalled.
+	// Zones []string
+	Time    time.Time
+	RfiType string
 }
 
-type AgentMsgPost struct {
-	MessageType string // "HELLO", "BEAT", or "FULLBEAT"
-	//	Name        string
-	Identity  string
-	Addresses []string
-	Port      uint16
-	TLSA      dns.TLSA
-	Zone      string // in the /hello we only send one zone, the one that triggered the /hello
-	Zones     []string
-	Time      time.Time
+type AgentMsgPostPlus struct {
+	AgentMsgPost
+	Response chan *AgentMsgResponse
 }
 
 type AgentMsgResponse struct {
-	Status   string // ok | error | ...
-	Time     time.Time
-	Client   string
-	Msg      string
-	Error    bool
-	ErrorMsg string
-}
-
-// AgentPost/AgentResponse is used in the mgmt API
-type AgentPost struct {
-	Command string `json:"command"`
-	Zone    string `json:"zone"`
-	AgentId string `json:"agent_id"`
-}
-
-type AgentResponse struct {
-	Identity    string
-	Status      int
-	Time        time.Time
-	Agents      []*Agent
-	HsyncRRs    []string
-	AgentConfig LocalAgentConf
+	Status string // ok | error | ...
+	Time   time.Time
+	// Client      string
+	AgentId     AgentId
 	Msg         string
+	Zone        ZoneName
+	RfiResponse map[AgentId]*RfiData
 	Error       bool
 	ErrorMsg    string
 }
 
+type RfiData struct {
+	Status      string // ok | error | ...
+	Time        time.Time
+	Msg         string
+	Error       bool
+	ErrorMsg    string
+	ZoneXfrSrcs []string
+	ZoneXfrAuth []string
+	ZoneXfrDsts []string
+}
+
+// AgentMgmt{Post,Response} are used in the mgmt API
+type AgentMgmtPost struct {
+	Command     string `json:"command"`
+	MessageType AgentMsg
+	Zone        ZoneName `json:"zone"`
+	AgentId     AgentId  `json:"agent_id"`
+	RRType      uint16
+	RR          string
+	RRs         []string
+	AddedRRs    []string // for update-local-zonedata
+	RemovedRRs  []string // for update-local-zonedata
+	Upstream    AgentId
+	Downstream  AgentId
+	RfiType     string
+	// Response    chan *AgentMgmtResponse
+}
+
+// also mgmt API, same response struct
+type AgentDebugPost struct {
+	Command string   `json:"command"`
+	Zone    ZoneName `json:"zone"`
+	AgentId AgentId  `json:"agent_id"`
+	RRType  uint16
+	RR      string
+	Data    ZoneUpdate
+}
+
+type AgentMgmtResponse struct {
+	Identity      AgentId
+	Status        string
+	Time          time.Time
+	Agents        []*Agent // used for hsync-agentstatus
+	ZoneAgentData *ZoneAgentData
+	HsyncRRs      []string
+	AgentConfig   LocalAgentConf
+	RfiType       string
+	RfiResponse   map[AgentId]*RfiData
+	AgentRegistry *AgentRegistry
+	// ZoneDataRepo  *ZoneDataRepo
+	// ZoneDataRepo map[ZoneName]map[AgentId]*OwnerData
+	ZoneDataRepo map[ZoneName]map[AgentId]map[uint16][]string
+	Msg          string
+	Error        bool
+	ErrorMsg     string
+}
+
+// The ...Plus structs are always the original struct + a response channel
+type AgentMgmtPostPlus struct {
+	AgentMgmtPost
+	Response chan *AgentMgmtResponse
+}
+
 type AgentMsgReport struct {
-	Transport   string
-	MessageType string
-	Identity    string
-	Msg         interface{}
-	// Agent *Agent
+	Transport    string
+	MessageType  AgentMsg
+	Zone         ZoneName
+	Identity     AgentId
+	BeatInterval uint32
+	Msg          interface{}
+	RfiType      string
+	Response     chan *SynchedDataResponse
 }

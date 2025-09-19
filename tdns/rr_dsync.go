@@ -16,7 +16,7 @@ func init() {
 	RegisterDsyncRR()
 }
 
-const TypeDSYNC = 0x0F9B
+// const TypeDSYNC = 0x0F9B
 
 type DSYNC struct {
 	Type   uint16
