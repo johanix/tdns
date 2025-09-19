@@ -8,8 +8,6 @@ replace (
 )
 
 require (
-	github.com/c-bata/go-prompt v0.2.6
-	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/tdns/cli v0.0.0-20250315051723-3a4d693f9b08
 	github.com/miekg/dns v1.1.62
@@ -18,6 +16,8 @@ require (
 )
 
 require (
+	github.com/c-bata/go-prompt v0.2.6 // indirect
+	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
