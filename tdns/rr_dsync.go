@@ -7,6 +7,7 @@ package tdns
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 
 	"github.com/miekg/dns"
@@ -172,6 +173,7 @@ func (rd *DSYNC) Len() int {
 }
 
 func RegisterDsyncRR() error {
+	log.Println("DEBUG RegisterDsyncRR")
 	dns.PrivateHandle("DSYNC", TypeDSYNC, NewDSYNC)
 	return nil
 }
