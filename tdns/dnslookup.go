@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -666,7 +667,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(qname string, qtype uint16, server
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.SetEdns0(4096, true)
-	err := AddOTSToMessage(m, OTS_OPT_IN)
+	err := edns0.AddOTSToMessage(m, edns0.OTS_OPT_IN)
 	if err != nil {
 		lg.Printf("IterativeDNSQuery: Error from AddOTSToMessage: %v", err)
 		return nil, 0, ContextFailure, err

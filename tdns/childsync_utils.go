@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -114,7 +115,7 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 			continue
 		}
 
-		edeFound, edeCode, edeMessage = ExtractEDEFromMsg(res)
+		edeFound, edeCode, edeMessage = edns0.ExtractEDEFromMsg(res)
 		log.Printf("after ExtractEDEFromMsg: EDE found: %t, code: %d, message: %s", edeFound, edeCode, edeMessage)
 		if edeFound {
 			edeSender = dst

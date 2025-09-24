@@ -139,11 +139,11 @@ func AuthQueryEngine(requests chan AuthQueryRequest) {
 		m := new(dns.Msg)
 		m.SetQuestion(req.qname, req.rrtype)
 		// Set the DNSSEC OK (DO) bit in the EDNS0 options
-		edns0 := new(dns.OPT)
-		edns0.Hdr.Name = "."
-		edns0.Hdr.Rrtype = dns.TypeOPT
-		edns0.SetDo()
-		m.Extra = append(m.Extra, edns0)
+		opt := new(dns.OPT)
+		opt.Hdr.Name = "."
+		opt.Hdr.Rrtype = dns.TypeOPT
+		opt.SetDo()
+		m.Extra = append(m.Extra, opt)
 
 		if Globals.Debug {
 			fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", req.qname,

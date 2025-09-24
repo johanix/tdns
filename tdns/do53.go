@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -140,10 +141,10 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 		opt := r.IsEdns0()
 		if opt != nil {
 			msgoptions.DnssecOK = opt.Do()
-			ots_val, ots_ok := ExtractOTSOption(opt)
+			ots_val, ots_ok := edns0.ExtractOTSOption(opt)
 			if ots_ok {
-				msgoptions.OtsOptIn = ots_val == OTS_OPT_IN
-				msgoptions.OtsOptOut = ots_val == OTS_OPT_OUT
+				msgoptions.OtsOptIn = ots_val == edns0.OTS_OPT_IN
+				msgoptions.OtsOptOut = ots_val == edns0.OTS_OPT_OUT
 			}
 			if msgoptions.OtsOptIn {
 				log.Printf("OTS OPT_IN: %v", msgoptions.OtsOptIn)

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
-package tdns
+package edns0
 
 import (
 	"fmt"

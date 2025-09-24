@@ -17,6 +17,8 @@ import (
 	"crypto/tls"
 
 	"github.com/johanix/tdns/tdns"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
+
 	// cli "github.com/johanix/tdns/tdns/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -193,11 +195,11 @@ var rootCmd = &cobra.Command{
 					var otsValue uint8
 					switch ots {
 					case "opt_in":
-						otsValue = tdns.OTS_OPT_IN
+						otsValue = edns0.OTS_OPT_IN
 					case "opt_out":
-						otsValue = tdns.OTS_OPT_OUT
+						otsValue = edns0.OTS_OPT_OUT
 					}
-					err := tdns.AddOTSOption(opt, otsValue)
+					err := edns0.AddOTSOption(opt, otsValue)
 					if err != nil {
 						fmt.Printf("Error from AddOTSOption: %v", err)
 						os.Exit(1)
