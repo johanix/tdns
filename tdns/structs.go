@@ -475,6 +475,7 @@ type KeyDB struct {
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
 	DeferredUpdateQ     chan DeferredUpdate
+	KeyBootstrapperQ    chan KeyBootstrapperRequest
 }
 
 type Tx struct {
@@ -520,3 +521,25 @@ type CombinerResponse struct {
 //	HsyncRRs []string // Keep the HSYNC RRset for reference
 //	Agents   []*Agent // The actual agents involved in the zone
 // }
+
+type VerificationInfo struct {
+	KeyName        string
+	Key            string
+	ZoneName       string
+	AttemptsLeft   int
+	NextCheckTime  time.Time
+	ZoneData       *ZoneData
+	Keyid          uint16
+	FailedAttempts int
+}
+
+type KeyBootstrapperRequest struct {
+	Cmd          string
+	KeyName      string
+	ZoneName     string
+	ZoneData     *ZoneData
+	Key          string
+	Verified     bool
+	Keyid        uint16
+	ResponseChan chan *VerificationInfo
+}

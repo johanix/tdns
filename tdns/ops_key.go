@@ -128,6 +128,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 			Zone:       zd.ZoneName,
 			Algorithm:  alg,
 			State:      Sig0StateActive,
+			ParentState: 255, // XXX: FIXME johani 20250930
 			Creator:    "bootstrap-sig0",
 		}
 		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
@@ -185,6 +186,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, UpdateResult,
 			Zone:       zd.ZoneName,
 			Algorithm:  alg,
 			State:      Sig0StateActive,
+			ParentState: 255, // XXX: FIXME johani 20250930
 			Creator:    "bootstrap-sig0",
 		}
 		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)

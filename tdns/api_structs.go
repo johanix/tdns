@@ -24,6 +24,7 @@ type KeystorePost struct {
 	DnskeyRR        string
 	PrivateKeyCache *PrivateKeyCache
 	State           string
+	ParentState     uint8
 	Creator         string
 }
 
