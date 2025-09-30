@@ -102,13 +102,17 @@ func RemoveOTSOption(opt *dns.OPT) {
 // AddEDNS0WithOTS adds an EDNS0 OPT RR to a message and includes the OTS option
 func AddOTSToMessage(msg *dns.Msg, otsPayload uint8) error {
     
-    // Find the OPT RR that was just added
-    for _, rr := range msg.Extra {
-        if opt, ok := rr.(*dns.OPT); ok {
-            return AddOTSOption(opt, otsPayload)
-        }
-    }
-    
-    return fmt.Errorf("no OPT RR found in message")
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		msg.SetEdns0(4096, true)
+		opt = msg.IsEdns0()
+	}
+
+	// Avoid duplicates if called multiple times
+	RemoveOTSOption(opt)
+	return AddOTSOption(opt, otsPayload)
 }
  

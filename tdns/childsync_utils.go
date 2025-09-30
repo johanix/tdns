@@ -90,7 +90,7 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 
 	var edeFound bool
 	var edeCode uint16
-	var edeMessage, edeSender string
+	var edeMessage string
 
 	for _, dst := range addrs {
 		if Globals.Verbose {
@@ -112,11 +112,15 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 				Sender:     dst,
 			}
 			log.Printf("Error msg: %s", res.String())
+			if res != nil {
+				log.Printf("Partial response: %s", res.String())
+			}
 			continue
 		}
 
 		edeFound, edeCode, edeMessage = edns0.ExtractEDEFromMsg(res)
 		log.Printf("after ExtractEDEFromMsg: EDE found: %t, code: %d, message: %s", edeFound, edeCode, edeMessage)
+		edeSender := ""
 		if edeFound {
 			edeSender = dst
 			log.Printf("EDE Code: %d, EDE Message: %s", edeCode, edeMessage)

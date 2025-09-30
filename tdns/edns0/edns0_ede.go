@@ -33,15 +33,18 @@ var EDECodeToString = map[uint16]string{
 func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 	opt := msg.IsEdns0()
 	if opt == nil {
-		opt = new(dns.OPT)
-		opt.Hdr.Name = "."
-		opt.Hdr.Rrtype = dns.TypeOPT
-		msg.Extra = append(msg.Extra, opt)
+		msg.SetEdns0(4096, true)
+		opt = msg.IsEdns0()
 	}
 
 	ede := new(dns.EDNS0_EDE)
 	ede.InfoCode = edeCode
 	// ede.ExtraText = EDECodeToMsg[edeCode]
+	if s, ok := EDECodeToString[edeCode]; ok {
+		ede.ExtraText = s
+	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+		ede.ExtraText = s
+	}
 
 	opt.Option = append(opt.Option, ede)
 }
@@ -49,7 +52,11 @@ func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
 	ede := new(dns.EDNS0_EDE)
 	ede.InfoCode = edeCode
-	ede.ExtraText = EDECodeToString[edeCode]
+	if s, ok := EDECodeToString[edeCode]; ok {
+		ede.ExtraText = s
+	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+		ede.ExtraText = s
+	}
 
 	opt.Option = append(opt.Option, ede)
 }

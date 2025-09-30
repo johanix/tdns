@@ -76,12 +76,29 @@ func AddProviderSyncOption(opt *dns.OPT, pso *ProviderSyncOption) error {
 		return fmt.Errorf("OPT RR is nil")
 	}
 	optionData := SerializeProviderSyncOption(pso)
+	if len(optionData) > 0xFFFF {
+			return fmt.Errorf("provider-sync option too large: %d bytes", len(optionData))
+	}
+
 	option := &dns.EDNS0_LOCAL{
 		Code: EDNS0_PROVIDERSYNC_OPTION_CODE,
 		Data: optionData,
 	}
 	opt.Option = append(opt.Option, option)
 	return nil
+}
+
+// AddProviderSyncToMessage ensures an OPT exists and appends the ProviderSync option.
+func AddProviderSyncToMessage(msg *dns.Msg, pso *ProviderSyncOption) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		msg.SetEdns0(4096, true)
+		opt = msg.IsEdns0()
+	}
+	return AddProviderSyncOption(opt, pso)
 }
 
 // ExtractProviderSyncOption extracts the ProviderSyncOption from an OPT RR
