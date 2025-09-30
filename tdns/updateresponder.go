@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	// "github.com/gookit/goutil/dump"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -107,7 +108,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if zd == nil {
 		log.Printf("UpdateResponder: zone %s not found", qname)
 		m.SetRcode(r, dns.RcodeRefused)
-		AttachEDEToResponse(m, EDEZoneNotFound)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
@@ -115,7 +116,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if zd.Error {
 		log.Printf("UpdateResponder: zone %s is in %s error state: %s", qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 		m.SetRcode(r, dns.RcodeServerFailure)
-		AttachEDEToResponse(m, dns.ExtendedErrorCodeNotReady)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
@@ -126,7 +127,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if zd.Options[OptFrozen] {
 		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update for owner=%s", zd.ZoneName, qname)
 		m.SetRcode(r, dns.RcodeRefused)
-		AttachEDEToResponse(m, EDEZoneFrozen)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneFrozen)
 		w.WriteMsg(m)
 		return nil
 	}
@@ -143,7 +144,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
-			AttachEDEToResponse(m, EDEZoneUpdatesNotAllowed)
+			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -181,7 +182,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
 				zd.ZoneName, qname)
 			m.SetRcode(r, dns.RcodeRefused)
-			AttachEDEToResponse(m, EDEZoneUpdatesNotAllowed)
+			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -203,7 +204,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		m.SetRcode(m, dns.RcodeServerFailure)
-		AttachEDEToResponse(m, EDESig0KeyNotKnown)
+		edns0.AttachEDEToResponse(m, edns0.EDESig0KeyNotKnown)
 		w.WriteMsg(m)
 		return err
 	}
@@ -215,7 +216,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		zd.Logger.Printf("Error from TrustUpdate(): %v", err)
 		m.SetRcode(m, int(dur.Status.ValidationRcode))
-		AttachEDEToResponse(m, EDESig0KeyKnownButNotTrusted)
+		edns0.AttachEDEToResponse(m, edns0.EDESig0KeyKnownButNotTrusted)
 		w.WriteMsg(m)
 		return err
 	}
