@@ -10,9 +10,9 @@ import (
 )
 
 type ReporterOption struct {
-	ZoneName string
 	EDECode uint16
 	Severity uint8
+	ZoneName string
 	Sender string
 	Message string
 }
@@ -22,16 +22,27 @@ func ReporterOptionToEDNS0Local(reporterOption *ReporterOption) (*dns.EDNS0_LOCA
 		return nil, fmt.Errorf("reporterOption is nil")
 	}
 
-	data := make([]byte, 3+len(reporterOption.Sender) + len(reporterOption.Message))
+	zoneLen := len(reporterOption.ZoneName)
+	senderLen := len(reporterOption.Sender)
+	msgLen := len(reporterOption.Message)
+	if zoneLen > 255 || senderLen > 255 || msgLen > 255 {
+		return nil, fmt.Errorf("field too long: zone=%d sender=%d msg=%d (max 255)", zoneLen, senderLen, msgLen)
+	}
+
+	data := make([]byte, 6+zoneLen+senderLen+msgLen)
 	data[0] = byte(reporterOption.EDECode >> 8)
 	data[1] = byte(reporterOption.EDECode & 0xFF)
 	data[2] = reporterOption.Severity
-	data[3] = byte(len(reporterOption.ZoneName))
-	data[4] = byte(len(reporterOption.Sender))
-	data[5] = byte(len(reporterOption.Message))
-	copy(data[6:], []byte(reporterOption.ZoneName))
-	copy(data[6+len(reporterOption.ZoneName):], []byte(reporterOption.Sender))
-	copy(data[6+len(reporterOption.ZoneName)+len(reporterOption.Sender):], []byte(reporterOption.Message))
+	data[3] = byte(zoneLen)
+	data[4] = byte(senderLen)
+	data[5] = byte(msgLen)
+
+	off := 6
+	copy(data[off:], []byte(reporterOption.ZoneName))
+	off += zoneLen
+	copy(data[off:], []byte(reporterOption.Sender))
+	off += senderLen
+	copy(data[off:], []byte(reporterOption.Message))
 
 	return &dns.EDNS0_LOCAL{
 			Code: EDNS0_REPORTER_OPTION_CODE,
@@ -67,15 +78,32 @@ func ExtractReporterOption(opt *dns.OPT) (*ReporterOption, bool) {
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			if localOpt.Code == EDNS0_REPORTER_OPTION_CODE {
-				if len(localOpt.Data) > 3 {
-					reporterOption := &ReporterOption{
-						EDECode: uint16(localOpt.Data[0]) << 8 | uint16(localOpt.Data[1]),
-						Severity: localOpt.Data[2],
-						Sender: string(localOpt.Data[5:5+localOpt.Data[3]]),
-						Message: string(localOpt.Data[5+localOpt.Data[3]:]),
-					}
-					return reporterOption, true
+				data := localOpt.Data
+				if len(data) < 6 {
+					return nil, false
 				}
+				zoneLen := int(data[3])
+				senderLen := int(data[4])
+				msgLen := int(data[5])
+				needed := 6 + zoneLen + senderLen + msgLen
+				if len(data) < needed {
+					return nil, false
+				}
+				off := 6
+				zone := string(data[off : off+zoneLen])
+				off += zoneLen
+				sender := string(data[off : off+senderLen])
+				off += senderLen
+				message := string(data[off : off+msgLen])
+
+				reporterOption := &ReporterOption{
+					EDECode:  uint16(data[0])<<8 | uint16(data[1]),
+					Severity: data[2],
+					ZoneName: zone,
+					Sender:   sender,
+					Message:  message,
+				}
+				return reporterOption, true
 			}
 		}
 	}

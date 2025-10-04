@@ -19,5 +19,5 @@ server:
    hostname:		there-is-no-place-like-127.0.0.1
 
 log:
-   file:		/var/log/tdns/tdns-server.log
+   file:		/var/log/tdns/tdns-reporter.log
 

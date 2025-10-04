@@ -14,6 +14,9 @@ func init() {
 	// From ../tdns/cli/start_cmds.go:
 	rootCmd.AddCommand(cli.PingCmd)
 
+	rootCmd.AddCommand(cli.ReportCmd)
+	rootCmd.AddCommand(cli.RawReportCmd)
+
 	rootCmd.AddCommand(cli.DaemonCmd)
 	cli.AgentCmd.AddCommand(cli.DaemonCmd)
 	cli.CombinerCmd.AddCommand(cli.DaemonCmd)

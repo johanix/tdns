@@ -95,7 +95,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeReporter:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeReporter, AppTypeCli:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
