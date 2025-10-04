@@ -1,43 +1,23 @@
-include:
-   - combiner-zones.yaml
+service:
+   name:		TDNS-REPORTER
+   verbose:		true
+   debug:		true   # writes processed zone to disk
+
+reporter:
+   dns:
+      listen:		127.0.0.1:9998
 
 apiserver:
-   addresses:           [ 127.0.0.1:8082 ]
-   apikey:              you-have-stolen-my-frotzblinger
-   certFile:            /etc/tdns/certs/localhost.crt
-   keyFile:             /etc/tdns/certs/localhost.key
+   addresses:     	[ 127.0.0.1:8991 ]
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
+   certfile:		/etc/tdns/certs/abra.ca.dabra..crt
+   keyfile:		/etc/tdns/certs/abra.ca.dabra..key
 
-service:
-   name:                TDNS-COMBINER
-   verbose:             true
-   debug:               true   # writes processed zone to disk
-   refresh:             true
-   maxrefresh:          1800    # seconds. Cap refresh counter to max this
-#   reset_soa_serial:   false   # replace inbound SOA serial with unixtime.
-   resign:              false    # re-sign primary zones as needed
-
-dnsengine:
-   addresses:           [ 127.0.0.1:5366, '[::1]:5366']
-   zones:
-      config:           /etc/tdns/tdns-czones.yaml
-      filedir:          /etc/axfr.net/zones
-      filetmpl:         "%s/%s.zone.new"                # zonename.zone
-
-resignerengine:
-   interval:            300 # seconds between runs. Reasonable value is likely ~3600
-   keygen:
-      mode:             internal # internal | external
-      generator:        /opt/local/bin/dnssec-keygen
-#      algorithm:       ED25519 # moved to the dnssec policy
-
-common:
-   command:	/usr/local/libexec/tdns-combiner
-   rootca:      ../etc/certs/PublicRootCAs.pem
-   debug:	true
-   verbose:	true
+server:
+   id:			ooga booga boo
+   version:		v99.99
+   hostname:		there-is-no-place-like-127.0.0.1
 
 log:
-   file:	/var/log/axfr.net/tdns-combiner.log
+   file:		/var/log/tdns/tdns-server.log
 
-db:
-   file:	/var/tmp/combiner.db
