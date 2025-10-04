@@ -41,12 +41,21 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 
 	var configsections = make(map[string]interface{}, 5)
 
-	if Globals.App.Type != AppTypeImr {
-		configsections["log"] = config.Log
+	configsections["log"] = config.Log
+	switch Globals.App.Type {
+	case AppTypeImr:
+		configsections["imrengine"] = config.ImrEngine
+	case AppTypeReporter:
+		configsections["apiserver"] = config.ApiServer
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
 		configsections["dnsengine"] = config.DnsEngine
+	default:
+		configsections["service"] = config.Service
+		configsections["db"] = config.Db
+		configsections["apiserver"] = config.ApiServer
 	}
 
 	if _, err := ValidateBySection(&config, configsections, cfgfile); err != nil {

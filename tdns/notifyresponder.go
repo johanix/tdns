@@ -5,10 +5,15 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
+	"context"
+
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 func NotifyHandler(conf *Config) error {
@@ -101,4 +106,58 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 	m.MsgHdr.Authoritative = true
 	dhr.ResponseWriter.WriteMsg(m)
 	return nil
+}
+
+// This is a minimal DNS server that only handles NOTIFYs. It is (only?) used in the tdns-reporter.
+
+func CreateNotifyOnlyDNSServer(conf *Config) (stop func(context.Context) error, err error) {
+	addr := viper.GetString("reporter.dns.listen")
+	if addr == "" {
+		addr = ":53"
+	}
+
+	// Set up a dedicated ServeMux to avoid global handlers
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		if r == nil || r.Opcode != dns.OpcodeNotify {
+			// Optionally reply REFUSED, or silently drop. Here we refuse.
+			resp := new(dns.Msg)
+			resp.SetRcode(r, dns.RcodeRefused)
+			_ = w.WriteMsg(resp)
+			return
+		}
+
+		// At this point we have a NOTIFY. Minimal ACK:
+		resp := new(dns.Msg)
+		resp.SetReply(r)
+		resp.MsgHdr.Authoritative = true
+		_ = w.WriteMsg(resp)
+
+		// Optional: do any lightweight logging or enqueue a side-effect here.
+		// e.g., record the notify, update metrics, etc.
+		if edns0.HasReporterOption(r.IsEdns0()) {
+			reporterOption, found := edns0.ExtractReporterOption(r.IsEdns0())
+			if found {
+				fmt.Printf("NotifyReporter: Received a NOTIFY for %s with Reporter option: %+v\n", r.Question[0].Name, reporterOption)
+			} else {
+				fmt.Printf("NotifyReporter: Received a NOTIFY for %s (has EDNS(0) OPT RR, but no Reporter option found)\n", r.Question[0].Name)
+			}
+		} else {
+			fmt.Printf("NotifyReporter: Received a NOTIFY for %s (no EDNS(0) options at all)\n", r.Question[0].Name)
+		}
+	})
+
+	udpSrv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
+	tcpSrv := &dns.Server{Addr: addr, Net: "tcp", Handler: mux}
+
+	// Start both listeners
+	go func() { _ = udpSrv.ListenAndServe() }()
+	go func() { _ = tcpSrv.ListenAndServe() }()
+
+	// Return a unified stopper
+	return func(ctx context.Context) error {
+		_ = udpSrv.ShutdownContext(ctx)
+		_ = tcpSrv.ShutdownContext(ctx)
+		return nil
+	}, nil
 }

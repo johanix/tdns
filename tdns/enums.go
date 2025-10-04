@@ -101,6 +101,7 @@ var AppTypeToString = map[AppType]string{
 	AppTypeCombiner: "combiner",
 	AppTypeImr:      "imr",
 	AppTypeCli:      "cli",
+	AppTypeReporter: "reporter",
 }
 
 var StringToAppType = map[string]AppType{
@@ -108,6 +109,9 @@ var StringToAppType = map[string]AppType{
 	"agent":  AppTypeAgent,
 	//"msa":      AppTypeMSA,
 	"combiner": AppTypeCombiner,
+	"imr":      AppTypeImr,
+	"cli":      AppTypeCli,
+	"reporter": AppTypeReporter,
 }
 
 type ErrorType uint8

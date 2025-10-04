@@ -9,7 +9,7 @@ import (
 
 const (
 	// KeyState Option Code (temporary until IANA assignment)
-	OptcodeKeyState = 65002
+	// OptcodeKeyState = 65002
 
 	// Sender (Child) KeyStates
 	KeyStateRequestAutoBootstrap   = 0
@@ -46,7 +46,7 @@ func CreateKeyStateOption(keyID uint16, keyState uint8, extraText string) *dns.E
 	copy(data[3:], []byte(extraText))
 
 	return &dns.EDNS0_LOCAL{
-		Code: OptcodeKeyState,
+		Code: EDNS0_KEYSTATE_OPTION_CODE,
 		Data: data,
 	}
 }
@@ -109,7 +109,7 @@ func ExtractKeyStateFromMsg(msg *dns.Msg) (*KeyStateOption, error) {
 	if opt := msg.IsEdns0(); opt != nil {
 		for _, option := range opt.Option {
 			if local, ok := option.(*dns.EDNS0_LOCAL); ok {
-				if local.Code == OptcodeKeyState {
+				if local.Code == EDNS0_KEYSTATE_OPTION_CODE {
 					keystate, err := ParseKeyStateOption(local)
 					if err != nil {
 						log.Printf("Error parsing KeyState option: %v", err)
@@ -140,7 +140,7 @@ func AttachKeyStateToResponse(msg *dns.Msg, keyStateOpt *KeyStateOption) {
 	filtered := make([]dns.EDNS0, 0, len(opt.Option))
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
-			if localOpt.Code == OptcodeKeyState {
+			if localOpt.Code == EDNS0_KEYSTATE_OPTION_CODE {
 				continue
 			}
 		}

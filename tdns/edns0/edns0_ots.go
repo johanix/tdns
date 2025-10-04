@@ -11,8 +11,6 @@ import (
 
 // EDNS0 OTS option constants
 const (
-	EDNS0_OTS_OPTION_CODE = 65001 // TBD: Replace with actual IANA assigned code
-	
 	// OTS payload values
 	OTS_OPT_IN  = 1
 	OTS_OPT_OUT = 2
