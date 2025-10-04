@@ -84,8 +84,6 @@ func ParseKeyStateOption(opt *dns.EDNS0_LOCAL) (*KeyStateOption, error) {
 }
 
 func keyStateToString(state uint8) string {
-	fmt.Printf("keyStateToString: state=%d\n", state)
-
 	states := map[uint8]string{
 		KeyStateRequestAutoBootstrap:    "Request Auto Bootstrap",
 		KeyStateRequestManualBootstrap:  "Request Manual Bootstrap",
@@ -108,13 +106,9 @@ func keyStateToString(state uint8) string {
 }
 
 func ExtractKeyStateFromMsg(msg *dns.Msg) (*KeyStateOption, error) {
-	fmt.Printf("ExtractKeyStateFromMsg: msg.Extra: %+v", msg.Extra)
-
 	if opt := msg.IsEdns0(); opt != nil {
 		for _, option := range opt.Option {
 			if local, ok := option.(*dns.EDNS0_LOCAL); ok {
-				fmt.Printf("ExtractKeyStateFromMsg: Found KeyState option\n")
-				fmt.Printf("ExtractKeyStateFromMsg: local.Code: %d\n", local.Code)
 				if local.Code == OptcodeKeyState {
 					keystate, err := ParseKeyStateOption(local)
 					if err != nil {
@@ -131,20 +125,34 @@ func ExtractKeyStateFromMsg(msg *dns.Msg) (*KeyStateOption, error) {
 }
 
 func AttachKeyStateToResponse(msg *dns.Msg, keyStateOpt *KeyStateOption) {
+	if msg == nil || keyStateOpt == nil {
+		return
+	}
 
-	edns0_keyStateOpt := CreateKeyStateOption(
+	// Ensure there is exactly one OPT RR on the message
+	opt := msg.IsEdns0()
+	if opt == nil {
+		msg.SetEdns0(4096, true)
+		opt = msg.IsEdns0()
+	}
+
+	// Remove any existing KeyState options to avoid duplicates
+	filtered := make([]dns.EDNS0, 0, len(opt.Option))
+	for _, option := range opt.Option {
+		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
+			if localOpt.Code == OptcodeKeyState {
+				continue
+			}
+		}
+		filtered = append(filtered, option)
+	}
+	opt.Option = filtered
+
+	// Append the new KeyState option
+	edns0KeyStateOpt := CreateKeyStateOption(
 		keyStateOpt.KeyID,
 		keyStateOpt.KeyState,
 		keyStateOpt.ExtraText,
 	)
-
-	msg.Extra = append(msg.Extra, &dns.OPT{
-		Hdr: dns.RR_Header{
-			Name:   ".",
-			Rrtype: dns.TypeOPT,
-			Class:  dns.DefaultMsgSize,
-		},
-		Option: []dns.EDNS0{edns0_keyStateOpt},
-	})
-
+	opt.Option = append(opt.Option, edns0KeyStateOpt)
 }
