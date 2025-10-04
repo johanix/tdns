@@ -92,6 +92,7 @@ const (
 	AppTypeCombiner
 	AppTypeImr // simplified recursor
 	AppTypeCli
+	AppTypeReporter
 )
 
 var AppTypeToString = map[AppType]string{

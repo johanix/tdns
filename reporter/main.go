@@ -13,7 +13,7 @@ import (
 func main() {
 	var tconf tdns.Config
 
-	tdns.Globals.App.Type = tdns.AppTypeCombiner
+	tdns.Globals.App.Type = tdns.AppTypeReporter
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate

@@ -49,9 +49,9 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	var client = map[Transport]*DNSClient{}
 	var t Transport
 
-	client[TransportDo53] = NewDNSClient(TransportDo53, nil)
+	client[TransportDo53] = NewDNSClient(TransportDo53, "53",nil)
 	for _, t = range []Transport{TransportDoT, TransportDoH, TransportDoQ} {
-		client[t] = NewDNSClient(t, nil)
+		client[t] = NewDNSClient(t, "53",nil)
 	}
 
 	return &RRsetCacheT{

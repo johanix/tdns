@@ -28,6 +28,7 @@ const (
 
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
+	Port      string
 	Transport Transport
 	// Server     string
 	TLSConfig  *tls.Config
@@ -38,7 +39,7 @@ type DNSClient struct {
 }
 
 // NewDNSClient creates a new DNS client with the specified transport
-func NewDNSClient(transport Transport, tlsConfig *tls.Config) *DNSClient {
+func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSClient {
 	if tlsConfig == nil {
 		switch transport {
 		case TransportDoT, TransportDoH:
@@ -61,7 +62,7 @@ func NewDNSClient(transport Transport, tlsConfig *tls.Config) *DNSClient {
 
 	client := &DNSClient{
 		Transport: transport,
-		// Server:    server,
+		Port:      port,
 		TLSConfig: tlsConfig,
 		Timeout:   5 * time.Second,
 	}
@@ -104,25 +105,27 @@ func (c *DNSClient) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Durati
 		fmt.Printf("*** Exchange: Globals.Debug is set\n")
 	}
 	if Globals.Debug {
-		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
-			TransportToString[c.Transport], server, dns.OpcodeToString[msg.Opcode],
+		fmt.Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s\n",
+			TransportToString[c.Transport], server, c.Port,
+			dns.OpcodeToString[msg.Opcode],
 			msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	switch c.Transport {
 	case TransportDo53:
 		if Globals.Debug {
-			log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s",
-				net.JoinHostPort(server, "53"), dns.OpcodeToString[msg.Opcode],
+			log.Printf("*** Do53 sending message to %s:%s opcode: %s qname: %s rrtype: %s",
+				server, c.Port,
+				dns.OpcodeToString[msg.Opcode],
 				msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 		}
-		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, "53"))
+		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, c.Port))
 	case TransportDoT:
-		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, "853"))
+		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, c.Port))
 	case TransportDoH:
 		return c.exchangeDoH(msg, server)
 	case TransportDoQ:
-		return c.exchangeDoQ(msg, net.JoinHostPort(server, "8853"))
+		return c.exchangeDoQ(msg, net.JoinHostPort(server, c.Port))
 	default:
 		return nil, 0, fmt.Errorf("unsupported transport protocol: %d", c.Transport)
 	}
