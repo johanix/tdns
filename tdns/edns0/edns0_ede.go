@@ -18,6 +18,8 @@ const (
 	EDEZoneFrozen                 uint16 = 516
 	EDEZoneNotFound               uint16 = 517
 	EDEZoneUpdatesNotAllowed      uint16 = 518
+	EDEMPZoneXfrFailure           uint16 = 519
+	EDEMPParentSyncFailure        uint16 = 520
 )
 
 var EDECodeToString = map[uint16]string{
@@ -27,6 +29,8 @@ var EDECodeToString = map[uint16]string{
 	EDEZoneFrozen:                 "Zone is frozen, updates not currently possible",
 	EDEZoneNotFound:               "Zone not found",
 	EDEZoneUpdatesNotAllowed:      "Zone does not allow DNS UPDATE",
+	EDEMPZoneXfrFailure:           "Zone XFR between providers failed",
+	EDEMPParentSyncFailure:        "Parent sync by provider failed",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response
