@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -168,7 +169,7 @@ func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 					Command:    "sig0-mgmt",
 					SubCommand: "list",
 				}
-				tx, _ := kdb.Begin("APIkeystore")
+				tx, _ := kdb.Begin("KeyBootstrapper")
 				resp, _ := kdb.Sig0KeyMgmt(tx, kp)
 				tx.Commit()
 
@@ -178,7 +179,7 @@ func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 					keyid, _ := strconv.ParseUint(tmp[1], 10, 16)
 					fmt.Printf("KeyBootstrapper: Updating key state for %s, keyid %d\n", keyname, keyid)
 
-					go UpdateKeyState(keyname, uint16(keyid), kdb, keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
+					go kdb.UpdateKeyState(keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
 				}
 
 				// Uppdatera keystate för alla aktiva nycklar
@@ -189,7 +190,7 @@ func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 				}
 
 				for _, key := range sak.Keys {
-					go UpdateKeyState(key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), kdb, keybootstrapperq, key.Algorithm)
+					go kdb.UpdateKeyState(key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
 				}
 			}
 		}
@@ -275,7 +276,7 @@ func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 	return nameservers, nil
 }
 
-func UpdateKeyState(KeyName string, keyid uint16, kdb *KeyDB, keybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
+func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
 	dsync_target, err := LookupDSYNCTarget(KeyName, Globals.IMR, dns.TypeANY, SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("kunde inte hitta DSYNC target: %v", err)
@@ -286,9 +287,9 @@ func UpdateKeyState(KeyName string, keyid uint16, kdb *KeyDB, keybootstrapperq c
 	m.SetQuestion(dns.Fqdn(KeyName), dns.TypeANY)
 
 	// Lägg till EDNS(0) option med KeyState
-	AttachKeyStateToResponse(m, &KeyStateOption{
+	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
 		KeyID:     keyid,
-		KeyState:  KeyStateInquiryKey,
+		KeyState:  edns0.KeyStateInquiryKey,
 		ExtraText: "",
 	})
 
@@ -321,7 +322,7 @@ func UpdateKeyState(KeyName string, keyid uint16, kdb *KeyDB, keybootstrapperq c
 		return fmt.Errorf("DNS-förfrågan misslyckades med kod: %v", dns.RcodeToString[r.Rcode])
 	}
 
-	keystate, err := ExtractKeyStateFromMsg(r)
+	keystate, err := edns0.ExtractKeyStateFromMsg(r)
 	if err != nil {
 		return fmt.Errorf("kunde inte extrahera KeyState från svar: %v", err)
 	}
@@ -359,7 +360,7 @@ func UpdateKeyState(KeyName string, keyid uint16, kdb *KeyDB, keybootstrapperq c
 	log.Printf("KeyBootstrapper: Parent state uppdaterad: %s", resp.Msg)
 
 	// Om nyckeln är okänd, bootstrappa den med parent
-	if keystate.KeyState == KeyStateUnknown {
+	if keystate.KeyState == edns0.KeyStateUnknown {
 
 		zd, _ := FindZone(KeyName)
 
