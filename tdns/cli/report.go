@@ -149,6 +149,14 @@ var ReportCmd = &cobra.Command{
             dsyncLookup = false
         }
 
+        tdns.Globals.App.Type = tdns.AppTypeCli
+		if tdns.Globals.Debug {
+			fmt.Printf("ReportCmd: Calling Conf.MainInit(%q)\n", tdns.DefaultCliCfgFile)
+		}
+		if err := Conf.MainInit(tdns.DefaultCliCfgFile); err != nil {
+			tdns.Shutdowner(&Conf, fmt.Sprintf("Error initializing tdns-cli: %v", err))
+		}
+
         if reportSender == "" {
             fmt.Printf("Error: sender not specified\n")
             return
@@ -159,14 +167,6 @@ var ReportCmd = &cobra.Command{
             fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
             return
         }
-
-		tdns.Globals.App.Type = tdns.AppTypeCli
-		if tdns.Globals.Debug {
-			fmt.Printf("ReportCmd: Calling Conf.MainInit(%q)\n", tdns.DefaultCliCfgFile)
-		}
-		if err := Conf.MainInit(tdns.DefaultCliCfgFile); err != nil {
-			tdns.Shutdowner(&Conf, fmt.Sprintf("Error initializing tdns-cli: %v", err))
-		}
 
         if dsyncLookup {
 
