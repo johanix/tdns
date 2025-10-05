@@ -141,9 +141,7 @@ func CreateNotifyOnlyDNSServer(conf *Config) (stop func(context.Context) error, 
 			return
 		}
 
-		fmt.Printf("TSIG details: %+v\n", tsig)
-
-        if err = w.TsigStatus(); err != nil {
+		if err = w.TsigStatus(); err != nil {
          	// TSIG validation failure
 	        resp.SetRcode(r, dns.RcodeNotAuth)
 	        edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
