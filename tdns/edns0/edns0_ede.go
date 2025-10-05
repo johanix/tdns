@@ -5,7 +5,6 @@ package edns0
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/miekg/dns"
 )
@@ -21,6 +20,8 @@ const (
 	EDEMPZoneXfrFailure           uint16 = 519
 	EDEMPParentSyncFailure        uint16 = 520
 	EDEReporterOptionNotFound     uint16 = 521
+	EDETsigRequired               uint16 = 522
+	EDETsigValidationFailure      uint16 = 523
 )
 
 var EDECodeToString = map[uint16]string{
@@ -33,6 +34,8 @@ var EDECodeToString = map[uint16]string{
 	EDEMPZoneXfrFailure:           "Zone XFR between providers failed",
 	EDEMPParentSyncFailure:        "Parent sync by provider failed",
 	EDEReporterOptionNotFound:     "Expected Reporter option not found",
+	EDETsigRequired:               "TSIG required",
+	EDETsigValidationFailure:      "TSIG validation failure",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response
@@ -68,11 +71,11 @@ func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
 }
 
 func ExtractEDEFromMsg(msg *dns.Msg) (bool, uint16, string) {
-	log.Printf("ExtractEDEFromMsg: msg.Extra: %+v", msg.Extra)
+	// log.Printf("ExtractEDEFromMsg: msg.Extra: %+v", msg.Extra)
 	var edemsg string
 	for _, extra := range msg.Extra {
 		if opt, ok := extra.(*dns.OPT); ok {
-			log.Printf("ExtractEDEFromMsg: opt.Option: %+v", opt.Option)
+			// log.Printf("ExtractEDEFromMsg: opt.Option: %+v", opt.Option)
 			for _, option := range opt.Option {
 				if ede, ok := option.(*dns.EDNS0_EDE); ok {
 					privede, privexist := EDECodeToString[ede.InfoCode]
@@ -88,7 +91,7 @@ func ExtractEDEFromMsg(msg *dns.Msg) (bool, uint16, string) {
 					default:
 						edemsg = fmt.Sprintf("Unknown EDE code: %d", ede.InfoCode)
 					}
-					log.Printf("EDE Code: %d, EDE Message: %s EDE local code2msg: %s", ede.InfoCode, ede.ExtraText, edemsg)
+					// log.Printf("EDE Code: %d, EDE Message: %s EDE local code2msg: %s", ede.InfoCode, ede.ExtraText, edemsg)
 					return true, ede.InfoCode, edemsg
 				}
 			}

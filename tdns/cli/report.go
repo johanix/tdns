@@ -17,6 +17,7 @@ import (
 )
 
 var reportSender, reportDetails string
+var reportTsig bool
 
 var ReportCmd = &cobra.Command{
 	Use:   "report",
@@ -116,7 +117,6 @@ var RawReportCmd = &cobra.Command{
 
         // fmt.Printf("%s\n", m.String())
         c := tdns.NewDNSClient(tdns.TransportDo53, "9998", nil)
-        c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
 
         // There is no built-in map or function in miekg/dns for this, so we use a switch.
         var alg string
@@ -132,10 +132,16 @@ var RawReportCmd = &cobra.Command{
         default:
             alg = tsig.Algorithm // fallback to whatever is provided
         }
-        m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
 
-        // fmt.Printf("Sending report...\n")
-        // fmt.Printf("%s\n", m.String())
+        if reportTsig {
+            fmt.Printf("TSIG signing the report\n")
+            c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
+            m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
+        }
+
+        if tdns.Globals.Debug {
+            fmt.Printf("%s\n", m.String())
+        }
 
         resp, _, err := c.Exchange(m, "127.0.0.1")
         if err != nil {
@@ -145,8 +151,13 @@ var RawReportCmd = &cobra.Command{
         if rcode == dns.RcodeSuccess {
             fmt.Printf("Report accepted (rcode: %s)\n", dns.RcodeToString[rcode])
         } else {
-            fmt.Printf("Error: Rcode: %s\n", dns.RcodeToString[rcode])
-            fmt.Printf("Response msg:\n%s\n", resp.String())
+            hasede, edecode, edemsg := edns0.ExtractEDEFromMsg(resp)
+            if hasede {
+                fmt.Printf("Error: rcode: %s, EDE Message: %s (EDE code: %d)\n", dns.RcodeToString[rcode], edemsg, edecode)
+            } else {
+                fmt.Printf("Error: rcode: %s\n", dns.RcodeToString[rcode])
+                fmt.Printf("Response msg:\n%s\n", resp.String())
+            }
             os.Exit(1)
         }
 	},
@@ -155,5 +166,6 @@ var RawReportCmd = &cobra.Command{
 func init() {
 	RawReportCmd.Flags().StringVarP(&reportSender, "sender", "S", "", "Report sender")
 	RawReportCmd.Flags().StringVarP(&reportDetails, "details", "D", "", "Report details")
+    RawReportCmd.Flags().BoolVarP(&reportTsig, "tsig", "T", true, "TSIG sign the report")
 }
 
