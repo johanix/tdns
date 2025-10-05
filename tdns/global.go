@@ -32,6 +32,7 @@ type GlobalStuff struct {
 	Address     string
 	App         AppDetails
 	ServerSVCB  *dns.SVCB // ALPN for DoH/DoQ
+	TsigKeys    map[string]*TsigDetails
 }
 
 var Globals = GlobalStuff{

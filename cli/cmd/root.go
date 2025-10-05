@@ -102,6 +102,11 @@ var cconf CliConf
 
 type CliConf struct {
 	ApiServers []ApiDetails
+	Keys	   tdns.TsigConf
+}
+
+type TsigConf struct {
+	Tsig	[]tdns.TsigDetails
 }
 
 type ApiDetails struct {
@@ -126,4 +131,16 @@ func initApi() {
 
 	// for convenience we store the API client for "server" in the old place also
 	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-server"]
+
+	numtsigs := len(cconf.Keys.Tsig)
+	if numtsigs > 0 {
+		tdns.Globals.TsigKeys = make(map[string]*tdns.TsigDetails, numtsigs)
+		for _, val := range cconf.Keys.Tsig {
+			tdns.Globals.TsigKeys[val.Name] = &tdns.TsigDetails{
+								Name:		val.Name,
+								Algorithm:	val.Algorithm,
+								Secret:		val.Secret,
+							  }
+		}
+	}
 }

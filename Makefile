@@ -6,6 +6,7 @@ all:
 	$(MAKE) -C ./dog/
 	$(MAKE) -C ./combiner/
 	$(MAKE) -C ./imr/
+	$(MAKE) -C ./reporter/
 #	$(MAKE) -C ./msa/
 #	$(MAKE) -C ./sidecar-cli/
 
@@ -16,6 +17,7 @@ clean:
 	$(MAKE) -C ./dog/ clean
 	$(MAKE) -C ./combiner/ clean
 	$(MAKE) -C ./imr/ clean
+	$(MAKE) -C ./reporter/ clean
 #	$(MAKE) -C ./msa/ clean
 #	$(MAKE) -C ./sidecar-cli/ clean
 
@@ -25,6 +27,7 @@ install:
 	$(MAKE) -C ./agent/ install
 	$(MAKE) -C ./dog/ install
 	$(MAKE) -C ./combiner/ install
+	$(MAKE) -C ./reporter/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install
 

@@ -5,10 +5,15 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
+	"context"
+
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 func NotifyHandler(conf *Config) error {
@@ -101,4 +106,80 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 	m.MsgHdr.Authoritative = true
 	dhr.ResponseWriter.WriteMsg(m)
 	return nil
+}
+
+// This is a minimal DNS server that only handles NOTIFYs. It is (only?) used in the tdns-reporter.
+
+func CreateNotifyOnlyDNSServer(conf *Config) (stop func(context.Context) error, err error) {
+	addr := viper.GetString("reporter.dns.listen")
+	if addr == "" {
+		addr = ":53"
+	}
+
+	// Set up a dedicated ServeMux to avoid global handlers
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		if r == nil || r.Opcode != dns.OpcodeNotify {
+			// Optionally reply REFUSED, or silently drop. Here we refuse.
+			resp := new(dns.Msg)
+			resp.SetRcode(r, dns.RcodeRefused)
+			_ = w.WriteMsg(resp)
+			return
+		}
+
+		// At this point we have a NOTIFY. Minimal ACK:
+		resp := new(dns.Msg)
+		resp.SetReply(r)
+		resp.MsgHdr.Authoritative = true
+
+		var tsig *dns.TSIG
+
+		if tsig = r.IsTsig(); tsig == nil{
+			resp.SetRcode(r, dns.RcodeRefused)
+			edns0.AttachEDEToResponse(resp, edns0.EDETsigRequired)
+			_ = w.WriteMsg(resp)
+			return
+		}
+
+		if err = w.TsigStatus(); err != nil {
+         	// TSIG validation failure
+	        resp.SetRcode(r, dns.RcodeNotAuth)
+	        edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
+          	_ = w.WriteMsg(resp)
+	        return
+        }
+		
+		if edns0.HasReporterOption(r.IsEdns0()) {
+			ro, found := edns0.ExtractReporterOption(r.IsEdns0())
+			if found {
+				edetxt := edns0.EDECodeToString[ro.EDECode]
+				if ro.Details == "" {
+					ro.Details = "No details provided"
+				}
+				fmt.Printf("NotifyReport: Zone: %s Sender: %s Error: %s (%d) Details: %s\n", 
+				    ro.ZoneName, ro.Sender, edetxt, ro.EDECode, ro.Details)
+			} else {
+				fmt.Printf("NotifyReporter: Received a NOTIFY for %s (has EDNS(0) OPT RR, but no Reporter option found)\n", r.Question[0].Name)
+				edns0.AttachEDEToResponse(resp, edns0.EDEReporterOptionNotFound)
+			}
+		} else {
+			fmt.Printf("NotifyReporter: Received a NOTIFY for %s (no EDNS(0) options at all)\n", r.Question[0].Name)
+			edns0.AttachEDEToResponse(resp, edns0.EDEReporterOptionNotFound)
+		}
+		_ = w.WriteMsg(resp)
+	})
+
+	udpSrv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
+	tcpSrv := &dns.Server{Addr: addr, Net: "tcp", Handler: mux}
+
+	// Start both listeners
+	go func() { _ = udpSrv.ListenAndServe() }()
+	go func() { _ = tcpSrv.ListenAndServe() }()
+
+	// Return a unified stopper
+	return func(ctx context.Context) error {
+		_ = udpSrv.ShutdownContext(ctx)
+		_ = tcpSrv.ShutdownContext(ctx)
+		return nil
+	}, nil
 }

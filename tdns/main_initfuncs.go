@@ -76,7 +76,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	Globals.App.ServerConfigTime = time.Now()
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeReporter:
 		pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 		pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -95,7 +95,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeImr:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeReporter, AppTypeCli:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -103,7 +103,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 			Globals.App.Name, Globals.App.Type)
 	}
 
-	err := conf.ParseConfig(false) // false = !reload, initial config
+	err := conf.ParseConfig(false) // false = initial config, not reload
 	if err != nil {
 		return fmt.Errorf("Error parsing config %q: %v", conf.Internal.CfgFile, err)
 	}

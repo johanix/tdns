@@ -543,3 +543,12 @@ type KeyBootstrapperRequest struct {
 	Keyid        uint16
 	ResponseChan chan *VerificationInfo
 }
+
+type TsigConf struct {
+	Tsig    []TsigDetails
+}
+type TsigDetails struct {
+	Name		string `validate:"required" yaml:"name"`
+	Algorithm	string `validate:"required" yaml:"algorithm"`
+	Secret		string `validate:"required" yaml:"secret"`
+}

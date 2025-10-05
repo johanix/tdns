@@ -159,6 +159,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		log.Printf("Templates: %+v", conf.Templates)
 	}
 
+	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
 	// Build template map
 	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
 	for _, tmpl := range conf.Templates {
@@ -168,8 +169,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 		if _, exists := Templates[tmpl.Name]; exists {
 			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
 		}
-		Templates[tmpl.Name] = tmpl
-	}
+			Templates[tmpl.Name] = tmpl
+		}
+	
 
 	// Handle template expansion if specified
 	for _, t := range conf.Templates {
@@ -204,6 +206,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	if Globals.Debug {
 		log.Printf("Templates: %+v", Templates)
+	}
 	}
 
 	// log.Printf("*** ParseConfig: 1")

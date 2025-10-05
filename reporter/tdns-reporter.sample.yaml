@@ -1,0 +1,18 @@
+service:
+   name:		TDNS-REPORTER
+   verbose:		true
+   debug:		true   # writes processed zone to disk
+
+reporter:
+   dns:
+      listen:		127.0.0.1:9998
+
+apiserver:
+   addresses:     	[ 127.0.0.1:8991 ]
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
+   certfile:		/etc/tdns/certs/abra.ca.dabra..crt
+   keyfile:		/etc/tdns/certs/abra.ca.dabra..key
+
+log:
+   file:		/var/log/tdns/tdns-reporter.log
+

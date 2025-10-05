@@ -31,6 +31,18 @@ func WalkRoutes(router *mux.Router, address string) {
 	//	return nil
 }
 
+func SetupReporterAPIRouter(conf *Config) (*mux.Router, error) {
+	rtr := mux.NewRouter().StrictSlash(true)
+	apikey := conf.ApiServer.ApiKey
+	if apikey == "" {
+		return nil, fmt.Errorf("apiserver.apikey is not set")
+	}
+	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
+
+	return rtr, nil
+}
+
 func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	rtr := mux.NewRouter().StrictSlash(true)

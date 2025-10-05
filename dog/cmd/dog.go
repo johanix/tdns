@@ -114,6 +114,11 @@ var rootCmd = &cobra.Command{
 			options["server"] = server
 		}
 
+		// If -p/--port was explicitly provided, let it override any other port source
+		if cmd.Flags().Changed("port") && port != "" {
+			options["port"] = port
+		}
+
 		if options["port"] == "" {
 			options["port"] = defaultPorts[options["transport"]]
 			if options["port"] == "" {
@@ -237,7 +242,7 @@ var rootCmd = &cobra.Command{
 				if err != nil {
 					log.Fatalf("Error: %v", err)
 				}
-				client := tdns.NewDNSClient(t, tlsConfig)
+				client := tdns.NewDNSClient(t, options["port"], tlsConfig)
 				res, _, err := client.Exchange(m, server) // FIXME: duration is always zero
 
 				elapsed := time.Since(start)

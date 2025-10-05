@@ -15,4 +15,5 @@ const (
 	DefaultAgentCfgFile  = "/etc/tdns/tdns-agent.yaml"
 	//	DefaultMSACfgFile      = "/etc/tdns/tdns-msa.yaml"
 	DefaultCombinerCfgFile = "/etc/tdns/tdns-combiner.yaml"
+	DefaultReporterCfgFile = "/etc/tdns/tdns-reporter.yaml"
 )
