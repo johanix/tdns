@@ -2,8 +2,6 @@ module tdns-reporter
 
 go 1.23.0
 
-toolchain go1.24.4
-
 replace (
 	//	github.com/johanix/tdns/music => ../music
 	//	github.com/johanix/tdns/music/fsm => ../music/fsm
