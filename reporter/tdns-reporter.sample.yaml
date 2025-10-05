@@ -13,11 +13,6 @@ apiserver:
    certfile:		/etc/tdns/certs/abra.ca.dabra..crt
    keyfile:		/etc/tdns/certs/abra.ca.dabra..key
 
-server:
-   id:			ooga booga boo
-   version:		v99.99
-   hostname:		there-is-no-place-like-127.0.0.1
-
 log:
    file:		/var/log/tdns/tdns-reporter.log
 

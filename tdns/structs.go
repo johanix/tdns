@@ -544,6 +544,9 @@ type KeyBootstrapperRequest struct {
 	ResponseChan chan *VerificationInfo
 }
 
+type TsigConf struct {
+	Tsig    []TsigDetails
+}
 type TsigDetails struct {
 	Name		string `validate:"required" yaml:"name"`
 	Algorithm	string `validate:"required" yaml:"algorithm"`

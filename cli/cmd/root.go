@@ -102,17 +102,11 @@ var cconf CliConf
 
 type CliConf struct {
 	ApiServers []ApiDetails
-	Keys	   TsigConf
+	Keys	   tdns.TsigConf
 }
 
 type TsigConf struct {
 	Tsig	[]tdns.TsigDetails
-}
-
-type xxxTsigDetails struct {
-	Name		string `validate:"required" yaml:"name"`
-	Algorithm	string `validate:"required" yaml:"algorithm"`
-	Secret		string `validate:"required" yaml:"secret"`
 }
 
 type ApiDetails struct {

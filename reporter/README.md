@@ -1,29 +1,24 @@
-# **tdns-combiner**
+# **tdns-reporter**
 
 Description
 
-**tdns-combiner** is a small, single-purpose service that controls the four
-apex RRsets — NS, DNSKEY, CDS and CSYNC for zones that it receives via
-inbound zone transfer (typically from a zone owner) and (after possible
-modifications) publishes via outbound zone transfer (to a signer).
+**tdns-reporter** is a small, single-purpose service that only listens
+for TSIG-signed NOTIFY messages with an EDNS(0) Reporter option attached.
 
-The replacement data for the four RRsets is received via an API
-connection from a nearby **tdns-agent**.
+The intent is to provide a reporting channel for multi provider DNS
+errors and problems.
 
-## Design Constraints for **tdns-combiner**
+The tdns-cli tool has a new sub command, "report" which may be used to
+test and demonstrate this functionality. Example:
 
-1. Essentially all configuration errors should be fatal. There is no
-   point to a **tdns-combiner** that is running on a partially broken config.
+tdns-cli report -z foffa.z2.axfr.net -S johani -D "no coffee"
 
-2. The semantics of replacement of data is as follows:
-
-   2.1. DNSKEY, CDS and CSYNC: if there is replacement data, then use
-        that.  Otherwise remove any CDS or CSYNC RRs from the inbound,
-        unsigned zone.
-
-   2.2. NS: if there is replacement data, then use that. Otherwise
-        leave the original NS RRset from the inbound, unsigned, zone
-        intact.
+Arguments are:
+-z zonename
+-S sender    name of sender (a corresponding TSIG key with name {sender}.key. must
+		   exist in the tdns-cli.yaml config file).
+--ede num    EDE code point to set
+-D "details" additional text describing the problem
 
 
 
