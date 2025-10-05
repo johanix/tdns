@@ -20,7 +20,7 @@ const (
 	EDEMPZoneXfrFailure           uint16 = 519
 	EDEMPParentSyncFailure        uint16 = 520
 	EDEReporterOptionNotFound     uint16 = 521
-EDETsigRequired               uint16 = 522
+    EDETsigRequired               uint16 = 522
 	EDETsigValidationFailure      uint16 = 523
 )
 
