@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,7 +43,7 @@ func main() {
 	apiSrv := &http.Server{Addr: apiAddr, Handler: router}
 	go func() {
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("api server error: %v", err)
+			tdns.Shutdowner(&conf, fmt.Sprintf("api server error: %v", err))
 		}
 	}()
 

@@ -15,6 +15,8 @@ ${PROG}: build
 PROGS_WITH_VERSION := tdns-server tdns-agent music-sidecar
 FOO := tdns-agent
 
+all: $(PROG)
+
 # version.go:	../VERSION Makefile
 # 	/bin/sh ../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
