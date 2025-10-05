@@ -14,62 +14,9 @@ import (
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-var cfgFile, cfgFileUsed string
-var LocalConfig string
-
-
-func initConfig() {
-    cfgFile = Conf.Internal.CfgFile // this gets populated from MainInit()
-    if cfgFile != "" {
-        fmt.Printf("tdns-imr: config file is '%s'\n", cfgFile)
-        // Use config file from the flag.
-        viper.SetConfigFile(cfgFile)
-    } else {
-        viper.SetConfigFile(tdns.DefaultImrCfgFile)
-    }
-
-    viper.AutomaticEnv() // read in environment variables that match
-
-    // If a config file is found, read it in.
-    if err := viper.ReadInConfig(); err == nil {
-        if tdns.Globals.Verbose {
-            fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
-        }
-        cfgFileUsed = viper.ConfigFileUsed()
-    } else {
-        log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
-    }
-
-    LocalConfig = viper.GetString("imr.localconfig")
-    if LocalConfig != "" {
-        _, err := os.Stat(LocalConfig)
-        if err != nil {
-            if !os.IsNotExist(err) {
-                log.Fatalf("Error stat(%s): %v", LocalConfig, err)
-            }
-        } else {
-            viper.SetConfigFile(LocalConfig)
-            if err := viper.MergeInConfig(); err != nil {
-                log.Fatalf("Error merging in local config from '%s'", LocalConfig)
-            } else {
-                if tdns.Globals.Verbose {
-                    fmt.Printf("Merging in local config from '%s'\n", LocalConfig)
-                }
-            }
-        }
-        viper.SetConfigFile(LocalConfig)
-    }
-
-    ValidateConfig(nil, cfgFileUsed) // will terminate on error
-    err := viper.Unmarshal(&Conf)
-    if err != nil {
-        log.Printf("Error from viper.UnMarshal(cfg): %v", err)
-    }
-}
-
+var reportSender, reportDetails string
 
 var ReportCmd = &cobra.Command{
 	Use:   "report",
@@ -140,29 +87,46 @@ var RawReportCmd = &cobra.Command{
 	Use:   "rawreport",
 	Short: "Send a rawreport",
 	Run: func(cmd *cobra.Command, args []string) {
-        fmt.Printf("Args: %v\n", args)
-        fmt.Printf("Sending report...\n")
+        PrepArgs("zonename")
+
+        if reportSender == "" {
+            fmt.Printf("Error: sender not specified\n")
+            return
+        }
+
         m := new(dns.Msg)
-        m.SetNotify("kau.se.")
+        m.SetNotify(tdns.Globals.Zonename)
 
         err := edns0.AddReporterOptionToMessage(m, &edns0.ReporterOption{
-            ZoneName: "kau.se.",
+            ZoneName: tdns.Globals.Zonename,
             EDECode: edns0.EDEMPZoneXfrFailure,
             Severity: 17,
-            Sender: "Jonathan",
-            Message: "All fckd up",
+            Sender: reportSender,
+            Details: reportDetails,
         })
         if err != nil {
             log.Fatal(err)
         }
 
-        fmt.Printf("%s\n", m.String())
+        // fmt.Printf("%s\n", m.String())
         c := tdns.NewDNSClient(tdns.TransportDo53, "9998", nil)
         resp, _, err := c.Exchange(m, "127.0.0.1")
         if err != nil {
             log.Fatal(err)
         }
-        fmt.Printf("%s\n", resp.String())
+        rcode := resp.Rcode
+        if rcode == dns.RcodeSuccess {
+            fmt.Printf("Report accepted (rcode: %s)\n", dns.RcodeToString[rcode])
+        } else {
+            fmt.Printf("Error: Rcode: %s\n", dns.RcodeToString[rcode])
+            fmt.Printf("Response msg:\n%s\n", resp.String())
+            os.Exit(1)
+        }
 	},
+}
+
+func init() {
+	RawReportCmd.Flags().StringVarP(&reportSender, "sender", "S", "", "Report sender")
+	RawReportCmd.Flags().StringVarP(&reportDetails, "details", "D", "", "Report details")
 }
 

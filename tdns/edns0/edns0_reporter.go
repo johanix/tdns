@@ -14,7 +14,7 @@ type ReporterOption struct {
 	Severity uint8
 	ZoneName string
 	Sender string
-	Message string
+	Details string
 }
 
 func ReporterOptionToEDNS0Local(reporterOption *ReporterOption) (*dns.EDNS0_LOCAL, error) {
@@ -24,25 +24,25 @@ func ReporterOptionToEDNS0Local(reporterOption *ReporterOption) (*dns.EDNS0_LOCA
 
 	zoneLen := len(reporterOption.ZoneName)
 	senderLen := len(reporterOption.Sender)
-	msgLen := len(reporterOption.Message)
-	if zoneLen > 255 || senderLen > 255 || msgLen > 255 {
-		return nil, fmt.Errorf("field too long: zone=%d sender=%d msg=%d (max 255)", zoneLen, senderLen, msgLen)
+	detailsLen := len(reporterOption.Details)
+	if zoneLen > 255 || senderLen > 255 || detailsLen > 255 {
+		return nil, fmt.Errorf("field too long: zone=%d sender=%d details=%d (max 255)", zoneLen, senderLen, detailsLen)
 	}
 
-	data := make([]byte, 6+zoneLen+senderLen+msgLen)
+	data := make([]byte, 6+zoneLen+senderLen+detailsLen)
 	data[0] = byte(reporterOption.EDECode >> 8)
 	data[1] = byte(reporterOption.EDECode & 0xFF)
 	data[2] = reporterOption.Severity
 	data[3] = byte(zoneLen)
 	data[4] = byte(senderLen)
-	data[5] = byte(msgLen)
+	data[5] = byte(detailsLen)
 
 	off := 6
 	copy(data[off:], []byte(reporterOption.ZoneName))
 	off += zoneLen
 	copy(data[off:], []byte(reporterOption.Sender))
 	off += senderLen
-	copy(data[off:], []byte(reporterOption.Message))
+	copy(data[off:], []byte(reporterOption.Details))
 
 	return &dns.EDNS0_LOCAL{
 			Code: EDNS0_REPORTER_OPTION_CODE,
@@ -84,8 +84,8 @@ func ExtractReporterOption(opt *dns.OPT) (*ReporterOption, bool) {
 				}
 				zoneLen := int(data[3])
 				senderLen := int(data[4])
-				msgLen := int(data[5])
-				needed := 6 + zoneLen + senderLen + msgLen
+				detailsLen := int(data[5])
+				needed := 6 + zoneLen + senderLen + detailsLen
 				if len(data) < needed {
 					return nil, false
 				}
@@ -94,14 +94,14 @@ func ExtractReporterOption(opt *dns.OPT) (*ReporterOption, bool) {
 				off += zoneLen
 				sender := string(data[off : off+senderLen])
 				off += senderLen
-				message := string(data[off : off+msgLen])
+				details := string(data[off : off+detailsLen])
 
 				reporterOption := &ReporterOption{
 					EDECode:  uint16(data[0])<<8 | uint16(data[1]),
 					Severity: data[2],
 					ZoneName: zone,
 					Sender:   sender,
-					Message:  message,
+					Details:  details,
 				}
 				return reporterOption, true
 			}

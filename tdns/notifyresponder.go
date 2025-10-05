@@ -131,20 +131,27 @@ func CreateNotifyOnlyDNSServer(conf *Config) (stop func(context.Context) error, 
 		resp := new(dns.Msg)
 		resp.SetReply(r)
 		resp.MsgHdr.Authoritative = true
-		_ = w.WriteMsg(resp)
 
 		// Optional: do any lightweight logging or enqueue a side-effect here.
 		// e.g., record the notify, update metrics, etc.
 		if edns0.HasReporterOption(r.IsEdns0()) {
-			reporterOption, found := edns0.ExtractReporterOption(r.IsEdns0())
+			ro, found := edns0.ExtractReporterOption(r.IsEdns0())
 			if found {
-				fmt.Printf("NotifyReporter: Received a NOTIFY for %s with Reporter option: %+v\n", r.Question[0].Name, reporterOption)
+				edetxt := edns0.EDECodeToString[ro.EDECode]
+				if ro.Details == "" {
+					ro.Details = "No details provided"
+				}
+				fmt.Printf("NotifyReport: Zone: %s Sender: %s Error: %s (%d) Details: %s\n", 
+				    ro.ZoneName, ro.Sender, edetxt, ro.EDECode, ro.Details)
 			} else {
 				fmt.Printf("NotifyReporter: Received a NOTIFY for %s (has EDNS(0) OPT RR, but no Reporter option found)\n", r.Question[0].Name)
+				edns0.AttachEDEToResponse(resp, edns0.EDEReporterOptionNotFound)
 			}
 		} else {
 			fmt.Printf("NotifyReporter: Received a NOTIFY for %s (no EDNS(0) options at all)\n", r.Question[0].Name)
+			edns0.AttachEDEToResponse(resp, edns0.EDEReporterOptionNotFound)
 		}
+		_ = w.WriteMsg(resp)
 	})
 
 	udpSrv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
