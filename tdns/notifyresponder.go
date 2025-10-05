@@ -132,20 +132,24 @@ func CreateNotifyOnlyDNSServer(conf *Config) (stop func(context.Context) error, 
 		resp.SetReply(r)
 		resp.MsgHdr.Authoritative = true
 
-		if r.IsTsig() == nil{
+		var tsig *dns.TSIG
+
+		if tsig = r.IsTsig(); tsig == nil{
 			resp.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(resp, edns0.EDETsigRequired)
 			_ = w.WriteMsg(resp)
 			return
 		}
 
-if err = w.TsigStatus(); err != nil {
-	// TSIG validation failure
-	resp.SetRcode(r, dns.RcodeNotAuth)
-	edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
-	_ = w.WriteMsg(resp)
-	return
-}
+		fmt.Printf("TSIG details: %+v\n", tsig)
+
+        if err = w.TsigStatus(); err != nil {
+         	// TSIG validation failure
+	        resp.SetRcode(r, dns.RcodeNotAuth)
+	        edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
+          	_ = w.WriteMsg(resp)
+	        return
+        }
 		
 		if edns0.HasReporterOption(r.IsEdns0()) {
 			ro, found := edns0.ExtractReporterOption(r.IsEdns0())

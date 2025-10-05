@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 	"strconv"
-    "strings"
+	"strings"
 	"time"
 
 	tdns "github.com/johanix/tdns/tdns"
@@ -74,10 +74,6 @@ func parseDSYNCFromImrResponse(r tdns.ImrResponse) (dsyncrrs []*tdns.DSYNC, pare
 func discoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult, error) {
 	var dr tdns.DsyncResult
 
-	if !strings.HasSuffix(child, ".") {
-		child = dns.Fqdn(child)
-	}
-
 	labels := dns.SplitDomainName(child)
 	if len(labels) == 0 {
 		return dr, fmt.Errorf("invalid child name: %s", child)
@@ -140,9 +136,20 @@ func discoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult,
 var ReportCmd = &cobra.Command{
 	Use:   "report <qname>",
 	Short: "Send a report and (optionally) discover DSYNC via the internal resolver (imr)",
-	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		qname := dns.Fqdn(args[0])
+		// qname := dns.Fqdn(args[0])
+        PrepArgs("zonename")
+
+        if reportSender == "" {
+            fmt.Printf("Error: sender not specified\n")
+            return
+        }
+
+        tsig := tdns.Globals.TsigKeys[reportSender + ".key."]
+        if tsig == nil {
+            fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
+            return
+        }
 
 		tdns.Globals.App.Type = tdns.AppTypeCli
 		if tdns.Globals.Debug {
@@ -155,14 +162,14 @@ var ReportCmd = &cobra.Command{
 		// Start RecursorEngine (IMR)
 		viper.Set("recursorengine.active", true)
 		viper.Set("recursorengine.root-hints", "/etc/tdns/root.hints")
-		log.Printf("ReportCmd: Starting RecursorEngine")
+		// log.Printf("ReportCmd: Starting RecursorEngine")
 		Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
 		stopCh := make(chan struct{}, 10)
 		go Conf.RecursorEngine(stopCh)
 
 		// Discover DSYNC via IMR for the zone that contains qname
-		log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", qname)
-		dsyncRes, derr := discoverDSYNCViaImr(qname, 3*time.Second)
+		log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
+		dsyncRes, derr := discoverDSYNCViaImr(tdns.Globals.Zonename, 3*time.Second)
 		var reporterDSYNC *tdns.DSYNC
 		if derr != nil {
 			log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
@@ -170,7 +177,7 @@ var ReportCmd = &cobra.Command{
 			return
 		} else {
 			for _, ds := range dsyncRes.Rdata {
-				if ds.Scheme == tdns.StringToScheme["REPORTER"] {
+				if ds.Scheme == tdns.SchemeReporter {
 					reporterDSYNC = ds
 					break
 				}
@@ -178,20 +185,20 @@ var ReportCmd = &cobra.Command{
 		}
 
 		if reporterDSYNC == nil {
-			log.Printf("ReportCmd: no DSYNC REPORTER found for %s, aborting report", qname)
+			log.Printf("ReportCmd: no DSYNC REPORTER found for %s, aborting report", tdns.Globals.Zonename)
 			close(stopCh)
 			return
 		}
 
 		// Prepare DNS message
 		m := new(dns.Msg)
-		m.SetNotify(qname)
+		m.SetNotify(tdns.Globals.Zonename)
 		err := edns0.AddReporterOptionToMessage(m, &edns0.ReporterOption{
-			ZoneName: qname,
+			ZoneName: tdns.Globals.Zonename,
 			EDECode:  edns0.EDEMPZoneXfrFailure,
 			Severity: 17,
-			Sender:   "jonathan",
-			Details:  "All fckd up",
+			Sender:   reportSender,
+			Details:  reportDetails,
 		})
 		if err != nil {
 			log.Printf("ReportCmd: failed to build report EDNS0 option: %v", err)
@@ -209,12 +216,50 @@ var ReportCmd = &cobra.Command{
 
 		// Send the report
 		c := tdns.NewDNSClient(tdns.TransportDo53, port, nil)
-		rep, _, err := c.Exchange(m, targetIP)
+
+        // There is no built-in map or function in miekg/dns for this, so we use a switch.
+        var alg string
+        switch strings.ToLower(tsig.Algorithm) {
+        case "hmac-sha1":
+           alg = dns.HmacSHA1
+        case "hmac-sha256":
+           alg = dns.HmacSHA256
+        case "hmac-sha384":
+           alg = dns.HmacSHA384
+        case "hmac-sha512":
+           alg = dns.HmacSHA512
+        default:
+           alg = tsig.Algorithm // fallback to whatever is provided
+        }
+
+        if reportTsig {
+           fmt.Printf("TSIG signing the report\n")
+           c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
+           m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
+        }
+
+        if tdns.Globals.Debug {
+           fmt.Printf("%s\n", m.String())
+        }
+
+		resp, _, err := c.Exchange(m, targetIP)
 		if err != nil {
-			log.Printf("ReportCmd: error sending report: %v", err)
-		} else {
-			fmt.Printf("Report response:\n%s\n", rep.String())
-		}
+			fmt.Printf("ReportCmd: error sending report: %v\n", err)
+            os.Exit(1)
+		} 
+        rcode := resp.Rcode
+        if rcode == dns.RcodeSuccess {
+            fmt.Printf("Report accepted (rcode: %s)\n", dns.RcodeToString[rcode])
+        } else {
+            hasede, edecode, edemsg := edns0.ExtractEDEFromMsg(resp)
+            if hasede {
+                fmt.Printf("Error: rcode: %s, EDE Message: %s (EDE code: %d)\n", dns.RcodeToString[rcode], edemsg, edecode)
+            } else {
+                fmt.Printf("Error: rcode: %s\n", dns.RcodeToString[rcode])
+                fmt.Printf("Response msg:\n%s\n", resp.String())
+            }
+            os.Exit(1)
+        }
 
 		close(stopCh)
 	},
@@ -270,7 +315,7 @@ var RawReportCmd = &cobra.Command{
         }
 
         if reportTsig {
-            fmt.Printf("TSIG signing the report\n")
+            // fmt.Printf("TSIG signing the report\n")
             c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
             m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
         }
@@ -300,6 +345,9 @@ var RawReportCmd = &cobra.Command{
 }
 
 func init() {
+	ReportCmd.Flags().StringVarP(&reportSender, "sender", "S", "", "Report sender")
+	ReportCmd.Flags().StringVarP(&reportDetails, "details", "D", "", "Report details")
+    ReportCmd.Flags().BoolVarP(&reportTsig, "tsig", "T", true, "TSIG sign the report")
 	RawReportCmd.Flags().StringVarP(&reportSender, "sender", "S", "", "Report sender")
 	RawReportCmd.Flags().StringVarP(&reportDetails, "details", "D", "", "Report details")
     RawReportCmd.Flags().BoolVarP(&reportTsig, "tsig", "T", true, "TSIG sign the report")
