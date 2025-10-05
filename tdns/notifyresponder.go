@@ -7,6 +7,7 @@ package tdns
 import (
 	"fmt"
 	"log"
+	"net"
 	"sync"
 
 	"context"
@@ -169,12 +170,29 @@ func CreateNotifyOnlyDNSServer(conf *Config) (stop func(context.Context) error, 
 		_ = w.WriteMsg(resp)
 	})
 
-	udpSrv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
-	tcpSrv := &dns.Server{Addr: addr, Net: "tcp", Handler: mux}
+	udpConn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind UDP notify listener on %s: %w", addr, err)
+	}
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = udpConn.Close()
+		return nil, fmt.Errorf("failed to bind TCP notify listener on %s: %w", addr, err)
+	}
 
-	// Start both listeners
-	go func() { _ = udpSrv.ListenAndServe() }()
-	go func() { _ = tcpSrv.ListenAndServe() }()
+	udpSrv := &dns.Server{PacketConn: udpConn, Net: "udp", Handler: mux, Addr: addr}
+	tcpSrv := &dns.Server{Listener: tcpListener, Net: "tcp", Handler: mux, Addr: addr}
+
+	go func() {
+		if serveErr := udpSrv.ActivateAndServe(); serveErr != nil {
+			log.Printf("notify-only UDP server stopped: %v", serveErr)
+		}
+	}()
+	go func() {
+		if serveErr := tcpSrv.ActivateAndServe(); serveErr != nil {
+			log.Printf("notify-only TCP server stopped: %v", serveErr)
+		}
+	}()
 
 	// Return a unified stopper
 	return func(ctx context.Context) error {

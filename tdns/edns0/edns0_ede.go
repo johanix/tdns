@@ -20,7 +20,7 @@ const (
 	EDEMPZoneXfrFailure           uint16 = 519
 	EDEMPParentSyncFailure        uint16 = 520
 	EDEReporterOptionNotFound     uint16 = 521
-	EDETsigRequired               uint16 = 522
+    EDETsigRequired               uint16 = 522
 	EDETsigValidationFailure      uint16 = 523
 )
 
@@ -59,11 +59,11 @@ func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 }
 
 func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
-	ede := new(dns.EDNS0_EDE)
-	ede.InfoCode = edeCode
-	if s, ok := EDECodeToString[edeCode]; ok {
+    ede := new(dns.EDNS0_EDE)
+    ede.InfoCode = edeCode
+    if s, ok := EDECodeToString[edeCode]; ok {
 		ede.ExtraText = s
-	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+    } else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
 		ede.ExtraText = s
 	}
 
