@@ -70,6 +70,16 @@ func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
 	opt.Option = append(opt.Option, ede)
 }
 
+func EDEToString(edeCode uint16) (string, bool) {
+    if s, ok := EDECodeToString[edeCode]; ok {
+		return s, true
+    } else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+		return s, true
+	}
+	
+	return "", false
+}
+
 func ExtractEDEFromMsg(msg *dns.Msg) (bool, uint16, string) {
 	// log.Printf("ExtractEDEFromMsg: msg.Extra: %+v", msg.Extra)
 	var edemsg string

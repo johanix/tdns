@@ -22,6 +22,7 @@ type Config struct {
 	// Zones          map[string]ZoneConf
 	Zones      []ZoneConf `yaml:"zones"`
 	Templates  []ZoneConf `yaml:"templates"`
+	Keys       KeyConf
 	Db         DbConf
 	Registrars map[string][]string
 	Log        struct {

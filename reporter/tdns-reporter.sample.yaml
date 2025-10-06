@@ -7,6 +7,16 @@ reporter:
    dns:
       listen:		127.0.0.1:9998
 
+keys:
+   tsig:
+      - name:		johani.key.
+        algorithm:	hmac-sha256
+        secret:		fjvJ7KwoL7oX9n+L5sOwYJqyuxS8Jwt5k2M+JIwTQ7E=
+
+      - name:		jonathan.key.
+        algorithm:	hmac-sha256
+        secret:		jkYMg8gccGs1upIgE+tLGAyquXDZyuc06YuFUPoM6Ac=
+
 apiserver:
    addresses:     	[ 127.0.0.1:8991 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney

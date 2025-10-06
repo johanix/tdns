@@ -162,6 +162,7 @@ var ReportCmd = &cobra.Command{
             return
         }
 
+        // At the moment we require the name of the key to be {sender}.key.
         tsig := tdns.Globals.TsigKeys[reportSender + ".key."]
         if tsig == nil {
             fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
@@ -226,13 +227,6 @@ var ReportCmd = &cobra.Command{
 			return
 		}
 
-
-//        targetIP := reporterDSYNC.Target
-//		port := "9998"
-//		if reporterDSYNC.Port != 0 {
-//			port = strconv.Itoa(int(reporterDSYNC.Port))
-//		}
-
 		log.Printf("ReportCmd: sending report to %s:%s (from DSYNC REPORTER)", targetIP, port)
 
 		// Send the report
@@ -254,7 +248,10 @@ var ReportCmd = &cobra.Command{
         }
 
         if reportTsig {
-           fmt.Printf("TSIG signing the report\n")
+            if tdns.Globals.Debug {
+                fmt.Printf("TSIG signing the report with %s\n", tsig.Name)
+            }
+           
            c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
            m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
         }

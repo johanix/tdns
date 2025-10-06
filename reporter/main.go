@@ -47,8 +47,17 @@ func main() {
 		}
 	}()
 
+	numtsigs, tsigSecrets := tdns.ParseTsigKeys(&conf.Keys)
+	if tdns.Globals.Debug {
+		fmt.Printf("Parsed %d TSIG keys\n", numtsigs)
+	}
+	if numtsigs == 0 {
+		fmt.Printf("No TSIG keys found in config. As TSIG is required for reporting, exiting.\n")
+		tdns.Shutdowner(&conf, "No TSIG keys found in config. As TSIG is required for reporting, exiting.")
+	}
+
 	// Start notify-only DNS server
-	stopDNS, err := tdns.CreateNotifyOnlyDNSServer(&conf)
+	stopDNS, err := tdns.NotifyReporter(&conf, tsigSecrets)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("dns: %v", err))
 	}

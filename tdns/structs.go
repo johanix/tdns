@@ -544,7 +544,7 @@ type KeyBootstrapperRequest struct {
 	ResponseChan chan *VerificationInfo
 }
 
-type TsigConf struct {
+type KeyConf struct {
 	Tsig    []TsigDetails
 }
 type TsigDetails struct {
