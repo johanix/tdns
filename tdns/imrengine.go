@@ -663,7 +663,7 @@ func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 			v = "tdnsd - an authoritative name server for experiments and POCs"
 		}
 		m.Answer = append(m.Answer, &dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassCHAOS, Ttl: 3600}, Txt: []string{v},
 		})
 	case "version.server.":
 		m.SetRcode(r, dns.RcodeSuccess)
@@ -674,12 +674,12 @@ func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 			v = strings.Replace(v, "{version}", Globals.App.Version, -1)
 		}
 		m.Answer = append(m.Answer, &dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassCHAOS, Ttl: 3600}, Txt: []string{v},
 		})
 	case "authors.server.":
 		m.SetRcode(r, dns.RcodeSuccess)
 		m.Answer = append(m.Answer, &dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassCHAOS, Ttl: 3600},
 			Txt: []string{
 				"Johan Stenstam <johan.stenstam@internetstiftelsen.se>",
 				"Erik Bergström <erik.bergstrom@internetstiftelsen.se>",
@@ -694,7 +694,7 @@ func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 			v = "a.random.internet.host."
 		}
 		m.Answer = append(m.Answer, &dns.TXT{
-			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{v},
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassCHAOS, Ttl: 3600}, Txt: []string{v},
 		})
 	default:
 	}
