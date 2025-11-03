@@ -33,7 +33,7 @@ const (
 	SchemeAPI      = 3
 	// Private schemes:
 	SchemeMSUpdate = 129
-	SchemeReporter = 130
+	SchemeReport   = 130
 )
 
 var SchemeToString = map[DsyncScheme]string{
@@ -42,7 +42,7 @@ var SchemeToString = map[DsyncScheme]string{
 	SchemeAPI:      "API",
 	// Private schemes:
 	SchemeMSUpdate: "MSUPDATE", // MSUPDATE is used in a multi-signer context and indicates a DNS UPDATE sent from a signer to the upstream unsigned zone.
-	SchemeReporter: "REPORTER",
+	SchemeReport:   "REPORT",
 }
 
 var StringToScheme = map[string]DsyncScheme{
@@ -50,13 +50,13 @@ var StringToScheme = map[string]DsyncScheme{
 	"UPDATE":   SchemeUpdate,
 	"API":      SchemeAPI,
 	"MSUPDATE": SchemeMSUpdate,
-	"REPORTER": SchemeReporter,
+	"REPORT":   SchemeReport,
 	"1":        SchemeNotify,
 	"2":        SchemeUpdate,
 	"3":        SchemeAPI,
 	// Private schemes:
 	"129":      SchemeMSUpdate,
-	"130":      SchemeReporter,
+	"130":      SchemeReport,
 }
 
 func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }

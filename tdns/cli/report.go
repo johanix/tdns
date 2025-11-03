@@ -182,28 +182,28 @@ var ReportCmd = &cobra.Command{
 		// Discover DSYNC via IMR for the zone that contains qname
 		log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
 		dsyncRes, derr := discoverDSYNCViaImr(tdns.Globals.Zonename, 3*time.Second)
-		var reporterDSYNC *tdns.DSYNC
+		var reportDSYNC *tdns.DSYNC
 		if derr != nil {
 			log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
 			close(stopCh)
 			return
 		} else {
 			for _, ds := range dsyncRes.Rdata {
-				if ds.Scheme == tdns.SchemeReporter {
-					reporterDSYNC = ds
+				if ds.Scheme == tdns.SchemeReport {
+					reportDSYNC = ds
 					break
 				}
 			}
 		}
 
-		if reporterDSYNC == nil {
-			log.Printf("ReportCmd: no DSYNC REPORTER found for %s, aborting report", tdns.Globals.Zonename)
+		if reportDSYNC == nil {
+			log.Printf("ReportCmd: no DSYNC REPORT found for %s, aborting report", tdns.Globals.Zonename)
 			return
 		}
         close(stopCh)
     
-        targetIP = reporterDSYNC.Target
-        port = strconv.Itoa(int(reporterDSYNC.Port))
+        targetIP = reportDSYNC.Target
+        port = strconv.Itoa(int(reportDSYNC.Port))
     } else {
         targetIP = dsyncTarget
         port = strconv.Itoa(dsyncPort)
@@ -215,7 +215,7 @@ var ReportCmd = &cobra.Command{
 		// Prepare DNS message
 		m := new(dns.Msg)
 		m.SetNotify(tdns.Globals.Zonename)
-		err := edns0.AddReporterOptionToMessage(m, &edns0.ReporterOption{
+		err := edns0.AddReportOptionToMessage(m, &edns0.ReportOption{
 			ZoneName: tdns.Globals.Zonename,
 			EDECode:  uint16(edeCode),
 			Severity: 17,
@@ -227,7 +227,7 @@ var ReportCmd = &cobra.Command{
 			return
 		}
 
-		log.Printf("ReportCmd: sending report to %s:%s (from DSYNC REPORTER)", targetIP, port)
+		log.Printf("ReportCmd: sending report to %s:%s (from DSYNC REPORT)", targetIP, port)
 
 		// Send the report
 		c := tdns.NewDNSClient(tdns.TransportDo53, port, nil)
