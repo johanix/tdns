@@ -1005,13 +1005,28 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 	glue4Map := map[string]RRset{}
 	glue6Map := map[string]RRset{}
 	// var servers []string
-	serverMap, exist := rrcache.ServerMap.Get(zonename)
+    serverMap, exist := rrcache.ServerMap.Get(zonename)
 	if !exist {
 		log.Printf("ParseAdditionalForNSAddrs: *** warning: serverMap entry for zone %q not found, creating new", zonename)
 		serverMap = map[string]*AuthServer{}
 	}
+    // Prune expired auth servers for this zone before updating
+    now := time.Now()
+    for name, srv := range serverMap {
+        if !srv.Expire.IsZero() && srv.Expire.Before(now) {
+            delete(serverMap, name)
+            if Globals.Debug {
+                log.Printf("ParseAdditionalForNSAddrs: pruned expired server %s for zone %s", name, zonename)
+            }
+        }
+    }
+    var otsname bool = false
 	for _, rr := range r.Extra {
 		name := rr.Header().Name
+		if strings.HasPrefix(name, "_dns.") {
+			otsname = true
+			name = strings.TrimPrefix(name, "_dns.")
+		}
 		if _, exist := nsMap[name]; !exist {
 			log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
 			continue
@@ -1033,27 +1048,35 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 		}
 
 		switch rr.(type) {
-		case *dns.A:
+        case *dns.A:
 			addr := rr.(*dns.A).A.String()
 			// servers = append(servers, net.JoinHostPort(addr, "53"))
 			if !slices.Contains(serverMap[name].Addrs, addr) {
 				serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
 			}
+            // set expiry for this server mapping from glue TTL
+            serverMap[name].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue4Map[name]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[name] = tmp
 
-		case *dns.AAAA:
+        case *dns.AAAA:
 			addr := rr.(*dns.AAAA).AAAA.String()
 			// servers = append(servers, net.JoinHostPort(addr, "53"))
 			if !slices.Contains(serverMap[name].Addrs, addr) {
 				serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
 			}
+            // set expiry for this server mapping from glue TTL
+            serverMap[name].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue6Map[name]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[name] = tmp
 
 		case *dns.SVCB:
+			if !otsname {
+				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
+				continue
+			}
 			log.Printf("Additional contains an SVCB, here we should collect the ALPN")
 			svcb := rr.(*dns.SVCB)
 			for _, kv := range svcb.Value {

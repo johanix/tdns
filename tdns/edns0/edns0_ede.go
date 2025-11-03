@@ -19,8 +19,8 @@ const (
 	EDEZoneUpdatesNotAllowed      uint16 = 518
 	EDEMPZoneXfrFailure           uint16 = 519
 	EDEMPParentSyncFailure        uint16 = 520
-	EDEReporterOptionNotFound     uint16 = 521
-    EDETsigRequired               uint16 = 522
+	EDEReportOptionNotFound       uint16 = 521
+        EDETsigRequired               uint16 = 522
 	EDETsigValidationFailure      uint16 = 523
 )
 
@@ -33,7 +33,7 @@ var EDECodeToString = map[uint16]string{
 	EDEZoneUpdatesNotAllowed:      "Zone does not allow DNS UPDATE",
 	EDEMPZoneXfrFailure:           "Zone XFR between providers failed",
 	EDEMPParentSyncFailure:        "Parent sync by provider failed",
-	EDEReporterOptionNotFound:     "Expected Reporter option not found",
+	EDEReportOptionNotFound:       "Expected Report option not found",
 	EDETsigRequired:               "TSIG required",
 	EDETsigValidationFailure:      "TSIG validation failure",
 }

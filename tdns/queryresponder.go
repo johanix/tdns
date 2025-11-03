@@ -458,7 +458,7 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 				log.Printf("CreateServerSvcbRRs: Zone %s: Found identity NS %s", zd.ZoneName, nsName)
 				// Create SVCB record for this NS name
 				tmp := &dns.SVCB{
-					Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 					Priority: 1,
 					Target:   ".",
 					Value:    Globals.ServerSVCB.Value,
@@ -542,7 +542,7 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 										Target:   ".",
 										Value:    values,
 									}
-									zd.ServerSVCB = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+									zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 									log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
 									log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
 
