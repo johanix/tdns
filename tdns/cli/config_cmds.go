@@ -99,6 +99,11 @@ var configStatusCmd = &cobra.Command{
 			} else {
 				fmt.Printf("DnsEngine: not listening on any addresses\n")
 			}
+			if len(resp.Identities) > 0 {
+				fmt.Printf("Identities: %v\n", resp.Identities)
+			} else {
+				fmt.Printf("Identities: not set\n")
+			}
 
 			if len(resp.ApiServer.Addresses) > 0 {
 				fmt.Printf("ApiServer: listening on %v\n", resp.ApiServer.Addresses)

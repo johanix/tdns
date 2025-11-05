@@ -276,6 +276,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			log.Printf("APIconfig: config status inquiry")
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
+			resp.Identities = conf.Service.Identities
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 

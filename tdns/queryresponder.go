@@ -58,6 +58,9 @@ var standardDNSTypes = map[uint16]bool{
 func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	qname string, qtype uint16, msgoptions MsgOptions, kdb *KeyDB) error {
 
+    // Track if the Server SVCB owner is already present in the Answer section
+    serverSvcbInAnswer := false
+
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
@@ -265,14 +268,19 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 					if strings.HasSuffix(tgt, zd.ZoneName) {
 						tgtowner, _ := zd.GetOwner(tgt)
 						if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
-							m.Answer = append(m.Answer, tgtrrset.RRs...)
+                            m.Answer = append(m.Answer, tgtrrset.RRs...)
+                            if qtype == dns.TypeSVCB && zd.ServerSVCB != nil && tgt == zd.ServerSVCB.Name {
+                                serverSvcbInAnswer = true
+                            }
 							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 							m.Extra = append(m.Extra, v4glue.RRs...)
 							m.Extra = append(m.Extra, v6glue.RRs...)
-							if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-								m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
-							}
+            if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+                if !serverSvcbInAnswer {
+                    m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+                }
+            }
 							if msgoptions.DnssecOK {
 								tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
 								m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
@@ -281,9 +289,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 								m.Extra = append(m.Extra, v4glue.RRSIGs...)
 								m.Extra = append(m.Extra, v6glue.RRSIGs...)
-								if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
+							if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
+								if !serverSvcbInAnswer {
 									m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
 								}
+							}
 							}
 						}
 						w.WriteMsg(m)
@@ -320,22 +330,30 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 				owner.RRtypes.Set(qtype, RRset{RRs: []dns.RR{soaRR}})
 				rrset.RRs[0] = soaRR
 			}
-			if qname == origqname {
+            if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
 				m.Answer = append(m.Answer, rrset.RRs...)
+                if qtype == dns.TypeSVCB && zd.ServerSVCB != nil && qname == zd.ServerSVCB.Name {
+                    serverSvcbInAnswer = true
+                }
 			} else {
 				// zd.Logger.Printf("Wildcard match qname %s %s", qname, origqname)
 				tmp := WildcardReplace(rrset.RRs, qname, origqname)
 				m.Answer = append(m.Answer, tmp...)
+                if qtype == dns.TypeSVCB && zd.ServerSVCB != nil && qname == zd.ServerSVCB.Name {
+                    serverSvcbInAnswer = true
+                }
 			}
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
-			if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-				log.Printf("Adding SVCB: %s", zd.ServerSVCB.RRs[0].String())
-				m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
-			}
+            if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+                if !serverSvcbInAnswer {
+                    log.Printf("Adding SVCB: %s", zd.ServerSVCB.RRs[0].String())
+                    m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+                }
+            }
 			if msgoptions.DnssecOK {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
@@ -353,9 +371,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 				m.Extra = append(m.Extra, v4glue.RRSIGs...)
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
-				if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
-					m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
-				}
+                if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
+                    if !serverSvcbInAnswer {
+                        m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+                    }
+                }
 			}
 		} else {
 			log.Printf("---> No exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
@@ -388,18 +408,22 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
-		if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-			m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
-		}
+        if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
+            if !serverSvcbInAnswer {
+                m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+            }
+        }
 		if msgoptions.DnssecOK {
 			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
 			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 			m.Extra = append(m.Extra, v4glue.RRSIGs...)
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
-			if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
-				m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
-			}
+            if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
+                if !serverSvcbInAnswer {
+                    m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+                }
+            }
 		}
 	}
 
@@ -450,6 +474,13 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 		if ns, ok := rr.(*dns.NS); ok {
 			nsName := ns.Ns
 
+			if Globals.Debug {
+				log.Printf("CreateServerSvcbRRs: Zone %s: NS name: %s", zd.ZoneName, nsName)
+			    if Globals.ServerSVCB != nil {
+					log.Printf("CreateServerSvcbRRs: Server SVCB: %s", Globals.ServerSVCB.String())
+				}
+			}
+
 			// Check if this NS name is in service.identities
 			if CaseFoldContains(conf.Service.Identities, nsName) {
 				if strings.HasSuffix(nsName, zd.ZoneName) {
@@ -486,8 +517,32 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 			if dns.IsSubDomain(zd.ZoneName, nsName) {
 				// var svcbRRset = RRset{}
 				// This is an in-bailiwick NS
-				if nsData, exists := zd.Data.Get(nsName); exists {
-					// Check A/AAAA records
+                if nsData, exists := zd.Data.Get(nsName); exists {
+                    // If zone already contains explicit SVCB for owner _dns.<nsName>, prefer that
+                    ownerName := "_dns." + nsName
+                    if ownerData, ok := zd.Data.Get(ownerName); ok {
+                        existingSvcb := ownerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+                        if len(existingSvcb.RRs) > 0 {
+                            // Validate all SVCB records in this RRset
+                            valid := true
+                            for _, rr := range existingSvcb.RRs {
+                                if svcb, ok := rr.(*dns.SVCB); ok {
+                                    if err := ValidateExplicitServerSVCB(svcb); err != nil {
+                                        log.Printf("CreateServerSvcbRRs: rejecting explicit SVCB at %s: %v", ownerName, err)
+                                        valid = false
+                                        break
+                                    }
+                                }
+                            }
+                            if valid {
+                                zd.ServerSVCB = &RRset{Name: ownerName, RRtype: dns.TypeSVCB, RRs: existingSvcb.RRs, RRSIGs: existingSvcb.RRSIGs}
+                                log.Printf("CreateServerSvcbRRs: Using existing SVCB at %s in zone %s", ownerName, zd.ZoneName)
+                                return nil
+                            }
+                        }
+                    }
+
+                    // Check A/AAAA records
 					aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
 					aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
 
@@ -536,7 +591,7 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 									if len(ipv6s) > 0 {
 										values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
 									}
-									tmp := &dns.SVCB{
+                                    tmp := &dns.SVCB{
 										Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 										Priority: 1,
 										Target:   ".",
@@ -553,8 +608,8 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 										log.Printf("Successfully signed SVCB RR for %s: %v", "_dns."+nsName, err)
 									}
 									// check whether we have any SVCB records for this NS name and if not add this to the zone
-									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-									if len(serversvcbs.RRs) == 0 {
+                                    serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+                                    if len(serversvcbs.RRs) == 0 {
 										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: []dns.RR{tmp}})
 									} else {
 										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: append(serversvcbs.RRs, tmp)})

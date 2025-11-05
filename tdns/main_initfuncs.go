@@ -55,16 +55,14 @@ func MainLoop(ctx context.Context, cancel context.CancelFunc, conf *Config) {
 				log.Println("mainloop: Exit signal received. Cleaning up.")
 				cancel()
 				return
-			case <-hupper:
-				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
-				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				all_zones, err = conf.ParseZones(true) // true = reload
-				if err != nil {
-					log.Printf("Error parsing zones: %v", err)
-					return // terminate MainLoop --> shutdown
-				} else {
-					log.Printf("mainloop: SIGHUP received. Forcing refresh of %d configured zones.", len(all_zones))
-				}
+            case <-hupper:
+                log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
+                all_zones, err = conf.ParseZones(true) // true = reload
+                if err != nil {
+                    log.Printf("mainloop: SIGHUP reload failed: %v (continuing without shutdown)", err)
+                    continue
+                }
+                log.Printf("mainloop: SIGHUP reload completed. Refreshed %d configured zones.", len(all_zones))
 
 			case <-conf.Internal.APIStopCh:
 				log.Println("mainloop: Stop command received. Cleaning up.")

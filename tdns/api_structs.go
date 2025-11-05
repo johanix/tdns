@@ -135,6 +135,7 @@ type ConfigResponse struct {
 	Time      time.Time
 	DnsEngine DnsEngineConf
 	ApiServer ApiServerConf
+	Identities []string
 	Msg       string
 	Error     bool
 	ErrorMsg  string
