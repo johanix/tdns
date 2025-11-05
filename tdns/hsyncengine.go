@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -46,7 +47,7 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
-func HsyncEngine(conf *Config, agentQs *AgentQs, stopch chan struct{}) {
+func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch chan struct{}) {
 	ourId := AgentId(conf.Agent.Identity)
 
 	helloQ := agentQs.Hello
@@ -84,6 +85,10 @@ func HsyncEngine(conf *Config, agentQs *AgentQs, stopch chan struct{}) {
 
 	for {
 		select {
+		case <-ctx.Done():
+			log.Printf("HsyncEngine: context cancelled")
+			HBticker.Stop()
+			return
 		case syncitem = <-syncQ:
 			registry.SyncRequestHandler(ourId, syncitem, synchedDataUpdateQ)
 

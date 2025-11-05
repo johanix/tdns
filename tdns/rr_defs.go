@@ -5,6 +5,7 @@
 package tdns
 
 const TypeNOTIFY = 0x0F9A
+
 // const TypeDSYNC = 0x0F9B
 const TypeDSYNC = 0x0042 // 66 is the official IANA code
 const TypeMSIGNER = 0x0F9C

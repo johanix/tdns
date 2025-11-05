@@ -55,7 +55,7 @@ var standardDNSTypes = map[uint16]bool{
 // 4. If no CNAME match, check for wild card match
 // 5. Give up.
 
-func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, 
+func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	qname string, qtype uint16, msgoptions MsgOptions, kdb *KeyDB) error {
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
@@ -458,12 +458,12 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 				log.Printf("CreateServerSvcbRRs: Zone %s: Found identity NS %s", zd.ZoneName, nsName)
 				// Create SVCB record for this NS name
 				tmp := &dns.SVCB{
-					Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 					Priority: 1,
 					Target:   ".",
 					Value:    Globals.ServerSVCB.Value,
 				}
-				zd.ServerSVCB = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+				zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 
 				// To be able to sign this SVCB we need to know that we are authoritative for the zone that the
 				// NS name is in and that we have the DNSSEC keys for that zone. As we get here during the initial
@@ -537,20 +537,20 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 										values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
 									}
 									tmp := &dns.SVCB{
-										Hdr:      dns.RR_Header{Name: nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+										Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 										Priority: 1,
 										Target:   ".",
 										Value:    values,
 									}
-									zd.ServerSVCB = &RRset{Name: nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+									zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 									log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
 									log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
 
 									_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
 									if err != nil {
-										log.Printf("Error signing SVCB RR for %s: %v", nsName, err)
+										log.Printf("Error signing SVCB RR for %s: %v", "_dns."+nsName, err)
 									} else {
-										log.Printf("Successfully signed SVCB RR for %s: %v", nsName, err)
+										log.Printf("Successfully signed SVCB RR for %s: %v", "_dns."+nsName, err)
 									}
 									// check whether we have any SVCB records for this NS name and if not add this to the zone
 									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)

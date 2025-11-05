@@ -8,7 +8,7 @@ package tdns
 // in the format expected by the dns.Server and the dns.Client. It also stores the keys with more details
 // in the tdns.Globals struct.
 func ParseTsigKeys(keyconf *KeyConf) (int, map[string]string) {
-    numtsigs := len(keyconf.Tsig)
+	numtsigs := len(keyconf.Tsig)
 	var tsigSecrets map[string]string
 	//fmt.Printf("numtsigs: %d\n", numtsigs)
 	if numtsigs > 0 {
@@ -16,10 +16,10 @@ func ParseTsigKeys(keyconf *KeyConf) (int, map[string]string) {
 		tsigSecrets = make(map[string]string, numtsigs)
 		for _, val := range keyconf.Tsig {
 			Globals.TsigKeys[val.Name] = &TsigDetails{
-								Name:		val.Name,
-								Algorithm:	val.Algorithm,
-								Secret:		val.Secret,
-							  }
+				Name:      val.Name,
+				Algorithm: val.Algorithm,
+				Secret:    val.Secret,
+			}
 			tsigSecrets[val.Name] = val.Secret
 		}
 		// fmt.Printf("tdns.Globals.TsigKeys: %+v\n", tdns.Globals.TsigKeys)

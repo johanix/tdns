@@ -1010,8 +1010,24 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 		log.Printf("ParseAdditionalForNSAddrs: *** warning: serverMap entry for zone %q not found, creating new", zonename)
 		serverMap = map[string]*AuthServer{}
 	}
+	// Prune expired auth servers for this zone before updating
+	now := time.Now()
+	for name, srv := range serverMap {
+		if !srv.Expire.IsZero() && srv.Expire.Before(now) {
+			delete(serverMap, name)
+			if Globals.Debug {
+				log.Printf("ParseAdditionalForNSAddrs: pruned expired server %s for zone %s", name, zonename)
+			}
+		}
+	}
+
 	for _, rr := range r.Extra {
 		name := rr.Header().Name
+		isOTSOwner := false
+		if strings.HasPrefix(name, "_dns.") {
+			isOTSOwner = true
+			name = strings.TrimPrefix(name, "_dns.")
+		}
 		if _, exist := nsMap[name]; !exist {
 			log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
 			continue
@@ -1039,6 +1055,8 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			if !slices.Contains(serverMap[name].Addrs, addr) {
 				serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
 			}
+			// set expiry for this server mapping from glue TTL
+			serverMap[name].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue4Map[name]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[name] = tmp
@@ -1049,11 +1067,17 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			if !slices.Contains(serverMap[name].Addrs, addr) {
 				serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
 			}
+			// set expiry for this server mapping from glue TTL
+			serverMap[name].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue6Map[name]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[name] = tmp
 
 		case *dns.SVCB:
+			if !isOTSOwner {
+				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
+				continue
+			}
 			log.Printf("Additional contains an SVCB, here we should collect the ALPN")
 			svcb := rr.(*dns.SVCB)
 			for _, kv := range svcb.Value {

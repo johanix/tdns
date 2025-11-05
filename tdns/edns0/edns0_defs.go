@@ -7,5 +7,5 @@ package edns0
 const (
 	EDNS0_OTS_OPTION_CODE      = 65001 // TBD: Replace with actual IANA assigned code
 	EDNS0_KEYSTATE_OPTION_CODE = 65002
-	EDNS0_REPORTER_OPTION_CODE = 65003
+	EDNS0_REPORT_OPTION_CODE   = 65003
 )

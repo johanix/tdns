@@ -6,6 +6,7 @@ package main
 
 import (
 	// "flag"
+	"context"
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -39,10 +40,13 @@ func main() {
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-	err = tdns.MainStartThreads(&conf, apirouter)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    err = tdns.MainStartThreads(ctx, &conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
-	tdns.MainLoop(&conf)
+    tdns.MainLoop(ctx, cancel, &conf)
 }

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	// "github.com/johanix/tdns/music"
@@ -34,10 +35,13 @@ func main() {
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-	err = tdns.MainStartThreads(&tconf, apirouter)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    err = tdns.MainStartThreads(ctx, &tconf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
-	tdns.MainLoop(&tconf)
+    tdns.MainLoop(ctx, cancel, &tconf)
 }

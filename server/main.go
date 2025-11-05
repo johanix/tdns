@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -15,6 +16,9 @@ import (
 
 func main() {
 	var conf tdns.Config
+
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
 
 	// Set application globals
 	tdns.Globals.App.Type = tdns.AppTypeServer
@@ -55,11 +59,11 @@ func main() {
 	}
 
 	// Start application threads
-	err = tdns.MainStartThreads(&conf, apirouter)
+    err = tdns.MainStartThreads(ctx, &conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
 	// Enter main loop
-	tdns.MainLoop(&conf)
+    tdns.MainLoop(ctx, cancel, &conf)
 }

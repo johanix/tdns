@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func DnsDoQEngine(conf *Config, doqaddrs []string, cert *tls.Certificate,
+func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tls.Certificate,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	tlsConfig := &tls.Config{
@@ -33,43 +33,54 @@ func DnsDoQEngine(conf *Config, doqaddrs []string, cert *tls.Certificate,
 	if len(ports) == 0 {
 		ports = []string{"8853"}
 	}
+	var listeners []*quic.Listener
 	for _, addr := range doqaddrs {
 		for _, port := range ports {
-			go func(addr string) {
-				hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 8853
-				log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
-				listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
-					MaxIdleTimeout:  time.Duration(30) * time.Second,
-					KeepAlivePeriod: time.Duration(15) * time.Second,
-				})
-				if err != nil {
-					log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
-					return
-				}
+			hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 8853
+			log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
+			listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
+				MaxIdleTimeout:  time.Duration(30) * time.Second,
+				KeepAlivePeriod: time.Duration(15) * time.Second,
+			})
+			if err != nil {
+				log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
+				continue
+			}
+			listeners = append(listeners, listener)
 
+			go func(l *quic.Listener, hp string) {
 				for {
-					conn, err := listener.Accept(context.Background())
+					conn, err := l.Accept(ctx)
 					if err != nil {
-						log.Printf("Failed to accept QUIC connection on %s: %s", hostport, err.Error())
+						if ctx.Err() != nil {
+							return
+						}
+						log.Printf("Failed to accept QUIC connection on %s: %s", hp, err.Error())
 						continue
 					}
-
-					go handleDoQConnection(conn, ourDNSHandler)
+					go handleDoQConnection(ctx, conn, ourDNSHandler)
 				}
-			}(addr)
+			}(listener, hostport)
 		}
 	}
+	go func() {
+		<-ctx.Done()
+		log.Printf("DnsDoQEngine: shutting down DoQ listeners...")
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
 	return nil
 }
 
-func handleDoQConnection(conn quic.Connection, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
+func handleDoQConnection(ctx context.Context, conn quic.Connection, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
 	defer conn.CloseWithError(0, "") // Add this to ensure clean connection closure
 
 	for {
 		if Globals.Debug {
 			log.Printf("DoQ: waiting for stream on connection from %v", conn.RemoteAddr())
 		}
-		stream, err := conn.AcceptStream(context.Background())
+		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			// Log all errors, but with different levels of detail
 			if err.Error() == "Application error 0x0 (remote)" {

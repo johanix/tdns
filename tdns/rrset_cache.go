@@ -49,9 +49,9 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	var client = map[Transport]*DNSClient{}
 	var t Transport
 
-	client[TransportDo53] = NewDNSClient(TransportDo53, "53",nil)
+	client[TransportDo53] = NewDNSClient(TransportDo53, "53", nil)
 	for _, t = range []Transport{TransportDoT, TransportDoH, TransportDoQ} {
-		client[t] = NewDNSClient(t, "53",nil)
+		client[t] = NewDNSClient(t, "53", nil)
 	}
 
 	return &RRsetCacheT{
@@ -67,24 +67,55 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 
 func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
-	tmp, ok := rrcache.RRsets.Get(lookupKey)
+	crrset, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
 		return nil
 	}
-	if tmp.Expiration.Before(time.Now()) {
+	// Expiration-based eviction
+	if crrset.Expiration.Before(time.Now()) {
 		rrcache.RRsets.Remove(lookupKey)
-		log.Printf("RRsetCache: Removed expired key %s", lookupKey)
+		if Globals.Debug {
+			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
+		}
+		// If an NS RRset expired, also remove its server mappings for that zone
+		if qtype == dns.TypeNS {
+			rrcache.ServerMap.Remove(qname)
+			if Globals.Debug {
+				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+			}
+		}
 		return nil
 	}
-	return &tmp
+	return &crrset
 }
 
-func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, rrset *CachedRRset) {
+func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
 	if Globals.Debug {
-		fmt.Printf("rrcache: Adding key %s to cache\n", lookupKey)
+		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
 	}
-	rrcache.RRsets.Set(lookupKey, *rrset)
+
+	if crrset == nil {
+		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
+		return
+	}
+
+	// Compute min TTL and set Expiration accordingly when RRset present
+	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
+		minTTL := crrset.RRset.RRs[0].Header().Ttl
+		for _, rr := range crrset.RRset.RRs[1:] {
+			if rr.Header().Ttl < minTTL {
+				minTTL = rr.Header().Ttl
+			}
+		}
+		crrset.Ttl = minTTL
+		crrset.Expiration = time.Now().Add(time.Duration(minTTL) * time.Second)
+	} else if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
+		// For negative/no-RRset entries, if Expiration not set but TTL is provided
+		crrset.Expiration = time.Now().Add(time.Duration(crrset.Ttl) * time.Second)
+	}
+
+	rrcache.RRsets.Set(lookupKey, *crrset)
 }
 
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)
@@ -148,7 +179,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				if err != nil {
 					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 					// Skip invalid ALPN value
-					continue 
+					continue
 				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}
@@ -241,7 +272,6 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 				RRs:    nsRecords,
 				RRSIGs: nil, // No DNSSEC in root hints
 			},
-			Expiration: time.Now().Add(time.Duration(nsRecords[0].Header().Ttl) * time.Second),
 		})
 	} else {
 		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
@@ -290,7 +320,6 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 					RRs:    records,
 					RRSIGs: nil, // No DNSSEC in root hints
 				},
-				Expiration: time.Now().Add(time.Duration(records[0].Header().Ttl) * time.Second),
 			})
 		}
 

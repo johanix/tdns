@@ -208,8 +208,11 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			resp.Msg = fmt.Sprintf("%s: Daemon was happy, but now winding down", Globals.App.Name)
 
 			go func() {
-				time.Sleep(5000 * time.Millisecond)
-				stopCh <- struct{}{}
+				// Allow the HTTP response to be sent before triggering shutdown
+				time.Sleep(200 * time.Millisecond)
+				conf.Internal.StopOnce.Do(func() {
+					close(stopCh)
+				})
 			}()
 
 		case "api":

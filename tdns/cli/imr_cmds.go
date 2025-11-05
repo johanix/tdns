@@ -188,7 +188,7 @@ var imrZoneListCmd = &cobra.Command{
 		if len(args) == 0 {
 			fmt.Println("Error: no zone file argument")
 			return
-		} 
+		}
 		fmt.Printf("Listing records for zone: %s\n", args[0])
 	},
 }
@@ -287,12 +287,18 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	switch item.Val.Context {
 	case tdns.ContextNXDOMAIN:
 		fmt.Printf("NXDOMAIN (negative response type 3)\n")
+		fmt.Printf("%s %s (%s, TTL: %s)\n", item.Val.Name,
+			dns.TypeToString[uint16(item.Val.RRtype)], tdns.CacheContextToString[item.Val.Context], tdns.TtlPrint(item.Val.Expiration))
 	case tdns.ContextNoErrNoAns:
-		fmt.Printf("negative response type 0\n")
+		// fmt.Printf("negative response type 0\n")
+		fmt.Printf("%s %s (%s, TTL: %s)\n", item.Val.Name,
+			dns.TypeToString[uint16(item.Val.RRtype)], tdns.CacheContextToString[item.Val.Context], tdns.TtlPrint(item.Val.Expiration))
 	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
 		// Print each RR in the RRset
 		for _, rr := range item.Val.RRset.RRs {
-			fmt.Printf("%v (%s)\n", rr, tdns.CacheContextToString[item.Val.Context])
+			ttlStr := tdns.TtlPrint(item.Val.Expiration)
+			fmt.Printf("%v (%s, TTL: %s)\n", rr,
+				tdns.CacheContextToString[item.Val.Context], ttlStr)
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("%v\n", rr)

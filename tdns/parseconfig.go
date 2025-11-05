@@ -160,53 +160,31 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
-	// Build template map
-	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
-	for _, tmpl := range conf.Templates {
-		if tmpl.Name == "" {
-			return fmt.Errorf("template missing required 'name' field")
-		}
-		if _, exists := Templates[tmpl.Name]; exists {
-			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
-		}
+		// Build template map
+		Templates = make(map[string]ZoneConf) // Clear existing entries on reload
+		for _, tmpl := range conf.Templates {
+			if tmpl.Name == "" {
+				return fmt.Errorf("template missing required 'name' field")
+			}
+			if _, exists := Templates[tmpl.Name]; exists {
+				return fmt.Errorf("duplicate template name: %s", tmpl.Name)
+			}
 			Templates[tmpl.Name] = tmpl
 		}
-	
 
-	// Handle template expansion if specified
-	for _, t := range conf.Templates {
-		if t.Template != "" && t.Template != t.Name {
-			log.Printf("Template %q depends on template %q: expanding", t.Name, t.Template)
-			if tmpl, exist := Templates[t.Template]; exist {
-				if tmpl.Template != "" && tmpl.Template == t.Name {
-					log.Printf("Template %q: circular dependency via %q. Ignoring template.", t.Name, t.Template)
-					delete(Templates, t.Name)
-					delete(Templates, t.Template)
-					continue
-				}
-				var err error
-				//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
-				t, err = ExpandTemplate(t, &tmpl, Globals.App.Type)
-				if err != nil {
-					fmt.Printf("Error expanding template %q for other template %q. Aborting.\n", t.Template, t.Name)
-					// return nil, err
-					// zd.SetError(ConfigError, "template expansion error: %q: %v", t.Template, err)
-					delete(Templates, t.Name)
-					continue
-				}
-				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
-			} else {
-				//zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
-				fmt.Printf("Template %q refers to non-existing template %q. Ignored.\n", t.Name, t.Template)
-				delete(Templates, t.Name)
+		// Handle template expansion if specified
+		// Robust expansion with cycle detection
+		var done = make(map[string]bool)
+		for _, t := range conf.Templates {
+			if _, ok := Templates[t.Name]; !ok {
 				continue
 			}
+			_, _ = expandTemplateChain(t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
 		}
-	}
 
-	if Globals.Debug {
-		log.Printf("Templates: %+v", Templates)
-	}
+		if Globals.Debug {
+			log.Printf("Templates: %+v", Templates)
+		}
 	}
 
 	// log.Printf("*** ParseConfig: 1")
@@ -462,13 +440,13 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 			switch opt {
 			case OptDelSyncParent, // as a parent, publish supported DSYNC schemes
-				OptDelSyncChild,      // as a child, try to sync with parent via DSYNC scheme
-				OptAllowUpdates,      // zone allows DNS UPDATEs to authoritiative data
-				OptAllowChildUpdates, // zone allows updates to child delegation information
-				OptAllowCombine,      // zone allows combine with local changes
-				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
-				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
-				OptDontPublishKey,    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				OptDelSyncChild,       // as a child, try to sync with parent via DSYNC scheme
+				OptAllowUpdates,       // zone allows DNS UPDATEs to authoritiative data
+				OptAllowChildUpdates,  // zone allows updates to child delegation information
+				OptAllowCombine,       // zone allows combine with local changes
+				OptFoldCase,           // fold case of owner names to lower to make query matching case insensitive
+				OptBlackLies,          // zone may implement DNSSEC signed negative responses via so-called black lies.
+				OptDontPublishKey,     // do not publish a SIG(0) KEY record for the zone (default should be to publish)
 				OptAddTransportSignal: // add a transport signal to the zone
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)
@@ -684,6 +662,78 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	zconf.MultiSigner = tmpl.MultiSigner
 
 	return zconf, nil
+}
+
+// expandTemplateChain expands a template by following its parent chain (via the Template field)
+// using DFS with cycle detection. It updates the global Templates map with the fully expanded
+// template on success. If a cycle is detected, all templates in the cycle are removed from the
+// Templates map and an error is returned. Missing parent references also remove the referring
+// template.
+func expandTemplateChain(name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
+    if done[name] {
+        return Templates[name], nil
+    }
+    t, exists := Templates[name]
+    if !exists {
+        return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
+    }
+
+    if onStack[name] {
+        // Cycle detected: find cycle in stack
+        var cycle []string
+        for i := range stack {
+            if stack[i] == name {
+                cycle = append([]string{}, stack[i:]...)
+                break
+            }
+        }
+        cycle = append(cycle, name)
+        log.Printf("Template cycle detected: %s", strings.Join(cycle, " -> "))
+        for _, n := range cycle {
+            delete(Templates, n)
+        }
+        return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
+    }
+
+    onStack[name] = true
+    stack = append(stack, name)
+
+    if t.Template != "" && t.Template != name {
+        parent, exists := Templates[t.Template]
+        if !exists {
+            log.Printf("Template %q refers to non-existing template %q. Ignored.", t.Name, t.Template)
+            delete(Templates, t.Name)
+            onStack[name] = false
+            return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
+        }
+        // Recurse to expand parent first
+        expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
+        if err != nil {
+            onStack[name] = false
+            return ZoneConf{}, err
+        }
+        // Apply parent's fields into child
+        expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
+        if err != nil {
+            log.Printf("Error expanding template %q from parent %q: %v", t.Name, t.Template, err)
+            delete(Templates, t.Name)
+            onStack[name] = false
+            return ZoneConf{}, err
+        }
+        t = expandedChild
+    } else if t.Template == name {
+        // Self-cycle
+        log.Printf("Template %q: self-referential cycle. Removing.", name)
+        delete(Templates, name)
+        onStack[name] = false
+        return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
+    }
+
+    // Mark done and store expanded result
+    done[name] = true
+    onStack[name] = false
+    Templates[name] = t
+    return t, nil
 }
 
 func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {

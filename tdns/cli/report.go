@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -143,13 +144,13 @@ var ReportCmd = &cobra.Command{
 	Short: "Send a report and (optionally) discover DSYNC via the internal resolver (imr)",
 	Run: func(cmd *cobra.Command, args []string) {
 		// qname := dns.Fqdn(args[0])
-        PrepArgs("zonename")
-        dsyncLookup := true
-        if dsyncTarget != "" && dsyncPort != 0 {
-            dsyncLookup = false
-        }
+		PrepArgs("zonename")
+		dsyncLookup := true
+		if dsyncTarget != "" && dsyncPort != 0 {
+			dsyncLookup = false
+		}
 
-        tdns.Globals.App.Type = tdns.AppTypeCli
+		tdns.Globals.App.Type = tdns.AppTypeCli
 		if tdns.Globals.Debug {
 			fmt.Printf("ReportCmd: Calling Conf.MainInit(%q)\n", tdns.DefaultCliCfgFile)
 		}
@@ -157,65 +158,62 @@ var ReportCmd = &cobra.Command{
 			tdns.Shutdowner(&Conf, fmt.Sprintf("Error initializing tdns-cli: %v", err))
 		}
 
-        if reportSender == "" {
-            fmt.Printf("Error: sender not specified\n")
-            return
-        }
-
-        // At the moment we require the name of the key to be {sender}.key.
-        tsig := tdns.Globals.TsigKeys[reportSender + ".key."]
-        if tsig == nil {
-            fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
-            return
-        }
-
-        if dsyncLookup {
-
-        // Start RecursorEngine (IMR)
-		viper.Set("recursorengine.active", true)
-		viper.Set("recursorengine.root-hints", "/etc/tdns/root.hints")
-		// log.Printf("ReportCmd: Starting RecursorEngine")
-		Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
-		stopCh := make(chan struct{}, 10)
-		go Conf.RecursorEngine(stopCh)
-
-		// Discover DSYNC via IMR for the zone that contains qname
-		log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
-		dsyncRes, derr := discoverDSYNCViaImr(tdns.Globals.Zonename, 3*time.Second)
-		var reporterDSYNC *tdns.DSYNC
-		if derr != nil {
-			log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
-			close(stopCh)
+		if reportSender == "" {
+			fmt.Printf("Error: sender not specified\n")
 			return
-		} else {
-			for _, ds := range dsyncRes.Rdata {
-				if ds.Scheme == tdns.SchemeReporter {
-					reporterDSYNC = ds
-					break
+		}
+
+		// TSIG requirements are only enforced when TSIG signing is requested
+
+		if dsyncLookup {
+
+			// Start RecursorEngine (IMR)
+			viper.Set("recursorengine.active", true)
+			viper.Set("recursorengine.root-hints", "/etc/tdns/root.hints")
+			// log.Printf("ReportCmd: Starting RecursorEngine")
+			Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go Conf.RecursorEngine(ctx)
+
+			// Discover DSYNC via IMR for the zone that contains qname
+			log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
+			dsyncRes, derr := discoverDSYNCViaImr(tdns.Globals.Zonename, 3*time.Second)
+			var reportDSYNC *tdns.DSYNC
+			if derr != nil {
+				log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
+				cancel()
+				return
+			} else {
+				for _, ds := range dsyncRes.Rdata {
+					if ds.Scheme == tdns.SchemeReport {
+						reportDSYNC = ds
+						break
+					}
 				}
 			}
+
+			if reportDSYNC == nil {
+				log.Printf("ReportCmd: no DSYNC REPORT found for %s, aborting report", tdns.Globals.Zonename)
+				return
+			}
+			cancel()
+
+			targetIP = reportDSYNC.Target
+			port = strconv.Itoa(int(reportDSYNC.Port))
+		} else {
+			targetIP = dsyncTarget
+			port = strconv.Itoa(dsyncPort)
 		}
 
-		if reporterDSYNC == nil {
-			log.Printf("ReportCmd: no DSYNC REPORTER found for %s, aborting report", tdns.Globals.Zonename)
-			return
+		if edeCode == 0 {
+			edeCode = int(edns0.EDEMPZoneXfrFailure)
 		}
-        close(stopCh)
-    
-        targetIP = reporterDSYNC.Target
-        port = strconv.Itoa(int(reporterDSYNC.Port))
-    } else {
-        targetIP = dsyncTarget
-        port = strconv.Itoa(dsyncPort)
-    }
-
-        if edeCode == 0 {
-            edeCode = int(edns0.EDEMPZoneXfrFailure)
-        }
 		// Prepare DNS message
 		m := new(dns.Msg)
 		m.SetNotify(tdns.Globals.Zonename)
-		err := edns0.AddReporterOptionToMessage(m, &edns0.ReporterOption{
+		err := edns0.AddReportOptionToMessage(m, &edns0.ReportOption{
 			ZoneName: tdns.Globals.Zonename,
 			EDECode:  uint16(edeCode),
 			Severity: 17,
@@ -227,66 +225,72 @@ var ReportCmd = &cobra.Command{
 			return
 		}
 
-		log.Printf("ReportCmd: sending report to %s:%s (from DSYNC REPORTER)", targetIP, port)
+		log.Printf("ReportCmd: sending report to %s:%s (from DSYNC REPORT)", targetIP, port)
 
 		// Send the report
 		c := tdns.NewDNSClient(tdns.TransportDo53, port, nil)
 
-        // There is no built-in map or function in miekg/dns for this, so we use a switch.
-        var alg string
-        switch strings.ToLower(tsig.Algorithm) {
-        case "hmac-sha1":
-           alg = dns.HmacSHA1
-        case "hmac-sha256":
-           alg = dns.HmacSHA256
-        case "hmac-sha384":
-           alg = dns.HmacSHA384
-        case "hmac-sha512":
-           alg = dns.HmacSHA512
-        default:
-           alg = tsig.Algorithm // fallback to whatever is provided
-        }
+		if reportTsig {
+			// Lookup TSIG key only when signing is requested
+			// At the moment we require the name of the key to be {sender}.key.
+			tsig := tdns.Globals.TsigKeys[reportSender+".key."]
+			if tsig == nil {
+				fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
+				return
+			}
 
-        if reportTsig {
-            if tdns.Globals.Debug {
-                fmt.Printf("TSIG signing the report with %s\n", tsig.Name)
-            }
-           
-           c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
-           m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
-        }
+			// There is no built-in map or function in miekg/dns for this, so we use a switch.
+			var alg string
+			switch strings.ToLower(tsig.Algorithm) {
+			case "hmac-sha1":
+				alg = dns.HmacSHA1
+			case "hmac-sha256":
+				alg = dns.HmacSHA256
+			case "hmac-sha384":
+				alg = dns.HmacSHA384
+			case "hmac-sha512":
+				alg = dns.HmacSHA512
+			default:
+				alg = tsig.Algorithm // fallback to whatever is provided
+			}
+			if tdns.Globals.Debug {
+				fmt.Printf("TSIG signing the report with %s\n", tsig.Name)
+			}
 
-        if tdns.Globals.Debug {
-           fmt.Printf("%s\n", m.String())
-        }
+			c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
+			m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
+		}
+
+		if tdns.Globals.Debug {
+			fmt.Printf("%s\n", m.String())
+		}
 
 		resp, _, err := c.Exchange(m, targetIP)
 		if err != nil {
 			fmt.Printf("ReportCmd: error sending report: %v\n", err)
-            os.Exit(1)
-		} 
-        rcode := resp.Rcode
-        if rcode == dns.RcodeSuccess {
-            fmt.Printf("Report accepted (rcode: %s)\n", dns.RcodeToString[rcode])
-        } else {
-            hasede, edecode, edemsg := edns0.ExtractEDEFromMsg(resp)
-            if hasede {
-                fmt.Printf("Error: rcode: %s, EDE Message: %s (EDE code: %d)\n", dns.RcodeToString[rcode], edemsg, edecode)
-            } else {
-                fmt.Printf("Error: rcode: %s\n", dns.RcodeToString[rcode])
-                fmt.Printf("Response msg:\n%s\n", resp.String())
-            }
-            os.Exit(1)
-        }
+			os.Exit(1)
+		}
+		rcode := resp.Rcode
+		if rcode == dns.RcodeSuccess {
+			fmt.Printf("Report accepted (rcode: %s)\n", dns.RcodeToString[rcode])
+		} else {
+			hasede, edecode, edemsg := edns0.ExtractEDEFromMsg(resp)
+			if hasede {
+				fmt.Printf("Error: rcode: %s, EDE Message: %s (EDE code: %d)\n", dns.RcodeToString[rcode], edemsg, edecode)
+			} else {
+				fmt.Printf("Error: rcode: %s\n", dns.RcodeToString[rcode])
+				fmt.Printf("Response msg:\n%s\n", resp.String())
+			}
+			os.Exit(1)
+		}
 	},
 }
 
 func init() {
 	ReportCmd.Flags().StringVarP(&reportSender, "sender", "S", "", "Report sender")
 	ReportCmd.Flags().StringVarP(&reportDetails, "details", "D", "", "Report details")
-    ReportCmd.Flags().BoolVarP(&reportTsig, "tsig", "T", true, "TSIG sign the report")
-    ReportCmd.Flags().IntVarP(&edeCode, "ede", "", 0, "Manual override of EDE code (513-523 locally defined)")
-    ReportCmd.Flags().IntVarP(&dsyncPort, "port", "", 0, "Manual override of DSYNC port")
-    ReportCmd.Flags().StringVarP(&dsyncTarget, "target", "", "", "Manual override of DSYNC target")
+	ReportCmd.Flags().BoolVarP(&reportTsig, "tsig", "T", true, "TSIG sign the report")
+	ReportCmd.Flags().IntVarP(&edeCode, "ede", "", 0, "Manual override of EDE code (513-523 locally defined)")
+	ReportCmd.Flags().IntVarP(&dsyncPort, "port", "", 0, "Manual override of DSYNC port")
+	ReportCmd.Flags().StringVarP(&dsyncTarget, "target", "", "", "Manual override of DSYNC target")
 }
-

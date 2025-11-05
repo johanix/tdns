@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -38,14 +39,23 @@ type ImrResponse struct {
 
 // var RecursorCache *RRsetCacheNG
 
-func (conf *Config) RecursorEngine(stopch chan struct{}) {
+func (conf *Config) RecursorEngine(ctx context.Context) {
 	var recursorch = conf.Internal.RecursorCh
 
 	if !viper.GetBool("recursorengine.active") {
 		log.Printf("RecursorEngine is NOT active.")
-		for rrq := range recursorch {
-			log.Printf("RecursorEngine: not active, but got a request: %v", rrq)
-			continue // ensure that we keep reading to keep the channel open
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("RecursorEngine: terminating due to context cancelled (inactive mode)")
+				return
+			case rrq, ok := <-recursorch:
+				if !ok {
+					return
+				}
+				log.Printf("RecursorEngine: not active, but got a request: %v", rrq)
+				continue // ensure that we keep reading to keep the channel open
+			}
 		}
 	} else {
 		log.Printf("RecursorEngine: Starting")
@@ -71,42 +81,51 @@ func (conf *Config) RecursorEngine(stopch chan struct{}) {
 	conf.Internal.RRsetCache = rrcache
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-	go rrcache.ImrEngine(conf, stopch)
+	go rrcache.ImrEngine(ctx, conf)
 
-	for rrq := range recursorch {
-		if Globals.Debug {
-			log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
-			fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
-		}
-		// resp := ImrResponse{
-		//			Validated: false,
-		// Msg:       "RecursorEngine: request to look up a RRset",
-		// }
-		var resp *ImrResponse
-
-		// 1. Is the answer in the cache?
-		crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
-		if crrset != nil {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("RecursorEngine: terminating due to context cancelled (active mode)")
+			return
+		case rrq, ok := <-recursorch:
+			if !ok {
+				return
+			}
 			if Globals.Debug {
-				fmt.Printf("RecursorEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 			}
-			resp = &ImrResponse{
-				RRset: crrset.RRset,
-			}
-		} else {
-			var err error
-			if Globals.Debug {
-				log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
-				fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			}
+			// resp := ImrResponse{
+			//			Validated: false,
+			// Msg:       "RecursorEngine: request to look up a RRset",
+			// }
+			var resp *ImrResponse
 
-			resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
-			if err != nil {
-				log.Printf("Error from IterateOverQuery: %v", err)
+			// 1. Is the answer in the cache?
+			crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
+			if crrset != nil {
+				if Globals.Debug {
+					fmt.Printf("RecursorEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				}
+				resp = &ImrResponse{
+					RRset: crrset.RRset,
+				}
+			} else {
+				var err error
+				if Globals.Debug {
+					log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
+					fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
+				}
+
+				resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+				if err != nil {
+					log.Printf("Error from IterateOverQuery: %v", err)
+				}
 			}
-		}
-		if rrq.ResponseCh != nil {
-			rrq.ResponseCh <- *resp
+			if rrq.ResponseCh != nil {
+				rrq.ResponseCh <- *resp
+			}
 		}
 	}
 }
@@ -504,34 +523,55 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	return bestmatch, servers, nil
 }
 
-func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
+func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 	ImrHandler := createImrHandler(conf, rrcache)
 	dns.HandleFunc(".", ImrHandler)
 
 	addresses := viper.GetStringSlice("imrengine.addresses")
 	if CaseFoldContains(conf.ImrEngine.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
+		servers := make([]*dns.Server, 0, len(addresses)*2)
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
-				go func(addr, net string) {
+				server := &dns.Server{
+					Addr: addr,
+					Net:  net,
+					// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				}
+				servers = append(servers, server)
+				go func(s *dns.Server, addr, net string) {
 					log.Printf("ImrEngine: serving on %s (%s)\n", addr, net)
-					server := &dns.Server{
-						Addr: addr,
-						Net:  net,
-						// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-					}
-
 					// Must bump the buffer size of incoming UDP msgs, as updates
 					// may be much larger then queries
-					// server.UDPSize = dns.DefaultMsgSize // 4096
-					if err := server.ListenAndServe(); err != nil {
+					// s.UDPSize = dns.DefaultMsgSize // 4096
+					if err := s.ListenAndServe(); err != nil {
 						log.Printf("Failed to setup the %s server: %s", net, err.Error())
 					} else {
 						log.Printf("ImrEngine: listening on %s/%s", addr, net)
 					}
-				}(addr, net)
+				}(server, addr, net)
 			}
 		}
+		// Graceful shutdown of Do53 servers
+		go func() {
+			<-ctx.Done()
+			log.Printf("ImrEngine: ctx cancelled: shutting down Do53 servers (%d)", len(servers))
+			for _, s := range servers {
+				done := make(chan struct{})
+				go func(s *dns.Server) {
+					defer close(done)
+					if err := s.Shutdown(); err != nil {
+						log.Printf("ImrEngine: error shutting down Do53 server %s/%s: %v", s.Addr, s.Net, err)
+					}
+				}(s)
+				select {
+				case <-done:
+					// ok
+				case <-time.After(5 * time.Second):
+					log.Printf("ImrEngine: timeout waiting for Do53 server shutdown %s/%s", s.Addr, s.Net)
+				}
+			}
+		}()
 	} else {
 		log.Printf("ImrEngine: Not serving on transport Do53 (normal UDP/TCP)")
 	}
@@ -576,7 +616,7 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 		addresses = tmp
 
 		if CaseFoldContains(conf.ImrEngine.Transports, "dot") {
-			err := DnsDoTEngine(conf, addresses, &cert, ImrHandler)
+			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
 			}
@@ -585,7 +625,7 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 		}
 
 		if CaseFoldContains(conf.ImrEngine.Transports, "doh") {
-			err := DnsDoHEngine(conf, addresses, certFile, keyFile, ImrHandler)
+			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
 			}
@@ -594,7 +634,7 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 		}
 
 		if CaseFoldContains(conf.ImrEngine.Transports, "doq") {
-			err := DnsDoQEngine(conf, addresses, &cert, ImrHandler)
+			err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
 			}

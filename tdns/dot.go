@@ -5,17 +5,19 @@
 package tdns
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
-func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
+func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tls.Certificate,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	if cert == nil {
@@ -47,6 +49,7 @@ func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
 	if len(ports) == 0 {
 		ports = []string{"853"}
 	}
+	var servers []*dns.Server
 	for _, addr := range dotaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
@@ -57,15 +60,32 @@ func DnsDoTEngine(conf *Config, dotaddrs []string, cert *tls.Certificate,
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 				Handler:       dns.HandlerFunc(loggingHandler),
 			}
-			go func() {
-				log.Printf("DnsEngine: serving on %s (DoT)\n", hostport)
-				if err := server.ListenAndServe(); err != nil {
-					log.Printf("Failed to setup the DoT server on %s: %s", hostport, err.Error())
+			servers = append(servers, server)
+			go func(srv *dns.Server, hp string) {
+				log.Printf("DnsEngine: serving on %s (DoT)\n", hp)
+				if err := srv.ListenAndServe(); err != nil {
+					log.Printf("Failed to setup the DoT server on %s: %s", hp, err.Error())
 				} else {
-					log.Printf("DnsEngine: listening on %s/DoT", hostport)
+					log.Printf("DnsEngine: listening on %s/DoT", hp)
 				}
-			}()
+			}(server, hostport)
 		}
 	}
+	go func() {
+		<-ctx.Done()
+		log.Printf("DnsDoTEngine: shutting down DoT servers...")
+		for _, s := range servers {
+			done := make(chan struct{})
+			go func(srv *dns.Server) {
+				_ = srv.Shutdown()
+				close(done)
+			}(s)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				log.Printf("DnsDoTEngine: timeout shutting down %s; continuing", s.Addr)
+			}
+		}
+	}()
 	return nil
 }

@@ -42,7 +42,7 @@ func NotifyReporter(conf *Config, tsigSecrets map[string]string) (stop func(cont
 
 		var tsig *dns.TSIG
 
-		if tsig = r.IsTsig(); tsig == nil{
+		if tsig = r.IsTsig(); tsig == nil {
 			resp.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(resp, edns0.EDETsigRequired)
 			_ = w.WriteMsg(resp)
@@ -50,15 +50,15 @@ func NotifyReporter(conf *Config, tsigSecrets map[string]string) (stop func(cont
 		}
 
 		if err = w.TsigStatus(); err != nil {
-         	// TSIG validation failure
-	        resp.SetRcode(r, dns.RcodeNotAuth)
-	        edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
-          	_ = w.WriteMsg(resp)
-	        return
-        }
-		
-		if edns0.HasReporterOption(r.IsEdns0()) {
-			ro, found := edns0.ExtractReporterOption(r.IsEdns0())
+			// TSIG validation failure
+			resp.SetRcode(r, dns.RcodeNotAuth)
+			edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
+			_ = w.WriteMsg(resp)
+			return
+		}
+
+		if edns0.HasReportOption(r.IsEdns0()) {
+			ro, found := edns0.ExtractReportOption(r.IsEdns0())
 			if found {
 				edetxt, ok := edns0.EDEToString(ro.EDECode)
 				if !ok {
@@ -67,15 +67,15 @@ func NotifyReporter(conf *Config, tsigSecrets map[string]string) (stop func(cont
 				if ro.Details == "" {
 					ro.Details = "No details provided"
 				}
-				fmt.Printf("NotifyReport: Zone: %s Sender: %s Error: %s (%d) Details: %s\n", 
-				    ro.ZoneName, ro.Sender, edetxt, ro.EDECode, ro.Details)
+				fmt.Printf("NotifyReport: Zone: %s Sender: %s Error: %s (%d) Details: %s\n",
+					ro.ZoneName, ro.Sender, edetxt, ro.EDECode, ro.Details)
 			} else {
-				fmt.Printf("NotifyReporter: Received a NOTIFY for %s (has EDNS(0) OPT RR, but no Reporter option found)\n", r.Question[0].Name)
-				edns0.AttachEDEToResponse(resp, edns0.EDEReporterOptionNotFound)
+				fmt.Printf("NotifyReporter: Received a NOTIFY for %s (has EDNS(0) OPT RR, but no Report option found)\n", r.Question[0].Name)
+				edns0.AttachEDEToResponse(resp, edns0.EDEReportOptionNotFound)
 			}
 		} else {
 			fmt.Printf("NotifyReporter: Received a NOTIFY for %s (no EDNS(0) options at all)\n", r.Question[0].Name)
-			edns0.AttachEDEToResponse(resp, edns0.EDEReporterOptionNotFound)
+			edns0.AttachEDEToResponse(resp, edns0.EDEReportOptionNotFound)
 		}
 		_ = w.WriteMsg(resp)
 	})

@@ -106,7 +106,7 @@ func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force 
 		if shouldSign {
 			rrsig := new(dns.RRSIG)
 			rrsig.Hdr = dns.RR_Header{
-				Name:   key.DnskeyRR.Header().Name,
+				Name:   rrset.RRs[0].Header().Name, // key.DnskeyRR.Header().Name,
 				Rrtype: dns.TypeRRSIG,
 				Class:  dns.ClassINET,
 				Ttl:    rrset.RRs[0].Header().Ttl,

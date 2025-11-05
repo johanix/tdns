@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -67,7 +68,10 @@ func main() {
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-	err = tdns.MainStartThreads(&tconf, apirouter)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    err = tdns.MainStartThreads(ctx, &tconf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
@@ -83,7 +87,7 @@ func main() {
 	mconf.Internal.Processes = fsml
 	mconf.Internal.MusicDB.FSMlist = fsml
 
-	tdns.MainLoop(&tconf)
+    tdns.MainLoop(ctx, cancel, &tconf)
 
 	err = mconf.Internal.TokViper.WriteConfig()
 	if err != nil {

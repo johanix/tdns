@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +21,8 @@ var StopCh chan struct{}
 var LocalConfig string
 
 var cliflag bool
+var appCtx context.Context
+var appCancel context.CancelFunc
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-imr",
@@ -32,11 +35,10 @@ var rootCmd = &cobra.Command{
 				// StartInteractiveMode() // old go-prompt version
 				// startReadlineMode() // new readline version
 				return
-			} else {
-				fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
-				done := make(chan struct{}, 1)
-				<-done
-			}
+            } else {
+                fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
+                tdns.MainLoop(appCtx, appCancel, &cli.Conf)
+            }
 		}
 	},
 }
@@ -135,7 +137,8 @@ func initImr() {
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
 	}
-	err = tdns.MainStartThreads(&cli.Conf, nil)
+    appCtx, appCancel = context.WithCancel(context.Background())
+    err = tdns.MainStartThreads(appCtx, &cli.Conf, nil)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -150,6 +151,7 @@ type InternalConf struct {
 	DnssecPolicies  map[string]DnssecPolicy
 	StopCh          chan struct{}
 	APIStopCh       chan struct{}
+	StopOnce        sync.Once
 	RefreshZoneCh   chan ZoneRefresher
 	BumpZoneCh      chan BumperData
 	ValidatorCh     chan ValidatorRequest
