@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -38,7 +39,7 @@ type ImrResponse struct {
 
 // var RecursorCache *RRsetCacheNG
 
-func (conf *Config) RecursorEngine(stopch chan struct{}) {
+func (conf *Config) RecursorEngine(ctx context.Context, stopch chan struct{}) {
 	var recursorch = conf.Internal.RecursorCh
 
 	if !viper.GetBool("recursorengine.active") {
@@ -71,7 +72,7 @@ func (conf *Config) RecursorEngine(stopch chan struct{}) {
 	conf.Internal.RRsetCache = rrcache
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-	go rrcache.ImrEngine(conf, stopch)
+    go rrcache.ImrEngine(ctx, conf, stopch)
 
 	for rrq := range recursorch {
 		if Globals.Debug {
@@ -504,7 +505,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	return bestmatch, servers, nil
 }
 
-func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
+func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config, done chan struct{}) error {
 	ImrHandler := createImrHandler(conf, rrcache)
 	dns.HandleFunc(".", ImrHandler)
 
@@ -575,8 +576,8 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 		}
 		addresses = tmp
 
-		if CaseFoldContains(conf.ImrEngine.Transports, "dot") {
-			err := DnsDoTEngine(conf, addresses, &cert, ImrHandler)
+        if CaseFoldContains(conf.ImrEngine.Transports, "dot") {
+            err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
 			}
@@ -584,8 +585,8 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 			log.Printf("ImrEngine: Not serving on transport DoT")
 		}
 
-		if CaseFoldContains(conf.ImrEngine.Transports, "doh") {
-			err := DnsDoHEngine(conf, addresses, certFile, keyFile, ImrHandler)
+        if CaseFoldContains(conf.ImrEngine.Transports, "doh") {
+            err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
 			}
@@ -593,8 +594,8 @@ func (rrcache *RRsetCacheT) ImrEngine(conf *Config, done chan struct{}) error {
 			log.Printf("ImrEngine: Not serving on transport DoH")
 		}
 
-		if CaseFoldContains(conf.ImrEngine.Transports, "doq") {
-			err := DnsDoQEngine(conf, addresses, &cert, ImrHandler)
+        if CaseFoldContains(conf.ImrEngine.Transports, "doq") {
+            err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
 			}

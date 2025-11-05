@@ -201,16 +201,19 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
 
-		case "stop":
+        case "stop":
 			log.Printf("Daemon instructed to stop\n")
 			// var done struct{}
 			resp.Status = "stopping"
 			resp.Msg = fmt.Sprintf("%s: Daemon was happy, but now winding down", Globals.App.Name)
 
-			go func() {
-				time.Sleep(5000 * time.Millisecond)
-				stopCh <- struct{}{}
-			}()
+            go func() {
+                // Allow the HTTP response to be sent before triggering shutdown
+                time.Sleep(200 * time.Millisecond)
+                conf.Internal.StopOnce.Do(func() {
+                    close(stopCh)
+                })
+            }()
 
 		case "api":
 			// XXX: Here we should return the defined API endpoints, as reported by ShowAPI().

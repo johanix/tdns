@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -35,7 +36,7 @@ type DnsNotifyRequest struct {
 	Status         *NotifyStatus
 }
 
-func UpdateHandler(conf *Config) error {
+func UpdateHandler(ctx context.Context, conf *Config) error {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	updateq := conf.Internal.UpdateQ
 
@@ -45,10 +46,18 @@ func UpdateHandler(conf *Config) error {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		for dhr = range dnsupdateq {
-			UpdateResponder(&dhr, updateq)
+    go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("DnsUpdateResponderEngine: context cancelled")
+				return
+			case dhr = <-dnsupdateq:
+				UpdateResponder(&dhr, updateq)
+			}
 		}
+
 	}()
 	wg.Wait()
 

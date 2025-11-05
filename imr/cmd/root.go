@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -135,7 +136,7 @@ func initImr() {
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
 	}
-	err = tdns.MainStartThreads(&cli.Conf, nil)
+    err = tdns.MainStartThreads(context.Background(), &cli.Conf, nil)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}

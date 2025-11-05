@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -15,7 +16,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest) error {
+func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest) error {
 	var ds DelegationSyncRequest
 	var imr = viper.GetString("resolver.address")
 	if imr == "" {
@@ -28,9 +29,9 @@ func (kdb *KeyDB) DelegationSyncher(delsyncq chan DelegationSyncRequest, notifyq
 	log.Printf("*** DelegationSyncher: starting ***")
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
+    go func() {
 		var err error
-		for ds = range delsyncq {
+        for ds = range delsyncq {
 			zd := ds.ZoneData
 			dss := ds.SyncStatus
 

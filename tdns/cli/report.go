@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -177,7 +178,9 @@ var ReportCmd = &cobra.Command{
 		// log.Printf("ReportCmd: Starting RecursorEngine")
 		Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
 		stopCh := make(chan struct{}, 10)
-		go Conf.RecursorEngine(stopCh)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go Conf.RecursorEngine(ctx, stopCh)
 
 		// Discover DSYNC via IMR for the zone that contains qname
 		log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
@@ -186,6 +189,7 @@ var ReportCmd = &cobra.Command{
 		if derr != nil {
 			log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
 			close(stopCh)
+			cancel()
 			return
 		} else {
 			for _, ds := range dsyncRes.Rdata {
@@ -200,7 +204,8 @@ var ReportCmd = &cobra.Command{
 			log.Printf("ReportCmd: no DSYNC REPORT found for %s, aborting report", tdns.Globals.Zonename)
 			return
 		}
-        close(stopCh)
+		close(stopCh)
+		cancel()
     
         targetIP = reportDSYNC.Target
         port = strconv.Itoa(int(reportDSYNC.Port))

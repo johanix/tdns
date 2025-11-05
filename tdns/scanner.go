@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -75,7 +76,7 @@ func (scanner *Scanner) AddLogger(rrtype string) error {
 	return nil
 }
 
-func ScannerEngine(scannerq chan ScanRequest, authqueryq chan AuthQueryRequest) error {
+func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq chan AuthQueryRequest) error {
 	//	scannerq := conf.Internal.ScannerQ
 	interval := viper.GetInt("scanner.interval")
 	if interval < 10 {
@@ -95,9 +96,12 @@ func ScannerEngine(scannerq chan ScanRequest, authqueryq chan AuthQueryRequest) 
 	log.Printf("*** ScannerEngine: starting ***")
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
+    go func() {
 		for {
 			select {
+            case <-ctx.Done():
+                log.Println("ScannerEngine: context cancelled")
+                return
 			case <-ticker.C:
 				// log.Printf("Time for periodic scan of all zones.")
 				// cds_scanner("")

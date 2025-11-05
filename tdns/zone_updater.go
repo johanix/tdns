@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"slices"
@@ -58,7 +59,7 @@ type DeferredUpdate struct {
 	Action       func() error
 }
 
-func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
+func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context, stopchan chan struct{}) error {
 	updateq := kdb.UpdateQ
 
 	var ur UpdateRequest
@@ -66,7 +67,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 	log.Printf("ZoneUpdater: starting")
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
+    go func() {
 		for ur = range updateq {
 			log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
 			if ur.Cmd == "PING" {
@@ -216,7 +217,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(stopchan chan struct{}) error {
 	return nil
 }
 
-func (kdb *KeyDB) DeferredUpdaterEngine(stopchan chan struct{}) error {
+func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context, stopchan chan struct{}) error {
 	deferredq := kdb.DeferredUpdateQ
 
 	var deferredUpdates []DeferredUpdate
@@ -228,9 +229,12 @@ func (kdb *KeyDB) DeferredUpdaterEngine(stopchan chan struct{}) error {
 	log.Printf("DeferredUpdater: starting")
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
+    go func() {
 		for {
 			select {
+            case <-ctx.Done():
+                log.Printf("DeferredUpdater: context cancelled")
+                return
 			case du = <-deferredq:
 				log.Printf("DeferredUpdater: Received update request on queue: %+v", deferredq)
 				if du.Cmd == "PING" {

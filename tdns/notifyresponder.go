@@ -5,13 +5,14 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"sync"
 
 	"github.com/miekg/dns"
 )
 
-func NotifyHandler(conf *Config) error {
+func NotifyHandler(ctx context.Context, conf *Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	scannerq := conf.Internal.ScannerQ
@@ -22,9 +23,17 @@ func NotifyHandler(conf *Config) error {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		for dhr = range dnsnotifyq {
-			NotifyResponder(&dhr, zonech, scannerq)
+    go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("DnsNotifyResponderEngine: context cancelled")
+				return
+            case dhr = <-dnsnotifyq:
+                NotifyResponder(ctx, &dhr, zonech, scannerq)
+			}
+			
 		}
 	}()
 	wg.Wait()
@@ -33,7 +42,7 @@ func NotifyHandler(conf *Config) error {
 	return nil
 }
 
-func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
+func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
 
 	qname := dhr.Qname
 	ntype := dhr.Msg.Question[0].Qtype
@@ -63,34 +72,46 @@ func NotifyResponder(dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq 
 
 	// log.Printf("NotifyResponder: The qname %s seems to belong to the known zone %s", qname, zd.ZoneName)
 
-	switch ntype {
+    switch ntype {
 	case dns.TypeSOA:
-		zonech <- ZoneRefresher{
-			Name:      qname, // send zone name into RefreshEngine
-			ZoneStore: zd.ZoneStore,
-		}
+        select {
+        case <-ctx.Done():
+            return nil
+        case zonech <- ZoneRefresher{
+            Name:      qname, // send zone name into RefreshEngine
+            ZoneStore: zd.ZoneStore,
+        }:
+        }
 		log.Printf("NotifyResponder: Received NOTIFY(%s) for %q Refreshing.",
 			dns.TypeToString[ntype], qname)
 
 	case dns.TypeCDS, dns.TypeCSYNC:
 		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %q. This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
-		scannerq <- ScanRequest{
-			Cmd:       "SCAN",
-			ChildZone: qname,
-			ZoneData:  zd,
-			RRtype:    ntype,
-		}
+        select {
+        case <-ctx.Done():
+            return nil
+        case scannerq <- ScanRequest{
+            Cmd:       "SCAN",
+            ChildZone: qname,
+            ZoneData:  zd,
+            RRtype:    ntype,
+        }:
+        }
 
 	case dns.TypeDNSKEY:
 		log.Printf("NotifyResponder: Received a NOTIFY(%s) for %q. This should trigger a scan for the %s %s RRset",
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
-		scannerq <- ScanRequest{
-			Cmd:       "SCAN",
-			ChildZone: qname,
-			ZoneData:  zd,
-			RRtype:    ntype,
-		}
+        select {
+        case <-ctx.Done():
+            return nil
+        case scannerq <- ScanRequest{
+            Cmd:       "SCAN",
+            ChildZone: qname,
+            ZoneData:  zd,
+            RRtype:    ntype,
+        }:
+        }
 
 	default:
 		log.Printf("NotifyResponder: Unknown type of notification: NOTIFY(%s)",

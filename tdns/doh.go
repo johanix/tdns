@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -18,7 +19,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func DnsDoHEngine(conf *Config, dohaddrs []string, certFile, keyFile string,
+func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	log.Printf("DnsEngine: DoH addresses: %v", dohaddrs)
@@ -69,20 +70,32 @@ func DnsDoHEngine(conf *Config, dohaddrs []string, certFile, keyFile string,
 	if len(ports) == 0 {
 		ports = []string{"443"}
 	}
-	for _, addr := range dohaddrs {
+    var servers []*http.Server
+    for _, addr := range dohaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
-			go func(hostport string) {
-				log.Printf("DnsEngine: setting up DoH server on %s", hostport)
-				if err := http.ListenAndServeTLS(hostport, certFile, keyFile, nil); err != nil {
-					log.Printf("Failed to setup the DoH server on %s: %s", hostport, err.Error())
-				} else {
-					log.Printf("DnsEngine: listening on %s/DoH", hostport)
-				}
-				log.Printf("DnsEngine: done setting up DoH server on %s", hostport)
-			}(hostport)
+            srv := &http.Server{Addr: hostport, Handler: nil}
+            servers = append(servers, srv)
+            go func(s *http.Server, hp string) {
+                log.Printf("DnsEngine: setting up DoH server on %s", hp)
+                if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+                    log.Printf("Failed to setup the DoH server on %s: %s", hp, err.Error())
+                } else {
+                    log.Printf("DnsEngine: listening on %s/DoH", hp)
+                }
+                log.Printf("DnsEngine: done setting up DoH server on %s", hp)
+            }(srv, hostport)
 		}
 	}
+    go func() {
+        <-ctx.Done()
+        log.Printf("DnsDoHEngine: shutting down DoH servers...")
+        for _, s := range servers {
+            if err := s.Shutdown(context.Background()); err != nil {
+                log.Printf("DnsDoHEngine: error during shutdown of %s: %v", s.Addr, err)
+            }
+        }
+    }()
 	return nil
 }
 

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 )
 
 // func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
-func ResignerEngine(zoneresignch chan *ZoneData, stopch chan struct{}) {
+func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData, stopch chan struct{}) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
@@ -39,8 +40,11 @@ func ResignerEngine(zoneresignch chan *ZoneData, stopch chan struct{}) {
 	//	var zr ZoneRefresher // We're reusing the ZoneRefresher struct also for the resigner
 	// var zone string
 
-	for {
+    for {
 		select {
+        case <-ctx.Done():
+            log.Printf("ResignerEngine: context cancelled")
+            return
 		case zd := <-zoneresignch:
 
 			//			zd, exist := Zones.Get(zone)

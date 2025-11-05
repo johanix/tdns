@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -124,7 +125,7 @@ type AuthQueryResponse struct {
 	err   error
 }
 
-func AuthQueryEngine(requests chan AuthQueryRequest) {
+func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 	log.Printf("*** AuthQueryEngine: Starting ***	")
 
 	tcpclient := new(dns.Client)

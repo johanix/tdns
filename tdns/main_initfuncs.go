@@ -7,10 +7,12 @@ package tdns
 import (
 	// "flag"
 
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -24,7 +26,10 @@ import (
 	// "github.com/orcaman/concurrent-map/v2"
 )
 
-func MainLoop(conf *Config) {
+func MainLoop(ctx context.Context, cancel context.CancelFunc, conf *Config) {
+	if Globals.Debug {
+		debug.SetTraceback("all")
+	}
 	exit := make(chan os.Signal, 1)
 	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
 	hupper := make(chan os.Signal, 1)
@@ -43,9 +48,12 @@ func MainLoop(conf *Config) {
 		for {
 			// log.Println("mainloop: signal dispatcher")
 			select {
+			case <-ctx.Done():
+				log.Println("mainloop: context cancelled. Cleaning up.")
+				return
 			case <-exit:
 				log.Println("mainloop: Exit signal received. Cleaning up.")
-				// do whatever we need to do to wrap up nicely
+				cancel()
 				return
 			case <-hupper:
 				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
@@ -60,6 +68,7 @@ func MainLoop(conf *Config) {
 
 			case <-conf.Internal.APIStopCh:
 				log.Println("mainloop: Stop command received. Cleaning up.")
+				cancel()
 				return
 			}
 		}
@@ -242,7 +251,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	return nil
 }
 
-func MainStartThreads(conf *Config, apirouter *mux.Router) error {
+func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	stopch := conf.Internal.StopCh
 
@@ -263,8 +272,8 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	case AppTypeAgent:
 		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
 		// the HsyncEngine starts listening for incoming connections
-		go HsyncEngine(conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
-		go conf.SynchedDataEngine(conf.Internal.AgentQs, conf.Internal.StopCh)
+        go HsyncEngine(ctx, conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
+        go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs, conf.Internal.StopCh)
 		syncrtr, err := SetupAgentSyncRouter(conf)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
@@ -278,19 +287,19 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent:
-		go AuthQueryEngine(conf.Internal.AuthQueryQ)
-		go ScannerEngine(conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+        go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
+        go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
 
 		kdb.UpdateQ = make(chan UpdateRequest, 10)
 		conf.Internal.UpdateQ = kdb.UpdateQ
 		kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
 		conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
 
-		go kdb.ZoneUpdaterEngine(stopch)
-		go kdb.DeferredUpdaterEngine(stopch)
+        go kdb.ZoneUpdaterEngine(ctx, stopch)
+        go kdb.DeferredUpdaterEngine(ctx, stopch)
 
-		go UpdateHandler(conf)
-		go kdb.DelegationSyncher(conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+        go UpdateHandler(ctx, conf)
+        go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
 		log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	default:
 		log.Printf("TDNS %s (%s): not starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
@@ -298,8 +307,8 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
-		go NotifyHandler(conf)
-		go DnsEngine(conf)
+        go NotifyHandler(ctx, conf)
+        go DnsEngine(ctx, conf)
 		log.Printf("TDNS %s (%s): starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	default:
 		log.Printf("TDNS %s (%s): not starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
@@ -309,7 +318,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	case AppTypeServer:
 		// Only tdns-server runs the resigner engine
 		conf.Internal.ResignQ = make(chan *ZoneData, 10)
-		go ResignerEngine(conf.Internal.ResignQ, stopch)
+        go ResignerEngine(ctx, conf.Internal.ResignQ, stopch)
 		log.Printf("TDNS %s (%s): starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	default:
 		log.Printf("TDNS %s (%s): not starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
@@ -319,7 +328,7 @@ func MainStartThreads(conf *Config, apirouter *mux.Router) error {
 	case AppTypeImr:
 		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
 		stopCh := make(chan struct{}, 10)
-		go conf.RecursorEngine(stopCh)
+        go conf.RecursorEngine(ctx, stopCh)
 		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
 		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 
