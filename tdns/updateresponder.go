@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 
 	// "github.com/gookit/goutil/dump"
 	edns0 "github.com/johanix/tdns/tdns/edns0"
@@ -42,26 +41,29 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 
 	log.Printf("*** DnsUpdateResponderEngine: starting")
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-    go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("DnsUpdateResponderEngine: context cancelled")
-				return
-			case dhr, ok := <-dnsupdateq:
-				if !ok {
-					log.Println("DnsUpdateResponderEngine: dnsupdateq closed")
-					return
-				}
-				UpdateResponder(&dhr, updateq)
+	//	var wg sync.WaitGroup
+	//	wg.Add(1)
+	//    go func() {
+	//		defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("DnsUpdateResponderEngine: context cancelled")
+			return nil
+		case dhr, ok := <-dnsupdateq:
+			if !ok {
+				log.Println("DnsUpdateResponderEngine: dnsupdateq closed")
+				return nil
+			}
+			err := UpdateResponder(&dhr, updateq)
+			if err != nil {
+				log.Printf("Error from UpdateResponder: %v", err)
 			}
 		}
+	}
 
-	}()
-	wg.Wait()
+	//	}()
+	//	wg.Wait()
 
 	log.Println("DnsUpdateResponderEngine: terminating")
 	return nil

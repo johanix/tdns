@@ -135,11 +135,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs, sto
 
 	log.Printf("*** SynchedDataEngine starting ***")
 
-    for {
+	for {
 		select {
-        case <-ctx.Done():
-            log.Printf("SynchedDataEngine: context cancelled")
-            return
+		case <-ctx.Done():
+			log.Printf("SynchedDataEngine: context cancelled")
+			return
 		case <-stopch:
 			log.Printf("SynchedDataEngine: Stopping")
 			return

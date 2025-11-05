@@ -49,9 +49,9 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	var client = map[Transport]*DNSClient{}
 	var t Transport
 
-	client[TransportDo53] = NewDNSClient(TransportDo53, "53",nil)
+	client[TransportDo53] = NewDNSClient(TransportDo53, "53", nil)
 	for _, t = range []Transport{TransportDoT, TransportDoH, TransportDoQ} {
-		client[t] = NewDNSClient(t, "53",nil)
+		client[t] = NewDNSClient(t, "53", nil)
 	}
 
 	return &RRsetCacheT{
@@ -179,7 +179,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				if err != nil {
 					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 					// Skip invalid ALPN value
-					continue 
+					continue
 				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}

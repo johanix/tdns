@@ -32,9 +32,9 @@ var ExitCmd = &cobra.Command{
 
 // quitCmd represents the quit command
 var QuitCmd = &cobra.Command{
-	Use:   "quit",
-	Short: "Exit the interactive shell",
-	Long:  `Exit the interactive shell`,
+	Use:    "quit",
+	Short:  "Exit the interactive shell",
+	Long:   `Exit the interactive shell`,
 	Hidden: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		Terminate()
@@ -101,7 +101,7 @@ func StartInteractiveMode() {
 		// prompt.OptionInputTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(5),
 	)
-	
+
 	p.Run()
 	exec.Command("stty", "sane").Run()
 	os.Exit(0)
@@ -160,10 +160,10 @@ func completer(d prompt.Document) []prompt.Suggest {
 	// Get the full text and current word being completed
 	fullText := d.Text
 	currentWord := d.GetWordBeforeCursor()
-	
+
 	// Split the full text into words
 	words := strings.Fields(fullText)
-	
+
 	// Determine what we're completing
 	var word string
 	if len(words) > 0 {
@@ -181,7 +181,7 @@ func completer(d prompt.Document) []prompt.Suggest {
 		if len(subSuggestions) > 0 {
 			return subSuggestions
 		}
-		
+
 		// If no subcommands, show the guide
 		guide := updateGuide(fullText)
 		if guide != "" {
@@ -206,7 +206,7 @@ func completer(d prompt.Document) []prompt.Suggest {
 // getTopLevelCommands returns suggestions for top-level commands
 func getTopLevelCommands(word string) []prompt.Suggest {
 	matches := []string{}
-	
+
 	if word == "" {
 		// When word is empty, show all commands except completion
 		for _, cmd := range cmdRoot.Commands() {
@@ -243,7 +243,7 @@ func getTopLevelCommands(word string) []prompt.Suggest {
 				return subSuggestions
 			}
 		}
-		
+
 		// If no subcommands, return the command with a space
 		return []prompt.Suggest{{
 			Text:        matches[0] + " ",
@@ -268,7 +268,7 @@ func getSubcommandSuggestions(words []string, word string) []prompt.Suggest {
 	// Find the parent command
 	var parentCmd *cobra.Command
 	var err error
-	
+
 	if word == "" {
 		// When word is empty, we want to show all subcommands of the current command
 		parentCmd, _, err = cmdRoot.Find(words)
@@ -277,7 +277,7 @@ func getSubcommandSuggestions(words []string, word string) []prompt.Suggest {
 		parentWords := words[:len(words)-1]
 		parentCmd, _, err = cmdRoot.Find(parentWords)
 	}
-	
+
 	if err != nil {
 		return []prompt.Suggest{}
 	}

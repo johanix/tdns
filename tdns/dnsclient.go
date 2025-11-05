@@ -45,17 +45,17 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSC
 		case TransportDoT, TransportDoH:
 			tlsConfig = &tls.Config{
 				InsecureSkipVerify: true,
-				MinVersion:	    tls.VersionTLS12,
+				MinVersion:         tls.VersionTLS12,
 			}
 		case TransportDoQ:
 			tlsConfig = &tls.Config{
 				InsecureSkipVerify: true,
 				NextProtos:         []string{"doq"},
-				MinVersion:	    tls.VersionTLS12,
+				MinVersion:         tls.VersionTLS12,
 			}
 		default:
 			tlsConfig = &tls.Config{
-				MinVersion:	    tls.VersionTLS12,
+				MinVersion: tls.VersionTLS12,
 			}
 		}
 	}
@@ -99,11 +99,11 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSC
 
 // Exchange sends a DNS message and returns the response
 func (c *DNSClient) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
-//	if !Globals.Debug {
-//		fmt.Printf("*** Exchange: Globals.Debug is NOT set\n")
-//	} else {
-//		fmt.Printf("*** Exchange: Globals.Debug is set\n")
-//	}
+	//	if !Globals.Debug {
+	//		fmt.Printf("*** Exchange: Globals.Debug is NOT set\n")
+	//	} else {
+	//		fmt.Printf("*** Exchange: Globals.Debug is set\n")
+	//	}
 	if Globals.Debug {
 		fmt.Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s\n",
 			TransportToString[c.Transport], server, c.Port,

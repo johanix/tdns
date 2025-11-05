@@ -55,7 +55,7 @@ var standardDNSTypes = map[uint16]bool{
 // 4. If no CNAME match, check for wild card match
 // 5. Give up.
 
-func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg, 
+func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	qname string, qtype uint16, msgoptions MsgOptions, kdb *KeyDB) error {
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
@@ -548,9 +548,9 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 
 									_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
 									if err != nil {
-										log.Printf("Error signing SVCB RR for %s: %v", "_dns." + nsName, err)
+										log.Printf("Error signing SVCB RR for %s: %v", "_dns."+nsName, err)
 									} else {
-										log.Printf("Successfully signed SVCB RR for %s: %v", "_dns." + nsName, err)
+										log.Printf("Successfully signed SVCB RR for %s: %v", "_dns."+nsName, err)
 									}
 									// check whether we have any SVCB records for this NS name and if not add this to the zone
 									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)

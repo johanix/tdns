@@ -83,12 +83,12 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch cha
 
 	HBticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
 
-    for {
+	for {
 		select {
-        case <-ctx.Done():
-            log.Printf("HsyncEngine: context cancelled")
-            HBticker.Stop()
-            return
+		case <-ctx.Done():
+			log.Printf("HsyncEngine: context cancelled")
+			HBticker.Stop()
+			return
 		case syncitem = <-syncQ:
 			registry.SyncRequestHandler(ourId, syncitem, synchedDataUpdateQ)
 

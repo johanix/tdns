@@ -25,20 +25,20 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 
 	// time.Sleep(5 * time.Second) // Allow time for zones to load
 
-    log.Printf("*** DelegationSyncher: starting ***")
-    var err error
-    for {
-        select {
-        case <-ctx.Done():
-            log.Println("DelegationSyncher: terminating due to context cancelled")
-            log.Println("DelegationSyncher: terminating")
-            return nil
-        case ds, ok := <-delsyncq:
-            if !ok {
-                log.Println("DelegationSyncher: delsyncq closed")
-                log.Println("DelegationSyncher: terminating")
-                return nil
-            }
+	log.Printf("*** DelegationSyncher: starting ***")
+	var err error
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("DelegationSyncher: terminating due to context cancelled")
+			log.Println("DelegationSyncher: terminating")
+			return nil
+		case ds, ok := <-delsyncq:
+			if !ok {
+				log.Println("DelegationSyncher: delsyncq closed")
+				log.Println("DelegationSyncher: terminating")
+				return nil
+			}
 			zd := ds.ZoneData
 			dss := ds.SyncStatus
 

@@ -342,7 +342,7 @@ type CachedRRset struct {
 	RRtype     uint16
 	Rcode      uint8
 	RRset      *RRset
-	Ttl	   uint32
+	Ttl        uint32
 	Context    CacheContext
 	Validated  bool
 	Expiration time.Time
@@ -546,10 +546,10 @@ type KeyBootstrapperRequest struct {
 }
 
 type KeyConf struct {
-	Tsig    []TsigDetails
+	Tsig []TsigDetails
 }
 type TsigDetails struct {
-	Name		string `validate:"required" yaml:"name"`
-	Algorithm	string `validate:"required" yaml:"algorithm"`
-	Secret		string `validate:"required" yaml:"secret"`
+	Name      string `validate:"required" yaml:"name"`
+	Algorithm string `validate:"required" yaml:"algorithm"`
+	Secret    string `validate:"required" yaml:"secret"`
 }

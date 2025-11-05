@@ -42,11 +42,11 @@ func NewDNSClientOG(transport Transport, server string, tlsConfig *tls.Config) *
 		case TransportDoT, TransportDoH, TransportDoQ:
 			tlsConfig = &tls.Config{
 				InsecureSkipVerify: true,
-				MinVersion:	    tls.VersionTLS12,
+				MinVersion:         tls.VersionTLS12,
 			}
 		default:
 			tlsConfig = &tls.Config{
-				MinVersion:	tls.VersionTLS12,
+				MinVersion: tls.VersionTLS12,
 			}
 		}
 	}
@@ -232,4 +232,3 @@ func (c *DNSClientOG) exchangeDoQ(msg *dns.Msg) (*dns.Msg, error) {
 
 	return response, nil
 }
-

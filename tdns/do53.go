@@ -20,8 +20,8 @@ import (
 )
 
 type MsgOptions struct {
-	DnssecOK bool
-	OtsOptIn bool
+	DnssecOK  bool
+	OtsOptIn  bool
 	OtsOptOut bool
 }
 
@@ -45,48 +45,48 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
 		log.Printf("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory. Still configuring: %v", addresses)
 	}
-    log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
-    var servers []*dns.Server
-    for _, addr := range addresses {
-        for _, transport := range []string{"udp", "tcp"} {
-            srv := &dns.Server{
-                Addr:          addr,
-                Net:           transport,
-                MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-            }
-            // Must bump the buffer size of incoming UDP msgs, as updates
-            // may be much larger then queries
-            srv.UDPSize = dns.DefaultMsgSize // 4096
-            servers = append(servers, srv)
+	log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
+	var servers []*dns.Server
+	for _, addr := range addresses {
+		for _, transport := range []string{"udp", "tcp"} {
+			srv := &dns.Server{
+				Addr:          addr,
+				Net:           transport,
+				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+			}
+			// Must bump the buffer size of incoming UDP msgs, as updates
+			// may be much larger then queries
+			srv.UDPSize = dns.DefaultMsgSize // 4096
+			servers = append(servers, srv)
 
-            go func(s *dns.Server, addr, transport string) {
-                log.Printf("DnsEngine: serving on %s (%s)\n", addr, transport)
-                if err := s.ListenAndServe(); err != nil {
-                    log.Printf("Failed to setup the %s server: %s", transport, err.Error())
-                } else {
-                    log.Printf("DnsEngine: listening on %s/%s", addr, transport)
-                }
-            }(srv, addr, transport)
-        }
-    }
+			go func(s *dns.Server, addr, transport string) {
+				log.Printf("DnsEngine: serving on %s (%s)\n", addr, transport)
+				if err := s.ListenAndServe(); err != nil {
+					log.Printf("Failed to setup the %s server: %s", transport, err.Error())
+				} else {
+					log.Printf("DnsEngine: listening on %s/%s", addr, transport)
+				}
+			}(srv, addr, transport)
+		}
+	}
 
-    // Graceful shutdown on context cancellation
-    go func() {
-        <-ctx.Done()
-        log.Printf("DnsEngine: shutting down Do53 servers...")
-        for _, s := range servers {
-            done := make(chan struct{})
-            go func(srv *dns.Server) {
-                _ = srv.Shutdown()
-                close(done)
-            }(s)
-            select {
-            case <-done:
-            case <-time.After(5 * time.Second):
-                log.Printf("DnsEngine: timeout shutting down %s/%s; continuing", s.Addr, s.Net)
-            }
-        }
-    }()
+	// Graceful shutdown on context cancellation
+	go func() {
+		<-ctx.Done()
+		log.Printf("DnsEngine: shutting down Do53 servers...")
+		for _, s := range servers {
+			done := make(chan struct{})
+			go func(srv *dns.Server) {
+				_ = srv.Shutdown()
+				close(done)
+			}(s)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				log.Printf("DnsEngine: timeout shutting down %s/%s; continuing", s.Addr, s.Net)
+			}
+		}
+	}()
 
 	certFile := viper.GetString("dnsengine.certfile")
 	keyFile := viper.GetString("dnsengine.keyfile")
@@ -127,22 +127,22 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		}
 		addresses = tmp
 
-        if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
-            err := DnsDoTEngine(ctx, conf, addresses, &cert, authDNSHandler)
+		if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
+			err := DnsDoTEngine(ctx, conf, addresses, &cert, authDNSHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
 			}
 		}
 
-        if CaseFoldContains(conf.DnsEngine.Transports, "doh") {
-            err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, authDNSHandler)
+		if CaseFoldContains(conf.DnsEngine.Transports, "doh") {
+			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, authDNSHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
 			}
 		}
 
-        if CaseFoldContains(conf.DnsEngine.Transports, "doq") {
-            err := DnsDoQEngine(ctx, conf, addresses, &cert, authDNSHandler)
+		if CaseFoldContains(conf.DnsEngine.Transports, "doq") {
+			err := DnsDoQEngine(ctx, conf, addresses, &cert, authDNSHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
 			}

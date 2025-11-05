@@ -26,24 +26,24 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 
-    if !viper.GetBool("service.resign") {
-        log.Printf("ResignerEngine is NOT active. Zones will only be updated on receipt on Notifies.")
-        for {
-            select {
-            case <-ctx.Done():
-                log.Printf("ResignerEngine: terminating due to context cancelled (inactive mode)")
-                ticker.Stop()
-                return
-            case _, ok := <-zoneresignch:
-                if !ok {
-                    ticker.Stop()
-                    return
-                }
-                // ensure that we keep reading to keep the channel open
-                continue
-            }
-        }
-    } else {
+	if !viper.GetBool("service.resign") {
+		log.Printf("ResignerEngine is NOT active. Zones will only be updated on receipt on Notifies.")
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("ResignerEngine: terminating due to context cancelled (inactive mode)")
+				ticker.Stop()
+				return
+			case _, ok := <-zoneresignch:
+				if !ok {
+					ticker.Stop()
+					return
+				}
+				// ensure that we keep reading to keep the channel open
+				continue
+			}
+		}
+	} else {
 		log.Printf("*** ResignerEngine: Starting with interval %d seconds ***", interval)
 	}
 
@@ -51,17 +51,17 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	//	var zr ZoneRefresher // We're reusing the ZoneRefresher struct also for the resigner
 	// var zone string
 
-    for {
+	for {
 		select {
-        case <-ctx.Done():
-            log.Printf("ResignerEngine: terminating due to context cancelled")
+		case <-ctx.Done():
+			log.Printf("ResignerEngine: terminating due to context cancelled")
 			ticker.Stop()
-            return
-        case zd, ok := <-zoneresignch:
-            if !ok {
-                ticker.Stop()
-                return
-            }
+			return
+		case zd, ok := <-zoneresignch:
+			if !ok {
+				ticker.Stop()
+				return
+			}
 
 			if zd == nil {
 				log.Printf("ResignerEngine: Zone <nil> does not exist, cannot resign")

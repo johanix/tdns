@@ -225,20 +225,20 @@ func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 
 	var runQueueTicker = time.NewTicker(10 * time.Second)
 
-    log.Printf("DeferredUpdater: starting")
-    defer runQueueTicker.Stop()
-    for {
-        select {
-        case <-ctx.Done():
-            log.Printf("DeferredUpdater: context cancelled")
-            log.Println("DeferredUpdater: terminating")
-            return nil
-        case du, ok := <-deferredq:
-            if !ok {
-                log.Printf("DeferredUpdater: deferredq closed")
-                log.Println("DeferredUpdater: terminating")
-                return nil
-            }
+	log.Printf("DeferredUpdater: starting")
+	defer runQueueTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("DeferredUpdater: context cancelled")
+			log.Println("DeferredUpdater: terminating")
+			return nil
+		case du, ok := <-deferredq:
+			if !ok {
+				log.Printf("DeferredUpdater: deferredq closed")
+				log.Println("DeferredUpdater: terminating")
+				return nil
+			}
 			log.Printf("DeferredUpdater: Received update request on queue: %+v", deferredq)
 			if du.Cmd == "PING" {
 				log.Printf("DeferredUpdater: PING received. PONG!")
@@ -277,7 +277,7 @@ func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 			}
 			log.Printf("DeferredUpdater: Request for update of type %s is completed.", du.Cmd)
 
-        case <-runQueueTicker.C:
+		case <-runQueueTicker.C:
 			if len(deferredUpdates) == 0 {
 				continue
 			}
@@ -303,8 +303,8 @@ func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 					i++
 				}
 			}
-        }
-    }
+		}
+	}
 }
 
 // 1. Sort actions so that all removes come first.

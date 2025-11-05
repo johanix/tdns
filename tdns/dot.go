@@ -49,31 +49,31 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 	if len(ports) == 0 {
 		ports = []string{"853"}
 	}
-    var servers []*dns.Server
-    for _, addr := range dotaddrs {
+	var servers []*dns.Server
+	for _, addr := range dotaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
-            server := &dns.Server{
+			server := &dns.Server{
 				Addr:          hostport,
 				Net:           "tcp-tls",
 				TLSConfig:     tlsConfig,
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 				Handler:       dns.HandlerFunc(loggingHandler),
 			}
-            servers = append(servers, server)
-            go func(srv *dns.Server, hp string) {
+			servers = append(servers, server)
+			go func(srv *dns.Server, hp string) {
 				log.Printf("DnsEngine: serving on %s (DoT)\n", hostport)
-                if err := srv.ListenAndServe(); err != nil {
-                    log.Printf("Failed to setup the DoT server on %s: %s", hp, err.Error())
+				if err := srv.ListenAndServe(); err != nil {
+					log.Printf("Failed to setup the DoT server on %s: %s", hp, err.Error())
 				} else {
-                    log.Printf("DnsEngine: listening on %s/DoT", hp)
+					log.Printf("DnsEngine: listening on %s/DoT", hp)
 				}
-            }(server, hostport)
+			}(server, hostport)
 		}
 	}
-    go func() {
-        <-ctx.Done()
-        log.Printf("DnsDoTEngine: shutting down DoT servers...")
+	go func() {
+		<-ctx.Done()
+		log.Printf("DnsDoTEngine: shutting down DoT servers...")
 		for _, s := range servers {
 			done := make(chan struct{})
 			go func(srv *dns.Server) {
@@ -86,6 +86,6 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 				log.Printf("DnsDoTEngine: timeout shutting down %s; continuing", s.Addr)
 			}
 		}
-    }()
+	}()
 	return nil
 }

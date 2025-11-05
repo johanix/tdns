@@ -71,26 +71,26 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 	if len(ports) == 0 {
 		ports = []string{"443"}
 	}
-    var servers []*http.Server
-    for _, addr := range dohaddrs {
+	var servers []*http.Server
+	for _, addr := range dohaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
-            srv := &http.Server{Addr: hostport, Handler: nil}
-            servers = append(servers, srv)
-            go func(s *http.Server, hp string) {
-                log.Printf("DnsEngine: setting up DoH server on %s", hp)
-                if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-                    log.Printf("Failed to setup the DoH server on %s: %s", hp, err.Error())
-                } else {
-                    log.Printf("DnsEngine: listening on %s/DoH", hp)
-                }
-                log.Printf("DnsEngine: done setting up DoH server on %s", hp)
-            }(srv, hostport)
+			srv := &http.Server{Addr: hostport, Handler: nil}
+			servers = append(servers, srv)
+			go func(s *http.Server, hp string) {
+				log.Printf("DnsEngine: setting up DoH server on %s", hp)
+				if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+					log.Printf("Failed to setup the DoH server on %s: %s", hp, err.Error())
+				} else {
+					log.Printf("DnsEngine: listening on %s/DoH", hp)
+				}
+				log.Printf("DnsEngine: done setting up DoH server on %s", hp)
+			}(srv, hostport)
 		}
 	}
-    go func() {
-        <-ctx.Done()
-        log.Printf("DnsDoHEngine: shutting down DoH servers...")
+	go func() {
+		<-ctx.Done()
+		log.Printf("DnsDoHEngine: shutting down DoH servers...")
 		// Use bounded shutdown context to avoid hanging forever
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -99,7 +99,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 				log.Printf("DnsDoHEngine: error during shutdown of %s: %v", s.Addr, err)
 			}
 		}
-    }()
+	}()
 	return nil
 }
 

@@ -28,18 +28,18 @@ type DSYNC struct {
 type DsyncScheme uint8
 
 const (
-	SchemeNotify   = 1
-	SchemeUpdate   = 2
-	SchemeAPI      = 3
+	SchemeNotify = 1
+	SchemeUpdate = 2
+	SchemeAPI    = 3
 	// Private schemes:
 	SchemeMSUpdate = 129
 	SchemeReport   = 130
 )
 
 var SchemeToString = map[DsyncScheme]string{
-	SchemeNotify:   "NOTIFY",
-	SchemeUpdate:   "UPDATE",
-	SchemeAPI:      "API",
+	SchemeNotify: "NOTIFY",
+	SchemeUpdate: "UPDATE",
+	SchemeAPI:    "API",
 	// Private schemes:
 	SchemeMSUpdate: "MSUPDATE", // MSUPDATE is used in a multi-signer context and indicates a DNS UPDATE sent from a signer to the upstream unsigned zone.
 	SchemeReport:   "REPORT",
@@ -55,8 +55,8 @@ var StringToScheme = map[string]DsyncScheme{
 	"2":        SchemeUpdate,
 	"3":        SchemeAPI,
 	// Private schemes:
-	"129":      SchemeMSUpdate,
-	"130":      SchemeReport,
+	"129": SchemeMSUpdate,
+	"130": SchemeReport,
 }
 
 func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }

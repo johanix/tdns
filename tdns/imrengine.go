@@ -81,7 +81,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	conf.Internal.RRsetCache = rrcache
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-    go rrcache.ImrEngine(ctx, conf)
+	go rrcache.ImrEngine(ctx, conf)
 
 	for {
 		select {
@@ -594,8 +594,8 @@ func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 		}
 		addresses = tmp
 
-        if CaseFoldContains(conf.ImrEngine.Transports, "dot") {
-            err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler)
+		if CaseFoldContains(conf.ImrEngine.Transports, "dot") {
+			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
 			}
@@ -603,8 +603,8 @@ func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 			log.Printf("ImrEngine: Not serving on transport DoT")
 		}
 
-        if CaseFoldContains(conf.ImrEngine.Transports, "doh") {
-            err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
+		if CaseFoldContains(conf.ImrEngine.Transports, "doh") {
+			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
 			}
@@ -612,8 +612,8 @@ func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 			log.Printf("ImrEngine: Not serving on transport DoH")
 		}
 
-        if CaseFoldContains(conf.ImrEngine.Transports, "doq") {
-            err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
+		if CaseFoldContains(conf.ImrEngine.Transports, "doq") {
+			err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
 			}

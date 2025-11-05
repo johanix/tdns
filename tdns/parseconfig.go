@@ -160,53 +160,52 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
-	// Build template map
-	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
-	for _, tmpl := range conf.Templates {
-		if tmpl.Name == "" {
-			return fmt.Errorf("template missing required 'name' field")
-		}
-		if _, exists := Templates[tmpl.Name]; exists {
-			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
-		}
+		// Build template map
+		Templates = make(map[string]ZoneConf) // Clear existing entries on reload
+		for _, tmpl := range conf.Templates {
+			if tmpl.Name == "" {
+				return fmt.Errorf("template missing required 'name' field")
+			}
+			if _, exists := Templates[tmpl.Name]; exists {
+				return fmt.Errorf("duplicate template name: %s", tmpl.Name)
+			}
 			Templates[tmpl.Name] = tmpl
 		}
-	
 
-	// Handle template expansion if specified
-	for _, t := range conf.Templates {
-		if t.Template != "" && t.Template != t.Name {
-			log.Printf("Template %q depends on template %q: expanding", t.Name, t.Template)
-			if tmpl, exist := Templates[t.Template]; exist {
-				if tmpl.Template != "" && tmpl.Template == t.Name {
-					log.Printf("Template %q: circular dependency via %q. Ignoring template.", t.Name, t.Template)
+		// Handle template expansion if specified
+		for _, t := range conf.Templates {
+			if t.Template != "" && t.Template != t.Name {
+				log.Printf("Template %q depends on template %q: expanding", t.Name, t.Template)
+				if tmpl, exist := Templates[t.Template]; exist {
+					if tmpl.Template != "" && tmpl.Template == t.Name {
+						log.Printf("Template %q: circular dependency via %q. Ignoring template.", t.Name, t.Template)
+						delete(Templates, t.Name)
+						delete(Templates, t.Template)
+						continue
+					}
+					var err error
+					//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
+					t, err = ExpandTemplate(t, &tmpl, Globals.App.Type)
+					if err != nil {
+						fmt.Printf("Error expanding template %q for other template %q. Aborting.\n", t.Template, t.Name)
+						// return nil, err
+						// zd.SetError(ConfigError, "template expansion error: %q: %v", t.Template, err)
+						delete(Templates, t.Name)
+						continue
+					}
+					//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
+				} else {
+					//zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
+					fmt.Printf("Template %q refers to non-existing template %q. Ignored.\n", t.Name, t.Template)
 					delete(Templates, t.Name)
-					delete(Templates, t.Template)
 					continue
 				}
-				var err error
-				//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
-				t, err = ExpandTemplate(t, &tmpl, Globals.App.Type)
-				if err != nil {
-					fmt.Printf("Error expanding template %q for other template %q. Aborting.\n", t.Template, t.Name)
-					// return nil, err
-					// zd.SetError(ConfigError, "template expansion error: %q: %v", t.Template, err)
-					delete(Templates, t.Name)
-					continue
-				}
-				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
-			} else {
-				//zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
-				fmt.Printf("Template %q refers to non-existing template %q. Ignored.\n", t.Name, t.Template)
-				delete(Templates, t.Name)
-				continue
 			}
 		}
-	}
 
-	if Globals.Debug {
-		log.Printf("Templates: %+v", Templates)
-	}
+		if Globals.Debug {
+			log.Printf("Templates: %+v", Templates)
+		}
 	}
 
 	// log.Printf("*** ParseConfig: 1")
@@ -462,13 +461,13 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 			switch opt {
 			case OptDelSyncParent, // as a parent, publish supported DSYNC schemes
-				OptDelSyncChild,      // as a child, try to sync with parent via DSYNC scheme
-				OptAllowUpdates,      // zone allows DNS UPDATEs to authoritiative data
-				OptAllowChildUpdates, // zone allows updates to child delegation information
-				OptAllowCombine,      // zone allows combine with local changes
-				OptFoldCase,          // fold case of owner names to lower to make query matching case insensitive
-				OptBlackLies,         // zone may implement DNSSEC signed negative responses via so-called black lies.
-				OptDontPublishKey,    // do not publish a SIG(0) KEY record for the zone (default should be to publish)
+				OptDelSyncChild,       // as a child, try to sync with parent via DSYNC scheme
+				OptAllowUpdates,       // zone allows DNS UPDATEs to authoritiative data
+				OptAllowChildUpdates,  // zone allows updates to child delegation information
+				OptAllowCombine,       // zone allows combine with local changes
+				OptFoldCase,           // fold case of owner names to lower to make query matching case insensitive
+				OptBlackLies,          // zone may implement DNSSEC signed negative responses via so-called black lies.
+				OptDontPublishKey,     // do not publish a SIG(0) KEY record for the zone (default should be to publish)
 				OptAddTransportSignal: // add a transport signal to the zone
 				options[opt] = true
 				cleanoptions = append(cleanoptions, opt)

@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -91,53 +90,46 @@ func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq ch
 	scanner.AddLogger("DNSKEY")
 	scanner.AddLogger("GENERIC")
 
-	var sr ScanRequest
-
 	log.Printf("*** ScannerEngine: starting ***")
-    var wg sync.WaitGroup
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        defer ticker.Stop()
-		for {
-			select {
-            case <-ctx.Done():
-                log.Println("ScannerEngine: context cancelled")
-                return
-			case <-ticker.C:
-				// log.Printf("Time for periodic scan of all zones.")
-				// cds_scanner("")
-				// csync_scanner("")
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("ScannerEngine: context cancelled")
+			return nil
+		case <-ticker.C:
 
-			case sr = <-scannerq:
-				switch sr.Cmd {
-				case "SCAN":
-					if sr.ChildZone == "" {
-						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
-						continue
-					}
-					//					zd := FindZone(sr.Zone)
-					//					if  {
-					//						log.Printf("ScannerEngine: Zone containing %s not found. Ignoring.", sr.Zone)
-					//						continue
-					//					}
-					log.Printf("ScannerEngine: Request for immediate scan of zone %s for RRtype %s",
-						sr.ChildZone, dns.TypeToString[sr.RRtype])
-					switch sr.RRtype {
-					case dns.TypeCDS:
-						log.Printf("go scanner.CheckCDS(sr)")
-					case dns.TypeCSYNC:
-						go scanner.CheckCSYNC(sr, &sr.CurrentChildData)
-					case dns.TypeDNSKEY:
-						log.Printf("go scanner.CheckDNSKEY(sr)")
-					}
-				default:
-					log.Printf("ScannerEngine: Unknown command: '%s'. Ignoring.", sr.Cmd)
+		case sr, ok := <-scannerq:
+			if !ok {
+				log.Println("ScannerEngine: scannerq closed")
+				return nil
+			}
+			switch sr.Cmd {
+			case "SCAN":
+				if sr.ChildZone == "" {
+					log.Print("ScannerEngine: Zone unspecified. Ignoring.")
+					continue
 				}
+				//					zd := FindZone(sr.Zone)
+				//					if  {
+				//						log.Printf("ScannerEngine: Zone containing %s not found. Ignoring.", sr.Zone)
+				//						continue
+				//					}
+				log.Printf("ScannerEngine: Request for immediate scan of zone %s for RRtype %s",
+					sr.ChildZone, dns.TypeToString[sr.RRtype])
+				switch sr.RRtype {
+				case dns.TypeCDS:
+					log.Printf("go scanner.CheckCDS(sr)")
+				case dns.TypeCSYNC:
+					go scanner.CheckCSYNC(sr, &sr.CurrentChildData)
+				case dns.TypeDNSKEY:
+					log.Printf("go scanner.CheckDNSKEY(sr)")
+				}
+			default:
+				log.Printf("ScannerEngine: Unknown command: '%s'. Ignoring.", sr.Cmd)
 			}
 		}
-	}()
-	wg.Wait()
+	}
 
 	log.Println("ScannerEngine: terminating")
 	return nil

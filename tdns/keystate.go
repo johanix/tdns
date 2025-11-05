@@ -224,4 +224,3 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 		ExtraText: "Nyckel hittades inte i truststore",
 	}, nil
 }
-

@@ -123,13 +123,13 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 		// zd.Logger.Printf(msg)
 
 		kp := KeystorePost{
-			Command:    "sig0-mgmt",
-			SubCommand: "generate",
-			Zone:       zd.ZoneName,
-			Algorithm:  alg,
-			State:      Sig0StateActive,
+			Command:     "sig0-mgmt",
+			SubCommand:  "generate",
+			Zone:        zd.ZoneName,
+			Algorithm:   alg,
+			State:       Sig0StateActive,
 			ParentState: 255, // XXX: FIXME johani 20250930
-			Creator:    "bootstrap-sig0",
+			Creator:     "bootstrap-sig0",
 		}
 		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
 		if err != nil {
@@ -181,13 +181,13 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, UpdateResult,
 		//		zd.Logger.Printf(msg)
 
 		kp := KeystorePost{
-			Command:    "sig0-mgmt",
-			SubCommand: "generate",
-			Zone:       zd.ZoneName,
-			Algorithm:  alg,
-			State:      Sig0StateActive,
+			Command:     "sig0-mgmt",
+			SubCommand:  "generate",
+			Zone:        zd.ZoneName,
+			Algorithm:   alg,
+			State:       Sig0StateActive,
 			ParentState: 255, // XXX: FIXME johani 20250930
-			Creator:    "bootstrap-sig0",
+			Creator:     "bootstrap-sig0",
 		}
 		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
 		if err != nil {
