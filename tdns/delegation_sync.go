@@ -17,7 +17,7 @@ import (
 )
 
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest) error {
-	var ds DelegationSyncRequest
+	// var ds DelegationSyncRequest
 	var imr = viper.GetString("resolver.address")
 	if imr == "" {
 		log.Printf("DelegationSyncEngine: resolver address not specified. Terminating.")
@@ -26,12 +26,23 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 
 	// time.Sleep(5 * time.Second) // Allow time for zones to load
 
-	log.Printf("*** DelegationSyncher: starting ***")
-	var wg sync.WaitGroup
-	wg.Add(1)
+    log.Printf("*** DelegationSyncher: starting ***")
+    var wg sync.WaitGroup
+    wg.Add(1)
     go func() {
-		var err error
-        for ds = range delsyncq {
+        var err error
+        for {
+            select {
+            case <-ctx.Done():
+                log.Println("DelegationSyncher: terminating due to context cancelled")
+                wg.Done()
+                return
+            case ds, ok := <-delsyncq:
+                if !ok {
+                    log.Println("DelegationSyncher: delsyncq closed")
+                    wg.Done()
+                    return
+                }
 			zd := ds.ZoneData
 			dss := ds.SyncStatus
 
@@ -149,8 +160,9 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			default:
 				log.Printf("DelegationSyncher: Zone %s: Unknown command: '%s'. Ignoring.", ds.ZoneName, ds.Command)
 			}
-		}
-	}()
+            }
+        }
+    }()
 	wg.Wait()
 
 	log.Println("DelegationSyncher: terminating")

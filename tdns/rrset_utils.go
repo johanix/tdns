@@ -126,117 +126,128 @@ type AuthQueryResponse struct {
 }
 
 func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
-	log.Printf("*** AuthQueryEngine: Starting ***	")
+	log.Printf("*** AuthQueryEngine: Starting ***\t")
 
 	tcpclient := new(dns.Client)
 	tcpclient.Net = "tcp"
 
-	for req := range requests {
-		log.Printf("*** AuthQueryEngine: Received request for %s %s from %s ***", req.qname, dns.TypeToString[req.rrtype], req.ns)
-		rrset := RRset{
-			Name: req.qname,
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("AuthQueryEngine: terminating due to context cancelled")
+			return
+		case req, ok := <-requests:
+			if !ok {
+				log.Println("AuthQueryEngine: requests channel closed")
+				return
+			}
 
-		m := new(dns.Msg)
-		m.SetQuestion(req.qname, req.rrtype)
-		// Set the DNSSEC OK (DO) bit in the EDNS0 options
-		opt := new(dns.OPT)
-		opt.Hdr.Name = "."
-		opt.Hdr.Rrtype = dns.TypeOPT
-		opt.SetDo()
-		m.Extra = append(m.Extra, opt)
+			log.Printf("*** AuthQueryEngine: Received request for %s %s from %s ***", req.qname, dns.TypeToString[req.rrtype], req.ns)
+			rrset := RRset{
+				Name: req.qname,
+			}
 
-		if Globals.Debug {
-			fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", req.qname,
-				dns.TypeToString[req.rrtype], req.ns)
-		}
+			m := new(dns.Msg)
+			m.SetQuestion(req.qname, req.rrtype)
+			// Set the DNSSEC OK (DO) bit in the EDNS0 options
+			opt := new(dns.OPT)
+			opt.Hdr.Name = "."
+			opt.Hdr.Rrtype = dns.TypeOPT
+			opt.SetDo()
+			m.Extra = append(m.Extra, opt)
 
-		var err error
-		var res *dns.Msg
-
-		switch req.transport {
-		case "tcp":
-			res, _, err = tcpclient.Exchange(m, req.ns)
-		default:
-			res, err = dns.Exchange(m, req.ns)
-		}
-
-		if err != nil {
-			req.response <- &AuthQueryResponse{&rrset, err}
-			continue
-		}
-
-		if res.Rcode != dns.RcodeSuccess {
-			req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("Query for %s %s received rcode: %s",
-				req.qname, dns.TypeToString[req.rrtype], dns.RcodeToString[res.Rcode])}
-			continue
-		}
-
-		if len(res.Answer) > 0 {
 			if Globals.Debug {
-				fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
+				fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", req.qname,
+					dns.TypeToString[req.rrtype], req.ns)
 			}
-			for _, rr := range res.Answer {
-				if rr.Header().Rrtype == req.rrtype {
-					if Globals.Debug {
-						fmt.Printf("%s\n", rr.String())
-					}
 
-					rrset.RRs = append(rrset.RRs, rr)
+			var err error
+			var res *dns.Msg
 
-				} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
-					rrset.RRSIGs = append(rrset.RRSIGs, rr)
-				} else {
-					log.Printf("AuthQueryNG: Error: answer is not an %s RR: %s", dns.TypeToString[req.rrtype], rr.String())
+			switch req.transport {
+			case "tcp":
+				res, _, err = tcpclient.Exchange(m, req.ns)
+			default:
+				res, err = dns.Exchange(m, req.ns)
+			}
+
+			if err != nil {
+				req.response <- &AuthQueryResponse{&rrset, err}
+				continue
+			}
+
+			if res.Rcode != dns.RcodeSuccess {
+				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("Query for %s %s received rcode: %s",
+					req.qname, dns.TypeToString[req.rrtype], dns.RcodeToString[res.Rcode])}
+				continue
+			}
+
+			if len(res.Answer) > 0 {
+				if Globals.Debug {
+					fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
 				}
-			}
-			req.response <- &AuthQueryResponse{&rrset, nil}
-			continue
-		}
+				for _, rr := range res.Answer {
+					if rr.Header().Rrtype == req.rrtype {
+						if Globals.Debug {
+							fmt.Printf("%s\n", rr.String())
+						}
 
-		if len(res.Ns) > 0 {
-			if Globals.Debug {
-				fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
-			}
-			for _, rr := range res.Ns {
-				if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
-					if Globals.Debug {
-						fmt.Printf("AuthQueryNG: Found: %s\n", rr.String())
+						rrset.RRs = append(rrset.RRs, rr)
+
+					} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
+						rrset.RRSIGs = append(rrset.RRSIGs, rr)
+					} else {
+						log.Printf("AuthQueryNG: Error: answer is not an %s RR: %s", dns.TypeToString[req.rrtype], rr.String())
 					}
-
-					rrset.RRs = append(rrset.RRs, rr)
-
-				} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
-					rrset.RRSIGs = append(rrset.RRSIGs, rr)
 				}
-			}
-			if len(rrset.RRs) > 0 {
 				req.response <- &AuthQueryResponse{&rrset, nil}
 				continue
 			}
-		}
 
-		if len(res.Extra) > 0 {
-			if Globals.Debug {
-				fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
-			}
-			for _, rr := range res.Extra {
-				if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
-					if Globals.Debug {
-						fmt.Printf("%s\n", rr.String())
+			if len(res.Ns) > 0 {
+				if Globals.Debug {
+					fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
+				}
+				for _, rr := range res.Ns {
+					if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
+						if Globals.Debug {
+							fmt.Printf("AuthQueryNG: Found: %s\n", rr.String())
+						}
+
+						rrset.RRs = append(rrset.RRs, rr)
+
+					} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
+						rrset.RRSIGs = append(rrset.RRSIGs, rr)
 					}
-
-					rrset.RRs = append(rrset.RRs, rr)
-
-				} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
-					rrset.RRSIGs = append(rrset.RRSIGs, rr)
+				}
+				if len(rrset.RRs) > 0 {
+					req.response <- &AuthQueryResponse{&rrset, nil}
+					continue
 				}
 			}
-			req.response <- &AuthQueryResponse{&rrset, nil}
-			continue
-		}
 
-		req.response <- &AuthQueryResponse{&rrset, nil}
+			if len(res.Extra) > 0 {
+				if Globals.Debug {
+					fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
+				}
+				for _, rr := range res.Extra {
+					if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
+						if Globals.Debug {
+							fmt.Printf("%s\n", rr.String())
+						}
+
+						rrset.RRs = append(rrset.RRs, rr)
+
+					} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
+						rrset.RRSIGs = append(rrset.RRSIGs, rr)
+					}
+				}
+				req.response <- &AuthQueryResponse{&rrset, nil}
+				continue
+			}
+
+			req.response <- &AuthQueryResponse{&rrset, nil}
+		}
 	}
 }
 

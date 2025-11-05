@@ -43,19 +43,14 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData, stopch cha
     for {
 		select {
         case <-ctx.Done():
-            log.Printf("ResignerEngine: context cancelled")
+            log.Printf("ResignerEngine: terminating due to context cancelled")
             return
 		case zd := <-zoneresignch:
 
-			//			zd, exist := Zones.Get(zone)
 			if zd == nil {
 				log.Printf("ResignerEngine: Zone <nil> does not exist, cannot resign")
 				continue
 			}
-
-			//			if slices.Contains(ZonesToKeepSigned, zd) {
-			//				continue
-			//			}
 
 			if _, exist := ZonesToKeepSigned[zd.ZoneName]; exist {
 				continue
