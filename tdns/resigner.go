@@ -25,6 +25,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	}
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
 
 	if !viper.GetBool("service.resign") {
 		log.Printf("ResignerEngine is NOT active. Zones will only be updated on receipt on Notifies.")
@@ -32,11 +33,9 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 			select {
 			case <-ctx.Done():
 				log.Printf("ResignerEngine: terminating due to context cancelled (inactive mode)")
-				ticker.Stop()
 				return
 			case _, ok := <-zoneresignch:
 				if !ok {
-					ticker.Stop()
 					return
 				}
 				// ensure that we keep reading to keep the channel open
@@ -55,11 +54,9 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 		select {
 		case <-ctx.Done():
 			log.Printf("ResignerEngine: terminating due to context cancelled")
-			ticker.Stop()
 			return
 		case zd, ok := <-zoneresignch:
 			if !ok {
-				ticker.Stop()
 				return
 			}
 

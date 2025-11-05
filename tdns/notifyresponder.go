@@ -78,6 +78,11 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 	case dns.TypeSOA:
 		select {
 		case <-ctx.Done():
+			// Send immediate failure so NOTIFY sender doesn't block on cancellation
+			m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
+			if err := dhr.ResponseWriter.WriteMsg(m); err != nil {
+				log.Printf("NotifyResponder: WriteMsg error on cancellation (SOA): %v", err)
+			}
 			return nil
 		case zonech <- ZoneRefresher{
 			Name:      qname, // send zone name into RefreshEngine
@@ -92,6 +97,11 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		select {
 		case <-ctx.Done():
+			// Send immediate failure so NOTIFY sender doesn't block on cancellation
+			m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
+			if err := dhr.ResponseWriter.WriteMsg(m); err != nil {
+				log.Printf("NotifyResponder: WriteMsg error on cancellation (CDS/CSYNC): %v", err)
+			}
 			return nil
 		case scannerq <- ScanRequest{
 			Cmd:       "SCAN",
@@ -106,6 +116,11 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 			dns.TypeToString[ntype], qname, qname, dns.TypeToString[ntype])
 		select {
 		case <-ctx.Done():
+			// Send immediate failure so NOTIFY sender doesn't block on cancellation
+			m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
+			if err := dhr.ResponseWriter.WriteMsg(m); err != nil {
+				log.Printf("NotifyResponder: WriteMsg error on cancellation (DNSKEY): %v", err)
+			}
 			return nil
 		case scannerq <- ScanRequest{
 			Cmd:       "SCAN",

@@ -163,12 +163,7 @@ var ReportCmd = &cobra.Command{
 			return
 		}
 
-		// At the moment we require the name of the key to be {sender}.key.
-		tsig := tdns.Globals.TsigKeys[reportSender+".key."]
-		if tsig == nil {
-			fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
-			return
-		}
+		// TSIG requirements are only enforced when TSIG signing is requested
 
 		if dsyncLookup {
 
@@ -235,22 +230,29 @@ var ReportCmd = &cobra.Command{
 		// Send the report
 		c := tdns.NewDNSClient(tdns.TransportDo53, port, nil)
 
-		// There is no built-in map or function in miekg/dns for this, so we use a switch.
-		var alg string
-		switch strings.ToLower(tsig.Algorithm) {
-		case "hmac-sha1":
-			alg = dns.HmacSHA1
-		case "hmac-sha256":
-			alg = dns.HmacSHA256
-		case "hmac-sha384":
-			alg = dns.HmacSHA384
-		case "hmac-sha512":
-			alg = dns.HmacSHA512
-		default:
-			alg = tsig.Algorithm // fallback to whatever is provided
-		}
-
 		if reportTsig {
+			// Lookup TSIG key only when signing is requested
+			// At the moment we require the name of the key to be {sender}.key.
+			tsig := tdns.Globals.TsigKeys[reportSender+".key."]
+			if tsig == nil {
+				fmt.Printf("Error: tsig key not found for sender: %s\n", reportSender)
+				return
+			}
+
+			// There is no built-in map or function in miekg/dns for this, so we use a switch.
+			var alg string
+			switch strings.ToLower(tsig.Algorithm) {
+			case "hmac-sha1":
+				alg = dns.HmacSHA1
+			case "hmac-sha256":
+				alg = dns.HmacSHA256
+			case "hmac-sha384":
+				alg = dns.HmacSHA384
+			case "hmac-sha512":
+				alg = dns.HmacSHA512
+			default:
+				alg = tsig.Algorithm // fallback to whatever is provided
+			}
 			if tdns.Globals.Debug {
 				fmt.Printf("TSIG signing the report with %s\n", tsig.Name)
 			}

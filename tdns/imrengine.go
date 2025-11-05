@@ -530,27 +530,48 @@ func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 	addresses := viper.GetStringSlice("imrengine.addresses")
 	if CaseFoldContains(conf.ImrEngine.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
+		servers := make([]*dns.Server, 0, len(addresses)*2)
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
-				go func(addr, net string) {
+				server := &dns.Server{
+					Addr: addr,
+					Net:  net,
+					// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				}
+				servers = append(servers, server)
+				go func(s *dns.Server, addr, net string) {
 					log.Printf("ImrEngine: serving on %s (%s)\n", addr, net)
-					server := &dns.Server{
-						Addr: addr,
-						Net:  net,
-						// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-					}
-
 					// Must bump the buffer size of incoming UDP msgs, as updates
 					// may be much larger then queries
-					// server.UDPSize = dns.DefaultMsgSize // 4096
-					if err := server.ListenAndServe(); err != nil {
+					// s.UDPSize = dns.DefaultMsgSize // 4096
+					if err := s.ListenAndServe(); err != nil {
 						log.Printf("Failed to setup the %s server: %s", net, err.Error())
 					} else {
 						log.Printf("ImrEngine: listening on %s/%s", addr, net)
 					}
-				}(addr, net)
+				}(server, addr, net)
 			}
 		}
+		// Graceful shutdown of Do53 servers
+		go func() {
+			<-ctx.Done()
+			log.Printf("ImrEngine: ctx cancelled: shutting down Do53 servers (%d)", len(servers))
+			for _, s := range servers {
+				done := make(chan struct{})
+				go func(s *dns.Server) {
+					defer close(done)
+					if err := s.Shutdown(); err != nil {
+						log.Printf("ImrEngine: error shutting down Do53 server %s/%s: %v", s.Addr, s.Net, err)
+					}
+				}(s)
+				select {
+				case <-done:
+					// ok
+				case <-time.After(5 * time.Second):
+					log.Printf("ImrEngine: timeout waiting for Do53 server shutdown %s/%s", s.Addr, s.Net)
+				}
+			}
+		}()
 	} else {
 		log.Printf("ImrEngine: Not serving on transport Do53 (normal UDP/TCP)")
 	}

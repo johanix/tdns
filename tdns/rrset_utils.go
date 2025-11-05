@@ -183,12 +183,9 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 
 			m := new(dns.Msg)
 			m.SetQuestion(req.qname, req.rrtype)
-			// Set the DNSSEC OK (DO) bit in the EDNS0 options
-			opt := new(dns.OPT)
-			opt.Hdr.Name = "."
-			opt.Hdr.Rrtype = dns.TypeOPT
-			opt.SetDo()
-			m.Extra = append(m.Extra, opt)
+			// m.SetEdns0 creates the OPT record (if not present), sets the DO bit, and adds it to the Additional (Extra) section.
+			m.SetEdns0(dns.DefaultMsgSize, true)
+			// No need to manually set OPT header fields; SetEdns0 initializes them.
 
 			if Globals.Debug {
 				fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", req.qname,

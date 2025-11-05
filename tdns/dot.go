@@ -62,7 +62,7 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 			}
 			servers = append(servers, server)
 			go func(srv *dns.Server, hp string) {
-				log.Printf("DnsEngine: serving on %s (DoT)\n", hostport)
+				log.Printf("DnsEngine: serving on %s (DoT)\n", hp)
 				if err := srv.ListenAndServe(); err != nil {
 					log.Printf("Failed to setup the DoT server on %s: %s", hp, err.Error())
 				} else {
