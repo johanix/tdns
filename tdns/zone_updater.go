@@ -65,10 +65,21 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context, stopchan chan struct{})
 	var ur UpdateRequest
 
 	log.Printf("ZoneUpdater: starting")
-	var wg sync.WaitGroup
-	wg.Add(1)
+    var wg sync.WaitGroup
+    wg.Add(1)
     go func() {
-		for ur = range updateq {
+        defer wg.Done()
+        for {
+            select {
+            case <-ctx.Done():
+                log.Printf("ZoneUpdater: context cancelled")
+                return
+            case tmp, ok := <-updateq:
+                if !ok {
+                    log.Printf("ZoneUpdater: updateq closed")
+                    return
+                }
+                ur = tmp
 			log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
 			if ur.Cmd == "PING" {
 				log.Printf("ZoneUpdater: PING received. PONG!")
@@ -208,9 +219,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context, stopchan chan struct{})
 			default:
 				log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)
 			}
-			log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
-		}
-	}()
+            log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
+            }
+        }
+    }()
 	wg.Wait()
 
 	log.Println("ZoneUpdater: terminating")
