@@ -42,8 +42,6 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 
 	log.Printf("*** DnsUpdateResponderEngine: starting")
 
-	var dhr DnsUpdateRequest
-
 	var wg sync.WaitGroup
 	wg.Add(1)
     go func() {
@@ -53,7 +51,11 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 			case <-ctx.Done():
 				log.Println("DnsUpdateResponderEngine: context cancelled")
 				return
-			case dhr = <-dnsupdateq:
+			case dhr, ok := <-dnsupdateq:
+				if !ok {
+					log.Println("DnsUpdateResponderEngine: dnsupdateq closed")
+					return
+				}
 				UpdateResponder(&dhr, updateq)
 			}
 		}

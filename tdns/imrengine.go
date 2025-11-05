@@ -39,14 +39,23 @@ type ImrResponse struct {
 
 // var RecursorCache *RRsetCacheNG
 
-func (conf *Config) RecursorEngine(ctx context.Context, stopch chan struct{}) {
+func (conf *Config) RecursorEngine(ctx context.Context) {
 	var recursorch = conf.Internal.RecursorCh
 
 	if !viper.GetBool("recursorengine.active") {
 		log.Printf("RecursorEngine is NOT active.")
-		for rrq := range recursorch {
-			log.Printf("RecursorEngine: not active, but got a request: %v", rrq)
-			continue // ensure that we keep reading to keep the channel open
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("RecursorEngine: terminating due to context cancelled (inactive mode)")
+				return
+			case rrq, ok := <-recursorch:
+				if !ok {
+					return
+				}
+				log.Printf("RecursorEngine: not active, but got a request: %v", rrq)
+				continue // ensure that we keep reading to keep the channel open
+			}
 		}
 	} else {
 		log.Printf("RecursorEngine: Starting")
@@ -72,42 +81,51 @@ func (conf *Config) RecursorEngine(ctx context.Context, stopch chan struct{}) {
 	conf.Internal.RRsetCache = rrcache
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-    go rrcache.ImrEngine(ctx, conf, stopch)
+    go rrcache.ImrEngine(ctx, conf)
 
-	for rrq := range recursorch {
-		if Globals.Debug {
-			log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
-			fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
-		}
-		// resp := ImrResponse{
-		//			Validated: false,
-		// Msg:       "RecursorEngine: request to look up a RRset",
-		// }
-		var resp *ImrResponse
-
-		// 1. Is the answer in the cache?
-		crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
-		if crrset != nil {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("RecursorEngine: terminating due to context cancelled (active mode)")
+			return
+		case rrq, ok := <-recursorch:
+			if !ok {
+				return
+			}
 			if Globals.Debug {
-				fmt.Printf("RecursorEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 			}
-			resp = &ImrResponse{
-				RRset: crrset.RRset,
-			}
-		} else {
-			var err error
-			if Globals.Debug {
-				log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
-				fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			}
+			// resp := ImrResponse{
+			//			Validated: false,
+			// Msg:       "RecursorEngine: request to look up a RRset",
+			// }
+			var resp *ImrResponse
 
-			resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
-			if err != nil {
-				log.Printf("Error from IterateOverQuery: %v", err)
+			// 1. Is the answer in the cache?
+			crrset := rrcache.Get(rrq.Qname, rrq.Qtype)
+			if crrset != nil {
+				if Globals.Debug {
+					fmt.Printf("RecursorEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				}
+				resp = &ImrResponse{
+					RRset: crrset.RRset,
+				}
+			} else {
+				var err error
+				if Globals.Debug {
+					log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
+					fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
+				}
+
+				resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+				if err != nil {
+					log.Printf("Error from IterateOverQuery: %v", err)
+				}
 			}
-		}
-		if rrq.ResponseCh != nil {
-			rrq.ResponseCh <- *resp
+			if rrq.ResponseCh != nil {
+				rrq.ResponseCh <- *resp
+			}
 		}
 	}
 }
@@ -505,7 +523,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	return bestmatch, servers, nil
 }
 
-func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config, done chan struct{}) error {
+func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 	ImrHandler := createImrHandler(conf, rrcache)
 	dns.HandleFunc(".", ImrHandler)
 

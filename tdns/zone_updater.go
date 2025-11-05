@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/gookit/goutil/dump"
@@ -59,27 +58,22 @@ type DeferredUpdate struct {
 	Action       func() error
 }
 
-func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context, stopchan chan struct{}) error {
+func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 	updateq := kdb.UpdateQ
 
-	var ur UpdateRequest
-
 	log.Printf("ZoneUpdater: starting")
-    var wg sync.WaitGroup
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        for {
-            select {
-            case <-ctx.Done():
-                log.Printf("ZoneUpdater: context cancelled")
-                return
-            case tmp, ok := <-updateq:
-                if !ok {
-                    log.Printf("ZoneUpdater: updateq closed")
-                    return
-                }
-                ur = tmp
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("ZoneUpdater: context cancelled")
+			log.Println("ZoneUpdater: terminating")
+			return nil
+		case ur, ok := <-updateq:
+			if !ok {
+				log.Printf("ZoneUpdater: updateq closed")
+				log.Println("ZoneUpdater: terminating")
+				return nil
+			}
 			log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
 			if ur.Cmd == "PING" {
 				log.Printf("ZoneUpdater: PING received. PONG!")
@@ -219,106 +213,98 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context, stopchan chan struct{})
 			default:
 				log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)
 			}
-            log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
-            }
-        }
-    }()
-	wg.Wait()
-
-	log.Println("ZoneUpdater: terminating")
-	return nil
+			log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
+		}
+	}
 }
 
-func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context, stopchan chan struct{}) error {
+func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 	deferredq := kdb.DeferredUpdateQ
 
 	var deferredUpdates []DeferredUpdate
 
 	var runQueueTicker = time.NewTicker(10 * time.Second)
 
-	var du DeferredUpdate
+    log.Printf("DeferredUpdater: starting")
+    defer runQueueTicker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            log.Printf("DeferredUpdater: context cancelled")
+            log.Println("DeferredUpdater: terminating")
+            return nil
+        case du, ok := <-deferredq:
+            if !ok {
+                log.Printf("DeferredUpdater: deferredq closed")
+                log.Println("DeferredUpdater: terminating")
+                return nil
+            }
+			log.Printf("DeferredUpdater: Received update request on queue: %+v", deferredq)
+			if du.Cmd == "PING" {
+				log.Printf("DeferredUpdater: PING received. PONG!")
+				continue
+			}
+			_, ok = Zones.Get(du.ZoneName)
+			if !ok && du.Cmd != "DEFERRED-UPDATE" {
+				log.Printf("DeferredUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", du.Cmd, du.ZoneName, du)
+				log.Printf("DeferredUpdater: Current list of known zones: %v", Zones.Keys())
+				continue
+			}
 
-	log.Printf("DeferredUpdater: starting")
-	var wg sync.WaitGroup
-	wg.Add(1)
-    go func() {
-		for {
-			select {
-            case <-ctx.Done():
-                log.Printf("DeferredUpdater: context cancelled")
-                return
-			case du = <-deferredq:
-				log.Printf("DeferredUpdater: Received update request on queue: %+v", deferredq)
-				if du.Cmd == "PING" {
-					log.Printf("DeferredUpdater: PING received. PONG!")
-					continue
-				}
-				_, ok := Zones.Get(du.ZoneName)
-				if !ok && du.Cmd != "DEFERRED-UPDATE" {
-					log.Printf("DeferredUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", du.Cmd, du.ZoneName, du)
-					log.Printf("DeferredUpdater: Current list of known zones: %v", Zones.Keys())
-					continue
-				}
-
-				switch du.Cmd {
-				case "DEFERRED-UPDATE":
-					// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
-					if du.PreCondition() {
-						log.Printf("DeferredUpdater: PreCondition is true for deferred update \"%s\". Executing immediately.", du.Description)
-						err := du.Action()
-						if err != nil {
-							log.Printf("DeferredUpdater: Error return from deferred update %q action: %v", du.Description, err)
-						}
-					} else {
-						log.Printf("DeferredUpdater: PreCondition is false for deferred update \"%s\". Deferring execution.", du.Description)
-						du := DeferredUpdate{
-							Description:  du.Description,
-							PreCondition: du.PreCondition,
-							Action:       du.Action,
-							AddTime:      time.Now(),
-						}
-						deferredUpdates = append(deferredUpdates, du)
+			switch du.Cmd {
+			case "DEFERRED-UPDATE":
+				// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
+				if du.PreCondition() {
+					log.Printf("DeferredUpdater: PreCondition is true for deferred update \"%s\". Executing immediately.", du.Description)
+					err := du.Action()
+					if err != nil {
+						log.Printf("DeferredUpdater: Error return from deferred update %q action: %v", du.Description, err)
 					}
-					continue
-
-				default:
-					log.Printf("Unknown command: '%s'. Ignoring.", du.Cmd)
+				} else {
+					log.Printf("DeferredUpdater: PreCondition is false for deferred update \"%s\". Deferring execution.", du.Description)
+					du := DeferredUpdate{
+						Description:  du.Description,
+						PreCondition: du.PreCondition,
+						Action:       du.Action,
+						AddTime:      time.Now(),
+					}
+					deferredUpdates = append(deferredUpdates, du)
 				}
-				log.Printf("DeferredUpdater: Request for update of type %s is completed.", du.Cmd)
+				continue
 
-			case <-runQueueTicker.C:
-				if len(deferredUpdates) == 0 {
-					continue
-				}
+			default:
+				log.Printf("Unknown command: '%s'. Ignoring.", du.Cmd)
+			}
+			log.Printf("DeferredUpdater: Request for update of type %s is completed.", du.Cmd)
 
-				log.Printf("DeferredUpdater: running deferred updates queue (%d items).", len(deferredUpdates))
-				for i := 0; i < len(deferredUpdates); {
-					du := deferredUpdates[i]
-					log.Printf("DeferredUpdater: running deferred update \"%s\"", du.Description)
-					ok := du.PreCondition()
-					if ok {
-						log.Printf("DeferredUpdater: PreCondition is true. Executing deferred update \"%s\"", du.Description)
-						err := du.Action()
-						if err != nil {
-							log.Printf("DeferredUpdater: Error from deferred update action: %v", err)
-							i++
-						} else {
-							log.Printf("DeferredUpdater: Deferred update \"%s\" executed successfully.", du.Description)
-							// Remove the item from deferredUpdates queue
-							deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
-						}
-					} else {
-						log.Printf("DeferredUpdater: Deferred update \"%s\" not executed because precondition failed.", du.Description)
+        case <-runQueueTicker.C:
+			if len(deferredUpdates) == 0 {
+				continue
+			}
+
+			log.Printf("DeferredUpdater: running deferred updates queue (%d items).", len(deferredUpdates))
+			for i := 0; i < len(deferredUpdates); {
+				du := deferredUpdates[i]
+				log.Printf("DeferredUpdater: running deferred update \"%s\"", du.Description)
+				ok := du.PreCondition()
+				if ok {
+					log.Printf("DeferredUpdater: PreCondition is true. Executing deferred update \"%s\"", du.Description)
+					err := du.Action()
+					if err != nil {
+						log.Printf("DeferredUpdater: Error from deferred update action: %v", err)
 						i++
+					} else {
+						log.Printf("DeferredUpdater: Deferred update \"%s\" executed successfully.", du.Description)
+						// Remove the item from deferredUpdates queue
+						deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
 					}
+				} else {
+					log.Printf("DeferredUpdater: Deferred update \"%s\" not executed because precondition failed.", du.Description)
+					i++
 				}
 			}
-		}
-	}()
-	wg.Wait()
-
-	log.Println("DeferredUpdater: terminating")
-	return nil
+        }
+    }
 }
 
 // 1. Sort actions so that all removes come first.

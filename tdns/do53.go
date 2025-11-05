@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 	_ "github.com/mattn/go-sqlite3"
@@ -74,8 +75,15 @@ func DnsEngine(ctx context.Context, conf *Config) error {
         <-ctx.Done()
         log.Printf("DnsEngine: shutting down Do53 servers...")
         for _, s := range servers {
-            if err := s.Shutdown(); err != nil {
-                log.Printf("DnsEngine: error during shutdown of %s/%s: %v", s.Addr, s.Net, err)
+            done := make(chan struct{})
+            go func(srv *dns.Server) {
+                _ = srv.Shutdown()
+                close(done)
+            }(s)
+            select {
+            case <-done:
+            case <-time.After(5 * time.Second):
+                log.Printf("DnsEngine: timeout shutting down %s/%s; continuing", s.Addr, s.Net)
             }
         }
     }()

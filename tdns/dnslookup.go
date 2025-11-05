@@ -1020,11 +1020,12 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
             }
         }
     }
-    var otsname bool = false
+
 	for _, rr := range r.Extra {
 		name := rr.Header().Name
+		isOTSOwner := false
 		if strings.HasPrefix(name, "_dns.") {
-			otsname = true
+			isOTSOwner = true
 			name = strings.TrimPrefix(name, "_dns.")
 		}
 		if _, exist := nsMap[name]; !exist {
@@ -1073,7 +1074,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			glue6Map[name] = tmp
 
 		case *dns.SVCB:
-			if !otsname {
+			if !isOTSOwner {
 				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
 				continue
 			}

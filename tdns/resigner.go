@@ -12,7 +12,7 @@ import (
 )
 
 // func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
-func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData, stopch chan struct{}) {
+func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
@@ -26,13 +26,24 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData, stopch cha
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 
-	if !viper.GetBool("service.resign") {
-		log.Printf("ResignerEngine is NOT active. Zones will only be updated on receipt on Notifies.")
-		for range zoneresignch {
-			// ensure that we keep reading to keep the channel open
-			continue
-		}
-	} else {
+    if !viper.GetBool("service.resign") {
+        log.Printf("ResignerEngine is NOT active. Zones will only be updated on receipt on Notifies.")
+        for {
+            select {
+            case <-ctx.Done():
+                log.Printf("ResignerEngine: terminating due to context cancelled (inactive mode)")
+                ticker.Stop()
+                return
+            case _, ok := <-zoneresignch:
+                if !ok {
+                    ticker.Stop()
+                    return
+                }
+                // ensure that we keep reading to keep the channel open
+                continue
+            }
+        }
+    } else {
 		log.Printf("*** ResignerEngine: Starting with interval %d seconds ***", interval)
 	}
 
@@ -44,8 +55,13 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData, stopch cha
 		select {
         case <-ctx.Done():
             log.Printf("ResignerEngine: terminating due to context cancelled")
+			ticker.Stop()
             return
-		case zd := <-zoneresignch:
+        case zd, ok := <-zoneresignch:
+            if !ok {
+                ticker.Stop()
+                return
+            }
 
 			if zd == nil {
 				log.Printf("ResignerEngine: Zone <nil> does not exist, cannot resign")

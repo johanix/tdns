@@ -19,8 +19,6 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 
 	log.Printf("*** DnsNotifyResponderEngine: starting")
 
-	var dhr DnsNotifyRequest
-
 	var wg sync.WaitGroup
 	wg.Add(1)
     go func() {
@@ -30,8 +28,12 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 			case <-ctx.Done():
 				log.Println("DnsNotifyResponderEngine: context cancelled")
 				return
-            case dhr = <-dnsnotifyq:
-                NotifyResponder(ctx, &dhr, zonech, scannerq)
+			case dhr, ok := <-dnsnotifyq:
+				if !ok {
+					log.Println("DnsNotifyResponderEngine: dnsnotifyq closed")
+					return
+				}
+				NotifyResponder(ctx, &dhr, zonech, scannerq)
 			}
 			
 		}

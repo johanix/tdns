@@ -177,10 +177,10 @@ var ReportCmd = &cobra.Command{
 		viper.Set("recursorengine.root-hints", "/etc/tdns/root.hints")
 		// log.Printf("ReportCmd: Starting RecursorEngine")
 		Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
-		stopCh := make(chan struct{}, 10)
+		
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go Conf.RecursorEngine(ctx, stopCh)
+		go Conf.RecursorEngine(ctx)
 
 		// Discover DSYNC via IMR for the zone that contains qname
 		log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
@@ -188,7 +188,6 @@ var ReportCmd = &cobra.Command{
 		var reportDSYNC *tdns.DSYNC
 		if derr != nil {
 			log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
-			close(stopCh)
 			cancel()
 			return
 		} else {
@@ -204,7 +203,6 @@ var ReportCmd = &cobra.Command{
 			log.Printf("ReportCmd: no DSYNC REPORT found for %s, aborting report", tdns.Globals.Zonename)
 			return
 		}
-		close(stopCh)
 		cancel()
     
         targetIP = reportDSYNC.Target

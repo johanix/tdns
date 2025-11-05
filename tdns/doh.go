@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
@@ -90,11 +91,14 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
     go func() {
         <-ctx.Done()
         log.Printf("DnsDoHEngine: shutting down DoH servers...")
-        for _, s := range servers {
-            if err := s.Shutdown(context.Background()); err != nil {
-                log.Printf("DnsDoHEngine: error during shutdown of %s: %v", s.Addr, err)
-            }
-        }
+		// Use bounded shutdown context to avoid hanging forever
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, s := range servers {
+			if err := s.Shutdown(shutdownCtx); err != nil {
+				log.Printf("DnsDoHEngine: error during shutdown of %s: %v", s.Addr, err)
+			}
+		}
     }()
 	return nil
 }

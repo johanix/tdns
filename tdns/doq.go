@@ -35,35 +35,34 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 	}
     var listeners []*quic.Listener
     for _, addr := range doqaddrs {
-		for _, port := range ports {
-            go func(addr string) {
-                hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 8853
-                log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
-                listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
-					MaxIdleTimeout:  time.Duration(30) * time.Second,
-					KeepAlivePeriod: time.Duration(15) * time.Second,
-				})
-				if err != nil {
-					log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
-					return
-				}
-                listeners = append(listeners, listener)
+        for _, port := range ports {
+            hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 8853
+            log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
+            listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
+                MaxIdleTimeout:  time.Duration(30) * time.Second,
+                KeepAlivePeriod: time.Duration(15) * time.Second,
+            })
+            if err != nil {
+                log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
+                continue
+            }
+            listeners = append(listeners, listener)
 
-				for {
-					conn, err := listener.Accept(ctx)
-					if err != nil {
-						if ctx.Err() != nil {
-							return
-						}
-						log.Printf("Failed to accept QUIC connection on %s: %s", hostport, err.Error())
-						continue
-					}
-
+            go func(l *quic.Listener, hp string) {
+                for {
+                    conn, err := l.Accept(ctx)
+                    if err != nil {
+                        if ctx.Err() != nil {
+                            return
+                        }
+                        log.Printf("Failed to accept QUIC connection on %s: %s", hp, err.Error())
+                        continue
+                    }
                     go handleDoQConnection(ctx, conn, ourDNSHandler)
-				}
-			}(addr)
-		}
-	}
+                }
+            }(listener, hostport)
+        }
+    }
     go func() {
         <-ctx.Done()
         log.Printf("DnsDoQEngine: shutting down DoQ listeners...")

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
@@ -73,11 +74,18 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
     go func() {
         <-ctx.Done()
         log.Printf("DnsDoTEngine: shutting down DoT servers...")
-        for _, s := range servers {
-            if err := s.Shutdown(); err != nil {
-                log.Printf("DnsDoTEngine: error during shutdown of %s: %v", s.Addr, err)
-            }
-        }
+		for _, s := range servers {
+			done := make(chan struct{})
+			go func(srv *dns.Server) {
+				_ = srv.Shutdown()
+				close(done)
+			}(s)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				log.Printf("DnsDoTEngine: timeout shutting down %s; continuing", s.Addr)
+			}
+		}
     }()
 	return nil
 }

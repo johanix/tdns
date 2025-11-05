@@ -287,7 +287,7 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	switch item.Val.Context {
 	case tdns.ContextNXDOMAIN:
 		fmt.Printf("NXDOMAIN (negative response type 3)\n")
-		fmt.Printf("%s (%s, TTL: %s)\n", item.Val.Name,
+		fmt.Printf("%s %s (%s, TTL: %s)\n", item.Val.Name,
 		   dns.TypeToString[uint16(item.Val.RRtype)], tdns.CacheContextToString[item.Val.Context], tdns.TtlPrint(item.Val.Expiration))
 	case tdns.ContextNoErrNoAns:
 		// fmt.Printf("negative response type 0\n")

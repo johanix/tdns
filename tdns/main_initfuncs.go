@@ -253,7 +253,6 @@ func (conf *Config) MainInit(defaultcfg string) error {
 
 func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
-	stopch := conf.Internal.StopCh
 
 	conf.Internal.APIStopCh = make(chan struct{})
 
@@ -295,8 +294,8 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 		kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
 		conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
 
-        go kdb.ZoneUpdaterEngine(ctx, stopch)
-        go kdb.DeferredUpdaterEngine(ctx, stopch)
+        go kdb.ZoneUpdaterEngine(ctx)
+        go kdb.DeferredUpdaterEngine(ctx)
 
         go UpdateHandler(ctx, conf)
         go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
@@ -318,7 +317,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 	case AppTypeServer:
 		// Only tdns-server runs the resigner engine
 		conf.Internal.ResignQ = make(chan *ZoneData, 10)
-        go ResignerEngine(ctx, conf.Internal.ResignQ, stopch)
+        go ResignerEngine(ctx, conf.Internal.ResignQ)
 		log.Printf("TDNS %s (%s): starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	default:
 		log.Printf("TDNS %s (%s): not starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
@@ -327,8 +326,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 	switch Globals.App.Type {
 	case AppTypeImr:
 		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-		stopCh := make(chan struct{}, 10)
-        go conf.RecursorEngine(ctx, stopCh)
+        go conf.RecursorEngine(ctx)
 		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
 		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 

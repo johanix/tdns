@@ -94,9 +94,11 @@ func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq ch
 	var sr ScanRequest
 
 	log.Printf("*** ScannerEngine: starting ***")
-	var wg sync.WaitGroup
-	wg.Add(1)
+    var wg sync.WaitGroup
+    wg.Add(1)
     go func() {
+        defer wg.Done()
+        defer ticker.Stop()
 		for {
 			select {
             case <-ctx.Done():
