@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -126,21 +127,51 @@ type AuthQueryResponse struct {
 }
 
 func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
-	log.Printf("*** AuthQueryEngine: Starting ***\t")
+    log.Printf("*** AuthQueryEngine: Starting ***")
 
-	tcpclient := new(dns.Client)
-	tcpclient.Net = "tcp"
+    tcpclient := new(dns.Client)
+    tcpclient.Net = "tcp"
 
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("AuthQueryEngine: terminating due to context cancelled")
-			return
-		case req, ok := <-requests:
-			if !ok {
-				log.Println("AuthQueryEngine: requests channel closed")
-				return
-			}
+    // After cancellation, keep draining requests for a short window to avoid leaving senders blocked.
+    ctxCh := ctx.Done()
+    shuttingDown := false
+    var drainTimer *time.Timer
+
+    for {
+        var timeout <-chan time.Time
+        if shuttingDown {
+            if drainTimer == nil {
+                drainTimer = time.NewTimer(500 * time.Millisecond)
+            } else {
+                timeout = drainTimer.C
+            }
+        }
+        select {
+        case <-ctxCh:
+            shuttingDown = true
+            ctxCh = nil
+            if drainTimer == nil {
+                drainTimer = time.NewTimer(500 * time.Millisecond)
+            }
+            continue
+        case <-timeout:
+            return
+        case req, ok := <-requests:
+            if !ok {
+                log.Println("AuthQueryEngine: requests channel closed")
+                return
+            }
+            if shuttingDown {
+                if drainTimer != nil {
+                    if !drainTimer.Stop() {
+                        select { case <-drainTimer.C: default: }
+                    }
+                    drainTimer.Reset(500 * time.Millisecond)
+                }
+                rrset := RRset{Name: req.qname}
+                req.response <- &AuthQueryResponse{&rrset, ctx.Err()}
+                continue
+            }
 
 			log.Printf("*** AuthQueryEngine: Received request for %s %s from %s ***", req.qname, dns.TypeToString[req.rrtype], req.ns)
 			rrset := RRset{
