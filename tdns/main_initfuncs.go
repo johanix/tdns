@@ -11,10 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"runtime/debug"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -27,55 +24,20 @@ import (
 )
 
 func MainLoop(ctx context.Context, cancel context.CancelFunc, conf *Config) {
-	if Globals.Debug {
-		debug.SetTraceback("all")
-	}
-	exit := make(chan os.Signal, 1)
-	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
-	hupper := make(chan os.Signal, 1)
-	signal.Notify(hupper, syscall.SIGHUP)
-
-	defer signal.Stop(exit)
-	defer signal.Stop(hupper)
-
-	var err error
-	var all_zones []string
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		for {
-			// log.Println("mainloop: signal dispatcher")
-			select {
-			case <-ctx.Done():
-				log.Println("mainloop: context cancelled. Cleaning up.")
-				return
-			case <-exit:
-				log.Println("mainloop: Exit signal received. Cleaning up.")
-				cancel()
-				return
-			case <-hupper:
-				log.Println("mainloop: SIGHUP received. Forcing refresh of all configured zones.")
-				// err = ParseZones(conf.Zones, conf.Internal.RefreshZoneCh)
-				all_zones, err = conf.ParseZones(true) // true = reload
-				if err != nil {
-					log.Printf("Error parsing zones: %v", err)
-					return // terminate MainLoop --> shutdown
-				} else {
-					log.Printf("mainloop: SIGHUP received. Forcing refresh of %d configured zones.", len(all_zones))
-				}
-
-			case <-conf.Internal.APIStopCh:
-				log.Println("mainloop: Stop command received. Cleaning up.")
-				cancel()
-				return
-			}
-		}
-	}()
-	wg.Wait()
-
-	fmt.Println("mainloop: leaving signal dispatcher")
+    if Globals.Debug {
+        debug.SetTraceback("all")
+    }
+    for {
+        select {
+        case <-ctx.Done():
+            log.Println("mainloop: context cancelled. Cleaning up.")
+            return
+        case <-conf.Internal.APIStopCh:
+            log.Println("mainloop: Stop command received. Cleaning up.")
+            cancel()
+            return
+        }
+    }
 }
 
 // const DefaultCfgFile = "/etc/axfr.net/tdnsd.yaml"
@@ -206,14 +168,13 @@ func (conf *Config) MainInit(defaultcfg string) error {
 		}
 	}
 
-	switch Globals.App.Type {
-	case AppTypeImr, AppTypeServer:
-		conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
-		go ValidatorEngine(conf, conf.Internal.StopCh)
-		log.Printf("TDNS %s (%s): starting: validatorengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	default:
-		log.Printf("TDNS %s (%s): not starting: validatorengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	}
+    switch Globals.App.Type {
+    case AppTypeImr, AppTypeServer:
+        conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
+        log.Printf("TDNS %s (%s): validator channel initialized (engine starts in starter)", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    default:
+        log.Printf("TDNS %s (%s): not starting: validatorengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    }
 
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	go Notifier(conf.Internal.NotifyQ)
@@ -252,94 +213,201 @@ func (conf *Config) MainInit(defaultcfg string) error {
 }
 
 func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) error {
-	kdb := conf.Internal.KeyDB
+    kdb := conf.Internal.KeyDB
 
-	conf.Internal.APIStopCh = make(chan struct{})
+    conf.Internal.APIStopCh = make(chan struct{})
 
-	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
-	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
-	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
-	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
+    conf.Internal.ScannerQ = make(chan ScanRequest, 5)
+    conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
+    conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
+    conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
 
-	// Everyone has the mgmt API dispatcher
-	err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
-	if err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
+    // Everyone has the mgmt API dispatcher
+    err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
+    if err != nil {
+        return fmt.Errorf("Error starting API dispatcher: %v", err)
+    }
 
-	switch Globals.App.Type {
-	case AppTypeAgent:
-		// we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
-		// the HsyncEngine starts listening for incoming connections
-		go HsyncEngine(ctx, conf, conf.Internal.AgentQs, conf.Internal.StopCh) // Only used by agent
-		go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs, conf.Internal.StopCh)
-		syncrtr, err := SetupAgentSyncRouter(conf)
-		if err != nil {
-			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
-		}
-		log.Printf("TDNS %s (%s): starting agent-to-agent sync engine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-		go APIdispatcherNG(conf, syncrtr, conf.Agent.Api.Addresses.Listen, conf.Agent.Api.CertFile, conf.Agent.Api.KeyFile, conf.Internal.APIStopCh)
-		log.Printf("TDNS %s (%s): starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	default:
-		log.Printf("TDNS %s (%s): not starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	}
+    switch Globals.App.Type {
+    case AppTypeAgent:
+        // we pass the HelloQ and HeartbeatQ channels to the HsyncEngine to ensure they are created before
+        // the HsyncEngine starts listening for incoming connections
+        go HsyncEngine(ctx, conf, conf.Internal.AgentQs) // Only used by agent
+        go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs)
+        syncrtr, err := SetupAgentSyncRouter(conf)
+        if err != nil {
+            return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
+        }
+        log.Printf("TDNS %s (%s): starting agent-to-agent sync engine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+        go APIdispatcherNG(conf, syncrtr, conf.Agent.Api.Addresses.Listen, conf.Agent.Api.CertFile, conf.Agent.Api.KeyFile, conf.Internal.APIStopCh)
+        log.Printf("TDNS %s (%s): starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    default:
+        log.Printf("TDNS %s (%s): not starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    }
 
-	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent:
-		go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-		go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+    switch Globals.App.Type {
+    case AppTypeServer, AppTypeAgent:
+        go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
+        go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
 
-		kdb.UpdateQ = make(chan UpdateRequest, 10)
-		conf.Internal.UpdateQ = kdb.UpdateQ
-		kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
-		conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+        kdb.UpdateQ = make(chan UpdateRequest, 10)
+        conf.Internal.UpdateQ = kdb.UpdateQ
+        kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
+        conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
 
-		go kdb.ZoneUpdaterEngine(ctx)
-		go kdb.DeferredUpdaterEngine(ctx)
+        go kdb.ZoneUpdaterEngine(ctx)
+        go kdb.DeferredUpdaterEngine(ctx)
 
-		go UpdateHandler(ctx, conf)
-		go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
-		log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	default:
-		log.Printf("TDNS %s (%s): not starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	}
+        go UpdateHandler(ctx, conf)
+        go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+        log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    default:
+        log.Printf("TDNS %s (%s): not starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    }
 
-	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
-		go NotifyHandler(ctx, conf)
-		go DnsEngine(ctx, conf)
-		log.Printf("TDNS %s (%s): starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	default:
-		log.Printf("TDNS %s (%s): not starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	}
+    switch Globals.App.Type {
+    case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+        go NotifyHandler(ctx, conf)
+        go DnsEngine(ctx, conf)
+        log.Printf("TDNS %s (%s): starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    default:
+        log.Printf("TDNS %s (%s): not starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    }
 
-	switch Globals.App.Type {
-	case AppTypeServer:
-		// Only tdns-server runs the resigner engine
-		conf.Internal.ResignQ = make(chan *ZoneData, 10)
-		go ResignerEngine(ctx, conf.Internal.ResignQ)
-		log.Printf("TDNS %s (%s): starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	default:
-		log.Printf("TDNS %s (%s): not starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	}
+    switch Globals.App.Type {
+    case AppTypeServer:
+        // Only tdns-server runs the resigner engine
+        conf.Internal.ResignQ = make(chan *ZoneData, 10)
+        go ResignerEngine(ctx, conf.Internal.ResignQ)
+        log.Printf("TDNS %s (%s): starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    default:
+        log.Printf("TDNS %s (%s): not starting: resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    }
 
-	switch Globals.App.Type {
-	case AppTypeImr:
-		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-		go conf.RecursorEngine(ctx)
-		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
-		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    switch Globals.App.Type {
+    case AppTypeImr:
+        conf.Internal.RecursorCh = make(chan ImrRequest, 10)
+        go conf.RecursorEngine(ctx)
+        // go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
+        log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 
-	default:
-		log.Printf("TDNS %s (%s): not starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	}
+    default:
+        log.Printf("TDNS %s (%s): not starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    }
 
-	return nil
+    return nil
+}
+
+// StartImr starts subsystems for tdns-imr
+func StartImr(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+    conf.Internal.APIStopCh = make(chan struct{})
+    if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
+        return fmt.Errorf("Error starting API dispatcher: %v", err)
+    }
+    if conf.Internal.ValidatorCh == nil {
+        conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
+    }
+    go ValidatorEngine(ctx, conf)
+    conf.Internal.RecursorCh = make(chan ImrRequest, 10)
+    go conf.RecursorEngine(ctx)
+    log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    return nil
+}
+
+// StartCombiner starts subsystems for tdns-combiner
+func StartCombiner(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+    conf.Internal.APIStopCh = make(chan struct{})
+    if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
+        return fmt.Errorf("Error starting API dispatcher: %v", err)
+    }
+
+    conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
+    go NotifyHandler(ctx, conf)
+    go DnsEngine(ctx, conf)
+    log.Printf("TDNS %s (%s): starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    return nil
+}
+
+// StartServer starts subsystems for tdns-server
+func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+    if conf.Internal.ValidatorCh == nil {
+        conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
+    }
+    go ValidatorEngine(ctx, conf)
+    kdb := conf.Internal.KeyDB
+    conf.Internal.APIStopCh = make(chan struct{})
+    conf.Internal.ScannerQ = make(chan ScanRequest, 5)
+    conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
+    conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
+    conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
+    if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
+        return fmt.Errorf("Error starting API dispatcher: %v", err)
+    }
+    go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
+    go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+    kdb.UpdateQ = make(chan UpdateRequest, 10)
+    conf.Internal.UpdateQ = kdb.UpdateQ
+    kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
+    conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+    go kdb.ZoneUpdaterEngine(ctx)
+    go kdb.DeferredUpdaterEngine(ctx)
+    go UpdateHandler(ctx, conf)
+    go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+    go NotifyHandler(ctx, conf)
+    go DnsEngine(ctx, conf)
+    conf.Internal.ResignQ = make(chan *ZoneData, 10)
+    go ResignerEngine(ctx, conf.Internal.ResignQ)
+    log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine, resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    return nil
+}
+
+// StartAgent starts subsystems for tdns-agent
+func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+    kdb := conf.Internal.KeyDB
+    conf.Internal.APIStopCh = make(chan struct{})
+    conf.Internal.ScannerQ = make(chan ScanRequest, 5)
+    conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
+    conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
+    conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
+    if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
+        return fmt.Errorf("Error starting API dispatcher: %v", err)
+    }
+    // Agent-specific
+    go HsyncEngine(ctx, conf, conf.Internal.AgentQs)
+    go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs)
+    syncrtr, err := SetupAgentSyncRouter(conf)
+    if err != nil {
+        return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
+    }
+    go APIdispatcherNG(conf, syncrtr, conf.Agent.Api.Addresses.Listen, conf.Agent.Api.CertFile, conf.Agent.Api.KeyFile, conf.Internal.APIStopCh)
+    log.Printf("TDNS %s (%s): starting: agent-to-agent sync engines", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    // Common engines
+    go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
+    go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+    kdb.UpdateQ = make(chan UpdateRequest, 10)
+    conf.Internal.UpdateQ = kdb.UpdateQ
+    kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
+    conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
+    go kdb.ZoneUpdaterEngine(ctx)
+    go kdb.DeferredUpdaterEngine(ctx)
+    go UpdateHandler(ctx, conf)
+    go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+    go NotifyHandler(ctx, conf)
+    go DnsEngine(ctx, conf)
+    log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+    return nil
 }
 
 func Shutdowner(conf *Config, msg string) {
 	log.Printf("%s: shutting down: %s", Globals.App.Name, msg)
-	conf.Internal.StopCh <- struct{}{}
-	time.Sleep(2 * time.Second)
+    // Prefer closing APIStopCh once as a broadcast to MainLoop and all listeners
+    if conf.Internal.APIStopCh != nil {
+        conf.Internal.StopOnce.Do(func() {
+            // small delay can help in-flight API responses complete before close is observed
+            time.Sleep(200 * time.Millisecond)
+            close(conf.Internal.APIStopCh)
+        })
+    }
+    time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
 }
