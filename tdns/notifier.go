@@ -4,9 +4,9 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"sync"
 
 	"github.com/miekg/dns"
 )
@@ -29,15 +29,20 @@ type NotifyResponse struct {
 
 // XXX: The whole point with the NotifierEngine is to be able to control the max rate of send notifications per
 // zone. This is not yet implemented, but this is where to do it.
-func Notifier(notifyreqQ chan NotifyRequest) error {
-
-	var nr NotifyRequest
+func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 
 	log.Printf("*** NotifierEngine: starting")
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		for nr = range notifyreqQ {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("NotifierEngine: terminating due to context cancelled")
+			return nil
+		case nr, ok := <-notifyreqQ:
+			if !ok {
+				log.Println("NotifierEngine: terminating due to notifyreqQ closed")
+				return nil
+			}
+
 			zd := nr.ZoneData
 
 			log.Printf("NotifierEngine: Zone %q: will notify downstreams", zd.ZoneName)
@@ -48,8 +53,7 @@ func Notifier(notifyreqQ chan NotifyRequest) error {
 				nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}
 			}
 		}
-	}()
-	wg.Wait()
+	}
 
 	log.Println("*** NotifierEngine: terminating")
 	return nil

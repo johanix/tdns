@@ -41,13 +41,13 @@ func ValidatorEngine(ctx context.Context, conf *Config) {
 	// var owner
 	var rrtype string
 
-    for {
-        select {
-        case <-ctx.Done():
-            log.Printf("ValidatorEngine: context cancelled")
-            return
-        case vr = <-validatorch:
-        }
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("ValidatorEngine: context cancelled")
+			return
+		case vr = <-validatorch:
+		}
 		rrset = vr.RRset
 		resp := ValidatorResponse{
 			Validated: false,

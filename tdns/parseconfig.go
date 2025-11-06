@@ -670,70 +670,70 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 // Templates map and an error is returned. Missing parent references also remove the referring
 // template.
 func expandTemplateChain(name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
-    if done[name] {
-        return Templates[name], nil
-    }
-    t, exists := Templates[name]
-    if !exists {
-        return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
-    }
+	if done[name] {
+		return Templates[name], nil
+	}
+	t, exists := Templates[name]
+	if !exists {
+		return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
+	}
 
-    if onStack[name] {
-        // Cycle detected: find cycle in stack
-        var cycle []string
-        for i := range stack {
-            if stack[i] == name {
-                cycle = append([]string{}, stack[i:]...)
-                break
-            }
-        }
-        cycle = append(cycle, name)
-        log.Printf("Template cycle detected: %s", strings.Join(cycle, " -> "))
-        for _, n := range cycle {
-            delete(Templates, n)
-        }
-        return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
-    }
+	if onStack[name] {
+		// Cycle detected: find cycle in stack
+		var cycle []string
+		for i := range stack {
+			if stack[i] == name {
+				cycle = append([]string{}, stack[i:]...)
+				break
+			}
+		}
+		cycle = append(cycle, name)
+		log.Printf("Template cycle detected: %s", strings.Join(cycle, " -> "))
+		for _, n := range cycle {
+			delete(Templates, n)
+		}
+		return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
+	}
 
-    onStack[name] = true
-    stack = append(stack, name)
+	onStack[name] = true
+	stack = append(stack, name)
 
-    if t.Template != "" && t.Template != name {
-        parent, exists := Templates[t.Template]
-        if !exists {
-            log.Printf("Template %q refers to non-existing template %q. Ignored.", t.Name, t.Template)
-            delete(Templates, t.Name)
-            onStack[name] = false
-            return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
-        }
-        // Recurse to expand parent first
-        expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
-        if err != nil {
-            onStack[name] = false
-            return ZoneConf{}, err
-        }
-        // Apply parent's fields into child
-        expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
-        if err != nil {
-            log.Printf("Error expanding template %q from parent %q: %v", t.Name, t.Template, err)
-            delete(Templates, t.Name)
-            onStack[name] = false
-            return ZoneConf{}, err
-        }
-        t = expandedChild
-    } else if t.Template == name {
-        // Self-cycle
-        log.Printf("Template %q: self-referential cycle. Removing.", name)
-        delete(Templates, name)
-        onStack[name] = false
-        return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
-    }
+	if t.Template != "" && t.Template != name {
+		parent, exists := Templates[t.Template]
+		if !exists {
+			log.Printf("Template %q refers to non-existing template %q. Ignored.", t.Name, t.Template)
+			delete(Templates, t.Name)
+			onStack[name] = false
+			return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
+		}
+		// Recurse to expand parent first
+		expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
+		if err != nil {
+			onStack[name] = false
+			return ZoneConf{}, err
+		}
+		// Apply parent's fields into child
+		expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
+		if err != nil {
+			log.Printf("Error expanding template %q from parent %q: %v", t.Name, t.Template, err)
+			delete(Templates, t.Name)
+			onStack[name] = false
+			return ZoneConf{}, err
+		}
+		t = expandedChild
+	} else if t.Template == name {
+		// Self-cycle
+		log.Printf("Template %q: self-referential cycle. Removing.", name)
+		delete(Templates, name)
+		onStack[name] = false
+		return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
+	}
 
-    // Mark done and store expanded result
-    done[name] = true
-    onStack[name] = false
-    Templates[name] = t
-    return t, nil
+	// Mark done and store expanded result
+	done[name] = true
+	onStack[name] = false
+	Templates[name] = t
+	return t, nil
 }
 
 func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -23,7 +24,7 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
-func RefreshEngine(conf *Config, stopch chan struct{}) {
+func RefreshEngine(ctx context.Context, conf *Config) {
 
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
@@ -34,7 +35,12 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 
 	if !viper.GetBool("service.refresh") {
 		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt of Notifies.")
-		for range zonerefch {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-zonerefch:
+			}
 			// ensure that we keep reading to keep the channel open
 			continue
 		}
@@ -49,13 +55,21 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	var updated bool
 	var err error
 	var bd BumperData
-	var zr ZoneRefresher
 
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
 	for {
 		select {
-		case zr = <-zonerefch:
+		case <-ctx.Done():
+			log.Printf("RefreshEngine: terminating due to context cancelled")
+			ticker.Stop()
+			return
+		case zr, ok := <-zonerefch:
+			if !ok {
+				log.Printf("RefreshEngine: terminating due to zonerefch closed")
+				ticker.Stop()
+				return
+			}
 			// log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
 			zone = zr.Name
 			resp := RefresherResponse{

@@ -140,7 +140,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 		case <-ctx.Done():
 			log.Printf("SynchedDataEngine: context cancelled")
 			return
-        // stopch removed; ctx.Done() handles shutdown
+			// stopch removed; ctx.Done() handles shutdown
 
 		case synchedDataUpdate = <-SDupdateQ:
 			var change bool

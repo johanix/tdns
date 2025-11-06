@@ -48,9 +48,9 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 			}
 			listeners = append(listeners, listener)
 
-            go func(l *quic.Listener, hp string) {
+			go func(l *quic.Listener, hp string) {
 				for {
-                    conn, err := l.Accept(ctx)
+					conn, err := l.Accept(ctx)
 					if err != nil {
 						if ctx.Err() != nil {
 							return
@@ -58,7 +58,7 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 						log.Printf("Failed to accept QUIC connection on %s: %s", hp, err.Error())
 						continue
 					}
-                    go handleDoQConnection(ctx, conn, ourDNSHandler)
+					go handleDoQConnection(ctx, conn, ourDNSHandler)
 				}
 			}(listener, hostport)
 		}
@@ -70,17 +70,17 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 			_ = l.Close()
 		}
 	}()
-return nil
+	return nil
 }
 
 func handleDoQConnection(ctx context.Context, conn *quic.Conn, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
-    defer conn.CloseWithError(0, "") // ensure clean connection closure
+	defer conn.CloseWithError(0, "") // ensure clean connection closure
 
 	for {
 		if Globals.Debug {
 			log.Printf("DoQ: waiting for stream on connection from %v", conn.RemoteAddr())
 		}
-        stream, err := conn.AcceptStream(ctx)
+		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			// Log all errors, but with different levels of detail
 			if err.Error() == "Application error 0x0 (remote)" {
@@ -96,7 +96,7 @@ func handleDoQConnection(ctx context.Context, conn *quic.Conn, dnsHandler func(w
 		if Globals.Debug {
 			log.Printf("DoQ: accepted stream %v from %v", stream.StreamID(), conn.RemoteAddr())
 		}
-        go handleDoQStream(stream, conn, dnsHandler)
+		go handleDoQStream(stream, conn, dnsHandler)
 	}
 }
 
@@ -107,7 +107,7 @@ func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns
 
 	// Read the DNS message length (2 bytes)
 	lenBuf := make([]byte, 2)
-    _, err := io.ReadFull(stream, lenBuf)
+	_, err := io.ReadFull(stream, lenBuf)
 	if err != nil {
 		log.Printf("Failed to read message length: %s", err.Error())
 		stream.Close()
@@ -117,7 +117,7 @@ func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns
 
 	// Read the DNS message
 	msgBuf := make([]byte, msgLen)
-    _, err = io.ReadFull(stream, msgBuf)
+	_, err = io.ReadFull(stream, msgBuf)
 	if err != nil {
 		log.Printf("Failed to read DNS message: %s", err.Error())
 		stream.Close()
@@ -132,7 +132,7 @@ func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns
 	}
 
 	// Create a response writer for DoQ with both stream and connection
-    rw := &doqResponseWriter{stream: stream, conn: conn}
+	rw := &doqResponseWriter{stream: stream, conn: conn}
 
 	if Globals.Debug {
 		log.Printf("*** DoQ received message opcode: %s qname: %s rrtype: %s", dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
@@ -148,9 +148,9 @@ func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns
 
 // DoQ Response Writer implementation
 type doqResponseWriter struct {
-    stream *quic.Stream
-    conn   *quic.Conn
-    wrote  bool // Add this field to track if we've written
+	stream *quic.Stream
+	conn   *quic.Conn
+	wrote  bool // Add this field to track if we've written
 }
 
 func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {

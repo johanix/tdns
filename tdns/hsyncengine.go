@@ -114,7 +114,7 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 
-        // stopch removed; ctx.Done() handles shutdown
+			// stopch removed; ctx.Done() handles shutdown
 		}
 	}
 }
