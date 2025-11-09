@@ -147,17 +147,17 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
-	// Normalize service.transportsignal (default: svcb)
-	if conf.Service.TransportSignal == "" {
-		conf.Service.TransportSignal = "svcb"
+	// Normalize service.transport.type (default: svcb)
+	if conf.Service.Transport.Type == "" {
+		conf.Service.Transport.Type = "none"
 	} else {
-		ts := strings.ToLower(conf.Service.TransportSignal)
+		ts := strings.ToLower(conf.Service.Transport.Type)
 		switch ts {
-		case "svcb", "tsync":
-			conf.Service.TransportSignal = ts
+		case "svcb", "tsync", "none":
+			conf.Service.Transport.Type = ts
 		default:
-			log.Printf("ParseConfig: unknown service.transportsignal=%q; defaulting to 'svcb'", conf.Service.TransportSignal)
-			conf.Service.TransportSignal = "svcb"
+			log.Printf("ParseConfig: unknown service.transport.type=%q; defaulting to 'none'", conf.Service.Transport.Type)
+			conf.Service.Transport.Type = "none"
 		}
 	}
 

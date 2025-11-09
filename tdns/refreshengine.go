@@ -190,9 +190,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					})
 
 					if zd.Options[OptAddTransportSignal] {
-						err = zd.CreateServerSvcbRRs(conf)
+						err = zd.CreateTransportSignalRRs(conf)
 						if err != nil {
-							log.Printf("Error from CreateServerSvcbRRs(%s): %v", zone, err)
+							log.Printf("Error from CreateTransportSignalRRs(%s): %v", zone, err)
 						}
 					}
 
