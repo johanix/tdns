@@ -38,9 +38,18 @@ it understands the experimental new record types **DSYNC** **HSYNC** and **DELEG
 ## SIG(0) key management (create, roll, use, remove) in the originator
    end (the "keystore") and in the receiver end (the "truststore").
 
-## Support for experimental new DNS record types (DSYNC, HSYNC, ...).
+## Support for various experimental new DNS record types
+
+tdns has a complete implementation of the DSYNC record, but as that is now standardized (RFC 9859)
+it cannot be considered experimental anymore. There are also multiple variants of HSYNC records (used to
+specify "zone owner intent" in multi-provider setups) and the authoritative part of the DELEG record.
+For transport signaling without using SVCB there is another experimental record, tentatively called
+TSYNC.
 
 ## Support for new DNS transports (in addition to Do53): DoT, DoH, DoQ.
+
+All three are supported in tdns-server (the authoritative server) and in dog (the testing tool similar
+to dig). The recursive server is able to issue queries over new transports, but does not yet listen.
 
 ## Automatic Delegations Synchronization via DNS UPDATE.
 
