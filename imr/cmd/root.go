@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -137,8 +139,26 @@ func initImr() {
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
 	}
-    appCtx, appCancel = context.WithCancel(context.Background())
-    err = tdns.MainStartThreads(appCtx, &cli.Conf, nil)
+    // Signal-driven root context
+    appCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+    // SIGHUP reload watcher
+    hup := make(chan os.Signal, 1)
+    signal.Notify(hup, syscall.SIGHUP)
+    go func() {
+        for {
+            select {
+            case <-appCtx.Done():
+                return
+            case <-hup:
+                if _, err := cli.Conf.ParseZones(true); err != nil {
+                    log.Printf("SIGHUP reload failed: %v", err)
+                }
+            }
+        }
+    }()
+
+    err = tdns.StartImr(appCtx, &cli.Conf, nil)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}

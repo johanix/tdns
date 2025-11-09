@@ -47,7 +47,7 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
-func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch chan struct{}) {
+func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
 	ourId := AgentId(conf.Agent.Identity)
 
 	helloQ := agentQs.Hello
@@ -114,11 +114,7 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch cha
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 
-		case <-stopch:
-			log.Printf("HsyncEngine shutting down")
-			// stop all tickers
-			HBticker.Stop()
-			return
+			// stopch removed; ctx.Done() handles shutdown
 		}
 	}
 }

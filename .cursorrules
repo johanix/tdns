@@ -1,0 +1,62 @@
+# Cursor Rules - Cross-Project Operational Patterns
+
+## Context and Shutdown
+- Always thread `context.Context` as the first parameter of any long-running function, goroutine, or server.
+- Create the root context in `main` using:
+  - `ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)`
+  - `defer stop()`
+- Handle `SIGHUP` separately (reload) in a small goroutine that calls your reload function (e.g., config/zones reload) without cancelling the context.
+- Keep the main loop minimal. Only select on:
+  - `ctx.Done()` → graceful shutdown
+  - `APIStopCh` (closed once) → call `stop()`/`cancel()` and return
+
+## API Stop Semantics
+- Use one broadcast channel: `APIStopCh chan struct{}`.
+- Only ever close it (don’t send values). Use `sync.Once` to guarantee single close:
+  - `StopOnce.Do(func(){ close(APIStopCh) })`
+- Producers of stop (e.g., API “stop” command, `Shutdowner`) close `APIStopCh`. Consider a short delay (~200ms) before close so HTTP responses can flush.
+- Consumers:
+  - `MainLoop` and any long-running edge services may listen to `APIStopCh`. Prefer letting `MainLoop` call the root cancel, and other goroutines exit on `ctx.Done()`.
+
+## Goroutine Loop Pattern
+- Every loop that waits on channels should also select on `ctx.Done()` and handle closed-channel reads:
+```
+for {
+  select {
+  case <-ctx.Done():
+    return
+  case item, ok := <-inputCh:
+    if !ok { return }
+    // handle item
+  }
+}
+```
+- When sending during shutdown, either:
+  - Use non-blocking sends with a `default` case; or
+  - Provide a drain period that responds to `ctx.Done()` but finishes in-flight work within a bounded time.
+
+## Server Shutdown (bounded)
+- HTTP (net/http): `srv.Shutdown(ctxWithTimeout)` with ~5s timeout.
+- DNS (miekg/dns): `srv.Shutdown()` doesn’t take a context; wrap in a watchdog goroutine with ~5s timeout.
+- QUIC (quic-go): accept with `Accept(ctx)`; on `ctx.Done()` call `listener.Close()`; treat streams as pointers (`*quic.Stream`).
+
+## Signal Handling
+- Don’t wire `signal.Notify` inside library start/loop code. Do it in `main` and pass the resulting `ctx` down.
+- `SIGHUP` → reload logic only; don’t cancel the app context.
+
+## Channels
+- Close channels only at the producer side. Don’t close shared input channels owned by another component.
+- Prefer typed response channels for request/response flows. Always guard response sends with select (and timeouts if necessary).
+
+## Logging and Errors
+- On shutdown: log context cancellation for visibility, avoid noisy errors for expected shutdown paths.
+- Avoid catching and dropping errors silently. Propagate or log with clear context.
+
+## Testing Guidelines
+- Test graceful shutdown by cancelling the root context and asserting:
+  - All engines exit within bounded time.
+  - No goroutine leaks (use race detector and goroutine dumps in tests if practical).
+- Test API stop:
+  - Call “stop” endpoint; assert `APIStopCh` is closed exactly once and main loop cancels.
+
+

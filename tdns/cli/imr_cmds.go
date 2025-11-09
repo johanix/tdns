@@ -230,6 +230,87 @@ var ImrStatsCmd = &cobra.Command{
 	},
 }
 
+var imrStatsAuthTransportsCmd = &cobra.Command{
+	Use:   "auth-transports [zone]",
+	Short: "Show per-transport query counters for auth servers in a zone",
+	Args:  cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RecursorCache is nil")
+			return
+		}
+		if len(args) == 1 {
+			zone := dns.Fqdn(args[0])
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMap.Get(zone)
+			if !ok {
+				fmt.Printf("No auth servers recorded for zone %q\n", zone)
+				return
+			}
+			fmt.Printf("Auth server transport counters for zone %s\n", zone)
+			for name, server := range serverMap {
+				fmt.Printf("\nServer: %s\n", name)
+				// Show received transport percentage signal (pct). If none: do53=100
+				fmt.Printf("  signal: %s\n", renderSignal(server))
+				counters := server.SnapshotCounters()
+				order := []tdns.Transport{tdns.TransportDo53, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDoQ}
+				for _, t := range order {
+					if c, ok := counters[t]; ok && c > 0 {
+						fmt.Printf("  %-4s: %d\n", tdns.TransportToString[t], c)
+					}
+				}
+			}
+			return
+		}
+		// No zone provided: list all zones
+		fmt.Printf("Auth server transport counters for all zones\n")
+		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
+			zone := item.Key
+			serverMap := item.Val
+			fmt.Printf("\nZone: %s\n", zone)
+			for name, server := range serverMap {
+				fmt.Printf("  Server: %s\n", name)
+				fmt.Printf("    signal: %s\n", renderSignal(server))
+				counters := server.SnapshotCounters()
+				order := []tdns.Transport{tdns.TransportDo53, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDoQ}
+				for _, t := range order {
+					if c, ok := counters[t]; ok && c > 0 {
+						fmt.Printf("    %-4s: %d\n", tdns.TransportToString[t], c)
+					}
+				}
+			}
+		}
+	},
+}
+
+// Alias with requested name that prints the same information as auth-transports
+var imrStatsAuthServersCmd = &cobra.Command{
+	Use:   "auth-servers [zone]",
+	Short: "Show per-transport query counters and signal for auth servers",
+	Args:  cobra.MaximumNArgs(1),
+	Run:   imrStatsAuthTransportsCmd.Run,
+}
+
+// renderSignal formats the received transport percentage signal. If none, returns "do53=100".
+func renderSignal(server *tdns.AuthServer) string {
+	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
+	// Order by known transports for stable output.
+	order := []tdns.Transport{tdns.TransportDoQ, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDo53}
+	weights := server.TransportWeights
+	if len(weights) == 0 {
+		return "do53=100"
+	}
+	var parts []string
+	for _, t := range order {
+		if w, ok := weights[t]; ok && w > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", tdns.TransportToString[t], int(w)))
+		}
+	}
+	if len(parts) == 0 {
+		return "do53=100"
+	}
+	return strings.Join(parts, ",")
+}
+
 // Compare command - takes two files
 var XXXcompareCmd = &cobra.Command{
 	Use:   "compare [file1] [file2]",
@@ -261,6 +342,9 @@ func init() {
 	imrZoneListCmd.Annotations = map[string]string{
 		"guide": "(zone or car)",
 	}
+
+	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
+	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
 }
 
 func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
@@ -278,6 +362,18 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 
 	if !strings.HasSuffix(item.Val.Name, suffix) {
 		// fmt.Printf("skipping item with name %q\n", item.Val.Name)
+		return
+	}
+
+	// Evict expired entries on-the-fly to keep dump output consistent with effective cache state
+	if !item.Val.Expiration.IsZero() && item.Val.Expiration.Before(time.Now()) {
+		if Conf.Internal.RRsetCache != nil {
+			Conf.Internal.RRsetCache.RRsets.Remove(item.Key)
+			// If the expired RRset is NS, also remove its ServerMap entry, mirroring Get()
+			if uint16(tmp) == dns.TypeNS {
+				Conf.Internal.RRsetCache.ServerMap.Remove(parts[0])
+			}
+		}
 		return
 	}
 

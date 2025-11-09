@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/c-bata/go-prompt"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // Reference to the root command, set by the root package
@@ -43,8 +46,8 @@ var QuitCmd = &cobra.Command{
 
 func Terminate() {
 	fmt.Println("Goodbye!")
-	// Clean up terminal and exit immediately
-	exec.Command("stty", "sane").Run()
+    // Clean up terminal and exit immediately
+    restoreTTY()
 	os.Exit(0)
 }
 
@@ -92,7 +95,49 @@ func updateGuide(input string) string {
 	return ""
 }
 
+// original TTY state captured at interactive start
+var (
+	origTTYState *term.State
+	origTTYFD    int
+	ttyFile      *os.File
+)
+
+func restoreTTY() {
+	if origTTYState != nil && origTTYFD != 0 {
+		_ = term.Restore(origTTYFD, origTTYState)
+		// Some environments need explicit re-enabling of isig/canon/echo
+		_ = exec.Command("stty", "isig", "icanon", "echo").Run()
+	} else {
+		// Fallback if we never captured state
+		_ = exec.Command("stty", "sane").Run()
+	}
+	if ttyFile != nil {
+		_ = ttyFile.Close()
+		ttyFile = nil
+	}
+}
+
 func StartInteractiveMode() {
+    // Capture current TTY state (prefer /dev/tty over stdin) and arrange restoration on exit/signals
+    if f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+        ttyFile = f
+        origTTYFD = int(f.Fd())
+    } else {
+        origTTYFD = int(os.Stdin.Fd())
+    }
+    if term.IsTerminal(origTTYFD) {
+        if st, err := term.GetState(origTTYFD); err == nil {
+            origTTYState = st
+        }
+    }
+    sigch := make(chan os.Signal, 2)
+    signal.Notify(sigch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+    go func() {
+        <-sigch
+        restoreTTY()
+        os.Exit(0)
+    }()
+
 	p := prompt.New(
 		executor,
 		completer,
@@ -103,7 +148,7 @@ func StartInteractiveMode() {
 	)
 
 	p.Run()
-	exec.Command("stty", "sane").Run()
+    restoreTTY()
 	os.Exit(0)
 }
 

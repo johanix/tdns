@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -66,6 +67,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 }
 
 func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
+	
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
 	crrset, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
@@ -74,13 +76,13 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 	// Expiration-based eviction
 	if crrset.Expiration.Before(time.Now()) {
 		rrcache.RRsets.Remove(lookupKey)
-		if Globals.Debug {
+		if rrcache.Debug {
 			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
 		}
 		// If an NS RRset expired, also remove its server mappings for that zone
 		if qtype == dns.TypeNS {
 			rrcache.ServerMap.Remove(qname)
-			if Globals.Debug {
+			if rrcache.Debug {
 				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
 			}
 		}
@@ -91,7 +93,7 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
-	if Globals.Debug {
+	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
 	}
 
@@ -99,7 +101,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
 		return
 	}
-
+	
 	// Compute min TTL and set Expiration accordingly when RRset present
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
 		minTTL := crrset.RRset.RRs[0].Header().Ttl
@@ -107,6 +109,16 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 			if rr.Header().Ttl < minTTL {
 				minTTL = rr.Header().Ttl
 			}
+		}
+		// Apply a small TTL floor for NS RRsets only when learned via referral, to avoid instant drop
+		if qtype == dns.TypeNS && crrset.Context == ContextReferral && minTTL == 0 {
+			if rrcache.Debug {
+				log.Printf("RRsetCache:Set: NS minTTL was 0 for %q (Context=Referral); applying floor 10s", qname)
+			}
+			minTTL = 10
+		}
+		if rrcache.Debug && qtype == dns.TypeNS {
+			log.Printf("RRsetCache:Set: NS minTTL=%ds for zone %q (Context=%s)", minTTL, qname, CacheContextToString[crrset.Context])
 		}
 		crrset.Ttl = minTTL
 		crrset.Expiration = time.Now().Add(time.Duration(minTTL) * time.Second)
@@ -179,7 +191,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				if err != nil {
 					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 					// Skip invalid ALPN value
-					continue
+					continue 
 				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}
@@ -337,7 +349,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
 	// dump.P(authMap)
 
 	// rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
-	rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, authMap, true) // force re-query bypassing cache
+	rrset, _, _, err := rrcache.IterativeDNSQuery(context.Background(), ".", dns.TypeNS, authMap, true) // force re-query bypassing cache
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}

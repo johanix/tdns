@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -20,7 +21,7 @@ import (
 // The common case will be that the RRset is in a child zone, and the delegation is signed. In this case, the
 // validator will check that the delegation is correct, and that the child zone is signed.
 
-func ValidatorEngine(conf *Config, stopch chan struct{}) {
+func ValidatorEngine(ctx context.Context, conf *Config) {
 	var validatorch = conf.Internal.ValidatorCh
 	var vr ValidatorRequest
 
@@ -40,7 +41,13 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 	// var owner
 	var rrtype string
 
-	for vr = range validatorch {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("ValidatorEngine: context cancelled")
+			return
+		case vr = <-validatorch:
+		}
 		rrset = vr.RRset
 		resp := ValidatorResponse{
 			Validated: false,
