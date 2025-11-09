@@ -80,6 +80,7 @@ func main() {
         }
     }()
 
+    // err = tdns.StartServer(ctx, &conf, apirouter)
     err = tdns.StartServer(ctx, &conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))

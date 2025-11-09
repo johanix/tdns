@@ -23,6 +23,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	TypeDELEG:   true,
 	TypeHSYNC:   true,
 	TypeHSYNC2:  true,
+	TypeTSYNC:   true,
 }
 
 var standardDNSTypes = map[uint16]bool{
@@ -456,22 +457,24 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 					continue // we'll deal with this below
 				}
 				log.Printf("CreateServerSvcbRRs: Zone %s: Found identity NS %s", zd.ZoneName, nsName)
-				// Create SVCB record for this NS name
-				tmp := &dns.SVCB{
-					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-					Priority: 1,
-					Target:   ".",
-					Value:    Globals.ServerSVCB.Value,
+				if conf.Service.TransportSignal == "svcb" {
+					// Create SVCB record for this NS name
+					tmp := &dns.SVCB{
+						Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+						Priority: 1,
+						Target:   ".",
+						Value:    Globals.ServerSVCB.Value,
+					}
+					zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+					log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using identity NS %s", zd.ZoneName, nsName)
+					log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
+				} else {
+					log.Printf("CreateServerSvcbRRs: transportsignal=tsync; skipping synthesized SVCB for identity NS %s", nsName)
 				}
-				zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-
 				// To be able to sign this SVCB we need to know that we are authoritative for the zone that the
 				// NS name is in and that we have the DNSSEC keys for that zone. As we get here during the initial
 				// zone load we don't necessarily know that yet, so this would turn into a deferred operation.
 				// Skipping this for now.
-
-				log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using identity NS %s", zd.ZoneName, nsName)
-				log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
 				return nil
 			}
 		}
@@ -528,39 +531,69 @@ func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
 							}
 							for _, addr := range addrs {
 								if strings.HasPrefix(addr, ip) {
-									// Make a copy of the existing SVCB keyvalue slice
-									values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
-									if len(ipv4s) > 0 {
-										values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
-									}
-									if len(ipv6s) > 0 {
-										values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
-									}
-									tmp := &dns.SVCB{
-										Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-										Priority: 1,
-										Target:   ".",
-										Value:    values,
-									}
-									zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-									log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
-									log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
+									if conf.Service.TransportSignal == "svcb" {
+										// Make a copy of the existing SVCB keyvalue slice
+										values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
+										if len(ipv4s) > 0 {
+											values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
+										}
+										if len(ipv6s) > 0 {
+											values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
+										}
+										tmp := &dns.SVCB{
+											Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+											Priority: 1,
+											Target:   ".",
+											Value:    values,
+										}
+										zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+										log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
+										log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
 
-									_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
-									if err != nil {
-										log.Printf("Error signing SVCB RR for %s: %v", "_dns."+nsName, err)
+										_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
+										if err != nil {
+											log.Printf("Error signing SVCB RR for %s: %v", "_dns."+nsName, err)
+										} else {
+											log.Printf("Successfully signed SVCB RR for %s: %v", "_dns."+nsName, err)
+										}
+										// Add to zone data
+										serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+										if len(serversvcbs.RRs) == 0 {
+											nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: []dns.RR{tmp}})
+										} else {
+											nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: append(serversvcbs.RRs, tmp)})
+											log.Printf("CreateServerSvcbRRs: Added server SVCB to existing SVCB RRset for zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
+										}
 									} else {
-										log.Printf("Successfully signed SVCB RR for %s: %v", "_dns."+nsName, err)
+										// Build TSYNC with keyed fields
+										var v4s []string
+										for _, ip := range ipv4s {
+											v4s = append(v4s, ip.String())
+										}
+										var v6s []string
+										for _, ip := range ipv6s {
+											v6s = append(v6s, ip.String())
+										}
+										tsyncStr := fmt.Sprintf("_dns.%s 10800 IN TSYNC . %q %q %q",
+											nsName,
+											fmt.Sprintf("transport=%s", ""),
+											fmt.Sprintf("v4=%s", strings.Join(v4s, ",")),
+											fmt.Sprintf("v6=%s", strings.Join(v6s, ",")),
+										)
+										rr, err := dns.NewRR(tsyncStr)
+										if err != nil {
+											log.Printf("CreateServerSvcbRRs: failed to build TSYNC: %v", err)
+											return false
+										}
+										// Add TSYNC to zone data
+										existing := nsData.RRtypes.GetOnlyRRSet(TypeTSYNC)
+										if len(existing.RRs) == 0 {
+											nsData.RRtypes.Set(TypeTSYNC, RRset{RRs: []dns.RR{rr}})
+										} else {
+											nsData.RRtypes.Set(TypeTSYNC, RRset{RRs: append(existing.RRs, rr)})
+										}
+										log.Printf("CreateServerSvcbRRs: Added TSYNC to zone %s for in-bailiwick NS %s: %s", zd.ZoneName, nsName, rr.String())
 									}
-									// check whether we have any SVCB records for this NS name and if not add this to the zone
-									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-									if len(serversvcbs.RRs) == 0 {
-										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: []dns.RR{tmp}})
-									} else {
-										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: append(serversvcbs.RRs, tmp)})
-										log.Printf("CreateServerSvcbRRs: Added server SVCB to existing SVCB RRset for zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
-									}
-
 									return true
 								}
 							}

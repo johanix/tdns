@@ -110,7 +110,10 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
 	conf.Internal.SyncQ = make(chan SyncRequest, 10)           // Only used by agent
 	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10) // Only used by sidecar.
-	// RefreshEngine now started in Start* functions with ctx
+	// RefreshEngine now started in Start* functions with ctx, but the channel must exist before ParseZones
+	if conf.Internal.RefreshZoneCh == nil {
+		conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	}
 
 	if Globals.App.Type == AppTypeAgent {
 		conf.Internal.AgentQs = &AgentQs{
@@ -277,7 +280,9 @@ func StartCombiner(ctx context.Context, conf *Config, apirouter *mux.Router) err
 		return fmt.Errorf("Error starting API dispatcher: %v", err)
 	}
 
-	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	if conf.Internal.RefreshZoneCh == nil {
+		conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	}
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	go RefreshEngine(ctx, conf)
 	go Notifier(ctx, conf.Internal.NotifyQ)
@@ -295,7 +300,9 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 	go ValidatorEngine(ctx, conf)
 	kdb := conf.Internal.KeyDB
 	conf.Internal.APIStopCh = make(chan struct{})
-	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	if conf.Internal.RefreshZoneCh == nil {
+		conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	}
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
@@ -320,7 +327,7 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 	go DnsEngine(ctx, conf)
 	conf.Internal.ResignQ = make(chan *ZoneData, 10)
 	go ResignerEngine(ctx, conf.Internal.ResignQ)
-	log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine, resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	log.Printf("TDNS %s (%s): starting: refreshengine, authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine, resignerengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }
 
@@ -328,7 +335,9 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	conf.Internal.APIStopCh = make(chan struct{})
-	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	if conf.Internal.RefreshZoneCh == nil {
+		conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	}
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
@@ -361,7 +370,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
 	go NotifyHandler(ctx, conf)
 	go DnsEngine(ctx, conf)
-	log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	log.Printf("TDNS %s (%s): starting: refreshengine, authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }
 

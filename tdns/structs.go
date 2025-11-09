@@ -354,8 +354,23 @@ type AuthServer struct {
 	Alpn          []string // {"do53", "doq", "dot", "doh"}
 	Transports    []Transport
 	PrefTransport Transport // "doq" | "dot" | "doh" | "do53"
+	TransportWeights map[Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	// Stats (guarded by mu)
+	mu                sync.Mutex
+	TransportCounters map[Transport]uint64 // total queries attempted per transport
 	Src           string    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire        time.Time
+}
+
+// SnapshotCounters returns a copy of the per-transport counters.
+func (as *AuthServer) SnapshotCounters() map[Transport]uint64 {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	out := make(map[Transport]uint64, len(as.TransportCounters))
+	for t, c := range as.TransportCounters {
+		out[t] = c
+	}
+	return out
 }
 
 type RRsetCacheT struct {

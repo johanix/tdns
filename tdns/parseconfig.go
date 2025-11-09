@@ -147,6 +147,20 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
+	// Normalize service.transportsignal (default: svcb)
+	if conf.Service.TransportSignal == "" {
+		conf.Service.TransportSignal = "svcb"
+	} else {
+		ts := strings.ToLower(conf.Service.TransportSignal)
+		switch ts {
+		case "svcb", "tsync":
+			conf.Service.TransportSignal = ts
+		default:
+			log.Printf("ParseConfig: unknown service.transportsignal=%q; defaulting to 'svcb'", conf.Service.TransportSignal)
+			conf.Service.TransportSignal = "svcb"
+		}
+	}
+
 	// After storing in configMap
 	if Globals.Debug {
 		// log.Printf("After decoding configuration")

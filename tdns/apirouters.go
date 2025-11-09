@@ -231,8 +231,15 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 
 		go func(srv *http.Server, idx int) {
 			log.Printf("Starting API dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
-			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-				log.Fatalf("ListenAndServeTLS(): %v", err)
+			if conf.ApiServer.UseTLS {
+				if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+					log.Printf("APIdispatcher: ListenAndServeTLS error: %v", err)
+				}
+			} else {
+				log.Printf("APIdispatcher: serving HTTP on %s", srv.Addr)
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("APIdispatcher: ListenAndServe error: %v", err)
+				}
 			}
 		}(servers[idx], idxCopy)
 	}

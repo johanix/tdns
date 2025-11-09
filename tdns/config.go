@@ -47,6 +47,7 @@ type ServiceConf struct {
 	Debug      *bool
 	Verbose    *bool
 	Identities []string // this is a strawman attempt at deciding on what name to publish the ALPN
+	TransportSignal string `yaml:"transportsignal" validate:"omitempty,oneof=tsync svcb"`
 }
 
 type DnsEngineConf struct {

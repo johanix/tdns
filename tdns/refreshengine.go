@@ -34,10 +34,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	ticker := time.NewTicker(1 * time.Second)
 
 	if !viper.GetBool("service.refresh") {
-		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt of Notifies.")
+		log.Printf("RefreshEngine: NOT active. Will accept zone definitions but skip periodic refreshes.")
 		for {
 			select {
 			case <-ctx.Done():
+				log.Printf("RefreshEngine: terminating due to context cancelled (inactive mode)")
 				return
 			case <-zonerefch:
 			}
