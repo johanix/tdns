@@ -47,8 +47,14 @@ DoT, DoQ and DoH.
 
 # General TDNS Features:
 
-## SIG(0) key management (create, roll, use, remove) in the originator
-   end (the "keystore") and in the receiver end (the "truststore").
+## Support for SIG(0) key management (create, roll, use, remove)
+
+In the originator end (typically the child zone, with the "keystore") SIG(0) key pairs
+are automatically generated when needed. The public key is communicated to the receiver
+end (typically the parent, with the "truststore"). There is also support for a novel EDNS(0)
+option, called KeyState, which enables the two parties to communicate questions and responses
+about the state of a public key (like whether the key has been successfully validated or not,
+if it is trusted, etc.
 
 ## Support for various experimental new DNS record types
 
@@ -70,10 +76,18 @@ enough support to be able to agree on upgrading connections to use integrity pro
 
 ## Automatic Delegations Synchronization via DNS UPDATE.
 
-## DNS Provider Configuration via the HSYNC RRset.
+This functionality is built on top of the SIG(0) key management support in combination with the new
+**DSYNC** record type.
+
+## DNS Multi-Provider Configuration via the HSYNC RRset.
+
+This is built using the **HSYNC** RRset (to express zone owner intent) in combiation with
+**tdns-agent** (for communication and synchronization between providers) and **tdns-combiner** 
+(for managing updates to the specific RRsets that require synchronization across providers).
 
 ## Distributed Multi-signer Synchronization.
 
-
-
+Multi-signer is in practice just a special case of multi-provider where more than one provider
+is requested by the zone owner to sign the zone. this requires additional synchronization among the
+providers using the same mechanisms as for all multi-provider synchronization.
 
