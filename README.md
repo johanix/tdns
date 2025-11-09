@@ -11,6 +11,14 @@ The repo consists of several separate programs:
 A simple authoritative DNS nameserver with some special features. 
 See **server/README.md**
 
+## tdns-imr
+An extremely simplistic iterative mode resolver, i.e. recursive nameserver.
+The special features for **tdns-imr** are primarily in the ability to understand and
+utilize so-called "DNS transport signals" from authoritative nameservers. Another
+feature is that it is possible to run tdns-imr in "interactive mode", where it is
+possible to both issue queries (of course) but also interactively examine various internal data
+structures (most interesting are usually different sections of the cache).
+
 ## tdns-agent
 A version of **tdns-server** that must be configured as a secondary, downstream
 of whatever is in use as the primary. The point with **tdns-agent** is to enable 
@@ -20,18 +28,22 @@ to change the existing zone generation and publication setup. See **agent/README
 ## tdns-combiner
 A DNS zone transfer proxy, intended to sit between a "zone owner" and a signer
 (like tdns-server configured to do online-signing). In addition to acting as a
-proxy tdns-combiner is able to manage four specific apex RRsets that may (according
+proxy **tdns-combiner** is able to manage four specific apex RRsets that may (according
 to policy) be automatically managed: these are the DNSKEY, NS, CDS and CSYNC RRsets.
 
 ## tdns-cli
 A CLI tool to interact with the different server applications (**tdns-server**,
-**tdns-agent** and **tdns-combiner**) via a REST-ful API. See **cli/README.md**
+**tdns-agent** and **tdns-combiner**) via a REST-ful API. See **cli/README.md**.
+It would be possible to also intersct with **tdns-imr**, but as the IMR already has its own
+interactive mode that is not needed.
 
 ## dog
 A CLI tool that seems like a very simplistic cousin to
 the much more powerful tool "dig", which is part of the BIND9
-distribution from ISC. The primary raison d'etre for "dog" is that
+distribution from ISC. The primary raison d'etre for **dog** is that
 it understands the experimental new record types **DSYNC** **HSYNC** and **DELEG**.
+Another useful feature is that **dog** speaks all sorts of DNS transports, including
+DoT, DoQ and DoH.
 
 # General TDNS Features:
 
@@ -50,6 +62,11 @@ TSYNC.
 
 All three are supported in tdns-server (the authoritative server) and in dog (the testing tool similar
 to dig). The recursive server is able to issue queries over new transports, but does not yet listen.
+
+## Support for DNS transport signaling
+
+The support in the authoritative end is more robust than the support in **tdns-imr**, but both have
+enough support to be able to agree on upgrading connections to use integrity protecting transports.
 
 ## Automatic Delegations Synchronization via DNS UPDATE.
 
