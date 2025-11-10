@@ -113,9 +113,11 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 	}
 
 	var pkc *PrivateKeyCache
-	mode := viper.GetString("delegationsync.child.update.keygen.mode")
+	modekey := "delegationsync.child.update.keygen.mode"
+	mode := viper.GetString(modekey)
 	if rrtype == dns.TypeDNSKEY {
-		mode = viper.GetString("resignerengine.keygen.mode")
+		modekey = "resignerengine.keygen.mode"
+		mode = viper.GetString(modekey)
 	}
 	mode = strings.ToLower(mode)
 
@@ -200,7 +202,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 	case "external":
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
 		if keygenprog == "" {
-			return nil, "", fmt.Errorf("Error: key generator program not specified")
+			return nil, "", fmt.Errorf("Error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
 		}
 
 		algstr := dns.AlgorithmToString[alg]
@@ -256,7 +258,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		}
 
 	default:
-		return nil, "", fmt.Errorf("Error: unknown keygen mode: \"%s\"", mode)
+		return nil, "", fmt.Errorf("Error: unknown keygen mode: \"%s\" (modekey=%s)", mode, modekey)
 	}
 
 	const (

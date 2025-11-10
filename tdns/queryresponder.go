@@ -70,7 +70,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
 			return rrset
 		}
-		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+		if zd.Options[OptOnlineSigning] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			log.Printf("QueryResponder: MaybeSignRRset: have ZSKs, no prior RRSIGs. Signing %s %s", qname, dns.TypeToString[rrset.RRtype])
 			_, err := zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
@@ -348,19 +349,35 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
+			// Add transport signal RRs that aren't already present in the Answer section
 			if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
-				if !transportSignalInAnswer {
-					log.Printf("Adding transport signal: %s", zd.TransportSignal.RRs[0].String())
-					m.Extra = append(m.Extra, zd.TransportSignal.RRs...)
+				// Build a set of (name, type) present in Answer to avoid duplicates
+				present := map[string]bool{}
+				for _, arr := range m.Answer {
+					h := arr.Header()
+					present[h.Name+"|"+dns.TypeToString[h.Rrtype]] = true
+				}
+				addedAny := false
+				for _, trr := range zd.TransportSignal.RRs {
+					h := trr.Header()
+					key := h.Name + "|" + dns.TypeToString[h.Rrtype]
+					if !present[key] {
+						m.Extra = append(m.Extra, trr)
+						addedAny = true
+					}
+				}
+				// If we added any TSYNC/SVCB above, consider adding their signatures too
+				if addedAny && msgoptions.DnssecOK && len(zd.TransportSignal.RRSIGs) > 0 {
+					m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
 				}
 			}
 			if msgoptions.DnssecOK {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
-				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
+				// if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
 					}
-				}
+				// }
 
 				if qname == origqname {
 					m.Answer = append(m.Answer, rrset.RRSIGs...)
@@ -372,9 +389,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 				m.Extra = append(m.Extra, v4glue.RRSIGs...)
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
 				if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil {
-					if !transportSignalInAnswer {
-						m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
-					}
+					// RRSIGs for any transport signal RRs we appended above are already covered
+					// by the DNSSEC block above. Nothing more to do here.
 				}
 				// TSYNC has no signatures to add
 			}

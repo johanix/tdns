@@ -211,6 +211,48 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 				continue
 			}
 			if nsData, exists := zd.Data.Get(nsName); exists {
+				// Prefer explicit TSYNC at _dns.<nsName>; handle indirect via alias if present
+				ownerName := "_dns." + nsName
+				if ownerData, ok := zd.Data.Get(ownerName); ok {
+					existingTS := ownerData.RRtypes.GetOnlyRRSet(TypeTSYNC)
+					if len(existingTS.RRs) > 0 {
+						// Base RRset is the explicit TSYNC
+						zd.TransportSignal = &RRset{Name: ownerName, RRtype: TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
+						zd.AddTransportSignal = true
+						// Check for alias indirection
+						alias := "."
+						if prr, ok := existingTS.RRs[0].(*dns.PrivateRR); ok {
+							if ts, ok2 := prr.Data.(*TSYNC); ok2 && ts != nil && ts.Alias != "" {
+								alias = ts.Alias
+							}
+						}
+						if alias != "." {
+							log.Printf("createTransportSignalTSYNC: Looking up zone for %s TSYNC alias target %s", ownerName, alias)
+							// Resolve alias target to the closest enclosing zone we serve.
+							if bestZD, _ := FindZone(alias); bestZD != nil {
+								targetOwner := "_dns." + alias
+								log.Printf("createTransportSignalTSYNC: Resolved %s TSYNC alias target to %s", ownerName, targetOwner)
+								if tOwnerData, ok := bestZD.Data.Get(targetOwner); ok {
+									targetTS := tOwnerData.RRtypes.GetOnlyRRSet(TypeTSYNC)
+									log.Printf("Found %d TSYNC RRs at target %s", len(targetTS.RRs), targetOwner)
+									if len(targetTS.RRs) > 0 {
+										zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetTS.RRs...)
+										// also carry over RRSIGs for Additional section symmetry
+										if len(targetTS.RRSIGs) > 0 {
+											zd.TransportSignal.RRSIGs = append(zd.TransportSignal.RRSIGs, targetTS.RRSIGs...)
+										}
+									}
+								} else {
+									log.Printf("createTransportSignalTSYNC: No TSYNC RRset data found for target %s", targetOwner)
+								}
+							} else {
+								log.Printf("createTransportSignalTSYNC: No zone found for TSYNC target _dns.%s", alias)
+							}
+						}
+						log.Printf("createTransportSignalTSYNC: Using existing TSYNC at %s (alias=%s) for in-bailiwick NS %s", ownerName, alias, nsName)
+						return nil
+					}
+				}
 				aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
 				aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
 				// Only synthesize TSYNC for nameservers whose address matches configured addresses

@@ -17,6 +17,9 @@ service:
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
    resign:		true	# re-sign primary zones as needed
+   transport:
+      mode:		svcb	# svcb | tsync | none ; default=none
+      signal:		"doq:20,dot:30"	# comma sep list of doq,dot,doh and do53. Sum <= 100
 
 dnsengine:
    addresses:		[ 127.0.0.1:5355, '[::1]:5355']

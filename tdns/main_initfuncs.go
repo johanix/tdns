@@ -147,6 +147,8 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("Error parsing zones: %v", err)
 	}
+	// Provide the complete zone list to engines that need cross-zone post-initialization
+	conf.Internal.AllZones = all_zones
 
 	switch Globals.App.Type {
 	case AppTypeAgent:

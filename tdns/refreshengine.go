@@ -14,6 +14,17 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
+// After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
+func runTransportSignalPostpass(conf *Config) {
+	for zname, zdz := range Zones.Items() {
+		if zdz != nil && zdz.Options[OptAddTransportSignal] {
+			if err := zdz.CreateTransportSignalRRs(conf); err != nil {
+				log.Printf("Postpass CreateTransportSignalRRs(%s): %v", zname, err)
+			}
+		}
+	}
+}
+
 type RefreshCounter struct {
 	Name           string
 	SOARefresh     uint32
@@ -32,6 +43,20 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
 	var refreshCounters = cmap.New[*RefreshCounter]()
 	ticker := time.NewTicker(1 * time.Second)
+
+	// Build expected zone set from config for a robust post-initialization barrier
+	expected := map[string]struct{}{}
+	for _, zn := range conf.Internal.AllZones {
+		expected[zn] = struct{}{}
+	}
+	tryPostpass := func(doneZone string) {
+		if doneZone != "" {
+			delete(expected, doneZone)
+		}
+		if len(expected) == 0 {
+			runTransportSignalPostpass(conf)
+		}
+	}
 
 	if !viper.GetBool("service.refresh") {
 		log.Printf("RefreshEngine: NOT active. Will accept zone definitions but skip periodic refreshes.")
@@ -189,14 +214,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Downstreams: downstreams,
 					})
 
-					if zd.Options[OptAddTransportSignal] {
-						err = zd.CreateTransportSignalRRs(conf)
-						if err != nil {
-							log.Printf("Error from CreateTransportSignalRRs(%s): %v", zone, err)
-						}
-					}
-
+					// Register the zone before any per-zone actions.
 					Zones.Set(zone, zd)
+
+					// Defer transport signal synthesis until all zones are initialized.
+					tryPostpass(zone)
 
 					if Globals.App.Type != AppTypeAgent {
 						err = zd.SetupZoneSigning(conf.Internal.ResignQ)

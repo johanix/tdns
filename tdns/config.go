@@ -154,6 +154,7 @@ type InternalConf struct {
 	DebugMode       bool   // if true, may activate dangerous tests
 	ZonesCfgFile    string //
 	KeyDB           *KeyDB
+	AllZones        []string
 	DnssecPolicies  map[string]DnssecPolicy
 	StopCh          chan struct{}
 	APIStopCh       chan struct{}

@@ -161,16 +161,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
-	// After storing in configMap
 	if Globals.Debug {
-		// log.Printf("After decoding configuration")
-		// for _, tmpl := range conf.Templates {
-		// log.Printf("Template %q options: %+v", tmpl.Name, tmpl.OptionsStrs)
-		// }
-	}
-
-	if Globals.Debug {
-		log.Printf("Templates: %+v", conf.Templates)
+		tmp := fmt.Sprintf("Templates: %d templates defined: ", len(conf.Templates))
+		for _, tmpl := range conf.Templates {
+			tmp += fmt.Sprintf(" %s", tmpl.Name)
+		}
+		log.Printf(tmp)
 	}
 
 	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
@@ -197,7 +193,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 
 		if Globals.Debug {
-			log.Printf("Templates: %+v", Templates)
+			tmp := fmt.Sprintf("Templates (again): %d templates defined: ", len(Templates))
+			for _, tmpl := range Templates {
+				tmp += fmt.Sprintf(" %s", tmpl.Name)
+			}
+			log.Printf(tmp)
 		}
 	}
 
@@ -478,6 +478,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 					options[opt] = true
 					cleanoptions = append(cleanoptions, opt)
 				} else {
+					zd.SetError(ConfigError, "online-signing is ignored because the DNSSEC policy is not set")
 					log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
 				}
 
@@ -607,8 +608,9 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 		all_zones = append(all_zones, zname)
 
-		// If validation passed, send to refresh channel
-		conf.Internal.RefreshZoneCh <- ZoneRefresher{
+		// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
+		// try a non-blocking send; if it would block, send from a goroutine.
+		zr := ZoneRefresher{
 			Name:         zname,
 			Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
 			ZoneType:     zonetype, // primary | secondary
@@ -619,6 +621,14 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			Options:      options,
 			UpdatePolicy: policy,
 			DnssecPolicy: zconf.DnssecPolicy,
+		}
+		select {
+		case conf.Internal.RefreshZoneCh <- zr:
+			// enqueued immediately
+		default:
+			go func(z ZoneRefresher) {
+				conf.Internal.RefreshZoneCh <- z
+			}(zr)
 		}
 	}
 
