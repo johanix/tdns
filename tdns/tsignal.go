@@ -120,7 +120,29 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 							}
 						}
 						if valid {
-							zd.TransportSignal = &RRset{Name: ownerName, RRtype: dns.TypeSVCB, RRs: existingSvcb.RRs, RRSIGs: existingSvcb.RRSIGs}
+							// Start with the explicit SVCB RRset
+							zd.TransportSignal = &RRset{Name: ownerName, RRtype: dns.TypeSVCB, RRs: append([]dns.RR(nil), existingSvcb.RRs...), RRSIGs: append([]dns.RR(nil), existingSvcb.RRSIGs...)}
+
+							// If any SVCB has a non-terminal Target (not "."), attempt to include the target SVCB as well.
+							// This mirrors the TSYNC alias behavior so clients get both the original and the target.
+							for _, rr := range existingSvcb.RRs {
+								if svcb, ok := rr.(*dns.SVCB); ok {
+									if svcb.Target != "." && svcb.Target != "" {
+										if bestZD, _ := FindZone(svcb.Target); bestZD != nil {
+											targetOwner := "_dns." + svcb.Target
+											if tOwnerData, ok := bestZD.Data.Get(targetOwner); ok {
+												targetRRset := tOwnerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+												if len(targetRRset.RRs) > 0 {
+													zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetRRset.RRs...)
+													if len(targetRRset.RRSIGs) > 0 {
+														zd.TransportSignal.RRSIGs = append(zd.TransportSignal.RRSIGs, targetRRset.RRSIGs...)
+													}
+												}
+											}
+										}
+									}
+								}
+							}
 							zd.AddTransportSignal = true
 							log.Printf("CreateTransportSignalRRs(SVCB): Using existing SVCB at %s in zone %s", ownerName, zd.ZoneName)
 							return nil
