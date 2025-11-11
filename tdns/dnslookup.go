@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -845,6 +846,52 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			}
 		}
 
+		// Helper to parse and apply transport signal (common for SVCB local key and TSYNC)
+		applyTransportSignal := func(owner string, s string) {
+			kvMap, err := parseTransportString(s)
+			if err != nil {
+				log.Printf("Invalid transport string for %s: %q: %v", owner, s, err)
+				return
+			}
+			// Build weights and ordered transports by descending weight
+			type pair struct {
+				k string
+				w uint8
+			}
+			var pairs []pair
+			weights := map[Transport]uint8{}
+			for k, v := range kvMap {
+				t, err := StringToTransport(k)
+				if err != nil {
+					log.Printf("Unknown transport in transport weights for %s: %q", owner, k)
+					continue
+				}
+				pairs = append(pairs, pair{k: k, w: v})
+				weights[t] = v
+			}
+			// sort by weight desc, stable on key
+			sort.SliceStable(pairs, func(i, j int) bool {
+				return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
+			})
+			var transports []Transport
+			var alpnOrder []string
+			for _, p := range pairs {
+				t, err := StringToTransport(p.k)
+				if err != nil {
+					continue
+				}
+				transports = append(transports, t)
+				alpnOrder = append(alpnOrder, p.k)
+			}
+			serverMap[owner].Transports = transports
+			if len(transports) > 0 {
+				serverMap[owner].PrefTransport = transports[0]
+			}
+			// keep textual order for display/debug
+			serverMap[owner].Alpn = alpnOrder
+			serverMap[owner].TransportWeights = weights
+		}
+
 		switch rr.(type) {
 		case *dns.A:
 			addr := rr.(*dns.A).A.String()
@@ -875,53 +922,23 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
 				continue
 			}
-			log.Printf("Additional contains an SVCB, here we should collect the ALPN")
+			log.Printf("Additional contains an SVCB; collecting transport weights (SVCB local key)")
 			svcb := rr.(*dns.SVCB)
 			for _, kv := range svcb.Value {
-				if kv.Key() == dns.SVCB_ALPN {
-					if alpn, ok := kv.(*dns.SVCBAlpn); ok {
-						// Keep the server's ALPN order
-						serverMap[name].Alpn = alpn.Alpn
-
-						// Convert ALPN strings to Transport values in the same order
-						var transports []Transport
-						for _, t := range alpn.Alpn {
-							if transport, err := StringToTransport(t); err == nil {
-								transports = append(transports, transport)
-							}
-						}
-						serverMap[name].Transports = transports
-
-						// Set the first transport as preferred (server's preference)
-						if len(transports) > 0 {
-							serverMap[name].PrefTransport = transports[0]
-						}
-
-						log.Printf("Found ALPN values for %s: %v (preferred: %s)",
-							name, alpn.Alpn, TransportToString[serverMap[name].PrefTransport])
-					} else if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == 65280 {
-						// Parse pct string from local SVCB param key65280
-						pctStr := string(local.Data)
-						kvMap, err := parsePctString(pctStr)
-						if err != nil {
-							log.Printf("Invalid pct string for %s: %q: %v", name, pctStr, err)
-							continue
-						}
-						weights := map[Transport]uint8{}
-						for k, v := range kvMap {
-							t, err := StringToTransport(k)
-							if err != nil {
-								log.Printf("Unknown transport in pct for %s: %q", name, k)
-								continue
-							}
-							// Only accept weights for advertised transports
-							if !slices.Contains(serverMap[name].Transports, t) {
-								continue
-							}
-							weights[t] = v
-						}
-						serverMap[name].TransportWeights = weights
-					}
+				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
+					applyTransportSignal(name, string(local.Data))
+				}
+			}
+		case *dns.PrivateRR:
+			// TSYNC transport signal
+			if !isOTSOwner {
+				log.Printf("Additional contains a Private RR (TSYNC?), but owner is not _dns.{nsname}, skipping")
+				continue
+			}
+			if ts, ok := rr.(*dns.PrivateRR).Data.(*TSYNC); ok && ts != nil {
+				if ts.Transports != "" {
+					log.Printf("Additional contains TSYNC; collecting transport weights from TSYNC")
+					applyTransportSignal(name, ts.Transports)
 				}
 			}
 		default:
@@ -962,7 +979,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 		})
 	}
 
-	log.Printf("*** CollectNSAddrsFromAdditional: adding %d servers for zone %q to cache", len(serverMap), zonename)
+	log.Printf("*** ParseAdditionalForNSAddrs: adding %d servers for zone %q to cache", len(serverMap), zonename)
 	// rrcache.Servers.Set(zonename, servers)
 	rrcache.AddServers(zonename, serverMap)
 	// log.Printf("ParseAdditionalForNSAddrs: serverMap:")
@@ -986,8 +1003,8 @@ func getMinTTL(rrs []dns.RR) time.Duration {
 	return time.Duration(min) * time.Second
 }
 
-// parsePctString parses strings like "doq=30,dot=20" into a map[string]uint8
-func parsePctString(s string) (map[string]uint8, error) {
+// parseTransportString parses strings like "doq:30,dot:20" into a map[string]uint8
+func parseTransportString(s string) (map[string]uint8, error) {
 	res := map[string]uint8{}
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -997,9 +1014,9 @@ func parsePctString(s string) (map[string]uint8, error) {
 	parts := strings.Split(s, ",")
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		kv := strings.SplitN(p, "=", 2)
+		kv := strings.SplitN(p, ":", 2)
 		if len(kv) != 2 {
-			return nil, fmt.Errorf("invalid pct item: %q", p)
+			return nil, fmt.Errorf("invalid transport item: %q", p)
 		}
 		k := strings.ToLower(strings.TrimSpace(kv[0]))
 		vstr := strings.TrimSpace(kv[1])

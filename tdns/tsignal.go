@@ -79,7 +79,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 				}
 				values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
 				if sig := conf.Service.Transport.Signal; sig != "" {
-					values = append(values, &dns.SVCBLocal{KeyCode: 65280, Data: []byte(sig)})
+					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
 				}
 				tmp := &dns.SVCB{
 					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
@@ -182,7 +182,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
 					}
 					if sig := conf.Service.Transport.Signal; sig != "" {
-						values = append(values, &dns.SVCBLocal{KeyCode: 65280, Data: []byte(sig)})
+						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
 					}
 					tmp := &dns.SVCB{
 						Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
