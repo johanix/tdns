@@ -87,6 +87,10 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSC
 			Timeout: client.Timeout,
 		}
 	case TransportDoQ:
+		// Ensure TLS 1.3 for DoQ per RFC 9250
+		if client.TLSConfig != nil && client.TLSConfig.MinVersion < tls.VersionTLS13 {
+			client.TLSConfig.MinVersion = tls.VersionTLS13
+		}
 		client.QUICConfig = &quic.Config{
 			MaxIdleTimeout:  client.Timeout,
 			KeepAlivePeriod: client.Timeout / 2,

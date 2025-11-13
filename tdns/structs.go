@@ -356,6 +356,9 @@ type AuthServer struct {
 	Transports    []Transport
 	PrefTransport Transport // "doq" | "dot" | "doh" | "do53"
 	TransportWeights map[Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
+	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
+	TransportSignal string `yaml:"transport" mapstructure:"transport"`
 	// Stats (guarded by mu)
 	mu                sync.Mutex
 	TransportCounters map[Transport]uint64 // total queries attempted per transport

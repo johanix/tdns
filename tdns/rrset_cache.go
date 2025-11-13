@@ -48,12 +48,12 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
 
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	var client = map[Transport]*DNSClient{}
-	var t Transport
-
+	// var t Transport
+	// Default ports per transport
 	client[TransportDo53] = NewDNSClient(TransportDo53, "53", nil)
-	for _, t = range []Transport{TransportDoT, TransportDoH, TransportDoQ} {
-		client[t] = NewDNSClient(t, "53", nil)
-	}
+	client[TransportDoT] = NewDNSClient(TransportDoT, "853", nil)
+	client[TransportDoH] = NewDNSClient(TransportDoH, "443", nil)
+	client[TransportDoQ] = NewDNSClient(TransportDoQ, "8853", nil)
 
 	return &RRsetCacheT{
 		RRsets:    NewCmap[CachedRRset](),
@@ -140,26 +140,69 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 			Alpn:  server.Alpn,
 			Src:   "stub",
 		}
-		if len(server.Alpn) == 0 {
-			tmpauthserver.Alpn = []string{"do53"}
-			tmpauthserver.Transports = []Transport{TransportDo53}
-			tmpauthserver.PrefTransport = TransportDo53
-		} else {
-			// Keep the server's ALPN order
-			tmpauthserver.Alpn = server.Alpn
-
-			// Convert ALPN strings to Transport values in the same order
-			var transports []Transport
-			for _, alpn := range server.Alpn {
-				if t, err := StringToTransport(alpn); err == nil {
-					transports = append(transports, t)
+		// New: prefer explicit transport signal string when provided
+		if server.TransportSignal != "" {
+			kvMap, err := ParseTransportString(server.TransportSignal)
+			if err != nil {
+				log.Printf("AddStub: invalid transport string for %s: %q: %v", server.Name, server.TransportSignal, err)
+			} else {
+				// build weights and order by weight desc (stable)
+				type pair struct{ k string; w uint8 }
+				var pairs []pair
+				for k, v := range kvMap {
+					pairs = append(pairs, pair{k: k, w: v})
 				}
+				slices.SortFunc(pairs, func(a, b pair) int {
+					if a.w == b.w {
+						if a.k < b.k { return -1 }
+						if a.k > b.k { return 1 }
+						return 0
+					}
+					if a.w > b.w { return -1 }
+					return 1
+				})
+				var transports []Transport
+				var alpnOrder []string
+				weights := map[Transport]uint8{}
+				for _, p := range pairs {
+					t, err := StringToTransport(p.k)
+					if err != nil {
+						log.Printf("AddStub: unknown transport %q for %s", p.k, server.Name)
+						continue
+					}
+					transports = append(transports, t)
+					alpnOrder = append(alpnOrder, p.k)
+					weights[t] = p.w
+				}
+				tmpauthserver.Alpn = alpnOrder
+				tmpauthserver.Transports = transports
+				if len(transports) > 0 {
+					tmpauthserver.PrefTransport = transports[0]
+				}
+				tmpauthserver.TransportWeights = weights
 			}
-			tmpauthserver.Transports = transports
-
-			// Set the first transport as preferred (server's preference)
-			if len(transports) > 0 {
-				tmpauthserver.PrefTransport = transports[0]
+		} else {
+			// Back-compat: use ALPN order to set transports (no weights)
+			if len(server.Alpn) == 0 {
+				tmpauthserver.Alpn = []string{"do53"}
+				tmpauthserver.Transports = []Transport{TransportDo53}
+				tmpauthserver.TransportWeights = map[Transport]uint8{TransportDo53: 100}
+				tmpauthserver.PrefTransport = TransportDo53
+			} else {
+				tmpauthserver.Alpn = server.Alpn
+				var transports []Transport
+				weights := map[Transport]uint8{}
+				for _, alpn := range server.Alpn {
+					if t, err := StringToTransport(alpn); err == nil {
+						transports = append(transports, t)
+						weights[t] = 100
+					}
+				}
+				tmpauthserver.Transports = transports
+				tmpauthserver.TransportWeights = weights
+				if len(transports) > 0 {
+					tmpauthserver.PrefTransport = transports[0]
+				}
 			}
 		}
 		authservers[server.Name] = tmpauthserver
@@ -197,6 +240,19 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				}
 				if !slices.Contains(serverMap[name].Transports, t) {
 					serverMap[name].Transports = append(serverMap[name].Transports, t)
+				}
+			}
+			// Merge/overwrite transport weights if provided
+			if len(server.TransportWeights) > 0 {
+				if serverMap[name].TransportWeights == nil {
+					serverMap[name].TransportWeights = make(map[Transport]uint8)
+				}
+				for k, v := range server.TransportWeights {
+					serverMap[name].TransportWeights[k] = v
+				}
+				// Set preferred transport from provided order if available
+				if len(server.Transports) > 0 {
+					serverMap[name].PrefTransport = server.Transports[0]
 				}
 			}
 		}

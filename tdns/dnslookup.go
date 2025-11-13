@@ -383,7 +383,11 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtyp
 					target := rr.(*dns.CNAME).Target
 					maxchase := 10
 					for i := 0; i < maxchase; i++ {
-						select { case <-ctx.Done(): return nil, 0, ContextFailure, ctx.Err(); default: }
+						select {
+						case <-ctx.Done():
+							return nil, 0, ContextFailure, ctx.Err()
+						default:
+						}
 						lg.Printf("*** AuthDNSQuery: found CNAME for %s: %s. Chasing it.", qname, target)
 						// We need to look up the target of the CNAME
 						tmprrset, rcode, context, err := rrcache.AuthDNSQuery(ctx, target, qtype, nameservers, lg, verbose)
@@ -706,6 +710,9 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 			rcode = r.MsgHdr.Rcode
 
 			if len(r.Answer) != 0 {
+				// Parse any transport signal for this specific server even on final answers
+				parseTransportForServerFromAdditional(server, r)
+				rrcache.persistServerTransportUpdate(server)
 				tmprrset, rcode2, ctx2, err, done := rrcache.handleAnswer(ctx, qname, qtype, r)
 				if err != nil || done {
 					return tmprrset, rcode2, ctx2, err
@@ -714,12 +721,12 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 				nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
 				if len(nsRRs.RRs) > 0 {
 					serverMap, err := rrcache.ParseAdditionalForNSAddrs("authority", nsRRs, zonename, nsMap, r)
-				if err != nil {
-					log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
-					return nil, rcode, ContextFailure, err
-				}
+					if err != nil {
+						log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
+						return nil, rcode, ContextFailure, err
+					}
 					if len(serverMap) == 0 {
-					return nil, rcode, ContextReferral, nil
+						return nil, rcode, ContextReferral, nil
 					}
 					return rrcache.IterativeDNSQuery(ctx, qname, qtype, serverMap, false)
 				}
@@ -729,7 +736,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 			if len(r.Ns) != 0 {
 				if rcode == dns.RcodeSuccess {
 					return rrcache.handleReferral(ctx, qname, qtype, r, false)
-							}
+				}
 				if rcode == dns.RcodeNameError {
 					ctxn, rcode3, handled := rrcache.handleNegative(qname, qtype, r)
 					if handled {
@@ -737,13 +744,13 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 					}
 					continue
 				}
-					log.Printf("*** IterativeDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
+				log.Printf("*** IterativeDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
 				continue
-				}
+			}
 
-				if rcode == dns.RcodeSuccess {
-					return &rrset, rcode, ContextFailure, nil // no point in continuing
-				}
+			if rcode == dns.RcodeSuccess {
+				return &rrset, rcode, ContextFailure, nil // no point in continuing
+			}
 			continue
 		}
 	}
@@ -819,6 +826,52 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 		}
 	}
 
+	// Helper to parse and apply transport signal (common for SVCB local key and TSYNC)
+	applyTransportSignal := func(owner string, s string) {
+		kvMap, err := parseTransportString(s)
+		if err != nil {
+			log.Printf("Invalid transport string for %s: %q: %v", owner, s, err)
+			return
+		}
+		// Build weights and ordered transports by descending weight
+		type pair struct {
+			k string
+			w uint8
+		}
+		var pairs []pair
+		weights := map[Transport]uint8{}
+		for k, v := range kvMap {
+			t, err := StringToTransport(k)
+			if err != nil {
+				log.Printf("Unknown transport in transport weights for %s: %q", owner, k)
+				continue
+			}
+			pairs = append(pairs, pair{k: k, w: v})
+			weights[t] = v
+		}
+		// sort by weight desc, stable on key
+		sort.SliceStable(pairs, func(i, j int) bool {
+			return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
+		})
+		var transports []Transport
+		var alpnOrder []string
+		for _, p := range pairs {
+			t, err := StringToTransport(p.k)
+			if err != nil {
+				continue
+			}
+			transports = append(transports, t)
+			alpnOrder = append(alpnOrder, p.k)
+		}
+		serverMap[owner].Transports = transports
+		if len(transports) > 0 {
+			serverMap[owner].PrefTransport = transports[0]
+		}
+		// keep textual order for display/debug
+		serverMap[owner].Alpn = alpnOrder
+		serverMap[owner].TransportWeights = weights
+	}
+
 	for _, rr := range r.Extra {
 		name := rr.Header().Name
 		isOTSOwner := false
@@ -846,52 +899,10 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			}
 		}
 
-		// Helper to parse and apply transport signal (common for SVCB local key and TSYNC)
-		applyTransportSignal := func(owner string, s string) {
-			kvMap, err := parseTransportString(s)
-			if err != nil {
-				log.Printf("Invalid transport string for %s: %q: %v", owner, s, err)
-				return
-			}
-			// Build weights and ordered transports by descending weight
-			type pair struct {
-				k string
-				w uint8
-			}
-			var pairs []pair
-			weights := map[Transport]uint8{}
-			for k, v := range kvMap {
-				t, err := StringToTransport(k)
-				if err != nil {
-					log.Printf("Unknown transport in transport weights for %s: %q", owner, k)
-					continue
-				}
-				pairs = append(pairs, pair{k: k, w: v})
-				weights[t] = v
-			}
-			// sort by weight desc, stable on key
-			sort.SliceStable(pairs, func(i, j int) bool {
-				return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
-			})
-			var transports []Transport
-			var alpnOrder []string
-			for _, p := range pairs {
-				t, err := StringToTransport(p.k)
-				if err != nil {
-					continue
-				}
-				transports = append(transports, t)
-				alpnOrder = append(alpnOrder, p.k)
-			}
-			serverMap[owner].Transports = transports
-			if len(transports) > 0 {
-				serverMap[owner].PrefTransport = transports[0]
-			}
-			// keep textual order for display/debug
-			serverMap[owner].Alpn = alpnOrder
-			serverMap[owner].TransportWeights = weights
+		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
+			log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
 		}
-
+		// log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
 		switch rr.(type) {
 		case *dns.A:
 			addr := rr.(*dns.A).A.String()
@@ -922,11 +933,24 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
 				continue
 			}
-			log.Printf("Additional contains an SVCB; collecting transport weights (SVCB local key)")
+			log.Printf("Additional contains an SVCB; rr: %s", rr.String())
 			svcb := rr.(*dns.SVCB)
+			haveLocal := false
 			for _, kv := range svcb.Value {
 				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
+					log.Printf("SVCB transport key for %s: %q", name, string(local.Data))
 					applyTransportSignal(name, string(local.Data))
+					haveLocal = true
+					break
+				}
+			}
+			if !haveLocal {
+				for _, kv := range svcb.Value {
+					if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
+						log.Printf("SVCB ALPN for %s: %v", name, a.Alpn)
+						applyAlpnSignal(name, strings.Join(a.Alpn, ","), serverMap)
+						break
+					}
 				}
 			}
 		case *dns.PrivateRR:
@@ -937,11 +961,67 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 			}
 			if ts, ok := rr.(*dns.PrivateRR).Data.(*TSYNC); ok && ts != nil {
 				if ts.Transports != "" {
+					val := ts.Transports
+					if strings.HasPrefix(val, "transport=") {
+						val = strings.TrimPrefix(val, "transport=")
+					}
+					log.Printf("Additional contains TSYNC; rr: %s", rr.String())
+					log.Printf("TSYNC transport value for %s: %q", name, val)
 					log.Printf("Additional contains TSYNC; collecting transport weights from TSYNC")
-					applyTransportSignal(name, ts.Transports)
+					applyTransportSignal(name, val)
 				}
 			}
 		default:
+		}
+	}
+
+	// Second pass: parse transport signals irrespective of earlier non-glue filtering,
+	// but only apply to known NS owners for this zone (present in serverMap).
+	for _, rr := range r.Extra {
+		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
+			log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
+		}
+
+		// log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
+		owner := rr.Header().Name
+		if !strings.HasPrefix(owner, "_dns.") {
+			continue
+		}
+		base := strings.TrimPrefix(owner, "_dns.")
+		// Only apply to owners we track for this zone
+		if _, ok := serverMap[base]; !ok {
+			continue
+		}
+		switch rr.(type) {
+		case *dns.SVCB:
+			svcb := rr.(*dns.SVCB)
+			haveLocal := false
+			for _, kv := range svcb.Value {
+				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
+					log.Printf("Transport(second-pass): SVCB key for %s: %q", base, string(local.Data))
+					applyTransportSignal(base, string(local.Data))
+					haveLocal = true
+					break
+				}
+			}
+			if !haveLocal {
+				for _, kv := range svcb.Value {
+					if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
+						log.Printf("Transport(second-pass): SVCB ALPN for %s: %v", base, a.Alpn)
+						applyAlpnSignal(base, strings.Join(a.Alpn, ","), serverMap)
+						break
+					}
+				}
+			}
+		case *dns.PrivateRR:
+			if ts, ok := rr.(*dns.PrivateRR).Data.(*TSYNC); ok && ts != nil && ts.Transports != "" {
+				val := ts.Transports
+				if strings.HasPrefix(val, "transport=") {
+					val = strings.TrimPrefix(val, "transport=")
+				}
+				log.Printf("Transport(second-pass): TSYNC value for %s: %q", base, val)
+				applyTransportSignal(base, val)
+			}
 		}
 	}
 
@@ -1059,7 +1139,10 @@ func pickTransport(server *AuthServer, qname string) Transport {
 	}
 	// Build weighted list honoring server.Transports order
 	var total int
-	type pair struct{ t Transport; w int }
+	type pair struct {
+		t Transport
+		w int
+	}
 	var candidates []pair
 	for _, t := range server.Transports {
 		if w, ok := server.TransportWeights[t]; ok && w > 0 {
@@ -1229,9 +1312,200 @@ func (rrcache *RRsetCacheT) tryServer(ctx context.Context, server *AuthServer, a
 	incrementTransportCounter(server, t)
 	log.Printf("calling c.Exchange with Transport=%q, server=%+v, addr=%q, qname=%q, qtype=%q", TransportToString[t], server, addr,
 		qname, dns.TypeToString[qtype])
-	return c.Exchange(m, addr)
+	// return c.Exchange(m, addr)
+	r, _, err := c.Exchange(m, addr)
+	if Globals.Verbose {
+		log.Printf("tryServer: r: %s, err: %v", r.String(), err)
+	}
+	return r, 0, err
 }
 
+// applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server
+func applyTransportSignalToServer(server *AuthServer, s string) {
+	if server == nil || s == "" {
+		return
+	}
+	kvMap, err := parseTransportString(s)
+	if err != nil {
+		log.Printf("applyTransportSignalToServer: invalid transport string for %s: %q: %v", server.Name, s, err)
+		return
+	}
+	type pair struct {
+		k string
+		w uint8
+	}
+	var pairs []pair
+	weights := map[Transport]uint8{}
+	for k, v := range kvMap {
+		t, err := StringToTransport(k)
+		if err != nil {
+			log.Printf("applyTransportSignalToServer: unknown transport for %s: %q", server.Name, k)
+			continue
+		}
+		pairs = append(pairs, pair{k: k, w: v})
+		weights[t] = v
+	}
+	sort.SliceStable(pairs, func(i, j int) bool {
+		return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
+	})
+	var transports []Transport
+	var alpnOrder []string
+	for _, p := range pairs {
+		t, err := StringToTransport(p.k)
+		if err != nil {
+			continue
+		}
+		transports = append(transports, t)
+		alpnOrder = append(alpnOrder, p.k)
+	}
+	server.Transports = transports
+	if len(transports) > 0 {
+		server.PrefTransport = transports[0]
+	}
+	server.Alpn = alpnOrder
+	server.TransportWeights = weights
+}
+
+// applyAlpnSignal applies 100-weight transports from a comma-separated ALPN list to a server in serverMap
+func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*AuthServer) {
+	if owner == "" || serverMap == nil {
+		return
+	}
+	weights := map[Transport]uint8{}
+	var order []string
+	tokens := strings.Split(alpnCSV, ",")
+	for _, tok := range tokens {
+		k := strings.TrimSpace(tok)
+		if k == "" {
+			continue
+		}
+		t, err := StringToTransport(k)
+		if err != nil {
+			continue
+		}
+		weights[t] = 100
+		order = append(order, k)
+	}
+	if len(order) == 0 {
+		return
+	}
+	serverMap[owner].TransportWeights = weights
+	serverMap[owner].Alpn = order
+	serverMap[owner].Transports = nil
+	for _, k := range order {
+		if t, err := StringToTransport(k); err == nil {
+			serverMap[owner].Transports = append(serverMap[owner].Transports, t)
+		}
+	}
+	if len(serverMap[owner].Transports) > 0 {
+		serverMap[owner].PrefTransport = serverMap[owner].Transports[0]
+	}
+}
+
+// applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
+func applyAlpnSignalToServer(server *AuthServer, alpnCSV string) {
+	if server == nil {
+		return
+	}
+	weights := map[Transport]uint8{}
+	var order []string
+	tokens := strings.Split(alpnCSV, ",")
+	for _, tok := range tokens {
+		k := strings.TrimSpace(tok)
+		if k == "" {
+			continue
+		}
+		t, err := StringToTransport(k)
+		if err != nil {
+			continue
+		}
+		weights[t] = 100
+		order = append(order, k)
+	}
+	if len(order) == 0 {
+		return
+	}
+	server.TransportWeights = weights
+	server.Alpn = order
+	server.Transports = nil
+	for _, k := range order {
+		if t, err := StringToTransport(k); err == nil {
+			server.Transports = append(server.Transports, t)
+		}
+	}
+	if len(server.Transports) > 0 {
+		server.PrefTransport = server.Transports[0]
+	}
+}
+// parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section
+func parseTransportForServerFromAdditional(server *AuthServer, r *dns.Msg) {
+	if Globals.Verbose {
+		log.Printf("**** parseTransportForServerFromAdditional: server: %+v, r: %s", server, r.String())
+	}
+	if server == nil || r == nil {
+		return
+	}
+	// Canonicalize target owner to FQDN and lower-case for case-insensitive compare
+	base := strings.TrimSuffix(server.Name, ".")
+	targetOwner := dns.Fqdn("_dns." + base)
+	for _, rr := range r.Extra {
+		owner := dns.Fqdn(rr.Header().Name)
+		if !strings.EqualFold(owner, targetOwner) {
+			log.Printf("**** parseTransportForServerFromAdditional: owner != target: %s != %s", owner, targetOwner)
+			continue
+		}
+		log.Printf("**** parseTransportForServerFromAdditional: owner == target: %s == %s", owner, targetOwner)
+		switch x := rr.(type) {
+		case *dns.SVCB:
+			log.Printf("**** parseTransportForServerFromAdditional: x: %+v", x)
+			haveLocal := false
+			for _, kv := range x.Value {
+				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
+					log.Printf("**** parseTransportForServerFromAdditional: parsing SVCB transport value: %s", string(local.Data))
+					applyTransportSignalToServer(server, string(local.Data))
+					haveLocal = true
+					break
+				}
+			}
+			if !haveLocal {
+				for _, kv := range x.Value {
+					if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
+						log.Printf("**** parseTransportForServerFromAdditional: parsing SVCB ALPN value: %v", a.Alpn)
+						applyAlpnSignalToServer(server, strings.Join(a.Alpn, ","))
+						break
+					}
+				}
+			}
+		case *dns.PrivateRR:
+			log.Printf("**** parseTransportForServerFromAdditional: TSYNC RR: x: %+v", x)
+			if ts, ok := x.Data.(*TSYNC); ok && ts != nil {
+				log.Printf("**** parseTransportForServerFromAdditional: TSYNC data: %+v", ts)
+				log.Printf("**** parseTransportForServerFromAdditional: TSYNC transports: \"%s\"", ts.Transports)
+				if ts.Transports != "" {
+					val := ts.Transports
+					if strings.HasPrefix(val, "transport=") {
+						val = strings.TrimPrefix(val, "transport=")
+					}
+					log.Printf("**** parseTransportForServerFromAdditional: parsing TSYNC transport value: %s", val)
+					applyTransportSignalToServer(server, val)
+				}
+			}
+		}
+	}
+}
+
+// persistServerTransportUpdate writes the updated server transport info back into the global ServerMap
+func (rrcache *RRsetCacheT) persistServerTransportUpdate(server *AuthServer) {
+	if server == nil {
+		return
+	}
+	for zone, sm := range rrcache.ServerMap.Items() {
+		if _, ok := sm[server.Name]; ok {
+			sm[server.Name] = server
+			rrcache.ServerMap.Set(zone, sm)
+		}
+	}
+}
 func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg) (*RRset, int, CacheContext, error, bool) {
 	var rrset RRset
 	for _, rr := range r.Answer {
@@ -1367,7 +1641,11 @@ func (rrcache *RRsetCacheT) chaseCNAME(ctx context.Context, target string, qtype
 	maxchase := 10
 	cur := target
 	for i := 0; i < maxchase; i++ {
-		select { case <-ctx.Done(): return nil, 0, ContextFailure, ctx.Err(); default: }
+		select {
+		case <-ctx.Done():
+			return nil, 0, ContextFailure, ctx.Err()
+		default:
+		}
 		rrcache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", cur)
 		bestmatch, tmpservers, err := rrcache.FindClosestKnownZone(cur)
 		if err != nil {
