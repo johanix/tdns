@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,10 +52,21 @@ var ImrQueryCmd = &cobra.Command{
 		case r := <-resp:
 			if r.RRset != nil {
 				// fmt.Printf("%v\n", r.RRset)
+				// Determine validation status from cache for the queried <qname,qtype>
+				isValidated := false
+				if Conf.Internal.RRsetCache != nil {
+					if c := Conf.Internal.RRsetCache.Get(qname, qtype); c != nil && c.Validated {
+						isValidated = true
+					}
+				}
+				suffix := ""
+				if isValidated {
+					suffix = " (validated)"
+				}
 				for _, rr := range r.RRset.RRs {
 					switch rr.Header().Rrtype {
 					case qtype, dns.TypeCNAME:
-						fmt.Printf("%s\n", rr.String())
+						fmt.Printf("%s%s\n", rr.String(), suffix)
 					default:
 						fmt.Printf("Not printing: %q\n", rr.String())
 					}
@@ -85,9 +97,16 @@ var ImrDumpCmd = &cobra.Command{
 			return
 		}
 
-		// Get all keys from the concurrent map
+		// Collect and sort items by owner name, comparing labels from right to left
+		items := []tdns.Tuple[string, tdns.CachedRRset]{}
 		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
-			PrintCacheItem(item, ".")
+			items = append(items, item)
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return lessByReverseLabels(items[i].Val.Name, items[j].Val.Name)
+		})
+		for _, it := range items {
+			PrintCacheItem(it, ".")
 		}
 	},
 }
@@ -108,9 +127,18 @@ var dumpSuffixCmd = &cobra.Command{
 		}
 		fmt.Printf("Listing records in the RRsetCache with owner names ending in %q\n", suffix)
 
-		// Get all keys from the concurrent map
+		// Collect and sort items by owner name (reverse label order)
+		items := []tdns.Tuple[string, tdns.CachedRRset]{}
 		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
-			PrintCacheItem(item, suffix)
+			if suffix == "" || strings.HasSuffix(item.Val.Name, suffix) {
+				items = append(items, item)
+			}
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return lessByReverseLabels(items[i].Val.Name, items[j].Val.Name)
+		})
+		for _, it := range items {
+			PrintCacheItem(it, suffix)
 		}
 	},
 }
@@ -168,6 +196,176 @@ var dumpKeysCmd = &cobra.Command{
 
 		// Get all keys from the concurrent map
 		fmt.Printf("%v\n", Conf.Internal.RRsetCache.RRsets.Keys())
+	},
+}
+
+// dumpDnskeysCmd dumps DNSKEYs (from DnskeyCache) and DS RRsets (from RRsetCache) with validation status
+var dumpDnskeysCmd = &cobra.Command{
+	Use:   "dnskeys",
+	Short: "Dump DNSKEY trust anchors and cached DS RRsets with validation status",
+	Run: func(cmd *cobra.Command, args []string) {
+		// Combined, sorted-by-owner (reverse labels): DS (first) then DNSKEYs
+		type taView struct {
+			keyid     uint16
+			validated bool
+			trusted   bool
+			expires   string
+			alg       uint8
+			flags     uint16
+			pub       string
+		}
+		type dsView struct {
+			validated bool
+			expires   string
+			rrs       []string
+			sigs      []string
+		}
+		type ownerView struct {
+			ds     *dsView
+			dnskey []taView
+		}
+		owners := map[string]*ownerView{}
+
+		// DNSKEY trust anchors
+		keys := tdns.DnskeyCache.Map.Keys()
+		for _, k := range keys {
+			val, ok := tdns.DnskeyCache.Map.Get(k)
+			if !ok {
+				continue
+			}
+			ov := owners[val.Name]
+			if ov == nil {
+				ov = &ownerView{}
+				owners[val.Name] = ov
+			}
+			ov.dnskey = append(ov.dnskey, taView{
+				keyid:     val.Keyid,
+				validated: val.Validated,
+				trusted:   val.Trusted,
+				expires:   tdns.TtlPrint(val.Expiration),
+				alg:       val.Dnskey.Algorithm,
+				flags:     val.Dnskey.Flags,
+				pub:       truncateKey(val.Dnskey.PublicKey, 15),
+			})
+		}
+		// DS RRsets
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
+			parts := strings.Split(item.Key, "::")
+			if len(parts) != 2 {
+				continue
+			}
+			rrtypeNum, err := strconv.Atoi(parts[1])
+			if err != nil || uint16(rrtypeNum) != dns.TypeDS {
+				continue
+			}
+			val := item.Val
+			ov := owners[parts[0]]
+			if ov == nil {
+				ov = &ownerView{}
+				owners[parts[0]] = ov
+			}
+			dsv := &dsView{
+				validated: val.Validated,
+				expires:   tdns.TtlPrint(val.Expiration),
+			}
+			if val.RRset != nil {
+				// sort DS lines by key tag
+				type dsLine struct {
+					s string
+					k int
+				}
+				var lines []dsLine
+				for _, rr := range val.RRset.RRs {
+					if d, ok := rr.(*dns.DS); ok {
+						lines = append(lines, dsLine{s: rr.String(), k: int(d.KeyTag)})
+					} else {
+						lines = append(lines, dsLine{s: rr.String(), k: 0})
+					}
+				}
+				sort.Slice(lines, func(i, j int) bool { return lines[i].k < lines[j].k || (lines[i].k == lines[j].k && lines[i].s < lines[j].s) })
+				for _, ln := range lines {
+					dsv.rrs = append(dsv.rrs, ln.s)
+				}
+				for _, s := range val.RRset.RRSIGs {
+					dsv.sigs = append(dsv.sigs, s.String())
+				}
+			}
+			ov.ds = dsv
+		}
+
+		// Sort owners by reverse-label
+		var ownerKeys []string
+		for o := range owners {
+			ownerKeys = append(ownerKeys, o)
+		}
+		sort.Slice(ownerKeys, func(i, j int) bool { return lessByReverseLabels(ownerKeys[i], ownerKeys[j]) })
+		if len(ownerKeys) == 0 {
+			fmt.Printf("(no DS/DNSKEY data)\n")
+			return
+		}
+		for _, owner := range ownerKeys {
+			ov := owners[owner]
+			// DS first
+			if ov.ds != nil {
+				valStr := "unvalidated"
+				if ov.ds.validated {
+					valStr = "validated"
+				}
+				// Include signer name and keyid in header if present in cached RRset
+				var signerInfo string
+				if Conf.Internal.RRsetCache != nil {
+					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
+						if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
+							signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
+						}
+					}
+				}
+				fmt.Printf("\n%s DS (%s%s, TTL: %s)\n", owner, valStr, signerInfo, ov.ds.expires)
+				for _, s := range ov.ds.rrs {
+					fmt.Printf("  %s\n", s)
+				}
+			}
+			// DNSKEYs next, sorted by keyid
+			if len(ov.dnskey) > 0 {
+				sort.Slice(ov.dnskey, func(i, j int) bool { return ov.dnskey[i].keyid < ov.dnskey[j].keyid })
+				// Try to fetch DNSKEY RRset from cache to get RRset-level validated + TTL
+				var rrsetValidated bool
+				var rrsetTTL string = "-"
+				var signerInfo string
+				if Conf.Internal.RRsetCache != nil {
+					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDNSKEY); c != nil {
+						rrsetValidated = c.Validated
+						rrsetTTL = tdns.TtlPrint(c.Expiration)
+						if rrsetValidated && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
+							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
+								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
+							}
+						}
+					}
+				}
+				vStr := "unvalidated"
+				if rrsetValidated {
+					vStr = "validated"
+				}
+				fmt.Printf("\n%s DNSKEY (%s%s, TTL: %s)\n", owner, vStr, signerInfo, rrsetTTL)
+				for _, v := range ov.dnskey {
+					vStr := "unvalidated"
+					if v.validated {
+						vStr = "validated"
+					}
+					tStr := "untrusted"
+					if v.trusted {
+						tStr = "trusted"
+					}
+					fmt.Printf("  key %s (keyid: %d): %s, %s, alg=%d, flags=%d, TTL: %s\n",
+						v.pub, v.keyid, vStr, tStr, v.alg, v.flags, v.expires)
+				}
+			}
+		}
 	},
 }
 
@@ -324,7 +522,7 @@ var XXXcompareCmd = &cobra.Command{
 
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd)
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd)
 	dumpAuthServersCmd.AddCommand(dumpKeysCmd, dumpServersCmd)
 
 	ImrZoneCmd.AddCommand(imrZoneListCmd, imrZoneCheckCmd)
@@ -378,29 +576,65 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	}
 
 	rrtype := dns.TypeToString[uint16(tmp)]
-	fmt.Printf("\nOwner: %s RRtype: %s\n", parts[0], rrtype)
+	// Unified header format: "<owner> <TYPE> (validated|unvalidated, TTL: X)"
+	valStr := "unvalidated"
+	if item.Val.Validated {
+		valStr = "validated"
+	}
+	ttlStr := tdns.TtlPrint(item.Val.Expiration)
+	fmt.Printf("\n%s %s (%s, TTL: %s)\n", parts[0], rrtype, valStr, ttlStr)
 
 	switch item.Val.Context {
 	case tdns.ContextNXDOMAIN:
-		fmt.Printf("NXDOMAIN (negative response type 3)\n")
-		fmt.Printf("%s %s (%s, TTL: %s)\n", item.Val.Name,
-			dns.TypeToString[uint16(item.Val.RRtype)], tdns.CacheContextToString[item.Val.Context], tdns.TtlPrint(item.Val.Expiration))
+		// NXDOMAIN: no RRset to list
+		fmt.Printf("  %s\n", tdns.CacheContextToString[item.Val.Context])
 	case tdns.ContextNoErrNoAns:
-		// fmt.Printf("negative response type 0\n")
-		fmt.Printf("%s %s (%s, TTL: %s)\n", item.Val.Name,
-			dns.TypeToString[uint16(item.Val.RRtype)], tdns.CacheContextToString[item.Val.Context], tdns.TtlPrint(item.Val.Expiration))
+		// Negative response type 0 (NOERROR/NODATA)
+		fmt.Printf("  %s\n", tdns.CacheContextToString[item.Val.Context])
 	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
-		// Print each RR in the RRset
+		// Print each RR in the RRset (no RRSIGs filtering unless requested)
 		for _, rr := range item.Val.RRset.RRs {
-			ttlStr := tdns.TtlPrint(item.Val.Expiration)
-			fmt.Printf("%v (%s, TTL: %s)\n", rr,
-				tdns.CacheContextToString[item.Val.Context], ttlStr)
+			fmt.Printf("  %s\n", rr.String())
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
-			fmt.Printf("%v\n", rr)
+			fmt.Printf("  %s\n", rr.String())
 		}
 	default:
-		fmt.Printf("Context: %q (which we don't know what to do with)",
-			tdns.CacheContextToString[item.Val.Context])
+		fmt.Printf("  Context: %q", tdns.CacheContextToString[item.Val.Context])
 	}
+}
+
+// lessByReverseLabels compares two FQDNs by labels from right to left.
+// Returns true if a < b in that ordering.
+func lessByReverseLabels(a, b string) bool {
+	an := dns.Fqdn(strings.ToLower(strings.TrimSpace(a)))
+	bn := dns.Fqdn(strings.ToLower(strings.TrimSpace(b)))
+	// Fast path equal
+	if an == bn {
+		return false
+	}
+	al := dns.SplitDomainName(an)
+	bl := dns.SplitDomainName(bn)
+	// Compare from the rightmost label (closest to root)
+	for ai, bi := len(al)-1, len(bl)-1; ai >= 0 && bi >= 0; ai, bi = ai-1, bi-1 {
+		if al[ai] == bl[bi] {
+			continue
+		}
+		return al[ai] < bl[bi]
+	}
+	// All compared equal up to the shorter; shorter one sorts first
+	return len(al) < len(bl)
+}
+
+// truncateKey returns the first n characters of k (if longer) followed by "..."
+// If k is shorter than n, returns k as-is.
+func truncateKey(k string, n int) string {
+	k = strings.TrimSpace(k)
+	if n <= 0 {
+		return ""
+	}
+	if len(k) <= n {
+		return k
+	}
+	return k[:n] + "..."
 }

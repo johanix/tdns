@@ -170,6 +170,13 @@ func executor(input string) {
 	}
 
 	// Execute just the command's Run function with remaining args
+	// Friendly behavior: if user typed "query" with no args (often from "q<TAB><ENTER>"),
+	// assume they meant to quit.
+	if cmd.Name() == "query" && (len(flags) == 0 || (len(flags) == 1 && strings.TrimSpace(flags[0]) == "")) {
+		fmt.Println("query was empty, assuming you meant 'quit'")
+		Terminate()
+		return
+	}
 	if cmd.Run != nil {
 		cmd.Run(cmd, flags)
 	} else if cmd.RunE != nil {
