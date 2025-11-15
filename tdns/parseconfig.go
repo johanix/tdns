@@ -147,16 +147,26 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
-	// After storing in configMap
-	if Globals.Debug {
-		// log.Printf("After decoding configuration")
-		// for _, tmpl := range conf.Templates {
-		// log.Printf("Template %q options: %+v", tmpl.Name, tmpl.OptionsStrs)
-		// }
+	// Normalize service.transport.type (default: none)
+	if conf.Service.Transport.Type == "" {
+		conf.Service.Transport.Type = "none"
+	} else {
+		ts := strings.ToLower(conf.Service.Transport.Type)
+		switch ts {
+		case "svcb", "tsync", "none":
+			conf.Service.Transport.Type = ts
+		default:
+			log.Printf("ParseConfig: unknown service.transport.type=%q; defaulting to 'none'", conf.Service.Transport.Type)
+			conf.Service.Transport.Type = "none"
+		}
 	}
 
 	if Globals.Debug {
-		log.Printf("Templates: %+v", conf.Templates)
+		tmp := fmt.Sprintf("Templates: %d templates defined: ", len(conf.Templates))
+		for _, tmpl := range conf.Templates {
+			tmp += fmt.Sprintf(" %s", tmpl.Name)
+		}
+		log.Printf(tmp)
 	}
 
 	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
@@ -183,7 +193,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 
 		if Globals.Debug {
-			log.Printf("Templates: %+v", Templates)
+			tmp := fmt.Sprintf("Templates (again): %d templates defined: ", len(Templates))
+			for _, tmpl := range Templates {
+				tmp += fmt.Sprintf(" %s", tmpl.Name)
+			}
+			log.Printf(tmp)
 		}
 	}
 
@@ -464,6 +478,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 					options[opt] = true
 					cleanoptions = append(cleanoptions, opt)
 				} else {
+					zd.SetError(ConfigError, "online-signing is ignored because the DNSSEC policy is not set")
 					log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
 				}
 
@@ -593,8 +608,15 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 		all_zones = append(all_zones, zname)
 
-		// If validation passed, send to refresh channel
-		conf.Internal.RefreshZoneCh <- ZoneRefresher{
+		switch Globals.App.Type {
+		case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
+		// try a non-blocking send; if it would block, send from a goroutine.
+        if conf.Internal.RefreshZoneCh == nil {
+			log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.", zname)
+			return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+		}
+		zr := ZoneRefresher{
 			Name:         zname,
 			Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
 			ZoneType:     zonetype, // primary | secondary
@@ -606,6 +628,15 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 			UpdatePolicy: policy,
 			DnssecPolicy: zconf.DnssecPolicy,
 		}
+		select {
+		case conf.Internal.RefreshZoneCh <- zr:
+			// enqueued immediately
+		default:
+			go func(z ZoneRefresher) {
+				conf.Internal.RefreshZoneCh <- z
+			}(zr)
+		}
+	}
 	}
 
 	// ValidateZones(conf, ZonesCfgFile) // will terminate on error
@@ -670,70 +701,70 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 // Templates map and an error is returned. Missing parent references also remove the referring
 // template.
 func expandTemplateChain(name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
-    if done[name] {
-        return Templates[name], nil
-    }
-    t, exists := Templates[name]
-    if !exists {
-        return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
-    }
+	if done[name] {
+		return Templates[name], nil
+	}
+	t, exists := Templates[name]
+	if !exists {
+		return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
+	}
 
-    if onStack[name] {
-        // Cycle detected: find cycle in stack
-        var cycle []string
-        for i := range stack {
-            if stack[i] == name {
-                cycle = append([]string{}, stack[i:]...)
-                break
-            }
-        }
-        cycle = append(cycle, name)
-        log.Printf("Template cycle detected: %s", strings.Join(cycle, " -> "))
-        for _, n := range cycle {
-            delete(Templates, n)
-        }
-        return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
-    }
+	if onStack[name] {
+		// Cycle detected: find cycle in stack
+		var cycle []string
+		for i := range stack {
+			if stack[i] == name {
+				cycle = append([]string{}, stack[i:]...)
+				break
+			}
+		}
+		cycle = append(cycle, name)
+		log.Printf("Template cycle detected: %s", strings.Join(cycle, " -> "))
+		for _, n := range cycle {
+			delete(Templates, n)
+		}
+		return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
+	}
 
-    onStack[name] = true
-    stack = append(stack, name)
+	onStack[name] = true
+	stack = append(stack, name)
 
-    if t.Template != "" && t.Template != name {
-        parent, exists := Templates[t.Template]
-        if !exists {
-            log.Printf("Template %q refers to non-existing template %q. Ignored.", t.Name, t.Template)
-            delete(Templates, t.Name)
-            onStack[name] = false
-            return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
-        }
-        // Recurse to expand parent first
-        expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
-        if err != nil {
-            onStack[name] = false
-            return ZoneConf{}, err
-        }
-        // Apply parent's fields into child
-        expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
-        if err != nil {
-            log.Printf("Error expanding template %q from parent %q: %v", t.Name, t.Template, err)
-            delete(Templates, t.Name)
-            onStack[name] = false
-            return ZoneConf{}, err
-        }
-        t = expandedChild
-    } else if t.Template == name {
-        // Self-cycle
-        log.Printf("Template %q: self-referential cycle. Removing.", name)
-        delete(Templates, name)
-        onStack[name] = false
-        return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
-    }
+	if t.Template != "" && t.Template != name {
+		parent, exists := Templates[t.Template]
+		if !exists {
+			log.Printf("Template %q refers to non-existing template %q. Ignored.", t.Name, t.Template)
+			delete(Templates, t.Name)
+			onStack[name] = false
+			return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
+		}
+		// Recurse to expand parent first
+		expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
+		if err != nil {
+			onStack[name] = false
+			return ZoneConf{}, err
+		}
+		// Apply parent's fields into child
+		expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
+		if err != nil {
+			log.Printf("Error expanding template %q from parent %q: %v", t.Name, t.Template, err)
+			delete(Templates, t.Name)
+			onStack[name] = false
+			return ZoneConf{}, err
+		}
+		t = expandedChild
+	} else if t.Template == name {
+		// Self-cycle
+		log.Printf("Template %q: self-referential cycle. Removing.", name)
+		delete(Templates, name)
+		onStack[name] = false
+		return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
+	}
 
-    // Mark done and store expanded result
-    done[name] = true
-    onStack[name] = false
-    Templates[name] = t
-    return t, nil
+	// Mark done and store expanded result
+	done[name] = true
+	onStack[name] = false
+	Templates[name] = t
+	return t, nil
 }
 
 func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {

@@ -8,6 +8,10 @@ import (
 	// "flag"
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -40,13 +44,30 @@ func main() {
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
 
-    err = tdns.MainStartThreads(ctx, &conf, apirouter)
+    // SIGHUP reload watcher
+    hup := make(chan os.Signal, 1)
+    signal.Notify(hup, syscall.SIGHUP)
+    defer signal.Stop(hup)
+    go func() {
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-hup:
+                if _, err := conf.ParseZones(true); err != nil {
+                    log.Printf("SIGHUP reload failed: %v", err)
+                }
+            }
+        }
+    }()
+
+    err = tdns.StartAgent(ctx, &conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
-    tdns.MainLoop(ctx, cancel, &conf)
+    tdns.MainLoop(ctx, stop, &conf)
 }

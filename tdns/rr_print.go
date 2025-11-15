@@ -86,14 +86,37 @@ func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 		namepad = " "
 	}
 	spaces := strings.Repeat(" ", leftpad)
-	fmt.Printf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
-
-	if len(p) > 6 {
-		fmt.Printf(" (\n")
-		fmt.Printf("%s %s )\n", spaces, strings.Join(p[6:], " "))
-	} else {
-		fmt.Printf("\n")
+	if len(p) < 6 {
+		fmt.Printf(rr.String())
+		return
 	}
+	line := fmt.Sprintf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
+
+	if len(p) == 6 {
+		fmt.Printf("%s\n", line)
+		return
+	}
+	
+	// Print line, then subsequent fields, wrapping at rightmargin
+	//fmt.Printf("%s (\n", line)
+	currentLine := line + " ("
+	for i := 6; i < len(p); i++ {
+		item := p[i]
+		// If currentLine is just spaces, no leading space before item, else add one.
+		sep := ""
+		if len(strings.TrimSpace(currentLine)) > 0 {
+			sep = " "
+		}
+		if len(currentLine)+len(sep)+len(item) > rightmargin {
+			// Line would exceed rightmargin, flush and start a new one
+			fmt.Printf("%s\n", currentLine)
+			currentLine = spaces + sep + item
+		} else {
+			currentLine += sep + item
+		}
+	}
+	// Print the remainder and close bracket
+	fmt.Printf("%s )\n", currentLine)
 }
 
 func PrintSoaRR(rr dns.RR, leftpad, rightmargin int) {

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -12,6 +13,17 @@ import (
 
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
+
+// After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
+func runTransportSignalPostpass(conf *Config) {
+	for zname, zdz := range Zones.Items() {
+		if zdz != nil && zdz.Options[OptAddTransportSignal] {
+			if err := zdz.CreateTransportSignalRRs(conf); err != nil {
+				log.Printf("Postpass CreateTransportSignalRRs(%s): %v", zname, err)
+			}
+		}
+	}
+}
 
 type RefreshCounter struct {
 	Name           string
@@ -23,22 +35,43 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
-func RefreshEngine(conf *Config, stopch chan struct{}) {
+func RefreshEngine(ctx context.Context, conf *Config) {
 
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
 	var refreshCounters = cmap.New[*RefreshCounter]()
-	ticker := time.NewTicker(1 * time.Second)
+	var ticker *time.Ticker 
+
+	// Build expected zone set from config for a robust post-initialization barrier
+	expected := map[string]struct{}{}
+	for _, zn := range conf.Internal.AllZones {
+		expected[zn] = struct{}{}
+	}
+	tryPostpass := func(doneZone string) {
+		if doneZone != "" {
+			delete(expected, doneZone)
+		}
+		if len(expected) == 0 {
+			runTransportSignalPostpass(conf)
+		}
+	}
 
 	if !viper.GetBool("service.refresh") {
-		log.Printf("Refresh Engine is NOT active. Zones will only be updated on receipt of Notifies.")
-		for range zonerefch {
+		log.Printf("RefreshEngine: NOT active. Will accept zone definitions but skip periodic refreshes.")
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("RefreshEngine: terminating due to context cancelled (inactive mode)")
+				return
+			case <-zonerefch:
+			}
 			// ensure that we keep reading to keep the channel open
 			continue
 		}
 	} else {
+		ticker = time.NewTicker(1 * time.Second)
 		log.Printf("RefreshEngine: Starting")
 	}
 
@@ -49,13 +82,21 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 	var updated bool
 	var err error
 	var bd BumperData
-	var zr ZoneRefresher
 
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
 	for {
 		select {
-		case zr = <-zonerefch:
+		case <-ctx.Done():
+			log.Printf("RefreshEngine: terminating due to context cancelled")
+			ticker.Stop()
+			return
+		case zr, ok := <-zonerefch:
+			if !ok {
+				log.Printf("RefreshEngine: terminating due to zonerefch closed")
+				ticker.Stop()
+				return
+			}
 			// log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
 			zone = zr.Name
 			resp := RefresherResponse{
@@ -174,14 +215,11 @@ func RefreshEngine(conf *Config, stopch chan struct{}) {
 						Downstreams: downstreams,
 					})
 
-					if zd.Options[OptAddTransportSignal] {
-						err = zd.CreateServerSvcbRRs(conf)
-						if err != nil {
-							log.Printf("Error from CreateServerSvcbRRs(%s): %v", zone, err)
-						}
-					}
-
+					// Register the zone before any per-zone actions.
 					Zones.Set(zone, zd)
+
+					// Defer transport signal synthesis until all zones are initialized.
+					tryPostpass(zone)
 
 					if Globals.App.Type != AppTypeAgent {
 						err = zd.SetupZoneSigning(conf.Internal.ResignQ)

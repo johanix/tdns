@@ -5,9 +5,7 @@
 package tdns
 
 import (
-	"fmt"
 	"log"
-	"net"
 	"sort"
 	"strings"
 
@@ -23,6 +21,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	TypeDELEG:   true,
 	TypeHSYNC:   true,
 	TypeHSYNC2:  true,
+	TypeTSYNC:   true,
 }
 
 var standardDNSTypes = map[uint16]bool{
@@ -58,6 +57,9 @@ var standardDNSTypes = map[uint16]bool{
 func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	qname string, qtype uint16, msgoptions MsgOptions, kdb *KeyDB) error {
 
+	// Track if the configured transport signal is already present in the Answer section
+	transportSignalInAnswer := false
+
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
@@ -68,7 +70,8 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
 			return rrset
 		}
-		if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+		if zd.Options[OptOnlineSigning] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
+			log.Printf("QueryResponder: MaybeSignRRset: have ZSKs, no prior RRSIGs. Signing %s %s", qname, dns.TypeToString[rrset.RRtype])
 			_, err := zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
@@ -266,13 +269,28 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 						tgtowner, _ := zd.GetOwner(tgt)
 						if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
 							m.Answer = append(m.Answer, tgtrrset.RRs...)
+							// XXX: This is not correct. We need to check if the CNAME target is a transport signal RR.
+							// if zd.AddTransportSignal && zd.TransportSignal != nil && rrMatchesTransportSignal(v.RRs[0], zd.TransportSignal) {
+							//	transportSignalInAnswer = true
+							//}
+							if zd.AddTransportSignal && zd.TransportSignal != nil {
+							   for _, arr := range m.Answer {
+							       if rrMatchesTransportSignal(arr, zd.TransportSignal) {
+							           transportSignalInAnswer = true
+							           break
+							       }
+							   }
+							}
 							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 							m.Extra = append(m.Extra, v4glue.RRs...)
 							m.Extra = append(m.Extra, v6glue.RRs...)
-							if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-								m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+							if !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
+								if !transportSignalInAnswer {
+									m.Extra = append(m.Extra, zd.TransportSignal.RRs...)
+								}
 							}
+							
 							if msgoptions.DnssecOK {
 								tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
 								m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
@@ -281,8 +299,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 								m.Extra = append(m.Extra, v4glue.RRSIGs...)
 								m.Extra = append(m.Extra, v6glue.RRSIGs...)
-								if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRSIGs) > 0 {
-									m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+								if !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRSIGs) > 0 {
+									if !transportSignalInAnswer {
+										m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
+									}
 								}
 							}
 						}
@@ -323,26 +343,50 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
 				m.Answer = append(m.Answer, rrset.RRs...)
+				if zd.AddTransportSignal && zd.TransportSignal != nil && qtype == zd.TransportSignal.RRtype && (qname == zd.TransportSignal.Name || origqname == zd.TransportSignal.Name) {
+					transportSignalInAnswer = true
+				}
 			} else {
 				// zd.Logger.Printf("Wildcard match qname %s %s", qname, origqname)
 				tmp := WildcardReplace(rrset.RRs, qname, origqname)
 				m.Answer = append(m.Answer, tmp...)
+				if zd.AddTransportSignal && zd.TransportSignal != nil && qtype == zd.TransportSignal.RRtype && (qname == zd.TransportSignal.Name || origqname == zd.TransportSignal.Name) {
+					transportSignalInAnswer = true
+				}
 			}
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
-			if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-				log.Printf("Adding SVCB: %s", zd.ServerSVCB.RRs[0].String())
-				m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+			// Add transport signal RRs that aren't already present in the Answer section
+			if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
+				// Build a set of (name, type) present in Answer to avoid duplicates
+				present := map[string]bool{}
+				for _, arr := range m.Answer {
+					h := arr.Header()
+					present[h.Name+"|"+dns.TypeToString[h.Rrtype]] = true
+				}
+				addedAny := false
+				for _, trr := range zd.TransportSignal.RRs {
+					h := trr.Header()
+					key := h.Name + "|" + dns.TypeToString[h.Rrtype]
+					if !present[key] {
+						m.Extra = append(m.Extra, trr)
+						addedAny = true
+					}
+				}
+				// If we added any TSYNC/SVCB above, consider adding their signatures too
+				if addedAny && msgoptions.DnssecOK && len(zd.TransportSignal.RRSIGs) > 0 {
+					m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
+				}
 			}
 			if msgoptions.DnssecOK {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
-				if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
+				// if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 					if qname == origqname {
 						owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
 					}
-				}
+				// }
 
 				if qname == origqname {
 					m.Answer = append(m.Answer, rrset.RRSIGs...)
@@ -353,9 +397,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 				m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 				m.Extra = append(m.Extra, v4glue.RRSIGs...)
 				m.Extra = append(m.Extra, v6glue.RRSIGs...)
-				if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
-					m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+				if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil {
+					// RRSIGs for any transport signal RRs we appended above are already covered
+					// by the DNSSEC block above. Nothing more to do here.
 				}
+				// TSYNC has no signatures to add
 			}
 		} else {
 			log.Printf("---> No exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
@@ -388,8 +434,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
-		if !msgoptions.OtsOptOut && zd.ServerSVCB != nil && len(zd.ServerSVCB.RRs) > 0 {
-			m.Extra = append(m.Extra, zd.ServerSVCB.RRs...)
+		if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
+			if !transportSignalInAnswer {
+				m.Extra = append(m.Extra, zd.TransportSignal.RRs...)
+			}
 		}
 		if msgoptions.DnssecOK {
 			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
@@ -397,9 +445,12 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 			m.Extra = append(m.Extra, v4glue.RRSIGs...)
 			m.Extra = append(m.Extra, v6glue.RRSIGs...)
-			if !msgoptions.OtsOptOut && zd.ServerSVCB != nil {
-				m.Extra = append(m.Extra, zd.ServerSVCB.RRSIGs...)
+			if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil {
+				if !transportSignalInAnswer {
+					m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
+				}
 			}
+			// TSYNC has no signatures to add
 		}
 	}
 
@@ -433,148 +484,28 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	return nil
 }
 
-func (zd *ZoneData) CreateServerSvcbRRs(conf *Config) error {
-	// Get the NS RRset for the zone apex
-	apex, exists := zd.Data.Get(zd.ZoneName)
-	if !exists {
-		return fmt.Errorf("zone apex not found")
+
+// rrMatchesTransportSignal checks whether a given RR matches the configured transport signal RRset
+func rrMatchesTransportSignal(rr dns.RR, ts *RRset) bool {
+	if ts == nil || rr == nil {
+		return false
 	}
+	h := rr.Header()
+	return h.Rrtype == ts.RRtype && h.Name == ts.Name
+}
 
-	nsRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
-	if len(nsRRset.RRs) == 0 {
-		return fmt.Errorf("no NS records found at zone apex")
-	}
-
-	// First check if any NS names match service identities
-	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			nsName := ns.Ns
-
-			// Check if this NS name is in service.identities
-			if CaseFoldContains(conf.Service.Identities, nsName) {
-				if strings.HasSuffix(nsName, zd.ZoneName) {
-					continue // we'll deal with this below
-				}
-				log.Printf("CreateServerSvcbRRs: Zone %s: Found identity NS %s", zd.ZoneName, nsName)
-				// Create SVCB record for this NS name
-				tmp := &dns.SVCB{
-					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-					Priority: 1,
-					Target:   ".",
-					Value:    Globals.ServerSVCB.Value,
-				}
-				zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-
-				// To be able to sign this SVCB we need to know that we are authoritative for the zone that the
-				// NS name is in and that we have the DNSSEC keys for that zone. As we get here during the initial
-				// zone load we don't necessarily know that yet, so this would turn into a deferred operation.
-				// Skipping this for now.
-
-				log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using identity NS %s", zd.ZoneName, nsName)
-				log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
-				return nil
+// findServerTSYNCRRset returns a TSYNC RRset from any owner under this zone that starts with _dns.
+func (zd *ZoneData) XXfindServerTSYNCRRset() *RRset {
+	// Look for any TSYNC RRset at owners beginning with _dns.
+	for item := range zd.Data.IterBuffered() {
+		owner := item.Key
+		od := item.Val
+		if strings.HasPrefix(owner, "_dns.") {
+			rrset := od.RRtypes.GetOnlyRRSet(TypeTSYNC)
+			if len(rrset.RRs) > 0 {
+				return &rrset
 			}
 		}
 	}
-
-	// var svcbRRsets = map[string]*RRset{} // map[nsname]*RRset
-
-	// Next look for in-bailiwick NS records and their addresses
-	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			nsName := ns.Ns
-			if dns.IsSubDomain(zd.ZoneName, nsName) {
-				// var svcbRRset = RRset{}
-				// This is an in-bailiwick NS
-				if nsData, exists := zd.Data.Get(nsName); exists {
-					// Check A/AAAA records
-					aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
-					aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-
-					// Convert A/AAAA records to string slices
-					var ipv4s []net.IP
-					var ipv6s []net.IP
-
-					if aRRset.RRs != nil {
-						for _, rr := range aRRset.RRs {
-							if a, ok := rr.(*dns.A); ok {
-								ipv4s = append(ipv4s, a.A)
-							}
-						}
-						log.Printf("CreateServerSvcbRRs: Zone %s: Found %d A records for in-bailiwick NS %s: %v", zd.ZoneName, len(ipv4s), nsName, ipv4s)
-					}
-
-					if aaaaRRset.RRs != nil {
-						for _, rr := range aaaaRRset.RRs {
-							if aaaa, ok := rr.(*dns.AAAA); ok {
-								ipv6s = append(ipv6s, aaaa.AAAA)
-							}
-						}
-						log.Printf("CreateServerSvcbRRs: Zone %s: Found %d AAAA records for in-bailiwick NS %s: %v", zd.ZoneName, len(ipv6s), nsName, ipv6s)
-					}
-
-					// Helper to check if address matches any configured addresses
-					checkAddrs := func(addrs []string, rrset *RRset) bool {
-						if rrset == nil {
-							return false
-						}
-						for _, rr := range rrset.RRs {
-							var ip string
-							switch r := rr.(type) {
-							case *dns.A:
-								ip = r.A.String()
-							case *dns.AAAA:
-								ip = r.AAAA.String()
-							}
-							for _, addr := range addrs {
-								if strings.HasPrefix(addr, ip) {
-									// Make a copy of the existing SVCB keyvalue slice
-									values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
-									if len(ipv4s) > 0 {
-										values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
-									}
-									if len(ipv6s) > 0 {
-										values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
-									}
-									tmp := &dns.SVCB{
-										Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-										Priority: 1,
-										Target:   ".",
-										Value:    values,
-									}
-									zd.ServerSVCB = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-									log.Printf("CreateServerSvcbRRs: Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
-									log.Printf("CreateServerSvcbRRs: SVCB: %s", tmp.String())
-
-									_, err := zd.SignRRset(zd.ServerSVCB, "", nil, false)
-									if err != nil {
-										log.Printf("Error signing SVCB RR for %s: %v", "_dns."+nsName, err)
-									} else {
-										log.Printf("Successfully signed SVCB RR for %s: %v", "_dns."+nsName, err)
-									}
-									// check whether we have any SVCB records for this NS name and if not add this to the zone
-									serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-									if len(serversvcbs.RRs) == 0 {
-										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: []dns.RR{tmp}})
-									} else {
-										nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: append(serversvcbs.RRs, tmp)})
-										log.Printf("CreateServerSvcbRRs: Added server SVCB to existing SVCB RRset for zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
-									}
-
-									return true
-								}
-							}
-						}
-						return false
-					}
-
-					if checkAddrs(conf.DnsEngine.Addresses, &aRRset) || checkAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
-						return nil
-					}
-				}
-			}
-		}
-	}
-
 	return nil
 }

@@ -93,7 +93,8 @@ type ZoneData struct {
 	LatestError     time.Time // time of latest error
 	RefreshCount    int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	LatestRefresh   time.Time // time of latest successful refresh
-	ServerSVCB      *RRset    // ALPN for DoT/DoH/DoQ
+	TransportSignal *RRset    // transport signal RRset (SVCB or TSYNC)
+	AddTransportSignal bool   // whether to attach TransportSignal in responses
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -354,8 +355,26 @@ type AuthServer struct {
 	Alpn          []string // {"do53", "doq", "dot", "doh"}
 	Transports    []Transport
 	PrefTransport Transport // "doq" | "dot" | "doh" | "do53"
+	TransportWeights map[Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
+	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
+	TransportSignal string `yaml:"transport" mapstructure:"transport"`
+	// Stats (guarded by mu)
+	mu                sync.Mutex
+	TransportCounters map[Transport]uint64 // total queries attempted per transport
 	Src           string    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire        time.Time
+}
+
+// SnapshotCounters returns a copy of the per-transport counters.
+func (as *AuthServer) SnapshotCounters() map[Transport]uint64 {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	out := make(map[Transport]uint64, len(as.TransportCounters))
+	for t, c := range as.TransportCounters {
+		out[t] = c
+	}
+	return out
 }
 
 type RRsetCacheT struct {

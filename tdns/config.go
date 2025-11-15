@@ -47,6 +47,12 @@ type ServiceConf struct {
 	Debug      *bool
 	Verbose    *bool
 	Identities []string // this is a strawman attempt at deciding on what name to publish the ALPN
+	Transport TransportConf `yaml:"transport"`
+}
+
+type TransportConf struct {
+	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
+	Signal string `yaml:"signal"`
 }
 
 type DnsEngineConf struct {
@@ -148,6 +154,7 @@ type InternalConf struct {
 	DebugMode       bool   // if true, may activate dangerous tests
 	ZonesCfgFile    string //
 	KeyDB           *KeyDB
+	AllZones        []string
 	DnssecPolicies  map[string]DnssecPolicy
 	StopCh          chan struct{}
 	APIStopCh       chan struct{}

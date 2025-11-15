@@ -92,6 +92,10 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if rrq.ResponseCh == nil {
+				log.Printf("RecursorEngine: received nil or invalid request (no response channel)")
+				continue
+			}
 			if Globals.Debug {
 				log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 				fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
@@ -111,6 +115,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 				resp = &ImrResponse{
 					RRset: crrset.RRset,
 				}
+				rrq.ResponseCh <- *resp
 			} else {
 				var err error
 				if Globals.Debug {
@@ -118,19 +123,22 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 					fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
 				}
 
-				resp, err = rrcache.ImrQuery(rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+				resp, err = rrcache.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 				if err != nil {
 					log.Printf("Error from IterateOverQuery: %v", err)
+				} else if resp == nil {
+					resp = &ImrResponse{
+						Error: true,
+						ErrorMsg: fmt.Sprintf("ImrQuery: no response from ImrQuery"),
+					}
 				}
-			}
-			if rrq.ResponseCh != nil {
 				rrq.ResponseCh <- *resp
 			}
 		}
 	}
 }
 
-func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
 	log.Printf("ImrQuery: <%s, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 	maxiter := 12
 
@@ -155,7 +163,9 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 	for {
 		if maxiter <= 0 {
 			log.Printf("*** ImrQuery: max iterations reached. Giving up.")
-			return nil, fmt.Errorf("Max iterations reached. Giving up.")
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Max iterations reached. Giving up.")
+			return &resp, fmt.Errorf("Max iterations reached. Giving up.")
 		} else {
 			maxiter--
 		}
@@ -187,7 +197,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 			// when it goes out of scope, even if there are still pending writes to it
 
 			// Launch parallel queries for each nameserver
-			err := rrcache.CollectNSAddresses(cnsrrset.RRset, respch)
+			err := rrcache.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
 			if err != nil {
 				log.Printf("Error from CollectNSAddresses: %v", err)
 				resp.Error = true
@@ -195,8 +205,17 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 				return &resp, err
 			}
 
-			// Process responses until we get a usable address
-			for rrresp := range respch {
+			// Process a bounded number of responses until we get a usable address
+			want := len(cnsrrset.RRset.RRs) * 2
+			for i := 0; i < want; i++ {
+				var rrresp *ImrResponse
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case rrresp = <-respch:
+				case <-time.After(3 * time.Second):
+					rrresp = nil
+				}
 				if rrresp == nil || rrresp.RRset == nil {
 					continue
 				}
@@ -229,7 +248,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 						log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
 					}
 
-					rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
+					rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
 					if err != nil {
 						log.Printf("Error from IterativeDNSQuery: %v", err)
 						continue
@@ -272,7 +291,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 		}
 
 		log.Printf("ImrQuery: sending query to %d auth servers: %+v", len(authservers), authservers)
-		rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
+		rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -304,7 +323,7 @@ func (rrcache *RRsetCacheT) ImrQuery(qname string, qtype uint16, qclass uint16, 
 	}
 }
 
-func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
+func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
 	rd_bit := r.MsgHdr.RecursionDesired
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
@@ -363,7 +382,7 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 				// when it goes out of scope, even if there are still pending writes to it
 
 				// Launch parallel queries for each nameserver
-				err := rrcache.CollectNSAddresses(cnsrrset.RRset, respch)
+				err := rrcache.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
 				if err != nil {
 					log.Printf("Error from CollectNSAddresses: %v", err)
 					// m.SetRcode(r, dns.RcodeServerFailure)
@@ -371,8 +390,19 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 					return
 				}
 
-				// Process responses until we get a usable address
-				for resp := range respch {
+				// Process a bounded number of responses until we get a usable address
+				want := len(cnsrrset.RRset.RRs) * 2
+				for i := 0; i < want; i++ {
+					var resp *ImrResponse
+					select {
+					case <-ctx.Done():
+						m.SetRcode(r, dns.RcodeServerFailure)
+						w.WriteMsg(m)
+						return
+					case resp = <-respch:
+					case <-time.After(3 * time.Second):
+						resp = nil
+					}
 					if resp == nil || resp.RRset == nil {
 						continue
 					}
@@ -405,7 +435,7 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 							}
 							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
 						}
-						rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
+						rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
 						if err != nil {
 							log.Printf("Error from IterativeDNSQuery: %v", err)
 							continue
@@ -429,7 +459,7 @@ func (rrcache *RRsetCacheT) ImrResponder(w dns.ResponseWriter, r *dns.Msg, qname
 			}
 
 			log.Printf("ImrResponder: sending query to %d authservers: %+v", len(authservers), authservers)
-			rrset, rcode, context, err := rrcache.IterativeDNSQuery(qname, qtype, authservers, false)
+			rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
 				w.WriteMsg(m)
@@ -524,7 +554,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 }
 
 func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
-	ImrHandler := createImrHandler(conf, rrcache)
+	ImrHandler := createImrHandler(ctx, conf, rrcache)
 	dns.HandleFunc(".", ImrHandler)
 
 	addresses := viper.GetStringSlice("imrengine.addresses")
@@ -645,7 +675,7 @@ func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
 	return nil
 }
 
-func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWriter, r *dns.Msg) {
+func createImrHandler(ctx context.Context, conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWriter, r *dns.Msg) {
 	//	dnsupdateq := conf.Internal.DnsUpdateQ
 	//	dnsnotifyq := conf.Internal.DnsNotifyQ
 	//	kdb := conf.Internal.KeyDB
@@ -680,7 +710,7 @@ func createImrHandler(conf *Config, rrcache *RRsetCacheT) func(w dns.ResponseWri
 				return
 			}
 
-			go rrcache.ImrResponder(w, r, qname, qtype, dnssec_ok)
+			rrcache.ImrResponder(ctx, w, r, qname, qtype, dnssec_ok)
 			return
 
 		default:

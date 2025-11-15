@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -20,13 +21,24 @@ import (
 // The common case will be that the RRset is in a child zone, and the delegation is signed. In this case, the
 // validator will check that the delegation is correct, and that the child zone is signed.
 
-func ValidatorEngine(conf *Config, stopch chan struct{}) {
+func ValidatorEngine(ctx context.Context, conf *Config) {
 	var validatorch = conf.Internal.ValidatorCh
 	var vr ValidatorRequest
+	var ok bool
 
 	if !viper.GetBool("validator.active") {
 		log.Printf("ValidatorEngine is NOT active.")
-		for range validatorch {
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("ValidatorEngine: terminating due to context cancelled (inactive mode)")
+				return
+			case vr, ok = <-validatorch:
+				if !ok {
+					log.Printf("ValidatorEngine: validatorch closed")
+					return
+				}
+			}
 			log.Printf("ValidatorEngine: ValidatorEngine is not active, but got a request: %v", vr)
 			continue // ensure that we keep reading to keep the channel open
 		}
@@ -40,7 +52,17 @@ func ValidatorEngine(conf *Config, stopch chan struct{}) {
 	// var owner
 	var rrtype string
 
-	for vr = range validatorch {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("ValidatorEngine: context cancelled. Terminating.")
+			return
+		case vr, ok = <-validatorch:
+			if !ok {
+				log.Printf("ValidatorEngine: validatorch closed. Terminating.")
+				return
+			}
+		}
 		rrset = vr.RRset
 		resp := ValidatorResponse{
 			Validated: false,

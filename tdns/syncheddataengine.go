@@ -109,18 +109,31 @@ func (zdr *ZoneDataRepo) Set(zone ZoneName, agentRepo *AgentRepo) {
 
 // SynchedDataEngine is a component that updates the combiner with new information
 // received from the agents that are sharing zones with us.
-func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs, stopch chan struct{}) {
+func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 	SDupdateQ := agentQs.SynchedDataUpdate
 	SDcmdQ := agentQs.SynchedDataCmd
 
 	var synchedDataUpdate *SynchedDataUpdate
+	var ok bool
 
 	if !viper.GetBool("syncheddataengine.active") {
 		log.Printf("SynchedDataEngine is NOT active. No updates will be sent to the combiner.")
-		for synchedDataUpdate = range SDupdateQ {
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("SynchedDataEngine: context cancelled")
+				return
+			case synchedDataUpdate, ok = <-SDupdateQ:
+				if !ok {
+					log.Printf("SynchedDataEngine: synchedDataUpdate channel closed")
+					return
+				}
+			}
 			log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
 			continue
-		}
+		}	
+	} else {
+		log.Printf("SynchedDataEngine: Starting")
 	}
 
 	// XXX: Set up communication with the combiner
@@ -140,9 +153,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs, sto
 		case <-ctx.Done():
 			log.Printf("SynchedDataEngine: context cancelled")
 			return
-		case <-stopch:
-			log.Printf("SynchedDataEngine: Stopping")
-			return
+			// stopch removed; ctx.Done() handles shutdown
 
 		case synchedDataUpdate = <-SDupdateQ:
 			var change bool

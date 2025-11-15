@@ -11,7 +11,6 @@ replace (
 require (
 	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/tdns/cli v0.0.0-20250315051723-3a4d693f9b08
-	github.com/miekg/dns v1.1.68
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.16.0
 )
@@ -37,6 +36,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
+	github.com/miekg/dns v1.1.68 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
@@ -57,6 +57,7 @@ require (
 	golang.org/x/net v0.40.0 // indirect
 	golang.org/x/sync v0.14.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/term v0.32.0 // indirect
 	golang.org/x/text v0.25.0 // indirect
 	golang.org/x/tools v0.33.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect

@@ -1,0 +1,14 @@
+**/*~
+*~
+.DS_Store
+TAGS
+server/tdns-server
+imr/tdns-imr
+cli/tdns-cli
+agent/tdns-agent
+combiner/tdns-combiner
+dog/dog
+reporter/tdns-reporter
+msa
+sidecar-cli
+.vscode

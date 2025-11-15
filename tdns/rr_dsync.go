@@ -51,7 +51,7 @@ var StringToScheme = map[string]DsyncScheme{
 	"API":      SchemeAPI,
 	"MSUPDATE": SchemeMSUpdate,
 	"REPORT":   SchemeReport,
-	"REPORTER": SchemeReport,  // Keep this for backwards compatibility
+	"REPORTER": SchemeReport, // Keep this for backwards compatibility
 	"1":        SchemeNotify,
 	"2":        SchemeUpdate,
 	"3":        SchemeAPI,

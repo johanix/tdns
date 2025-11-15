@@ -47,7 +47,7 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
-func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch chan struct{}) {
+func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
 	ourId := AgentId(conf.Agent.Identity)
 
 	helloQ := agentQs.Hello
@@ -59,6 +59,7 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch cha
 	registry := conf.Internal.AgentRegistry
 	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
 
+	var ok bool
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
 
@@ -69,8 +70,17 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch cha
 
 	if !viper.GetBool("syncengine.active") {
 		log.Printf("HsyncEngine is NOT active. No detection of communication with other agents will be done.")
-		for range syncQ {
-			syncitem = <-syncQ
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("HsyncEngine: context cancelled")
+				return
+			case syncitem, ok = <-syncQ:
+				if !ok {
+					log.Printf("HsyncEngine: syncQ channel closed")
+					return
+				}
+			}
 			log.Printf("HsyncEngine: NOT active, but received a sync request: %+v", syncitem)
 			continue
 		}
@@ -114,11 +124,7 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs, stopch cha
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 
-		case <-stopch:
-			log.Printf("HsyncEngine shutting down")
-			// stop all tickers
-			HBticker.Stop()
-			return
+			// stopch removed; ctx.Done() handles shutdown
 		}
 	}
 }
