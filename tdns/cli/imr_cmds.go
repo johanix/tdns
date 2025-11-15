@@ -51,10 +51,21 @@ var ImrQueryCmd = &cobra.Command{
 		case r := <-resp:
 			if r.RRset != nil {
 				// fmt.Printf("%v\n", r.RRset)
+				// Determine validation status from cache for the queried <qname,qtype>
+				isValidated := false
+				if Conf.Internal.RRsetCache != nil {
+					if c := Conf.Internal.RRsetCache.Get(qname, qtype); c != nil && c.Validated {
+						isValidated = true
+					}
+				}
+				suffix := ""
+				if isValidated {
+					suffix = " (validated)"
+				}
 				for _, rr := range r.RRset.RRs {
 					switch rr.Header().Rrtype {
 					case qtype, dns.TypeCNAME:
-						fmt.Printf("%s\n", rr.String())
+						fmt.Printf("%s%s\n", rr.String(), suffix)
 					default:
 						fmt.Printf("Not printing: %q\n", rr.String())
 					}
@@ -168,6 +179,98 @@ var dumpKeysCmd = &cobra.Command{
 
 		// Get all keys from the concurrent map
 		fmt.Printf("%v\n", Conf.Internal.RRsetCache.RRsets.Keys())
+	},
+}
+
+// dumpDnskeysCmd dumps DNSKEYs (from DnskeyCache) and DS RRsets (from RRsetCache) with validation status
+var dumpDnskeysCmd = &cobra.Command{
+	Use:   "dnskeys",
+	Short: "Dump DNSKEY trust anchors and cached DS RRsets with validation status",
+	Run: func(cmd *cobra.Command, args []string) {
+		// DNSKEYs from DnskeyCache
+		fmt.Printf("DNSKEY trust anchors in cache:\n")
+		keys := tdns.DnskeyCache.Map.Keys()
+		if len(keys) == 0 {
+			fmt.Printf("  (none)\n")
+		}
+		// Group by owner for readability
+		type taView struct {
+			keyid     uint16
+			validated bool
+			trusted   bool
+			expires   string
+			alg       uint8
+			flags     uint16
+		}
+		byOwner := map[string][]taView{}
+		for _, k := range keys {
+			val, ok := tdns.DnskeyCache.Map.Get(k)
+			if !ok {
+				continue
+			}
+			byOwner[val.Name] = append(byOwner[val.Name], taView{
+				keyid:     val.Keyid,
+				validated: val.Validated,
+				trusted:   val.Trusted,
+				expires:   tdns.TtlPrint(val.Expiration),
+				alg:       val.Dnskey.Algorithm,
+				flags:     val.Dnskey.Flags,
+			})
+		}
+		for owner, arr := range byOwner {
+			fmt.Printf("\nOwner: %s (DNSKEY)\n", owner)
+			for _, v := range arr {
+				vStr := "unvalidated"
+				if v.validated {
+					vStr = "validated"
+				}
+				tStr := "untrusted"
+				if v.trusted {
+					tStr = "trusted"
+				}
+				fmt.Printf("  keyid %d: %s, %s, alg=%d, flags=%d, TTL: %s\n",
+					v.keyid, vStr, tStr, v.alg, v.flags, v.expires)
+			}
+		}
+
+		// DS RRsets from RRsetCache
+		fmt.Printf("\nDS RRsets in cache:\n")
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+		var foundDS bool
+		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
+			parts := strings.Split(item.Key, "::")
+			if len(parts) != 2 {
+				continue
+			}
+			rrtypeNum, err := strconv.Atoi(parts[1])
+			if err != nil {
+				continue
+			}
+			if uint16(rrtypeNum) != dns.TypeDS {
+				continue
+			}
+			foundDS = true
+			val := item.Val
+			valStr := "unvalidated"
+			if val.Validated {
+				valStr = "validated"
+			}
+			fmt.Printf("\nOwner: %s RRtype: DS (%s, TTL: %s)\n", parts[0], valStr, tdns.TtlPrint(val.Expiration))
+			if val.RRset != nil {
+				for _, rr := range val.RRset.RRs {
+					fmt.Printf("  %s\n", rr.String())
+				}
+				// for _, s := range val.RRset.RRSIGs {
+				// 	fmt.Printf("  %s\n", s.String())
+				// }
+			}
+		}
+		if !foundDS {
+			fmt.Printf("  (none)\n")
+		}
 	},
 }
 
@@ -324,7 +427,7 @@ var XXXcompareCmd = &cobra.Command{
 
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd)
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd)
 	dumpAuthServersCmd.AddCommand(dumpKeysCmd, dumpServersCmd)
 
 	ImrZoneCmd.AddCommand(imrZoneListCmd, imrZoneCheckCmd)
@@ -391,10 +494,14 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 			dns.TypeToString[uint16(item.Val.RRtype)], tdns.CacheContextToString[item.Val.Context], tdns.TtlPrint(item.Val.Expiration))
 	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
 		// Print each RR in the RRset
+		valStr := "unvalidated"
+		if item.Val.Validated {
+			valStr = "validated"
+		}
 		for _, rr := range item.Val.RRset.RRs {
 			ttlStr := tdns.TtlPrint(item.Val.Expiration)
-			fmt.Printf("%v (%s, TTL: %s)\n", rr,
-				tdns.CacheContextToString[item.Val.Context], ttlStr)
+			fmt.Printf("%v (%s, %s, TTL: %s)\n", rr,
+				tdns.CacheContextToString[item.Val.Context], valStr, ttlStr)
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("%v\n", rr)
