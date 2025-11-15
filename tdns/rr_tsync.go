@@ -215,8 +215,9 @@ func (rd *TSYNC) Copy(dest dns.PrivateRdata) error {
 func (rd *TSYNC) Len() int {
 	// 2 bytes for Type +
 	// for each string: 2 bytes length + len(data)
-	// Alias uses domain name wire format; approximate with label bytes + root (adds 1)
-	return 2 + (len(rd.Alias) + 1) + 2 + len(rd.Transports) + 2 + len(rd.V4addr) + 2 + len(rd.V6addr)
+	// Alias uses domain name wire format: sum(1+len(label)) + root(1)
+	aliasLen := domainNameWireLen(rd.Alias)
+	return 2 + aliasLen + 2 + len(rd.Transports) + 2 + len(rd.V4addr) + 2 + len(rd.V6addr)
 }
 
 func RegisterTsyncRR() error {
@@ -258,6 +259,22 @@ func stripQuotes(s string) string {
 		}
 	}
 	return s
+}
+
+// domainNameWireLen returns the length in bytes of a domain name in DNS wire format.
+// It is sum(1+len(label)) for each label plus the root label (1). "." => 1.
+func domainNameWireLen(name string) int {
+	n := dns.Fqdn(strings.TrimSpace(name))
+	if n == "." {
+		return 1
+	}
+	labels := dns.SplitDomainName(n)
+	// Start with 1 for the root label
+	total := 1
+	for _, lbl := range labels {
+		total += 1 + len(lbl)
+	}
+	return total
 }
 
 

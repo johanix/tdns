@@ -828,7 +828,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(src string, nsrrset *RRset
 
 	// Helper to parse and apply transport signal (common for SVCB local key and TSYNC)
 	applyTransportSignal := func(owner string, s string) {
-		kvMap, err := parseTransportString(s)
+		kvMap, err := ParseTransportString(s)
 		if err != nil {
 			log.Printf("Invalid transport string for %s: %q: %v", owner, s, err)
 			return
@@ -1084,44 +1084,7 @@ func getMinTTL(rrs []dns.RR) time.Duration {
 }
 
 // parseTransportString parses strings like "doq:30,dot:20" into a map[string]uint8
-func parseTransportString(s string) (map[string]uint8, error) {
-	res := map[string]uint8{}
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return res, nil
-	}
-	var sum int
-	parts := strings.Split(s, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		kv := strings.SplitN(p, ":", 2)
-		if len(kv) != 2 {
-			return nil, fmt.Errorf("invalid transport item: %q", p)
-		}
-		k := strings.ToLower(strings.TrimSpace(kv[0]))
-		vstr := strings.TrimSpace(kv[1])
-		// simple atoi
-		var v int
-		for i := 0; i < len(vstr); i++ {
-			if vstr[i] < '0' || vstr[i] > '9' {
-				return nil, fmt.Errorf("invalid pct number: %q", vstr)
-			}
-			v = v*10 + int(vstr[i]-'0')
-			if v > 100 {
-				return nil, fmt.Errorf("pct value > 100: %d", v)
-			}
-		}
-		if v < 0 || v > 100 {
-			return nil, fmt.Errorf("pct out of range: %d", v)
-		}
-		res[k] = uint8(v)
-		sum += v
-		if sum > 100 {
-			return nil, fmt.Errorf("pct sum > 100: %d", sum)
-		}
-	}
-	return res, nil
-}
+// parseTransportString removed; use tdns.ParseTransportString from ops_svcb_transport.go
 
 // pickTransport chooses a transport based on configured weights, falling back sensibly
 func pickTransport(server *AuthServer, qname string) Transport {
@@ -1314,10 +1277,17 @@ func (rrcache *RRsetCacheT) tryServer(ctx context.Context, server *AuthServer, a
 		qname, dns.TypeToString[qtype])
 	// return c.Exchange(m, addr)
 	r, _, err := c.Exchange(m, addr)
-	if Globals.Verbose {
-		log.Printf("tryServer: r: %s, err: %v", r.String(), err)
+	if Globals.Debug {
+		if r != nil {
+			log.Printf("tryServer: query \"%s %s\" sent to %s returned response:\n%s", qname, dns.TypeToString[qtype], addr, r.String())
+		} else {
+			log.Printf("tryServer: query \"%s %s\" sent to %s returned no response", qname, dns.TypeToString[qtype], addr)
+		}
 	}
-	return r, 0, err
+	if err != nil {
+		log.Printf("tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
+	}
+    return r, 0, err
 }
 
 // applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server
@@ -1325,7 +1295,7 @@ func applyTransportSignalToServer(server *AuthServer, s string) {
 	if server == nil || s == "" {
 		return
 	}
-	kvMap, err := parseTransportString(s)
+	kvMap, err := ParseTransportString(s)
 	if err != nil {
 		log.Printf("applyTransportSignalToServer: invalid transport string for %s: %q: %v", server.Name, s, err)
 		return
@@ -1495,6 +1465,7 @@ func parseTransportForServerFromAdditional(server *AuthServer, r *dns.Msg) {
 }
 
 // persistServerTransportUpdate writes the updated server transport info back into the global ServerMap
+// XXX: This should be safe as ServerMap is a concurrent map.
 func (rrcache *RRsetCacheT) persistServerTransportUpdate(server *AuthServer) {
 	if server == nil {
 		return

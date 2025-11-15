@@ -316,7 +316,7 @@ func APIdispatcherNG(conf *Config, router *mux.Router, addrs []string, certFile 
 		go func(srv *http.Server, idx int) {
 			log.Printf("Starting API dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
 			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-				log.Fatalf("ListenAndServeTLS(): %v", err)
+				log.Printf("APIdispatcherNG: ListenAndServeTLS() error: %v", err)
 			}
 		}(servers[idx], idxCopy)
 	}

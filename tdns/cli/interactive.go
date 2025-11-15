@@ -103,7 +103,7 @@ var (
 )
 
 func restoreTTY() {
-	if origTTYState != nil && origTTYFD != 0 {
+	if origTTYState != nil {
 		_ = term.Restore(origTTYFD, origTTYState)
 		// Some environments need explicit re-enabling of isig/canon/echo
 		_ = exec.Command("stty", "isig", "icanon", "echo").Run()

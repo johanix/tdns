@@ -215,7 +215,6 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 }
 
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
-	var err error
 	serverMap, ok := rrcache.ServerMap.Get(zone)
 	if !ok {
 		serverMap = map[string]*AuthServer{}
@@ -257,11 +256,8 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 			}
 		}
 		// Only set preferred transport if we have valid transports
-		if len(serverMap[name].Alpn) > 0 {
-			serverMap[name].PrefTransport, err = StringToTransport(serverMap[name].Alpn[0])
-			if err != nil {
-				return fmt.Errorf("failed to set preferred transport: %w", err)
-			}
+		if len(serverMap[name].Transports) > 0 {
+			serverMap[name].PrefTransport = serverMap[name].Transports[0]
 		}
 	}
 	if Globals.Debug {

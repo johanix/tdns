@@ -42,6 +42,11 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer stop()
 
+    err = tdns.StartCombiner(ctx, &tconf, apirouter)
+	if err != nil {
+		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
+	}
+
     // SIGHUP reload watcher
     hup := make(chan os.Signal, 1)
     signal.Notify(hup, syscall.SIGHUP)
@@ -58,11 +63,6 @@ func main() {
             }
         }
     }()
-
-    err = tdns.StartCombiner(ctx, &tconf, apirouter)
-	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
-	}
 
     tdns.MainLoop(ctx, stop, &tconf)
 }

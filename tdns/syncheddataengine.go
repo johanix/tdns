@@ -114,13 +114,26 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 	SDcmdQ := agentQs.SynchedDataCmd
 
 	var synchedDataUpdate *SynchedDataUpdate
+	var ok bool
 
 	if !viper.GetBool("syncheddataengine.active") {
 		log.Printf("SynchedDataEngine is NOT active. No updates will be sent to the combiner.")
-		for synchedDataUpdate = range SDupdateQ {
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("SynchedDataEngine: context cancelled")
+				return
+			case synchedDataUpdate, ok = <-SDupdateQ:
+				if !ok {
+					log.Printf("SynchedDataEngine: synchedDataUpdate channel closed")
+					return
+				}
+			}
 			log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
 			continue
-		}
+		}	
+	} else {
+		log.Printf("SynchedDataEngine: Starting")
 	}
 
 	// XXX: Set up communication with the combiner

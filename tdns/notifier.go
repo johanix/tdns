@@ -50,13 +50,15 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 			zd.SendNotify(nr.RRtype, nr.Targets)
 
 			if nr.Response != nil {
-				nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}
+				select {
+				case nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}:
+				case <- ctx.Done():
+					log.Printf("NotifierEngine: Context cancelled while sending response for zone %q NOTIFY request", zd.ZoneName)
+					return nil
+				}
 			}
 		}
 	}
-
-	log.Println("*** NotifierEngine: terminating")
-	return nil
 }
 
 func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {

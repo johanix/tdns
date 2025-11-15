@@ -269,8 +269,17 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 						tgtowner, _ := zd.GetOwner(tgt)
 						if tgtrrset, ok := tgtowner.RRtypes.Get(qtype); ok {
 							m.Answer = append(m.Answer, tgtrrset.RRs...)
-							if zd.AddTransportSignal && zd.TransportSignal != nil && rrMatchesTransportSignal(v.RRs[0], zd.TransportSignal) {
-								transportSignalInAnswer = true
+							// XXX: This is not correct. We need to check if the CNAME target is a transport signal RR.
+							// if zd.AddTransportSignal && zd.TransportSignal != nil && rrMatchesTransportSignal(v.RRs[0], zd.TransportSignal) {
+							//	transportSignalInAnswer = true
+							//}
+							if zd.AddTransportSignal && zd.TransportSignal != nil {
+							   for _, arr := range m.Answer {
+							       if rrMatchesTransportSignal(arr, zd.TransportSignal) {
+							           transportSignalInAnswer = true
+							           break
+							       }
+							   }
 							}
 							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)

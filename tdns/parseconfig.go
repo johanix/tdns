@@ -147,7 +147,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
-	// Normalize service.transport.type (default: svcb)
+	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
 		conf.Service.Transport.Type = "none"
 	} else {
@@ -608,8 +608,14 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 		all_zones = append(all_zones, zname)
 
+		switch Globals.App.Type {
+		case AppTypeServer, AppTypeAgent, AppTypeCombiner:
 		// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
 		// try a non-blocking send; if it would block, send from a goroutine.
+        if conf.Internal.RefreshZoneCh == nil {
+			log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.", zname)
+			return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+		}
 		zr := ZoneRefresher{
 			Name:         zname,
 			Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
@@ -630,6 +636,7 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				conf.Internal.RefreshZoneCh <- z
 			}(zr)
 		}
+	}
 	}
 
 	// ValidateZones(conf, ZonesCfgFile) // will terminate on error

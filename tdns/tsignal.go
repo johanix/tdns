@@ -26,7 +26,7 @@ func matchesConfiguredAddrs(addrs []string, rrset *RRset) bool {
 			ip = r.AAAA.String()
 		}
 		for _, addr := range addrs {
-			if strings.HasPrefix(addr, ip) {
+			if strings.HasPrefix(ip, addr) {
 				return true
 			}
 		}
@@ -76,6 +76,10 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 			if CaseFoldContains(conf.Service.Identities, nsName) {
 				if strings.HasSuffix(nsName, zd.ZoneName) {
 					continue // in-bailiwick; handled below
+				}
+				if Globals.ServerSVCB == nil {
+					log.Printf("CreateTransportSignalRRs(SVCB): no Server SVCB configured; skipping identity NS %s", nsName)
+					continue
 				}
 				values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
 				if sig := conf.Service.Transport.Signal; sig != "" {

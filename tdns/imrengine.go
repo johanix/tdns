@@ -92,6 +92,10 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if rrq.ResponseCh == nil {
+				log.Printf("RecursorEngine: received nil or invalid request (no response channel)")
+				continue
+			}
 			if Globals.Debug {
 				log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 				fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
@@ -111,6 +115,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 				resp = &ImrResponse{
 					RRset: crrset.RRset,
 				}
+				rrq.ResponseCh <- *resp
 			} else {
 				var err error
 				if Globals.Debug {
@@ -121,9 +126,12 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 				resp, err = rrcache.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 				if err != nil {
 					log.Printf("Error from IterateOverQuery: %v", err)
+				} else if resp == nil {
+					resp = &ImrResponse{
+						Error: true,
+						ErrorMsg: fmt.Sprintf("ImrQuery: no response from ImrQuery"),
+					}
 				}
-			}
-			if rrq.ResponseCh != nil {
 				rrq.ResponseCh <- *resp
 			}
 		}
@@ -155,7 +163,9 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 	for {
 		if maxiter <= 0 {
 			log.Printf("*** ImrQuery: max iterations reached. Giving up.")
-			return nil, fmt.Errorf("Max iterations reached. Giving up.")
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Max iterations reached. Giving up.")
+			return &resp, fmt.Errorf("Max iterations reached. Giving up.")
 		} else {
 			maxiter--
 		}
@@ -386,6 +396,8 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 					var resp *ImrResponse
 					select {
 					case <-ctx.Done():
+						m.SetRcode(r, dns.RcodeServerFailure)
+						w.WriteMsg(m)
 						return
 					case resp = <-respch:
 					case <-time.After(3 * time.Second):
@@ -698,7 +710,7 @@ func createImrHandler(ctx context.Context, conf *Config, rrcache *RRsetCacheT) f
 				return
 			}
 
-			go rrcache.ImrResponder(ctx, w, r, qname, qtype, dnssec_ok)
+			rrcache.ImrResponder(ctx, w, r, qname, qtype, dnssec_ok)
 			return
 
 		default:

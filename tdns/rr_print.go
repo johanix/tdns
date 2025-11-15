@@ -86,6 +86,10 @@ func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 		namepad = " "
 	}
 	spaces := strings.Repeat(" ", leftpad)
+	if len(p) < 6 {
+		fmt.Printf(rr.String())
+		return
+	}
 	line := fmt.Sprintf("%s%s%s %s", p[0], namepad, p[1], strings.Join(p[2:6], " "))
 
 	if len(p) == 6 {

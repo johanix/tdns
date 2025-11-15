@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"time"
@@ -96,19 +95,23 @@ func handleDoQConnection(ctx context.Context, conn *quic.Conn, dnsHandler func(w
 		if Globals.Debug {
 			log.Printf("DoQ: accepted stream %v from %v", stream.StreamID(), conn.RemoteAddr())
 		}
-		go handleDoQStream(stream, conn, dnsHandler)
+		go handleDoQStream(ctx, stream, conn, dnsHandler)
 	}
 }
 
-func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
+func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
 	if Globals.Debug {
 		log.Printf("DoQ: handling stream %v from %v", stream.StreamID(), conn.RemoteAddr())
 	}
 
 	// Read the DNS message length (2 bytes)
 	lenBuf := make([]byte, 2)
-	_, err := io.ReadFull(stream, lenBuf)
-	if err != nil {
+	if err := readExactWithContext(ctx, stream, lenBuf); err != nil {
+		if ctx.Err() != nil {
+			// graceful cancellation
+			_ = stream.Close()
+			return
+		}
 		log.Printf("Failed to read message length: %s", err.Error())
 		stream.Close()
 		return
@@ -117,8 +120,11 @@ func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns
 
 	// Read the DNS message
 	msgBuf := make([]byte, msgLen)
-	_, err = io.ReadFull(stream, msgBuf)
-	if err != nil {
+	if err := readExactWithContext(ctx, stream, msgBuf); err != nil {
+		if ctx.Err() != nil {
+			_ = stream.Close()
+			return
+		}
 		log.Printf("Failed to read DNS message: %s", err.Error())
 		stream.Close()
 		return
@@ -144,6 +150,40 @@ func handleDoQStream(stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns
 	if Globals.Debug {
 		log.Printf("DoQ: finished handling stream %v from %v", stream.StreamID(), conn.RemoteAddr())
 	}
+}
+
+// readExactWithContext reads exactly len(buf) bytes from the stream,
+// periodically setting a short read deadline to allow checking ctx.Done().
+func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error {
+	const sliceReadDeadline = 200 * time.Millisecond
+	defer func() {
+		// clear any deadline
+		_ = s.SetReadDeadline(time.Time{})
+	}()
+	total := 0
+	for total < len(buf) {
+		// set a short read deadline to avoid blocking indefinitely
+		_ = s.SetReadDeadline(time.Now().Add(sliceReadDeadline))
+		n, err := s.Read(buf[total:])
+		if n > 0 {
+			total += n
+		}
+		if err != nil {
+			// handle deadline expiry to check ctx.Done()
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					// continue reading
+					continue
+				}
+			}
+			return err
+		}
+		// If no bytes and no error (shouldn't happen with SetReadDeadline), loop again
+	}
+	return nil
 }
 
 // DoQ Response Writer implementation

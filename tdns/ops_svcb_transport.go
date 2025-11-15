@@ -109,32 +109,6 @@ func ComputeDo53Remainder(pct map[string]uint8) uint8 {
     return uint8(100 - sum)
 }
 
-// SetTransportParam sets or replaces the private-use transport parameter on the SVCB RR.
-// It validates against the RR's ALPN list.
-func SetTransportParam(svcb *dns.SVCB, transports map[string]uint8) error {
-    if svcb == nil {
-        return fmt.Errorf("SetTransportParam: nil svcb")
-    }
-    // Marshal
-    value := MarshalTransport(transports)
-    // Replace existing or append new
-    replaced := false
-    for i, kv := range svcb.Value {
-        if local, ok := kv.(*dns.SVCBLocal); ok {
-            if uint16(local.Key()) == SvcbTransportKey {
-                local.Data = []byte(value)
-                svcb.Value[i] = local
-                replaced = true
-                break
-            }
-        }
-    }
-    if !replaced {
-        svcb.Value = append(svcb.Value, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(value)})
-    }
-    return nil
-}
-
 // GetTransportParam fetches and parses the transport parameter from the SVCB RR, if present.
 func GetTransportParam(svcb *dns.SVCB) (map[string]uint8, bool, error) {
     if svcb == nil {
@@ -152,29 +126,6 @@ func GetTransportParam(svcb *dns.SVCB) (map[string]uint8, bool, error) {
         }
     }
     return nil, false, nil
-}
-
-// BuildServerSVCB is a convenience builder that applies ALPN and transport weights with validation.
-func BuildServerSVCB(name string, alpn []string, transports map[string]uint8) (*dns.SVCB, error) {
-    svcb := &dns.SVCB{
-        Hdr: dns.RR_Header{
-            Name:   dns.Fqdn(name),
-            Rrtype: dns.TypeSVCB,
-            Class:  dns.ClassINET,
-            Ttl:    120,
-        },
-        Priority: 1,
-        Target:   dns.Fqdn(name),
-    }
-    if len(alpn) > 0 {
-        svcb.Value = append(svcb.Value, &dns.SVCBAlpn{Alpn: alpn})
-    }
-    if transports != nil {
-        if err := SetTransportParam(svcb, transports); err != nil {
-            return nil, err
-        }
-    }
-    return svcb, nil
 }
 
 // ValidateExplicitServerSVCB validates an explicit SVCB RR for server use.
