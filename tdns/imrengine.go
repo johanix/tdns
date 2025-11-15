@@ -805,6 +805,41 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 		seenNames[name] = true
 	}
 	for anchorName := range seenNames {
+		// Seed DS RRset from trust anchors (if provided) into cache as validated,
+		// so DNSKEY validation can find a validated DS RRset.
+		if dslist := dsByName[anchorName]; len(dslist) > 0 {
+			var rrds []dns.RR
+			var minTTL uint32
+			for i, ds := range dslist {
+				rrds = append(rrds, ds)
+				if i == 0 || ds.Hdr.Ttl < minTTL {
+					minTTL = ds.Hdr.Ttl
+				}
+			}
+			// Fallback TTL if not present in TA (e.g., config without TTL)
+			if minTTL == 0 {
+				minTTL = 86400
+			}
+			dsRRset := &RRset{
+				Name:   anchorName,
+				Class:  dns.ClassINET,
+				RRtype: dns.TypeDS,
+				RRs:    rrds,
+				// No RRSIGs for TA-seeded DS; considered trusted
+			}
+			rrcache.Set(anchorName, dns.TypeDS, &CachedRRset{
+				Name:       anchorName,
+				RRtype:     dns.TypeDS,
+				RRset:      dsRRset,
+				Context:    ContextPriming,
+				Validated:  true,
+				Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
+			})
+			if Globals.Debug {
+				log.Printf("initializeImrTrustAnchors: seeded validated DS RRset for %s with %d DS (TTL=%d)", anchorName, len(rrds), minTTL)
+			}
+		}
+
 		// Fetch the DNSKEY RRset for the anchor, using current known servers
 		serverMap, ok := rrcache.ServerMap.Get(anchorName)
 		if !ok || len(serverMap) == 0 {
