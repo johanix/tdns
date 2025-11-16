@@ -65,6 +65,16 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	var err error
 	// RecursorCache, err = NewRRsetCacheNG(viper.GetString("recursorengine.root-hints"))
 	rrcache := NewRRsetCache(log.Default(), conf.ImrEngine.Verbose, conf.ImrEngine.Debug)
+	rrcache.DNSKEYFetcher = func(ctx context.Context, name string) (*RRset, error) {
+		return DefaultDNSKEYFetcher(ctx, name, rrcache)
+	}
+	rrcache.DSGetter = func(name string) (*RRset, bool) {
+		name = dns.Fqdn(name)
+		if ds := rrcache.Get(name, dns.TypeDS); ds != nil && ds.RRset != nil {
+			return ds.RRset, ds.Validated
+		}
+		return nil, false
+	}
 	if !rrcache.Primed {
 		err = rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
 		if err != nil {

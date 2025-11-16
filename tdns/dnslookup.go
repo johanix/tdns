@@ -1769,3 +1769,22 @@ func (rrcache *RRsetCacheT) chaseCNAME(ctx context.Context, target string, qtype
 	}
 	return nil, dns.RcodeServerFailure, ContextFailure, fmt.Errorf("CNAME chase exceeded max depth")
 }
+
+func DefaultDNSKEYFetcher(ctx context.Context, name string, rrcache *RRsetCacheT) (*RRset, error) {
+    // implement with your IterativeDNSQuery + server selection
+    best, servers, _ := rrcache.FindClosestKnownZone(name)
+    _ = best // could be used for logging
+    if len(servers) == 0 {
+        if sm, ok := rrcache.ServerMap.Get("."); ok {
+            servers = sm
+        }
+    }
+    if len(servers) == 0 {
+        return nil, fmt.Errorf("no servers for %s", name)
+    }
+    rr, _, _, err := rrcache.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false)
+    if err != nil || rr == nil || len(rr.RRs) == 0 {
+        return nil, fmt.Errorf("dnskey fetch failed for %s: %v", name, err)
+    }
+    return rr, nil
+}

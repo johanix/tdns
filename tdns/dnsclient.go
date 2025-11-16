@@ -16,16 +16,6 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// Transport represents the DNS transport protocol
-type Transport uint8
-
-const (
-	TransportDo53 Transport = iota + 1
-	TransportDoT
-	TransportDoH
-	TransportDoQ
-)
-
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
 	Port      string
@@ -266,27 +256,4 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string) (*dns.Msg, time.Dur
 	return response, 0, nil
 }
 
-// StringToTransport converts a string transport name to Transport type
-func StringToTransport(s string) (Transport, error) {
-	switch s {
-	case "do53", "Do53", "Do53-TCP":
-		return TransportDo53, nil
-	case "tcp", "TCP":
-		return TransportDo53, nil // TCP is still Do53, just forced TCP
-	case "dot", "DoT", "DoT-TCP":
-		return TransportDoT, nil
-	case "doh", "DoH", "DoH-TCP":
-		return TransportDoH, nil
-	case "doq", "DoQ", "DoQ-TCP":
-		return TransportDoQ, nil
-	default:
-		return TransportDo53, fmt.Errorf("unknown transport: %s", s)
-	}
-}
-
-var TransportToString = map[Transport]string{
-	TransportDo53: "do53",
-	TransportDoT:  "dot",
-	TransportDoH:  "doh",
-	TransportDoQ:  "doq",
-}
+// StringToTransport and TransportToString provided by core aliases (see core_alias.go)

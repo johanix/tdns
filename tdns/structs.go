@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto"
 	"database/sql"
 	"log"
@@ -207,14 +208,6 @@ type OwnerData struct {
 	RRtypes *RRTypeStore
 }
 
-type RRset struct {
-	Name   string
-	Class  uint16
-	RRtype uint16
-	RRs    []dns.RR
-	RRSIGs []dns.RR
-}
-
 type ChildDelegationData struct {
 	DelHasChanged    bool      // When returned from a scanner, this indicates that a change has been detected
 	ParentSerial     uint32    // The parent serial that this data was correct for
@@ -382,6 +375,10 @@ type RRsetCacheT struct {
 	Servers   *ConcurrentMap[string, []string]
 	ServerMap *ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
 	DNSClient map[Transport]*DNSClient
+	// Optional injected DNSKEY fetcher for validation; if nil, legacy path is used
+	DNSKEYFetcher func(ctx context.Context, name string) (*RRset, error)
+	// Optional injected DS getter for validation; if nil, legacy path (cache lookup) is used
+	DSGetter func(name string) (rrset *RRset, validated bool)
 	Primed    bool
 	Logger    *log.Logger
 	Verbose   bool

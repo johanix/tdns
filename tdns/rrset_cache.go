@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/tdns/cache"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
@@ -48,7 +50,7 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
 // If a required signer key is missing, it will query for the signer's DNSKEY via the recursive
 // engine and retry using keys from the cache. Only keys marked as Trusted are accepted for
 // successful validation. Returns true if at least one signature validates and is time-valid.
-func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT, rrset *RRset, verbose bool) (bool, error) {
+func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, fetcher cache.RRFetcher, rrset *RRset, verbose bool) (bool, error) {
 	if Globals.Verbose {
 		log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 			rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
@@ -85,7 +87,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 		if Globals.Verbose {
 			log.Printf("ValidateRRset: TA %q::%d in cache: %+v", signer, keyid, ta)
 		}
-		if ta == nil && rrcache != nil && ctx != nil {
+		if ta == nil && ctx != nil {
 			if verbose {
 				log.Printf("ValidateRRset: TA %q::%d not in cache; attempting to obtain keys", signer, keyid)
 			}
@@ -121,19 +123,10 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 						}
 					}
 				}
-			} else {
-			// Attempt to fetch the signer's DNSKEY to populate cache (chain trust evaluated by caller)
-			_, servers, _ := rrcache.FindClosestKnownZone(signer)
-			if verbose {
-				log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
-			}
-			if len(servers) == 0 {
-				if sm, ok := rrcache.ServerMap.Get("."); ok {
-					servers = sm
-				}
-			}
-			if len(servers) > 0 {
-				if dkeys, _, _, err := rrcache.IterativeDNSQuery(ctx, signer, dns.TypeDNSKEY, servers, false); err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
+			} else if fetcher != nil {
+				// Attempt to fetch the signer's DNSKEY to populate cache
+				dkeys, err := fetcher.FetchDNSKEY(ctx, signer)
+				if err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
 					if verbose {
 						log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
 					}
@@ -162,7 +155,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 						}
 					}
 					// Attempt to validate the fetched DNSKEY RRset using DS and promote keys to trusted if successful
-					if ok, _ := dkc.ValidateDNSKEYs(ctx, rrcache, dkeys, verbose); ok {
+					if ok, _ := dkc.ValidateDNSKEYs(ctx, fetcher, dkeys, verbose); ok {
 						if verbose {
 							log.Printf("ValidateRRset: signer DNSKEY RRset for %q validated; promoting keys to trusted", signer)
 						}
@@ -182,7 +175,8 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 				} else if err != nil && verbose {
 					log.Printf("ValidateRRset: failed fetching DNSKEY for %q: %v", signer, err)
 				}
-			}
+			} else if verbose {
+				log.Printf("ValidateRRset: no fetcher configured; cannot obtain DNSKEYs for %q", signer)
 			}
 			ta = dkc.Get(signer, keyid)
 		}
@@ -233,7 +227,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 // 3) Ensure a validated DS RRset for this apex exists in the cache.
 // 4) Match the DNSKEY against any DS digest present.
 // 5) Verify the DNSKEY RRset RRSIG with the matched DNSKEY and time window.
-func (dkc *DnskeyCacheT) ValidateDNSKEYs(ctx context.Context, rrcache *RRsetCacheT, rrset *RRset, verbose bool) (bool, error) {
+func (dkc *DnskeyCacheT) ValidateDNSKEYs(ctx context.Context, fetcher cache.RRFetcher, rrset *RRset, verbose bool) (bool, error) {
 	if rrset == nil {
 		return false, nil
 	}
@@ -317,12 +311,13 @@ func (dkc *DnskeyCacheT) ValidateDNSKEYs(ctx context.Context, rrcache *RRsetCach
 		}
 		return true, nil
 	}
-	// 3) Retrieve DS RRset for this apex from cache and require it to be validated
-	var dsRRs *CachedRRset
-	if rrcache != nil {
-		dsRRs = rrcache.Get(name, dns.TypeDS)
+	// 3) Retrieve DS RRset for this apex and require it to be validated
+	var dsRRset *RRset
+	var dsValidated bool
+	if fetcher != nil {
+		dsRRset, dsValidated = fetcher.GetDS(name)
 	}
-	if dsRRs == nil || dsRRs.RRset == nil || !dsRRs.Validated || len(dsRRs.RRset.RRs) == 0 {
+	if dsRRset == nil || !dsValidated || len(dsRRset.RRs) == 0 {
 		if verbose {
 			log.Printf("ValidateDNSKEYs: validated DS RRset for %s not present in cache", name)
 		}
@@ -330,7 +325,7 @@ func (dkc *DnskeyCacheT) ValidateDNSKEYs(ctx context.Context, rrcache *RRsetCach
 	}
 	// 4) Match signerKey to any DS in DS RRset
 	var dsMatch bool
-	for _, rr := range dsRRs.RRset.RRs {
+	for _, rr := range dsRRset.RRs {
 		if ds, ok := rr.(*dns.DS); ok {
 			if ds.KeyTag != keyid {
 				continue
@@ -452,6 +447,44 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	}
 
 	rrcache.RRsets.Set(lookupKey, *crrset)
+}
+
+// FetchDNSKEY implements cache.RRFetcher on RRsetCacheT using the configured fetcher or a fallback.
+func (rrcache *RRsetCacheT) FetchDNSKEY(ctx context.Context, name string) (*RRset, error) {
+	if rrcache == nil {
+		return nil, errors.New("nil cache")
+	}
+	name = dns.Fqdn(name)
+	if rrcache.DNSKEYFetcher != nil {
+		return rrcache.DNSKEYFetcher(ctx, name)
+	}
+	// Fallback: attempt an iterative query using known servers
+	_, servers, _ := rrcache.FindClosestKnownZone(name)
+	if len(servers) == 0 {
+		if sm, ok := rrcache.ServerMap.Get("."); ok {
+			servers = sm
+		}
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no servers known for %q", name)
+	}
+	rrs, _, _, err := rrcache.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false)
+	return rrs, err
+}
+
+// GetDS implements cache.RRFetcher on RRsetCacheT using injected getter or local cache.
+func (rrcache *RRsetCacheT) GetDS(name string) (*RRset, bool) {
+	if rrcache == nil {
+		return nil, false
+	}
+	name = dns.Fqdn(name)
+	if rrcache.DSGetter != nil {
+		return rrcache.DSGetter(name)
+	}
+	if ds := rrcache.Get(name, dns.TypeDS); ds != nil && ds.RRset != nil {
+		return ds.RRset, ds.Validated
+	}
+	return nil, false
 }
 
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)

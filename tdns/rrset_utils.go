@@ -363,50 +363,56 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 	return rrsets_differ, adds, removes
 }
 
-func (rrset *RRset) RemoveRR(rr dns.RR) {
-	log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
+// Methods moved to tdns/core on core.RRset. Keep free-function wrappers for now.
+
+// Free-function equivalents to support moving RRset to tdns/core later.
+func RRsetRemoveRR(rrset *RRset, rr dns.RR) {
+	if rrset == nil || rr == nil {
+		return
+	}
 	for i, r := range rrset.RRs {
-		log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
 		if dns.IsDuplicate(r, rr) {
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			rrset.RRSIGs = []dns.RR{}
-			log.Printf("RemoveRR: *REMOVED* '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
 			return
 		}
 	}
 }
 
-func (rrset *RRset) Copy() *RRset {
-	new_rrset := RRset{
-		Name:   rrset.Name,
+func RRsetCopy(src *RRset) *RRset {
+	if src == nil {
+		return nil
+	}
+	dst := RRset{
+		Name:   src.Name,
 		RRs:    []dns.RR{},
 		RRSIGs: []dns.RR{},
 	}
-	new_rrset.RRs = append(new_rrset.RRs, rrset.RRs...)
-	new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
-	return &new_rrset
+	dst.RRs = append(dst.RRs, src.RRs...)
+	dst.RRSIGs = append(dst.RRSIGs, src.RRSIGs...)
+	return &dst
 }
 
-// Add adds a RR to the RRset if it is not already present.
-func (rrset *RRset) Add(rr dns.RR) {
+func RRsetAdd(rrset *RRset, rr dns.RR) {
+	if rrset == nil || rr == nil {
+		return
+	}
 	for _, rr2 := range rrset.RRs {
 		if dns.IsDuplicate(rr, rr2) {
-			// log.Printf("rrset.Add: RR already present: %s", rr.String())
 			return
 		}
 	}
-	// log.Printf("rrset.Add: Adding RR: %s to RRset\n%v", rr.String(), rrset.RRs)
 	rrset.RRs = append(rrset.RRs, rr)
 }
 
-// Delete deletes a RR from the RRset if it is present.
-func (rrset *RRset) Delete(rr dns.RR) {
+func RRsetDelete(rrset *RRset, rr dns.RR) {
+	if rrset == nil || rr == nil {
+		return
+	}
 	for i, rr2 := range rrset.RRs {
 		if dns.IsDuplicate(rr, rr2) {
-			// log.Printf("rrset.Delete: Found RR: %s in RRset\n%v", rr.String(), rrset.RRs)
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			return
 		}
 	}
-	// log.Printf("rrset.Delete: RR not found: %s", rr.String())
 }

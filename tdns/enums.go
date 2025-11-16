@@ -5,30 +5,6 @@ package tdns
 
 import "fmt"
 
-type CacheContext uint8
-
-const (
-	ContextAnswer CacheContext = iota + 1
-	ContextHint
-	ContextPriming
-	ContextReferral
-	ContextNXDOMAIN
-	ContextNoErrNoAns
-	ContextGlue    // from additional section
-	ContextFailure // some sort of general failure that we cannot sort out
-)
-
-var CacheContextToString = map[CacheContext]string{
-	ContextAnswer:     "answer",
-	ContextHint:       "hint",
-	ContextPriming:    "priming",
-	ContextReferral:   "referral",
-	ContextNXDOMAIN:   "NXDOMAIN",
-	ContextNoErrNoAns: "NOERROR, NODATA (negative response type 0)",
-	ContextGlue:       "glue",
-	ContextFailure:    "failure",
-}
-
 type ZoneOption uint8
 
 const (

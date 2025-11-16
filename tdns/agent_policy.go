@@ -128,7 +128,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 							synchedDataUpdate.Zone, rr.String(), synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
 						rr.Header().Class = dns.ClassINET
-						cur_rrset.Delete(rr)
+						RRsetDelete(&cur_rrset, rr)
 						changed = true
 					}
 					nod.RRtypes.Set(rrtype, cur_rrset)
@@ -138,13 +138,13 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						msg = fmt.Sprintf("Adding %s %s RRset to agent %q",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
-						cur_rrset = *rrset.Copy()
+						cur_rrset = *RRsetCopy(&rrset)
 						changed = true
 					} else {
 						for _, rr := range rrset.RRs {
 							msg = fmt.Sprintf("Adding RR: %s to RRset\n%v", rr.String(), cur_rrset.RRs)
 							log.Printf("SynchedDataEngine: %s", msg)
-							cur_rrset.Add(rr)
+							RRsetAdd(&cur_rrset, rr)
 							changed = true
 						}
 					}
