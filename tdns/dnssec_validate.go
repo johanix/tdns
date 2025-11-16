@@ -87,11 +87,11 @@ func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 }
 
 // If key not found *TrustAnchor is nil
-func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error) {
-	ta := DnskeyCache.Get(signer, keyid)
+func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*CachedDnskeyRRset, error) {
+	cdr := DnskeyCache.Get(signer, keyid)
 
-	if ta != nil {
-		return ta, nil
+	if cdr != nil {
+		return cdr, nil
 	}
 
 	zd.Logger.Printf("FindDnskey: Request for DNSKEY with id %s::%d not found in cache, will fetch.", signer, keyid)
@@ -110,8 +110,8 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*TrustAnchor, error
 		return nil, fmt.Errorf("FindDnskey: Error: DNSKEY RRset for %s is not valid", signer)
 	}
 
-	ta = DnskeyCache.Get(signer, keyid)
-	return ta, nil
+	cdr = DnskeyCache.Get(signer, keyid)
+	return cdr, nil
 }
 
 // ValidateChildDnskeys: we have the ChildDelegationData for the child zone,
@@ -174,7 +174,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 							// Store the KSK in the DnskeyCache
 							keyname := dnskey.Header().Name
 							expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
-							ta := TrustAnchor{
+							cdr := CachedDnskeyRRset{
 								Name:       keyname,
 								Keyid:      keyid,
 								Validated:  true,
@@ -182,7 +182,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 								Dnskey:     *dnskey,
 								Expiration: expiration,
 							}
-							DnskeyCache.Set(keyname, keyid, &ta)
+							DnskeyCache.Set(keyname, keyid, &cdr)
 							zd.Logger.Printf("ValidateChildDnskeys: Stored KSK in TAStore with key %s::%d and expiration %v", keyname, keyid, expiration)
 							kskValidated = true
 						} else {
@@ -212,7 +212,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 				keyid := dnskey.KeyTag()
 				// lookupKey := fmt.Sprintf("%s::%d", keyname, keyid)
 				expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
-				ta := TrustAnchor{
+				cdr := CachedDnskeyRRset{
 					Name:       keyname,
 					Keyid:      keyid,
 					Validated:  true,
@@ -220,7 +220,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 					Dnskey:     *dnskey,
 					Expiration: expiration,
 				}
-				DnskeyCache.Set(keyname, keyid, &ta)
+				DnskeyCache.Set(keyname, keyid, &cdr)
 				zd.Logger.Printf("ValidateChildDnskeys: Stored ZSK in DnskeyCache with key %s::%d and expiration %v", keyname, keyid, expiration)
 			}
 		}

@@ -205,11 +205,14 @@ var dumpDnskeysCmd = &cobra.Command{
 	Short: "Dump DNSKEY trust anchors and cached DS RRsets with validation status",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Combined, sorted-by-owner (reverse labels): DS (first) then DNSKEYs
-		type taView struct {
+		type dnskeyView struct {
+			name      string
 			keyid     uint16
 			validated bool
 			trusted   bool
+			trustanchor bool
 			expires   string
+			protocol  uint8
 			alg       uint8
 			flags     uint16
 			pub       string
@@ -222,7 +225,7 @@ var dumpDnskeysCmd = &cobra.Command{
 		}
 		type ownerView struct {
 			ds     *dsView
-			dnskey []taView
+			dnskey []dnskeyView
 		}
 		owners := map[string]*ownerView{}
 
@@ -238,12 +241,15 @@ var dumpDnskeysCmd = &cobra.Command{
 				ov = &ownerView{}
 				owners[val.Name] = ov
 			}
-			ov.dnskey = append(ov.dnskey, taView{
+			ov.dnskey = append(ov.dnskey, dnskeyView{
+				name:      val.Name,
 				keyid:     val.Keyid,
 				validated: val.Validated,
 				trusted:   val.Trusted,
+				trustanchor: val.TrustAnchor,
 				expires:   tdns.TtlPrint(val.Expiration),
 				alg:       val.Dnskey.Algorithm,
+				protocol:  val.Dnskey.Protocol,
 				flags:     val.Dnskey.Flags,
 				pub:       truncateKey(val.Dnskey.PublicKey, 15),
 			})
@@ -353,6 +359,7 @@ var dumpDnskeysCmd = &cobra.Command{
 				}
 				fmt.Printf("\n%s DNSKEY (%s%s, TTL: %s)\n", owner, vStr, signerInfo, rrsetTTL)
 				for _, v := range ov.dnskey {
+					// fmt.Printf("FOO: validated: %v trusted: %v trustanchor: %v\n", v.validated, v.trusted, v.trustanchor)
 					vStr := "unvalidated"
 					if v.validated {
 						vStr = "validated"
@@ -361,8 +368,11 @@ var dumpDnskeysCmd = &cobra.Command{
 					if v.trusted {
 						tStr = "trusted"
 					}
-					fmt.Printf("  key %s (keyid: %d): %s, %s, alg=%d, flags=%d, TTL: %s\n",
-						v.pub, v.keyid, vStr, tStr, v.alg, v.flags, v.expires)
+					if v.trustanchor {
+						tStr = "*trust anchor*"
+					}
+					fmt.Printf("  %s DNSKEY %d %d %d %s (keyid: %d, %s, %s, TTL: %s)\n",
+						v.name, v.flags, v.protocol, v.alg, v.pub, v.keyid, vStr, tStr, v.expires)
 				}
 			}
 		}

@@ -1547,7 +1547,7 @@ func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtyp
 			exp := cr.Expiration
 			for _, rr := range rrset.RRs {
 				if dk, ok := rr.(*dns.DNSKEY); ok {
-					DnskeyCache.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &TrustAnchor{
+					DnskeyCache.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 						Name:       dns.Fqdn(dk.Hdr.Name),
 						Keyid:      dk.KeyTag(),
 						Validated:  true,

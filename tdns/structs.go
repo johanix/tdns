@@ -291,14 +291,15 @@ type ValidatorResponse struct {
 
 // type TAStore map[string]map[uint16]TrustAnchor
 type DnskeyCacheT struct {
-	Map cmap.ConcurrentMap[string, TrustAnchor]
+	Map cmap.ConcurrentMap[string, CachedDnskeyRRset]
 }
 
-type TrustAnchor struct {
+type CachedDnskeyRRset struct {
 	Name       string
 	Keyid      uint16
 	Validated  bool
 	Trusted    bool
+	TrustAnchor bool
 	Dnskey     dns.DNSKEY // just this key
 	RRset      *RRset     // complete RRset
 	Expiration time.Time

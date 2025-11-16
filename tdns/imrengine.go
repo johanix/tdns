@@ -794,13 +794,16 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 
 	// Add direct DNSKEY anchors to cache as trusted
 	for name, list := range dnskeysByName {
+		fmt.Printf("FOO1: adding %d DNSKEY TAs for %s\n", len(list), name)
 		exp := time.Now().Add(365 * 24 * time.Hour)
 		for _, dk := range list {
-			DnskeyCache.Set(name, dk.KeyTag(), &TrustAnchor{
+			fmt.Printf("FOO2: adding DNSKEY TA %s (keyid: %d)\n", name, dk.KeyTag())
+			DnskeyCache.Set(name, dk.KeyTag(), &CachedDnskeyRRset{
 				Name:       name,
 				Keyid:      dk.KeyTag(),
 				Validated:  true,
 				Trusted:    true,
+				TrustAnchor: true,
 				Dnskey:     *dk,
 				Expiration: exp,
 			})
@@ -899,7 +902,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 						continue
 					}
 					if strings.EqualFold(computed.Digest, ds.Digest) {
-						ta := TrustAnchor{
+						cdr := CachedDnskeyRRset{
 							Name:       dns.Fqdn(dk.Hdr.Name),
 							Keyid:      keyid,
 							Validated:  true,
@@ -907,8 +910,8 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 							Dnskey:     *dk,
 							Expiration: exp,
 						}
-						DnskeyCache.Set(ta.Name, ta.Keyid, &ta)
-						log.Printf("initializeImrTrustAnchors: DS matched DNSKEY %s::%d (expires %v)", ta.Name, ta.Keyid, exp)
+						DnskeyCache.Set(cdr.Name, cdr.Keyid, &cdr)
+						log.Printf("initializeImrTrustAnchors: DS matched DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
 					}
 				}
 			}
@@ -927,7 +930,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 		// Since the DNSKEY RRset validated, mark all contained DNSKEYs as validated/trusted in DnskeyCache
 		for _, rr := range rrset.RRs {
 			if dk, ok := rr.(*dns.DNSKEY); ok {
-				DnskeyCache.Set(anchorName, dk.KeyTag(), &TrustAnchor{
+				DnskeyCache.Set(anchorName, dk.KeyTag(), &CachedDnskeyRRset{
 					Name:       anchorName,
 					Keyid:      dk.KeyTag(),
 					Validated:  true,

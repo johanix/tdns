@@ -58,7 +58,7 @@ type TruststoreResponse struct {
 	Time          time.Time
 	Status        string
 	Zone          string
-	ChildDnskeys  map[string]TrustAnchor
+	ChildDnskeys  map[string]CachedDnskeyRRset
 	ChildSig0keys map[string]Sig0Key
 	Msg           string
 	Error         bool
@@ -175,7 +175,7 @@ type DebugResponse struct {
 	RRset      RRset
 	//	TrustedDnskeys	map[string]dns.DNSKEY
 	//	TrustedSig0keys	map[string]dns.KEY
-	TrustedDnskeys  []TrustAnchor
+	TrustedDnskeys  []CachedDnskeyRRset
 	TrustedSig0keys map[string]Sig0Key
 	CachedRRsets    []CachedRRset
 	Validated       bool

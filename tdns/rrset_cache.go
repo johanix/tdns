@@ -21,11 +21,11 @@ var DnskeyCache = NewDnskeyCache()
 
 func NewDnskeyCache() *DnskeyCacheT {
 	return &DnskeyCacheT{
-		Map: cmap.New[TrustAnchor](),
+		Map: cmap.New[CachedDnskeyRRset](),
 	}
 }
 
-func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *TrustAnchor {
+func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
 	tmp, ok := dkc.Map.Get(lookupKey)
 	if !ok {
@@ -39,9 +39,9 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *TrustAnchor {
 	return &tmp
 }
 
-func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, ta *TrustAnchor) {
+func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
 	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
-	dkc.Map.Set(lookupKey, *ta)
+	dkc.Map.Set(lookupKey, *cdr)
 }
 
 // ValidateRRset attempts to validate the provided RRset using DNSKEYs present in the DnskeyCache.
@@ -108,7 +108,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 				exp := time.Now().Add(time.Duration(minTTL) * time.Second)
 				for _, krr := range rrset.RRs {
 					if dk, ok := krr.(*dns.DNSKEY); ok {
-						dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &TrustAnchor{
+						dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 							Name:       dns.Fqdn(dk.Hdr.Name),
 							Keyid:      dk.KeyTag(),
 							Validated:  false,
@@ -148,7 +148,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 					exp := time.Now().Add(time.Duration(minTTL) * time.Second)
 					for _, krr := range dkeys.RRs {
 						if dk, ok := krr.(*dns.DNSKEY); ok {
-							dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &TrustAnchor{
+							dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 								Name:       dns.Fqdn(dk.Hdr.Name),
 								Keyid:      dk.KeyTag(),
 								Validated:  false,
@@ -168,7 +168,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 						}
 						for _, krr := range dkeys.RRs {
 							if dk, ok := krr.(*dns.DNSKEY); ok {
-								dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &TrustAnchor{
+								dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 									Name:       dns.Fqdn(dk.Hdr.Name),
 									Keyid:      dk.KeyTag(),
 									Validated:  true,
