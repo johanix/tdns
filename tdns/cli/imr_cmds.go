@@ -386,7 +386,7 @@ var imrZoneListCmd = &cobra.Command{
 		if len(args) == 0 {
 			fmt.Println("Error: no zone file argument")
 			return
-		}
+		} 
 		fmt.Printf("Listing records for zone: %s\n", args[0])
 	},
 }

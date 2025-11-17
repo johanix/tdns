@@ -100,7 +100,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	}
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-	go rrcache.ImrEngine(ctx, conf)
+	go ImrEngine(ctx, conf, rrcache)
 
 	for {
 		select {
@@ -142,7 +142,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 					fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
 				}
 
-				resp, err = rrcache.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+				resp, err = ImrQuery(ctx, rrcache, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 				if err != nil {
 					log.Printf("Error from IterateOverQuery: %v", err)
 				} else if resp == nil {
@@ -157,7 +157,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	}
 }
 
-func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+func ImrQuery(ctx context.Context, rrcache *RRsetCacheT, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
 	log.Printf("ImrQuery: <%s, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 	maxiter := 12
 
@@ -188,7 +188,7 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 		} else {
 			maxiter--
 		}
-		bestmatch, authservers, err := rrcache.FindClosestKnownZone(qname)
+		bestmatch, authservers, err := FindClosestKnownZone(rrcache, qname)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -216,7 +216,7 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 			// when it goes out of scope, even if there are still pending writes to it
 
 			// Launch parallel queries for each nameserver
-			err := rrcache.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+			err := CollectNSAddresses(ctx, rrcache, cnsrrset.RRset, respch)
 			if err != nil {
 				log.Printf("Error from CollectNSAddresses: %v", err)
 				resp.Error = true
@@ -267,7 +267,7 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 						log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
 					}
 
-					rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+					rrset, rcode, context, err := IterativeDNSQuery(ctx, rrcache, qname, qtype, authservers, false)
 					if err != nil {
 						log.Printf("Error from IterativeDNSQuery: %v", err)
 						continue
@@ -317,7 +317,7 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 			log.Printf("ImrQuery: sending query \"%s %s\" to %d auth servers: %s", qname, dns.TypeToString[qtype], len(authservers), strings.Join(auths, ", "))
 		}
 
-		rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+		rrset, rcode, context, err := IterativeDNSQuery(ctx, rrcache, qname, qtype, authservers, false)
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -349,7 +349,7 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 	}
 }
 
-func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
+func ImrResponder(ctx context.Context, rrcache *RRsetCacheT, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
 	rd_bit := r.MsgHdr.RecursionDesired
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
@@ -383,7 +383,7 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 			} else {
 				maxiter--
 			}
-			bestmatch, authservers, err := rrcache.FindClosestKnownZone(qname)
+			bestmatch, authservers, err := FindClosestKnownZone(rrcache, qname)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -412,7 +412,7 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 				// when it goes out of scope, even if there are still pending writes to it
 
 				// Launch parallel queries for each nameserver
-				err := rrcache.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+				err := CollectNSAddresses(ctx, rrcache, cnsrrset.RRset, respch)
 				if err != nil {
 					log.Printf("Error from CollectNSAddresses: %v", err)
 					// m.SetRcode(r, dns.RcodeServerFailure)
@@ -465,12 +465,12 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 							}
 							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
 						}
-						rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+						rrset, rcode, context, err := IterativeDNSQuery(ctx, rrcache, qname, qtype, authservers, false)
 						if err != nil {
 							log.Printf("Error from IterativeDNSQuery: %v", err)
 							continue
 						}
-						done, err := rrcache.ProcessAuthDNSResponse(ctx, qname, rrset, rcode, context, dnssec_ok, m, w, r)
+						done, err := ProcessAuthDNSResponse(ctx, rrcache, qname, rrset, rcode, context, dnssec_ok, m, w, r)
 						if err != nil {
 							return
 						}
@@ -489,13 +489,13 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 			}
 
 			log.Printf("ImrResponder: sending query to %d authservers: %+v", len(authservers), authservers)
-			rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+			rrset, rcode, context, err := IterativeDNSQuery(ctx, rrcache, qname, qtype, authservers, false)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
 				w.WriteMsg(m)
 				return
 			}
-			done, err := rrcache.ProcessAuthDNSResponse(ctx, qname, rrset, rcode, context, dnssec_ok, m, w, r)
+			done, err := ProcessAuthDNSResponse(ctx, rrcache, qname, rrset, rcode, context, dnssec_ok, m, w, r)
 			if err != nil {
 				return
 			}
@@ -518,7 +518,7 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 
 // returns true if we have a response (i.e. we're done), false if we have an error
 // all errors are treated as "done"
-func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname string, rrset *RRset, rcode int, context CacheContext, dnssec_ok bool, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
+func ProcessAuthDNSResponse(ctx context.Context, rrcache *RRsetCacheT, qname string, rrset *RRset, rcode int, context CacheContext, dnssec_ok bool, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
 	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, dnssec_ok: %v", qname, rrset, rcode, context, dnssec_ok)
 	m.SetRcode(r, rcode)
 	if rrset != nil {
@@ -570,7 +570,7 @@ func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname st
 	return false, nil
 }
 
-func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[string]*AuthServer, error) {
+func FindClosestKnownZone(rrcache *RRsetCacheT, qname string) (string, map[string]*AuthServer, error) {
 	// Iterate through known zone names and return the longest match.
 	var bestmatch string
 	// var servers []string
@@ -603,7 +603,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	return bestmatch, servers, nil
 }
 
-func (rrcache *RRsetCacheT) ImrEngine(ctx context.Context, conf *Config) error {
+func ImrEngine(ctx context.Context, conf *Config, rrcache *RRsetCacheT) error {
 	ImrHandler := createImrHandler(ctx, conf, rrcache)
 	dns.HandleFunc(".", ImrHandler)
 
@@ -811,6 +811,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 				Keyid:      dk.KeyTag(),
 				Validated:  true,
 				Trusted:    true,
+				IsConfigTA: true,
 				Dnskey:     *dk,
 				Expiration: exp,
 			})
@@ -871,7 +872,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 				return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 			}
 		}
-		rrset, _, _, err := rrcache.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, false)
+		rrset, _, _, err := IterativeDNSQuery(ctx, rrcache, anchorName, dns.TypeDNSKEY, serverMap, false)
 		if err != nil {
 			return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
 		}
@@ -914,6 +915,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 							Keyid:      keyid,
 							Validated:  true,
 							Trusted:    true,
+							IsConfigTA: true,
 							Dnskey:     *dk,
 							Expiration: exp,
 						}
@@ -942,6 +944,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 					Keyid:      dk.KeyTag(),
 					Validated:  true,
 					Trusted:    true,
+					IsConfigTA: true,
 					Dnskey:     *dk,
 					Expiration: exp,
 				})
@@ -949,7 +952,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 		}
 
 		// Fetch and validate the NS RRset for the anchor zone
-		nsRRset, _, _, err := rrcache.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, false)
+		nsRRset, _, _, err := IterativeDNSQuery(ctx, rrcache, anchorName, dns.TypeNS, serverMap, false)
 		if err != nil {
 			return fmt.Errorf("failed to fetch %s NS RRset: %v", anchorName, err)
 		}
@@ -1004,7 +1007,7 @@ func createImrHandler(ctx context.Context, conf *Config, rrcache *RRsetCacheT) f
 				return
 			}
 
-			rrcache.ImrResponder(ctx, w, r, qname, qtype, dnssec_ok)
+			ImrResponder(ctx, rrcache, w, r, qname, qtype, dnssec_ok)
 			return
 
 		default:

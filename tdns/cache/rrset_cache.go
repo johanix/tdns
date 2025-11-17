@@ -1,0 +1,441 @@
+/*
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+package cache
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/johanix/tdns/tdns/core"
+	"github.com/johanix/tdns/tdns/transport"
+	"github.com/miekg/dns"
+)
+
+var DnskeyCache = NewDnskeyCache()
+
+// var RRsetCache = NewRRsetCache()
+
+func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
+	var client = map[Transport]*DNSClient{}
+	// var t Transport
+	// Default ports per transport
+	client[TransportDo53] = NewDNSClient(TransportDo53, "53", nil)
+	client[TransportDoT] = NewDNSClient(TransportDoT, "853", nil)
+	client[TransportDoH] = NewDNSClient(TransportDoH, "443", nil)
+	client[TransportDoQ] = NewDNSClient(TransportDoQ, "8853", nil)
+
+	return &RRsetCacheT{
+		RRsets:    NewCmap[CachedRRset](),
+		Servers:   NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
+		ServerMap: NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		Logger:    lg,
+		Verbose:   verbose,
+		Debug:     debug,
+		DNSClient: client,
+	}
+}
+
+func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
+
+	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	crrset, ok := rrcache.RRsets.Get(lookupKey)
+	if !ok {
+		return nil
+	}
+	// Expiration-based eviction
+	if crrset.Expiration.Before(time.Now()) {
+		rrcache.RRsets.Remove(lookupKey)
+		if rrcache.Debug {
+			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
+		}
+		// If an NS RRset expired, also remove its server mappings for that zone
+		if qtype == dns.TypeNS {
+			rrcache.ServerMap.Remove(qname)
+			if rrcache.Debug {
+				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+			}
+		}
+		return nil
+	}
+	return &crrset
+}
+
+func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
+	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	if rrcache.Debug {
+		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
+	}
+
+	if crrset == nil {
+		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
+		return
+	}
+
+	// Compute min TTL and set Expiration accordingly when RRset present
+	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
+		minTTL := crrset.RRset.RRs[0].Header().Ttl
+		for _, rr := range crrset.RRset.RRs[1:] {
+			if rr.Header().Ttl < minTTL {
+				minTTL = rr.Header().Ttl
+			}
+		}
+		// Apply a small TTL floor for NS RRsets only when learned via referral, to avoid instant drop
+		if qtype == dns.TypeNS && crrset.Context == ContextReferral && minTTL == 0 {
+			if rrcache.Debug {
+				log.Printf("RRsetCache:Set: NS minTTL was 0 for %q (Context=Referral); applying floor 10s", qname)
+			}
+			minTTL = 10
+		}
+		if rrcache.Debug && qtype == dns.TypeNS {
+			log.Printf("RRsetCache:Set: NS minTTL=%ds for zone %q (Context=%s)", minTTL, qname, CacheContextToString[crrset.Context])
+		}
+		crrset.Ttl = minTTL
+		crrset.Expiration = time.Now().Add(time.Duration(minTTL) * time.Second)
+	} else if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
+		// For negative/no-RRset entries, if Expiration not set but TTL is provided
+		crrset.Expiration = time.Now().Add(time.Duration(crrset.Ttl) * time.Second)
+	}
+
+	rrcache.RRsets.Set(lookupKey, *crrset)
+}
+
+// FetchDNSKEY implements cache.RRFetcher on RRsetCacheT using the configured fetcher or a fallback.
+func (rrcache *RRsetCacheT) FetchDNSKEY(ctx context.Context, name string) (*RRset, error) {
+	if rrcache == nil {
+		return nil, errors.New("nil cache")
+	}
+	name = dns.Fqdn(name)
+	if rrcache.DNSKEYFetcher != nil {
+		return rrcache.DNSKEYFetcher(ctx, name)
+	}
+	// Fallback: attempt an iterative query using known servers
+	_, servers, _ := FindClosestKnownZone(rrcache, name)
+	if len(servers) == 0 {
+		if sm, ok := rrcache.ServerMap.Get("."); ok {
+			servers = sm
+		}
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no servers known for %q", name)
+	}
+	rrs, _, _, err := IterativeDNSQuery(ctx, rrcache, name, dns.TypeDNSKEY, servers, false)
+	return rrs, err
+}
+
+// GetDS implements cache.RRFetcher on RRsetCacheT using injected getter or local cache.
+func (rrcache *RRsetCacheT) GetDS(name string) (*RRset, bool) {
+	if rrcache == nil {
+		return nil, false
+	}
+	name = dns.Fqdn(name)
+	if rrcache.DSGetter != nil {
+		return rrcache.DSGetter(name)
+	}
+	if ds := rrcache.Get(name, dns.TypeDS); ds != nil && ds.RRset != nil {
+		return ds.RRset, ds.Validated
+	}
+	return nil, false
+}
+
+// A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)
+func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
+	authservers := map[string]*AuthServer{}
+	for _, server := range servers {
+		tmpauthserver := &AuthServer{
+			Name:  server.Name,
+			Addrs: server.Addrs,
+			Alpn:  server.Alpn,
+			Src:   "stub",
+		}
+		// New: prefer explicit transport signal string when provided
+		if server.TransportSignal != "" {
+			kvMap, err := transport.ParseTransportString(server.TransportSignal)
+			if err != nil {
+				log.Printf("AddStub: invalid transport string for %s: %q: %v", server.Name, server.TransportSignal, err)
+			} else {
+				// build weights and order by weight desc (stable)
+				type pair struct {
+					k string
+					w uint8
+				}
+				var pairs []pair
+				for k, v := range kvMap {
+					pairs = append(pairs, pair{k: k, w: v})
+				}
+				slices.SortFunc(pairs, func(a, b pair) int {
+					if a.w == b.w {
+						if a.k < b.k {
+							return -1
+						}
+						if a.k > b.k {
+							return 1
+						}
+						return 0
+					}
+					if a.w > b.w {
+						return -1
+					}
+					return 1
+				})
+				var transports []Transport
+				var alpnOrder []string
+				weights := map[Transport]uint8{}
+				for _, p := range pairs {
+					t, err := StringToTransport(p.k)
+					if err != nil {
+						log.Printf("AddStub: unknown transport %q for %s", p.k, server.Name)
+						continue
+					}
+					transports = append(transports, t)
+					alpnOrder = append(alpnOrder, p.k)
+					weights[t] = p.w
+				}
+				tmpauthserver.Alpn = alpnOrder
+				tmpauthserver.Transports = transports
+				if len(transports) > 0 {
+					tmpauthserver.PrefTransport = transports[0]
+				}
+				tmpauthserver.TransportWeights = weights
+			}
+		} else {
+			// Back-compat: use ALPN order to set transports (no weights)
+			if len(server.Alpn) == 0 {
+				tmpauthserver.Alpn = []string{"do53"}
+				tmpauthserver.Transports = []Transport{TransportDo53}
+				tmpauthserver.TransportWeights = map[Transport]uint8{TransportDo53: 100}
+				tmpauthserver.PrefTransport = TransportDo53
+			} else {
+				tmpauthserver.Alpn = server.Alpn
+				var transports []Transport
+				weights := map[Transport]uint8{}
+				for _, alpn := range server.Alpn {
+					if t, err := StringToTransport(alpn); err == nil {
+						transports = append(transports, t)
+						weights[t] = 100
+					}
+				}
+				tmpauthserver.Transports = transports
+				tmpauthserver.TransportWeights = weights
+				if len(transports) > 0 {
+					tmpauthserver.PrefTransport = transports[0]
+				}
+			}
+		}
+		authservers[server.Name] = tmpauthserver
+	}
+	if Globals.Debug {
+		fmt.Printf("rrcache: Adding stubs for zone %s to cache\n", zone)
+	}
+	rrcache.ServerMap.Set(zone, authservers)
+	return nil
+}
+
+func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
+	serverMap, ok := rrcache.ServerMap.Get(zone)
+	if !ok {
+		serverMap = map[string]*AuthServer{}
+	}
+	for name, server := range sm {
+		if _, exist := serverMap[name]; !exist {
+			serverMap[name] = server
+		} else {
+			for _, addr := range server.Addrs {
+				if !slices.Contains(serverMap[name].Addrs, addr) {
+					serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
+				}
+			}
+			for _, alpn := range server.Alpn {
+				t, err := StringToTransport(alpn)
+				if err != nil {
+					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
+					// Skip invalid ALPN value
+					continue
+				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
+					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
+				}
+				if !slices.Contains(serverMap[name].Transports, t) {
+					serverMap[name].Transports = append(serverMap[name].Transports, t)
+				}
+			}
+			// Merge/overwrite transport weights if provided
+			if len(server.TransportWeights) > 0 {
+				if serverMap[name].TransportWeights == nil {
+					serverMap[name].TransportWeights = make(map[Transport]uint8)
+				}
+				for k, v := range server.TransportWeights {
+					serverMap[name].TransportWeights[k] = v
+				}
+				// Set preferred transport from provided order if available
+				if len(server.Transports) > 0 {
+					serverMap[name].PrefTransport = server.Transports[0]
+				}
+			}
+		}
+		// Only set preferred transport if we have valid transports
+		if len(serverMap[name].Transports) > 0 {
+			serverMap[name].PrefTransport = serverMap[name].Transports[0]
+		}
+	}
+	if Globals.Debug {
+		fmt.Printf("rrcache: Adding servers for zone %s to cache\n", zone)
+	}
+	rrcache.ServerMap.Set(zone, serverMap)
+	return nil
+}
+
+func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {
+	// Verify root hints file exists
+	if _, err := os.Stat(hintsfile); err != nil {
+		return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
+	}
+
+	log.Printf("PrimeWithHints: reading root hints %s", hintsfile)
+	// Read and parse root hints file
+	data, err := os.ReadFile(hintsfile)
+	if err != nil {
+		return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
+	}
+	zp := dns.NewZoneParser(strings.NewReader(string(data)), ".", hintsfile)
+	zp.SetIncludeAllowed(true)
+
+	// Maps to collect NS and A/AAAA records
+	nsRecords := []dns.RR{}
+	glueRecords := map[string][]dns.RR{}
+	nsMap := map[string]bool{}
+	authMap := map[string]*AuthServer{}
+
+	var rootns []string
+
+	// Parse all records from the root hints file
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		switch rr.Header().Rrtype {
+		case dns.TypeNS:
+			if rr.Header().Name != "." {
+				log.Printf("Non-root NS record among hints: %v. Ignored.", rr.String())
+				continue
+			}
+			nsRecords = append(nsRecords, rr)
+			nsname := rr.(*dns.NS).Ns
+			nsMap[nsname] = true
+			authMap[nsname] = &AuthServer{
+				Name:          nsname,
+				Alpn:          []string{"do53"},
+				Transports:    []Transport{TransportDo53},
+				Src:           "hint",
+				PrefTransport: TransportDo53,
+			}
+			rootns = append(rootns, nsname)
+			log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
+
+		case dns.TypeA, dns.TypeAAAA:
+			// log.Printf("PWH: read address RR: %s", rr.String())
+			name := rr.Header().Name
+			glueRecords[name] = append(glueRecords[name], rr)
+		}
+	}
+
+	if err := zp.Err(); err != nil {
+		return fmt.Errorf("Error parsing root hints file %s: %v", hintsfile, err)
+	}
+
+	// Store NS records for root
+	if len(nsRecords) > 0 {
+		log.Printf("Found %d NS RRs", len(nsRecords))
+		rrcache.Set(".", dns.TypeNS, &CachedRRset{
+			Name:    ".",
+			RRtype:  dns.TypeNS,
+			Context: ContextHint,
+			RRset: &RRset{
+				Name:   ".",
+				RRtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+				RRs:    nsRecords,
+				RRSIGs: nil, // No DNSSEC in root hints
+			},
+		})
+	} else {
+		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
+	}
+
+	// Store root zone data
+	// cache.Data["."] = rootData
+	var servers []string
+
+	// Store glue records for root nameservers
+	log.Printf("Found %d glue records", len(glueRecords))
+	for name, rrs := range glueRecords {
+		if !nsMap[name] {
+			log.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)
+			continue
+		}
+
+		// Group records by type (A or AAAA)
+		typeGroups := map[uint16][]dns.RR{}
+		tmpsrv := authMap[name]
+		for _, rr := range rrs {
+			rrtype := rr.Header().Rrtype
+			typeGroups[rrtype] = append(typeGroups[rrtype], rr)
+			switch rr.Header().Rrtype {
+			case dns.TypeA:
+				servers = append(servers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
+				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.A).A.String())
+			case dns.TypeAAAA:
+				servers = append(servers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
+				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.AAAA).AAAA.String())
+			}
+		}
+		authMap[name] = tmpsrv
+		log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
+
+		// Create RRset for each type
+		for rrtype, records := range typeGroups {
+			rrcache.Set(name, rrtype, &CachedRRset{
+				Name:    name,
+				RRtype:  rrtype,
+				Context: ContextHint,
+				RRset: &RRset{
+					Name:   name,
+					Class:  dns.ClassINET,
+					RRtype: rrtype,
+					RRs:    records,
+					RRSIGs: nil, // No DNSSEC in root hints
+				},
+			})
+		}
+
+		// cache.Data[name] = ownerData
+	}
+
+	rrcache.ServerMap.Set(".", authMap)
+	rrcache.Servers.Set(".", servers)
+
+	log.Printf("PrimeWithHints: serverMap:")
+	for k, v := range authMap {
+		log.Printf("server: %q data: %+v", k, v)
+	}
+
+	// dump.P(authMap)
+
+	// rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
+	rrset, _, _, err := IterativeDNSQuery(context.Background(), rrcache, ".", dns.TypeNS, authMap, true) // force re-query bypassing cache
+	if err != nil {
+		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
+	}
+	if rrset == nil {
+		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
+	}
+
+	log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
+
+	rrcache.Primed = true
+
+	return nil
+}

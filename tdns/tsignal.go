@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/johanix/tdns/tdns/transport"
 	"github.com/miekg/dns"
 )
 
@@ -83,7 +84,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 				}
 				values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
 				if sig := conf.Service.Transport.Signal; sig != "" {
-					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
+					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(transport.SvcbTransportKey), Data: []byte(sig)})
 				}
 				tmp := &dns.SVCB{
 					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
@@ -116,7 +117,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						valid := true
 						for _, rr := range existingSvcb.RRs {
 							if svcb, ok := rr.(*dns.SVCB); ok {
-								if err := ValidateExplicitServerSVCB(svcb); err != nil {
+								if err := transport.ValidateExplicitServerSVCB(svcb); err != nil {
 									log.Printf("CreateTransportSignalRRs(SVCB): rejecting explicit SVCB at %s: %v", ownerName, err)
 									valid = false
 									break
@@ -186,7 +187,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
 					}
 					if sig := conf.Service.Transport.Signal; sig != "" {
-						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
+						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(transport.SvcbTransportKey), Data: []byte(sig)})
 					}
 					tmp := &dns.SVCB{
 						Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
@@ -328,5 +329,3 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 	}
 	return nil
 }
-
-

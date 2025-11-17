@@ -61,41 +61,41 @@ type ZoneData struct {
 	OwnerIndex cmap.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
-	Data            cmap.ConcurrentMap[string, OwnerData]
-	CombinerData    *cmap.ConcurrentMap[string, OwnerData]
-	Ready           bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType         string // axfr | ixfr
-	Logger          *log.Logger
-	ZoneFile        string
-	IncomingSerial  uint32 // SOA serial that we got from upstream
-	CurrentSerial   uint32 // SOA serial after local bumping
-	Verbose         bool
-	Debug           bool
-	IxfrChain       []Ixfr
-	Upstream        string   // primary from where zone is xfrred
-	Downstreams     []string // secondaries that we notify
-	Zonefile        string
-	DelegationSyncQ chan DelegationSyncRequest
-	MusicSyncQ      chan MusicSyncRequest // Multi-signer (communication between music-sidecars)
-	Parent          string                // name of parentzone (if filled in)
-	ParentNS        []string              // names of parent nameservers
-	ParentServers   []string              // addresses of parent nameservers
-	Children        map[string]*ChildDelegationData
-	Options         map[ZoneOption]bool
-	UpdatePolicy    UpdatePolicy
-	DnssecPolicy    *DnssecPolicy
-	MultiSigner     *MultiSignerConf
-	KeyDB           *KeyDB
-	AppType         AppType
-	SyncQ           chan SyncRequest
-	Error           bool      // zone is broken and cannot be used
-	ErrorType       ErrorType // "config" | "refresh" | "notify" | "update"
-	ErrorMsg        string    // reason for the error (if known)
-	LatestError     time.Time // time of latest error
-	RefreshCount    int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh   time.Time // time of latest successful refresh
-	TransportSignal *RRset    // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal bool   // whether to attach TransportSignal in responses
+	Data               cmap.ConcurrentMap[string, OwnerData]
+	CombinerData       *cmap.ConcurrentMap[string, OwnerData]
+	Ready              bool   // true if zd.Data has been populated (from file or upstream)
+	XfrType            string // axfr | ixfr
+	Logger             *log.Logger
+	ZoneFile           string
+	IncomingSerial     uint32 // SOA serial that we got from upstream
+	CurrentSerial      uint32 // SOA serial after local bumping
+	Verbose            bool
+	Debug              bool
+	IxfrChain          []Ixfr
+	Upstream           string   // primary from where zone is xfrred
+	Downstreams        []string // secondaries that we notify
+	Zonefile           string
+	DelegationSyncQ    chan DelegationSyncRequest
+	MusicSyncQ         chan MusicSyncRequest // Multi-signer (communication between music-sidecars)
+	Parent             string                // name of parentzone (if filled in)
+	ParentNS           []string              // names of parent nameservers
+	ParentServers      []string              // addresses of parent nameservers
+	Children           map[string]*ChildDelegationData
+	Options            map[ZoneOption]bool
+	UpdatePolicy       UpdatePolicy
+	DnssecPolicy       *DnssecPolicy
+	MultiSigner        *MultiSignerConf
+	KeyDB              *KeyDB
+	AppType            AppType
+	SyncQ              chan SyncRequest
+	Error              bool      // zone is broken and cannot be used
+	ErrorType          ErrorType // "config" | "refresh" | "notify" | "update"
+	ErrorMsg           string    // reason for the error (if known)
+	LatestError        time.Time // time of latest error
+	RefreshCount       int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	LatestRefresh      time.Time // time of latest successful refresh
+	TransportSignal    *RRset    // transport signal RRset (SVCB or TSYNC)
+	AddTransportSignal bool      // whether to attach TransportSignal in responses
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -283,20 +283,6 @@ type ValidatorResponse struct {
 }
 
 // type TAStore map[string]map[uint16]TrustAnchor
-type DnskeyCacheT struct {
-	Map cmap.ConcurrentMap[string, TrustAnchor]
-}
-
-type TrustAnchor struct {
-	Name       string
-	Keyid      uint16
-	Validated  bool
-	Trusted    bool
-	Dnskey     dns.DNSKEY // just this key
-	RRset      *RRset     // complete RRset
-	Expiration time.Time
-}
-
 type Sig0StoreT struct {
 	Map cmap.ConcurrentMap[string, Sig0Key]
 }
@@ -331,45 +317,6 @@ type DnssecKey struct {
 	Keystr     string
 }
 
-type CachedRRset struct {
-	Name       string
-	RRtype     uint16
-	Rcode      uint8
-	RRset      *RRset
-	Ttl        uint32
-	Context    CacheContext
-	Validated  bool
-	Expiration time.Time
-}
-
-type AuthServer struct {
-	Name          string
-	Addrs         []string
-	Alpn          []string // {"do53", "doq", "dot", "doh"}
-	Transports    []Transport
-	PrefTransport Transport // "doq" | "dot" | "doh" | "do53"
-	TransportWeights map[Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
-	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
-	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
-	TransportSignal string `yaml:"transport" mapstructure:"transport"`
-	// Stats (guarded by mu)
-	mu                sync.Mutex
-	TransportCounters map[Transport]uint64 // total queries attempted per transport
-	Src           string    // "answer", "glue", "hint", "priming", "stub", ...
-	Expire        time.Time
-}
-
-// SnapshotCounters returns a copy of the per-transport counters.
-func (as *AuthServer) SnapshotCounters() map[Transport]uint64 {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	out := make(map[Transport]uint64, len(as.TransportCounters))
-	for t, c := range as.TransportCounters {
-		out[t] = c
-	}
-	return out
-}
-
 type RRsetCacheT struct {
 	RRsets    *ConcurrentMap[string, CachedRRset]
 	Servers   *ConcurrentMap[string, []string]
@@ -379,10 +326,10 @@ type RRsetCacheT struct {
 	DNSKEYFetcher func(ctx context.Context, name string) (*RRset, error)
 	// Optional injected DS getter for validation; if nil, legacy path (cache lookup) is used
 	DSGetter func(name string) (rrset *RRset, validated bool)
-	Primed    bool
-	Logger    *log.Logger
-	Verbose   bool
-	Debug     bool
+	Primed   bool
+	Logger   *log.Logger
+	Verbose  bool
+	Debug    bool
 }
 
 type DelegationSyncRequest struct {
