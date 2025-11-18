@@ -9,18 +9,20 @@ import (
 
 func init() {
 	rootCmd.AddCommand(cli.ImrDumpCmd)
-//	rootCmd.AddCommand(ImrDumpCmd)
+	//	rootCmd.AddCommand(ImrDumpCmd)
 
 	rootCmd.AddCommand(cli.ImrQueryCmd)
-//	rootCmd.AddCommand(ImrQueryCmd)
+	//	rootCmd.AddCommand(ImrQueryCmd)
 
 	rootCmd.AddCommand(cli.ImrStatsCmd)
-//	rootCmd.AddCommand(ImrStatsCmd)
+	//	rootCmd.AddCommand(ImrStatsCmd)
+
+	rootCmd.AddCommand(cli.ImrShowCmd)
 
 	rootCmd.AddCommand(cli.ImrZoneCmd)
-//	rootCmd.AddCommand(ImrZoneCmd)
+	//	rootCmd.AddCommand(ImrZoneCmd)
 
-//	rootCmd.AddCommand(imrServerCmd)
+	//	rootCmd.AddCommand(imrServerCmd)
 
 	rootCmd.AddCommand(cli.ExitCmd)
 	rootCmd.AddCommand(cli.QuitCmd)

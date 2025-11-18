@@ -64,7 +64,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	// 1. Create the cache
 	var err error
 	// RecursorCache, err = NewRRsetCacheNG(viper.GetString("recursorengine.root-hints"))
-	rrcache := NewRRsetCache(log.Default(), conf.ImrEngine.Verbose, conf.ImrEngine.Debug)
+	rrcache := NewRRsetCache(log.Default(), conf.ImrEngine.Verbose, conf.ImrEngine.Debug, conf.ImrEngine.Options)
 	if !rrcache.Primed {
 		err = rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"))
 		if err != nil {
@@ -794,10 +794,10 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 
 	// Add direct DNSKEY anchors to cache as trusted
 	for name, list := range dnskeysByName {
-		fmt.Printf("FOO1: adding %d DNSKEY TAs for %s\n", len(list), name)
+		log.Printf("initializeImrTrustAnchors: zone %q has DNSKEY TAs", name)
 		exp := time.Now().Add(365 * 24 * time.Hour)
 		for _, dk := range list {
-			fmt.Printf("FOO2: adding DNSKEY TA %s (keyid: %d)\n", name, dk.KeyTag())
+			log.Printf("initializeImrTrustAnchors: zone %q adding DNSKEY TA (keyid: %d)\n", name, dk.KeyTag())
 			DnskeyCache.Set(name, dk.KeyTag(), &CachedDnskeyRRset{
 				Name:       name,
 				Keyid:      dk.KeyTag(),
@@ -807,7 +807,7 @@ func initializeImrTrustAnchors(ctx context.Context, rrcache *RRsetCacheT, conf *
 				Dnskey:     *dk,
 				Expiration: exp,
 			})
-			log.Printf("initializeImrTrustAnchors: added DNSKEY TA %s::%d (expires %v)", name, dk.KeyTag(), exp)
+			log.Printf("initializeImrTrustAnchors: zone %q added DNSKEY TA (keyid: %d) (expires %v)", name, dk.KeyTag(), exp)
 		}
 	}
 

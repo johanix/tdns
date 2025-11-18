@@ -122,67 +122,67 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 					}
 				}
 			} else {
-			// Attempt to fetch the signer's DNSKEY to populate cache (chain trust evaluated by caller)
-			_, servers, _ := rrcache.FindClosestKnownZone(signer)
-			if verbose {
-				log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
-			}
-			if len(servers) == 0 {
-				if sm, ok := rrcache.ServerMap.Get("."); ok {
-					servers = sm
+				// Attempt to fetch the signer's DNSKEY to populate cache (chain trust evaluated by caller)
+				_, servers, _ := rrcache.FindClosestKnownZone(signer)
+				if verbose {
+					log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
 				}
-			}
-			if len(servers) > 0 {
-				if dkeys, _, _, err := rrcache.IterativeDNSQuery(ctx, signer, dns.TypeDNSKEY, servers, false); err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
-					if verbose {
-						log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
+				if len(servers) == 0 {
+					if sm, ok := rrcache.ServerMap.Get("."); ok {
+						servers = sm
 					}
-					// Add fetched keys to cache (not trusted by default). Trust must be established elsewhere.
-					// Compute min TTL for expiration.
-					minTTL := dkeys.RRs[0].Header().Ttl
-					for _, krr := range dkeys.RRs[1:] {
-						if krr.Header().Ttl < minTTL {
-							minTTL = krr.Header().Ttl
+				}
+				if len(servers) > 0 {
+					if dkeys, _, _, err := rrcache.IterativeDNSQuery(ctx, signer, dns.TypeDNSKEY, servers, false); err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
+						if verbose {
+							log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
 						}
-					}
-					exp := time.Now().Add(time.Duration(minTTL) * time.Second)
-					for _, krr := range dkeys.RRs {
-						if dk, ok := krr.(*dns.DNSKEY); ok {
-							dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
-								Name:       dns.Fqdn(dk.Hdr.Name),
-								Keyid:      dk.KeyTag(),
-								Validated:  false,
-								Trusted:    false,
-								Dnskey:     *dk,
-								Expiration: exp,
-							})
-							if verbose {
-								log.Printf("ValidateRRset: cached fetched DNSKEY (untrusted) %q::%d exp=%v", dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), exp)
+						// Add fetched keys to cache (not trusted by default). Trust must be established elsewhere.
+						// Compute min TTL for expiration.
+						minTTL := dkeys.RRs[0].Header().Ttl
+						for _, krr := range dkeys.RRs[1:] {
+							if krr.Header().Ttl < minTTL {
+								minTTL = krr.Header().Ttl
 							}
 						}
-					}
-					// Attempt to validate the fetched DNSKEY RRset using DS and promote keys to trusted if successful
-					if ok, _ := dkc.ValidateDNSKEYs(ctx, rrcache, dkeys, verbose); ok {
-						if verbose {
-							log.Printf("ValidateRRset: signer DNSKEY RRset for %q validated; promoting keys to trusted", signer)
-						}
+						exp := time.Now().Add(time.Duration(minTTL) * time.Second)
 						for _, krr := range dkeys.RRs {
 							if dk, ok := krr.(*dns.DNSKEY); ok {
 								dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 									Name:       dns.Fqdn(dk.Hdr.Name),
 									Keyid:      dk.KeyTag(),
-									Validated:  true,
-									Trusted:    true,
+									Validated:  false,
+									Trusted:    false,
 									Dnskey:     *dk,
 									Expiration: exp,
 								})
+								if verbose {
+									log.Printf("ValidateRRset: cached fetched DNSKEY (untrusted) %q::%d exp=%v", dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), exp)
+								}
 							}
 						}
+						// Attempt to validate the fetched DNSKEY RRset using DS and promote keys to trusted if successful
+						if ok, _ := dkc.ValidateDNSKEYs(ctx, rrcache, dkeys, verbose); ok {
+							if verbose {
+								log.Printf("ValidateRRset: signer DNSKEY RRset for %q validated; promoting keys to trusted", signer)
+							}
+							for _, krr := range dkeys.RRs {
+								if dk, ok := krr.(*dns.DNSKEY); ok {
+									dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
+										Name:       dns.Fqdn(dk.Hdr.Name),
+										Keyid:      dk.KeyTag(),
+										Validated:  true,
+										Trusted:    true,
+										Dnskey:     *dk,
+										Expiration: exp,
+									})
+								}
+							}
+						}
+					} else if err != nil && verbose {
+						log.Printf("ValidateRRset: failed fetching DNSKEY for %q: %v", signer, err)
 					}
-				} else if err != nil && verbose {
-					log.Printf("ValidateRRset: failed fetching DNSKEY for %q: %v", signer, err)
 				}
-			}
 			}
 			ta = dkc.Get(signer, keyid)
 		}
@@ -370,7 +370,7 @@ func (dkc *DnskeyCacheT) ValidateDNSKEYs(ctx context.Context, rrcache *RRsetCach
 
 // var RRsetCache = NewRRsetCache()
 
-func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
+func NewRRsetCache(lg *log.Logger, verbose, debug bool, options map[ImrOption]string) *RRsetCacheT {
 	var client = map[Transport]*DNSClient{}
 	// var t Transport
 	// Default ports per transport
@@ -379,19 +379,35 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	client[TransportDoH] = NewDNSClient(TransportDoH, "443", nil)
 	client[TransportDoQ] = NewDNSClient(TransportDoQ, "8853", nil)
 
+	opts := cloneImrOptions(options)
+
 	return &RRsetCacheT{
-		RRsets:    NewCmap[CachedRRset](),
-		Servers:   NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
-		ServerMap: NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
-		Logger:    lg,
-		Verbose:   verbose,
-		Debug:     debug,
-		DNSClient: client,
+		RRsets:                 NewCmap[CachedRRset](),
+		Servers:                NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
+		ServerMap:              NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		Logger:                 lg,
+		Verbose:                verbose,
+		Debug:                  debug,
+		DNSClient:              client,
+		Options:                opts,
+		transportQueryInFlight: make(map[string]struct{}),
+		nsRevalidateInFlight:   make(map[string]struct{}),
 	}
 }
 
+func cloneImrOptions(src map[ImrOption]string) map[ImrOption]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[ImrOption]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
-	
+
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
 	crrset, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
@@ -425,7 +441,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
 		return
 	}
-	
+
 	// Compute min TTL and set Expiration accordingly when RRset present
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
 		minTTL := crrset.RRset.RRs[0].Header().Ttl
@@ -454,15 +470,121 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	rrcache.RRsets.Set(lookupKey, *crrset)
 }
 
+func (rrcache *RRsetCacheT) hasOption(opt ImrOption) bool {
+	if rrcache == nil || len(rrcache.Options) == 0 {
+		return false
+	}
+	_, ok := rrcache.Options[opt]
+	return ok
+}
+
+const (
+	transportQueryReasonObservation = "opportunistic-signal"
+	transportQueryReasonNewServer   = "new-auth-server"
+)
+
+func (rrcache *RRsetCacheT) transportSignalRRType() uint16 {
+	if rrcache == nil {
+		return dns.TypeSVCB
+	}
+	if val, ok := rrcache.Options[ImrOptTransportSignalType]; ok {
+		switch strings.ToLower(val) {
+		case "tsync":
+			return TypeTSYNC
+		}
+	}
+	return dns.TypeSVCB
+}
+
+func (rrcache *RRsetCacheT) transportSignalCached(owner string) bool {
+	if owner == "" || rrcache == nil {
+		return false
+	}
+	if c := rrcache.Get(owner, rrcache.transportSignalRRType()); c != nil && c.RRset != nil && len(c.RRset.RRs) > 0 {
+		return true
+	}
+	return false
+}
+
+func (rrcache *RRsetCacheT) maybeQueryTransportSignal(ctx context.Context, owner string, reason string) {
+	if owner == "" || rrcache == nil || ctx == nil {
+		return
+	}
+	switch reason {
+	case transportQueryReasonObservation:
+		if !(rrcache.hasOption(ImrOptQueryForTransport) || rrcache.hasOption(ImrOptAlwaysQueryForTransport)) {
+			return
+		}
+	case transportQueryReasonNewServer:
+		if !rrcache.hasOption(ImrOptAlwaysQueryForTransport) {
+			return
+		}
+	default:
+		if !(rrcache.hasOption(ImrOptQueryForTransport) || rrcache.hasOption(ImrOptAlwaysQueryForTransport)) {
+			return
+		}
+	}
+	rrcache.launchTransportSignalQuery(ctx, owner, reason)
+}
+
+func (rrcache *RRsetCacheT) launchTransportSignalQuery(ctx context.Context, owner string, reason string) {
+	if owner == "" || ctx == nil || rrcache == nil {
+		return
+	}
+	if rrcache.transportSignalCached(owner) {
+		return
+	}
+	if !rrcache.markTransportQuery(owner) {
+		return
+	}
+	go func() {
+		defer rrcache.clearTransportQuery(owner)
+		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		rrtype := rrcache.transportSignalRRType()
+		if rrcache.Debug {
+			log.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
+		}
+		if _, err := rrcache.ImrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil); err != nil {
+			if rrcache.Debug {
+				log.Printf("Transport signal query (%s) failed for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
+			}
+		}
+	}()
+}
+
+func (rrcache *RRsetCacheT) markTransportQuery(owner string) bool {
+	rrcache.transportQueryMu.Lock()
+	defer rrcache.transportQueryMu.Unlock()
+	if rrcache.transportQueryInFlight == nil {
+		rrcache.transportQueryInFlight = make(map[string]struct{})
+	}
+	if _, exist := rrcache.transportQueryInFlight[owner]; exist {
+		return false
+	}
+	rrcache.transportQueryInFlight[owner] = struct{}{}
+	return true
+}
+
+func (rrcache *RRsetCacheT) clearTransportQuery(owner string) {
+	rrcache.transportQueryMu.Lock()
+	defer rrcache.transportQueryMu.Unlock()
+	if rrcache.transportQueryInFlight == nil {
+		return
+	}
+	delete(rrcache.transportQueryInFlight, owner)
+}
+
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
 	for _, server := range servers {
 		tmpauthserver := &AuthServer{
-			Name:  server.Name,
-			Addrs: server.Addrs,
-			Alpn:  server.Alpn,
-			Src:   "stub",
+			Name:     server.Name,
+			Addrs:    server.Addrs,
+			Alpn:     server.Alpn,
+			Src:      "stub",
+			ConnMode: server.ConnMode,
 		}
 		// New: prefer explicit transport signal string when provided
 		if server.TransportSignal != "" {
@@ -471,18 +593,27 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				log.Printf("AddStub: invalid transport string for %s: %q: %v", server.Name, server.TransportSignal, err)
 			} else {
 				// build weights and order by weight desc (stable)
-				type pair struct{ k string; w uint8 }
+				type pair struct {
+					k string
+					w uint8
+				}
 				var pairs []pair
 				for k, v := range kvMap {
 					pairs = append(pairs, pair{k: k, w: v})
 				}
 				slices.SortFunc(pairs, func(a, b pair) int {
 					if a.w == b.w {
-						if a.k < b.k { return -1 }
-						if a.k > b.k { return 1 }
+						if a.k < b.k {
+							return -1
+						}
+						if a.k > b.k {
+							return 1
+						}
 						return 0
 					}
-					if a.w > b.w { return -1 }
+					if a.w > b.w {
+						return -1
+					}
 					return 1
 				})
 				var transports []Transport
@@ -557,7 +688,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				if err != nil {
 					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 					// Skip invalid ALPN value
-					continue 
+					continue
 				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}

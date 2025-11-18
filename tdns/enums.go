@@ -84,6 +84,52 @@ var StringToZoneOption = map[string]ZoneOption{
 	"add-transport-signal":   OptAddTransportSignal,
 }
 
+type ImrOption uint8
+
+const (
+	ImrOptRevalidateNS ImrOption = iota + 1
+	ImrOptQueryForTransport
+	ImrOptAlwaysQueryForTransport
+	ImrOptTransportSignalType
+)
+
+var ImrOptionToString = map[ImrOption]string{
+	ImrOptRevalidateNS:            "revalidate-ns",
+	ImrOptQueryForTransport:       "query-for-transport",
+	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
+	ImrOptTransportSignalType:     "transport-signal-type",
+}
+
+var StringToImrOption = map[string]ImrOption{
+	"revalidate-ns":              ImrOptRevalidateNS,
+	"query-for-transport":        ImrOptQueryForTransport,
+	"always-query-for-transport": ImrOptAlwaysQueryForTransport,
+	"transport-signal-type":      ImrOptTransportSignalType,
+}
+
+type ConnMode uint8
+
+const (
+	ConnModeLegacy ConnMode = iota
+	ConnModeOpportunistic
+	ConnModeValidated
+	ConnModeStrict
+)
+
+var ConnModeToString = map[ConnMode]string{
+	ConnModeLegacy:        "legacy",
+	ConnModeOpportunistic: "opportunistic",
+	ConnModeValidated:     "validated",
+	ConnModeStrict:        "strict",
+}
+
+var StringToConnMode = map[string]ConnMode{
+	"legacy":        ConnModeLegacy,
+	"opportunistic": ConnModeOpportunistic,
+	"validated":     ConnModeValidated,
+	"strict":        ConnModeStrict,
+}
+
 type AppType uint8
 
 const (

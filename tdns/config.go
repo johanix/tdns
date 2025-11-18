@@ -68,6 +68,8 @@ type ImrEngineConf struct {
 	KeyFile    string
 	Transports []string      `validate:"required"` // "do53", "dot", "doh", "doq"
 	Stubs      []ImrStubConf `yaml:"stubs"`
+	OptionsStrs []string               `yaml:"options" mapstructure:"options"`
+	Options     map[ImrOption]string   `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	TrustAnchorDS     string `yaml:"trust_anchor_ds"`

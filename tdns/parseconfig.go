@@ -245,6 +245,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	if Globals.App.Type == AppTypeImr {
+		conf.parseImrOptions()
+	}
+
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
@@ -328,6 +332,63 @@ func (conf *Config) InitializeKeyDB() error {
 		// do nothing for tdns-imr, tdns-cli
 	}
 	return nil
+}
+
+func (conf *Config) parseImrOptions() {
+	raw := conf.ImrEngine.OptionsStrs
+	clean := make(map[ImrOption]string)
+
+	if len(raw) == 0 {
+		conf.ImrEngine.Options = clean
+		return
+	}
+
+	for _, entry := range raw {
+		val := strings.TrimSpace(entry)
+		if val == "" {
+			continue
+		}
+
+		var optval string
+		key := val
+		if idx := strings.Index(val, ":"); idx >= 0 {
+			key = val[:idx]
+			optval = val[idx+1:]
+		}
+
+		key = strings.ToLower(strings.TrimSpace(key))
+		optval = strings.TrimSpace(optval)
+
+		imrOpt, ok := StringToImrOption[key]
+		if !ok {
+			log.Printf("ParseConfig: IMR option %q is unknown and will be ignored", key)
+			continue
+		}
+
+		switch imrOpt {
+		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport:
+			if optval != "" {
+				log.Printf("ParseConfig: IMR option %q does not accept a value; provided value %q will be ignored", key, optval)
+			}
+			clean[imrOpt] = "true"
+		case ImrOptTransportSignalType:
+			val := strings.ToLower(optval)
+			if val == "" {
+				val = "svcb"
+			}
+			switch val {
+			case "svcb", "tsync":
+				clean[imrOpt] = val
+			default:
+				log.Printf("ParseConfig: IMR option %q has invalid value %q (allowed: svcb|tsync); defaulting to svcb", key, optval)
+				clean[imrOpt] = "svcb"
+			}
+		default:
+			clean[imrOpt] = optval
+		}
+	}
+
+	conf.ImrEngine.Options = clean
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
@@ -610,33 +671,33 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 
 		switch Globals.App.Type {
 		case AppTypeServer, AppTypeAgent, AppTypeCombiner:
-		// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
-		// try a non-blocking send; if it would block, send from a goroutine.
-        if conf.Internal.RefreshZoneCh == nil {
-			log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.", zname)
-			return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+			// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
+			// try a non-blocking send; if it would block, send from a goroutine.
+			if conf.Internal.RefreshZoneCh == nil {
+				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.", zname)
+				return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+			}
+			zr := ZoneRefresher{
+				Name:         zname,
+				Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:     zonetype, // primary | secondary
+				Primary:      zconf.Primary,
+				ZoneStore:    zonestore,
+				Notify:       zconf.Notify,
+				Zonefile:     zconf.Zonefile,
+				Options:      options,
+				UpdatePolicy: policy,
+				DnssecPolicy: zconf.DnssecPolicy,
+			}
+			select {
+			case conf.Internal.RefreshZoneCh <- zr:
+				// enqueued immediately
+			default:
+				go func(z ZoneRefresher) {
+					conf.Internal.RefreshZoneCh <- z
+				}(zr)
+			}
 		}
-		zr := ZoneRefresher{
-			Name:         zname,
-			Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
-			ZoneType:     zonetype, // primary | secondary
-			Primary:      zconf.Primary,
-			ZoneStore:    zonestore,
-			Notify:       zconf.Notify,
-			Zonefile:     zconf.Zonefile,
-			Options:      options,
-			UpdatePolicy: policy,
-			DnssecPolicy: zconf.DnssecPolicy,
-		}
-		select {
-		case conf.Internal.RefreshZoneCh <- zr:
-			// enqueued immediately
-		default:
-			go func(z ZoneRefresher) {
-				conf.Internal.RefreshZoneCh <- z
-			}(zr)
-		}
-	}
 	}
 
 	// ValidateZones(conf, ZonesCfgFile) // will terminate on error

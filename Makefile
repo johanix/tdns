@@ -27,6 +27,7 @@ install:
 	$(MAKE) -C ./agent/ install
 	$(MAKE) -C ./dog/ install
 	$(MAKE) -C ./combiner/ install
+	$(MAKE) -C ./imr/ install
 	$(MAKE) -C ./reporter/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install

@@ -9,6 +9,7 @@ import (
 
 	tdns "github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
@@ -175,10 +176,27 @@ var dumpAuthServersCmd = &cobra.Command{
 		// Get all keys from the concurrent map
 		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
 			fmt.Printf("\nZone: %s\n", item.Key)
-			for _, server := range item.Val {
-				fmt.Printf("Server: %q (%s)\tAddrs: %v\tAlpn: %v \tPrefTransport: %q\n",
-					server.Name, server.Src, server.Addrs, server.Alpn, tdns.TransportToString[server.PrefTransport])
+			lines := []string{"Server | Source | Addresses | Transports | Connection"}
+			var names []string
+			for name := range item.Val {
+				names = append(names, name)
 			}
+			sort.Strings(names)
+			for _, name := range names {
+				server := item.Val[name]
+				addrs := formatList(server.Addrs)
+				src := server.Src
+				if src == "" {
+					src = "-"
+				}
+				transports := formatTransportWeights(server)
+				conn := tdns.ConnModeToString[server.ConnMode]
+				if conn == "" {
+					conn = "legacy"
+				}
+				lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s", name, src, addrs, transports, conn))
+			}
+			fmt.Println(columnize.SimpleFormat(lines))
 		}
 	},
 }
@@ -206,16 +224,16 @@ var dumpDnskeysCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Combined, sorted-by-owner (reverse labels): DS (first) then DNSKEYs
 		type dnskeyView struct {
-			name      string
-			keyid     uint16
-			validated bool
-			trusted   bool
+			name        string
+			keyid       uint16
+			validated   bool
+			trusted     bool
 			trustanchor bool
-			expires   string
-			protocol  uint8
-			alg       uint8
-			flags     uint16
-			pub       string
+			expires     string
+			protocol    uint8
+			alg         uint8
+			flags       uint16
+			pub         string
 		}
 		type dsView struct {
 			validated bool
@@ -242,16 +260,16 @@ var dumpDnskeysCmd = &cobra.Command{
 				owners[val.Name] = ov
 			}
 			ov.dnskey = append(ov.dnskey, dnskeyView{
-				name:      val.Name,
-				keyid:     val.Keyid,
-				validated: val.Validated,
-				trusted:   val.Trusted,
+				name:        val.Name,
+				keyid:       val.Keyid,
+				validated:   val.Validated,
+				trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
-				expires:   tdns.TtlPrint(val.Expiration),
-				alg:       val.Dnskey.Algorithm,
-				protocol:  val.Dnskey.Protocol,
-				flags:     val.Dnskey.Flags,
-				pub:       truncateKey(val.Dnskey.PublicKey, 15),
+				expires:     tdns.TtlPrint(val.Expiration),
+				alg:         val.Dnskey.Algorithm,
+				protocol:    val.Dnskey.Protocol,
+				flags:       val.Dnskey.Flags,
+				pub:         truncateKey(val.Dnskey.PublicKey, 15),
 			})
 		}
 		// DS RRsets
@@ -292,7 +310,9 @@ var dumpDnskeysCmd = &cobra.Command{
 						lines = append(lines, dsLine{s: rr.String(), k: 0})
 					}
 				}
-				sort.Slice(lines, func(i, j int) bool { return lines[i].k < lines[j].k || (lines[i].k == lines[j].k && lines[i].s < lines[j].s) })
+				sort.Slice(lines, func(i, j int) bool {
+					return lines[i].k < lines[j].k || (lines[i].k == lines[j].k && lines[i].s < lines[j].s)
+				})
 				for _, ln := range lines {
 					dsv.rrs = append(dsv.rrs, ln.s)
 				}
@@ -332,8 +352,11 @@ var dumpDnskeysCmd = &cobra.Command{
 				}
 				fmt.Printf("\n%s DS (%s%s, TTL: %s)\n", owner, valStr, signerInfo, ov.ds.expires)
 				for _, s := range ov.ds.rrs {
-					fmt.Printf("  %s\n", s)
+					fmt.Printf("  %s\n", maskDsLine(s))
 				}
+				// for range ov.ds.sigs {
+				//	fmt.Printf("  [sig]\n")
+				//}
 			}
 			// DNSKEYs next, sorted by keyid
 			if len(ov.dnskey) > 0 {
@@ -358,22 +381,15 @@ var dumpDnskeysCmd = &cobra.Command{
 					vStr = "validated"
 				}
 				fmt.Printf("\n%s DNSKEY (%s%s, TTL: %s)\n", owner, vStr, signerInfo, rrsetTTL)
+				lines := []string{"KeyID | Flags | TTL | Details"}
 				for _, v := range ov.dnskey {
-					// fmt.Printf("FOO: validated: %v trusted: %v trustanchor: %v\n", v.validated, v.trusted, v.trustanchor)
-					vStr := "unvalidated"
-					if v.validated {
-						vStr = "validated"
-					}
-					tStr := "untrusted"
-					if v.trusted {
-						tStr = "trusted"
-					}
-					if v.trustanchor {
-						tStr = "*trust anchor*"
-					}
-					fmt.Printf("  %s DNSKEY %d %d %d %s (keyid: %d, %s, %s, TTL: %s)\n",
-						v.name, v.flags, v.protocol, v.alg, v.pub, v.keyid, vStr, tStr, v.expires)
+					detail := fmt.Sprintf("%s DNSKEY %d %d %d %s", v.name, v.flags, v.protocol, v.alg, formatKeySnippet(v.pub))
+					lines = append(lines, fmt.Sprintf("%d | %s | %s | %s", v.keyid, dnskeyFlagList(v.validated, v.trusted, v.trustanchor), v.expires, detail))
 				}
+				fmt.Println(columnize.SimpleFormat(lines))
+				// for range ov.dnskey {
+				//	fmt.Printf("  [sig]\n")
+				//}
 			}
 		}
 	},
@@ -498,6 +514,49 @@ var imrStatsAuthServersCmd = &cobra.Command{
 	Run:   imrStatsAuthTransportsCmd.Run,
 }
 
+var ImrShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show IMR state",
+}
+
+var imrShowOptionsCmd = &cobra.Command{
+	Use:   "options",
+	Short: "Show configured IMR options",
+	Run: func(cmd *cobra.Command, args []string) {
+		if len(Conf.ImrEngine.OptionsStrs) == 0 && len(Conf.ImrEngine.Options) == 0 {
+			fmt.Println("No IMR options configured.")
+			return
+		}
+
+		fmt.Println("IMR options:")
+		type optionView struct {
+			name  string
+			value string
+		}
+		var rows []optionView
+		for opt, val := range Conf.ImrEngine.Options {
+			name, ok := tdns.ImrOptionToString[opt]
+			if !ok {
+				name = fmt.Sprintf("unknown(%d)", opt)
+			}
+			rows = append(rows, optionView{name: name, value: val})
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+		if len(rows) == 0 {
+			fmt.Println("  (no normalized options)")
+			return
+		}
+		for _, row := range rows {
+			switch strings.ToLower(row.value) {
+			case "", "true":
+				fmt.Printf("  %s\n", row.name)
+			default:
+				fmt.Printf("  %s = %s\n", row.name, row.value)
+			}
+		}
+	},
+}
+
 // renderSignal formats the received transport percentage signal. If none, returns "do53=100".
 func renderSignal(server *tdns.AuthServer) string {
 	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
@@ -517,6 +576,93 @@ func renderSignal(server *tdns.AuthServer) string {
 		return "do53=100"
 	}
 	return strings.Join(parts, ",")
+}
+
+func formatList(items []string) string {
+	if len(items) == 0 {
+		return "[]"
+	}
+	return fmt.Sprintf("[%s]", strings.Join(items, " "))
+}
+
+func formatTransportWeights(server *tdns.AuthServer) string {
+	if len(server.TransportWeights) > 0 {
+		order := []tdns.Transport{tdns.TransportDoQ, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDo53}
+		var parts []string
+		for _, t := range order {
+			if w, ok := server.TransportWeights[t]; ok && w > 0 {
+				parts = append(parts, fmt.Sprintf("%s:%d", tdns.TransportToString[t], w))
+			}
+		}
+		if len(parts) > 0 {
+			return fmt.Sprintf("[%s]", strings.Join(parts, " "))
+		}
+	}
+	if len(server.Transports) > 0 {
+		var parts []string
+		for _, t := range server.Transports {
+			name := tdns.TransportToString[t]
+			if name == "" {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s:100", name))
+		}
+		if len(parts) > 0 {
+			return fmt.Sprintf("[%s]", strings.Join(parts, " "))
+		}
+	}
+	return "[]"
+}
+
+func dnskeyFlagList(validated, trusted, trustanchor bool) string {
+	var flags []string
+	if validated {
+		flags = append(flags, "validated")
+	}
+	if trusted {
+		flags = append(flags, "trusted")
+	}
+	if trustanchor {
+		flags = append(flags, "trust-anchor")
+	}
+	if len(flags) == 0 {
+		flags = append(flags, "-")
+	}
+	return fmt.Sprintf("[%s]", strings.Join(flags, " "))
+}
+
+func formatKeySnippet(key string) string {
+	if len(key) <= 15 {
+		return key
+	}
+	return fmt.Sprintf("%s…", key[:15])
+}
+
+func maskDnskeyLine(line string) string {
+	parts := strings.Fields(line)
+	if len(parts) < 8 {
+		return line
+	}
+	parts[7] = formatKeySnippet(parts[7])
+	return strings.Join(parts, " ")
+}
+
+func maskDsLine(line string) string {
+	parts := strings.Fields(line)
+	if len(parts) < 8 {
+		return line
+	}
+	parts[7] = formatKeySnippet(parts[7])
+	return strings.Join(parts, " ")
+}
+
+func maskRrsigLine(line string) string {
+	parts := strings.Fields(line)
+	if len(parts) < 9 {
+		return line
+	}
+	parts[12] = "[sig]"
+	return strings.Join(parts, " ")
 }
 
 // Compare command - takes two files
@@ -553,6 +699,7 @@ func init() {
 
 	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
 	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
+	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 }
 
 func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
@@ -597,17 +744,25 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	switch item.Val.Context {
 	case tdns.ContextNXDOMAIN:
 		// NXDOMAIN: no RRset to list
-		fmt.Printf("  %s\n", tdns.CacheContextToString[item.Val.Context])
+		fmt.Printf("  %s NXDOMAIN (%s)\n", item.Val.Name, tdns.CacheContextToString[item.Val.Context])
 	case tdns.ContextNoErrNoAns:
 		// Negative response type 0 (NOERROR/NODATA)
-		fmt.Printf("  %s\n", tdns.CacheContextToString[item.Val.Context])
+		fmt.Printf("  %s NODATA (%s)\n", item.Val.Name, tdns.CacheContextToString[item.Val.Context])
 	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
 		// Print each RR in the RRset (no RRSIGs filtering unless requested)
+		ctxLabel := fmt.Sprintf("(%s)", tdns.CacheContextToString[item.Val.Context])
 		for _, rr := range item.Val.RRset.RRs {
-			fmt.Printf("  %s\n", rr.String())
+			switch rr.Header().Rrtype {
+			case dns.TypeDS:
+				fmt.Printf("  %s %s\n", maskDsLine(rr.String()), ctxLabel)
+			case dns.TypeDNSKEY:
+				fmt.Printf("  %s %s\n", maskDnskeyLine(rr.String()), ctxLabel)
+			default:
+				fmt.Printf("  %s %s\n", rr.String(), ctxLabel)
+			}
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
-			fmt.Printf("  %s\n", rr.String())
+			fmt.Printf("  %s %s\n", maskRrsigLine(rr.String()), ctxLabel)
 		}
 	default:
 		fmt.Printf("  Context: %q", tdns.CacheContextToString[item.Val.Context])
