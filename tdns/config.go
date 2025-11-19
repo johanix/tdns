@@ -161,6 +161,8 @@ type InternalConf struct {
 	CfgFile         string //
 	DebugMode       bool   // if true, may activate dangerous tests
 	ZonesCfgFile    string //
+	CertData        string // PEM encoded certificate
+	KeyData         string // PEM encoded key
 	KeyDB           *KeyDB
 	AllZones        []string
 	DnssecPolicies  map[string]DnssecPolicy

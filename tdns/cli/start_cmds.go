@@ -102,10 +102,14 @@ var DaemonRestartCmd = &cobra.Command{
 		}
 		if updateBinary {
 			dstbin := viper.GetString("common.command")
+			if dstbin == "" {
+				fmt.Printf("Update binary: destination unspecified (key: common.command)\n")
+				os.Exit(1)
+			}
 			srcbin := "/tmp/" + filepath.Base(dstbin)
 			dstat, err := os.Stat(dstbin)
 			if err != nil {
-				fmt.Printf("Error from stat(%s): %v\n", dstbin, err)
+				fmt.Printf("Error from stat(dst: %q): %v\n", dstbin, err)
 				os.Exit(1)
 			}
 			if tdns.Globals.Debug {
@@ -114,7 +118,7 @@ var DaemonRestartCmd = &cobra.Command{
 
 			sstat, err := os.Stat(srcbin)
 			if err != nil {
-				fmt.Printf("Error from stat(%s): %v\n", srcbin, err)
+				fmt.Printf("Error from stat(src: %q): %v\n", srcbin, err)
 				os.Exit(1)
 			}
 			if tdns.Globals.Debug {

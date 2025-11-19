@@ -13,7 +13,7 @@ import (
 )
 
 // matchesConfiguredAddrs returns true if any RR in rrset matches a configured address prefix.
-func matchesConfiguredAddrs(addrs []string, rrset *RRset) bool {
+func matchesConfiguredAddrs(hostports []string, rrset *RRset) bool {
 	if rrset == nil {
 		return false
 	}
@@ -25,8 +25,12 @@ func matchesConfiguredAddrs(addrs []string, rrset *RRset) bool {
 		case *dns.AAAA:
 			ip = r.AAAA.String()
 		}
-		for _, addr := range addrs {
-			if strings.HasPrefix(ip, addr) {
+		for _, hp := range hostports {
+			addr, _, err := net.SplitHostPort(hp)
+			if err != nil {
+				continue
+			}
+			if ip == addr {
 				return true
 			}
 		}
@@ -75,6 +79,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 			}
 			if CaseFoldContains(conf.Service.Identities, nsName) {
 				if strings.HasSuffix(nsName, zd.ZoneName) {
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: NS name %s is in-bailiwick", zd.ZoneName, nsName)
 					continue // in-bailiwick; handled below
 				}
 				if Globals.ServerSVCB == nil {
@@ -85,6 +90,25 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 				if sig := conf.Service.Transport.Signal; sig != "" {
 					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
 				}
+
+				certData, err := parseCertificate(conf.Internal.CertData)
+				if err != nil {
+					return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to parse certificate: %v", err)
+				} else {
+					tlsaRR := dns.TLSA{
+						Hdr:          dns.RR_Header{Name: "_443._tcp." + nsName, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 10800},
+						Usage:        3, // DANE-EE
+						Selector:     1, // SPKI
+						MatchingType: 1, // SHA-256
+						Certificate:  certData,
+					}
+					tlsastr, err := MarshalTLSAToString(&tlsaRR)
+					if err != nil {
+						return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to marshal TLSA: %v", err)
+					}
+					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTLSAKey), Data: []byte(tlsastr)})
+				}
+
 				tmp := &dns.SVCB{
 					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 					Priority: 1,
@@ -105,6 +129,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 		if ns, ok := rr.(*dns.NS); ok {
 			nsName := ns.Ns
 			if !dns.IsSubDomain(zd.ZoneName, nsName) {
+				log.Printf("CreateTransportSignalRRs(SVCB): In-bailiwick case: Zone %s: NS name %s is not in-bailiwick", zd.ZoneName, nsName)
 				continue
 			}
 			if nsData, exists := zd.Data.Get(nsName); exists {
@@ -177,7 +202,14 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 				}
 
 				// If any address matches configured addresses, publish SVCB
-				if matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) || matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
+				if !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) && !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: No addresses match configured addresses for in-bailiwick NS %s", zd.ZoneName, nsName)
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: Configured addresses: %v", zd.ZoneName, conf.DnsEngine.Addresses)
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: A RRset: %v", zd.ZoneName, aRRset.RRs)
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: AAAA RRset: %v", zd.ZoneName, aaaaRRset.RRs)
+					continue
+				} else {
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: Addresses match configured addresses for in-bailiwick NS %s: %v, %v", zd.ZoneName, nsName, aRRset.RRs, aaaaRRset.RRs)
 					values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
 					if len(ipv4s) > 0 {
 						values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
@@ -185,9 +217,30 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 					if len(ipv6s) > 0 {
 						values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
 					}
+					log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: Added IPv4 hints %v and IPv6 hints %v for in-bailiwick NS %s", zd.ZoneName, ipv4s, ipv6s, nsName)
 					if sig := conf.Service.Transport.Signal; sig != "" {
+						log.Printf("CreateTransportSignalRRs(SVCB): Zone %s: Adding transport signal %s for in-bailiwick NS %s", zd.ZoneName, sig, nsName)
 						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
 					}
+
+					certData, err := parseCertificate(conf.Internal.CertData)
+					if err != nil {
+						return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to parse certificate: %v", err)
+					} else {
+						tlsaRR := dns.TLSA{
+							Hdr:          dns.RR_Header{Name: "_443._tcp." + nsName, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 10800},
+							Usage:        3, // DANE-EE
+							Selector:     1, // SPKI
+							MatchingType: 1, // SHA-256
+							Certificate:  certData,
+						}
+						tlsastr, err := MarshalTLSAToString(&tlsaRR)
+						if err != nil {
+							return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to marshal TLSA: %v", err)
+						}
+						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTLSAKey), Data: []byte(tlsastr)})
+					}
+
 					tmp := &dns.SVCB{
 						Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 						Priority: 1,
@@ -328,5 +381,3 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 	}
 	return nil
 }
-
-
