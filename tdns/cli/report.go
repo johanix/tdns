@@ -257,7 +257,16 @@ var ReportCmd = &cobra.Command{
 				fmt.Printf("TSIG signing the report with %s\n", tsig.Name)
 			}
 
-			c.DNSClient.TsigSecret = map[string]string{tsig.Name: tsig.Secret}
+			tsigMap := map[string]string{tsig.Name: tsig.Secret}
+			if c.DNSClientUDP != nil {
+				c.DNSClientUDP.TsigSecret = tsigMap
+			}
+			if c.DNSClientTCP != nil {
+				c.DNSClientTCP.TsigSecret = tsigMap
+			}
+			if c.DNSClientTLS != nil {
+				c.DNSClientTLS.TsigSecret = tsigMap
+			}
 			m.SetTsig(tsig.Name, alg, 300, time.Now().Unix())
 		}
 

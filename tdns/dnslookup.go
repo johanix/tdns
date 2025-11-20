@@ -470,10 +470,15 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtyp
 							// Yes, this SOA may auth a negative response for qname
 							log.Printf("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
 							rrcache.Set(qname, qtype, &CachedRRset{
-								Name:       qname,
-								RRtype:     qtype,
-								Rcode:      uint8(rcode),
-								RRset:      nil,
+								Name:   qname,
+								RRtype: qtype,
+								Rcode:  uint8(rcode),
+								RRset: &RRset{
+									Name:   rr.Header().Name,
+									Class:  dns.ClassINET,
+									RRtype: dns.TypeSOA,
+									RRs:    []dns.RR{dns.Copy(rr)},
+								},
 								Context:    ContextNoErrNoAns,
 								Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 							})
@@ -732,15 +737,24 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 				continue
 			}
 
+			log.Printf("IterativeDNSQuery: examining Authoritative section (%d RRs):\n", len(r.Ns))
+			for _, rr := range r.Ns {
+				if rr == nil {
+					continue
+				}
+				log.Printf("  %T %s", rr, rr.String())
+			}
+			log.Printf("IterativeDNSQuery: ---- end of Authoritative section (%d RRs):\n", len(r.Ns))
+
 			if len(r.Ns) != 0 {
+				if ctxNeg, rcodeNeg, handled := rrcache.handleNegative(qname, qtype, r); handled {
+					return nil, rcodeNeg, ctxNeg, nil
+				}
 				if rcode == dns.RcodeSuccess {
 					return rrcache.handleReferral(ctx, qname, qtype, r, force)
 				}
 				if rcode == dns.RcodeNameError {
-					ctxn, rcode3, handled := rrcache.handleNegative(qname, qtype, r)
-					if handled {
-						return nil, rcode3, ctxn, nil
-					}
+					log.Printf("*** IterativeDNSQuery: NXDOMAIN response lacked usable SOA for %s %s", qname, dns.TypeToString[qtype])
 					continue
 				}
 				log.Printf("*** IterativeDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
@@ -906,6 +920,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src s
 			if owner := transportOwnerForNS(name); owner != "" {
 				rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonNewServer)
 			}
+			rrcache.maybeQueryTLSA(ctx, name)
 		}
 
 		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
@@ -954,6 +969,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src s
 					if owner := transportOwnerForNS(name); owner != "" {
 						rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 					}
+					rrcache.maybeQueryTLSA(ctx, name)
 					haveLocal = true
 					break
 				}
@@ -988,6 +1004,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src s
 					if owner := transportOwnerForNS(name); owner != "" {
 						rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 					}
+					rrcache.maybeQueryTLSA(ctx, name)
 				}
 			}
 		default:
@@ -1024,6 +1041,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src s
 					if owner := transportOwnerForNS(base); owner != "" {
 						rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 					}
+					rrcache.maybeQueryTLSA(ctx, base)
 					haveLocal = true
 					break
 				}
@@ -1050,6 +1068,7 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src s
 				if owner := transportOwnerForNS(base); owner != "" {
 					rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 				}
+				rrcache.maybeQueryTLSA(ctx, base)
 			}
 		}
 	}
@@ -1491,6 +1510,7 @@ func (rrcache *RRsetCacheT) parseTransportForServerFromAdditional(ctx context.Co
 					if owner := transportOwnerForNS(server.Name); owner != "" {
 						rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 					}
+					rrcache.maybeQueryTLSA(ctx, server.Name)
 					haveLocal = true
 					break
 				}
@@ -1521,6 +1541,7 @@ func (rrcache *RRsetCacheT) parseTransportForServerFromAdditional(ctx context.Co
 					if owner := transportOwnerForNS(server.Name); owner != "" {
 						rrcache.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 					}
+					rrcache.maybeQueryTLSA(ctx, server.Name)
 				}
 			}
 		}
@@ -1586,6 +1607,40 @@ func (rrcache *RRsetCacheT) applyTransportRRsetFromAnswer(qname string, rrset *R
 							applyAlpnSignalToServer(server, strings.Join(a.Alpn, ","))
 							applied = true
 							break
+						}
+					}
+				}
+				owners := tlsaOwnersForServer(base, server)
+				if len(owners) > 0 {
+					for _, kv := range svcb.Value {
+						local, ok := kv.(*dns.SVCBLocal)
+						if !ok || uint16(local.Key()) != SvcbTLSAKey {
+							continue
+						}
+						tlsaRR, err := ParseTLSAString(string(local.Data))
+						if err != nil {
+							log.Printf("applyTransportRRsetFromAnswer: failed to parse TLSA from SVCB: %v", err)
+							continue
+						}
+						for _, ownerName := range owners {
+							tlsa := &dns.TLSA{
+								Hdr: dns.RR_Header{
+									Name:   ownerName,
+									Rrtype: dns.TypeTLSA,
+									Class:  dns.ClassINET,
+									Ttl:    svcb.Hdr.Ttl,
+								},
+								Usage:        tlsaRR.Usage,
+								Selector:     tlsaRR.Selector,
+								MatchingType: tlsaRR.MatchingType,
+								Certificate:  tlsaRR.Certificate,
+							}
+							rrcache.storeTLSAForServer(base, ownerName, &RRset{
+								Name:   ownerName,
+								Class:  dns.ClassINET,
+								RRtype: dns.TypeTLSA,
+								RRs:    []dns.RR{tlsa},
+							}, validated)
 						}
 					}
 				}
@@ -1670,6 +1725,11 @@ func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtyp
 		rrcache.Set(qname, qtype, cr)
 		if qtype == dns.TypeSVCB || qtype == TypeTSYNC {
 			rrcache.applyTransportRRsetFromAnswer(qname, &rrset, validated)
+		} else if qtype == dns.TypeTLSA {
+			base := baseFromTLSAOwner(qname)
+			if base != "" {
+				rrcache.storeTLSAForServer(base, qname, &rrset, validated)
+			}
 		}
 		// If this is a validated DNSKEY RRset, cache its keys as trusted anchors with TTL-based expiration
 		if qtype == dns.TypeDNSKEY && validated {
@@ -1725,7 +1785,7 @@ func (rrcache *RRsetCacheT) handleReferral(ctx context.Context, qname string, qt
 	rrcache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	nsRRset, zonename, nsMap := extractReferral(r, qname, qtype)
 
-	rrcache.Logger.Printf("*** handleReferral: zone name is %s, nsRRset: %+v", zonename, nsRRset)
+	rrcache.Logger.Printf("*** handleReferral: zone name is %q, nsRRset: %+v", zonename, nsRRset)
 	// ensure we collect all the NS addresses
 	if err := rrcache.CollectNSAddresses(ctx, nsRRset, nil); err != nil {
 		log.Printf("*** handleReferral: Error from CollectNSAddresses: %v", err)
@@ -2027,64 +2087,122 @@ func XXXparentZoneFromHost(host string) (string, bool) {
 }
 
 func (rrcache *RRsetCacheT) handleNegative(qname string, qtype uint16, r *dns.Msg) (CacheContext, int, bool) {
-	// NXDOMAIN: SOA must exist in authority section
-	if r.MsgHdr.Rcode == dns.RcodeNameError {
-		var ttl uint32
-		var foundSOA bool
-		var soaOwner string
-		var soaRRs []dns.RR
-		var soaSigs []dns.RR
-		for _, rr := range r.Ns {
-			if rr.Header().Rrtype == dns.TypeSOA {
-				foundSOA = true
-				ttl = rr.Header().Ttl
-				soaOwner = rr.Header().Name
-				soaRRs = append(soaRRs, rr)
-			}
-			if rr.Header().Rrtype == dns.TypeRRSIG {
-				if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeSOA {
-					soaSigs = append(soaSigs, rr)
-				}
-			}
-		}
-		if !foundSOA {
+	if r == nil || len(r.Ns) == 0 {
+		return ContextFailure, r.MsgHdr.Rcode, false
+	}
+
+	var negContext CacheContext
+	switch r.MsgHdr.Rcode {
+	case dns.RcodeNameError:
+		negContext = ContextNXDOMAIN
+	case dns.RcodeSuccess:
+		if len(r.Answer) != 0 {
 			return ContextFailure, r.MsgHdr.Rcode, false
 		}
-		// Cache the SOA RRset from authority (with validation if signatures present)
-		if len(soaRRs) > 0 {
-			soarrset := &RRset{
-				Name:   soaOwner,
-				Class:  dns.ClassINET,
-				RRtype: dns.TypeSOA,
-				RRs:    soaRRs,
-				RRSIGs: soaSigs,
+		negContext = ContextNoErrNoAns
+	default:
+		return ContextFailure, r.MsgHdr.Rcode, false
+	}
+
+	log.Printf("handleNegative: qname: %q, qtype: %s, rcode: %s, negContext: %s", qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode], CacheContextToString[negContext])
+
+	var (
+		ttl      uint32
+		soaOwner string
+		soaRRs   []dns.RR
+		soaSigs  []dns.RR
+		soaMin   uint32
+	)
+
+	log.Printf("handleNegative: examining Authoritative section (%d RRs):\n", len(r.Ns))
+	for _, rr := range r.Ns {
+		if rr == nil {
+			continue
+		}
+		log.Printf("  %T %s", rr, rr.String())
+	}
+
+	for _, rr := range r.Ns {
+		switch rr.Header().Rrtype {
+		case dns.TypeSOA:
+			if soaOwner == "" {
+				soaOwner = rr.Header().Name
+				ttl = rr.Header().Ttl
+			} else if rr.Header().Ttl < ttl || ttl == 0 {
+				ttl = rr.Header().Ttl
 			}
-			validated := false
-			if len(soaSigs) > 0 {
-				if ok, _ := DnskeyCache.ValidateRRset(context.Background(), rrcache, soarrset, rrcache.Debug); ok {
-					validated = true
+			if s, ok := rr.(*dns.SOA); ok {
+				if soaMin == 0 || s.Minttl < soaMin {
+					soaMin = s.Minttl
 				}
 			}
-			rrcache.Set(soaOwner, dns.TypeSOA, &CachedRRset{
-				Name:       soaOwner,
-				RRtype:     dns.TypeSOA,
-				RRset:      soarrset,
-				Context:    ContextNXDOMAIN,
-				Validated:  validated,
-				Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
-			})
+			soaRRs = append(soaRRs, dns.Copy(rr))
+		case dns.TypeRRSIG:
+			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeSOA {
+				soaSigs = append(soaSigs, dns.Copy(rr))
+			}
+		default:
+			log.Printf("handleNegative: non-SOA/RRSIG RR type %s in authority of response to \"%s %s\"", 
+			dns.TypeToString[rr.Header().Rrtype], qname, dns.TypeToString[qtype])
 		}
-		rrcache.Set(qname, qtype, &CachedRRset{
-			Name:       qname,
-			RRtype:     qtype,
-			RRset:      nil,
-			Context:    ContextNXDOMAIN,
-			Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
-		})
-		return ContextNXDOMAIN, r.MsgHdr.Rcode, true
 	}
-	// NOERROR/NODATA handled earlier in referral builder when SOA present
-	return ContextFailure, r.MsgHdr.Rcode, false
+
+	if len(soaRRs) == 0 {
+		log.Printf("handleNegative: no SOA found in authority for \"%s %s\" (%s); authority RRs:", 
+		   qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode])
+		for _, rr := range r.Ns {
+			if rr == nil {
+				continue
+			}
+			log.Printf("  %T %s", rr, rr.String())
+		}
+		return ContextFailure, r.MsgHdr.Rcode, false
+	}
+	if soaMin > 0 && (ttl == 0 || soaMin < ttl) {
+		ttl = soaMin
+	}
+	if ttl == 0 {
+		ttl = 60
+	}
+
+	soarrset := &RRset{
+		Name:   soaOwner,
+		Class:  dns.ClassINET,
+		RRtype: dns.TypeSOA,
+		RRs:    soaRRs,
+		RRSIGs: soaSigs,
+	}
+	validated := false
+	if len(soaSigs) > 0 {
+		if ok, _ := DnskeyCache.ValidateRRset(context.Background(), rrcache, soarrset, rrcache.Debug); ok {
+			validated = true
+		}
+	}
+
+	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
+
+	rrcache.Set(qname, qtype, &CachedRRset{
+		Name:       qname,
+		RRtype:     qtype,
+		Rcode:      uint8(r.MsgHdr.Rcode),
+		RRset:      soarrset,
+		Context:    negContext,
+		Validated:  validated,
+		Expiration: expiration,
+	})
+
+	// Also cache the SOA RRset itself for future direct lookups.
+	rrcache.Set(soaOwner, dns.TypeSOA, &CachedRRset{
+		Name:       soaOwner,
+		RRtype:     dns.TypeSOA,
+		Rcode:      uint8(dns.RcodeSuccess),
+		RRset:      soarrset,
+		Context:    ContextAnswer,
+		Validated:  validated,
+		Expiration: expiration,
+	})
+
+	return negContext, r.MsgHdr.Rcode, true
 }
 
 func (rrcache *RRsetCacheT) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool) (*RRset, int, CacheContext, error) {

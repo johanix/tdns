@@ -28,18 +28,35 @@ const (
 
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
-	Port      string
-	Transport Transport
-	// Server     string
-	TLSConfig  *tls.Config
-	HTTPClient *http.Client
-	QUICConfig *quic.Config
-	Timeout    time.Duration
-	DNSClient  *dns.Client
+	Port            string
+	Transport       Transport
+	TLSConfig       *tls.Config
+	HTTPClient      *http.Client
+	QUICConfig      *quic.Config
+	Timeout         time.Duration
+	DNSClientUDP    *dns.Client
+	DNSClientTCP    *dns.Client
+	DNSClientTLS    *dns.Client
+	DisableFallback bool
+	ForceTCP        bool
+}
+
+type DNSClientOption func(*DNSClient)
+
+func WithDisableFallback() DNSClientOption {
+	return func(c *DNSClient) {
+		c.DisableFallback = true
+	}
+}
+
+func WithForceTCP() DNSClientOption {
+	return func(c *DNSClient) {
+		c.ForceTCP = true
+	}
 }
 
 // NewDNSClient creates a new DNS client with the specified transport
-func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSClient {
+func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts ...DNSClientOption) *DNSClient {
 	if tlsConfig == nil {
 		switch transport {
 		case TransportDoT, TransportDoH:
@@ -70,11 +87,10 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSC
 	// Initialize transport-specific configurations
 	switch transport {
 	case TransportDo53:
-		client.DNSClient = &dns.Client{
-			Timeout: client.Timeout,
-		}
+		client.DNSClientUDP = &dns.Client{Net: "udp", Timeout: client.Timeout}
+		client.DNSClientTCP = &dns.Client{Net: "tcp", Timeout: client.Timeout}
 	case TransportDoT:
-		client.DNSClient = &dns.Client{
+		client.DNSClientTLS = &dns.Client{
 			Net:       "tcp-tls",
 			TLSConfig: tlsConfig,
 			Timeout:   client.Timeout,
@@ -97,7 +113,10 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config) *DNSC
 		}
 	}
 
-	// dump.P(client)
+	for _, opt := range opts {
+		opt(client)
+	}
+
 	return client
 }
 
@@ -123,9 +142,18 @@ func (c *DNSClient) Exchange(msg *dns.Msg, server string) (*dns.Msg, time.Durati
 				dns.OpcodeToString[msg.Opcode],
 				msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 		}
-		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, c.Port))
+		addr := net.JoinHostPort(server, c.Port)
+		if c.ForceTCP {
+			return c.DNSClientTCP.Exchange(msg, addr)
+		}
+		r, rtt, err := c.DNSClientUDP.Exchange(msg, addr)
+		if err == nil && r != nil && r.Truncated && !c.DisableFallback {
+			log.Printf("Do53: UDP response from %s truncated (TC=1); retrying over TCP", addr)
+			return c.DNSClientTCP.Exchange(msg, addr)
+		}
+		return r, rtt, err
 	case TransportDoT:
-		return c.DNSClient.Exchange(msg, net.JoinHostPort(server, c.Port))
+		return c.DNSClientTLS.Exchange(msg, net.JoinHostPort(server, c.Port))
 	case TransportDoH:
 		return c.exchangeDoH(msg, server)
 	case TransportDoQ:

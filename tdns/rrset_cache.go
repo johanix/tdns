@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -392,6 +393,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool, options map[ImrOption]st
 		Options:                opts,
 		transportQueryInFlight: make(map[string]struct{}),
 		nsRevalidateInFlight:   make(map[string]struct{}),
+		tlsaQueryInFlight:      make(map[string]struct{}),
 	}
 }
 
@@ -575,6 +577,92 @@ func (rrcache *RRsetCacheT) clearTransportQuery(owner string) {
 	delete(rrcache.transportQueryInFlight, owner)
 }
 
+func (rrcache *RRsetCacheT) lookupSOARRset(name string) *RRset {
+	if rrcache == nil {
+		return nil
+	}
+	cur := dns.Fqdn(strings.TrimSpace(name))
+	visitedRoot := false
+	for cur != "" {
+		if c := rrcache.Get(cur, dns.TypeSOA); c != nil && c.RRset != nil && len(c.RRset.RRs) > 0 {
+			return c.RRset
+		}
+		if cur == "." {
+			if visitedRoot {
+				break
+			}
+			visitedRoot = true
+			continue
+		}
+		labels := dns.SplitDomainName(cur)
+		if len(labels) <= 1 {
+			cur = "."
+			continue
+		}
+		cur = strings.Join(labels[1:], ".") + "."
+	}
+	return nil
+}
+
+func (rrcache *RRsetCacheT) maybeQueryTLSA(ctx context.Context, base string) {
+	if rrcache == nil || ctx == nil || !rrcache.hasOption(ImrOptQueryForTransportTLSA) {
+		return
+	}
+	base = dns.Fqdn(strings.TrimSpace(base))
+	if base == "." || base == "" {
+		return
+	}
+	targets := []string{
+		dns.Fqdn(fmt.Sprintf("_853._udp.%s", base)),
+		dns.Fqdn(fmt.Sprintf("_853._tcp.%s", base)),
+	}
+	for _, owner := range targets {
+		if !rrcache.markTLSAQuery(owner) {
+			continue
+		}
+		go func(owner string) {
+			defer rrcache.clearTLSAQuery(owner)
+			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			resp, err := rrcache.ImrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil)
+			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+				return
+			}
+			rr := resp.RRset
+			validated := false
+			if len(rr.RRSIGs) > 0 {
+				if ok, _ := DnskeyCache.ValidateRRset(queryCtx, rrcache, rr, rrcache.Debug); ok {
+					validated = true
+				}
+			}
+			baseHint := baseFromTLSAOwner(owner)
+			rrcache.storeTLSAForServer(baseHint, owner, rr, validated)
+		}(owner)
+	}
+}
+
+func (rrcache *RRsetCacheT) markTLSAQuery(owner string) bool {
+	rrcache.tlsaQueryMu.Lock()
+	defer rrcache.tlsaQueryMu.Unlock()
+	if rrcache.tlsaQueryInFlight == nil {
+		rrcache.tlsaQueryInFlight = make(map[string]struct{})
+	}
+	if _, ok := rrcache.tlsaQueryInFlight[owner]; ok {
+		return false
+	}
+	rrcache.tlsaQueryInFlight[owner] = struct{}{}
+	return true
+}
+
+func (rrcache *RRsetCacheT) clearTLSAQuery(owner string) {
+	rrcache.tlsaQueryMu.Lock()
+	defer rrcache.tlsaQueryMu.Unlock()
+	if rrcache.tlsaQueryInFlight == nil {
+		return
+	}
+	delete(rrcache.tlsaQueryInFlight, owner)
+}
+
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
@@ -720,6 +808,105 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil
+}
+
+func tlsaOwnersForServer(base string, server *AuthServer) []string {
+	base = dns.Fqdn(strings.TrimSpace(base))
+	if base == "." || base == "" {
+		return nil
+	}
+	owners := map[string]struct{}{}
+	addOwner := func(proto string) {
+		owner := dns.Fqdn(fmt.Sprintf("_853._%s.%s", proto, base))
+		owners[owner] = struct{}{}
+	}
+	if server != nil {
+		for _, t := range server.Transports {
+			switch t {
+			case TransportDoT:
+				addOwner("tcp")
+			case TransportDoQ:
+				addOwner("udp")
+			}
+		}
+	}
+	if len(owners) == 0 {
+		addOwner("tcp")
+	}
+	var result []string
+	for owner := range owners {
+		result = append(result, owner)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func baseFromTLSAOwner(owner string) string {
+	owner = dns.Fqdn(strings.TrimSpace(owner))
+	if owner == "." || owner == "" {
+		return ""
+	}
+	prefixes := []string{"_853._udp.", "_853._tcp."}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(owner, prefix) {
+			return owner[len(prefix):]
+		}
+	}
+	return ""
+}
+
+func cloneRRs(rrs []dns.RR) []dns.RR {
+	if len(rrs) == 0 {
+		return nil
+	}
+	out := make([]dns.RR, 0, len(rrs))
+	for _, rr := range rrs {
+		if rr == nil {
+			continue
+		}
+		out = append(out, dns.Copy(rr))
+	}
+	return out
+}
+
+func (rrcache *RRsetCacheT) storeTLSAForServer(base, owner string, rrset *RRset, validated bool) {
+	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
+		return
+	}
+	base = dns.Fqdn(strings.TrimSpace(base))
+	if base == "." || base == "" {
+		return
+	}
+	owner = dns.Fqdn(strings.TrimSpace(owner))
+	if owner == "." || owner == "" {
+		return
+	}
+	for zone, sm := range rrcache.ServerMap.Items() {
+		server, ok := sm[base]
+		if !ok {
+			continue
+		}
+		server.mu.Lock()
+		if server.TLSARecords == nil {
+			server.TLSARecords = make(map[string]*CachedRRset)
+		}
+		server.TLSARecords[owner] = &CachedRRset{
+			Name:   owner,
+			RRtype: dns.TypeTLSA,
+			RRset: &RRset{
+				Name:   owner,
+				Class:  dns.ClassINET,
+				RRtype: dns.TypeTLSA,
+				RRs:    cloneRRs(rrset.RRs),
+				RRSIGs: cloneRRs(rrset.RRSIGs),
+			},
+			Context:    ContextAnswer,
+			Validated:  validated,
+			Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+		}
+		server.mu.Unlock()
+		rrcache.ServerMap.Set(zone, sm)
+	}
 }
 
 func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string) error {

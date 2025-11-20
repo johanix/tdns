@@ -23,7 +23,7 @@ var CacheContextToString = map[CacheContext]string{
 	ContextHint:       "hint",
 	ContextPriming:    "priming",
 	ContextReferral:   "referral",
-	ContextNXDOMAIN:   "NXDOMAIN",
+	ContextNXDOMAIN:   "NXDOMAIN (negative response type 3)",
 	ContextNoErrNoAns: "NOERROR, NODATA (negative response type 0)",
 	ContextGlue:       "glue",
 	ContextFailure:    "failure",
@@ -91,6 +91,7 @@ const (
 	ImrOptQueryForTransport
 	ImrOptAlwaysQueryForTransport
 	ImrOptTransportSignalType
+	ImrOptQueryForTransportTLSA
 )
 
 var ImrOptionToString = map[ImrOption]string{
@@ -98,6 +99,7 @@ var ImrOptionToString = map[ImrOption]string{
 	ImrOptQueryForTransport:       "query-for-transport",
 	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
 	ImrOptTransportSignalType:     "transport-signal-type",
+	ImrOptQueryForTransportTLSA:   "query-for-transport-tlsa",
 }
 
 var StringToImrOption = map[string]ImrOption{
@@ -105,6 +107,7 @@ var StringToImrOption = map[string]ImrOption{
 	"query-for-transport":        ImrOptQueryForTransport,
 	"always-query-for-transport": ImrOptAlwaysQueryForTransport,
 	"transport-signal-type":      ImrOptTransportSignalType,
+	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 }
 
 type ConnMode uint8
