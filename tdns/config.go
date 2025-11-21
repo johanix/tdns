@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"slices"
@@ -46,8 +47,8 @@ type ServiceConf struct {
 	Name       string `validate:"required"`
 	Debug      *bool
 	Verbose    *bool
-	Identities []string // this is a strawman attempt at deciding on what name to publish the ALPN
-	Transport TransportConf `yaml:"transport"`
+	Identities []string      // this is a strawman attempt at deciding on what name to publish the ALPN
+	Transport  TransportConf `yaml:"transport"`
 }
 
 type TransportConf struct {
@@ -63,19 +64,21 @@ type DnsEngineConf struct {
 }
 
 type ImrEngineConf struct {
-	Addresses  []string `validate:"required"`
-	CertFile   string
-	KeyFile    string
-	Transports []string      `validate:"required"` // "do53", "dot", "doh", "doq"
-	Stubs      []ImrStubConf `yaml:"stubs"`
+	Addresses   []string `validate:"required"`
+	CertFile    string
+	KeyFile     string
+	Transports  []string             `validate:"required"` // "do53", "dot", "doh", "doq"
+	Stubs       []ImrStubConf        `yaml:"stubs"`
+	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
+	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	TrustAnchorDS     string `yaml:"trust_anchor_ds"`
 	TrustAnchorDNSKEY string `yaml:"trust_anchor_dnskey"`
 	// Unbound-style file with one RR per line (DNSKEY and/or DS). Absolute path.
-	TrustAnchorFile   string `yaml:"trust-anchor-file"`
-	Verbose    bool
-	Debug      bool
+	TrustAnchorFile string `yaml:"trust-anchor-file"`
+	Verbose         bool
+	Debug           bool
 }
 type ImrStubConf struct {
 	Zone string `validate:"required"`
@@ -159,6 +162,8 @@ type InternalConf struct {
 	CfgFile         string //
 	DebugMode       bool   // if true, may activate dangerous tests
 	ZonesCfgFile    string //
+	CertData        string // PEM encoded certificate
+	KeyData         string // PEM encoded key
 	KeyDB           *KeyDB
 	AllZones        []string
 	DnssecPolicies  map[string]DnssecPolicy
@@ -207,11 +212,14 @@ func (conf *Config) ReloadConfig() (string, error) {
 	return "Config reloaded.", err
 }
 
-func (conf *Config) ReloadZoneConfig() (string, error) {
+func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	prezones := Zones.Keys()
 	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
-	zonelist, err := conf.ParseZones(true) // true: reload, not initial parsing
+	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)
 	}

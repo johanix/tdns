@@ -131,7 +131,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 			}
 			log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
 			continue
-		}	
+		}
 	} else {
 		log.Printf("SynchedDataEngine: Starting")
 	}

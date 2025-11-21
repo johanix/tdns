@@ -18,10 +18,13 @@ func main() {
 	var tconf tdns.Config
 	var mconf music.Config
 
-	Globals.App.Mode    = tdns.AppTypeMSA
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	Globals.App.Mode = tdns.AppTypeMSA
 	Globals.App.Version = appVersion
-	Globals.App.Name    = appName
-	Globals.App.Date    = appDate
+	Globals.App.Name = appName
+	Globals.App.Date = appDate
 
 	// These are set here to enable various config reload functions to reload from the correct files.
 	tconf.Internal.CfgFile = music.DefaultMSACfgFile
@@ -34,7 +37,7 @@ func main() {
 		tconf.Internal.ZonesCfgFile = mconf.Zones.Config
 	}
 
-	err := tdns.MainInit(&tconf)
+	err := tconf.MainInit(ctx, music.DefaultMSACfgFile)
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
@@ -54,7 +57,7 @@ func main() {
 	go music.MusicSyncEngine(&mconf, tconf.Internal.StopCh)
 
 	// ParseZones will read zone configs from the file specified in tconf.Internal.ZonesCfgFile
-	all_zones, err := tdns.ParseZones(&tconf, tconf.Internal.RefreshZoneCh, false) // false = !reload, initial config
+	all_zones, err := tconf.ParseZones(ctx, false) // false = !reload, initial config
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error parsing zones: %v", err))
 	}
@@ -68,10 +71,7 @@ func main() {
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-
-    err = tdns.MainStartThreads(ctx, &tconf, apirouter)
+	err = tdns.MainStartThreads(ctx, &tconf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
@@ -87,7 +87,7 @@ func main() {
 	mconf.Internal.Processes = fsml
 	mconf.Internal.MusicDB.FSMlist = fsml
 
-    tdns.MainLoop(ctx, cancel, &tconf)
+	tdns.MainLoop(ctx, cancel, &tconf)
 
 	err = mconf.Internal.TokViper.WriteConfig()
 	if err != nil {

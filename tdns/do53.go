@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -106,6 +107,19 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		log.Printf("DnsEngine: key file %q does not exist. Not starting DoT, DoH or DoQ service.", keyFile)
 		certKey = false
 	}
+
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return fmt.Errorf("DnsEngine: error reading cert file: %v", err)
+	}
+
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return fmt.Errorf("DnsEngine: error reading key file: %v", err)
+	}
+
+	conf.Internal.CertData = string(certPEM)
+	conf.Internal.KeyData = string(keyPEM)
 
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {

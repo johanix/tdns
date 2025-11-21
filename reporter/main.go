@@ -26,7 +26,7 @@ func main() {
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
 
-	if err := conf.MainInit(tdns.DefaultReporterCfgFile); err != nil {
+	if err := conf.MainInit(context.Background(), tdns.DefaultReporterCfgFile); err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("init: %v", err))
 	}
 

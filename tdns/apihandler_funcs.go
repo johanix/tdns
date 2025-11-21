@@ -138,13 +138,10 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		switch tp.Command {
 		case "list-dnskey":
 			log.Printf("tdnsd truststore list-dnskey inquiry")
-			tmp1 := map[string]TrustAnchor{}
+			tmp1 := map[string]CachedDnskeyRRset{}
 			for _, key := range DnskeyCache.Map.Keys() {
-				val, _ := DnskeyCache.Map.Get(key)
-				tmp1[key] = TrustAnchor{
-					Name:      val.Name,
-					Validated: val.Validated,
-					Dnskey:    val.Dnskey,
+				if val, ok := DnskeyCache.Map.Get(key); ok {
+					tmp1[key] = val
 				}
 			}
 			resp = &TruststoreResponse{
@@ -266,7 +263,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "reload-zones":
 			log.Printf("APIconfig: reloading zones")
-			resp.Msg, err = conf.ReloadZoneConfig()
+			resp.Msg, err = conf.ReloadZoneConfig(r.Context())
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -463,15 +460,15 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "show-ta":
 			log.Printf("tdnsd debug show-ta")
 			resp.Msg = fmt.Sprintf("TAStore: %v", DnskeyCache.Map.Keys())
-			tas := []TrustAnchor{}
+			cdrs := []CachedDnskeyRRset{}
 			for _, taname := range DnskeyCache.Map.Keys() {
-				ta, ok := DnskeyCache.Map.Get(taname)
+				cdr, ok := DnskeyCache.Map.Get(taname)
 				if !ok {
 					continue
 				}
-				tas = append(tas, ta)
+				cdrs = append(cdrs, cdr)
 			}
-			resp.TrustedDnskeys = tas
+			resp.TrustedDnskeys = cdrs
 
 		case "show-rrsetcache":
 			log.Printf("%s debug show-rrsetcache", Globals.App.Name)

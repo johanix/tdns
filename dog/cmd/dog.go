@@ -234,16 +234,37 @@ var rootCmd = &cobra.Command{
 				}
 
 				transport := "do53" // default
-				if t, ok := options["transport"]; ok {
-					transport = t
+				if tval, ok := options["transport"]; ok {
+					transport = tval
+				} else {
+					options["transport"] = transport
 				}
+				forceTCP := strings.EqualFold(transport, "Do53-TCP") || strings.EqualFold(transport, "tcp")
 
 				t, err := tdns.StringToTransport(transport)
 				if err != nil {
 					log.Fatalf("Error: %v", err)
 				}
-				client := tdns.NewDNSClient(t, options["port"], tlsConfig)
+				clientOpts := []tdns.DNSClientOption{}
+				if t == tdns.TransportDo53 {
+					if forceTCP {
+						clientOpts = append(clientOpts, tdns.WithForceTCP())
+						options["transport"] = "Do53-TCP"
+					} else {
+						clientOpts = append(clientOpts, tdns.WithDisableFallback())
+						options["transport"] = "do53"
+					}
+				} else {
+					options["transport"] = transport
+				}
+				client := tdns.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 				res, _, err := client.Exchange(m, server) // FIXME: duration is always zero
+				if err == nil && res != nil && res.Truncated && t == tdns.TransportDo53 && !forceTCP {
+					fmt.Println(";; Truncated UDP response received; retrying over TCP")
+					tcpClient := tdns.NewDNSClient(tdns.TransportDo53, options["port"], tlsConfig, tdns.WithForceTCP())
+					res, _, err = tcpClient.Exchange(m, server)
+					options["transport"] = "Do53-TCP"
+				}
 
 				elapsed := time.Since(start)
 				if err != nil {
@@ -297,7 +318,7 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		if transport, exists := options["transport"]; exists {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and TCP)", transport)
 		}
-		options["transport"] = "Do53"
+		options["transport"] = "Do53-TCP"
 		return options, nil
 	case "+TLS", "+DOT":
 		if transport, exists := options["transport"]; exists {

@@ -23,7 +23,7 @@ var CacheContextToString = map[CacheContext]string{
 	ContextHint:       "hint",
 	ContextPriming:    "priming",
 	ContextReferral:   "referral",
-	ContextNXDOMAIN:   "NXDOMAIN",
+	ContextNXDOMAIN:   "NXDOMAIN (negative response type 3)",
 	ContextNoErrNoAns: "NOERROR, NODATA (negative response type 0)",
 	ContextGlue:       "glue",
 	ContextFailure:    "failure",
@@ -82,6 +82,55 @@ var StringToZoneOption = map[string]ZoneOption{
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
 	"add-transport-signal":   OptAddTransportSignal,
+}
+
+type ImrOption uint8
+
+const (
+	ImrOptRevalidateNS ImrOption = iota + 1
+	ImrOptQueryForTransport
+	ImrOptAlwaysQueryForTransport
+	ImrOptTransportSignalType
+	ImrOptQueryForTransportTLSA
+)
+
+var ImrOptionToString = map[ImrOption]string{
+	ImrOptRevalidateNS:            "revalidate-ns",
+	ImrOptQueryForTransport:       "query-for-transport",
+	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
+	ImrOptTransportSignalType:     "transport-signal-type",
+	ImrOptQueryForTransportTLSA:   "query-for-transport-tlsa",
+}
+
+var StringToImrOption = map[string]ImrOption{
+	"revalidate-ns":              ImrOptRevalidateNS,
+	"query-for-transport":        ImrOptQueryForTransport,
+	"always-query-for-transport": ImrOptAlwaysQueryForTransport,
+	"transport-signal-type":      ImrOptTransportSignalType,
+	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
+}
+
+type ConnMode uint8
+
+const (
+	ConnModeLegacy ConnMode = iota
+	ConnModeOpportunistic
+	ConnModeValidated
+	ConnModeStrict
+)
+
+var ConnModeToString = map[ConnMode]string{
+	ConnModeLegacy:        "legacy",
+	ConnModeOpportunistic: "opportunistic",
+	ConnModeValidated:     "validated",
+	ConnModeStrict:        "strict",
+}
+
+var StringToConnMode = map[string]ConnMode{
+	"legacy":        ConnModeLegacy,
+	"opportunistic": ConnModeOpportunistic,
+	"validated":     ConnModeValidated,
+	"strict":        ConnModeStrict,
 }
 
 type AppType uint8

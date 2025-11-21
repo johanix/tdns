@@ -255,10 +255,13 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 			}
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-				DnskeyCache.Set(k, dnskeyrr.KeyTag(), &TrustAnchor{
-					Name:      k,
-					Validated: true, // always trust config
-					Dnskey:    *dnskeyrr,
+				DnskeyCache.Set(k, dnskeyrr.KeyTag(), &CachedDnskeyRRset{
+					Name:        k,
+					Keyid:       dnskeyrr.KeyTag(),
+					Validated:   true, // always trust config
+					Trusted:     true, // always trust config
+					TrustAnchor: true, // always trust config
+					Dnskey:      *dnskeyrr,
 				})
 			}
 		}

@@ -45,8 +45,8 @@ func init() {
 	cli.CombinerCmd.AddCommand(cli.ConfigCmd)
 	cli.AgentCmd.AddCommand(cli.ConfigCmd)
 
-	// From ../tdns/cli/rfc3597.go:
-	rootCmd.AddCommand(cli.ToRFC3597Cmd)
+	// From ../tdns/cli/generate_cmds.go:
+	rootCmd.AddCommand(cli.GenerateCmd)
 
 	// From ../tdns/cli/notify_cmds.go:
 	rootCmd.AddCommand(cli.NotifyCmd)
