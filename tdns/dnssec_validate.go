@@ -86,7 +86,7 @@ func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
 	return false, nil
 }
 
-// If key not found *TrustAnchor is nil
+// If key not found *CachedDnskeyRRset is returned with nil value
 func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*CachedDnskeyRRset, error) {
 	cdr := DnskeyCache.Get(signer, keyid)
 
@@ -107,6 +107,7 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*CachedDnskeyRRset,
 	}
 
 	if !valid {
+		zd.Logger.Printf("FindDnskey: Error: DNSKEY RRset for %q is not valid", signer)
 		return nil, fmt.Errorf("FindDnskey: Error: DNSKEY RRset for %s is not valid", signer)
 	}
 
@@ -177,6 +178,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 							cdr := CachedDnskeyRRset{
 								Name:       keyname,
 								Keyid:      keyid,
+								RRset:      dnskeyrrset,
 								Validated:  true,
 								Trusted:    true,
 								Dnskey:     *dnskey,
@@ -215,6 +217,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 				cdr := CachedDnskeyRRset{
 					Name:       keyname,
 					Keyid:      keyid,
+					RRset:      dnskeyrrset,
 					Validated:  true,
 					Trusted:    true,
 					Dnskey:     *dnskey,

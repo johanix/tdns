@@ -140,11 +140,8 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 			log.Printf("tdnsd truststore list-dnskey inquiry")
 			tmp1 := map[string]CachedDnskeyRRset{}
 			for _, key := range DnskeyCache.Map.Keys() {
-				val, _ := DnskeyCache.Map.Get(key)
-				tmp1[key] = CachedDnskeyRRset{
-					Name:      val.Name,
-					Validated: val.Validated,
-					Dnskey:    val.Dnskey,
+				if val, ok := DnskeyCache.Map.Get(key); ok {
+					tmp1[key] = val
 				}
 			}
 			resp = &TruststoreResponse{
@@ -266,7 +263,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "reload-zones":
 			log.Printf("APIconfig: reloading zones")
-			resp.Msg, err = conf.ReloadZoneConfig()
+			resp.Msg, err = conf.ReloadZoneConfig(r.Context())
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

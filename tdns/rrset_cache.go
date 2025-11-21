@@ -50,7 +50,7 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 // engine and retry using keys from the cache. Only keys marked as Trusted are accepted for
 // successful validation. Returns true if at least one signature validates and is time-valid.
 func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT, rrset *RRset, verbose bool) (bool, error) {
-	if Globals.Verbose {
+	if Globals.Debug {
 		log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 			rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 	}
@@ -59,31 +59,31 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 		return dkc.ValidateDNSKEYs(ctx, rrcache, rrset, verbose)
 	}
 	if rrset == nil || len(rrset.RRSIGs) == 0 {
-		if verbose {
+		if Globals.Debug {
 			log.Printf("ValidateRRset: no RRSIGs present for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
 		return false, nil
 	}
-	if verbose {
+	if Globals.Debug {
 		log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 			rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 	}
 	for _, rr := range rrset.RRSIGs {
 		sig, ok := rr.(*dns.RRSIG)
 		if !ok {
-			if verbose {
+			if Globals.Debug {
 				log.Printf("ValidateRRset: skipping non-RRSIG in RRSIGs slice: %T", rr)
 			}
 			continue
 		}
 		signer := dns.Fqdn(sig.SignerName)
 		keyid := sig.KeyTag
-		if verbose {
+		if Globals.Debug {
 			log.Printf("ValidateRRset: evaluating signature: signer=%q keyid=%d covered=%s inception=%d expiration=%d",
 				signer, keyid, dns.TypeToString[sig.TypeCovered], sig.Inception, sig.Expiration)
 		}
 		ta := dkc.Get(signer, keyid)
-		if Globals.Verbose {
+		if Globals.Debug {
 			log.Printf("ValidateRRset: TA %q::%d in cache: %+v", signer, keyid, ta)
 		}
 		if ta == nil && rrcache != nil && ctx != nil {
@@ -125,7 +125,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 			} else {
 				// Attempt to fetch the signer's DNSKEY to populate cache (chain trust evaluated by caller)
 				_, servers, _ := rrcache.FindClosestKnownZone(signer)
-				if verbose {
+				if Globals.Debug {
 					log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
 				}
 				if len(servers) == 0 {
@@ -135,7 +135,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 				}
 				if len(servers) > 0 {
 					if dkeys, _, _, err := rrcache.IterativeDNSQuery(ctx, signer, dns.TypeDNSKEY, servers, false); err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
-						if verbose {
+						if Globals.Debug {
 							log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
 						}
 						// Add fetched keys to cache (not trusted by default). Trust must be established elsewhere.
@@ -189,7 +189,7 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 		}
 		// Require a trusted key for a positive validation result
 		if ta == nil || !ta.Trusted {
-			if verbose {
+			if Globals.Debug {
 				if ta == nil {
 					log.Printf("ValidateRRset: no TA in cache for %q::%d", signer, keyid)
 				} else {
@@ -207,21 +207,21 @@ func (dkc *DnskeyCacheT) ValidateRRset(ctx context.Context, rrcache *RRsetCacheT
 		}
 		// Time validity
 		if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
-			if verbose {
+			if Globals.Debug {
 				log.Printf("ValidateRRset: signature verify OK and within validity window for %s %s using %s::%d",
 					rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid)
 			}
-			if verbose {
+			if Globals.Debug {
 				log.Printf("ValidateRRset: SUCCESS")
 			}
 			return true, nil
 		}
-		if verbose {
+		if Globals.Verbose {
 			log.Printf("ValidateRRset: signature time INVALID for %s %s using %s::%d (inc=%d exp=%d now=%d)",
 				rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, sig.Inception, sig.Expiration, time.Now().UTC().Unix())
 		}
 	}
-	if verbose {
+	if Globals.Verbose {
 		log.Printf("ValidateRRset: no acceptable signature validated for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 	}
 	return false, nil
@@ -470,6 +470,112 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	}
 
 	rrcache.RRsets.Set(lookupKey, *crrset)
+}
+
+// FlushDomain removes cached RRsets at or below the provided domain.
+// When keepStructural is true, NS/DS/DNSKEY RRsets and the address
+// records for their nameservers are preserved.
+func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int, error) {
+	if rrcache == nil {
+		return 0, fmt.Errorf("rrcache is nil")
+	}
+	domain = dns.CanonicalName(domain)
+	if domain == "" || domain == "." {
+		return 0, fmt.Errorf("invalid domain %q", domain)
+	}
+
+	var nsHosts map[string]struct{}
+	if keepStructural {
+		nsHosts = make(map[string]struct{})
+		for item := range rrcache.RRsets.IterBuffered() {
+			cr := item.Val
+			if cr.Name == "" || !isSubdomainOf(cr.Name, domain) {
+				continue
+			}
+			if cr.RRtype != dns.TypeNS || cr.RRset == nil {
+				continue
+			}
+			for _, rr := range cr.RRset.RRs {
+				ns, ok := rr.(*dns.NS)
+				if !ok {
+					continue
+				}
+				nsHosts[dns.CanonicalName(ns.Ns)] = struct{}{}
+			}
+		}
+	}
+
+	var keysToRemove []string
+	for item := range rrcache.RRsets.IterBuffered() {
+		key := item.Key
+		cr := item.Val
+		if cr.Name == "" || !isSubdomainOf(cr.Name, domain) {
+			continue
+		}
+		if keepStructural && isStructuralRRset(&cr, nsHosts) {
+			continue
+		}
+		keysToRemove = append(keysToRemove, key)
+	}
+
+	for _, key := range keysToRemove {
+		rrcache.RRsets.Remove(key)
+	}
+	removed := len(keysToRemove)
+
+	if !keepStructural && removed > 0 {
+		var auxKeys []string
+		for item := range rrcache.Servers.IterBuffered() {
+			if isSubdomainOf(item.Key, domain) {
+				auxKeys = append(auxKeys, item.Key)
+			}
+		}
+		for _, key := range auxKeys {
+			rrcache.Servers.Remove(key)
+		}
+		auxKeys = auxKeys[:0]
+		for item := range rrcache.ServerMap.IterBuffered() {
+			if isSubdomainOf(item.Key, domain) {
+				auxKeys = append(auxKeys, item.Key)
+			}
+		}
+		for _, key := range auxKeys {
+			rrcache.ServerMap.Remove(key)
+		}
+	}
+
+	return removed, nil
+}
+
+func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
+	if cr == nil {
+		return false
+	}
+	switch cr.RRtype {
+	case dns.TypeNS, dns.TypeDS, dns.TypeDNSKEY:
+		return true
+	case dns.TypeA, dns.TypeAAAA:
+		if nsHosts == nil {
+			return false
+		}
+		_, ok := nsHosts[dns.CanonicalName(cr.Name)]
+		return ok
+	default:
+		return false
+	}
+}
+
+func isSubdomainOf(name, parent string) bool {
+	name = dns.CanonicalName(name)
+	parent = dns.CanonicalName(parent)
+	if parent == "." {
+		return true
+	}
+	if name == parent {
+		return true
+	}
+	suffix := "." + strings.TrimSuffix(parent, ".") + "."
+	return strings.HasSuffix(name, suffix)
 }
 
 func (rrcache *RRsetCacheT) hasOption(opt ImrOption) bool {

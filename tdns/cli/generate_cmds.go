@@ -45,7 +45,11 @@ var generateTLSACmd = &cobra.Command{
 		if err != nil {
 			log.Fatalf("failed to parse certificate: %v", err)
 		}
-		digest := sha256.Sum256(cert.Raw)
+		spki := cert.RawSubjectPublicKeyInfo
+		if len(spki) == 0 {
+			log.Fatalf("certificate in %s is missing RawSubjectPublicKeyInfo", certFile)
+		}
+		digest := sha256.Sum256(spki)
 		digestHex := strings.ToUpper(hex.EncodeToString(digest[:]))
 
 		owner := fmt.Sprintf("_%d._%s.%s", tlsaPort, strings.ToLower(tlsaProto), domain)

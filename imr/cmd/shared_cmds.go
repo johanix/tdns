@@ -18,6 +18,7 @@ func init() {
 	//	rootCmd.AddCommand(ImrStatsCmd)
 
 	rootCmd.AddCommand(cli.ImrShowCmd)
+	rootCmd.AddCommand(cli.ImrFlushCmd)
 
 	rootCmd.AddCommand(cli.ImrZoneCmd)
 	//	rootCmd.AddCommand(ImrZoneCmd)

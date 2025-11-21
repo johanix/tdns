@@ -42,7 +42,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
 	var refreshCounters = cmap.New[*RefreshCounter]()
-	var ticker *time.Ticker 
+	var ticker *time.Ticker
 
 	// Build expected zone set from config for a robust post-initialization barrier
 	expected := map[string]struct{}{}

@@ -318,7 +318,7 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		if transport, exists := options["transport"]; exists {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and TCP)", transport)
 		}
-		options["transport"] = "Do53"
+		options["transport"] = "Do53-TCP"
 		return options, nil
 	case "+TLS", "+DOT":
 		if transport, exists := options["transport"]; exists {

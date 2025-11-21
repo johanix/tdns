@@ -37,10 +37,10 @@ var rootCmd = &cobra.Command{
 				// StartInteractiveMode() // old go-prompt version
 				// startReadlineMode() // new readline version
 				return
-            } else {
-                fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
-                tdns.MainLoop(appCtx, appCancel, &cli.Conf)
-            }
+			} else {
+				fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
+				tdns.MainLoop(appCtx, appCancel, &cli.Conf)
+			}
 		}
 	},
 }
@@ -127,11 +127,13 @@ func initConfig() {
 func initImr() {
 	// conf := cli.Conf
 
+	appCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling conf.MainInit(%q)\n", tdns.DefaultImrCfgFile)
 	}
 
-	err := cli.Conf.MainInit(tdns.DefaultImrCfgFile)
+	err := cli.Conf.MainInit(appCtx, tdns.DefaultImrCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}
@@ -139,26 +141,24 @@ func initImr() {
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
 	}
-    // Signal-driven root context
-    appCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-    // SIGHUP reload watcher
-    hup := make(chan os.Signal, 1)
-    signal.Notify(hup, syscall.SIGHUP)
-    go func() {
-        for {
-            select {
-            case <-appCtx.Done():
-                return
-            case <-hup:
-                if _, err := cli.Conf.ParseZones(true); err != nil {
-                    log.Printf("SIGHUP reload failed: %v", err)
-                }
-            }
-        }
-    }()
+	// SIGHUP reload watcher
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-appCtx.Done():
+				return
+			case <-hup:
+				if _, err := cli.Conf.ParseZones(appCtx, true); err != nil {
+					log.Printf("SIGHUP reload failed: %v", err)
+				}
+			}
+		}
+	}()
 
-    err = tdns.StartImr(appCtx, &cli.Conf, nil)
+	err = tdns.StartImr(appCtx, &cli.Conf, nil)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}

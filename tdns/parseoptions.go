@@ -67,7 +67,10 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 	options := map[ZoneOption]bool{}
 	var cleanoptions []ZoneOption
 	for _, option := range zconf.OptionsStrs {
-		option = strings.ToLower(option)
+		option = strings.ToLower(strings.TrimSpace(option))
+		if option == "" {
+			continue
+		}
 		log.Printf("ParseZones: zone %s: checking option: %q", zname, option)
 		opt, exist := StringToZoneOption[option]
 		if !exist {

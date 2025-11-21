@@ -12,7 +12,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// matchesConfiguredAddrs returns true if any RR in rrset matches a configured address prefix.
+// matchesConfiguredAddrs returns true if any RR in rrset matches a configured address.
+// Note that the hostports are expected to be in the format "address:port".
 func matchesConfiguredAddrs(hostports []string, rrset *RRset) bool {
 	if rrset == nil {
 		return false
@@ -26,12 +27,25 @@ func matchesConfiguredAddrs(hostports []string, rrset *RRset) bool {
 			ip = r.AAAA.String()
 		}
 		for _, hp := range hostports {
+			// (b) wildcard checks: if hp is "0.0.0.0" or "0.0.0.0:port" or "[::]" or "[::]:port", always match
+			if hp == "0.0.0.0" || hp == "[::]" {
+				return true
+			}
+			if strings.HasPrefix(hp, "0.0.0.0:") || strings.HasPrefix(hp, "[::]:") {
+				return true
+			}
+
+			// (a) relax: accept host or host:port in hp
 			addr, _, err := net.SplitHostPort(hp)
 			if err != nil {
-				continue
-			}
-			if ip == addr {
-				return true
+				// Not host:port, match against whole hp
+				if ip == hp {
+					return true
+				}
+			} else {
+				if ip == addr {
+					return true
+				}
 			}
 		}
 	}

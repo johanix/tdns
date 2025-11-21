@@ -6,6 +6,7 @@ package tdns
 
 import (
 	// "flag"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -335,7 +336,10 @@ func (conf *Config) InitializeKeyDB() error {
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
-func (conf *Config) ParseZones(reload bool) ([]string, error) {
+func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(conf.Zones) == 0 {
 		log.Printf("ParseZones: no authoritative zones defined.")
 		return nil, nil
@@ -566,7 +570,10 @@ func (conf *Config) ParseZones(reload bool) ([]string, error) {
 				// enqueued immediately
 			default:
 				go func(z ZoneRefresher) {
-					conf.Internal.RefreshZoneCh <- z
+					select {
+					case conf.Internal.RefreshZoneCh <- z:
+					case <-ctx.Done():
+					}
 				}(zr)
 			}
 		}

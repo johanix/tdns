@@ -40,7 +40,10 @@ func MainLoop(ctx context.Context, cancel context.CancelFunc, conf *Config) {
 	}
 }
 
-func (conf *Config) MainInit(defaultcfg string) error {
+func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	Globals.App.ServerBootTime = time.Now()
 	Globals.App.ServerConfigTime = time.Now()
 
@@ -143,7 +146,7 @@ func (conf *Config) MainInit(defaultcfg string) error {
 	// }
 
 	// Parse all configured zones
-	all_zones, err := conf.ParseZones(false) // false = initial load, not reload
+	all_zones, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {
 		return fmt.Errorf("Error parsing zones: %v", err)
 	}

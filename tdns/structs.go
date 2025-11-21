@@ -60,12 +60,12 @@ type ZoneData struct {
 	OwnerIndex cmap.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
-	Data               cmap.ConcurrentMap[string, OwnerData]
-	CombinerData       *cmap.ConcurrentMap[string, OwnerData]
-	Ready              bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType            string // axfr | ixfr
-	Logger             *log.Logger
-	ZoneFile           string
+	Data         cmap.ConcurrentMap[string, OwnerData]
+	CombinerData *cmap.ConcurrentMap[string, OwnerData]
+	Ready        bool   // true if zd.Data has been populated (from file or upstream)
+	XfrType      string // axfr | ixfr
+	Logger       *log.Logger
+	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping
 	Verbose            bool
@@ -340,14 +340,15 @@ type DnssecKey struct {
 }
 
 type CachedRRset struct {
-	Name       string
-	RRtype     uint16
-	Rcode      uint8
-	RRset      *RRset
-	Ttl        uint32
-	Context    CacheContext
-	Validated  bool
-	Expiration time.Time
+	Name         string
+	RRtype       uint16
+	Rcode        uint8
+	RRset        *RRset
+	NegAuthority []*RRset
+	Ttl          uint32
+	Context      CacheContext
+	Validated    bool
+	Expiration   time.Time
 }
 
 type AuthServer struct {
@@ -384,6 +385,8 @@ func promoteConnMode(server *AuthServer, target ConnMode) {
 	if server == nil {
 		return
 	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
 	if server.ConnMode < target {
 		server.ConnMode = target
 	}

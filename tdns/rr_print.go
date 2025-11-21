@@ -96,7 +96,7 @@ func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 		fmt.Printf("%s\n", line)
 		return
 	}
-	
+
 	// Print line, then subsequent fields, wrapping at rightmargin
 	//fmt.Printf("%s (\n", line)
 	currentLine := line + " ("

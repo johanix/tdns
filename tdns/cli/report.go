@@ -154,7 +154,7 @@ var ReportCmd = &cobra.Command{
 		if tdns.Globals.Debug {
 			fmt.Printf("ReportCmd: Calling Conf.MainInit(%q)\n", tdns.DefaultCliCfgFile)
 		}
-		if err := Conf.MainInit(tdns.DefaultCliCfgFile); err != nil {
+		if err := Conf.MainInit(context.Background(), tdns.DefaultCliCfgFile); err != nil {
 			tdns.Shutdowner(&Conf, fmt.Sprintf("Error initializing tdns-cli: %v", err))
 		}
 

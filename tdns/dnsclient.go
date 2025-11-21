@@ -56,6 +56,7 @@ func WithForceTCP() DNSClientOption {
 }
 
 // NewDNSClient creates a new DNS client with the specified transport
+// XXX: Once we can do cert validation we should add a WithVerifyCertificates() option.
 func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts ...DNSClientOption) *DNSClient {
 	if tlsConfig == nil {
 		switch transport {

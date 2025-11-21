@@ -52,7 +52,7 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 			if nr.Response != nil {
 				select {
 				case nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}:
-				case <- ctx.Done():
+				case <-ctx.Done():
 					log.Printf("NotifierEngine: Context cancelled while sending response for zone %q NOTIFY request", zd.ZoneName)
 					return nil
 				}

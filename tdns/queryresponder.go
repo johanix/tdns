@@ -274,12 +274,12 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 							//	transportSignalInAnswer = true
 							//}
 							if zd.AddTransportSignal && zd.TransportSignal != nil {
-							   for _, arr := range m.Answer {
-							       if rrMatchesTransportSignal(arr, zd.TransportSignal) {
-							           transportSignalInAnswer = true
-							           break
-							       }
-							   }
+								for _, arr := range m.Answer {
+									if rrMatchesTransportSignal(arr, zd.TransportSignal) {
+										transportSignalInAnswer = true
+										break
+									}
+								}
 							}
 							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
@@ -290,7 +290,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 									m.Extra = append(m.Extra, zd.TransportSignal.RRs...)
 								}
 							}
-							
+
 							if msgoptions.DnssecOK {
 								tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
 								m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
@@ -383,9 +383,9 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			if msgoptions.DnssecOK {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				// if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
-					if qname == origqname {
-						owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
-					}
+				if qname == origqname {
+					owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
+				}
 				// }
 
 				if qname == origqname {
@@ -483,7 +483,6 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 	return nil
 }
-
 
 // rrMatchesTransportSignal checks whether a given RR matches the configured transport signal RRset
 func rrMatchesTransportSignal(rr dns.RR, ts *RRset) bool {

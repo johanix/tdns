@@ -148,7 +148,9 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 }
 
 func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
-	log.Printf("ImrQuery: <%s, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
+	if Globals.Debug {
+		log.Printf("ImrQuery: <%s, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
+	}
 	maxiter := 12
 
 	resp := ImrResponse{
@@ -242,7 +244,9 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 							Src:           "answer",
 							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						}
-						log.Printf("ImrResponder: using resolved A address: %+v", authservers)
+						if Globals.Debug {
+							log.Printf("ImrResponder: using resolved A address: %+v", authservers)
+						}
 					case *dns.AAAA:
 						// servers = []string{rr.AAAA.String()}
 						authservers[rr.Header().Name] = &AuthServer{
@@ -254,7 +258,9 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 							Src:           "answer",
 							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						}
-						log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
+						if Globals.Debug {
+							log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
+						}
 					}
 
 					rrset, rcode, context, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
@@ -263,9 +269,11 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 						continue
 					}
 					if rrset != nil {
-						log.Printf("ImrQuery: received response from IterativeDNSQuery:")
-						for _, rr := range rrset.RRs {
-							log.Printf("ImrQuery: %s", rr.String())
+						if Globals.Debug {
+							log.Printf("ImrQuery: received response from IterativeDNSQuery:")
+							for _, rr := range rrset.RRs {
+								log.Printf("ImrQuery: %s", rr.String())
+							}
 						}
 						resp.RRset = rrset
 						return &resp, nil
@@ -299,7 +307,7 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 			// ss = append(servers, "...")
 		}
 
-		if Globals.Verbose {
+		if Globals.Debug {
 			auths := []string{}
 			for name, _ := range authservers {
 				auths = append(auths, name)
@@ -316,9 +324,11 @@ func (rrcache *RRsetCacheT) ImrQuery(ctx context.Context, qname string, qtype ui
 		}
 
 		if rrset != nil {
-			log.Printf("ImrQuery: received response from IterativeDNSQuery:")
-			for _, rr := range rrset.RRs {
-				log.Printf("ImrQuery: %s", rr.String())
+			if Globals.Debug {
+				log.Printf("ImrQuery: received response from IterativeDNSQuery:")
+				for _, rr := range rrset.RRs {
+					log.Printf("ImrQuery: %s", rr.String())
+				}
 			}
 			resp.RRset = rrset
 			return &resp, nil
@@ -345,21 +355,35 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 	m.RecursionAvailable = true
 
 	crrset := rrcache.Get(qname, qtype)
-	if crrset != nil && crrset.RRset != nil {
+	if crrset != nil {
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == ContextNXDOMAIN:
 			m.SetRcode(r, dns.RcodeNameError)
-			appendSOAToMessage(crrset.RRset, dnssec_ok, m)
+			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, dnssec_ok) && crrset.RRset != nil {
+				appendSOAToMessage(crrset.RRset, dnssec_ok, m)
+			}
+			if dnssec_ok && len(crrset.NegAuthority) > 0 && rrcache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority) {
+				m.AuthenticatedData = true
+			} else if crrset.Validated {
+				m.AuthenticatedData = true
+			}
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == ContextNoErrNoAns &&
-			qtype != dns.TypeSOA && crrset.RRset.RRtype == dns.TypeSOA:
+			qtype != dns.TypeSOA:
 			m.SetRcode(r, dns.RcodeSuccess)
-			appendSOAToMessage(crrset.RRset, dnssec_ok, m)
+			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, dnssec_ok) && crrset.RRset != nil {
+				appendSOAToMessage(crrset.RRset, dnssec_ok, m)
+			}
+			if dnssec_ok && len(crrset.NegAuthority) > 0 && rrcache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority) {
+				m.AuthenticatedData = true
+			} else if crrset.Validated {
+				m.AuthenticatedData = true
+			}
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == ContextAnswer &&
-			crrset.RRset.RRtype == qtype:
+			crrset.RRset != nil && crrset.RRset.RRtype == qtype:
 			m.SetRcode(r, dns.RcodeSuccess)
 			m.Answer = crrset.RRset.RRs
 			if dnssec_ok {
@@ -552,9 +576,7 @@ func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname st
 	switch context {
 	case ContextNXDOMAIN:
 		m.SetRcode(r, dns.RcodeNameError)
-		if !rrcache.appendCachedNegativeSOA(qname, qtype, dnssec_ok, m) {
-			appendSOAFromMsg(r, dnssec_ok, m)
-		}
+		rrcache.serveNegativeResponse(ctx, qname, qtype, dnssec_ok, m, r)
 		w.WriteMsg(m)
 		return true, nil
 	case ContextReferral:
@@ -562,9 +584,7 @@ func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname st
 		return false, nil
 	case ContextNoErrNoAns:
 		m.SetRcode(r, dns.RcodeSuccess)
-		if !rrcache.appendCachedNegativeSOA(qname, qtype, dnssec_ok, m) {
-			appendSOAFromMsg(r, dnssec_ok, m)
-		}
+		rrcache.serveNegativeResponse(ctx, qname, qtype, dnssec_ok, m, r)
 		w.WriteMsg(m)
 		return true, nil
 	}
@@ -589,6 +609,114 @@ func appendSOAToMessage(soa *RRset, dnssecOK bool, m *dns.Msg) {
 			m.Ns = append(m.Ns, dns.Copy(sig))
 		}
 	}
+}
+
+func appendNegAuthorityToMessage(m *dns.Msg, neg []*RRset, dnssecOK bool) bool {
+	if m == nil || len(neg) == 0 {
+		return false
+	}
+	var appended bool
+	for _, set := range neg {
+		if set == nil {
+			continue
+		}
+		for _, rr := range set.RRs {
+			if rr == nil {
+				continue
+			}
+			m.Ns = append(m.Ns, dns.Copy(rr))
+			appended = true
+		}
+		if dnssecOK {
+			for _, sig := range set.RRSIGs {
+				if sig == nil {
+					continue
+				}
+				m.Ns = append(m.Ns, dns.Copy(sig))
+				appended = true
+			}
+		}
+	}
+	return appended
+}
+
+func buildNegAuthorityFromMsg(src *dns.Msg) []*RRset {
+	if src == nil || len(src.Ns) == 0 {
+		return nil
+	}
+	type key struct {
+		name   string
+		rrtype uint16
+	}
+	var order []key
+	sets := make(map[key]*RRset)
+	get := func(name string, rrtype uint16) *RRset {
+		k := key{dns.CanonicalName(name), rrtype}
+		if rs, ok := sets[k]; ok {
+			return rs
+		}
+		rs := &RRset{Name: k.name, Class: dns.ClassINET, RRtype: rrtype}
+		sets[k] = rs
+		order = append(order, k)
+		return rs
+	}
+	for _, raw := range src.Ns {
+		if raw == nil {
+			continue
+		}
+		switch rr := raw.(type) {
+		case *dns.RRSIG:
+			set := get(rr.Header().Name, rr.TypeCovered)
+			set.RRSIGs = append(set.RRSIGs, dns.Copy(rr))
+		default:
+			set := get(raw.Header().Name, raw.Header().Rrtype)
+			set.RRs = append(set.RRs, dns.Copy(raw))
+		}
+	}
+	var out []*RRset
+	for _, k := range order {
+		if rs := sets[k]; rs != nil && (len(rs.RRs) > 0 || len(rs.RRSIGs) > 0) {
+			out = append(out, rs)
+		}
+	}
+	return out
+}
+
+func (rrcache *RRsetCacheT) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, dnssecOK bool, resp *dns.Msg, src *dns.Msg) bool {
+	if resp == nil {
+		return false
+	}
+	var neg []*RRset
+	cached := rrcache.Get(qname, qtype)
+	if cached != nil && len(cached.NegAuthority) > 0 {
+		neg = cached.NegAuthority
+		if appendNegAuthorityToMessage(resp, neg, dnssecOK) {
+			if dnssecOK {
+				if rrcache.ValidateNegativeResponse(ctx, qname, qtype, neg) {
+					resp.AuthenticatedData = true
+				}
+			} else if cached.Validated {
+				resp.AuthenticatedData = true
+			}
+			return true
+		}
+	}
+	if cached != nil && cached.RRset != nil {
+		appendSOAToMessage(cached.RRset, dnssecOK, resp)
+		if cached.Validated {
+			resp.AuthenticatedData = true
+		}
+		return true
+	}
+	neg = buildNegAuthorityFromMsg(src)
+	if len(neg) > 0 && appendNegAuthorityToMessage(resp, neg, dnssecOK) {
+		if dnssecOK && rrcache.ValidateNegativeResponse(ctx, qname, qtype, neg) {
+			resp.AuthenticatedData = true
+		}
+		return true
+	}
+	appendSOAFromMsg(src, dnssecOK, resp)
+	return true
 }
 
 func (rrcache *RRsetCacheT) appendCachedNegativeSOA(qname string, qtype uint16, dnssecOK bool, m *dns.Msg) bool {
@@ -637,7 +765,9 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	var bestmatch string
 	// var servers []string
 	var servers map[string]*AuthServer
-	log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
+	if Globals.Debug {
+		log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
+	}
 	// for item := range rrcache.Servers.IterBuffered() {
 	//	z := item.Key
 	//	ss := item.Val
@@ -655,7 +785,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 		}
 	}
 
-	if Globals.Verbose {
+	if Globals.Debug {
 		auths := []string{}
 		for name, _ := range servers {
 			auths = append(auths, name)

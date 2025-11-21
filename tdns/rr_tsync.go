@@ -7,7 +7,6 @@ package tdns
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -222,7 +221,6 @@ func (rd *TSYNC) Len() int {
 
 func RegisterTsyncRR() error {
 	dns.PrivateHandle("TSYNC", TypeTSYNC, NewTSYNC)
-	log.Printf("Private RRtype TSYNC registered")
 	return nil
 }
 
@@ -276,5 +274,3 @@ func domainNameWireLen(name string) int {
 	}
 	return total
 }
-
-

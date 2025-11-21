@@ -70,23 +70,27 @@ var dumpSuffixCmd = &cobra.Command{
 	},
 }
 
-var dumpServersCmd = &cobra.Command{
-	Use:   "servers",
-	Short: "List servers in the RecursorCache",
-	// Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Listing servers in the RecursorCache\n")
-		if Conf.Internal.RRsetCache == nil {
-			fmt.Println("RecursorCache is nil")
-			return
-		}
+var dumpServersCmd = newDumpServersCmd()
 
-		// Get all keys from the concurrent map
-		for item := range Conf.Internal.RRsetCache.Servers.IterBuffered() {
-			fmt.Printf("\nZone: %s\n", item.Key)
-			fmt.Printf("Servers: %v\n", item.Val)
-		}
-	},
+func newDumpServersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "servers",
+		Short: "List servers in the RecursorCache",
+		Run:   runDumpServers,
+	}
+}
+
+func runDumpServers(cmd *cobra.Command, args []string) {
+	fmt.Printf("Listing servers in the RecursorCache\n")
+	if Conf.Internal.RRsetCache == nil {
+		fmt.Println("RecursorCache is nil")
+		return
+	}
+
+	for item := range Conf.Internal.RRsetCache.Servers.IterBuffered() {
+		fmt.Printf("\nZone: %s\n", item.Key)
+		fmt.Printf("Servers: %v\n", item.Val)
+	}
 }
 
 var dumpAuthServersCmd = &cobra.Command{
@@ -196,20 +200,24 @@ var dumpZoneServersCmd = &cobra.Command{
 	},
 }
 
-var dumpKeysCmd = &cobra.Command{
-	Use:   "keys",
-	Short: "List keys in the RecursorCache",
-	// Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Listing keys in the RecursorCache\n")
-		if Conf.Internal.RRsetCache == nil {
-			fmt.Println("RecursorCache is nil")
-			return
-		}
+var dumpKeysCmd = newDumpKeysCmd()
 
-		// Get all keys from the concurrent map
-		fmt.Printf("%v\n", Conf.Internal.RRsetCache.RRsets.Keys())
-	},
+func newDumpKeysCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "keys",
+		Short: "List keys in the RecursorCache",
+		Run:   runDumpKeys,
+	}
+}
+
+func runDumpKeys(cmd *cobra.Command, args []string) {
+	fmt.Printf("Listing keys in the RecursorCache\n")
+	if Conf.Internal.RRsetCache == nil {
+		fmt.Println("RecursorCache is nil")
+		return
+	}
+
+	fmt.Printf("%v\n", Conf.Internal.RRsetCache.RRsets.Keys())
 }
 
 // dumpDnskeysCmd dumps DNSKEYs (from DnskeyCache) and DS RRsets (from RRsetCache) with validation status
@@ -505,7 +513,7 @@ func formatKeySnippet(key string) string {
 	if len(key) <= 15 {
 		return key
 	}
-	return fmt.Sprintf("%s…", key[:15])
+	return fmt.Sprintf("%s...", key[:15])
 }
 
 func maskDnskeyLine(line string) string {
@@ -528,7 +536,7 @@ func maskDsLine(line string) string {
 
 func maskRrsigLine(line string) string {
 	parts := strings.Fields(line)
-	if len(parts) < 9 {
+	if len(parts) <= 12 {
 		return line
 	}
 	parts[12] = "[sig]"
@@ -538,7 +546,7 @@ func maskRrsigLine(line string) string {
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
 	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd)
-	dumpAuthServersCmd.AddCommand(dumpKeysCmd, dumpServersCmd)
+	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd())
 	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
 }
 
@@ -591,6 +599,14 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
 		// Print each RR in the RRset (no RRSIGs filtering unless requested)
 		ctxLabel := fmt.Sprintf("(%s)", tdns.CacheContextToString[item.Val.Context])
+		if item.Val.RRset == nil {
+			fmt.Printf("  %s %s (no RRset)\n", item.Val.Name, ctxLabel)
+			return
+		}
+		if len(item.Val.RRset.RRs) == 0 {
+			fmt.Printf("  %s %s (no RRs)\n", item.Val.Name, ctxLabel)
+			return
+		}
 		for _, rr := range item.Val.RRset.RRs {
 			switch rr.Header().Rrtype {
 			case dns.TypeDS:

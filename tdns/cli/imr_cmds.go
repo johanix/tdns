@@ -214,6 +214,54 @@ var ImrShowCmd = &cobra.Command{
 	Short: "Show IMR state",
 }
 
+var ImrFlushCmd = &cobra.Command{
+	Use:   "flush",
+	Short: "Flush cached data",
+}
+
+var imrFlushCommonCmd = &cobra.Command{
+	Use:   "common [domain]",
+	Short: "Flush non-structural cached RRsets for a domain",
+	Args:  cobra.ExactArgs(1),
+	Run:   newFlushRunner(true),
+}
+
+var imrFlushAllCmd = &cobra.Command{
+	Use:   "all [domain]",
+	Short: "Flush all cached RRsets for a domain and its subdomains",
+	Args:  cobra.ExactArgs(1),
+	Run:   newFlushRunner(false),
+}
+
+func newFlushRunner(keepStructural bool) func(cmd *cobra.Command, args []string) {
+	return func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRset cache is not initialized")
+			return
+		}
+		domain := dns.Fqdn(args[0])
+		trimmed := strings.TrimSuffix(domain, ".")
+		if trimmed == "" {
+			fmt.Println("Refusing to flush the root zone")
+			return
+		}
+		if _, ok := dns.IsDomainName(trimmed); !ok {
+			fmt.Printf("Not a valid domain name: %q\n", args[0])
+			return
+		}
+		removed, err := Conf.Internal.RRsetCache.FlushDomain(domain, keepStructural)
+		if err != nil {
+			fmt.Printf("Flush failed: %v\n", err)
+			return
+		}
+		if keepStructural {
+			fmt.Printf("Removed %d non-structural cache RRsets at or below %s\n", removed, domain)
+		} else {
+			fmt.Printf("Removed %d cache RRsets at or below %s\n", removed, domain)
+		}
+	}
+}
+
 var imrShowConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Show running IMR configuration summary",
@@ -237,6 +285,7 @@ var imrShowConfigCmd = &cobra.Command{
 			fmt.Println("  Trust anchors: (none)")
 		} else {
 			fmt.Println("  Trust anchors:")
+			sort.Strings(taKeys)
 			for _, key := range taKeys {
 				if val, ok := tdns.DnskeyCache.Map.Get(key); ok {
 					fmt.Printf("    %s keyid=%d (validated=%t trusted=%t expires=%s)\n",
@@ -275,24 +324,51 @@ var imrShowOptionsCmd = &cobra.Command{
 			value string
 		}
 		var rows []optionView
+		normNames := make(map[string]struct{})
 		for opt, val := range Conf.ImrEngine.Options {
 			name, ok := tdns.ImrOptionToString[opt]
 			if !ok {
 				name = fmt.Sprintf("unknown(%d)", opt)
 			}
+			normNames[strings.ToLower(name)] = struct{}{}
 			rows = append(rows, optionView{name: name, value: val})
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
 		if len(rows) == 0 {
 			fmt.Println("  (no normalized options)")
-			return
+		} else {
+			for _, row := range rows {
+				switch strings.ToLower(row.value) {
+				case "", "true":
+					fmt.Printf("  %s\n", row.name)
+				default:
+					fmt.Printf("  %s = %s\n", row.name, row.value)
+				}
+			}
 		}
-		for _, row := range rows {
-			switch strings.ToLower(row.value) {
-			case "", "true":
-				fmt.Printf("  %s\n", row.name)
-			default:
-				fmt.Printf("  %s = %s\n", row.name, row.value)
+		var invalid []string
+		for _, raw := range Conf.ImrEngine.OptionsStrs {
+			name := raw
+			if idx := strings.IndexAny(name, ":="); idx != -1 {
+				name = name[:idx]
+			}
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name == "" {
+				invalid = append(invalid, raw)
+				continue
+			}
+			if _, known := tdns.StringToImrOption[name]; !known {
+				invalid = append(invalid, raw)
+				continue
+			}
+			if _, parsed := normNames[name]; !parsed {
+				invalid = append(invalid, raw)
+			}
+		}
+		if len(invalid) > 0 {
+			fmt.Println("  Invalid and ignored options:")
+			for _, raw := range invalid {
+				fmt.Printf("    %s\n", raw)
 			}
 		}
 	},
@@ -334,4 +410,5 @@ func init() {
 	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
+	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)
 }

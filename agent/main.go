@@ -30,7 +30,10 @@ func main() {
 	// conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
 	// conf.Internal.CfgFile = tdns.DefaultAgentCfgFile
 
-	err := conf.MainInit(tdns.DefaultAgentCfgFile)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	err := conf.MainInit(ctx, tdns.DefaultAgentCfgFile)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
@@ -44,30 +47,27 @@ func main() {
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-    defer stop()
+	// SIGHUP reload watcher
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				if _, err := conf.ParseZones(ctx, true); err != nil {
+					log.Printf("SIGHUP reload failed: %v", err)
+				}
+			}
+		}
+	}()
 
-    // SIGHUP reload watcher
-    hup := make(chan os.Signal, 1)
-    signal.Notify(hup, syscall.SIGHUP)
-    defer signal.Stop(hup)
-    go func() {
-        for {
-            select {
-            case <-ctx.Done():
-                return
-            case <-hup:
-                if _, err := conf.ParseZones(true); err != nil {
-                    log.Printf("SIGHUP reload failed: %v", err)
-                }
-            }
-        }
-    }()
-
-    err = tdns.StartAgent(ctx, &conf, apirouter)
+	err = tdns.StartAgent(ctx, &conf, apirouter)
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
-    tdns.MainLoop(ctx, stop, &conf)
+	tdns.MainLoop(ctx, stop, &conf)
 }
