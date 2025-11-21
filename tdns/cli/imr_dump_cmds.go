@@ -120,7 +120,7 @@ var dumpAuthServersCmd = &cobra.Command{
 					src = "-"
 				}
 				transports := formatTransportWeights(server)
-				conn := tdns.ConnModeToString[server.ConnMode]
+				conn := tdns.ConnModeToString[server.ConnectionMode()]
 				if conn == "" {
 					conn = "legacy"
 				}
@@ -135,15 +135,15 @@ var dumpAuthServersCmd = &cobra.Command{
 					if len(server.TransportSignal) > 0 {
 						fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
 					}
-					if len(server.TLSARecords) > 0 {
+					if tlsaSnapshot := server.SnapshotTLSARecords(); len(tlsaSnapshot) > 0 {
 						fmt.Printf("    TLSA records:\n")
 						var owners []string
-						for owner := range server.TLSARecords {
+						for owner := range tlsaSnapshot {
 							owners = append(owners, owner)
 						}
 						sort.Strings(owners)
 						for _, owner := range owners {
-							rec := server.TLSARecords[owner]
+							rec := tlsaSnapshot[owner]
 							status := "unvalidated"
 							if rec != nil && rec.Validated {
 								status = "validated"
@@ -435,11 +435,9 @@ func formatTransportWeights(server *tdns.AuthServer) string {
 }
 
 func connectionModeString(server *tdns.AuthServer) string {
-	if server == nil {
-		return "legacy"
-	}
-	if mode := tdns.ConnModeToString[server.ConnMode]; mode != "" {
-		return mode
+	mode := server.ConnectionMode()
+	if s := tdns.ConnModeToString[mode]; s != "" {
+		return s
 	}
 	return "legacy"
 }
@@ -454,15 +452,15 @@ func printAuthServerVerbose(name string, server *tdns.AuthServer) {
 	if len(server.TransportSignal) > 0 {
 		fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
 	}
-	if len(server.TLSARecords) > 0 {
+	if tlsaSnapshot := server.SnapshotTLSARecords(); len(tlsaSnapshot) > 0 {
 		fmt.Printf("    TLSA records:\n")
 		var owners []string
-		for owner := range server.TLSARecords {
+		for owner := range tlsaSnapshot {
 			owners = append(owners, owner)
 		}
 		sort.Strings(owners)
 		for _, owner := range owners {
-			rec := server.TLSARecords[owner]
+			rec := tlsaSnapshot[owner]
 			status := "unvalidated"
 			if rec != nil && rec.Validated {
 				status = "validated"

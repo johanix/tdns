@@ -370,6 +370,31 @@ type AuthServer struct {
 	Expire            time.Time
 }
 
+func (as *AuthServer) ConnectionMode() ConnMode {
+	if as == nil {
+		return ConnModeLegacy
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.ConnMode
+}
+
+func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.TLSARecords) == 0 {
+		return nil
+	}
+	snap := make(map[string]*CachedRRset, len(as.TLSARecords))
+	for owner, rec := range as.TLSARecords {
+		snap[owner] = rec
+	}
+	return snap
+}
+
 // SnapshotCounters returns a copy of the per-transport counters.
 func (as *AuthServer) SnapshotCounters() map[Transport]uint64 {
 	as.mu.Lock()

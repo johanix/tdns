@@ -352,7 +352,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 	var primary_zones []string
 
 	// Process each zone configuration
-	for _, zconf := range conf.Zones {
+	for i := range conf.Zones {
+		zconf := &conf.Zones[i]
 		zname := dns.Fqdn(zconf.Name)
 		zconf.Name = zname
 
@@ -370,15 +371,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		// Handle template expansion if specified
 		if zconf.Template != "" {
 			if tmpl, exist := Templates[zconf.Template]; exist {
-				var err error
-				//log.Printf("Zone %s uses the existing template %s: %+v\n", zname, zconf.Template, tmpl)
-				zconf, err = ExpandTemplate(zconf, &tmpl, Globals.App.Type)
+				updated, err := ExpandTemplate(*zconf, &tmpl, Globals.App.Type)
 				if err != nil {
 					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
 					// return nil, err
 					zd.SetError(ConfigError, "template expansion error: %q: %v", zconf.Template, err)
 					continue
 				}
+				*zconf = updated
 				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
 			} else {
 				zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
@@ -446,7 +446,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			log.Printf("ParseZones: zone %s: DNSSEC policy %q accepted", zname, zconf.DnssecPolicy)
 		}
 
-		options := parseZoneOptions(conf, zname, &zconf, &zd)
+		options := parseZoneOptions(conf, zname, zconf, &zd)
 		var outopts []string
 		for o, val := range options {
 			if val {
