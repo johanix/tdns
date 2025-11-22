@@ -9,7 +9,7 @@ import (
 	"log"
 
 	"github.com/spf13/viper"
-
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -48,7 +48,7 @@ func ValidatorEngine(ctx context.Context, conf *Config) {
 
 	// var DnskeyCache = NewRRsetCache()
 
-	var rrset *RRset
+	var rrset *core.RRset
 	// var owner
 	var rrtype string
 

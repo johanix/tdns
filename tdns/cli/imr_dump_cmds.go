@@ -585,7 +585,11 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 		valStr = "validated"
 	}
 	ttlStr := tdns.TtlPrint(item.Val.Expiration)
-	fmt.Printf("\n%s %s (%s, TTL: %s)\n", parts[0], rrtype, valStr, ttlStr)
+	fmt.Printf("\n%s %s (%s, TTL: %s", parts[0], rrtype, valStr, ttlStr)
+	if item.Val.Bogus {
+		fmt.Printf(", bogus")
+	}
+	fmt.Printf(")\n")
 
 	switch item.Val.Context {
 	case tdns.ContextNXDOMAIN:
@@ -608,12 +612,16 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 		for _, rr := range item.Val.RRset.RRs {
 			switch rr.Header().Rrtype {
 			case dns.TypeDS:
-				fmt.Printf("  %s %s\n", maskDsLine(rr.String()), ctxLabel)
+				fmt.Printf("  %s %s", maskDsLine(rr.String()), ctxLabel)
 			case dns.TypeDNSKEY:
-				fmt.Printf("  %s %s\n", maskDnskeyLine(rr.String()), ctxLabel)
+				fmt.Printf("  %s %s", maskDnskeyLine(rr.String()), ctxLabel)
 			default:
-				fmt.Printf("  %s %s\n", rr.String(), ctxLabel)
+				fmt.Printf("  %s %s", rr.String(), ctxLabel)
 			}
+			if item.Val.Bogus {
+				fmt.Printf(" [bogus]")
+			}
+			fmt.Println()
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("  %s %s\n", maskRrsigLine(rr.String()), ctxLabel)

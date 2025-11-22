@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 type KeystorePost struct {
@@ -172,7 +173,7 @@ type DebugResponse struct {
 	Status     string
 	Zone       string
 	OwnerIndex map[string]int
-	RRset      RRset
+	RRset      core.RRset
 	//	TrustedDnskeys	map[string]dns.DNSKEY
 	//	TrustedSig0keys	map[string]dns.KEY
 	TrustedDnskeys  []CachedDnskeyRRset
@@ -211,7 +212,7 @@ type MultiSignerPost struct {
 type MultiSignerResponse struct {
 	AppName  string
 	Time     time.Time
-	RRset    RRset
+	RRset    core.RRset
 	Msg      string
 	Error    bool
 	ErrorMsg string

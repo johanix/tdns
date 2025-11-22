@@ -5,14 +5,15 @@ package tdns
 
 import (
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 type MusicSyncRequest struct {
 	Command         string
 	ZoneName        string
 	ZoneData        *ZoneData
-	OldDnskeys      *RRset
-	NewDnskeys      *RRset
+	OldDnskeys      *core.RRset
+	NewDnskeys      *core.RRset
 	MusicSyncStatus *MusicSyncStatus
 	Response        chan MusicSyncStatus // used for API-based requests
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 var AllowedLocalRRtypes = map[uint16]bool{
@@ -81,7 +82,7 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 
 // AddCombinerData adds or updates local RRsets for the zone.
 // The input map keys are owner names and values are slices of RRsets.
-func (zd *ZoneData) AddCombinerData(data map[string][]RRset) error {
+func (zd *ZoneData) AddCombinerData(data map[string][]core.RRset) error {
 	if zd.CombinerData == nil {
 		var m = cmap.New[OwnerData]()
 		zd.CombinerData = &m
@@ -124,12 +125,12 @@ func (zd *ZoneData) AddCombinerData(data map[string][]RRset) error {
 }
 
 // GetCombinerData retrieves all local combiner data for the zone
-func (zd *ZoneData) GetCombinerData() (map[string][]RRset, error) {
+func (zd *ZoneData) GetCombinerData() (map[string][]core.RRset, error) {
 	if zd.CombinerData == nil {
 		return nil, fmt.Errorf("no local data exists for zone %s", zd.ZoneName)
 	}
 
-	result := make(map[string][]RRset)
+	result := make(map[string][]core.RRset)
 
 	// Iterate over all owners in CombinerData
 	for item := range zd.CombinerData.IterBuffered() {
@@ -137,7 +138,7 @@ func (zd *ZoneData) GetCombinerData() (map[string][]RRset, error) {
 		ownerData := item.Val
 
 		// Get all RRsets for this owner
-		var rrsets []RRset
+		var rrsets []core.RRset
 		for _, rrtype := range ownerData.RRtypes.Keys() {
 			if rrset, ok := ownerData.RRtypes.Get(rrtype); ok {
 				rrsets = append(rrsets, rrset)
@@ -161,7 +162,7 @@ func (zd *ZoneData) AddCombinerDataNG(data map[string][]string) error {
 	}
 
 	// Convert string RRs to dns.RR objects and group them into RRsets
-	rrsetData := make(map[string][]RRset)
+	rrsetData := make(map[string][]core.RRset)
 	for owner, rrStrings := range data {
 		var rrs []dns.RR
 		for _, rrString := range rrStrings {
@@ -180,9 +181,9 @@ func (zd *ZoneData) AddCombinerDataNG(data map[string][]string) error {
 		}
 
 		// Create RRsets
-		var rrsets []RRset
+		var rrsets []core.RRset
 		for rrtype, typeRRs := range rrsByType {
-			rrsets = append(rrsets, RRset{
+			rrsets = append(rrsets, core.RRset{
 				Name:   owner,
 				RRtype: rrtype,
 				RRs:    typeRRs,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
@@ -122,7 +123,7 @@ type AuthQueryRequest struct {
 }
 
 type AuthQueryResponse struct {
-	rrset *RRset
+	rrset *core.RRset
 	err   error
 }
 
@@ -171,13 +172,13 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 					}
 					drainTimer.Reset(500 * time.Millisecond)
 				}
-				rrset := RRset{Name: req.qname}
+				rrset := core.RRset{Name: req.qname}
 				req.response <- &AuthQueryResponse{&rrset, ctx.Err()}
 				continue
 			}
 
 			log.Printf("*** AuthQueryEngine: Received request for %s %s from %s ***", req.qname, dns.TypeToString[req.rrtype], req.ns)
-			rrset := RRset{
+			rrset := core.RRset{
 				Name: req.qname,
 			}
 
@@ -282,7 +283,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 	}
 }
 
-func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport string) (*RRset, error) {
+func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport string) (*core.RRset, error) {
 	//	requests := make(chan AuthQueryRequest)
 	//defer close(requests)
 
@@ -363,50 +364,3 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 	return rrsets_differ, adds, removes
 }
 
-func (rrset *RRset) RemoveRR(rr dns.RR) {
-	log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
-	for i, r := range rrset.RRs {
-		log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
-		if dns.IsDuplicate(r, rr) {
-			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
-			rrset.RRSIGs = []dns.RR{}
-			log.Printf("RemoveRR: *REMOVED* '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
-			return
-		}
-	}
-}
-
-func (rrset *RRset) Copy() *RRset {
-	new_rrset := RRset{
-		Name:   rrset.Name,
-		RRs:    []dns.RR{},
-		RRSIGs: []dns.RR{},
-	}
-	new_rrset.RRs = append(new_rrset.RRs, rrset.RRs...)
-	new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
-	return &new_rrset
-}
-
-// Add adds a RR to the RRset if it is not already present.
-func (rrset *RRset) Add(rr dns.RR) {
-	for _, rr2 := range rrset.RRs {
-		if dns.IsDuplicate(rr, rr2) {
-			// log.Printf("rrset.Add: RR already present: %s", rr.String())
-			return
-		}
-	}
-	// log.Printf("rrset.Add: Adding RR: %s to RRset\n%v", rr.String(), rrset.RRs)
-	rrset.RRs = append(rrset.RRs, rr)
-}
-
-// Delete deletes a RR from the RRset if it is present.
-func (rrset *RRset) Delete(rr dns.RR) {
-	for i, rr2 := range rrset.RRs {
-		if dns.IsDuplicate(rr, rr2) {
-			// log.Printf("rrset.Delete: Found RR: %s in RRset\n%v", rr.String(), rrset.RRs)
-			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
-			return
-		}
-	}
-	// log.Printf("rrset.Delete: RR not found: %s", rr.String())
-}

@@ -18,6 +18,7 @@ import (
 	// "github.com/johanix/tdns/tdns/transport"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // 1. Is the RRset in a zone that we're auth for? If so we claim that the data is valid
@@ -28,7 +29,7 @@ import (
 // 3. Query child NS for <qname, qtype>
 
 func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16,
-	verbose bool) (*RRset, bool, error) {
+	verbose bool) (*core.RRset, bool, error) {
 
 	cdd := zd.FindDelegation(qname, true)
 	switch {
@@ -114,9 +115,9 @@ func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16,
 
 // XXX: This should not be a method of ZoneData, but rather a function.
 
-func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRset, error) {
+func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*core.RRset, error) {
 	zd.Logger.Printf("LookupRRset: looking up %s %s", qname, dns.TypeToString[qtype])
-	var rrset *RRset
+	var rrset *core.RRset
 	var wildqname string
 	origqname := qname
 
@@ -174,7 +175,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 
 	// Must instantiate the rrset if not found above
 	if rrset == nil {
-		rrset = &RRset{}
+		rrset = &core.RRset{}
 	}
 
 	// Check for exact match qname + qtype
@@ -205,7 +206,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*RRse
 
 // XXX: This should die in favor of LookupChildRRsetNG
 func (zd *ZoneData) LookupChildRRset(qname string, qtype uint16,
-	v4glue, v6glue *RRset, verbose bool) (*RRset, error) {
+	v4glue, v6glue *core.RRset, verbose bool) (*core.RRset, error) {
 
 	var servers []string
 
@@ -226,7 +227,7 @@ func (zd *ZoneData) LookupChildRRset(qname string, qtype uint16,
 }
 
 func (zd *ZoneData) LookupChildRRsetNG(qname string, qtype uint16,
-	addrs []string, verbose bool) (*RRset, error) {
+	addrs []string, verbose bool) (*core.RRset, error) {
 
 	rrset, _, err := AuthDNSQuery(qname, zd.Logger, addrs, qtype, verbose)
 	if err != nil {
@@ -237,7 +238,7 @@ func (zd *ZoneData) LookupChildRRsetNG(qname string, qtype uint16,
 	return rrset, err
 }
 
-func ChildGlueRRsetsToAddrs(v4glue, v6glue []*RRset) ([]string, error) {
+func ChildGlueRRsetsToAddrs(v4glue, v6glue []*core.RRset) ([]string, error) {
 	var addrs []string
 	for _, nsname := range v4glue {
 		for _, glue := range nsname.RRs {
@@ -269,14 +270,14 @@ func ChildGlueRRsToAddrs(v4glue, v6glue []dns.RR) ([]string, error) {
 
 // XXX: Do we still use this anywhere?
 func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
-	rrtype uint16, verbose bool) (*RRset, int, error) {
+	rrtype uint16, verbose bool) (*core.RRset, int, error) {
 
 	// crrset := RRsetCache.Get(qname, rrtype)
 	// if crrset != nil {
 	//	lg.Printf("AuthDNSQuery: found %s %s in cache", qname, dns.TypeToString[rrtype])
 	//	return crrset.RRset, int(crrset.Rcode), nil
 	// }
-	var rrset RRset
+	var rrset core.RRset
 	var rcode int
 
 	// c := dns.Client{Net: "tcp"}
@@ -340,8 +341,8 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 }
 
 func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, nameservers []string,
-	lg *log.Logger, verbose bool) (*RRset, int, CacheContext, error) {
-	var rrset RRset
+	lg *log.Logger, verbose bool) (*core.RRset, int, CacheContext, error) {
+	var rrset core.RRset
 	var rcode int
 
 	// c := dns.Client{Net: "tcp"}
@@ -456,7 +457,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtyp
 			switch rcode {
 			case dns.RcodeSuccess:
 				// this is either a referral or a negative response
-				var rrset RRset
+				var rrset core.RRset
 				var zonename string
 
 				// 1. Collect the NS RRset from the Authority section
@@ -477,7 +478,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtyp
 								Name:   qname,
 								RRtype: qtype,
 								Rcode:  uint8(rcode),
-								RRset: &RRset{
+								RRset: &core.RRset{
 									Name:   rr.Header().Name,
 									Class:  dns.ClassINET,
 									RRtype: dns.TypeSOA,
@@ -510,8 +511,8 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtyp
 				}
 
 				// 2. Collect any glue from Additional
-				glue4Map := map[string]RRset{}
-				glue6Map := map[string]RRset{}
+				glue4Map := map[string]core.RRset{}
+				glue6Map := map[string]core.RRset{}
 				var servers []string
 				serverMap := map[string]*AuthServer{}
 				for _, rr := range r.Extra {
@@ -649,7 +650,7 @@ func (rrcache *RRsetCacheT) AuthDNSQuery(ctx context.Context, qname string, qtyp
 }
 
 // force is true if we should force a lookup even if the answer is in the cache
-func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*AuthServer, force bool) (*RRset, int, CacheContext, error) {
+func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*AuthServer, force bool) (*core.RRset, int, CacheContext, error) {
 	lg := rrcache.Logger
 
 	if Globals.Debug {
@@ -680,7 +681,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 	} else {
 		lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
 	}
-	var rrset RRset
+	var rrset core.RRset
 	var rcode int
 
 	m, err := rrcache.buildQuery(qname, qtype)
@@ -783,7 +784,7 @@ func (rrcache *RRsetCacheT) IterativeDNSQuery(ctx context.Context, qname string,
 }
 
 // CollectNSAddresses - given an NS RRset, chase down the A and AAAA records corresponding to each nsname
-func (rrcache *RRsetCacheT) CollectNSAddresses(ctx context.Context, rrset *RRset, respch chan *ImrResponse) error {
+func (rrcache *RRsetCacheT) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respch chan *ImrResponse) error {
 	if rrset == nil || len(rrset.RRs) == 0 {
 		return fmt.Errorf("rrset is nil or empty")
 	}
@@ -811,7 +812,7 @@ func (rrcache *RRsetCacheT) CollectNSAddresses(ctx context.Context, rrset *RRset
 	return nil
 }
 
-func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrset *RRset, zonename string,
+func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrset *core.RRset, zonename string,
 	nsMap map[string]bool, r *dns.Msg) (map[string]*AuthServer, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -832,8 +833,8 @@ func (rrcache *RRsetCacheT) ParseAdditionalForNSAddrs(ctx context.Context, src s
 	}
 
 	// 2. Collect any glue from Additional
-	glue4Map := map[string]RRset{}
-	glue6Map := map[string]RRset{}
+	glue4Map := map[string]core.RRset{}
+	glue6Map := map[string]core.RRset{}
 	// var servers []string
 	serverMap, exist := rrcache.ServerMap.Get(zonename)
 	if !exist {
@@ -1219,7 +1220,7 @@ func incrementTransportCounter(server *AuthServer, t Transport) {
 	}
 }
 
-func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
+func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*core.RRset, error) {
 	resolvers := viper.GetStringSlice("dns.resolvers")
 	if len(resolvers) == 0 {
 		return nil, fmt.Errorf("no DNS servers found in client configuration")
@@ -1233,7 +1234,7 @@ func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Durati
 }
 
 func RecursiveDNSQueryWithServers(qname string, qtype uint16, timeout time.Duration,
-	retries int, resolvers []string) (*RRset, error) {
+	retries int, resolvers []string) (*core.RRset, error) {
 	if len(resolvers) == 0 {
 		return nil, fmt.Errorf("no DNS resolvers provided")
 	}
@@ -1250,7 +1251,7 @@ func RecursiveDNSQueryWithServers(qname string, qtype uint16, timeout time.Durat
 	return nil, fmt.Errorf("failed to find any %s records after trying all resolvers", qname)
 }
 
-func RecursiveDNSQueryWithResolvConf(qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
+func RecursiveDNSQueryWithResolvConf(qname string, qtype uint16, timeout time.Duration, retries int) (*core.RRset, error) {
 	clientConfig, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load DNS client configuration: %v", err)
@@ -1266,7 +1267,7 @@ func RecursiveDNSQueryWithResolvConf(qname string, qtype uint16, timeout time.Du
 	return rrset, nil
 }
 
-func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration, retries int) (*RRset, error) {
+func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration, retries int) (*core.RRset, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	c := &dns.Client{
@@ -1281,7 +1282,7 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 	}
 	server = net.JoinHostPort(host, port)
 
-	var rrset RRset
+	var rrset core.RRset
 	var lastErr error
 	for attempt := 0; attempt < retries; attempt++ {
 		backoff := time.Duration(attempt) * 100 * time.Millisecond
@@ -1595,7 +1596,7 @@ func (rrcache *RRsetCacheT) persistServerTransportUpdate(server *AuthServer) {
 	}
 }
 
-func (rrcache *RRsetCacheT) applyTransportRRsetFromAnswer(qname string, rrset *RRset, validated bool) {
+func (rrcache *RRsetCacheT) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, validated bool) {
 	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -1668,7 +1669,7 @@ func (rrcache *RRsetCacheT) applyTransportRRsetFromAnswer(qname string, rrset *R
 								MatchingType: tlsaRR.MatchingType,
 								Certificate:  tlsaRR.Certificate,
 							}
-							rrcache.storeTLSAForServer(base, ownerName, &RRset{
+							rrcache.storeTLSAForServer(base, ownerName, &core.RRset{
 								Name:   ownerName,
 								Class:  dns.ClassINET,
 								RRtype: dns.TypeTLSA,
@@ -1702,8 +1703,8 @@ func (rrcache *RRsetCacheT) applyTransportRRsetFromAnswer(qname string, rrset *R
 	}
 }
 
-func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*RRset, int, CacheContext, error, bool) {
-	var rrset RRset
+func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, CacheContext, error, bool) {
+	var rrset core.RRset
 	for _, rr := range r.Answer {
 		switch t := rr.Header().Rrtype; t {
 		case qtype:
@@ -1743,7 +1744,7 @@ func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtyp
 		// Validate the RRset (if possible) using DnskeyCache
 		validated := false
 		if len(rrset.RRSIGs) > 0 {
-			ok, _ := DnskeyCache.ValidateRRset(ctx, rrcache, &rrset, rrcache.Debug)
+			ok, _ := rrcache.ValidateRRset(ctx, DnskeyCache, &rrset, rrcache.Debug)
 			validated = ok
 		}
 		cr := &CachedRRset{
@@ -1786,7 +1787,7 @@ func (rrcache *RRsetCacheT) handleAnswer(ctx context.Context, qname string, qtyp
 	return nil, r.MsgHdr.Rcode, ContextFailure, nil, false
 }
 
-func extractReferral(r *dns.Msg, qname string, qtype uint16) (*RRset, string, map[string]bool) {
+func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, string, map[string]bool) {
 	nsMap := map[string]bool{}
 	zonename := ""
 	var nsrrs []dns.RR
@@ -1796,7 +1797,7 @@ func extractReferral(r *dns.Msg, qname string, qtype uint16) (*RRset, string, ma
 	default:
 		nsrrs = r.Ns
 	}
-	var rrset RRset
+	var rrset core.RRset
 	for _, rr := range nsrrs {
 		switch rr.Header().Rrtype {
 		case dns.TypeNS:
@@ -1814,7 +1815,7 @@ func extractReferral(r *dns.Msg, qname string, qtype uint16) (*RRset, string, ma
 	return &rrset, zonename, nsMap
 }
 
-func (rrcache *RRsetCacheT) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*RRset, int, CacheContext, error) {
+func (rrcache *RRsetCacheT) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, CacheContext, error) {
 	if Globals.Debug {
 		rrcache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
@@ -1838,7 +1839,7 @@ func (rrcache *RRsetCacheT) handleReferral(ctx context.Context, qname string, qt
 		// Validate NS RRset if signatures are present
 		validated := false
 		if len(nsRRset.RRSIGs) > 0 {
-			if ok, _ := DnskeyCache.ValidateRRset(ctx, rrcache, nsRRset, rrcache.Debug); ok {
+			if ok, _ := rrcache.ValidateRRset(ctx, DnskeyCache, nsRRset, rrcache.Debug); ok {
 				validated = true
 			}
 		}
@@ -1868,7 +1869,7 @@ func (rrcache *RRsetCacheT) handleReferral(ctx context.Context, qname string, qt
 		}
 	}
 	if len(dsRRs) > 0 {
-		dsRRset := &RRset{
+		dsRRset := &core.RRset{
 			Name:   zonename,
 			Class:  dns.ClassINET,
 			RRtype: dns.TypeDS,
@@ -1877,7 +1878,7 @@ func (rrcache *RRsetCacheT) handleReferral(ctx context.Context, qname string, qt
 		}
 		validated := false
 		if len(dsSigs) > 0 {
-			if ok, _ := DnskeyCache.ValidateRRset(ctx, rrcache, dsRRset, rrcache.Debug); ok {
+			if ok, _ := rrcache.ValidateRRset(ctx, DnskeyCache, dsRRset, rrcache.Debug); ok {
 				validated = true
 			}
 		}
@@ -1998,7 +1999,7 @@ func (rrcache *RRsetCacheT) revalidateReferralNS(ctx context.Context, zonename s
 	rrset.RRtype = dns.TypeNS
 	validated := false
 	if len(rrset.RRSIGs) > 0 {
-		ok, err := DnskeyCache.ValidateRRset(ctx, rrcache, rrset, rrcache.Debug)
+		ok, err := rrcache.ValidateRRset(ctx, DnskeyCache, rrset, rrcache.Debug)
 		if err != nil {
 			rrcache.Logger.Printf("*** revalidateReferralNS: Error from ValidateRRset: %v", err)
 		}
@@ -2093,7 +2094,7 @@ func (rrcache *RRsetCacheT) revalidateGlueRR(ctx context.Context, host string, r
 
 	validated := false
 	if len(rrset.RRSIGs) > 0 {
-		ok, err := DnskeyCache.ValidateRRset(ctx, rrcache, rrset, rrcache.Debug)
+		ok, err := rrcache.ValidateRRset(ctx, DnskeyCache, rrset, rrcache.Debug)
 		if err != nil {
 			rrcache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
 		}
@@ -2134,20 +2135,20 @@ func (rrcache *RRsetCacheT) handleNegative(qname string, qtype uint16, r *dns.Ms
 		ttl      uint32
 		soaOwner string
 		soaMin   uint32
-		soarrset *RRset
-		negSets  = make(map[string]*RRset)
+		soarrset *core.RRset
+		negSets  = make(map[string]*core.RRset)
 		negOrder []string
 	)
 
 	getNegKey := func(name string, rrtype uint16) string {
 		return fmt.Sprintf("%s::%d", name, rrtype)
 	}
-	getNegSet := func(name string, rrtype uint16) *RRset {
+	getNegSet := func(name string, rrtype uint16) *core.RRset {
 		key := getNegKey(name, rrtype)
 		if rs, ok := negSets[key]; ok {
 			return rs
 		}
-		rs := &RRset{
+		rs := &core.RRset{
 			Name:   name,
 			Class:  dns.ClassINET,
 			RRtype: rrtype,
@@ -2197,22 +2198,48 @@ func (rrcache *RRsetCacheT) handleNegative(qname string, qtype uint16, r *dns.Ms
 		ttl = 60
 	}
 
-	validated := false
-	if len(soarrset.RRSIGs) > 0 {
-		if ok, _ := DnskeyCache.ValidateRRset(context.Background(), rrcache, soarrset, rrcache.Debug); ok {
-			validated = true
+	skipDNSKEYValidation := qtype == dns.TypeDNSKEY
+	hasValidatedDS := false
+	if skipDNSKEYValidation {
+		if ds := rrcache.Get(qname, dns.TypeDS); ds != nil && ds.RRset != nil && len(ds.RRset.RRs) > 0 && ds.Validated {
+			hasValidatedDS = true
+		}
+	}
+
+	soaValidated := false
+	if !skipDNSKEYValidation && len(soarrset.RRSIGs) > 0 {
+		if ok, _ := rrcache.ValidateRRset(context.Background(), DnskeyCache, soarrset, rrcache.Debug); ok {
+			soaValidated = true
 		}
 	}
 
 	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
 
-	var negAuthority []*RRset
+	var negAuthority []*core.RRset
 	for _, key := range negOrder {
 		if rs, ok := negSets[key]; ok && rs != nil {
 			if len(rs.RRs) == 0 && len(rs.RRSIGs) == 0 {
 				continue
 			}
 			negAuthority = append(negAuthority, rs)
+		}
+	}
+
+	var edeCode uint16
+	var edeText string
+	if skipDNSKEYValidation && hasValidatedDS && soaOwner != "" {
+		edeCode = 9
+		zone := strings.TrimSuffix(soaOwner, ".")
+		if zone == "" {
+			zone = "."
+		}
+		edeText = fmt.Sprintf("no DNSKEY matches DS for zone %s", zone)
+	}
+
+	negValidated := false
+	if !skipDNSKEYValidation && len(negAuthority) > 0 {
+		if rrcache.ValidateNegativeResponse(context.Background(), qname, qtype, negAuthority) {
+			negValidated = true
 		}
 	}
 
@@ -2223,8 +2250,10 @@ func (rrcache *RRsetCacheT) handleNegative(qname string, qtype uint16, r *dns.Ms
 		RRset:        soarrset,
 		NegAuthority: negAuthority,
 		Context:      negContext,
-		Validated:    validated,
+		Validated:    negValidated,
 		Expiration:   expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
+		EDECode:      edeCode,
+		EDEText:      edeText,
 	})
 
 	// XXX: should do either of:
@@ -2238,23 +2267,30 @@ func (rrcache *RRsetCacheT) handleNegative(qname string, qtype uint16, r *dns.Ms
 		Rcode:      uint8(dns.RcodeSuccess),
 		RRset:      soarrset,
 		Context:    ContextAnswer,
-		Validated:  validated,
+		Validated:  soaValidated,
 		Expiration: expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
 	})
 
 	return negContext, r.MsgHdr.Rcode, true
 }
 
-func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, negAuthority []*RRset) bool {
+func (rrcache *RRsetCacheT) xxxValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, negAuthority []*core.RRset) bool {
 	if len(negAuthority) == 0 {
+		return false
+	}
+	if qtype == dns.TypeDNSKEY {
+		// Cannot validate negative DNSKEY responses without the zone's DNSKEYs; treat as insecure/bogus
+		if Globals.Debug {
+			log.Printf("ValidateNegativeResponse: skipping validation for DNSKEY negative response at %q", qname)
+		}
 		return false
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	qnameCanon := canonicalName(qname)
+	qnameCanon := dns.CanonicalName(qname)
 	var (
-		soarrset      *RRset
+		soarrset      *core.RRset
 		hasSignatures bool
 		nsecs         []*dns.NSEC
 		nsec3Present  bool
@@ -2283,7 +2319,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 	if soarrset == nil || len(soarrset.RRs) == 0 {
 		return false
 	}
-	zoneName := canonicalName(soarrset.Name)
+	zoneName := dns.CanonicalName(soarrset.Name)
 	if !strings.HasSuffix(qnameCanon, zoneName) {
 		return false
 	}
@@ -2294,13 +2330,13 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		if set == nil || len(set.RRSIGs) == 0 {
 			continue
 		}
-		if ok, _ := DnskeyCache.ValidateRRset(ctx, rrcache, set, rrcache.Debug); !ok {
+		if ok, _ := rrcache.ValidateRRset(ctx, DnskeyCache, set, rrcache.Debug); !ok {
 			return false
 		}
 	}
 	if len(nsecs) > 0 {
 		baseZone := strings.TrimSuffix(zoneName, ".")
-		wildcard := canonicalName("*." + baseZone)
+		wildcard := dns.CanonicalName("*." + baseZone)
 		coveredQname := false
 		coveredWildcard := false
 		for _, nsec := range nsecs {
@@ -2322,17 +2358,13 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 	return false
 }
 
-func canonicalName(name string) string {
-	return dns.CanonicalName(dns.Fqdn(name))
-}
-
 func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	if nsec == nil {
 		return false
 	}
-	owner := canonicalName(nsec.Hdr.Name)
-	next := canonicalName(nsec.NextDomain)
-	target := canonicalName(name)
+	owner := dns.CanonicalName(nsec.Hdr.Name)
+	next := dns.CanonicalName(nsec.NextDomain)
+	target := dns.CanonicalName(name)
 	if owner == next {
 		return true
 	}
@@ -2342,7 +2374,7 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
-func (rrcache *RRsetCacheT) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool) (*RRset, int, CacheContext, error) {
+func (rrcache *RRsetCacheT) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool) (*core.RRset, int, CacheContext, error) {
 	maxchase := 10
 	cur := target
 	for i := 0; i < maxchase; i++ {
@@ -2378,9 +2410,12 @@ func (rrcache *RRsetCacheT) chaseCNAME(ctx context.Context, target string, qtype
 	return nil, dns.RcodeServerFailure, ContextFailure, fmt.Errorf("CNAME chase exceeded max depth")
 }
 
-func DefaultDNSKEYFetcher(ctx context.Context, name string, rrcache *RRsetCacheT) (*RRset, error) {
+func DefaultDNSKEYFetcher(ctx context.Context, name string, rrcache *RRsetCacheT) (*core.RRset, error) {
 	// implement with your IterativeDNSQuery + server selection
-	best, servers, _ := rrcache.FindClosestKnownZone(name)
+	best, servers, err := rrcache.FindClosestKnownZone(name)
+	if err != nil {
+		return nil, fmt.Errorf("FindClosestKnownZone error for %s: %v", name, err)
+	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {
 		if sm, ok := rrcache.ServerMap.Get("."); ok {
@@ -2393,6 +2428,28 @@ func DefaultDNSKEYFetcher(ctx context.Context, name string, rrcache *RRsetCacheT
 	rr, _, _, err := rrcache.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false)
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("dnskey fetch failed for %s: %v", name, err)
+	}
+	return rr, nil
+}
+
+func DefaultRRsetFetcher(ctx context.Context, qname string, qtype uint16, rrcache *RRsetCacheT) (*core.RRset, error) {
+	// implement with your IterativeDNSQuery + server selection
+	best, servers, err := rrcache.FindClosestKnownZone(qname)
+	if err != nil {
+		return nil, fmt.Errorf("FindClosestKnownZone error for %s: %v", qname, err)
+	}
+	_ = best // could be used for logging
+	if len(servers) == 0 {
+		if sm, ok := rrcache.ServerMap.Get("."); ok {
+			servers = sm
+		}
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no servers for %s", qname)
+	}
+	rr, _, _, err := rrcache.IterativeDNSQuery(ctx, qname, qtype, servers, false)
+	if err != nil || rr == nil || len(rr.RRs) == 0 {
+		return nil, fmt.Errorf("fetch failed for %s %s: %v", qname, dns.TypeToString[qtype], err)
 	}
 	return rr, nil
 }

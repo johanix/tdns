@@ -20,7 +20,7 @@ const (
 	EDEMPZoneXfrFailure           uint16 = 519
 	EDEMPParentSyncFailure        uint16 = 520
 	EDEReportOptionNotFound       uint16 = 521
-        EDETsigRequired               uint16 = 522
+	EDETsigRequired               uint16 = 522
 	EDETsigValidationFailure      uint16 = 523
 )
 
@@ -58,12 +58,42 @@ func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 	opt.Option = append(opt.Option, ede)
 }
 
-func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
-    ede := new(dns.EDNS0_EDE)
-    ede.InfoCode = edeCode
-    if s, ok := EDECodeToString[edeCode]; ok {
+func AttachEDEToResponseWithText(msg *dns.Msg, edeCode uint16, extraText string, dnssecOK bool) {
+	if msg == nil {
+		return
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		msg.SetEdns0(4096, dnssecOK)
+		opt = msg.IsEdns0()
+	} else {
+		const doBit = uint32(1 << 15)
+		if dnssecOK {
+			opt.Hdr.Ttl |= doBit
+		} else {
+			opt.Hdr.Ttl &^= doBit
+		}
+	}
+
+	ede := new(dns.EDNS0_EDE)
+	ede.InfoCode = edeCode
+	if extraText != "" {
+		ede.ExtraText = extraText
+	} else if s, ok := EDECodeToString[edeCode]; ok {
 		ede.ExtraText = s
-    } else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+		ede.ExtraText = s
+	}
+
+	opt.Option = append(opt.Option, ede)
+}
+
+func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
+	ede := new(dns.EDNS0_EDE)
+	ede.InfoCode = edeCode
+	if s, ok := EDECodeToString[edeCode]; ok {
+		ede.ExtraText = s
+	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
 		ede.ExtraText = s
 	}
 
@@ -71,12 +101,12 @@ func AddEDEToOPT(opt *dns.OPT, edeCode uint16) {
 }
 
 func EDEToString(edeCode uint16) (string, bool) {
-    if s, ok := EDECodeToString[edeCode]; ok {
+	if s, ok := EDECodeToString[edeCode]; ok {
 		return s, true
-    } else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
+	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
 		return s, true
 	}
-	
+
 	return "", false
 }
 

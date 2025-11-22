@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -33,7 +34,7 @@ import (
 //}
 
 // XXX: This should not be a method of ZoneData, but rather a function.
-func (zd *ZoneData) ValidateRRset(rrset *RRset, verbose bool) (bool, error) {
+func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error) {
 	if len(rrset.RRSIGs) == 0 {
 		return false, nil // is it an error if there is no RRSIG?
 	}

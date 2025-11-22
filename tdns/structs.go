@@ -12,6 +12,7 @@ import (
 
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 type ZoneStore uint8
@@ -93,7 +94,7 @@ type ZoneData struct {
 	LatestError        time.Time // time of latest error
 	RefreshCount       int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	LatestRefresh      time.Time // time of latest successful refresh
-	TransportSignal    *RRset    // transport signal RRset (SVCB or TSYNC)
+	TransportSignal    *core.RRset    // transport signal RRset (SVCB or TSYNC)
 	AddTransportSignal bool      // whether to attach TransportSignal in responses
 }
 
@@ -196,8 +197,8 @@ type DnssecPolicy struct {
 type Ixfr struct {
 	FromSerial uint32
 	ToSerial   uint32
-	Removed    []RRset
-	Added      []RRset
+	Removed    []core.RRset
+	Added      []core.RRset
 }
 
 type Owners []OwnerData
@@ -207,7 +208,7 @@ type OwnerData struct {
 	RRtypes *RRTypeStore
 }
 
-type RRset struct {
+type xxxRRset struct {
 	Name   string
 	Class  uint16
 	RRtype uint16
@@ -220,16 +221,16 @@ type ChildDelegationData struct {
 	ParentSerial     uint32    // The parent serial that this data was correct for
 	Timestamp        time.Time // Time at which this data was fetched
 	ChildName        string
-	RRsets           map[string]map[uint16]RRset // map[ownername]map[rrtype]RRset
+	RRsets           map[string]map[uint16]core.RRset // map[ownername]map[rrtype]RRset
 	NS_rrs           []dns.RR
 	A_glue           []dns.RR
 	A_glue_rrsigs    []dns.RR
 	AAAA_glue        []dns.RR
 	AAAA_glue_rrsigs []dns.RR
-	NS_rrset         *RRset
-	DS_rrset         *RRset
-	A_rrsets         []*RRset
-	AAAA_rrsets      []*RRset
+	NS_rrset         *core.RRset
+	DS_rrset         *core.RRset
+	A_rrsets         []*core.RRset
+	AAAA_rrsets      []*core.RRset
 }
 
 type DelegationSyncStatus struct {
@@ -280,7 +281,7 @@ type RefresherResponse struct {
 
 type ValidatorRequest struct {
 	Qname    string
-	RRset    *RRset
+	RRset    *core.RRset
 	Response chan ValidatorResponse
 }
 
@@ -301,7 +302,7 @@ type CachedDnskeyRRset struct {
 	Trusted     bool
 	TrustAnchor bool
 	Dnskey      dns.DNSKEY // just this key
-	RRset       *RRset     // complete RRset
+	RRset       *core.RRset     // complete RRset
 	Expiration  time.Time
 }
 
@@ -343,12 +344,15 @@ type CachedRRset struct {
 	Name         string
 	RRtype       uint16
 	Rcode        uint8
-	RRset        *RRset
-	NegAuthority []*RRset
+	RRset        *core.RRset
+	NegAuthority []*core.RRset
 	Ttl          uint32
 	Context      CacheContext
 	Validated    bool
+	Bogus        bool
 	Expiration   time.Time
+	EDECode      uint16
+	EDEText      string
 }
 
 type AuthServer struct {
@@ -440,9 +444,9 @@ type DelegationSyncRequest struct {
 	ZoneName     string
 	ZoneData     *ZoneData
 	SyncStatus   DelegationSyncStatus
-	OldDnskeys   *RRset
-	NewDnskeys   *RRset
-	MsignerGroup *RRset
+	OldDnskeys   *core.RRset
+	NewDnskeys   *core.RRset
+	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
 }
 

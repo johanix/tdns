@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // Define sets of known types
@@ -65,7 +66,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
 
-	MaybeSignRRset := func(rrset RRset, qname string) RRset {
+	MaybeSignRRset := func(rrset core.RRset, qname string) core.RRset {
 		if dak == nil {
 			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
 			return rrset
@@ -118,7 +119,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		m.Ns = append(m.Ns, nsecRR)
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 
-		nsecRRset := MaybeSignRRset(RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
+		nsecRRset := MaybeSignRRset(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
 	}
 
@@ -137,7 +138,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	m.SetReply(r)
 	m.MsgHdr.Authoritative = true
 
-	var v4glue, v6glue *RRset
+	var v4glue, v6glue *core.RRset
 	var wildqname string
 	origqname := qname
 
@@ -337,7 +338,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			if qtype == dns.TypeSOA {
 				soaRR := rrset.RRs[0].(*dns.SOA)
 				soaRR.Serial = zd.CurrentSerial
-				owner.RRtypes.Set(qtype, RRset{RRs: []dns.RR{soaRR}})
+				owner.RRtypes.Set(qtype, core.RRset{RRs: []dns.RR{soaRR}})
 				rrset.RRs[0] = soaRR
 			}
 			if qname == origqname {
@@ -485,7 +486,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 }
 
 // rrMatchesTransportSignal checks whether a given RR matches the configured transport signal RRset
-func rrMatchesTransportSignal(rr dns.RR, ts *RRset) bool {
+func rrMatchesTransportSignal(rr dns.RR, ts *core.RRset) bool {
 	if ts == nil || rr == nil {
 		return false
 	}
@@ -494,7 +495,7 @@ func rrMatchesTransportSignal(rr dns.RR, ts *RRset) bool {
 }
 
 // findServerTSYNCRRset returns a TSYNC RRset from any owner under this zone that starts with _dns.
-func (zd *ZoneData) XXfindServerTSYNCRRset() *RRset {
+func (zd *ZoneData) XXfindServerTSYNCRRset() *core.RRset {
 	// Look for any TSYNC RRset at owners beginning with _dns.
 	for item := range zd.Data.IterBuffered() {
 		owner := item.Key

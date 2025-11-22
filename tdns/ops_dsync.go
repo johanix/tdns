@@ -9,11 +9,12 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishDsyncRRs() error {
 	zd.Logger.Printf("PublishDsyncRRs: zone: %s", zd.ZoneName)
-	rrset := RRset{
+	rrset := core.RRset{
 		Name: zd.ZoneName,
 	}
 

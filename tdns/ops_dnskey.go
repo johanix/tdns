@@ -8,6 +8,7 @@ import (
 	"log"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
@@ -78,7 +79,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 	//		dump.P(k.DnskeyRR.String())
 	//	}
 
-	var dnskeys RRset
+	var dnskeys core.RRset
 	var exist bool
 
 	if dnskeys, exist = apex.RRtypes.Get(dns.TypeDNSKEY); exist {
@@ -95,7 +96,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 			}
 		}
 	} else {
-		dnskeys = RRset{
+		dnskeys = core.RRset{
 			RRs: publishkeys,
 		}
 	}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {
@@ -95,7 +96,7 @@ func (zd *ZoneData) UnpublishTlsaRR() error {
 	return nil
 }
 
-func LookupTlsaRR(name string) (*RRset, error) {
+func LookupTlsaRR(name string) (*core.RRset, error) {
 	rrset, err := RecursiveDNSQueryWithConfig(dns.Fqdn(name), dns.TypeTLSA, 3*time.Second, 3)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup %s TLSA record: %v", name, err)

@@ -13,6 +13,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/rand"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func sigLifetime(t time.Time, lifetime uint32) (uint32, uint32) {
@@ -57,7 +58,7 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-func (zd *ZoneData) SignRRset(rrset *RRset, name string, dak *DnssecKeys, force bool) (bool, error) {
+func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool) (bool, error) {
 
 	if !zd.Options[OptOnlineSigning] {
 		return false, fmt.Errorf("SignRRset: zone %s does not allow online signing", zd.ZoneName)
@@ -252,7 +253,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		}
 	}
 
-	MaybeSignRRset := func(rrset RRset, zone string) (RRset, bool) {
+	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
 		resigned, err := zd.SignRRset(&rrset, zone, dak, force)
 		if err != nil {
 			log.Printf("SignZone: failed to sign %s %s RRset for zone %s", rrset.RRs[0].Header().Name, dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], zd.ZoneName)

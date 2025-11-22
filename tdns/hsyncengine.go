@@ -11,6 +11,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 type SyncRequest struct {
@@ -18,8 +19,8 @@ type SyncRequest struct {
 	ZoneName   ZoneName
 	ZoneData   *ZoneData
 	SyncStatus *HsyncStatus
-	OldDnskeys *RRset
-	NewDnskeys *RRset
+	OldDnskeys *core.RRset
+	NewDnskeys *core.RRset
 	Response   chan SyncResponse
 }
 
@@ -232,7 +233,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		var zu = &ZoneUpdate{
 			Zone:   ampp.Zone,
-			RRsets: map[uint16]RRset{},
+			RRsets: map[uint16]core.RRset{},
 		}
 		for _, rrstr := range ampp.RRs {
 			rr, err := dns.NewRR(rrstr)
@@ -242,11 +243,11 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
 				return
 			}
-			var rrset RRset
+			var rrset core.RRset
 			var ok bool
 			rrtype := rr.Header().Rrtype
 			if rrset, ok = zu.RRsets[rrtype]; !ok {
-				rrset = RRset{}
+				rrset = core.RRset{}
 			}
 			rrset.RRs = append(rrset.RRs, rr)
 			zu.RRsets[rrtype] = rrset
@@ -580,7 +581,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		// Update the local zone data for the zone
 		var zu = &ZoneUpdate{
 			Zone:   msg.Zone,
-			RRsets: map[uint16]RRset{},
+			RRsets: map[uint16]core.RRset{},
 		}
 		for _, rrstr := range msg.RRs {
 			rr, err := dns.NewRR(rrstr)
@@ -590,11 +591,11 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
 				return
 			}
-			var rrset RRset
+			var rrset core.RRset
 			var ok bool
 			rrtype := rr.Header().Rrtype
 			if rrset, ok = zu.RRsets[rrtype]; !ok {
-				rrset = RRset{}
+				rrset = core.RRset{}
 			}
 			rrset.RRs = append(rrset.RRs, rr)
 			zu.RRsets[rrtype] = rrset
