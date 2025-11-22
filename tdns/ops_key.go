@@ -12,6 +12,7 @@ import (
 	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
@@ -26,7 +27,7 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 		return fmt.Errorf("PublishKeyRRs: KeyDB.UpdateQ is nil")
 	}
 
-	rrset := RRset{
+	rrset := core.RRset{
 		Name: zd.ZoneName,
 	}
 

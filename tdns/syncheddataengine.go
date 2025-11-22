@@ -12,6 +12,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 type SynchedDataUpdate struct {
@@ -53,7 +54,7 @@ type SynchedDataCmdResponse struct {
 type ZoneUpdate struct {
 	Zone    ZoneName
 	AgentId AgentId
-	RRsets  map[uint16]RRset // remote updates are only per RRset (i.e. full replace)
+	RRsets  map[uint16]core.RRset // remote updates are only per RRset (i.e. full replace)
 	RRs     []dns.RR         // local updates can be per RR
 }
 

@@ -1,29 +1,33 @@
 package tdns
 
+import (
+	core "github.com/johanix/tdns/tdns/core"
+)
+
 type RRTypeStore struct {
-	data ConcurrentMap[uint16, RRset]
+	data ConcurrentMap[uint16, core.RRset]
 }
 
 func NewRRTypeStore() *RRTypeStore {
 	return &RRTypeStore{
-		data: NewWithCustomShardingFunction[uint16, RRset](func(key uint16) uint32 {
+		data: NewWithCustomShardingFunction[uint16, core.RRset](func(key uint16) uint32 {
 			return uint32(key)
 		}),
 	}
 }
 
-func (s *RRTypeStore) Get(key uint16) (RRset, bool) {
+func (s *RRTypeStore) Get(key uint16) (core.RRset, bool) {
 	return s.data.Get(key)
 }
 
-func (s *RRTypeStore) GetOnlyRRSet(key uint16) RRset {
+func (s *RRTypeStore) GetOnlyRRSet(key uint16) core.RRset {
 	// dump.P(s)
 	// dump.P(key)
 	rrset, _ := s.data.Get(key)
 	return rrset
 }
 
-func (s *RRTypeStore) Set(key uint16, value RRset) {
+func (s *RRTypeStore) Set(key uint16, value core.RRset) {
 	s.data.Set(key, value)
 }
 

@@ -2,7 +2,10 @@ module github.com/johanix/tdns/tdns
 
 go 1.24
 
-replace github.com/johanix/tdns/tdns/edns0 => ./edns0
+replace (
+	github.com/johanix/tdns/tdns/edns0 => ./edns0
+	github.com/johanix/tdns/tdns/core => ./core
+)
 
 require (
 	github.com/go-playground/validator/v10 v10.22.1

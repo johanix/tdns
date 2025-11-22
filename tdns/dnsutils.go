@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
 	// "github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 const (
@@ -326,7 +327,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 		ztype = MapZone
 	}
 
-	var tmp RRset
+	var tmp core.RRset
 
 	if !strings.HasSuffix(rr.Header().Name, zd.ZoneName) {
 		zd.Logger.Printf("*** SortFunc: zone %s: RR %s is not in zone. Ignored.", zd.ZoneName, rr.String())
@@ -520,7 +521,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	return err
 }
 
-func RRsetToString(rrset *RRset) string {
+func RRsetToString(rrset *core.RRset) string {
 	var tmp string
 	for _, rr := range rrset.RRs {
 		tmp += rr.String() + "\n"

@@ -15,6 +15,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
@@ -555,7 +556,7 @@ func (zd *ZoneData) AddOwner(owner *OwnerData) {
 	// zd.mu.Unlock()
 }
 
-func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*RRset, error) {
+func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
 	if zd == nil {
 		return nil, fmt.Errorf("GetRRset: zone data is nil. This should not happen")
 	}
@@ -809,7 +810,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 		ChildName:    childname,
 		ParentSerial: zd.CurrentSerial,
 		Timestamp:    time.Now(),
-		RRsets:       make(map[string]map[uint16]RRset),
+		RRsets:       make(map[string]map[uint16]core.RRset),
 		NS_rrs:       []dns.RR{},
 		A_glue:       []dns.RR{},
 		AAAA_glue:    []dns.RR{},
@@ -820,7 +821,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 		return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", childname, err)
 	}
 
-	cdd.RRsets[childname] = map[uint16]RRset{
+	cdd.RRsets[childname] = map[uint16]core.RRset{
 		dns.TypeNS: owner.RRtypes.GetOnlyRRSet(dns.TypeNS),
 		dns.TypeDS: owner.RRtypes.GetOnlyRRSet(dns.TypeDS),
 	}
@@ -837,7 +838,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 		if err != nil {
 			return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", ns, err)
 		}
-		cdd.RRsets[ns] = map[uint16]RRset{
+		cdd.RRsets[ns] = map[uint16]core.RRset{
 			dns.TypeA:    nsowner.RRtypes.GetOnlyRRSet(dns.TypeA),
 			dns.TypeAAAA: nsowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA),
 		}
@@ -995,13 +996,13 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 }
 
 type DelegationData struct {
-	CurrentNS *RRset
-	AddedNS   *RRset
-	RemovedNS *RRset
+	CurrentNS *core.RRset
+	AddedNS   *core.RRset
+	RemovedNS *core.RRset
 
 	BailiwickNS []string
-	A_glue      map[string]*RRset // map[nsname]
-	AAAA_glue   map[string]*RRset // map[nsname]
+	A_glue      map[string]*core.RRset // map[nsname]
+	AAAA_glue   map[string]*core.RRset // map[nsname]
 	Actions     []dns.RR          // actions are DNS UPDATE actions that modify delegation data
 	Time        time.Time
 }
@@ -1009,10 +1010,10 @@ type DelegationData struct {
 func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 	dd := DelegationData{
 		Time:      time.Now(),
-		AddedNS:   &RRset{},
-		RemovedNS: &RRset{},
-		A_glue:    map[string]*RRset{},
-		AAAA_glue: map[string]*RRset{},
+		AddedNS:   &core.RRset{},
+		RemovedNS: &core.RRset{Name: zd.ZoneName},
+		A_glue:    map[string]*core.RRset{},
+		AAAA_glue: map[string]*core.RRset{},
 	}
 
 	rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeNS)

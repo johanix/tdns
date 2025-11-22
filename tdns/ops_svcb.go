@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyValue) error {
@@ -102,6 +103,6 @@ func (zd *ZoneData) UnpublishSvcbRR(name string) error {
 	return nil
 }
 
-func LookupSVCB(name string) (*RRset, error) {
+func LookupSVCB(name string) (*core.RRset, error) {
 	return RecursiveDNSQueryWithConfig(dns.Fqdn(name), dns.TypeSVCB, 3*time.Second, 3)
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // XXX: This should be merged with the FetchChildDelegationData() function
@@ -48,10 +49,10 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 
 // Returns two RRsets with A glue and AAAA glue. Each RRset may be nil.
 // XXX: This is wrong. The v4 (and v6) glue is not an *RRset, but a []*RRset
-func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
+func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *core.RRset) {
 	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
 	// dump.P(nsrrs)
-	var v4glue, v6glue, maybe_4glue, maybe_6glue RRset
+	var v4glue, v6glue, maybe_4glue, maybe_6glue core.RRset
 	var nsname string
 	zone := nsrrs.RRs[0].Header().Name
 	for _, rr := range nsrrs.RRs {
@@ -108,7 +109,7 @@ func (zd *ZoneData) FindGlue(nsrrs RRset, dnssec_ok bool) (*RRset, *RRset) {
 	return &v4glue, &v6glue
 }
 
-func (zd *ZoneData) FindGlueSimple(nsrrs RRset, dnssec_ok bool) ([]dns.RR, []dns.RR, []dns.RR, []dns.RR) {
+func (zd *ZoneData) FindGlueSimple(nsrrs core.RRset, dnssec_ok bool) ([]dns.RR, []dns.RR, []dns.RR, []dns.RR) {
 	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
 	// dump.P(nsrrs)
 	var v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs []dns.RR

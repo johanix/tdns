@@ -10,11 +10,12 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // matchesConfiguredAddrs returns true if any RR in rrset matches a configured address.
 // Note that the hostports are expected to be in the format "address:port".
-func matchesConfiguredAddrs(hostports []string, rrset *RRset) bool {
+func matchesConfiguredAddrs(hostports []string, rrset *core.RRset) bool {
 	if rrset == nil {
 		return false
 	}
@@ -129,7 +130,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 					Target:   ".",
 					Value:    values,
 				}
-				zd.TransportSignal = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+				zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 				zd.AddTransportSignal = true
 				log.Printf("CreateTransportSignalRRs(SVCB): Adding server SVCB to zone %s using identity NS %s", zd.ZoneName, nsName)
 				log.Printf("CreateTransportSignalRRs(SVCB): SVCB: %s", tmp.String())
@@ -164,7 +165,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						}
 						if valid {
 							// Start with the explicit SVCB RRset
-							zd.TransportSignal = &RRset{Name: ownerName, RRtype: dns.TypeSVCB, RRs: append([]dns.RR(nil), existingSvcb.RRs...), RRSIGs: append([]dns.RR(nil), existingSvcb.RRSIGs...)}
+							zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: dns.TypeSVCB, RRs: append([]dns.RR(nil), existingSvcb.RRs...), RRSIGs: append([]dns.RR(nil), existingSvcb.RRSIGs...)}
 
 							// If any SVCB has a non-terminal Target (not "."), attempt to include the target SVCB as well.
 							// This mirrors the TSYNC alias behavior so clients get both the original and the target.
@@ -261,7 +262,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						Target:   ".",
 						Value:    values,
 					}
-					zd.TransportSignal = &RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
+					zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 					zd.AddTransportSignal = true
 					log.Printf("CreateTransportSignalRRs(SVCB): Adding server SVCB to zone %s using in-bailiwick NS %s", zd.ZoneName, nsName)
 					log.Printf("CreateTransportSignalRRs(SVCB): SVCB: %s", tmp.String())
@@ -272,9 +273,9 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 					// Add into zone data
 					serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
 					if len(serversvcbs.RRs) == 0 {
-						nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: []dns.RR{tmp}})
+						nsData.RRtypes.Set(dns.TypeSVCB, core.RRset{RRs: []dns.RR{tmp}})
 					} else {
-						nsData.RRtypes.Set(dns.TypeSVCB, RRset{RRs: append(serversvcbs.RRs, tmp)})
+						nsData.RRtypes.Set(dns.TypeSVCB, core.RRset{RRs: append(serversvcbs.RRs, tmp)})
 						log.Printf("CreateTransportSignalRRs(SVCB): Added server SVCB to existing SVCB RRset for %s", nsName)
 					}
 					return nil
@@ -310,7 +311,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 					existingTS := ownerData.RRtypes.GetOnlyRRSet(TypeTSYNC)
 					if len(existingTS.RRs) > 0 {
 						// Base RRset is the explicit TSYNC
-						zd.TransportSignal = &RRset{Name: ownerName, RRtype: TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
+						zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
 						zd.AddTransportSignal = true
 						// Check for alias indirection
 						alias := "."
@@ -378,11 +379,11 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 				// Store in zone data
 				existing := nsData.RRtypes.GetOnlyRRSet(TypeTSYNC)
 				if len(existing.RRs) == 0 {
-					nsData.RRtypes.Set(TypeTSYNC, RRset{RRs: []dns.RR{trr}})
+					nsData.RRtypes.Set(TypeTSYNC, core.RRset{RRs: []dns.RR{trr}})
 				} else {
-					nsData.RRtypes.Set(TypeTSYNC, RRset{RRs: append(existing.RRs, trr)})
+					nsData.RRtypes.Set(TypeTSYNC, core.RRset{RRs: append(existing.RRs, trr)})
 				}
-				zd.TransportSignal = &RRset{Name: "_dns." + nsName, RRtype: TypeTSYNC, RRs: []dns.RR{trr}}
+				zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: TypeTSYNC, RRs: []dns.RR{trr}}
 				zd.AddTransportSignal = true
 				log.Printf("createTransportSignalTSYNC: Added TSYNC to zone %s for in-bailiwick NS %s: %s", zd.ZoneName, nsName, trr.String())
 				// Sign TSYNC if online signing is enabled; QueryResponder will include RRSIGs when present

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gookit/goutil/dump"
-
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -469,7 +469,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 				// If this is a delete then it is ok that the RRset doesn't exist.
 				continue
 			}
-			rrset = RRset{
+			rrset = core.RRset{
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
 			}
@@ -599,7 +599,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				continue
 			}
-			rrset = RRset{
+			rrset = core.RRset{
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
 			}

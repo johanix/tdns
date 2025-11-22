@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
@@ -73,7 +74,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		return true, &hss, nil
 	}
 
-	var oldhsync *RRset
+	var oldhsync *core.RRset
 
 	if rrset, exists := oldapex.RRtypes.Get(TypeHSYNC); exists {
 		oldhsync = &rrset

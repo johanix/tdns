@@ -12,6 +12,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	core "github.com/johanix/tdns/tdns/core"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -28,7 +29,7 @@ type ScanResponse struct {
 	Time    time.Time
 	Zone    string
 	RRtype  uint16
-	Result  RRset
+	Result  core.RRset
 	Message string
 }
 
