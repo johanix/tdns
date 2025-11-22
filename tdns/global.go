@@ -37,8 +37,8 @@ type GlobalStuff struct {
 
 var Globals = GlobalStuff{
 	//	IMR:     "8.8.8.8:53",
-	Verbose:    false,
-	Debug:      false,
+	Verbose: false,
+	Debug:   false,
 	ApiClients: map[string]*ApiClient{},
 }
 

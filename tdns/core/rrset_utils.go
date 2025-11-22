@@ -9,13 +9,13 @@ import (
 	"github.com/miekg/dns"
 )
 
-func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger) (bool, []dns.RR, []dns.RR) {
+func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]
 	adds := []dns.RR{}
 	removes := []dns.RR{}
 
-	if Globals.Debug {
+	if debug {
 		lg.Printf("*** RRD: Comparing %s RRsets for %s:", typestr, zone)
 		lg.Printf("-------- Old set for %s %s:", zone, typestr)
 		for _, rr := range oldrrs {
@@ -63,16 +63,20 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 			adds = append(adds, nrr)
 		}
 	}
-	if Globals.Verbose {
+	if verbose {
 		lg.Printf("*** RRD: RRsetDiffer: Zone %s %s rrsets_differ: %v\n***Adds: %v\n***Removes: %v", zone, typestr, rrsets_differ, adds, removes)
 	}
 	return rrsets_differ, adds, removes
 }
 
-func (rrset *RRset) RemoveRR(rr dns.RR) {
-	log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
+func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
+	if debug {
+		log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
+	}
 	for i, r := range rrset.RRs {
-		log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
+		if debug {
+			log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
+		}
 		if dns.IsDuplicate(r, rr) {
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			rrset.RRSIGs = []dns.RR{}

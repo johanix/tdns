@@ -479,7 +479,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
-			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
+			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
 			} else {
@@ -608,7 +608,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			rrset.RemoveRR(rrcopy) // Cannot remove rr, because it is in the wrong class.
+			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
 			} else {

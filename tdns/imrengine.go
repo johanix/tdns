@@ -560,8 +560,8 @@ func (rrcache *RRsetCacheT) ImrResponder(ctx context.Context, w dns.ResponseWrit
 
 // returns true if we have a response (i.e. we're done), false if we have an error
 // all errors are treated as "done"
-func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context CacheContext, dnssecOK bool, checkingDisabled bool, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
-	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, dnssec_ok: %v, cd: %v", qname, rrset, rcode, context, dnssecOK, checkingDisabled)
+func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context CacheContext, dnssecOK bool, cdflag bool, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
+	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, dnssec_ok: %v, cd: %v", qname, rrset, rcode, context, dnssecOK, cdflag)
 	m.SetRcode(r, rcode)
 	if rrset != nil {
 		log.Printf("ImrResponder: received response from IterativeDNSQuery:")
@@ -574,7 +574,7 @@ func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname st
 		}
 		// Set AD if this RRset is validated (from cache or on-the-fly)
 		var validated bool
-		shouldValidate := dnssecOK && !checkingDisabled
+		shouldValidate := dnssecOK && !cdflag
 		if rrcache != nil && shouldValidate {
 			if c := rrcache.Get(rrset.Name, rrset.RRtype); c != nil && c.Validated {
 				validated = true
@@ -607,7 +607,7 @@ func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname st
 	switch context {
 	case ContextNXDOMAIN:
 		m.SetRcode(r, dns.RcodeNameError)
-		rrcache.serveNegativeResponse(ctx, qname, qtype, dnssecOK, checkingDisabled, m, r)
+		rrcache.serveNegativeResponse(ctx, qname, qtype, dnssecOK, cdflag, m, r)
 		w.WriteMsg(m)
 		return true, nil
 	case ContextReferral:
@@ -615,7 +615,7 @@ func (rrcache *RRsetCacheT) ProcessAuthDNSResponse(ctx context.Context, qname st
 		return false, nil
 	case ContextNoErrNoAns:
 		m.SetRcode(r, dns.RcodeSuccess)
-		rrcache.serveNegativeResponse(ctx, qname, qtype, dnssecOK, checkingDisabled, m, r)
+		rrcache.serveNegativeResponse(ctx, qname, qtype, dnssecOK, cdflag, m, r)
 		w.WriteMsg(m)
 		return true, nil
 	}
