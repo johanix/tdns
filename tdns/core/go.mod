@@ -1,6 +1,6 @@
 module github.com/johanix/tdns/tdns/core
 
-go 1.25.3
+go 1.24
 
 require (
 	github.com/miekg/dns v1.1.68

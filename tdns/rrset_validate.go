@@ -1,32 +1,38 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
- package tdns
+package tdns
 
- import (
-	 "context"
-	 "log"
-	 "strings"
-	 "time"
- 
-	 "github.com/miekg/dns"
-	 core "github.com/johanix/tdns/tdns/core"
- )
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
+)
 
 // ValidateRRset attempts to validate the provided RRset using DNSKEYs present in the DnskeyCache.
 // If a required signer key is missing, it will query for the signer's DNSKEY via the recursive
 // engine and retry using keys from the cache. Only keys marked as Trusted are accepted for
 // successful validation. Returns true if at least one signature validates and is time-valid.
 func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, dkc *DnskeyCacheT, rrset *core.RRset, verbose bool) (bool, error) {
+	if rrset == nil {
+		log.Printf("ValidateRRset: rrset is nil; nothing to validate")
+		return false, fmt.Errorf("rrset is nil; nothing to validate")
+	}
+
 	if Globals.Debug {
 		log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 			rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 	}
 	// Special-case DNSKEY RRset validation: must anchor via DS and the specific KSK
-	if rrset != nil && rrset.RRtype == dns.TypeDNSKEY {
+	if rrset.RRtype == dns.TypeDNSKEY {
 		return rrcache.ValidateDNSKEYs(ctx, dkc, rrset, verbose)
 	}
-	if rrset == nil || len(rrset.RRSIGs) == 0 {
+	if len(rrset.RRSIGs) == 0 {
 		if Globals.Debug {
 			log.Printf("ValidateRRset: no RRSIGs present for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
@@ -58,42 +64,9 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, dkc *DnskeyCacheT
 			if verbose {
 				log.Printf("ValidateRRset: TA %q::%d not in cache; attempting to obtain keys", signer, keyid)
 			}
-			// If validating a DNSKEY RRset, avoid refetching signer DNSKEY:
-			// use the provided RRset to populate cache (untrusted) and continue.
-			if rrset.RRtype == dns.TypeDNSKEY && (rrset.Name == "" || dns.Fqdn(rrset.Name) == signer) {
-				if verbose {
-					log.Printf("ValidateRRset: using provided DNSKEY RRset to populate cache for %q", signer)
-				}
-				// Populate cache entries for the keys in this RRset (untrusted)
-				var minTTL uint32
-				if len(rrset.RRs) > 0 {
-					minTTL = rrset.RRs[0].Header().Ttl
-					for _, krr := range rrset.RRs[1:] {
-						if krr.Header().Ttl < minTTL {
-							minTTL = krr.Header().Ttl
-						}
-					}
-				}
-				exp := time.Now().Add(time.Duration(minTTL) * time.Second)
-				for _, krr := range rrset.RRs {
-					if dk, ok := krr.(*dns.DNSKEY); ok {
-						dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
-							Name:       dns.Fqdn(dk.Hdr.Name),
-							Keyid:      dk.KeyTag(),
-							Validated:  false,
-							Trusted:    false,
-							Dnskey:     *dk,
-							Expiration: exp,
-						})
-						if verbose {
-							log.Printf("ValidateRRset: cached DNSKEY (untrusted) %q::%d exp=%v", dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), exp)
-						}
-					}
-				}
-			} else {
 			// Attempt to fetch the signer's DNSKEY to populate cache (chain trust evaluated by caller)
 			_, servers, _ := rrcache.FindClosestKnownZone(signer)
-				if Globals.Debug {
+			if Globals.Debug {
 				log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
 			}
 			if len(servers) == 0 {
@@ -103,7 +76,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, dkc *DnskeyCacheT
 			}
 			if len(servers) > 0 {
 				if dkeys, _, _, err := rrcache.IterativeDNSQuery(ctx, signer, dns.TypeDNSKEY, servers, false); err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
-						if Globals.Debug {
+					if Globals.Debug {
 						log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
 					}
 					// Add fetched keys to cache (not trusted by default). Trust must be established elsewhere.
@@ -151,7 +124,6 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, dkc *DnskeyCacheT
 				} else if err != nil && verbose {
 					log.Printf("ValidateRRset: failed fetching DNSKEY for %q: %v", signer, err)
 				}
-			}
 			}
 			ta = dkc.Get(signer, keyid)
 		}
@@ -337,7 +309,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, dkc *DnskeyCach
 	return true, nil
 }
 
- func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, negAuthority []*core.RRset) bool {
+func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, negAuthority []*core.RRset) bool {
 	if len(negAuthority) == 0 {
 		return false
 	}

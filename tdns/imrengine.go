@@ -713,13 +713,13 @@ func buildNegAuthorityFromMsg(src *dns.Msg) []*core.RRset {
 	return out
 }
 
-func (rrcache *RRsetCacheT) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, dnssecOK bool, checkingDisabled bool, resp *dns.Msg, src *dns.Msg) bool {
+func (rrcache *RRsetCacheT) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, dnssecOK bool, cdflag bool, resp *dns.Msg, src *dns.Msg) bool {
 	if resp == nil {
 		return false
 	}
 	cached := rrcache.Get(qname, qtype)
 
-	if checkingDisabled {
+	if cdflag {
 		if cached != nil && cached.RRset != nil {
 			appendSOAToMessage(cached.RRset, dnssecOK, resp)
 			return true

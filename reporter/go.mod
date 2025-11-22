@@ -1,6 +1,6 @@
 module tdns-reporter
 
-go 1.25.3
+go 1.24
 
 replace (
 	//	github.com/johanix/tdns/music => ../music

@@ -75,10 +75,6 @@ func AttachEDEToResponseWithText(msg *dns.Msg, edeCode uint16, extraText string,
 		}
 	}
 
-	if opt == nil {
-		return
-	}
-
 	ede := new(dns.EDNS0_EDE)
 	ede.InfoCode = edeCode
 	if extraText != "" {
