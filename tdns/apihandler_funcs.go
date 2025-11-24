@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
+	cache "github.com/johanix/tdns/tdns/cache"
 )
 
 func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
@@ -138,9 +139,9 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		switch tp.Command {
 		case "list-dnskey":
 			log.Printf("tdnsd truststore list-dnskey inquiry")
-			tmp1 := map[string]CachedDnskeyRRset{}
-			for _, key := range DnskeyCache.Map.Keys() {
-				if val, ok := DnskeyCache.Map.Get(key); ok {
+			tmp1 := map[string]cache.CachedDnskeyRRset{}
+			for _, key := range cache.DnskeyCache.Map.Keys() {
+				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
 					tmp1[key] = val
 				}
 			}
@@ -459,10 +460,10 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-ta":
 			log.Printf("tdnsd debug show-ta")
-			resp.Msg = fmt.Sprintf("TAStore: %v", DnskeyCache.Map.Keys())
-			cdrs := []CachedDnskeyRRset{}
-			for _, taname := range DnskeyCache.Map.Keys() {
-				cdr, ok := DnskeyCache.Map.Get(taname)
+			resp.Msg = fmt.Sprintf("TAStore: %v", cache.DnskeyCache.Map.Keys())
+			cdrs := []cache.CachedDnskeyRRset{}
+			for _, taname := range cache.DnskeyCache.Map.Keys() {
+				cdr, ok := cache.DnskeyCache.Map.Get(taname)
 				if !ok {
 					continue
 				}
@@ -473,7 +474,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "show-rrsetcache":
 			log.Printf("%s debug show-rrsetcache", Globals.App.Name)
 			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
-			rrsets := []CachedRRset{}
+			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
 				rrset, ok := conf.Internal.RRsetCache.RRsets.Get(rrsetkey)
 				if !ok {

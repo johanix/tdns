@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 	// "github.com/gookit/goutil/dump"
+	cache "github.com/johanix/tdns/tdns/cache"
 )
 
 // XXX: These should die
@@ -255,7 +256,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 			}
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
-				DnskeyCache.Set(k, dnskeyrr.KeyTag(), &CachedDnskeyRRset{
+				cache.DnskeyCache.Set(k, dnskeyrr.KeyTag(), &cache.CachedDnskeyRRset{
 					Name:        k,
 					Keyid:       dnskeyrr.KeyTag(),
 					Validated:   true, // always trust config

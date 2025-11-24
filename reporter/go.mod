@@ -1,11 +1,12 @@
 module tdns-reporter
 
-go 1.24.0
+go 1.25.3
 
 replace (
 	//	github.com/johanix/tdns/music => ../music
 	//	github.com/johanix/tdns/music/fsm => ../music/fsm
 	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cache => ../tdns/cache
 	github.com/johanix/tdns/tdns/core => ../tdns/core
 	github.com/johanix/tdns/tdns/edns0 => ../tdns/edns0
 )
@@ -29,7 +30,8 @@ require (
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns/tdns/core v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/tdns/core v0.0.0-20251122130747-9c54a3943883 // indirect
 	github.com/johanix/tdns/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

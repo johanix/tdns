@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/tdns"
+	cache "github.com/johanix/tdns/tdns/cache"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
@@ -280,14 +281,14 @@ var imrShowConfigCmd = &cobra.Command{
 		}
 		fmt.Printf("  Cache primed: %t\n", primed)
 
-		taKeys := tdns.DnskeyCache.Map.Keys()
+		taKeys := cache.DnskeyCache.Map.Keys()
 		if len(taKeys) == 0 {
 			fmt.Println("  Trust anchors: (none)")
 		} else {
 			fmt.Println("  Trust anchors:")
 			sort.Strings(taKeys)
 			for _, key := range taKeys {
-				if val, ok := tdns.DnskeyCache.Map.Get(key); ok {
+				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
 					fmt.Printf("    %s keyid=%d (validated=%t trusted=%t expires=%s)\n",
 						val.Name, val.Keyid, val.Validated, val.Trusted, tdns.TtlPrint(val.Expiration))
 				}
@@ -375,7 +376,7 @@ var imrShowOptionsCmd = &cobra.Command{
 }
 
 // renderSignal formats the received transport percentage signal. If none, returns "do53=100".
-func renderSignal(server *tdns.AuthServer) string {
+func renderSignal(server *cache.AuthServer) string {
 	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
 	// Order by known transports for stable output.
 	order := []tdns.Transport{tdns.TransportDoQ, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDo53}

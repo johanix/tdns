@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -66,21 +67,22 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
 	}
 
-	MaybeSignRRset := func(rrset core.RRset, qname string) core.RRset {
+	MaybeSignRRset := func(rrset core.RRset, qname string) (core.RRset, error) {
 		if dak == nil {
 			log.Printf("QueryResponder: MaybeSignRRset: Warning: dak is nil")
-			return rrset
+			return rrset, fmt.Errorf("dak is nil")
 		}
+		var err error
 		if zd.Options[OptOnlineSigning] && len(dak.ZSKs) > 0 && len(rrset.RRSIGs) == 0 {
 			log.Printf("QueryResponder: MaybeSignRRset: have ZSKs, no prior RRSIGs. Signing %s %s", qname, dns.TypeToString[rrset.RRtype])
-			_, err := zd.SignRRset(&rrset, qname, dak, false)
+			_, err = zd.SignRRset(&rrset, qname, dak, false)
 			if err != nil {
 				log.Printf("Error signing %s: %v", qname, err)
 			} else {
 				log.Printf("Signed %s: %v", qname, err)
 			}
 		}
-		return rrset
+		return rrset, err
 	}
 
 	// AddCDEResponse adds a compact-denial-of-existence response to the message
@@ -119,7 +121,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		m.Ns = append(m.Ns, nsecRR)
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 
-		nsecRRset := MaybeSignRRset(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
+		nsecRRset, err := MaybeSignRRset(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
+		if err != nil {
+			log.Printf("QueryResponder: failed to sign NSEC RRset for zone %s: %v", zd.ZoneName, err)
+		}
 		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
 	}
 
@@ -129,8 +134,16 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	}
 
 	if msgoptions.DnssecOK {
-		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
-		apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
+		soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
+		if err != nil {
+			log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
+		}
+		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+		nsRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName)
+		if err != nil {
+			log.Printf("QueryResponder: failed to sign NS RRset for zone %s: %v", zd.ZoneName, err)
+		}
+		apex.RRtypes.Set(dns.TypeNS, nsRRset)
 	}
 
 	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
@@ -170,8 +183,16 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
 		}
 		if msgoptions.DnssecOK {
-			apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
-			apex.RRtypes.Set(dns.TypeNS, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName))
+			soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
+			if err != nil {
+				log.Printf("QueryResponder: failed to sign SOA RRset for parent zone %s: %v", zd.ZoneName, err)
+			}
+			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+			nsRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName)
+			if err != nil {
+				log.Printf("QueryResponder: failed to sign NS RRset for parent zone %s: %v", zd.ZoneName, err)
+			}
+			apex.RRtypes.Set(dns.TypeNS, nsRRset)
 		}
 		m.MsgHdr.Rcode = dns.RcodeSuccess
 		dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
@@ -240,7 +261,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	if owner.RRtypes.Count() == 0 {
 		m.MsgHdr.Rcode = dns.RcodeNameError
 		// ensure correct serial
-		apex.RRtypes.Set(dns.TypeSOA, MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName))
+		soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
+		if err != nil {
+			log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
+		}
+		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 		if msgoptions.DnssecOK {
 			AddCDEResponse(m, origqname, apex, nil)
@@ -262,7 +287,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 					}
 					m.Answer = append(m.Answer, v.RRs...)
 					if msgoptions.DnssecOK {
-						owner.RRtypes.Set(k, MaybeSignRRset(v, qname))
+						rrset, err := MaybeSignRRset(v, qname)
+						if err != nil {
+							log.Printf("QueryResponder: failed to sign RRset for qname %s: %v", qname, err)
+						}
+						owner.RRtypes.Set(k, rrset)
 						m.Answer = append(m.Answer, v.RRSIGs...)
 					}
 					tgt := v.RRs[0].(*dns.CNAME).Target
@@ -293,7 +322,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 							}
 
 							if msgoptions.DnssecOK {
-								tgtowner.RRtypes.Set(qtype, MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname))
+								tgtRRset, err := MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname)
+								if err != nil {
+									log.Printf("QueryResponder: failed to sign RRset for qname %s: %v", qname, err)
+								}
+								tgtowner.RRtypes.Set(qtype, tgtRRset)
 								m.Answer = append(m.Answer, tgtowner.RRtypes.GetOnlyRRSet(qtype).RRSIGs...)
 
 								m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
@@ -383,11 +416,14 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			}
 			if msgoptions.DnssecOK {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
-				// if zd.Options[OptOnlineSigning] && dak != nil && len(dak.ZSKs) > 0 {
 				if qname == origqname {
-					owner.RRtypes.Set(qtype, MaybeSignRRset(rrset, qname))
+					signed, err := MaybeSignRRset(rrset, qname)
+					if err != nil {
+						log.Printf("QueryResponder: failed to sign RRset for qname %s: %v", qname, err)
+					}
+					owner.RRtypes.Set(qtype, signed)
+					rrset = signed
 				}
-				// }
 
 				if qname == origqname {
 					m.Answer = append(m.Answer, rrset.RRSIGs...)

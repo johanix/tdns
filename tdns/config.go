@@ -11,7 +11,11 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	cache "github.com/johanix/tdns/tdns/cache"
 )
+
+var Conf Config
 
 type Config struct {
 	// OBE App            AppDetails
@@ -83,7 +87,7 @@ type ImrEngineConf struct {
 type ImrStubConf struct {
 	Zone string `validate:"required"`
 	// Servers []StubServerConf `validate:"required"`
-	Servers []AuthServer `validate:"required"`
+	Servers []cache.AuthServer `validate:"required"`
 }
 
 // type StubServerConf struct {
@@ -189,7 +193,7 @@ type InternalConf struct {
 	SyncStatusQ     chan SyncStatus
 	AgentRegistry   *AgentRegistry
 	ZoneDataRepo    *ZoneDataRepo
-	RRsetCache      *RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	RRsetCache      *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 }
 
 type AgentQs struct {

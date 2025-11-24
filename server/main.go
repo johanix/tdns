@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	var conf tdns.Config
+	// var conf tdns.Config
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -51,7 +51,8 @@ func main() {
 	}
 
 	// Initialize the application
-	err := conf.MainInit(ctx, tdns.DefaultServerCfgFile)
+	err := tdns.Conf.MainInit(ctx, tdns.DefaultServerCfgFile)
+	conf := tdns.Conf
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}

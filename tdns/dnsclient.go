@@ -14,10 +14,12 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // Transport represents the DNS transport protocol
-type Transport uint8
+// type xxxTransport uint8
+type Transport = core.Transport
 
 const (
 	TransportDo53 Transport = iota + 1
@@ -29,7 +31,7 @@ const (
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
 	Port            string
-	Transport       Transport
+	Transport       core.Transport
 	TLSConfig       *tls.Config
 	HTTPClient      *http.Client
 	QUICConfig      *quic.Config

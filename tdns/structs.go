@@ -13,6 +13,7 @@ import (
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	core "github.com/johanix/tdns/tdns/core"
+	cache "github.com/johanix/tdns/tdns/cache"
 )
 
 type ZoneStore uint8
@@ -340,14 +341,14 @@ type DnssecKey struct {
 	Keystr     string
 }
 
-type CachedRRset struct {
+type xxxCachedRRset struct {
 	Name         string
 	RRtype       uint16
 	Rcode        uint8
 	RRset        *core.RRset
 	NegAuthority []*core.RRset
 	Ttl          uint32
-	Context      CacheContext
+	Context      cache.CacheContext
 	Validated    bool
 	Bogus        bool
 	Expiration   time.Time
@@ -355,25 +356,26 @@ type CachedRRset struct {
 	EDEText      string
 }
 
-type AuthServer struct {
+type xxxAuthServer struct {
 	Name             string
 	Addrs            []string
 	Alpn             []string // {"do53", "doq", "dot", "doh"}
-	Transports       []Transport
-	PrefTransport    Transport           // "doq" | "dot" | "doh" | "do53"
-	TransportWeights map[Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	Transports       []core.Transport
+	PrefTransport    core.Transport           // "doq" | "dot" | "doh" | "do53"
+	TransportWeights map[core.Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
 	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
 	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
 	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`
-	ConnMode        ConnMode                `yaml:"connmode" mapstructure:"connmode"`
-	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
+	ConnMode        cache.ConnMode                `yaml:"connmode" mapstructure:"connmode"`
+	TLSARecords     map[string]*cache.CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
 	// Stats (guarded by mu)
 	mu                sync.Mutex
-	TransportCounters map[Transport]uint64 // total queries attempted per transport
+	TransportCounters map[core.Transport]uint64 // total queries attempted per transport
 	Src               string               // "answer", "glue", "hint", "priming", "stub", ...
 	Expire            time.Time
 }
 
+/*
 func (as *AuthServer) ConnectionMode() ConnMode {
 	if as == nil {
 		return ConnModeLegacy
@@ -424,8 +426,8 @@ func promoteConnMode(server *AuthServer, target ConnMode) {
 type RRsetCacheT struct {
 	RRsets                 *ConcurrentMap[string, CachedRRset]
 	Servers                *ConcurrentMap[string, []string]
-	ServerMap              *ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	DNSClient              map[Transport]*DNSClient
+	ServerMap              *ConcurrentMap[string, map[string]*cache.AuthServer] // map[zone]map[nsname]*AuthServer
+	DNSClient              map[core.Transport]*core.DNSClient
 	Options                map[ImrOption]string
 	Primed                 bool
 	Logger                 *log.Logger
@@ -438,6 +440,7 @@ type RRsetCacheT struct {
 	tlsaQueryMu            sync.Mutex
 	tlsaQueryInFlight      map[string]struct{}
 }
+*/
 
 type DelegationSyncRequest struct {
 	Command      string

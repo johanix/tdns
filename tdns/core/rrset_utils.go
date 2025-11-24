@@ -120,3 +120,26 @@ func (rrset *RRset) Delete(rr dns.RR) {
 	}
 	// log.Printf("rrset.Delete: RR not found: %s", rr.String())
 }
+
+func (rrset *RRset) Clone() *RRset {
+	if rrset == nil {
+		return nil
+	}
+	
+	clone := &RRset{
+		Name:   rrset.Name,
+		Class:  rrset.Class,
+		RRtype: rrset.RRtype,
+	}
+	for _, rr := range rrset.RRs {
+		if rr != nil {
+			clone.RRs = append(clone.RRs, dns.Copy(rr))
+		}
+	}
+	for _, sig := range rrset.RRSIGs {
+		if sig != nil {
+			clone.RRSIGs = append(clone.RRSIGs, dns.Copy(sig))
+		}
+	}
+	return clone
+}

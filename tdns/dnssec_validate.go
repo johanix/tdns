@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/johanix/tdns/tdns/core"
+	cache "github.com/johanix/tdns/tdns/cache"
 	"github.com/miekg/dns"
 )
 
@@ -71,7 +72,7 @@ func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error)
 			valid = true
 		}
 
-		time_ok := WithinValidityPeriod(rrsig.Inception, rrsig.Expiration, time.Now().UTC())
+		time_ok := cache.WithinValidityPeriod(rrsig.Inception, rrsig.Expiration, time.Now().UTC())
 		if verbose {
 			if time_ok {
 				zd.Logger.Printf("* RRSIG is within its validity period")
@@ -88,8 +89,8 @@ func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error)
 }
 
 // If key not found *CachedDnskeyRRset is returned with nil value
-func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*CachedDnskeyRRset, error) {
-	cdr := DnskeyCache.Get(signer, keyid)
+func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*cache.CachedDnskeyRRset, error) {
+	cdr := cache.DnskeyCache.Get(signer, keyid)
 
 	if cdr != nil {
 		return cdr, nil
@@ -112,7 +113,7 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*CachedDnskeyRRset,
 		return nil, fmt.Errorf("FindDnskey: Error: DNSKEY RRset for %s is not valid", signer)
 	}
 
-	cdr = DnskeyCache.Get(signer, keyid)
+	cdr = cache.DnskeyCache.Get(signer, keyid)
 	return cdr, nil
 }
 
@@ -176,7 +177,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 							// Store the KSK in the DnskeyCache
 							keyname := dnskey.Header().Name
 							expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
-							cdr := CachedDnskeyRRset{
+							cdr := cache.CachedDnskeyRRset{
 								Name:       keyname,
 								Keyid:      keyid,
 								RRset:      dnskeyrrset,
@@ -185,7 +186,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 								Dnskey:     *dnskey,
 								Expiration: expiration,
 							}
-							DnskeyCache.Set(keyname, keyid, &cdr)
+							cache.DnskeyCache.Set(keyname, keyid, &cdr)
 							zd.Logger.Printf("ValidateChildDnskeys: Stored KSK in TAStore with key %s::%d and expiration %v", keyname, keyid, expiration)
 							kskValidated = true
 						} else {
@@ -215,7 +216,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 				keyid := dnskey.KeyTag()
 				// lookupKey := fmt.Sprintf("%s::%d", keyname, keyid)
 				expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
-				cdr := CachedDnskeyRRset{
+				cdr := cache.CachedDnskeyRRset{
 					Name:       keyname,
 					Keyid:      keyid,
 					RRset:      dnskeyrrset,
@@ -224,7 +225,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 					Dnskey:     *dnskey,
 					Expiration: expiration,
 				}
-				DnskeyCache.Set(keyname, keyid, &cdr)
+				cache.DnskeyCache.Set(keyname, keyid, &cdr)
 				zd.Logger.Printf("ValidateChildDnskeys: Stored ZSK in DnskeyCache with key %s::%d and expiration %v", keyname, keyid, expiration)
 			}
 		}
@@ -240,7 +241,8 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 // if a signature period is valid. If t is the zero time, the
 // current time is taken other t is. Returns true if the signature
 // is valid at the given time, otherwise returns false.
-func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
+/*
+func xxxWithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	var utc int64
 	if t.IsZero() {
 		utc = time.Now().UTC().Unix()
@@ -253,3 +255,4 @@ func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	te := int64(exp) + mode*year68
 	return ti <= utc && utc <= te
 }
+*/

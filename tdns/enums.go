@@ -5,10 +5,10 @@ package tdns
 
 import "fmt"
 
-type CacheContext uint8
+type xxxCacheContext uint8
 
 const (
-	ContextAnswer CacheContext = iota + 1
+	ContextAnswer xxxCacheContext = iota + 1
 	ContextHint
 	ContextPriming
 	ContextReferral
@@ -18,7 +18,7 @@ const (
 	ContextFailure // some sort of general failure that we cannot sort out
 )
 
-var CacheContextToString = map[CacheContext]string{
+var CacheContextToString = map[xxxCacheContext]string{
 	ContextAnswer:     "answer",
 	ContextHint:       "hint",
 	ContextPriming:    "priming",
@@ -110,23 +110,23 @@ var StringToImrOption = map[string]ImrOption{
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 }
 
-type ConnMode uint8
+type xxxConnMode uint8
 
 const (
-	ConnModeLegacy ConnMode = iota
+	ConnModeLegacy xxxConnMode = iota
 	ConnModeOpportunistic
 	ConnModeValidated
 	ConnModeStrict
 )
 
-var ConnModeToString = map[ConnMode]string{
+var ConnModeToString = map[xxxConnMode]string{
 	ConnModeLegacy:        "legacy",
 	ConnModeOpportunistic: "opportunistic",
 	ConnModeValidated:     "validated",
 	ConnModeStrict:        "strict",
 }
 
-var StringToConnMode = map[string]ConnMode{
+var StringToConnMode = map[string]xxxConnMode{
 	"legacy":        ConnModeLegacy,
 	"opportunistic": ConnModeOpportunistic,
 	"validated":     ConnModeValidated,

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/viper"
 	core "github.com/johanix/tdns/tdns/core"
+	cache "github.com/johanix/tdns/tdns/cache"
 )
 
 type KeystorePost struct {
@@ -59,7 +60,7 @@ type TruststoreResponse struct {
 	Time          time.Time
 	Status        string
 	Zone          string
-	ChildDnskeys  map[string]CachedDnskeyRRset
+	ChildDnskeys  map[string]cache.CachedDnskeyRRset
 	ChildSig0keys map[string]Sig0Key
 	Msg           string
 	Error         bool
@@ -176,9 +177,9 @@ type DebugResponse struct {
 	RRset      core.RRset
 	//	TrustedDnskeys	map[string]dns.DNSKEY
 	//	TrustedSig0keys	map[string]dns.KEY
-	TrustedDnskeys  []CachedDnskeyRRset
+	TrustedDnskeys  []cache.CachedDnskeyRRset
 	TrustedSig0keys map[string]Sig0Key
-	CachedRRsets    []CachedRRset
+	CachedRRsets    []cache.CachedRRset
 	Validated       bool
 	Msg             string
 	Error           bool
