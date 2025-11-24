@@ -195,6 +195,21 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	zd.Ready = true
 	zd.mu.Unlock()
 
+	// If zone has online-signing enabled, republish DNSKEYs after refresh
+	// (they may have been lost if not present in the zone file)
+	if zd.Options[OptOnlineSigning] && zd.Options[OptAllowUpdates] && zd.KeyDB != nil {
+		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			zd.Logger.Printf("FetchFromFile: failed to get DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+		} else if dak != nil {
+			if err := zd.PublishDnskeyRRs(dak); err != nil {
+				zd.Logger.Printf("FetchFromFile: failed to republish DNSKEYs for zone %s after refresh: %v", zd.ZoneName, err)
+			} else {
+				zd.Logger.Printf("FetchFromFile: republished DNSKEYs for zone %s after refresh", zd.ZoneName)
+			}
+		}
+	}
+
 	// If the delegation has changed, send an update to the DelegationSyncEngine
 	if zd.Options[OptDelSyncChild] && delchanged {
 		zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
@@ -335,6 +350,21 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	zd.Data = new_zd.Data
 	zd.Ready = true
 	zd.mu.Unlock()
+
+	// If zone has online-signing enabled, republish DNSKEYs after refresh
+	// (they may have been lost if not present in the transferred zone)
+	if zd.Options[OptOnlineSigning] && zd.Options[OptAllowUpdates] && zd.KeyDB != nil {
+		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			zd.Logger.Printf("FetchFromUpstream: failed to get DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+		} else if dak != nil {
+			if err := zd.PublishDnskeyRRs(dak); err != nil {
+				zd.Logger.Printf("FetchFromUpstream: failed to republish DNSKEYs for zone %s after refresh: %v", zd.ZoneName, err)
+			} else {
+				zd.Logger.Printf("FetchFromUpstream: republished DNSKEYs for zone %s after refresh", zd.ZoneName)
+			}
+		}
+	}
 
 	// Can only test for differences between old and new zone data if the zone data is ready.
 	if delchanged && zd.Options[OptDelSyncChild] {
@@ -864,7 +894,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
 		owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
-		dsync_rrset, exist := owner.RRtypes.Get(TypeDSYNC)
+		dsync_rrset, exist := owner.RRtypes.Get(core.TypeDSYNC)
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)

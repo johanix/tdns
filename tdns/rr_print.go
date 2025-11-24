@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 	// "github.com/gookit/goutil/dump"
 )
 
@@ -219,7 +220,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 
 				case *dns.SVCB, *dns.PrivateRR:
 					switch rr.Header().Rrtype {
-					case TypeDELEG, dns.TypeSVCB:
+					case core.TypeDELEG, dns.TypeSVCB:
 						PrintSvcbRR(rr, leftpad, rightmargin)
 
 					default:

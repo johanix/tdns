@@ -210,7 +210,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, UpdateResult,
 	pkc := sak.Keys[0]
 
 	// 2. Get the parent DSYNC RRset
-	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
+	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to lookup DSYNC target: %v", zd.ZoneName, err), UpdateResult{}, err
 	}
@@ -295,7 +295,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string) (string,
 	}
 
 	// 2. Get the parent DSYNC RRset
-	dsyncTarget, err = LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, SchemeUpdate)
+	dsyncTarget, err = LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to lookup DSYNC target: %v", zd.ZoneName, err)
 	}

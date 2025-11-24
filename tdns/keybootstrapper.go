@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/tdns/edns0"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -277,7 +278,7 @@ func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 }
 
 func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
-	dsync_target, err := LookupDSYNCTarget(KeyName, Globals.IMR, dns.TypeANY, SchemeUpdate)
+	dsync_target, err := LookupDSYNCTarget(KeyName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("kunde inte hitta DSYNC target: %v", err)
 	}

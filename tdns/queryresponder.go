@@ -17,13 +17,13 @@ import (
 
 // Define sets of known types
 var tdnsSpecialTypes = map[uint16]bool{
-	TypeDSYNC:   true,
-	TypeNOTIFY:  true,
-	TypeMSIGNER: true,
-	TypeDELEG:   true,
-	TypeHSYNC:   true,
-	TypeHSYNC2:  true,
-	TypeTSYNC:   true,
+	core.TypeDSYNC:   true,
+	core.TypeNOTIFY:  true,
+	core.TypeMSIGNER: true,
+	core.TypeDELEG:   true,
+	core.TypeHSYNC:   true,
+	core.TypeHSYNC2:  true,
+	core.TypeTSYNC:   true,
 }
 
 var standardDNSTypes = map[uint16]bool{
@@ -217,7 +217,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		cdd := zd.FindDelegation(qname, msgoptions.DnssecOK)
 
 		// If there is delegation data and an NS RRset is present, return a referral
-		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
 			log.Printf("---> Sending referral for %s", qname)
 			m.MsgHdr.Authoritative = false
 			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
@@ -352,7 +352,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		cdd := zd.FindDelegation(qname, msgoptions.DnssecOK)
 
 		// If there is delegation data and an NS RRset is present, return a referral
-		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != TypeDELEG {
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
 			log.Printf("---> Sending referral for %s", qname)
 			m.MsgHdr.Authoritative = false
 			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
@@ -537,7 +537,7 @@ func (zd *ZoneData) XXfindServerTSYNCRRset() *core.RRset {
 		owner := item.Key
 		od := item.Val
 		if strings.HasPrefix(owner, "_dns.") {
-			rrset := od.RRtypes.GetOnlyRRSet(TypeTSYNC)
+			rrset := od.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
 			if len(rrset.RRs) > 0 {
 				return &rrset
 			}

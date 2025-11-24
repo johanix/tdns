@@ -1,4 +1,8 @@
-package tdns
+/*
+ * Copyright (c) Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
+package core
 
 import (
 	"bytes"

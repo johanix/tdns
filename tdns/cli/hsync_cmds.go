@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2025 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
 package cli
 
 import (
@@ -11,6 +15,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/tdns"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -410,7 +415,7 @@ func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
 			continue
 		}
 
-		hsyncRR, ok := privRR.Data.(*tdns.HSYNC)
+		hsyncRR, ok := privRR.Data.(*core.HSYNC)
 		if !ok {
 			log.Printf("PrivateRR does not contain HSYNC data: %v", privRR)
 			continue

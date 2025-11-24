@@ -1003,7 +1003,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				log.Printf("Additional contains a Private RR (TSYNC?), but owner is not _dns.{nsname}, skipping")
 				continue
 			}
-			if ts, ok := rr.(*dns.PrivateRR).Data.(*TSYNC); ok && ts != nil {
+			if ts, ok := rr.(*dns.PrivateRR).Data.(*core.TSYNC); ok && ts != nil {
 				if ts.Transports != "" {
 					val := ts.Transports
 					if strings.HasPrefix(val, "transport=") {
@@ -1070,7 +1070,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				}
 			}
 		case *dns.PrivateRR:
-			if ts, ok := rr.(*dns.PrivateRR).Data.(*TSYNC); ok && ts != nil && ts.Transports != "" {
+			if ts, ok := rr.(*dns.PrivateRR).Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
 				val := ts.Transports
 				if strings.HasPrefix(val, "transport=") {
 					val = strings.TrimPrefix(val, "transport=")
@@ -1533,7 +1533,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 			if Globals.Verbose {
 				log.Printf("**** parseTransportForServerFromAdditional: TSYNC RR: x: %+v", x)
 			}
-			if ts, ok := x.Data.(*TSYNC); ok && ts != nil {
+			if ts, ok := x.Data.(*core.TSYNC); ok && ts != nil {
 				if Globals.Verbose {
 					log.Printf("**** parseTransportForServerFromAdditional: TSYNC data: %+v", ts)
 					log.Printf("**** parseTransportForServerFromAdditional: TSYNC transports: \"%s\"", ts.Transports)
@@ -1656,10 +1656,10 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 					}
 				}
 			}
-		case TypeTSYNC:
+		case core.TypeTSYNC:
 			for _, rr := range rrset.RRs {
 				if priv, ok := rr.(*dns.PrivateRR); ok {
-					if ts, ok := priv.Data.(*TSYNC); ok && ts != nil && ts.Transports != "" {
+					if ts, ok := priv.Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
 						val := ts.Transports
 						if strings.HasPrefix(val, "transport=") {
 							val = strings.TrimPrefix(val, "transport=")
@@ -1734,7 +1734,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			Validated:  validated,
 		}
 		imr.Cache.Set(qname, qtype, cr)
-		if qtype == dns.TypeSVCB || qtype == TypeTSYNC {
+		if qtype == dns.TypeSVCB || qtype == core.TypeTSYNC {
 			imr.applyTransportRRsetFromAnswer(qname, &rrset, validated)
 		} else if qtype == dns.TypeTLSA {
 			base := baseFromTLSAOwner(qname)

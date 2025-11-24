@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	edns0 "github.com/johanix/tdns/tdns/edns0"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -332,7 +333,7 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 
 // Find the best scheme (from the POV of the child) to sync the deletation with the parent
 func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
-	var active_drr *DSYNC
+	var active_drr *core.DSYNC
 	var active_scheme string
 	var dsynctarget DsyncTarget
 
@@ -362,7 +363,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 		case "update":
 			log.Printf("BestSyncScheme(): checking UPDATE alternative:")
 			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == SchemeUpdate {
+				if drr.Scheme == core.SchemeUpdate {
 					active_drr = drr
 					break
 				}
@@ -379,7 +380,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 			}
 			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
+				if drr.Scheme == core.SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
 					active_drr = drr
 					break
 				}

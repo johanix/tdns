@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 type DsyncResult struct {
 	Qname  string
-	Rdata  []*DSYNC
+	Rdata  []*core.DSYNC
 	Parent string
 	Error  error
 }
@@ -89,15 +90,15 @@ func DsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
 }
 
-func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
+func DsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, error) {
 	m := new(dns.Msg)
-	m.SetQuestion(qname, TypeDSYNC)
+	m.SetQuestion(qname, core.TypeDSYNC)
 
-	var dsyncrrs []*DSYNC
+	var dsyncrrs []*core.DSYNC
 	var parent string
 
 	//	if Globals.Debug {
-	log.Printf("DsyncQuery: TypeDSYNC=%d\n", TypeDSYNC)
+	log.Printf("DsyncQuery: TypeDSYNC=%d\n", core.TypeDSYNC)
 	log.Printf("DEBUG: Sending to server %s query:\n%s\n", imr, m.String())
 	//	}
 
@@ -124,7 +125,7 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
 					log.Printf("%s\n", rr.String())
 				}
 
-				if dsyncrr, ok := prr.Data.(*DSYNC); ok {
+				if dsyncrr, ok := prr.Data.(*core.DSYNC); ok {
 					dsyncrrs = append(dsyncrrs, dsyncrr)
 				} else {
 					log.Printf("Error: answer is not a DSYNC RR: %s", rr.String())
@@ -163,15 +164,15 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*DSYNC, string, error) {
 
 type DsyncTarget struct {
 	Name      string
-	Scheme    DsyncScheme
+	Scheme    core.DsyncScheme
 	Port      uint16
 	Addresses []string // in addr:port format
-	RR        *DSYNC
+	RR        *core.DSYNC
 }
 
 // dtype = the type of DSYNC RR to look for (dns.TypeCDS, dns.TypeCSYNC, dns.TypeANY, ...)
 // scheme = the DSYNC scheme (SchemeNotify | SchemeUpdate)
-func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) (*DsyncTarget, error) {
+func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme core.DsyncScheme) (*DsyncTarget, error) {
 	var addrs []string
 	var dsynctarget DsyncTarget
 
@@ -186,7 +187,7 @@ func LookupDSYNCTarget(childzone, imr string, dtype uint16, scheme DsyncScheme) 
 	}
 
 	found := false
-	var dsync *DSYNC
+	var dsync *core.DSYNC
 
 	for _, dsyncrr := range dsync_res.Rdata {
 		if dsyncrr.Scheme == scheme && dsyncrr.Type == dtype {
