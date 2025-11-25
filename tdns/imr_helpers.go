@@ -18,59 +18,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-/*
-var DnskeyCache = NewDnskeyCache()
-
-func NewDnskeyCache() *DnskeyCacheT {
-	return &DnskeyCacheT{
-		Map: cmap.New[CachedDnskeyRRset](),
-	}
-}
-
-func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
-	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
-	tmp, ok := dkc.Map.Get(lookupKey)
-	if !ok {
-		return nil
-	}
-	if tmp.Expiration.Before(time.Now()) {
-		dkc.Map.Remove(lookupKey)
-		log.Printf("DnskeyCache: Removed expired key %s", lookupKey)
-		return nil
-	}
-	return &tmp
-}
-
-func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
-	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
-	dkc.Map.Set(lookupKey, *cdr)
-}
-
-func cloneImrOptions(src map[ImrOption]string) map[ImrOption]string {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make(map[ImrOption]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func isSubdomainOf(name, parent string) bool {
-	name = dns.CanonicalName(name)
-	parent = dns.CanonicalName(parent)
-	if parent == "." {
-		return true
-	}
-	if name == parent {
-		return true
-	}
-	suffix := "." + strings.TrimSuffix(parent, ".") + "."
-	return strings.HasSuffix(name, suffix)
-}
-*/
-
 const (
 	transportQueryReasonObservation = "opportunistic-signal"
 	transportQueryReasonNewServer   = "new-auth-server"
@@ -369,7 +316,7 @@ func (imr *Imr) PrimeWithHints(hintsfile string) error {
 	return nil
 }
 
-func getMinTTL(rrs []dns.RR) time.Duration {
+func XXXgetMinTTL(rrs []dns.RR) time.Duration {
 	if len(rrs) == 0 {
 		return 0
 	}

@@ -144,7 +144,7 @@ var debugValidateRRsetCmd = &cobra.Command{
 
 var debugLAVCmd = &cobra.Command{
 	Use:   "lav",
-	Short: "Request tdnsd to lookup and validate a child RRset",
+	Short: "Lookup and validate a child RRset",
 	Run: func(cmd *cobra.Command, args []string) {
 		if debugQname == "" {
 			fmt.Printf("Error: qname name not specified. Terminating.\n")
@@ -172,7 +172,7 @@ var debugLAVCmd = &cobra.Command{
 }
 var debugShowTACmd = &cobra.Command{
 	Use:   "show-ta",
-	Short: "Request tdnsd to return known trust anchors",
+	Short: "List known DNSSEC trust anchors",
 	Run: func(cmd *cobra.Command, args []string) {
 
 		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
@@ -206,7 +206,7 @@ var debugShowTACmd = &cobra.Command{
 
 var debugShowRRsetCacheCmd = &cobra.Command{
 	Use:   "show-rrsetcache",
-	Short: "Request tdnsd to return cached RRsets",
+	Short: "List cached RRsets",
 	Run: func(cmd *cobra.Command, args []string) {
 
 		dr := SendDebug(tdns.Globals.Api, tdns.DebugPost{
@@ -265,7 +265,7 @@ func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
 	}
 
 	if dr.Error {
-		fmt.Printf("error: %s", dr.ErrorMsg)
+		fmt.Printf("Error from %s: %s\n", dr.AppName, dr.ErrorMsg)
 	}
 
 	fmt.Printf("Message: %s\n", dr.Msg)

@@ -19,7 +19,7 @@ import (
 
 var zoneReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Send reload zone command to tdnsd",
+	Short: "Request re-loading a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("Reloading zone: %v\n", args)
 		if tdns.Globals.Zonename == "" {
@@ -44,7 +44,7 @@ var zoneReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdnsd: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -56,12 +56,12 @@ var zoneReloadCmd = &cobra.Command{
 
 var zoneNsecCmd = &cobra.Command{
 	Use:   "nsec",
-	Short: "A brief description of your command",
+	Short: "Prefix command, not useable by itself",
 }
 
 var zoneSignCmd = &cobra.Command{
 	Use:   "sign",
-	Short: "Send a zone sign command to tdnsd",
+	Short: "Request signing of a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
@@ -81,7 +81,7 @@ var zoneSignCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -93,7 +93,7 @@ var zoneSignCmd = &cobra.Command{
 
 var zoneWriteCmd = &cobra.Command{
 	Use:   "write",
-	Short: "Send a zone write command to tdnsd",
+	Short: "Write a zone to disk",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
@@ -113,7 +113,7 @@ var zoneWriteCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -125,7 +125,7 @@ var zoneWriteCmd = &cobra.Command{
 
 var zoneNsecGenerateCmd = &cobra.Command{
 	Use:   "generate",
-	Short: "Send an NSEC generate command to tdnsd",
+	Short: "Generate NSEC records for a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
@@ -145,7 +145,7 @@ var zoneNsecGenerateCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -157,7 +157,7 @@ var zoneNsecGenerateCmd = &cobra.Command{
 
 var zoneNsecShowCmd = &cobra.Command{
 	Use:   "show",
-	Short: "Send an NSEC show command to tdnsd",
+	Short: "Show the NSEC chain for a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 		prefixcmd, _ := getCommandContext("zone")
@@ -176,7 +176,7 @@ var zoneNsecShowCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -192,7 +192,7 @@ var zoneNsecShowCmd = &cobra.Command{
 
 var zoneFreezeCmd = &cobra.Command{
 	Use:   "freeze",
-	Short: "Tell tdnsd to freeze a zone (i.e. no longer accept changes to the zone data)",
+	Short: "Freeze a zone (i.e. stop accepting DDNS updates to the zone data)",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
@@ -212,7 +212,7 @@ var zoneFreezeCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdnsd: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -224,7 +224,7 @@ var zoneFreezeCmd = &cobra.Command{
 
 var zoneThawCmd = &cobra.Command{
 	Use:   "thaw",
-	Short: "Tell tdnsd to thaw a zone (i.e. accept changes to the zone data again)",
+	Short: "Thaw a zone (i.e. accept DDNS updates to the zone data again)",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 		prefixcmd, _ := getCommandContext("zone")
@@ -243,7 +243,7 @@ var zoneThawCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from tdns-server: %s\n", cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -260,7 +260,7 @@ var ZoneCmd = &cobra.Command{
 
 var zoneListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "Send an zone list command to tdnsd",
+	Short: "List configured zones",
 	Run: func(cmd *cobra.Command, args []string) {
 
 		prefixcmd, _ := getCommandContext("zone")
@@ -298,7 +298,7 @@ var zoneListCmd = &cobra.Command{
 
 var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
-	Short: "Bump SOA serial and epoch (if any) in tdnsd version of zone",
+	Short: "Bump SOA serial and epoch (if any) in tdns-server version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		prefixcmd, _ := getCommandContext("zone")
 		api, err := getApiClient(prefixcmd, true)
@@ -317,7 +317,7 @@ var zoneSerialBumpCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdnsd: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 			os.Exit(1)
 		}
 

@@ -304,7 +304,7 @@ func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport s
 	return resp.rrset, resp.err
 }
 
-func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger) (bool, []dns.RR, []dns.RR) {
+func xxxRRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]
 	adds := []dns.RR{}

@@ -413,7 +413,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 									Rcode:      uint8(rcode),
 									RRset:      &rrset,
 									Context:    cache.ContextAnswer,
-									Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+									Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 								})
 								return &rrset, rcode, cache.ContextAnswer, nil
 							}
@@ -447,7 +447,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				Rcode:      uint8(rcode),
 				RRset:      &rrset,
 				Context:    cache.ContextAnswer,
-				Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+				Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 			})
 			return &rrset, rcode, cache.ContextAnswer, nil
 		} else if len(r.Ns) != 0 {
@@ -507,7 +507,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						Rcode:      uint8(rcode),
 						RRset:      &rrset,
 						Context:    cache.ContextReferral,
-						Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 					})
 				}
 
@@ -1704,7 +1704,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 						Rcode:      uint8(rcode),
 						RRset:      &rrset,
 						Context:    cache.ContextAnswer,
-						Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 					})
 					return &rrset, rcode, cache.ContextAnswer, nil, true
 				}
@@ -1730,7 +1730,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			Rcode:      uint8(r.MsgHdr.Rcode),
 			RRset:      &rrset,
 			Context:    cache.ContextAnswer,
-			Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 			Validated:  validated,
 		}
 		imr.Cache.Set(qname, qtype, cr)
@@ -1827,7 +1827,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			RRset:      nsRRset,
 			Context:    cache.ContextReferral,
 			Validated:  validated,
-			Expiration: time.Now().Add(getMinTTL(nsRRset.RRs)),
+			Expiration: time.Now().Add(cache.GetMinTTL(nsRRset.RRs)),
 		})
 	}
 	// Also collect and cache DS RRset (signed) when present in referral
@@ -1866,7 +1866,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			RRset:      dsRRset,
 			Context:    cache.ContextReferral,
 			Validated:  validated,
-			Expiration: time.Now().Add(getMinTTL(dsRRs)),
+			Expiration: time.Now().Add(cache.GetMinTTL(dsRRs)),
 		})
 	}
 	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, nsMap, r)
@@ -1993,7 +1993,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 		RRset:      rrset,
 		Context:    cache.ContextAnswer,
 		Validated:  validated,
-		Expiration: time.Now().Add(getMinTTL(rrset.RRs)),
+		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 	})
 
 	imr.revalidateInBailiwickGlue(ctx, zonename, serverMap, true)
@@ -2088,7 +2088,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 		RRset:      rrset,
 		Context:    cache.ContextAnswer,
 		Validated:  validated,
-		Expiration: time.Now().Add(getMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
+		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
 	})
 }
 

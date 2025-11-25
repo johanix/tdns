@@ -239,7 +239,7 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 		}
 	}
 
-	differ, adds, removes := RRsetDiffer(owner, rrs_child, rrs_parent, rrtype, log.Default())
+	differ, adds, removes := core.RRsetDiffer(owner, rrs_child, rrs_parent, rrtype, log.Default(), Globals.Verbose, Globals.Debug)
 	if differ {
 		fmt.Printf("Parent and child %s RRsets differ. To get parent in sync:\n", rrname)
 		for _, rr := range removes {

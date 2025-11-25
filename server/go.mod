@@ -1,6 +1,6 @@
 module tdns-server
 
-go 1.24
+go 1.24.0
 
 replace (
 	github.com/johanix/tdns/tdns => ../tdns

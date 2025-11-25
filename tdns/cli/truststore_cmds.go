@@ -229,7 +229,7 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 	}
 
 	if tr.Error {
-		return tr, fmt.Errorf("error from tdnsd: %s", tr.ErrorMsg)
+		return tr, fmt.Errorf("error from %s: %s", tr.AppName, tr.ErrorMsg)
 	}
 
 	return tr, nil

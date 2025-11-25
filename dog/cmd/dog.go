@@ -46,6 +46,22 @@ var defaultPorts = map[string]string{
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
+	Long:  `dog is a CLI utility used issue DNS queries and present the result.
+	
+	Options:
+		+DNSSEC: Set the DO (DNSEC OK) bit in queries
+		+COMPACT: Set the COMPACT bit in queries (for compact denial of existence proofs)
+		+TCP: Force TCP transport
+		+TLS: Force TLS transport
+		+HTTPS: Force HTTPS transport
+		+QUIC: Force QUIC transport
+		+WIDTH=N: Set the width of the output to N characters
+		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
+		+OTS=opt_in|opt_out: Set the OTS (transport signaling) EDNS(0)option
+		+DO_BIT: Set the DO (DNSEC OK) bit
+		+DELEG: Set the DELEG bit in queries
+		+MULTI: Present RRs in multi-line format
+	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
 
@@ -380,6 +396,14 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 				return options, nil
 			} else {
 				return nil, fmt.Errorf("Error: Unknown OTS option: %s", otsArg)
+			}
+		}
+
+		if strings.HasPrefix(strings.ToUpper(ucarg), "+WIDTH") {
+			parts := strings.SplitN(ucarg, "=", 2)
+			if len(parts) > 1 {
+				options["width"] = parts[1]
+				return options, nil
 			}
 		}
 

@@ -141,9 +141,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							Zonefile:    zr.Zonefile,
 						})
 					}
+					// Collect dynamic RRs before refresh (they will be lost during refresh)
+					dynamicRRs := zd.CollectDynamicRRs(conf)
+
 					// XXX: Should do refresh in parallel
 					go func(zd *ZoneData) {
-						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
+						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, dynamicRRs)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
@@ -179,7 +182,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						KeyDB:           conf.Internal.KeyDB,
 					}
 
-					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
+					// Collect dynamic RRs before refresh (they will be lost during refresh)
+					dynamicRRs := zd.CollectDynamicRRs(conf)
+
+					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, dynamicRRs)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
@@ -273,7 +279,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not refreshing.", zone, zd.ErrorMsg)
 						continue
 					}
-					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false)
+					// Collect dynamic RRs before refresh (they will be lost during refresh)
+					dynamicRRs := zd.CollectDynamicRRs(conf)
+
+					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, dynamicRRs)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zd.Refresh(%s): %v", zone, err)

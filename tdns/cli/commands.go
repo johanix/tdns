@@ -55,7 +55,7 @@ func SendCommand(cmd, zone string) (string, error) {
 	}
 
 	if cr.Error {
-		return "", fmt.Errorf("error from tdnsd: %s", cr.ErrorMsg)
+		return "", fmt.Errorf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 	}
 
 	return cr.Msg, nil
@@ -81,7 +81,7 @@ func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResp
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from tdnsd: %s", cr.ErrorMsg)
+		return cr, fmt.Errorf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 	}
 
 	return cr, nil
