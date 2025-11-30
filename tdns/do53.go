@@ -20,12 +20,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-type MsgOptions struct {
-	DnssecOK  bool
-	OtsOptIn  bool
-	OtsOptOut bool
-}
-
 func CaseFoldContains(slice []string, str string) bool {
 	for _, s := range slice {
 		if strings.EqualFold(s, str) {
@@ -36,13 +30,17 @@ func CaseFoldContains(slice []string, str string) bool {
 }
 
 func DnsEngine(ctx context.Context, conf *Config) error {
+	log.Printf("DnsEngine: starting with addresses: %v", conf.DnsEngine.Addresses)
 
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
 	authDNSHandler := createAuthDnsHandler(conf)
-	dns.HandleFunc(".", authDNSHandler)
+	
+	// Create a local ServeMux for DnsEngine to avoid conflicts with other engines
+	dnsMux := dns.NewServeMux()
+	dnsMux.HandleFunc(".", authDNSHandler)
 
-	addresses := viper.GetStringSlice("dnsengine.addresses")
+	addresses := conf.DnsEngine.Addresses
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
 		log.Printf("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory. Still configuring: %v", addresses)
 	}
@@ -53,6 +51,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			srv := &dns.Server{
 				Addr:          addr,
 				Net:           transport,
+				Handler:       dnsMux, // Use local mux instead of global handler
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 			}
 			// Must bump the buffer size of incoming UDP msgs, as updates
@@ -108,26 +107,30 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		certKey = false
 	}
 
-	certPEM, err := os.ReadFile(certFile)
-	if err != nil {
-		return fmt.Errorf("DnsEngine: error reading cert file: %v", err)
-	}
-
-	keyPEM, err := os.ReadFile(keyFile)
-	if err != nil {
-		return fmt.Errorf("DnsEngine: error reading key file: %v", err)
-	}
-
-	conf.Internal.CertData = string(certPEM)
-	conf.Internal.KeyData = string(keyPEM)
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		log.Printf("DnsEngine: failed to load certificate: %v. Not starting DoT, DoH or DoQ service.", err)
-		certKey = false
-	}
+	var certPEM []byte
+	var keyPEM []byte
+	var err error
 
 	if certKey {
+		certPEM, err = os.ReadFile(certFile)
+		if err != nil {
+			return fmt.Errorf("DnsEngine: error reading cert file: %v", err)
+		}
+
+		keyPEM, err = os.ReadFile(keyFile)
+		if err != nil {
+			return fmt.Errorf("DnsEngine: error reading key file: %v", err)
+		}
+
+		conf.Internal.CertData = string(certPEM)
+		conf.Internal.KeyData = string(keyPEM)
+
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			log.Printf("DnsEngine: failed to load certificate: %v. Not starting DoT, DoH or DoQ service.", err)
+			certKey = false
+		}
+
 		// Strip port numbers from addresses before proceeding to modern transports
 		tmp := make([]string, len(addresses))
 		for i, addr := range addresses {
@@ -173,48 +176,49 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
 		// var dnssec_ok, ots_opt_in, ots_opt_out bool
-		var msgoptions MsgOptions
-		opt := r.IsEdns0()
-		if opt != nil {
-			msgoptions.DnssecOK = opt.Do()
-			ots_val, ots_ok := edns0.ExtractOTSOption(opt)
-			if ots_ok {
-				msgoptions.OtsOptIn = ots_val == edns0.OTS_OPT_IN
-				msgoptions.OtsOptOut = ots_val == edns0.OTS_OPT_OUT
-			}
-			if msgoptions.OtsOptIn {
-				log.Printf("OTS OPT_IN: %v", msgoptions.OtsOptIn)
-			}
-			if msgoptions.OtsOptOut {
-				log.Printf("OTS OPT_OUT: %v", msgoptions.OtsOptOut)
-			}
+		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
+		if err != nil {
+			log.Printf("Error extracting EDNS0 options: %v", err)
 		}
-		// log.Printf("DNSSEC OK: %v", dnssec_ok)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsnotifyq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DnssecOK, len(dnsnotifyq))
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. len(dnsnotifyq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO, len(dnsnotifyq))
 			// A DNS NOTIFY may trigger time consuming outbound queries
-			dnsnotifyq <- DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname}
+			dnsnotifyq <- DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname, Options: msgoptions}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeUpdate:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DnssecOK, len(dnsupdateq))
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO, len(dnsupdateq))
 			// A DNS Update may trigger time consuming outbound queries
 			dnsupdateq <- DnsUpdateRequest{
 				ResponseWriter: w,
 				Msg:            r,
 				Qname:          qname,
+				Options:        msgoptions,
 				Status:         &UpdateStatus{},
 			}
 			// Not waiting for a result
 			return
 
 		case dns.OpcodeQuery:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) dnssec_ok: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DnssecOK)
+			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO)
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
+
+			// Check if this is a reporter app handling error channel queries (RFC9567)
+			if Globals.App.Type == AppTypeReporter {
+				if strings.HasPrefix(qname, "_er.") {
+					edns0.ErrorChannelReporter(qname, qtype, w, r)
+					return
+				}
+				log.Printf("DnsHandler: Qname is %q, which is not the correct format for error channel reports (expected to start with '_er.').", qname)
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeRefused)
+				w.WriteMsg(m)
+				return
+			}
 
 			if zd, ok := Zones.Get(qname); ok {
 				if zd.Error {

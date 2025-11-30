@@ -25,6 +25,7 @@ type DnsUpdateRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
 	Qname          string
+	Options        *edns0.MsgOptions
 	Status         *UpdateStatus
 }
 
@@ -32,6 +33,7 @@ type DnsNotifyRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
 	Qname          string
+	Options        *edns0.MsgOptions
 	Status         *NotifyStatus
 }
 

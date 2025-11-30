@@ -183,6 +183,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 								RRset:      dnskeyrrset,
 								Validated:  true,
 								Trusted:    true,
+								State:      cache.ValidationStateSecure,
 								Dnskey:     *dnskey,
 								Expiration: expiration,
 							}
@@ -222,6 +223,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 					RRset:      dnskeyrrset,
 					Validated:  true,
 					Trusted:    true,
+					State:      cache.ValidationStateSecure,
 					Dnskey:     *dnskey,
 					Expiration: expiration,
 				}

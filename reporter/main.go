@@ -56,10 +56,62 @@ func main() {
 		tdns.Shutdowner(&conf, "No TSIG keys found in config. As TSIG is required for reporting, exiting.")
 	}
 
-	// Start notify-only DNS server
-	stopDNS, err := tdns.NotifyReporter(&conf, tsigSecrets)
-	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("dns: %v", err))
+	// Determine which servers to start based on config
+	// Default to ["notify"] if not specified
+	activeServers := viper.GetStringSlice("reporters.active")
+	if len(activeServers) == 0 {
+		activeServers = []string{"notify"} // Default to notify-only
+	}
+
+	var stopDNS func(context.Context) error
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Check if we should start notify server
+	startNotify := false
+	startErrorChannel := false
+	for _, srv := range activeServers {
+		if srv == "notify" {
+			startNotify = true
+		}
+		if srv == "errorchannel" {
+			startErrorChannel = true
+		}
+	}
+
+	// Start notify-only DNS server if configured
+	if startNotify {
+		notifyAddr := viper.GetString("reporters.notify.listen")
+		if notifyAddr == "" {
+			notifyAddr = ":53"
+		}
+		var err error
+		stopDNS, err = tdns.NotifyReporter(&conf, tsigSecrets, notifyAddr)
+		if err != nil {
+			tdns.Shutdowner(&conf, fmt.Sprintf("notify server: %v", err))
+		}
+		fmt.Printf("Started notify-only DNS server on %s\n", notifyAddr)
+	}
+
+	// Start full DNS engine if configured (for RFC9567 error channel reporting)
+	if startErrorChannel {
+		errorChannelAddr := viper.GetString("reporters.errorchannel.listen")
+		if errorChannelAddr == "" {
+			errorChannelAddr = ":53"
+		}
+		// Set the address for DnsEngine
+		conf.DnsEngine.Addresses = []string{errorChannelAddr}
+		if len(conf.DnsEngine.Transports) == 0 {
+			conf.DnsEngine.Transports = []string{"do53"} // Default to Do53
+		}
+
+		// Start DnsEngine in a goroutine (it handles shutdown via context cancellation)
+		go func() {
+			if err := tdns.DnsEngine(ctx, &conf); err != nil {
+				tdns.Shutdowner(&conf, fmt.Sprintf("error channel server: %v", err))
+			}
+		}()
+		fmt.Printf("Started DNS engine for error channel reporting (RFC9567) on %s\n", errorChannelAddr)
 	}
 
 	// Simple signal loop for graceful shutdown
@@ -67,8 +119,13 @@ func main() {
 	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM)
 	<-sigch
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = apiSrv.Shutdown(ctx)
-	_ = stopDNS(ctx)
+	// Cancel context to signal DnsEngine to shutdown
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	_ = apiSrv.Shutdown(shutdownCtx)
+	if stopDNS != nil {
+		_ = stopDNS(shutdownCtx)
+	}
 }

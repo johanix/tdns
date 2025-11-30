@@ -9,3 +9,8 @@ const (
 	EDNS0_KEYSTATE_OPTION_CODE = 65002
 	EDNS0_REPORT_OPTION_CODE   = 65003
 )
+
+// Standard EDNS(0) option codes (RFC9567)
+const (
+	EDNS0_ER_OPTION_CODE = 18 // RFC9567: DNS Error Reporting option code
+)

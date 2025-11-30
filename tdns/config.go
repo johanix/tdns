@@ -21,6 +21,7 @@ type Config struct {
 	// OBE App            AppDetails
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
+	// RecursorEngine RecursorEngineConf
 	ImrEngine      ImrEngineConf
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
@@ -66,6 +67,11 @@ type DnsEngineConf struct {
 	KeyFile    string   `yaml:"keyfile,omitempty"`
 	Transports []string `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
 }
+
+// type RecursorEngineConf struct {
+// 	Active bool `yaml:"active"`
+// 	RootHints string `yaml:"root-hints"`
+// }
 
 type ImrEngineConf struct {
 	Addresses   []string `validate:"required"`
@@ -194,6 +200,7 @@ type InternalConf struct {
 	AgentRegistry   *AgentRegistry
 	ZoneDataRepo    *ZoneDataRepo
 	RRsetCache      *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine       *Imr
 }
 
 type AgentQs struct {

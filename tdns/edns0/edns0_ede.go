@@ -11,17 +11,19 @@ import (
 
 const (
 	// Private EDE codes (above 512)
-	EDESig0KeyNotKnown            uint16 = 513
-	EDESig0KeyKnownButNotTrusted  uint16 = 514
-	EDEDelegationSyncNotSupported uint16 = 515
-	EDEZoneFrozen                 uint16 = 516
-	EDEZoneNotFound               uint16 = 517
-	EDEZoneUpdatesNotAllowed      uint16 = 518
-	EDEMPZoneXfrFailure           uint16 = 519
-	EDEMPParentSyncFailure        uint16 = 520
-	EDEReportOptionNotFound       uint16 = 521
-	EDETsigRequired               uint16 = 522
-	EDETsigValidationFailure      uint16 = 523
+	EDESig0KeyNotKnown            uint16 = 513 + iota
+	EDESig0KeyKnownButNotTrusted
+	EDEDelegationSyncNotSupported
+	EDEZoneFrozen
+	EDEZoneNotFound
+	EDEZoneUpdatesNotAllowed
+	EDEMPZoneXfrFailure
+	EDEMPParentSyncFailure
+	EDEReportOptionNotFound
+	EDETsigRequired
+	EDETsigValidationFailure
+
+	EDEScannerNotImplemented
 )
 
 var EDECodeToString = map[uint16]string{

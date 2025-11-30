@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns/tdns/edns0"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -280,56 +280,61 @@ func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
 	dsync_target, err := LookupDSYNCTarget(KeyName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
-		return fmt.Errorf("kunde inte hitta DSYNC target: %v", err)
+		return fmt.Errorf("could not find DSYNC target: %v", err)
 	}
 
-	// Skapa DNS-meddelande med EDNS(0) KeyState option
+	// Create DNS message with EDNS(0) KeyState option
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(KeyName), dns.TypeANY)
 
-	// Lägg till EDNS(0) option med KeyState
+	// Add EDNS(0) option with KeyState
 	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
 		KeyID:     keyid,
 		KeyState:  edns0.KeyStateInquiryKey,
 		ExtraText: "",
 	})
 
-	// Hämta aktiv nyckel för signering
+	// Get active key for signing
 	sak, err := kdb.GetSig0Keys(KeyName, Sig0StateActive)
 	if err != nil {
-		return fmt.Errorf("kunde inte hämta aktiv SIG(0) nyckel: %v", err)
+		return fmt.Errorf("could not get active SIG(0) key: %v", err)
 	}
 
 	if len(sak.Keys) == 0 {
-		return fmt.Errorf("ingen aktiv SIG(0) nyckel tillgänglig för %s", KeyName)
+		return fmt.Errorf("no active SIG(0) key available for %s", KeyName)
 	}
 
-	// Signera meddelandet
+	// Sign the message
 	signedMsg, err := SignMsg(*m, KeyName, sak)
 	if err != nil {
-		return fmt.Errorf("kunde inte signera meddelandet: %v", err)
+		return fmt.Errorf("could not sign the message: %v", err)
 	}
 
-	// Skicka det signerade meddelandet
+	// Send the signed message
 	c := new(dns.Client)
 	c.Timeout = 5 * time.Second
 
 	r, _, err := c.Exchange(signedMsg, dsync_target.Addresses[0])
 	if err != nil {
-		return fmt.Errorf("kunde inte skicka DNS-förfrågan: %v", err)
+		return fmt.Errorf("could not send DNS request: %v", err)
 	}
 
 	if r.Rcode != dns.RcodeSuccess {
-		return fmt.Errorf("DNS-förfrågan misslyckades med kod: %v", dns.RcodeToString[r.Rcode])
+		return fmt.Errorf("DNS request failed with code: %v", dns.RcodeToString[r.Rcode])
 	}
 
-	keystate, err := edns0.ExtractKeyStateFromMsg(r)
-	if err != nil {
-		return fmt.Errorf("kunde inte extrahera KeyState från svar: %v", err)
+	// Extract KeyState option from response using the new pattern
+	opt := r.IsEdns0()
+	if opt == nil {
+		return fmt.Errorf("could not extract KeyState from response: no EDNS(0) OPT RR in response")
+	}
+	keystate, found := edns0.ExtractKeyStateOption(opt)
+	if !found {
+		return fmt.Errorf("could not extract KeyState from response: KeyState option missing in response")
 	}
 
 	//mapKey := fmt.Sprintf("%s::%d", KeyName, keyid)
-	//log.Printf("KeyBootstrapper: Uppdaterar parent state för nyckel %s till %d", mapKey, utr.ParentState)
+	//log.Printf("KeyBootstrapper: Updating parent state for key %s to %d", mapKey, utr.ParentState)
 
 	tx, err := kdb.Begin("UpdateKeyState")
 	if err != nil {
@@ -358,9 +363,9 @@ func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq
 		return err
 	}
 
-	log.Printf("KeyBootstrapper: Parent state uppdaterad: %s", resp.Msg)
+	log.Printf("KeyBootstrapper: Parent state updated: %s", resp.Msg)
 
-	// Om nyckeln är okänd, bootstrappa den med parent
+	// If the key is unknown, bootstrap it with parent
 	if keystate.KeyState == edns0.KeyStateUnknown {
 
 		zd, _ := FindZone(KeyName)

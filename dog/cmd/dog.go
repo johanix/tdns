@@ -58,6 +58,7 @@ var rootCmd = &cobra.Command{
 		+WIDTH=N: Set the width of the output to N characters
 		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
 		+OTS=opt_in|opt_out: Set the OTS (transport signaling) EDNS(0)option
+		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
 		+DO_BIT: Set the DO (DNSEC OK) bit
 		+DELEG: Set the DELEG bit in queries
 		+MULTI: Present RRs in multi-line format
@@ -223,6 +224,13 @@ var rootCmd = &cobra.Command{
 					err := edns0.AddOTSOption(opt, otsValue)
 					if err != nil {
 						fmt.Printf("Error from AddOTSOption: %v", err)
+						os.Exit(1)
+					}
+				}
+				if erDomain, ok := options["er"]; ok {
+					err := edns0.AddEROption(opt, erDomain)
+					if err != nil {
+						fmt.Printf("Error from AddEROption: %v", err)
 						os.Exit(1)
 					}
 				}
@@ -396,6 +404,20 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 				return options, nil
 			} else {
 				return nil, fmt.Errorf("Error: Unknown OTS option: %s", otsArg)
+			}
+		}
+
+		// Add support for +ER={agent domain} (RFC9567: DNS Error Reporting)
+		if strings.HasPrefix(strings.ToUpper(ucarg), "+ER") {
+			if !strings.Contains(ucarg, "=") {
+				return nil, fmt.Errorf("Error: +ER option requires an agent domain (e.g., +ER=agent.example.com)")
+			}
+			parts := strings.SplitN(ucarg, "=", 2)
+			if len(parts) > 1 && parts[1] != "" {
+				options["er"] = parts[1]
+				return options, nil
+			} else {
+				return nil, fmt.Errorf("Error: +ER option requires a non-empty agent domain")
 			}
 		}
 

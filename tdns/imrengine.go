@@ -10,14 +10,15 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 
+	cache "github.com/johanix/tdns/tdns/cache"
 	core "github.com/johanix/tdns/tdns/core"
 	"github.com/johanix/tdns/tdns/edns0"
-	cache "github.com/johanix/tdns/tdns/cache"
 	"github.com/miekg/dns"
 )
 
@@ -80,7 +81,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	conf.Internal.RRsetCache = rrcache
 	imr := &Imr{
 		Cache: rrcache,
-		DnskeyCache: cache.NewDnskeyCache(),
+		DnskeyCache: rrcache.DnskeyCache, // Use the same DnskeyCache instance as the cache
 		Options: conf.ImrEngine.Options,
 		Verbose: conf.ImrEngine.Verbose,
 		Debug: conf.ImrEngine.Debug,
@@ -110,6 +111,8 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
 	go imr.ImrEngine(ctx, conf)
+
+	conf.Internal.ImrEngine = imr
 
 	for {
 		select {
@@ -368,9 +371,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	}
 }
 
-func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, dnssec_ok bool) {
-	rd_bit := r.MsgHdr.RecursionDesired
-	cd_bit := r.MsgHdr.CheckingDisabled
+func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
 
@@ -379,56 +380,59 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
 			m.SetRcode(r, dns.RcodeNameError)
-			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, dnssec_ok) && crrset.RRset != nil {
-				appendSOAToMessage(crrset.RRset, dnssec_ok, m)
+			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
+				appendSOAToMessage(crrset.RRset, msgoptions, m)
 			}
-			if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
-				m.AuthenticatedData = true
-			} else if crrset.Validated {
-				m.AuthenticatedData = true
-			}
+			// if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
+			//	m.AuthenticatedData = true
+			// } else if crrset.Validated {
+			//	m.AuthenticatedData = true
+			// }
+			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns &&
 			qtype != dns.TypeSOA:
 			m.SetRcode(r, dns.RcodeSuccess)
-			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, dnssec_ok) && crrset.RRset != nil {
-				appendSOAToMessage(crrset.RRset, dnssec_ok, m)
+			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
+				appendSOAToMessage(crrset.RRset, msgoptions, m)
 			}
-			if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
-				m.AuthenticatedData = true
-			} else if crrset.Validated {
-				m.AuthenticatedData = true
-			}
+			// if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
+			//	m.AuthenticatedData = true
+			// } else if crrset.Validated {
+			//	m.AuthenticatedData = true
+			// }
+			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
 			crrset.RRset != nil && crrset.RRset.RRtype == qtype:
-			if !cd_bit && (crrset.EDECode != 0 || crrset.Bogus) {
+			if !msgoptions.CD && (crrset.EDECode != 0 || crrset.State == cache.ValidationStateBogus) {
 				m.Answer = nil
 				m.Ns = nil
 				m.SetRcode(r, dns.RcodeServerFailure)
 				if crrset.EDECode != 0 {
-					edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, dnssec_ok)
+					edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
 				}
 				w.WriteMsg(m)
 				return
 			}
 			m.SetRcode(r, dns.RcodeSuccess)
 			m.Answer = crrset.RRset.RRs
-			if dnssec_ok {
+			if msgoptions.DO {
 				m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
 			}
-			if crrset.Validated {
-				m.AuthenticatedData = true
-			}
+			// if crrset.Validated {
+			//	m.AuthenticatedData = true
+			// }
+			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
 			w.WriteMsg(m)
 			return
 		}
 	}
 
 	m.SetRcode(r, dns.RcodeServerFailure)
-	if rd_bit {
+	if msgoptions.RD {
 		log.Printf("ImrResponder: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", qname, dns.TypeToString[qtype])
 		maxiter := 12
 
@@ -526,7 +530,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 							log.Printf("Error from IterativeDNSQuery: %v", err)
 							continue
 						}
-						done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, dnssec_ok, cd_bit, m, w, r)
+						done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
 						if err != nil {
 							return
 						}
@@ -554,7 +558,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				w.WriteMsg(m)
 				return
 			}
-			done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, dnssec_ok, cd_bit, m, w, r)
+			done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
 			if err != nil {
 				return
 			}
@@ -577,8 +581,8 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 // returns true if we have a response (i.e. we're done), false if we have an error
 // all errors are treated as "done"
-func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context cache.CacheContext, dnssecOK bool, cdflag bool, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
-	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, dnssec_ok: %v, cd: %v", qname, rrset, rcode, context, dnssecOK, cdflag)
+func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context cache.CacheContext, msgoptions *edns0.MsgOptions, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
+	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, DO: %v, CD: %v", qname, rrset, rcode, context, msgoptions.DO, msgoptions.CD)
 	m.SetRcode(r, rcode)
 	if rrset != nil {
 		log.Printf("ImrResponder: received response from IterativeDNSQuery:")
@@ -586,19 +590,26 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			log.Printf("ImrResponder: %s", rr.String())
 		}
 		m.Answer = rrset.RRs
-		if dnssecOK {
+		if msgoptions.DO {
 			m.Answer = append(m.Answer, rrset.RRSIGs...)
 		}
 		// Set AD if this RRset is validated (from cache or on-the-fly)
 		var validated bool
-		shouldValidate := dnssecOK && !cdflag
+		vstate := cache.ValidationStateNone
+		var err error
+		shouldValidate := msgoptions.DO && !msgoptions.CD
 		if imr.Cache != nil && shouldValidate {
-			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.Validated {
+			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.State == cache.ValidationStateSecure {
 				validated = true
 			} else {
-				if ok, _ := imr.Cache.ValidateRRset(ctx, cache.DnskeyCache, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug); ok {
-					validated = true
+				_, vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+				if err != nil {
+					log.Printf("ProcessAuthDNSResponse: failed to validate RRset: %v", err)
+					m.SetRcode(r, dns.RcodeServerFailure)
+					w.WriteMsg(m)
+					return false, err
 				}
+				validated = vstate == cache.ValidationStateSecure
 			}
 		}
 		if validated && shouldValidate {
@@ -614,9 +625,9 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		m.Answer = nil
 		m.Ns = nil
 		m.SetRcode(r, dns.RcodeServerFailure)
-		edeCode, edeText := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, dnssecOK)
-		if dnssecOK && edeCode != 0 {
-			edns0.AttachEDEToResponseWithText(m, edeCode, edeText, dnssecOK)
+		edeCode, edeText := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO)
+		if msgoptions.DO && edeCode != 0 {
+			edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
 		}
 		w.WriteMsg(m)
 		return true, nil
@@ -624,7 +635,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	switch context {
 	case cache.ContextNXDOMAIN:
 		m.SetRcode(r, dns.RcodeNameError)
-		imr.serveNegativeResponse(ctx, qname, qtype, dnssecOK, cdflag, m, r)
+		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
 		w.WriteMsg(m)
 		return true, nil
 	case cache.ContextReferral:
@@ -632,14 +643,14 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		return false, nil
 	case cache.ContextNoErrNoAns:
 		m.SetRcode(r, dns.RcodeSuccess)
-		imr.serveNegativeResponse(ctx, qname, qtype, dnssecOK, cdflag, m, r)
+		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
 		w.WriteMsg(m)
 		return true, nil
 	}
 	return false, nil
 }
 
-func appendSOAToMessage(soa *core.RRset, dnssecOK bool, m *dns.Msg) {
+func appendSOAToMessage(soa *core.RRset, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	if soa == nil || m == nil {
 		return
 	}
@@ -649,7 +660,7 @@ func appendSOAToMessage(soa *core.RRset, dnssecOK bool, m *dns.Msg) {
 		}
 		m.Ns = append(m.Ns, dns.Copy(rr))
 	}
-	if dnssecOK {
+	if msgoptions.DO {
 		for _, sig := range soa.RRSIGs {
 			if sig == nil {
 				continue
@@ -659,7 +670,7 @@ func appendSOAToMessage(soa *core.RRset, dnssecOK bool, m *dns.Msg) {
 	}
 }
 
-func appendNegAuthorityToMessage(m *dns.Msg, neg []*core.RRset, dnssecOK bool) bool {
+func appendNegAuthorityToMessage(m *dns.Msg, neg []*core.RRset, msgoptions *edns0.MsgOptions) bool {
 	if m == nil || len(neg) == 0 {
 		return false
 	}
@@ -675,7 +686,7 @@ func appendNegAuthorityToMessage(m *dns.Msg, neg []*core.RRset, dnssecOK bool) b
 			m.Ns = append(m.Ns, dns.Copy(rr))
 			appended = true
 		}
-		if dnssecOK {
+		if msgoptions.DO {
 			for _, sig := range set.RRSIGs {
 				if sig == nil {
 					continue
@@ -730,167 +741,76 @@ func buildNegAuthorityFromMsg(src *dns.Msg) []*core.RRset {
 	return out
 }
 
-func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, dnssecOK bool, cdflag bool, resp *dns.Msg, src *dns.Msg) bool {
+func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, msgoptions *edns0.MsgOptions, resp *dns.Msg, src *dns.Msg) bool {
 	if resp == nil {
 		return false
 	}
 	cached := imr.Cache.Get(qname, qtype)
 
-	if cdflag {
+	if msgoptions.CD {
 		if cached != nil && cached.RRset != nil {
-			appendSOAToMessage(cached.RRset, dnssecOK, resp)
+			appendSOAToMessage(cached.RRset, msgoptions, resp)
 			return true
 		}
-		appendSOAFromMsg(src, dnssecOK, resp)
+		appendSOAFromMsg(src, msgoptions, resp)
 		return true
 	}
 
-	if !dnssecOK {
+	if !msgoptions.DO {
 		if cached != nil && cached.RRset != nil {
-			appendSOAToMessage(cached.RRset, dnssecOK, resp)
+			appendSOAToMessage(cached.RRset, msgoptions, resp)
 			if cached.Validated {
 				resp.AuthenticatedData = true
 			}
-			attachNegativeEDE(resp, dnssecOK, cached)
+			attachNegativeEDE(resp, msgoptions, cached)
 			return true
 		}
-		attachNegativeEDE(resp, dnssecOK, cached)
-		appendSOAFromMsg(src, dnssecOK, resp)
+		attachNegativeEDE(resp, msgoptions, cached)
+		appendSOAFromMsg(src, msgoptions, resp)
 		return true
 	}
 
 	var neg []*core.RRset
 	if cached != nil && len(cached.NegAuthority) > 0 {
 		neg = cached.NegAuthority
-		if appendNegAuthorityToMessage(resp, neg, dnssecOK) {
-			if cached.Validated && dnssecOK {
+		if appendNegAuthorityToMessage(resp, neg, msgoptions) {
+			if cached.Validated && msgoptions.DO {
 				resp.AuthenticatedData = true
 			}
-			attachNegativeEDE(resp, dnssecOK, cached)
+			attachNegativeEDE(resp, msgoptions, cached)
 			return true
 		}
 	}
 	if cached != nil && cached.RRset != nil {
-		appendSOAToMessage(cached.RRset, dnssecOK, resp)
+		appendSOAToMessage(cached.RRset, msgoptions, resp)
 		if cached.Validated {
 			resp.AuthenticatedData = true
 		}
-		attachNegativeEDE(resp, dnssecOK, cached)
+		attachNegativeEDE(resp, msgoptions, cached)
 		return true
 	}
 	neg = buildNegAuthorityFromMsg(src)
-	if len(neg) > 0 && appendNegAuthorityToMessage(resp, neg, dnssecOK) {
-		if dnssecOK && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, neg, imr.IterativeDNSQueryFetcher()) {
-			resp.AuthenticatedData = true
-		}
-		attachNegativeEDE(resp, dnssecOK, cached)
+	if len(neg) > 0 && appendNegAuthorityToMessage(resp, neg, msgoptions) {
+		// if msgoptions.DO && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, neg, imr.IterativeDNSQueryFetcher()) {
+		//	resp.AuthenticatedData = true
+		//}
+		resp.AuthenticatedData = cached.State == cache.ValidationStateSecure
+		attachNegativeEDE(resp, msgoptions, cached)
 		return true
 	}
-	attachNegativeEDE(resp, dnssecOK, cached)
-	appendSOAFromMsg(src, dnssecOK, resp)
+	attachNegativeEDE(resp, msgoptions, cached)
+	appendSOAFromMsg(src, msgoptions, resp)
 	return true
 }
 
-func attachNegativeEDE(resp *dns.Msg, dnssecOK bool, cached *cache.CachedRRset) {
+func attachNegativeEDE(resp *dns.Msg, msgoptions *edns0.MsgOptions, cached *cache.CachedRRset) {
 	if resp == nil || cached == nil || cached.EDECode == 0 {
 		return
 	}
-	edns0.AttachEDEToResponseWithText(resp, cached.EDECode, cached.EDEText, dnssecOK)
+	edns0.AttachEDEToResponseWithText(resp, cached.EDECode, cached.EDEText, msgoptions.DO)
 }
 
-/*
-func lookupDnskeyEDE(rrcache *cache.RRsetCacheT, rrset *core.RRset) (uint16, string, bool) {
-	if rrcache == nil || rrset == nil {
-		return 0, "", false
-	}
-	for _, raw := range rrset.RRSIGs {
-		sig, ok := raw.(*dns.RRSIG)
-		if !ok || sig == nil {
-			continue
-		}
-		signer := dns.CanonicalName(sig.SignerName)
-		if signer == "" {
-			continue
-		}
-		ds := rrcache.Get(signer, dns.TypeDS)
-		if ds == nil || ds.RRset == nil || len(ds.RRset.RRs) == 0 || !ds.Validated {
-			continue
-		}
-		dnskey := rrcache.Get(signer, dns.TypeDNSKEY)
-		if dnskey == nil || dnskey.EDECode == 0 {
-			continue
-		}
-		text := dnskey.EDEText
-		if text == "" && dnskey.EDECode == 9 {
-			zone := strings.TrimSuffix(signer, ".")
-			if zone == "" {
-				zone = "."
-			}
-			text = fmt.Sprintf("no DNSKEY matches DS for zone %s", zone)
-		}
-		return dnskey.EDECode, text, true
-	}
-	return 0, "", false
-}
-*/
-
-/*
-func markRRsetBogus(rrcache *cache.RRsetCacheT, qname string, qtype uint16, rrset *core.RRset, dnssecOK bool) (uint16, string) {
-	if rrcache == nil || qname == "" {
-		return 0, ""
-	}
-	var edeCode uint16
-	var edeText string
-	if dnssecOK {
-		if code, text, ok := rrcache.lookupDnskeyEDE(rrset); ok {
-			edeCode = code
-			edeText = text
-		}
-	}
-	var cached *cache.CachedRRset
-	if cached = rrcache.Get(qname, qtype); cached == nil {
-		cached = &cache.CachedRRset{
-			Name:    qname,
-			RRtype:  qtype,
-			Rcode:   uint8(dns.RcodeSuccess),
-			Context: ContextAnswer,
-		}
-	}
-	cached.Bogus = true
-	if edeCode != 0 {
-		cached.EDECode = edeCode
-		cached.EDEText = edeText
-	}
-	if rrset != nil {
-		cached.RRset = cloneRRset(rrset)
-	}
-	rrcache.Set(qname, qtype, cached)
-	return edeCode, edeText
-}
-
-func cloneRRset(rs *core.RRset) *core.RRset {
-	if rs == nil {
-		return nil
-	}
-	clone := &core.RRset{
-		Name:   rs.Name,
-		Class:  rs.Class,
-		RRtype: rs.RRtype,
-	}
-	for _, rr := range rs.RRs {
-		if rr != nil {
-			clone.RRs = append(clone.RRs, dns.Copy(rr))
-		}
-	}
-	for _, sig := range rs.RRSIGs {
-		if sig != nil {
-			clone.RRSIGs = append(clone.RRSIGs, dns.Copy(sig))
-		}
-	}
-	return clone
-}
-*/
-func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uint16, dnssecOK bool, m *dns.Msg) bool {
+func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uint16, msgoptions *edns0.MsgOptions, m *dns.Msg) bool {
 	if rrcache == nil || m == nil {
 		return false
 	}
@@ -898,14 +818,14 @@ func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uin
 	if cached == nil || cached.RRset == nil {
 		return false
 	}
-	appendSOAToMessage(cached.RRset, dnssecOK, m)
+	appendSOAToMessage(cached.RRset, msgoptions, m)
 	if cached.Validated {
 		m.AuthenticatedData = true
 	}
 	return true
 }
 
-func appendSOAFromMsg(r *dns.Msg, dnssecOK bool, m *dns.Msg) {
+func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	if r == nil || len(r.Ns) == 0 {
 		return
 	}
@@ -927,60 +847,30 @@ func appendSOAFromMsg(r *dns.Msg, dnssecOK bool, m *dns.Msg) {
 		}
 	}
 	if soaRRset != nil {
-		appendSOAToMessage(soaRRset, dnssecOK, m)
+		appendSOAToMessage(soaRRset, msgoptions, m)
 	}
 }
-
-/*
-func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[string]*AuthServer, error) {
-	// Iterate through known zone names and return the longest match.
-	var bestmatch string
-	// var servers []string
-	var servers map[string]*AuthServer
-	if Globals.Debug {
-		log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
-	}
-	// for item := range rrcache.Servers.IterBuffered() {
-	//	z := item.Key
-	//	ss := item.Val
-	//	if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
-	//		bestmatch = z
-	//		servers = ss
-	//	}
-	// }
-	for item := range rrcache.ServerMap.IterBuffered() {
-		z := item.Key
-		ss := item.Val
-		if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
-			bestmatch = z
-			servers = ss
-		}
-	}
-
-	if Globals.Debug {
-		auths := []string{}
-		for name, _ := range servers {
-			auths = append(auths, name)
-		}
-		log.Printf("FindClosestKnownZone: authservers for zone %q: %s", qname, strings.Join(auths, ", "))
-	}
-	return bestmatch, servers, nil
-}
-	*/
 
 func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
 	ImrHandler := imr.createImrHandler(ctx, conf)
-	dns.HandleFunc(".", ImrHandler)
+	
+	// Create a local ServeMux for ImrEngine to avoid conflicts with other engines
+	imrMux := dns.NewServeMux()
+	imrMux.HandleFunc(".", ImrHandler)
 
-	addresses := viper.GetStringSlice("imrengine.addresses")
+	addresses := conf.ImrEngine.Addresses
 	if CaseFoldContains(conf.ImrEngine.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
+		if len(addresses) == 0 {
+			log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
+		}
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
 				server := &dns.Server{
-					Addr: addr,
-					Net:  net,
+					Addr:    addr,
+					Net:     net,
+					Handler: imrMux, // Use local mux instead of global handler
 					// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 				}
 				servers = append(servers, server)
@@ -1167,6 +1057,9 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 		}
 	}
 
+	// fmt.Printf("initializeImrTrustAnchors: dnskeysByName: %+v\n", dnskeysByName)
+	// fmt.Printf("initializeImrTrustAnchors: dsByName: %+v\n", dsByName)
+
 	// Add direct DNSKEY anchors to cache as trusted
 	for name, list := range dnskeysByName {
 		log.Printf("initializeImrTrustAnchors: zone %q has DNSKEY TAs", name)
@@ -1178,6 +1071,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				Keyid:       dk.KeyTag(),
 				Validated:   true,
 				Trusted:     true,
+				State:       cache.ValidationStateSecure,
 				TrustAnchor: true,
 				Dnskey:      *dk,
 				Expiration:  exp,
@@ -1194,7 +1088,23 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 	for name := range dsByName {
 		seenNames[name] = true
 	}
-	for anchorName := range seenNames {
+	// Process zones in deterministic order: root first, then others sorted
+	anchorNames := make([]string, 0, len(seenNames))
+	hasRoot := false
+	for name := range seenNames {
+		if name == "." {
+			hasRoot = true
+		} else {
+			anchorNames = append(anchorNames, name)
+		}
+	}
+	sort.Strings(anchorNames)
+	if hasRoot {
+		anchorNames = append([]string{"."}, anchorNames...)
+	}
+	log.Printf("initializeImrTrustAnchors: processing %d anchored names in order: %v", len(anchorNames), anchorNames)
+	for _, anchorName := range anchorNames {
+		log.Printf("initializeImrTrustAnchors: processing anchor %q", anchorName)
 		// Seed DS RRset from trust anchors (if provided) into cache as validated,
 		// so DNSKEY validation can find a validated DS RRset.
 		if dslist := dsByName[anchorName]; len(dslist) > 0 {
@@ -1223,6 +1133,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				RRset:      dsRRset,
 				Context:    cache.ContextPriming,
 				Validated:  true,
+				State:      cache.ValidationStateSecure,
 				Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
 			})
 			if Globals.Debug {
@@ -1239,7 +1150,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 			}
 		}
-		rrset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, false)
+		rrset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true)
 		if err != nil {
 			return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
 		}
@@ -1248,6 +1159,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 		}
 
 		// Compute min TTL for expiration of added anchors
+/*
 		var minTTL uint32
 		if len(rrset.RRs) > 0 {
 			minTTL = rrset.RRs[0].Header().Ttl
@@ -1257,7 +1169,9 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				}
 			}
 		}
-		exp := time.Now().Add(time.Duration(minTTL) * time.Second)
+			*/
+		minTTL := cache.GetMinTTL(rrset.RRs)
+		exp := time.Now().Add(minTTL)
 
 		// If DS present, match and add corresponding DNSKEY(s) to the TA store (trusted)
 		if dslist := dsByName[anchorName]; len(dslist) > 0 {
@@ -1277,11 +1191,14 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 						continue
 					}
 					if strings.EqualFold(computed.Digest, ds.Digest) {
+						// This DNSKEY matches the DS trust anchor, so it's validated
+						// Add it to DnskeyCache immediately so it can be used to validate the DNSKEY RRset's signatures
 						cdr := cache.CachedDnskeyRRset{
 							Name:       dns.Fqdn(dk.Hdr.Name),
 							Keyid:      keyid,
 							Validated:  true,
 							Trusted:    true,
+							State:      cache.ValidationStateSecure,
 							Dnskey:     *dk,
 							Expiration: exp,
 						}
@@ -1292,48 +1209,129 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			}
 		}
 
-		// Validate the DNSKEY RRset using the TA(s) in DnskeyCache
-		valid, err := imr.Cache.ValidateRRset(ctx, cache.DnskeyCache, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
-		if err != nil || !valid {
-			return fmt.Errorf("failed to validate %s DNSKEY RRset: %v", anchorName, err)
-		}
-		// Mark cached DNSKEY RRset as validated
-		if crr := imr.Cache.Get(anchorName, dns.TypeDNSKEY); crr != nil {
-			crr.Validated = true
+		// Check if the DNSKEY RRset is already validated in cache (from IterativeDNSQuery)
+		crr := imr.Cache.Get(anchorName, dns.TypeDNSKEY)
+		var vstate cache.ValidationState
+		if crr != nil && crr.State == cache.ValidationStateSecure {
+			// Already validated, use the cached state
+			vstate = crr.State
+			if Globals.Debug {
+				log.Printf("initializeImrTrustAnchors: %s DNSKEY RRset already validated in cache", anchorName)
+			}
+		} else {
+			// Not validated yet, validate it now
+			var err error
+			_, vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			if err != nil {
+				log.Printf("initializeImrTrustAnchors: failed to validate %s DNSKEY RRset: %v", anchorName, err)
+				return fmt.Errorf("failed to validate %s DNSKEY RRset: %v", anchorName, err)
+			}
+			if vstate != cache.ValidationStateSecure {
+				log.Printf("initializeImrTrustAnchors: %q DNSKEY RRset failed to validate (vstate: %s)", anchorName, cache.ValidationStateToString[vstate])
+				return fmt.Errorf("failed to validate %q DNSKEY RRset (vstate: %s)", anchorName, cache.ValidationStateToString[vstate])
+			}
+			// Update cached RRset with validated state
+			if crr == nil {
+				// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
+				minTTL := cache.GetMinTTL(rrset.RRs)
+				if minTTL == 0 {
+					minTTL = 86400 * time.Second
+				}
+				crr = &cache.CachedRRset{
+					Name:       anchorName,
+					RRtype:     dns.TypeDNSKEY,
+					Rcode:      uint8(dns.RcodeSuccess),
+					RRset:      rrset,
+					Context:    cache.ContextPriming,
+					Validated:  true,
+					State:      vstate,
+					Expiration: time.Now().Add(minTTL),
+				}
+			} else {
+				// Update existing cached RRset
+				crr.Validated = true
+				crr.State = vstate
+			}
 			imr.Cache.Set(anchorName, dns.TypeDNSKEY, crr)
 		}
+		// fmt.Printf("initializeImrTrustAnchors: cached DNSKEY RRset for %q (expires %v): %+v\n", anchorName, exp, crr)
+
 		// Since the DNSKEY RRset validated, mark all contained DNSKEYs as validated/trusted in DnskeyCache
 		for _, rr := range rrset.RRs {
 			if dk, ok := rr.(*dns.DNSKEY); ok {
-				cache.DnskeyCache.Set(anchorName, dk.KeyTag(), &cache.CachedDnskeyRRset{
+				cdr := cache.CachedDnskeyRRset{
 					Name:       anchorName,
 					Keyid:      dk.KeyTag(),
 					Validated:  true,
 					Trusted:    true,
+					State:      cache.ValidationStateSecure,
 					Dnskey:     *dk,
 					Expiration: exp,
-				})
+				}
+				imr.Cache.DnskeyCache.Set(anchorName, dk.KeyTag(), &cdr)
+				log.Printf("initializeImrTrustAnchors: DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
 			}
 		}
 
-		// Fetch and validate the NS RRset for the anchor zone
-		nsRRset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, false)
+		// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
+		nsRRset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true)
 		if err != nil {
-			return fmt.Errorf("failed to fetch %s NS RRset: %v", anchorName, err)
+			log.Printf("initializeImrTrustAnchors: warning: failed to fetch %s NS RRset: %v (continuing)", anchorName, err)
+			continue // Continue with next zone
 		}
 		if nsRRset == nil || len(nsRRset.RRs) == 0 {
-			return fmt.Errorf("no %s NS RRset found", anchorName)
+			log.Printf("initializeImrTrustAnchors: warning: no %s NS RRset found (continuing)", anchorName)
+			continue // Continue with next zone
 		}
-		valid, err = imr.Cache.ValidateRRset(ctx, cache.DnskeyCache, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
-		if err != nil || !valid {
-			return fmt.Errorf("failed to validate %s NS RRset: %v", anchorName, err)
-		}
-		// Mark cached NS RRset as validated
-		if crr := imr.Cache.Get(anchorName, dns.TypeNS); crr != nil {
-			crr.Validated = true
-			imr.Cache.Set(anchorName, dns.TypeNS, crr)
+		// Check if the NS RRset is already validated in cache (from IterativeDNSQuery)
+		nsCrr := imr.Cache.Get(anchorName, dns.TypeNS)
+		var nsVstate cache.ValidationState
+		if nsCrr != nil && nsCrr.State == cache.ValidationStateSecure {
+			// Already validated, use the cached state
+			nsVstate = nsCrr.State
+			if Globals.Debug {
+				log.Printf("initializeImrTrustAnchors: %s NS RRset already validated in cache", anchorName)
+			}
+		} else {
+			// Not validated yet, validate it now
+			_, nsVstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			if err != nil {
+				log.Printf("initializeImrTrustAnchors: warning: failed to validate %s NS RRset: %v (continuing)", anchorName, err)
+				continue // Continue with next zone
+			}
+			if nsVstate != cache.ValidationStateSecure {
+				log.Printf("initializeImrTrustAnchors: warning: %q NS RRset failed to validate (vstate: %s) (continuing)", anchorName, cache.ValidationStateToString[nsVstate])
+				continue // Continue with next zone
+			}
+			// Update cached NS RRset with validated state
+			if nsCrr == nil {
+				// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
+				minTTL := cache.GetMinTTL(nsRRset.RRs)
+				if minTTL == 0 {
+					minTTL = 86400 * time.Second
+				}
+				nsCrr = &cache.CachedRRset{
+					Name:       anchorName,
+					RRtype:     dns.TypeNS,
+					Rcode:      uint8(dns.RcodeSuccess),
+					RRset:      nsRRset,
+					Context:    cache.ContextPriming,
+					Validated:  true,
+					State:      nsVstate,
+					Expiration: time.Now().Add(minTTL),
+				}
+			} else {
+				// Update existing cached RRset
+				nsCrr.Validated = true
+				nsCrr.State = nsVstate
+			}
+			imr.Cache.Set(anchorName, dns.TypeNS, nsCrr)
 		}
 	}
+	// fmt.Printf("initializeImrTrustAnchors: completed. DnskeyCache has %d items\n", imr.Cache.DnskeyCache.Map.Count())
+	// for item := range imr.Cache.DnskeyCache.Map.IterBuffered() {
+	// 	fmt.Printf("initializeImrTrustAnchors: DnskeyCache item: %+v\n", item)
+	// }
 	return nil
 }
 
@@ -1344,14 +1342,11 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		qname := r.Question[0].Name
-		var dnssec_ok bool
-		opt := r.IsEdns0()
-		if opt != nil {
-			dnssec_ok = opt.Do()
+		// var dnssec_ok bool
+		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
+		if err != nil {
+			log.Printf("ImrHandler: error extracting EDNS0 options: %v", err)
 		}
-		rd := r.MsgHdr.RecursionDesired
-		// log.Printf("RecursionDesired: %v", rd)
-		// log.Printf("DNSSEC OK: %v", dnssec_ok)
 
 		qtype := r.Question[0].Qtype
 		log.Printf("ImrHandler: received query for \"%s %s\" from %s (opcode: %s (%d))", qname, dns.TypeToString[qtype], w.RemoteAddr(), dns.OpcodeToString[r.Opcode], r.Opcode)
@@ -1364,7 +1359,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 			return
 
 		case dns.OpcodeQuery:
-			log.Printf("ImrHandler: Lookup request for \"%s %s\" (RD: %v, DO: %v) from %s", qname, dns.TypeToString[qtype], rd, dnssec_ok, w.RemoteAddr())
+			log.Printf("ImrHandler: Lookup request for \"%s %s\" (RD: %v, DO: %v) from %s", qname, dns.TypeToString[qtype], msgoptions.RD, msgoptions.DO, w.RemoteAddr())
 
 			qname = strings.ToLower(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
@@ -1372,7 +1367,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 				return
 			}
 
-			imr.ImrResponder(ctx, w, r, qname, qtype, dnssec_ok)
+			imr.ImrResponder(ctx, w, r, qname, qtype, msgoptions)
 			return
 
 		default:

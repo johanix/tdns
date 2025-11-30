@@ -3,9 +3,18 @@ service:
    verbose:		true
    debug:		true   # writes processed zone to disk
 
-reporter:
-   dns:
+reporters:
+   # active: list of servers to start: "notify" (NOTIFY-only server), "errorchannel" (full DNS engine for RFC9567 error channel)
+   # Default is ["notify"] if not specified
+   active:		[ "notify", "errorchannel" ]  # Start both notify and error channel servers
+   # active:		[ "notify" ]                  # Start only notify server
+   # active:		[ "errorchannel" ]            # Start only error channel server
+
+   notify:
       listen:		127.0.0.1:9998
+
+   errorchannel:
+      listen:		127.0.0.1:9999
 
 keys:
    tsig:

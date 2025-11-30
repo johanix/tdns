@@ -10,9 +10,10 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/tdns/core"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 // Define sets of known types
@@ -57,7 +58,7 @@ var standardDNSTypes = map[uint16]bool{
 // 5. Give up.
 
 func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
-	qname string, qtype uint16, msgoptions MsgOptions, kdb *KeyDB) error {
+	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
 	// Track if the configured transport signal is already present in the Answer section
 	transportSignalInAnswer := false
@@ -133,7 +134,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		log.Fatalf("QueryResponder: failed to get apex data for zone %s", zd.ZoneName)
 	}
 
-	if msgoptions.DnssecOK {
+	if msgoptions.DO {
 		soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
 		if err != nil {
 			log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
@@ -182,7 +183,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		if err != nil {
 			log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
 		}
-		if msgoptions.DnssecOK {
+		if msgoptions.DO {
 			soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
 			if err != nil {
 				log.Printf("QueryResponder: failed to sign SOA RRset for parent zone %s: %v", zd.ZoneName, err)
@@ -200,7 +201,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			log.Printf("QueryResponder: failed to get DS record for %s", qname)
 		}
 		m.Answer = append(m.Answer, dsRRset.RRs...)
-		if msgoptions.DnssecOK {
+		if msgoptions.DO {
 			m.Answer = append(m.Answer, dsRRset.RRSIGs...)
 		}
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
@@ -214,7 +215,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 		// 1. Check for child delegation
 		log.Printf("---> Checking for child delegation for %s", qname)
-		cdd := zd.FindDelegation(qname, msgoptions.DnssecOK)
+		cdd := zd.FindDelegation(qname, msgoptions.DO)
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
@@ -239,7 +240,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-			if msgoptions.DnssecOK {
+			if msgoptions.DO {
 				AddCDEResponse(m, qname, apex, nil)
 			}
 			// log.Printf("QR: qname %s does not exist in zone %s. Returning NXDOMAIN", qname, zd.ZoneName)
@@ -267,7 +268,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		}
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-		if msgoptions.DnssecOK {
+		if msgoptions.DO {
 			AddCDEResponse(m, origqname, apex, nil)
 		}
 		w.WriteMsg(m)
@@ -286,7 +287,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 						log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)
 					}
 					m.Answer = append(m.Answer, v.RRs...)
-					if msgoptions.DnssecOK {
+					if msgoptions.DO {
 						rrset, err := MaybeSignRRset(v, qname)
 						if err != nil {
 							log.Printf("QueryResponder: failed to sign RRset for qname %s: %v", qname, err)
@@ -312,7 +313,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 								}
 							}
 							m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
+							v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DO)
 							m.Extra = append(m.Extra, v4glue.RRs...)
 							m.Extra = append(m.Extra, v6glue.RRs...)
 							if !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
@@ -321,7 +322,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 								}
 							}
 
-							if msgoptions.DnssecOK {
+							if msgoptions.DO {
 								tgtRRset, err := MaybeSignRRset(tgtowner.RRtypes.GetOnlyRRSet(qtype), qname)
 								if err != nil {
 									log.Printf("QueryResponder: failed to sign RRset for qname %s: %v", qname, err)
@@ -333,7 +334,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 								m.Extra = append(m.Extra, v4glue.RRSIGs...)
 								m.Extra = append(m.Extra, v6glue.RRSIGs...)
-								if !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRSIGs) > 0 {
+								if !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRSIGs) > 0 && msgoptions.DO {
 									if !transportSignalInAnswer {
 										m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
 									}
@@ -349,7 +350,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 		// 1. If qname is below the zone apex, check for child delegation
 		// log.Printf("---> Checking for child delegation for %s", qname)
-		cdd := zd.FindDelegation(qname, msgoptions.DnssecOK)
+		cdd := zd.FindDelegation(qname, msgoptions.DO)
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
@@ -389,7 +390,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 				}
 			}
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
+			v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DO)
 			m.Extra = append(m.Extra, v4glue.RRs...)
 			m.Extra = append(m.Extra, v6glue.RRs...)
 			// Add transport signal RRs that aren't already present in the Answer section
@@ -410,11 +411,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 					}
 				}
 				// If we added any TSYNC/SVCB above, consider adding their signatures too
-				if addedAny && msgoptions.DnssecOK && len(zd.TransportSignal.RRSIGs) > 0 {
+				if addedAny && msgoptions.DO && len(zd.TransportSignal.RRSIGs) > 0 {
 					m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
 				}
 			}
-			if msgoptions.DnssecOK {
+			if msgoptions.DO {
 				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
 				if qname == origqname {
 					signed, err := MaybeSignRRset(rrset, qname)
@@ -447,7 +448,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-			if msgoptions.DnssecOK {
+			if msgoptions.DO {
 				rrtypeList := []uint16{}
 				rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
 
@@ -468,7 +469,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 
 		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
 		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
+		v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DO)
 		m.Extra = append(m.Extra, v4glue.RRs...)
 		m.Extra = append(m.Extra, v6glue.RRs...)
 		if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
@@ -476,7 +477,7 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 				m.Extra = append(m.Extra, zd.TransportSignal.RRs...)
 			}
 		}
-		if msgoptions.DnssecOK {
+		if msgoptions.DO {
 			log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
 			m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
@@ -507,10 +508,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	// Final catch everything we don't want to deal with
 	m.MsgHdr.Rcode = dns.RcodeRefused
 	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DnssecOK)
+	v4glue, v6glue = zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DO)
 	m.Extra = append(m.Extra, v4glue.RRs...)
 	m.Extra = append(m.Extra, v6glue.RRs...)
-	if msgoptions.DnssecOK {
+	if msgoptions.DO {
 		m.Extra = append(m.Extra, v4glue.RRSIGs...)
 		m.Extra = append(m.Extra, v6glue.RRSIGs...)
 	}

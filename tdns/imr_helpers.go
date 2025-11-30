@@ -23,6 +23,29 @@ const (
 	transportQueryReasonNewServer   = "new-auth-server"
 )
 
+func (imr *Imr) TransportSignalRRType() uint16 {
+	if imr == nil {
+		return dns.TypeSVCB
+	}
+	if val, ok := imr.Options[ImrOptTransportSignalType]; ok {
+		switch strings.ToLower(val) {
+		case "tsync":
+			return core.TypeTSYNC
+		}
+	}
+	return dns.TypeSVCB
+}
+
+func (imr *Imr) TransportSignalCached(owner string) bool {
+	if owner == "" || imr == nil {
+		return false
+	}
+	if c := imr.Cache.Get(owner, imr.TransportSignalRRType()); c != nil && c.RRset != nil && len(c.RRset.RRs) > 0 {
+		return true
+	}
+	return false
+}
+
 func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, reason string) {
 	if owner == "" || imr.Cache == nil || ctx == nil {
 		return
@@ -48,7 +71,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 	if owner == "" || ctx == nil || imr.Cache == nil {
 		return
 	}
-	if imr.Cache.TransportSignalCached(owner) {
+	if imr.TransportSignalCached(owner) {
 		return
 	}
 	if !imr.Cache.MarkTransportQuery(owner) {
@@ -58,7 +81,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		defer imr.Cache.ClearTransportQuery(owner)
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		rrtype := imr.Cache.TransportSignalRRType()
+		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
 		}
@@ -95,14 +118,16 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 				return
 			}
 			rr := resp.RRset
-			validated := false
+			vstate := cache.ValidationStateNone
 			if len(rr.RRSIGs) > 0 {
-				if ok, _ := imr.Cache.ValidateRRset(queryCtx, cache.DnskeyCache, rr, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug); ok {
-					validated = true
+				_, vstate, err = imr.Cache.ValidateRRset(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+				if err != nil {
+					log.Printf("maybeQueryTLSA: failed to validate TLSA RRset: %v", err)
+					return
 				}
 			}
 			baseHint := baseFromTLSAOwner(owner)
-			imr.Cache.StoreTLSAForServer(baseHint, owner, rr, validated)
+			imr.Cache.StoreTLSAForServer(baseHint, owner, rr, vstate)
 		}(owner)
 	}
 }

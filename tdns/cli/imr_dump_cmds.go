@@ -147,10 +147,17 @@ var dumpAuthServersCmd = &cobra.Command{
 						for _, owner := range owners {
 							rec := tlsaSnapshot[owner]
 							status := "unvalidated"
-							if rec != nil && rec.Validated {
-								status = "validated"
+							stateStr := "none"
+							if rec != nil {
+								if rec.Validated {
+									status = "validated"
+								}
+								stateStr = cache.ValidationStateToString[rec.State]
+								if stateStr == "" {
+									stateStr = "none"
+								}
 							}
-							fmt.Printf("      %s (%s)\n", owner, status)
+							fmt.Printf("      %s (%s, state: %s)\n", owner, status, stateStr)
 							if rec != nil && rec.RRset != nil {
 								for _, rr := range rec.RRset.RRs {
 									fmt.Printf("        %s\n", rr.String())
@@ -348,14 +355,24 @@ var dumpDnskeysCmd = &cobra.Command{
 				}
 				// Include signer name and keyid in header if present in cached RRset
 				var signerInfo string
+				var stateStr string
 				if Conf.Internal.RRsetCache != nil {
-					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
-						if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
-							signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
+					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil {
+						stateStr = cache.ValidationStateToString[c.State]
+						if stateStr == "" {
+							stateStr = "none"
+						}
+						if c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
+							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
+								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
+							}
 						}
 					}
 				}
-				fmt.Printf("\n%s DS (%s%s, TTL: %s)\n", owner, valStr, signerInfo, ov.ds.expires)
+				if stateStr == "" {
+					stateStr = "none"
+				}
+				fmt.Printf("\n%s DS (%s, state: %s%s, TTL: %s)\n", owner, valStr, stateStr, signerInfo, ov.ds.expires)
 				for _, s := range ov.ds.rrs {
 					fmt.Printf("  %s\n", maskDsLine(s))
 				}
@@ -370,10 +387,15 @@ var dumpDnskeysCmd = &cobra.Command{
 				var rrsetValidated bool
 				var rrsetTTL string = "-"
 				var signerInfo string
+				var stateStr string
 				if Conf.Internal.RRsetCache != nil {
 					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDNSKEY); c != nil {
 						rrsetValidated = c.Validated
 						rrsetTTL = tdns.TtlPrint(c.Expiration)
+						stateStr = cache.ValidationStateToString[c.State]
+						if stateStr == "" {
+							stateStr = "none"
+						}
 						if rrsetValidated && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
 							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
 								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
@@ -381,11 +403,14 @@ var dumpDnskeysCmd = &cobra.Command{
 						}
 					}
 				}
+				if stateStr == "" {
+					stateStr = "none"
+				}
 				vStr := "unvalidated"
 				if rrsetValidated {
 					vStr = "validated"
 				}
-				fmt.Printf("\n%s DNSKEY (%s%s, TTL: %s)\n", owner, vStr, signerInfo, rrsetTTL)
+				fmt.Printf("\n%s DNSKEY (%s, state: %s%s, TTL: %s)\n", owner, vStr, stateStr, signerInfo, rrsetTTL)
 				lines := []string{"KeyID | Flags | TTL | Details"}
 				for _, v := range ov.dnskey {
 					detail := fmt.Sprintf("%s DNSKEY %d %d %d %s", v.name, v.flags, v.protocol, v.alg, formatKeySnippet(v.pub))
@@ -464,8 +489,15 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 		for _, owner := range owners {
 			rec := tlsaSnapshot[owner]
 			status := "unvalidated"
-			if rec != nil && rec.Validated {
-				status = "validated"
+			stateStr := "none"
+			if rec != nil {
+				if rec.Validated {
+					status = "validated"
+				}
+				stateStr = cache.ValidationStateToString[rec.State]
+				if stateStr == "" {
+					stateStr = "none"
+				}
 			}
 			ttlStr := "-"
 			expires := "-"
@@ -477,7 +509,7 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 					expires = tdns.TtlPrint(rec.Expiration)
 				}
 			}
-			fmt.Printf("      %s (%s, TTL: %s, Expires: %s)\n", owner, status, ttlStr, expires)
+			fmt.Printf("      %s (%s, state: %s, TTL: %s, Expires: %s)\n", owner, status, stateStr, ttlStr, expires)
 			if rec != nil && rec.RRset != nil {
 				for _, rr := range rec.RRset.RRs {
 					fmt.Printf("        %s\n", rr.String())
@@ -581,13 +613,17 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 	}
 
 	rrtype := dns.TypeToString[uint16(tmp)]
-	// Unified header format: "<owner> <TYPE> (validated|unvalidated, TTL: X)"
+	// Unified header format: "<owner> <TYPE> (validated|unvalidated, state: X, TTL: X)"
 	valStr := "unvalidated"
 	if item.Val.Validated {
 		valStr = "validated"
 	}
+	stateStr := cache.ValidationStateToString[item.Val.State]
+	if stateStr == "" {
+		stateStr = "none"
+	}
 	ttlStr := tdns.TtlPrint(item.Val.Expiration)
-	fmt.Printf("\n%s %s (%s, TTL: %s", parts[0], rrtype, valStr, ttlStr)
+	fmt.Printf("\n%s %s (%s, state: %s, TTL: %s", parts[0], rrtype, valStr, stateStr, ttlStr)
 	if item.Val.Bogus {
 		fmt.Printf(", bogus")
 	}

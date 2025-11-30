@@ -10,9 +10,10 @@ import (
 	"log"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -22,6 +23,7 @@ type ScanRequest struct {
 	CurrentChildData ChildDelegationData // Current parent-side delegation data for child
 	ZoneData         *ZoneData
 	RRtype           uint16
+	Edns0Options     *edns0.MsgOptions
 	Response         chan ScanResponse
 }
 
@@ -76,8 +78,9 @@ func (scanner *Scanner) AddLogger(rrtype string) error {
 	return nil
 }
 
-func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq chan AuthQueryRequest) error {
-	//	scannerq := conf.Internal.ScannerQ
+func ScannerEngine(ctx context.Context, conf *Config) error {
+	scannerq := conf.Internal.ScannerQ
+	authqueryq := conf.Internal.AuthQueryQ
 	interval := viper.GetInt("scanner.interval")
 	if interval < 10 {
 		interval = 10
@@ -121,6 +124,30 @@ func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq ch
 				switch sr.RRtype {
 				case dns.TypeCDS:
 					log.Printf("go scanner.CheckCDS(sr)")
+					if sr.Edns0Options != nil && sr.Edns0Options.HasEROption {
+						log.Printf("ScannerEngine: ER option is present. Should send NOTIMP EDE to agent %q. Ignoring.", sr.Edns0Options.ErAgentDomain)
+
+						if conf.Internal.ImrEngine != nil {
+							tmp, err := conf.Internal.ImrEngine.ImrQuery(ctx, sr.Edns0Options.ErAgentDomain, dns.TypeA, dns.ClassINET, nil)
+							if err != nil {
+								log.Printf("ScannerEngine: Error from ImrQuery: %v", err)
+							} else {
+								log.Printf("ScannerEngine: Looked up agent domain %q using ImrQuery:\n%+v\n", sr.Edns0Options.ErAgentDomain, tmp)
+							}
+							er_qname := fmt.Sprintf("_er.%d.%s%d._er.%s", sr.RRtype, sr.ChildZone, edns0.EDEScannerNotImplemented, 
+							sr.Edns0Options.ErAgentDomain)
+							log.Printf("ScannerEngine: Querying error channel %q for agent %q:\n%s\n", er_qname, sr.Edns0Options.ErAgentDomain, er_qname)
+							ir, err := conf.Internal.ImrEngine.ImrQuery(ctx, er_qname, dns.TypeTXT, dns.ClassINET, nil)
+							if err != nil {
+								log.Printf("ScannerEngine: Error from ImrQuery: %v", err)
+							} else {
+								log.Printf("ScannerEngine: Received response from ImrQuery: %v", ir)
+							}
+						} else {
+							log.Printf("ScannerEngine: ImrEngine not active. Ignoring.")
+						}
+						continue
+					}
 				case dns.TypeCSYNC:
 					go scanner.CheckCSYNC(sr, &sr.CurrentChildData)
 				case dns.TypeDNSKEY:

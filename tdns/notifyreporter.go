@@ -13,13 +13,11 @@ import (
 
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // This is a minimal DNS server that only handles NOTIFYs. It is (only?) used in the tdns-reporter.
 
-func NotifyReporter(conf *Config, tsigSecrets map[string]string) (stop func(context.Context) error, err error) {
-	addr := viper.GetString("reporter.dns.listen")
+func NotifyReporter(conf *Config, tsigSecrets map[string]string, addr string) (stop func(context.Context) error, err error) {
 	if addr == "" {
 		addr = ":53"
 	}

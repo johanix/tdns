@@ -44,49 +44,52 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 	return nil
 }
 
-func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
+func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
 
-	qname := dhr.Qname
-	ntype := dhr.Msg.Question[0].Qtype
+	qname := dnr.Qname
+	ntype := dnr.Msg.Question[0].Qtype
 
 	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone %q", dns.TypeToString[ntype], qname)
 
 	m := new(dns.Msg)
-	m.SetReply(dhr.Msg)
+	m.SetReply(dnr.Msg)
+	m.SetRcode(dnr.Msg, dns.RcodeSuccess)
 
 	// Let's see if we can find the zone
 	zd, _ := FindZone(qname)
 	if zd == nil || (zd != nil && zd.IsChildDelegation(qname)) {
 		log.Printf("NotifyResponder: Received Notify for unknown zone %q. Ignoring.", qname)
 		m := new(dns.Msg)
-		m.SetRcode(dhr.Msg, dns.RcodeRefused)
-		dhr.ResponseWriter.WriteMsg(m)
+		m.SetRcode(dnr.Msg, dns.RcodeRefused)
+		dnr.ResponseWriter.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
 
 	if zd.Error && zd.ErrorType != RefreshError {
 		log.Printf("NotifyResponder: Received Notify for zone %q, but it is in error state: %s", qname, zd.ErrorMsg)
 		m := new(dns.Msg)
-		m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
-		dhr.ResponseWriter.WriteMsg(m)
+		m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+		dnr.ResponseWriter.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
 
 	// log.Printf("NotifyResponder: The qname %s seems to belong to the known zone %s", qname, zd.ZoneName)
+	m.MsgHdr.Authoritative = true
 
 	switch ntype {
 	case dns.TypeSOA:
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
-			m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
-			if err := dhr.ResponseWriter.WriteMsg(m); err != nil {
+			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
 				log.Printf("NotifyResponder: WriteMsg error on cancellation (SOA): %v", err)
 			}
 			return nil
 		case zonech <- ZoneRefresher{
 			Name:      qname, // send zone name into RefreshEngine
 			ZoneStore: zd.ZoneStore,
+			Edns0Options: dnr.Options,
 		}:
 		}
 		log.Printf("NotifyResponder: Received NOTIFY(%s) for %q Refreshing.",
@@ -98,8 +101,8 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
-			m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
-			if err := dhr.ResponseWriter.WriteMsg(m); err != nil {
+			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
 				log.Printf("NotifyResponder: WriteMsg error on cancellation (CDS/CSYNC): %v", err)
 			}
 			return nil
@@ -108,6 +111,7 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 			ChildZone: qname,
 			ZoneData:  zd,
 			RRtype:    ntype,
+			Edns0Options: dnr.Options,
 		}:
 		}
 
@@ -117,8 +121,8 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
-			m.SetRcode(dhr.Msg, dns.RcodeServerFailure)
-			if err := dhr.ResponseWriter.WriteMsg(m); err != nil {
+			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
 				log.Printf("NotifyResponder: WriteMsg error on cancellation (DNSKEY): %v", err)
 			}
 			return nil
@@ -127,6 +131,7 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 			ChildZone: qname,
 			ZoneData:  zd,
 			RRtype:    ntype,
+			Edns0Options: dnr.Options,
 		}:
 		}
 
@@ -135,8 +140,6 @@ func NotifyResponder(ctx context.Context, dhr *DnsNotifyRequest, zonech chan Zon
 			dns.TypeToString[ntype])
 	}
 
-	m.SetRcode(dhr.Msg, dns.RcodeSuccess)
-	m.MsgHdr.Authoritative = true
-	dhr.ResponseWriter.WriteMsg(m)
+	dnr.ResponseWriter.WriteMsg(m)
 	return nil
 }

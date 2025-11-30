@@ -58,16 +58,14 @@ var ImrQueryCmd = &cobra.Command{
 			if r.RRset != nil {
 				// fmt.Printf("%v\n", r.RRset)
 				// Determine validation status from cache for the queried <qname,qtype>
-				isValidated := false
+				vstate := cache.ValidationStateNone
 				if Conf.Internal.RRsetCache != nil {
-					if c := Conf.Internal.RRsetCache.Get(qname, qtype); c != nil && c.Validated {
-						isValidated = true
+					if c := Conf.Internal.RRsetCache.Get(qname, qtype); c != nil {
+						vstate = c.State
 					}
 				}
-				suffix := ""
-				if isValidated {
-					suffix = " (validated)"
-				}
+				suffix := fmt.Sprintf(" (state: %s)", cache.ValidationStateToString[vstate])
+				
 				for _, rr := range r.RRset.RRs {
 					switch rr.Header().Rrtype {
 					case qtype, dns.TypeCNAME:

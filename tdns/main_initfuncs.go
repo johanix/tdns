@@ -212,7 +212,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent:
 		go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-		go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+		go ScannerEngine(ctx, conf)
 
 		kdb.UpdateQ = make(chan UpdateRequest, 10)
 		conf.Internal.UpdateQ = kdb.UpdateQ
@@ -303,6 +303,15 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 		conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	}
 	go ValidatorEngine(ctx, conf)
+
+	if viper.GetBool("recursorengine.active") {
+		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
+		go conf.RecursorEngine(ctx)
+		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	} else {
+		log.Printf("TDNS %s (%s): NOT starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	}
+
 	kdb := conf.Internal.KeyDB
 	conf.Internal.APIStopCh = make(chan struct{})
 	if conf.Internal.RefreshZoneCh == nil {
@@ -319,7 +328,7 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 	go RefreshEngine(ctx, conf)
 	go Notifier(ctx, conf.Internal.NotifyQ)
 	go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-	go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+	go ScannerEngine(ctx, conf)
 	kdb.UpdateQ = make(chan UpdateRequest, 10)
 	conf.Internal.UpdateQ = kdb.UpdateQ
 	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
@@ -364,7 +373,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	log.Printf("TDNS %s (%s): starting: agent-to-agent sync engines", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	// Common engines
 	go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-	go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+	go ScannerEngine(ctx, conf)
 	kdb.UpdateQ = make(chan UpdateRequest, 10)
 	conf.Internal.UpdateQ = kdb.UpdateQ
 	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)

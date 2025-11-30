@@ -9,6 +9,7 @@ import (
 	"github.com/miekg/dns"
 )
 
+// XXX: Would be nicer if this was a receiver function or rrset*
 func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]
@@ -142,4 +143,15 @@ func (rrset *RRset) Clone() *RRset {
 		}
 	}
 	return clone
+}
+
+func (rrset *RRset) String() string {
+	out := ""
+	for _, rr := range rrset.RRs {
+		out += rr.String() + "\n"
+	}
+	for _, sig := range rrset.RRSIGs {
+		out += sig.String() + "\n"
+	}
+	return out
 }
