@@ -50,6 +50,7 @@ var rootCmd = &cobra.Command{
 	
 	Options:
 		+DNSSEC: Set the DO (DNSEC OK) bit in queries
+		+CD: Set the CD (Checking Disabled) bit in queries
 		+COMPACT: Set the COMPACT bit in queries (for compact denial of existence proofs)
 		+TCP: Force TCP transport
 		+TLS: Force TLS transport
@@ -191,6 +192,10 @@ var rootCmd = &cobra.Command{
 				} else {
 					m.SetQuestion(qname, rrtype)
 				}
+				// Set CD (Checking Disabled) flag if requested
+				if options["cd"] == "true" {
+					m.MsgHdr.CheckingDisabled = true
+				}
 				// do_bit = options["do_bit"] == "true"
 				// m.SetEdns0(4096, do_bit)
 				opt := &dns.OPT{
@@ -328,6 +333,9 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 	switch ucarg {
 	case "+DNSSEC":
 		options["do_bit"] = "true"
+		return options, nil
+	case "+CD":
+		options["cd"] = "true"
 		return options, nil
 	case "+COMPACT":
 		options["compact"] = "true"
