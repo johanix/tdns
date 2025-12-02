@@ -20,20 +20,21 @@ import (
 func StartImrForCli(rootHints string) (context.Context, context.CancelFunc, *tdns.Imr, error) {
 	// Set up minimal config for IMR
 	active := true
-	Conf.ImrEngine.Active = &active
+	Conf.Imr.Active = &active
 	if rootHints != "" {
-		Conf.ImrEngine.RootHints = rootHints
+		Conf.Imr.RootHints = rootHints
 	}
-	Conf.ImrEngine.Verbose = tdns.Globals.Verbose
-	Conf.ImrEngine.Debug = tdns.Globals.Debug
+	Conf.Imr.Verbose = tdns.Globals.Verbose
+	Conf.Imr.Debug = tdns.Globals.Debug
 	Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
 
-	// Start RecursorEngine to initialize the internal IMR
+	// Start ImrEngine to initialize the internal IMR
+	// Pass quiet=true to suppress startup logging
 	ctx, cancel := context.WithCancel(context.Background())
-	go Conf.RecursorEngine(ctx)
+	go Conf.ImrEngine(ctx, true)
 
-	// Wait for RecursorEngine to initialize and create the Imr instance
-	// RecursorEngine creates the Imr synchronously before entering its main loop
+	// Wait for ImrEngine to initialize and create the Imr instance
+	// ImrEngine creates the Imr synchronously before entering its main loop
 	maxWait := 2 * time.Second
 	checkInterval := 50 * time.Millisecond
 	waited := time.Duration(0)

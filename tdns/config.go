@@ -18,20 +18,18 @@ import (
 var Conf Config
 
 type Config struct {
-	// OBE App            AppDetails
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
-	ImrEngine      ImrEngineConf
+	Imr            ImrEngineConf
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
-	// Zones          map[string]ZoneConf
-	Zones      []ZoneConf `yaml:"zones"`
-	Templates  []ZoneConf `yaml:"templates"`
-	Keys       KeyConf
-	Db         DbConf
-	Registrars map[string][]string
-	Log        struct {
+	Zones          []ZoneConf                 `yaml:"zones"`
+	Templates      []ZoneConf                 `yaml:"templates"`
+	Keys           KeyConf
+	Db             DbConf
+	Registrars     map[string][]string
+	Log            struct {
 		File string `validate:"required"`
 	}
 	Agent    LocalAgentConf
@@ -68,8 +66,8 @@ type DnsEngineConf struct {
 }
 
 type ImrEngineConf struct {
-	Active      *bool  `yaml:"active"`      // If nil or true, IMR is active. Only false explicitly disables it.
-	RootHints   string `yaml:"root-hints"`   // Path to root hints file. If empty, uses compiled-in hints.
+	Active      *bool    `yaml:"active"`     // If nil or true, IMR is active. Only false explicitly disables it.
+	RootHints   string   `yaml:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
 	Addresses   []string `validate:"required"`
 	CertFile    string
 	KeyFile     string

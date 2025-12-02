@@ -29,6 +29,7 @@ type Imr struct {
 	LineWidth   int // used to truncate long lines in logging and output (eg. DNSKEYs and RRSIGs)
 	Verbose     bool
 	Debug       bool
+	Quiet       bool // if true, suppress informational logging (useful for CLI tools)
 }
 
 type ImrRequest struct {
@@ -46,63 +47,73 @@ type ImrResponse struct {
 	Msg       string
 }
 
-// The RecursorEngine is a simple caching DNS recursor. It is not a fully fledged, all singing,
+// The ImrEngine is a simple caching DNS recursor. It is not a fully fledged, all singing,
 // all dancing recursive server. It is just intended to get the job done for the particular cases
 // that we need to support.
 
-// var RecursorCache *RRsetCacheNG
-
-func (conf *Config) RecursorEngine(ctx context.Context) {
+func (conf *Config) ImrEngine(ctx context.Context, quiet bool) {
 	var recursorch = conf.Internal.RecursorCh
 
 	// IMR is active by default unless explicitly set to false
-	isActive := conf.ImrEngine.Active == nil || *conf.ImrEngine.Active
+	isActive := conf.Imr.Active == nil || *conf.Imr.Active
 
 	if !isActive {
-		log.Printf("RecursorEngine is NOT active (imrengine.active explicitly set to false).")
+		if !quiet {
+			log.Printf("ImrEngine is NOT active (imrengine.active explicitly set to false).")
+		}
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("RecursorEngine: terminating due to context cancelled (inactive mode)")
+				if !quiet {
+					log.Printf("ImrEngine: terminating due to context cancelled (inactive mode)")
+				}
 				return
 			case rrq, ok := <-recursorch:
 				if !ok {
 					return
 				}
-				log.Printf("RecursorEngine: not active, but got a request: %v", rrq)
+				if !quiet {
+					log.Printf("ImrEngine: not active, but got a request: %v", rrq)
+				}
 				continue // ensure that we keep reading to keep the channel open
 			}
 		}
 	} else {
-		log.Printf("RecursorEngine: Starting")
+		if !quiet {
+			log.Printf("ImrEngine: Starting")
+		}
 	}
 
 	// 1. Create the cache
 	var err error
-	rrcache := cache.NewRRsetCache(log.Default(), conf.ImrEngine.Verbose, conf.ImrEngine.Debug)
+	rrcache := cache.NewRRsetCache(log.Default(), conf.Imr.Verbose, conf.Imr.Debug)
+	rrcache.Quiet = quiet // Set quiet flag early, before any logging
 
 	conf.Internal.RRsetCache = rrcache
 	imr := &Imr{
 		Cache:       rrcache,
 		DnskeyCache: rrcache.DnskeyCache, // Use the same DnskeyCache instance as the cache
-		Options:     conf.ImrEngine.Options,
+		Options:     conf.Imr.Options,
 		LineWidth:   130, // default line width for truncating long lines in logging and output
-		Verbose:     conf.ImrEngine.Verbose,
-		Debug:       conf.ImrEngine.Debug,
+		Verbose:     conf.Imr.Verbose,
+		Debug:       conf.Imr.Debug,
+		Quiet:       quiet, // Set quiet flag early, before any logging
 	}
 
 	if !rrcache.IsPrimed() {
-		err = rrcache.PrimeWithHints(conf.ImrEngine.RootHints, imr.IterativeDNSQueryFetcher())
+		err = rrcache.PrimeWithHints(conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
 		if err != nil {
-			Shutdowner(conf, fmt.Sprintf("RecursorEngine: failed to initialize RecursorCache w/ root hints: %v", err))
+			Shutdowner(conf, fmt.Sprintf("ImrEngine: failed to initialize RecursorCache w/ root hints: %v", err))
 		}
-		if len(conf.ImrEngine.Stubs) > 0 {
-			for _, stub := range conf.ImrEngine.Stubs {
+		if len(conf.Imr.Stubs) > 0 {
+			for _, stub := range conf.Imr.Stubs {
 				stubservers := []string{}
 				for _, server := range stub.Servers {
 					stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
 				}
-				log.Printf("RecursorEngine: adding stub %q with servers %s", stub.Zone, strings.Join(stubservers, ", "))
+				if !quiet {
+					log.Printf("ImrEngine: adding stub %q with servers %s", stub.Zone, strings.Join(stubservers, ", "))
+				}
 				imr.Cache.AddStub(stub.Zone, stub.Servers)
 			}
 		}
@@ -110,11 +121,13 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 
 	// Initialize trust anchors (DS/DNSKEY) and validate root (.) DNSKEY and NS
 	if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {
-		log.Printf("RecursorEngine: trust anchor initialization failed: %v", err)
+		if !quiet {
+			log.Printf("ImrEngine: trust anchor initialization failed: %v", err)
+		}
 	}
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-	go imr.ImrEngine(ctx, conf)
+	go imr.StartImrEngineListeners(ctx, conf)
 
 	conf.Internal.ImrEngine = imr
 	Globals.ImrEngine = imr
@@ -122,31 +135,32 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("RecursorEngine: terminating due to context cancelled (active mode)")
+			if !quiet {
+				log.Printf("ImrEngine: terminating due to context cancelled (active mode)")
+			}
 			return
 		case rrq, ok := <-recursorch:
 			if !ok {
 				return
 			}
 			if rrq.ResponseCh == nil {
-				log.Printf("RecursorEngine: received nil or invalid request (no response channel)")
+				if !quiet {
+					log.Printf("ImrEngine: received nil or invalid request (no response channel)")
+				}
 				continue
 			}
 			if Globals.Debug {
-				log.Printf("RecursorEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
-				fmt.Printf("RecursorEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				log.Printf("ImrEngine: received query for %s %s %s", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				fmt.Printf("ImrEngine: received query for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 			}
-			// resp := ImrResponse{
-			//			Validated: false,
-			// Msg:       "RecursorEngine: request to look up a RRset",
-			// }
+
 			var resp *ImrResponse
 
 			// 1. Is the answer in the cache?
 			crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
 			if crrset != nil {
 				if Globals.Debug {
-					fmt.Printf("RecursorEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+					fmt.Printf("ImrEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
 				}
 				resp = &ImrResponse{
 					RRset: crrset.RRset,
@@ -155,17 +169,17 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 			} else {
 				var err error
 				if Globals.Debug {
-					log.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
-					fmt.Printf("Recursor: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
+					log.Printf("ImrEngine: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
+					fmt.Printf("ImrEngine: <qname, qtype> tuple <%q, %s> not known, needs to be queried for\n", rrq.Qname, dns.TypeToString[rrq.Qtype])
 				}
 
 				resp, err = imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 				if err != nil {
-					log.Printf("Error from IterateOverQuery: %v", err)
+					log.Printf("ImrEngine: Error from ImrQuery: %v", err)
 				} else if resp == nil {
 					resp = &ImrResponse{
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("ImrQuery: no response from ImrQuery"),
+						ErrorMsg: fmt.Sprintf("ImrEngine: no response from ImrQuery"),
 					}
 				}
 				rrq.ResponseCh <- *resp
@@ -215,7 +229,9 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
 			return &resp, err
 		}
-		log.Printf("ImrQuery: best zone match for qname %q seems to be %q", qname, bestmatch)
+		if !imr.Quiet {
+			log.Printf("ImrQuery: best zone match for qname %q seems to be %q", qname, bestmatch)
+		}
 		// ss := servers
 
 		switch {
@@ -309,7 +325,9 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 					}
 					if rcode == dns.RcodeNameError {
 						// this is a negative response, which we need to figure out how to represent
-						log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
+						if !imr.Quiet {
+							log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
+						}
 						resp.Msg = "NXDOMAIN (negative response type 3)"
 						return &resp, nil
 					}
@@ -856,10 +874,12 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	}
 }
 
-func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
-	addresses := conf.ImrEngine.Addresses
+func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error {
+	addresses := conf.Imr.Addresses
 	if len(addresses) == 0 {
-		log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
+		if !imr.Quiet {
+			log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
+		}
 		return nil
 	}
 
@@ -869,11 +889,13 @@ func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
 	imrMux := dns.NewServeMux()
 	imrMux.HandleFunc(".", ImrHandler)
 
-	if CaseFoldContains(conf.ImrEngine.Transports, "do53") {
+	if CaseFoldContains(conf.Imr.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
 		if len(addresses) == 0 {
-			log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
+			if !imr.Quiet {
+				log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
+			}
 		}
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
@@ -960,7 +982,7 @@ func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
 		}
 		addresses = tmp
 
-		if CaseFoldContains(conf.ImrEngine.Transports, "dot") {
+		if CaseFoldContains(conf.Imr.Transports, "dot") {
 			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
@@ -969,7 +991,7 @@ func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
 			log.Printf("ImrEngine: Not serving on transport DoT")
 		}
 
-		if CaseFoldContains(conf.ImrEngine.Transports, "doh") {
+		if CaseFoldContains(conf.Imr.Transports, "doh") {
 			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
@@ -978,7 +1000,7 @@ func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
 			log.Printf("ImrEngine: Not serving on transport DoH")
 		}
 
-		if CaseFoldContains(conf.ImrEngine.Transports, "doq") {
+		if CaseFoldContains(conf.Imr.Transports, "doq") {
 			err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
 			if err != nil {
 				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
@@ -997,9 +1019,9 @@ func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
 // validates the anchored DNSKEY RRset and then validates the NS RRset for that name.
 func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) error {
 	// Only act if we have any trust-anchor configured
-	taDS := strings.TrimSpace(conf.ImrEngine.TrustAnchorDS)
-	taDNSKEY := strings.TrimSpace(conf.ImrEngine.TrustAnchorDNSKEY)
-	taFile := strings.TrimSpace(conf.ImrEngine.TrustAnchorFile)
+	taDS := strings.TrimSpace(conf.Imr.TrustAnchorDS)
+	taDNSKEY := strings.TrimSpace(conf.Imr.TrustAnchorDNSKEY)
+	taFile := strings.TrimSpace(conf.Imr.TrustAnchorFile)
 	if taDS == "" && taDNSKEY == "" && taFile == "" {
 		return nil
 	}

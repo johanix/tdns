@@ -520,11 +520,28 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Extract host and port
 	host := u.Host
 	port := ""
+	
+	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
-		var portErr error
-		host, port, portErr = net.SplitHostPort(host)
-		if portErr != nil {
-			return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+		// Check if it's an IPv6 address in brackets (e.g., [::1]:port)
+		if strings.HasPrefix(host, "[") && strings.Contains(host, "]:") {
+			// IPv6 with port: [::1]:5354
+			var portErr error
+			host, port, portErr = net.SplitHostPort(host)
+			if portErr != nil {
+				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+			}
+		} else if net.ParseIP(host) != nil {
+			// Valid IP address (IPv4 or IPv6) without port - use as-is
+			// net.ParseIP handles both IPv4 and IPv6 correctly
+			// No need to split, it's just the IP address
+		} else {
+			// Try to split as host:port (for hostnames with ports)
+			var portErr error
+			host, port, portErr = net.SplitHostPort(host)
+			if portErr != nil {
+				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+			}
 		}
 	}
 	options["server"] = host

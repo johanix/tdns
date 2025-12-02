@@ -6,11 +6,11 @@ import (
 )
 
 func (conf *Config) parseImrOptions() {
-	raw := conf.ImrEngine.OptionsStrs
+	raw := conf.Imr.OptionsStrs
 	clean := make(map[ImrOption]string)
 
 	if len(raw) == 0 {
-		conf.ImrEngine.Options = clean
+		conf.Imr.Options = clean
 		return
 	}
 
@@ -59,7 +59,7 @@ func (conf *Config) parseImrOptions() {
 		}
 	}
 
-	conf.ImrEngine.Options = clean
+	conf.Imr.Options = clean
 }
 
 func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData) map[ZoneOption]bool {

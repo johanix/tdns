@@ -606,7 +606,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 
 	// If no hints file is configured, use compiled-in hints
 	if hintsfile == "" || strings.TrimSpace(hintsfile) == "" {
-		log.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
+		if !rrcache.Quiet {
+			log.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
+		}
 		data = []byte(CompiledInRootHints)
 		source = "compiled-in"
 	} else {
@@ -671,7 +673,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 
 	// Store NS records for root
 	if len(nsRecords) > 0 {
-		log.Printf("Found %d NS RRs", len(nsRecords))
+		if !rrcache.Quiet {
+			log.Printf("Found %d NS RRs quiet: %v", len(nsRecords), rrcache.Quiet)
+		}
 		rrcache.Set(".", dns.TypeNS, &CachedRRset{
 			Name:    ".",
 			RRtype:  dns.TypeNS,
@@ -693,7 +697,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 	var servers []string
 
 	// Store glue records for root nameservers
-	log.Printf("Found %d glue records", len(glueRecords))
+	if !rrcache.Quiet {
+		log.Printf("Found %d glue records", len(glueRecords))
+	}
 	for name, rrs := range glueRecords {
 		if !nsMap[name] {
 			log.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)
@@ -750,7 +756,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 		return fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
-	log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
+	if rrcache.Debug {
+		log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
+	}
 
 	rrcache.Primed = true
 

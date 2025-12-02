@@ -59,6 +59,7 @@ type RRsetCacheT struct {
 	LineWidth              int
 	Verbose                bool
 	Debug                  bool
+	Quiet                  bool // if true, suppress informational logging (useful for CLI tools)
 	transportQueryMu       sync.Mutex
 	transportQueryInFlight map[string]struct{}
 	nsRevalidateMu         sync.Mutex

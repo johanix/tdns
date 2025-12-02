@@ -251,12 +251,12 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 	switch Globals.App.Type {
 	case AppTypeImr:
 		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-		go conf.RecursorEngine(ctx)
-		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
-		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		go conf.ImrEngine(ctx, false) // Server mode: not quiet
+		// go ImrEngine(conf, stopCh) // ImrEngine is now started from ImrEngine, as they share cache
+		log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 
 	default:
-		log.Printf("TDNS %s (%s): not starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		log.Printf("TDNS %s (%s): not starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
 
 	return nil
@@ -273,8 +273,8 @@ func StartImr(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 	}
 	go ValidatorEngine(ctx, conf)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-	go conf.RecursorEngine(ctx)
-	log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	go conf.ImrEngine(ctx, false) // Server mode: not quiet
+	log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }
 
@@ -305,13 +305,13 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 	go ValidatorEngine(ctx, conf)
 
 	// IMR is active by default unless explicitly set to false
-	isActive := conf.ImrEngine.Active == nil || *conf.ImrEngine.Active
+	isActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if isActive {
 		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-		go conf.RecursorEngine(ctx)
-		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		go conf.ImrEngine(ctx, false) // Server mode: not quiet
+		log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	} else {
-		log.Printf("TDNS %s (%s): NOT starting: recursorengine, imrengine (imrengine.active explicitly set to false)", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		log.Printf("TDNS %s (%s): NOT starting: imrengine (imrengine.active explicitly set to false)", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
 
 	kdb := conf.Internal.KeyDB
@@ -401,8 +401,8 @@ func StartScanner(ctx context.Context, conf *Config, apirouter *mux.Router) erro
 	}
 	go ValidatorEngine(ctx, conf)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-	go conf.RecursorEngine(ctx)
-	log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	go conf.ImrEngine(ctx, false) // Server mode: not quiet
+	log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }
 

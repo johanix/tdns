@@ -6,7 +6,6 @@ package cli
 import (
 	"fmt"
 	"log"
-	"net"
 	"os"
 
 	"github.com/miekg/dns"
@@ -69,44 +68,56 @@ func init() {
 var childpri, parpri string
 
 func SendNotify(zonename string, ntype string) {
-	var lookupzone, lookupserver string
+	var dsynctarget *tdns.DsyncTarget
+	var err error
+
 	if zonename == "." {
 		fmt.Printf("Error: zone name not specified. Terminating.\n")
 		os.Exit(1)
 	}
 
-	if childpri == "" {
-		log.Fatalf("Error: child primary nameserver not specified.")
-	}
-
-	switch ntype {
-	case "DNSKEY":
-		lookupzone = zonename
-		lookupserver = childpri
-	default:
-		// lookupzone = lib.ParentZone(zonename, lib.Globals.IMR)
-		if tdns.Globals.ParentZone == "" {
-			log.Fatalf("Error: parent zone name not specified.")
-		}
-		tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
-
-		if parpri == "" {
-			log.Fatalf("Error: parent primary nameserver not specified.")
-		}
-		lookupzone = tdns.Globals.ParentZone
-		lookupserver = parpri
-	}
-
 	const notify_scheme = 1
-	dsynctarget, err := tdns.LookupDSYNCTarget(lookupzone, lookupserver, dns.StringToType[ntype], notify_scheme)
+	dtype := dns.StringToType[ntype]
+
+	// Old approach: using external IMR and manual parent zone specification (commented out)
+	// var lookupzone, lookupserver string
+	// if childpri == "" {
+	// 	log.Fatalf("Error: child primary nameserver not specified.")
+	// }
+	// switch ntype {
+	// case "DNSKEY":
+	// 	lookupzone = zonename
+	// 	lookupserver = childpri
+	// default:
+	// 	if tdns.Globals.ParentZone == "" {
+	// 		log.Fatalf("Error: parent zone name not specified.")
+	// 	}
+	// 	tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
+	// 	if parpri == "" {
+	// 		log.Fatalf("Error: parent primary nameserver not specified.")
+	// 	}
+	// 	lookupzone = tdns.Globals.ParentZone
+	// 	lookupserver = parpri
+	// }
+	// dsynctarget, err = tdns.LookupDSYNCTarget(lookupzone, lookupserver, dtype, notify_scheme)
+
+	// New approach: use internal IMR
+	// LookupDSYNCTarget will discover the parent zone internally for CDS/CSYNC
+	_, cancel, imr, err := StartImrForCli("")
 	if err != nil {
-		log.Fatalf("Error from LookupDSYNCTarget(%s, %s): %v", lookupzone, lookupserver, err)
+		log.Fatalf("Error initializing IMR: %v", err)
+	}
+	defer cancel()
+
+	dsynctarget, err = imr.LookupDSYNCTarget(zonename, dtype, notify_scheme)
+	if err != nil {
+		log.Fatalf("Error from LookupDSYNCTarget(%s): %v", zonename, err)
 	}
 
 	for _, dst := range dsynctarget.Addresses {
 		if tdns.Globals.Verbose {
-			fmt.Printf("Sending NOTIFY(%s) to %s on address %s:%d\n",
-				ntype, dsynctarget.Name, dst, dsynctarget.Port)
+			fmt.Printf("Sending NOTIFY(%s) to %s on address %s\n",
+				ntype, dsynctarget.Name, dst)
 		}
 
 		m := new(dns.Msg)
@@ -119,7 +130,7 @@ func SendNotify(zonename string, ntype string) {
 			fmt.Printf("Sending Notify:\n%s\n", m.String())
 		}
 
-		dst = net.JoinHostPort(dst, fmt.Sprintf("%d", dsynctarget.Port))
+		// dst is already in addr:port format from LookupDSYNCTarget
 		res, err := dns.Exchange(m, dst)
 		if err != nil {
 			log.Fatalf("Error from dns.Exchange(%s, NOTIFY(%s)): %v", dst, ntype, err)
@@ -132,9 +143,7 @@ func SendNotify(zonename string, ntype string) {
 			}
 			log.Printf("Error: Rcode: %s", dns.RcodeToString[res.Rcode])
 		} else {
-			if tdns.Globals.Verbose {
-				fmt.Printf("... and got rcode NOERROR back (good)\n")
-			}
+			fmt.Printf("... and got rcode NOERROR back (good)\n")
 			break
 		}
 	}

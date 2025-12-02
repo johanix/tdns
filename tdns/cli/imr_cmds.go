@@ -308,10 +308,10 @@ var imrShowConfigCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("IMR configuration summary:")
 
-		if len(Conf.ImrEngine.Addresses) == 0 {
+		if len(Conf.Imr.Addresses) == 0 {
 			fmt.Println("  Listening addresses: (none configured)")
 		} else {
-			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.ImrEngine.Addresses, ", "))
+			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.Imr.Addresses, ", "))
 		}
 
 		primed := false
@@ -334,11 +334,11 @@ var imrShowConfigCmd = &cobra.Command{
 			}
 		}
 
-		if len(Conf.ImrEngine.Stubs) == 0 {
+		if len(Conf.Imr.Stubs) == 0 {
 			fmt.Println("  Stub zones: (none)")
 		} else {
 			fmt.Println("  Stub zones:")
-			for _, stub := range Conf.ImrEngine.Stubs {
+			for _, stub := range Conf.Imr.Stubs {
 				var servers []string
 				for _, server := range stub.Servers {
 					servers = append(servers, fmt.Sprintf("%s (%s)", server.Name, strings.Join(server.Addrs, ", ")))
@@ -353,7 +353,7 @@ var imrShowOptionsCmd = &cobra.Command{
 	Use:   "options",
 	Short: "Show configured IMR options",
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(Conf.ImrEngine.OptionsStrs) == 0 && len(Conf.ImrEngine.Options) == 0 {
+		if len(Conf.Imr.OptionsStrs) == 0 && len(Conf.Imr.Options) == 0 {
 			fmt.Println("No IMR options configured.")
 			return
 		}
@@ -365,7 +365,7 @@ var imrShowOptionsCmd = &cobra.Command{
 		}
 		var rows []optionView
 		normNames := make(map[string]struct{})
-		for opt, val := range Conf.ImrEngine.Options {
+		for opt, val := range Conf.Imr.Options {
 			name, ok := tdns.ImrOptionToString[opt]
 			if !ok {
 				name = fmt.Sprintf("unknown(%d)", opt)
@@ -387,7 +387,7 @@ var imrShowOptionsCmd = &cobra.Command{
 			}
 		}
 		var invalid []string
-		for _, raw := range Conf.ImrEngine.OptionsStrs {
+		for _, raw := range Conf.Imr.OptionsStrs {
 			name := raw
 			if idx := strings.IndexAny(name, ":="); idx != -1 {
 				name = name[:idx]

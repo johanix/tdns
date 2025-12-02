@@ -87,7 +87,9 @@ func (imr *Imr) extractDsyncFromResponse(qname string, resp *ImrResponse, verbos
 func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) {
 	var dr DsyncResult
 	ctx := context.Background()
-	log.Printf("Discovering DSYNC for parent of child zone %q ...\n", child)
+	if !imr.Quiet {
+		log.Printf("Discovering DSYNC for parent of child zone %q ...\n", child)
+	}
 
 	// Step 1: One level up
 	labels := dns.SplitDomainName(child)
@@ -95,7 +97,9 @@ func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) 
 	parent_guess := dns.Fqdn(strings.Join(labels[1:], "."))
 	name := prefix + "._dsync." + parent_guess
 
-	log.Printf("Looking up %s DSYNC...\n", name)
+	if !imr.Quiet {
+		log.Printf("Looking up %s DSYNC...\n", name)
+	}
 	resp, err := imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 	if err != nil {
 		log.Printf("Error: during ImrQuery: %v\n", err)
@@ -109,7 +113,9 @@ func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) 
 	}
 	if len(prrs) > 0 {
 		dr = DsyncResult{Qname: name, Rdata: prrs, Parent: parent_guess}
-		log.Printf("Found %d DSYNC RRs at %s:\n%v", len(prrs), name, prrs)
+		if !imr.Quiet {
+			log.Printf("Found %d DSYNC RRs at %s:\n%v", len(prrs), name, prrs)
+		}
 		return dr, nil
 	}
 
@@ -120,7 +126,9 @@ func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) 
 			return dr, fmt.Errorf("misidentified parent for %s: %v", child, parent)
 		}
 		name = prefix + "._dsync." + parent
-		log.Printf("Looking up %s DSYNC...\n", name)
+		if !imr.Quiet {
+			log.Printf("Looking up %s DSYNC...\n", name)
+		}
 		resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 		if err != nil {
 			log.Printf("Error: during ImrQuery: %v\n", err)
@@ -142,7 +150,9 @@ func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) 
 	}
 	name = "_dsync." + parent
 
-	log.Printf("Looking up %s DSYNC...\n", name)
+	if !imr.Quiet {
+		log.Printf("Looking up %s DSYNC...\n", name)
+	}
 	resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 	if err != nil {
 		log.Printf("Error: during ImrQuery: %v\n", err)

@@ -842,13 +842,13 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 	// If we don't know the zone name (no NS owner found), don't mutate ServerMap with an empty key
 	if zonename == "" {
-		if imr.Cache.Debug {
+		if imr.Cache.Debug && !imr.Quiet {
 			log.Printf("ParseAdditionalForNSAddrs: empty zonename; skipping glue collection")
 		}
 		return map[string]*cache.AuthServer{}, nil
 	}
 
-	if Globals.Debug {
+	if Globals.Debug && !imr.Quiet {
 		log.Printf("*** ParseAdditionalForNSAddrs: zonename: %q\nnsMap: %+v", zonename, nsMap)
 	}
 
@@ -858,7 +858,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// var servers []string
 	serverMap, exist := imr.Cache.ServerMap.Get(zonename)
 	if !exist {
-		log.Printf("ParseAdditionalForNSAddrs: *** warning: serverMap entry for zone %q not found, creating new", zonename)
+		// log.Printf("ParseAdditionalForNSAddrs: *** warning: serverMap entry for zone %q not found, creating new", zonename)
 		serverMap = map[string]*cache.AuthServer{}
 	}
 	// Prune expired auth servers for this zone before updating
@@ -866,7 +866,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	for name, srv := range serverMap {
 		if !srv.Expire.IsZero() && srv.Expire.Before(now) {
 			delete(serverMap, name)
-			if Globals.Debug {
+			if Globals.Debug && !imr.Quiet {
 				log.Printf("ParseAdditionalForNSAddrs: pruned expired server %s for zone %s", name, zonename)
 			}
 		}
@@ -927,7 +927,9 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			name = strings.TrimPrefix(name, "_dns.")
 		}
 		if _, exist := nsMap[name]; !exist {
-			log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
+			if !imr.Quiet {
+				log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
+			}
 			continue
 		}
 		serversrc := ""
@@ -957,7 +959,9 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 
 		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
-			log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
+			if !imr.Quiet {
+				log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
+			}
 		}
 		// log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
 		switch rr.(type) {
@@ -986,16 +990,20 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			glue6Map[name] = tmp
 
 		case *dns.SVCB:
-			if !isOTSOwner {
+			if !isOTSOwner && !imr.Quiet {
 				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
 				continue
 			}
-			log.Printf("Additional contains an SVCB; rr: %s", rr.String())
+			if !imr.Quiet {
+				log.Printf("Additional contains an SVCB; rr: %s", rr.String())
+			}
 			svcb := rr.(*dns.SVCB)
 			haveLocal := false
 			for _, kv := range svcb.Value {
 				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
-					log.Printf("SVCB transport key for %s: %q", name, string(local.Data))
+					if !imr.Quiet {
+						log.Printf("SVCB transport key for %s: %q", name, string(local.Data))
+					}
 					if applyTransportSignal(name, string(local.Data)) {
 						cache.PromoteConnMode(serverMap[name], cache.ConnModeOpportunistic)
 					}
@@ -1018,7 +1026,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			}
 		case *dns.PrivateRR:
 			// TSYNC transport signal
-			if !isOTSOwner {
+			if !isOTSOwner && !imr.Quiet {
 				log.Printf("Additional contains a Private RR (TSYNC?), but owner is not _dns.{nsname}, skipping")
 				continue
 			}
@@ -1048,7 +1056,9 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// but only apply to known NS owners for this zone (present in serverMap).
 	for _, rr := range r.Extra {
 		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
-			log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
+			if !imr.Quiet {
+				log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
+			}
 		}
 
 		// log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
