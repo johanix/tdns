@@ -4,23 +4,70 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
+// StartImrForCli initializes and starts the internal IMR for CLI commands.
+// It sets up the minimal config, starts RecursorEngine, and waits for initialization.
+// Returns the context, cancel function, and the Imr instance, or an error if initialization fails.
+func StartImrForCli(rootHints string) (context.Context, context.CancelFunc, *tdns.Imr, error) {
+	// Set up minimal config for IMR
+	active := true
+	Conf.ImrEngine.Active = &active
+	if rootHints != "" {
+		Conf.ImrEngine.RootHints = rootHints
+	}
+	Conf.ImrEngine.Verbose = tdns.Globals.Verbose
+	Conf.ImrEngine.Debug = tdns.Globals.Debug
+	Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
+
+	// Start RecursorEngine to initialize the internal IMR
+	ctx, cancel := context.WithCancel(context.Background())
+	go Conf.RecursorEngine(ctx)
+
+	// Wait for RecursorEngine to initialize and create the Imr instance
+	// RecursorEngine creates the Imr synchronously before entering its main loop
+	maxWait := 2 * time.Second
+	checkInterval := 50 * time.Millisecond
+	waited := time.Duration(0)
+	for Conf.Internal.ImrEngine == nil && waited < maxWait {
+		time.Sleep(checkInterval)
+		waited += checkInterval
+	}
+
+	// Check if ImrEngine is available
+	if Conf.Internal.ImrEngine == nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("ImrEngine not initialized after %v. RecursorEngine may not have started properly", maxWait)
+	}
+
+	return ctx, cancel, Conf.Internal.ImrEngine, nil
+}
+
 var DsyncDiscoveryCmd = &cobra.Command{
 	Use:   "dsync-query",
 	Short: "Send a DNS query for 'zone. DSYNC' and present the result.",
 	Run: func(cmd *cobra.Command, args []string) {
-		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
-		tdns.SetupIMR()
 
-		dsync_res, err := tdns.DsyncDiscovery(tdns.Globals.Zonename,
-			tdns.Globals.IMR, tdns.Globals.Verbose)
+		PrepArgs("zonename")
+		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+
+		// Initialize internal IMR
+		_, cancel, imr, err := StartImrForCli("")
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		defer cancel()
+
+		// Use internal IMR to discover DSYNC records
+		dsync_res, err := imr.DsyncDiscovery(tdns.Globals.Zonename, tdns.Globals.Verbose)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -37,5 +84,5 @@ var DsyncDiscoveryCmd = &cobra.Command{
 }
 
 func init() {
-	DsyncDiscoveryCmd.PersistentFlags().StringVarP(&tdns.Globals.IMR, "imr", "i", "", "IMR to send the query to")
+	// No longer need IMR flag since we use internal IMR
 }

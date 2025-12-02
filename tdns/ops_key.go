@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	"github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
@@ -159,7 +159,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, UpdateResult,
 	var err error
 	// 1. Get the parent zone
 	if zd.Parent == "" {
-		zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 		if err != nil {
 			return "", UpdateResult{}, err
 		}
@@ -210,7 +210,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(alg uint8) (string, UpdateResult,
 	pkc := sak.Keys[0]
 
 	// 2. Get the parent DSYNC RRset
-	dsyncTarget, err := LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
+	dsyncTarget, err := Globals.ImrEngine.LookupDSYNCTarget(zd.ZoneName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to lookup DSYNC target: %v", zd.ZoneName, err), UpdateResult{}, err
 	}
@@ -288,14 +288,14 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(alg uint8, action string) (string,
 
 	// 1. Get the parent zone
 	if zd.Parent == "" {
-		zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 		if err != nil {
 			return "", 0, 0, UpdateResult{}, err
 		}
 	}
 
 	// 2. Get the parent DSYNC RRset
-	dsyncTarget, err = LookupDSYNCTarget(zd.ZoneName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
+	dsyncTarget, err = Globals.ImrEngine.LookupDSYNCTarget(zd.ZoneName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to lookup DSYNC target: %v", zd.ZoneName, err)
 	}

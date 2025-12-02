@@ -145,13 +145,21 @@ func (rrset *RRset) Clone() *RRset {
 	return clone
 }
 
-func (rrset *RRset) String() string {
+func (rrset *RRset) String(maxlen int) string {
 	out := ""
 	for _, rr := range rrset.RRs {
-		out += rr.String() + "\n"
+		rrstr := rr.String() + "\n"
+		if maxlen > 0 && len(rrstr) > maxlen {
+			rrstr = rrstr[:maxlen-4] + "...\n"
+		}
+		out += rrstr
 	}
 	for _, sig := range rrset.RRSIGs {
-		out += sig.String() + "\n"
+		sigstr := sig.String() + "\n"
+		if maxlen > 0 && len(sigstr) > maxlen {
+			sigstr = sigstr[:maxlen-4] + "...\n"
+		}
+		out += sigstr
 	}
 	return out
 }

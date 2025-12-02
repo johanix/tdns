@@ -19,6 +19,9 @@ import (
 
 type ScanRequest struct {
 	Cmd              string
+	ParentZone       string
+	ScanZones        []string
+	ScanType         string // "cds" | "csync" | "dnskey"	
 	ChildZone        string
 	CurrentChildData ChildDelegationData // Current parent-side delegation data for child
 	ZoneData         *ZoneData
@@ -31,8 +34,10 @@ type ScanResponse struct {
 	Time    time.Time
 	Zone    string
 	RRtype  uint16
-	Result  core.RRset
-	Message string
+	RRset   core.RRset
+	Msg     string
+	Error   bool
+	ErrorMsg string
 }
 
 //
@@ -124,31 +129,16 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 				switch sr.RRtype {
 				case dns.TypeCDS:
 					log.Printf("go scanner.CheckCDS(sr)")
-					if sr.Edns0Options != nil && sr.Edns0Options.HasEROption {
-						log.Printf("ScannerEngine: ER option is present. Should send NOTIMP EDE to agent %q. Ignoring.", sr.Edns0Options.ErAgentDomain)
-
-						if conf.Internal.ImrEngine != nil {
-							tmp, err := conf.Internal.ImrEngine.ImrQuery(ctx, sr.Edns0Options.ErAgentDomain, dns.TypeA, dns.ClassINET, nil)
-							if err != nil {
-								log.Printf("ScannerEngine: Error from ImrQuery: %v", err)
-							} else {
-								log.Printf("ScannerEngine: Looked up agent domain %q using ImrQuery:\n%+v\n", sr.Edns0Options.ErAgentDomain, tmp)
-							}
-							er_qname := fmt.Sprintf("_er.%d.%s%d._er.%s", sr.RRtype, sr.ChildZone, edns0.EDEScannerNotImplemented, 
-							sr.Edns0Options.ErAgentDomain)
-							log.Printf("ScannerEngine: Querying error channel %q for agent %q:\n%s\n", er_qname, sr.Edns0Options.ErAgentDomain, er_qname)
-							ir, err := conf.Internal.ImrEngine.ImrQuery(ctx, er_qname, dns.TypeTXT, dns.ClassINET, nil)
-							if err != nil {
-								log.Printf("ScannerEngine: Error from ImrQuery: %v", err)
-							} else {
-								log.Printf("ScannerEngine: Received response from ImrQuery: %v", ir)
-							}
-						} else {
-							log.Printf("ScannerEngine: ImrEngine not active. Ignoring.")
-						}
-						continue
+					err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECDSScannerNotImplemented, sr.Edns0Options)
+					if err != nil {
+						log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
 					}
+					// go scanner.CheckCDS(sr, &sr.CurrentChildData)
 				case dns.TypeCSYNC:
+					err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
+					if err != nil {
+						log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+					}
 					go scanner.CheckCSYNC(sr, &sr.CurrentChildData)
 				case dns.TypeDNSKEY:
 					log.Printf("go scanner.CheckDNSKEY(sr)")

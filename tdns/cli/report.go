@@ -14,11 +14,10 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/tdns"
-	edns0 "github.com/johanix/tdns/tdns/edns0"
 	core "github.com/johanix/tdns/tdns/core"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var reportSender, reportDetails string
@@ -29,7 +28,7 @@ var edeCode int
 var targetIP string
 var port string
 
-func imrQuery(qname string, qtype uint16, timeout time.Duration) (tdns.ImrResponse, error) {
+func xxximrQuery(qname string, qtype uint16, timeout time.Duration) (tdns.ImrResponse, error) {
 	var empty tdns.ImrResponse
 
 	if !strings.HasSuffix(qname, ".") {
@@ -56,7 +55,7 @@ func imrQuery(qname string, qtype uint16, timeout time.Duration) (tdns.ImrRespon
 // parseDSYNCFromImrResponse inspects an ImrResponse and returns any DSYNC RRs found
 // in the Answer section (same expectation as DsyncQuery).
 // It also returns the parent inferred from an SOA in the authority section if present.
-func parseDSYNCFromImrResponse(r tdns.ImrResponse) (dsyncrrs []*core.DSYNC, parent string) {
+func xxxparseDSYNCFromImrResponse(r tdns.ImrResponse) (dsyncrrs []*core.DSYNC, parent string) {
 	dsyncrrs = []*core.DSYNC{}
 
 	if r.RRset != nil {
@@ -78,7 +77,7 @@ func parseDSYNCFromImrResponse(r tdns.ImrResponse) (dsyncrrs []*core.DSYNC, pare
 
 // discoverDSYNCViaImr implements the same 3-step algorithm as DsyncDiscovery but using imrQuery.
 // child should be a FQDN (or will be normalized).
-func discoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult, error) {
+func xxxdiscoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult, error) {
 	var dr tdns.DsyncResult
 
 	labels := dns.SplitDomainName(child)
@@ -94,9 +93,9 @@ func discoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult,
 	if tdns.Globals.Debug {
 		log.Printf("discoverDSYNCViaImr: trying %s (step 1)\n", try1)
 	}
-	r1, err := imrQuery(try1, core.TypeDSYNC, timeout)
+	r1, err := xxximrQuery(try1, core.TypeDSYNC, timeout)
 	if err == nil {
-		dsyncrrs, parent := parseDSYNCFromImrResponse(r1)
+		dsyncrrs, parent := xxxparseDSYNCFromImrResponse(r1)
 		if len(dsyncrrs) > 0 {
 			dr = tdns.DsyncResult{Qname: try1, Rdata: dsyncrrs, Parent: parentGuess}
 			return dr, nil
@@ -110,9 +109,9 @@ func discoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult,
 				if tdns.Globals.Debug {
 					log.Printf("discoverDSYNCViaImr: trying %s (step 2)\n", try2)
 				}
-				r2, err2 := imrQuery(try2, core.TypeDSYNC, timeout)
+				r2, err2 := xxximrQuery(try2, core.TypeDSYNC, timeout)
 				if err2 == nil {
-					dsyncrrs2, _ := parseDSYNCFromImrResponse(r2)
+					dsyncrrs2, _ := xxxparseDSYNCFromImrResponse(r2)
 					if len(dsyncrrs2) > 0 {
 						dr = tdns.DsyncResult{Qname: try2, Rdata: dsyncrrs2, Parent: parent}
 						return dr, nil
@@ -131,9 +130,9 @@ func discoverDSYNCViaImr(child string, timeout time.Duration) (tdns.DsyncResult,
 	if tdns.Globals.Debug {
 		log.Printf("discoverDSYNCViaImr: trying %s (step 3)\n", try3)
 	}
-	r3, err3 := imrQuery(try3, core.TypeDSYNC, timeout)
+	r3, err3 := xxximrQuery(try3, core.TypeDSYNC, timeout)
 	if err3 == nil {
-		dsyncrrs3, parent := parseDSYNCFromImrResponse(r3)
+		dsyncrrs3, parent := xxxparseDSYNCFromImrResponse(r3)
 		dr = tdns.DsyncResult{Qname: try3, Rdata: dsyncrrs3, Parent: parent}
 		return dr, nil
 	}
@@ -168,30 +167,29 @@ var ReportCmd = &cobra.Command{
 
 		if dsyncLookup {
 
-			// Start RecursorEngine (IMR)
-			viper.Set("recursorengine.active", true)
-			viper.Set("recursorengine.root-hints", "/etc/tdns/root.hints")
-			// log.Printf("ReportCmd: Starting RecursorEngine")
-			Conf.Internal.RecursorCh = make(chan tdns.ImrRequest, 10)
-
-			ctx, cancel := context.WithCancel(context.Background())
+			// Initialize internal IMR
+			_, cancel, imr, err := StartImrForCli("/etc/tdns/root.hints")
+			if err != nil {
+				log.Fatalf("Error initializing IMR: %v", err)
+			}
 			defer cancel()
-			go Conf.RecursorEngine(ctx)
 
 			// Discover DSYNC via IMR for the zone that contains qname
 			log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
-			dsyncRes, derr := discoverDSYNCViaImr(tdns.Globals.Zonename, 3*time.Second)
-			var reportDSYNC *core.DSYNC
+
+			// New approach: use imr.DsyncDiscovery() directly
+			dsyncRes, derr := imr.DsyncDiscovery(tdns.Globals.Zonename, tdns.Globals.Verbose)
 			if derr != nil {
 				log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
-				cancel()
 				return
-			} else {
-				for _, ds := range dsyncRes.Rdata {
-					if ds.Scheme == core.SchemeReport {
-						reportDSYNC = ds
-						break
-					}
+			}
+
+			// Find DSYNC record with REPORT scheme
+			var reportDSYNC *core.DSYNC
+			for _, ds := range dsyncRes.Rdata {
+				if ds.Scheme == core.SchemeReport {
+					reportDSYNC = ds
+					break
 				}
 			}
 
@@ -199,7 +197,6 @@ var ReportCmd = &cobra.Command{
 				log.Printf("ReportCmd: no DSYNC REPORT found for %s, aborting report", tdns.Globals.Zonename)
 				return
 			}
-			cancel()
 
 			targetIP = reportDSYNC.Target
 			port = strconv.Itoa(int(reportDSYNC.Port))

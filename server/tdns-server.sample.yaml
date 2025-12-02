@@ -23,12 +23,12 @@ service:
 
 dnsengine:
    addresses:		[ 127.0.0.1:5355, '[::1]:5355']
-   transports:		[ do53, dot, doh, doq ]
+   transports:		[ do53, doq, dot, doh ]
    ports:
      do53:		[ 53 ]
+     doq:		[ 853 ]
      dot:		[ 853 ]
      doh:		[ 443 ]
-     doq:		[ 8853 ]
    certfile:		/etc/axfr.net/certs/servers/localhost..crt
    keyfile:		/etc/axfr.net/certs/servers/localhost..key
    zones:
@@ -41,8 +41,12 @@ resignerengine:
    keygen:
       mode:		internal # internal | external
       generator:	/opt/local/bin/dnssec-keygen
-#      algorithm:	ED25519	# moved to the dnssec policy
    
+imrengine:
+   active:		true
+   root-hints:		/etc/tdns/root.hints # optional, will use compiled-in hints if absent
+   trust-anchor-file:	/etc/tdns/root.key   # not optional, no DNSSEC validation if absent
+
 apiserver:
    addresses:     	[ 127.0.0.1:8989 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
@@ -51,9 +55,10 @@ apiserver:
 
 server:
    id:			ooga booga boo
-   version:		tdnsd {version}
+   version:		tdns-server {version}
    hostname:		there-is-no-place-like-127.0.0.1
 
+# This entire section should probably die.
 validator:
    active:		true
    verbose:		true
@@ -65,6 +70,7 @@ validator:
       trusted:
          file:		/etc/axfr.net/sig0-keys.yaml
 
+# This entire section should probably die.
 resolver:
    address:		8.8.8.8:53 
 #   address:		172.16.1.11:53 

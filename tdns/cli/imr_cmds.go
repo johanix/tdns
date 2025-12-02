@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ var ImrQueryCmd = &cobra.Command{
 			_ = cmd.Usage()
 			return
 		}
-		fmt.Printf("Querying %s for %s records\n", args[0], args[1])
+		fmt.Printf("Querying %s for %s records (verbose mode: %t)\n", args[0], args[1], tdns.Globals.Verbose)
 
 		qname := dns.Fqdn(args[0])
 		if _, ok := dns.IsDomainName(qname); !ok {
@@ -55,14 +56,54 @@ var ImrQueryCmd = &cobra.Command{
 
 		select {
 		case r := <-resp:
-			if r.RRset != nil {
-				// fmt.Printf("%v\n", r.RRset)
-				// Determine validation status from cache for the queried <qname,qtype>
-				vstate := cache.ValidationStateNone
-				if Conf.Internal.RRsetCache != nil {
-					if c := Conf.Internal.RRsetCache.Get(qname, qtype); c != nil {
-						vstate = c.State
+			// Check cache entry to determine if this is a negative response
+			var cached *cache.CachedRRset
+			if Conf.Internal.RRsetCache != nil {
+				cached = Conf.Internal.RRsetCache.Get(qname, qtype)
+			}
+			
+			if cached != nil && (cached.Context == cache.ContextNXDOMAIN || cached.Context == cache.ContextNoErrNoAns) {
+				// This is a negative response
+				vstate := cached.State
+				stateStr := cache.ValidationStateToString[vstate]
+				ctxStr := cache.CacheContextToString[cached.Context]
+				
+				switch cached.Context {
+				case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:
+					fmt.Printf("%s %s (state: %s)\n", qname, ctxStr, stateStr)
+				}
+				
+				// Print negative authority proof if present (only in verbose mode)
+				// Check the global verbose flag set by the root command's PersistentFlags
+				if tdns.Globals.Verbose {
+					if len(cached.NegAuthority) > 0 {
+						fmt.Printf("Proof:\n")
+						for _, negRRset := range cached.NegAuthority {
+							if negRRset != nil {
+								for _, rr := range negRRset.RRs {
+									fmt.Printf("  %s\n", rr.String())
+								}
+								for _, rr := range negRRset.RRSIGs {
+									fmt.Printf("  %s\n", rr.String())
+								}
+							}
+						}
+					} else if cached.RRset != nil {
+						// Fallback: print SOA if present
+						for _, rr := range cached.RRset.RRs {
+							if rr.Header().Rrtype == dns.TypeSOA {
+								fmt.Printf("  %s\n", rr.String())
+							}
+						}
 					}
+				} else {
+					fmt.Printf("Proof only presented in verbose mode\n")
+				}
+			} else if r.RRset != nil {
+				// Positive response
+				vstate := cache.ValidationStateNone
+				if cached != nil {
+					vstate = cached.State
 				}
 				suffix := fmt.Sprintf(" (state: %s)", cache.ValidationStateToString[vstate])
 				
@@ -394,6 +435,40 @@ func renderSignal(server *cache.AuthServer) string {
 	return strings.Join(parts, ",")
 }
 
+var ImrSetCmd = &cobra.Command{
+	Use:   "set",
+	Short: "Set IMR runtime parameters",
+}
+
+var imrSetLineWidthCmd = &cobra.Command{
+	Use:   "linewidth [num]",
+	Short: "Set line width for debug output",
+	Long:  `Set the line width used to truncate long lines in logging and output (e.g., DNSKEYs and RRSIGs)`,
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		width, err := strconv.Atoi(args[0])
+		if err != nil {
+			fmt.Printf("Error: %q is not a valid number: %v\n", args[0], err)
+			return
+		}
+		if width < 1 {
+			fmt.Printf("Error: line width must be at least 1\n")
+			return
+		}
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("Error: RRset cache is not initialized")
+			return
+		}
+		if Conf.Internal.ImrEngine == nil {
+			fmt.Println("Error: IMR engine is not initialized")
+			return
+		}
+		Conf.Internal.RRsetCache.LineWidth = width
+		Conf.Internal.ImrEngine.LineWidth = width
+		fmt.Printf("Line width set to %d\n", width)
+	},
+}
+
 func init() {
 	ImrZoneCmd.AddCommand(imrZoneListCmd, imrZoneCheckCmd)
 	ImrQueryCmd.Annotations = map[string]string{
@@ -410,4 +485,5 @@ func init() {
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
 	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)
+	ImrSetCmd.AddCommand(imrSetLineWidthCmd)
 }

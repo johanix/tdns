@@ -75,8 +75,11 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 		sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
 		// }
 	}
+	if Globals.App.Type == AppTypeScanner {
+		sr.HandleFunc("/scanner", APIscanner(&Globals.App, conf.Internal.ScannerQ, kdb)).Methods("POST")
+	}
 	if Globals.App.Type == AppTypeCombiner {
-		sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	}
 
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")

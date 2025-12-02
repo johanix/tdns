@@ -1,0 +1,36 @@
+include:
+#   - scanner-zones.yaml
+
+apiserver:
+   addresses:           [ 127.0.0.1:8082 ]
+   apikey:              you-have-stolen-my-frotzblinger
+   certFile:            /etc/tdns/certs/localhost.crt
+   keyFile:             /etc/tdns/certs/localhost.key
+
+service:
+   name:                TDNS-SCANNER
+   verbose:             true
+   debug:               true   # writes processed zone to disk
+   refresh:             true
+   maxrefresh:          1800    # seconds. Cap refresh counter to max this
+#   reset_soa_serial:   false   # replace inbound SOA serial with unixtime.
+   resign:              false    # re-sign primary zones as needed
+
+dnsengine:
+   addresses:           [ 127.0.0.1:5366, '[::1]:5366']
+
+imrengine:
+   active:		true   # Set to false to disable IMR. Defaults to true if not specified.
+   root-hints:		""   # Optional: path to root hints file. If empty, uses compiled-in hints.
+
+common:
+   command:		/usr/local/libexec/tdns-scanner
+   rootca:      	../etc/certs/PublicRootCAs.pem
+   debug:		true
+   verbose:		true
+
+log:
+   file:	/var/log/axfr.net/tdns-scanner.log
+
+db:
+   file:	/var/tmp/scanner.db

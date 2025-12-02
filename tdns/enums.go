@@ -5,30 +5,6 @@ package tdns
 
 import "fmt"
 
-type xxxCacheContext uint8
-
-const (
-	ContextAnswer xxxCacheContext = iota + 1
-	ContextHint
-	ContextPriming
-	ContextReferral
-	ContextNXDOMAIN
-	ContextNoErrNoAns
-	ContextGlue    // from additional section
-	ContextFailure // some sort of general failure that we cannot sort out
-)
-
-var CacheContextToString = map[xxxCacheContext]string{
-	ContextAnswer:     "answer",
-	ContextHint:       "hint",
-	ContextPriming:    "priming",
-	ContextReferral:   "referral",
-	ContextNXDOMAIN:   "NXDOMAIN (negative response type 3)",
-	ContextNoErrNoAns: "NOERROR, NODATA (negative response type 0)",
-	ContextGlue:       "glue",
-	ContextFailure:    "failure",
-}
-
 type ZoneOption uint8
 
 const (
@@ -92,6 +68,7 @@ const (
 	ImrOptAlwaysQueryForTransport
 	ImrOptTransportSignalType
 	ImrOptQueryForTransportTLSA
+	ImrOptUseTransportSignals
 )
 
 var ImrOptionToString = map[ImrOption]string{
@@ -100,6 +77,7 @@ var ImrOptionToString = map[ImrOption]string{
 	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
 	ImrOptTransportSignalType:     "transport-signal-type",
 	ImrOptQueryForTransportTLSA:   "query-for-transport-tlsa",
+	ImrOptUseTransportSignals:     "use-transport-signals",
 }
 
 var StringToImrOption = map[string]ImrOption{
@@ -108,29 +86,7 @@ var StringToImrOption = map[string]ImrOption{
 	"always-query-for-transport": ImrOptAlwaysQueryForTransport,
 	"transport-signal-type":      ImrOptTransportSignalType,
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
-}
-
-type xxxConnMode uint8
-
-const (
-	ConnModeLegacy xxxConnMode = iota
-	ConnModeOpportunistic
-	ConnModeValidated
-	ConnModeStrict
-)
-
-var ConnModeToString = map[xxxConnMode]string{
-	ConnModeLegacy:        "legacy",
-	ConnModeOpportunistic: "opportunistic",
-	ConnModeValidated:     "validated",
-	ConnModeStrict:        "strict",
-}
-
-var StringToConnMode = map[string]xxxConnMode{
-	"legacy":        ConnModeLegacy,
-	"opportunistic": ConnModeOpportunistic,
-	"validated":     ConnModeValidated,
-	"strict":        ConnModeStrict,
+	"use-transport-signals":      ImrOptUseTransportSignals,
 }
 
 type AppType uint8
@@ -142,6 +98,7 @@ const (
 	AppTypeImr // simplified recursor
 	AppTypeCli
 	AppTypeReporter
+	AppTypeScanner
 )
 
 var AppTypeToString = map[AppType]string{
@@ -151,6 +108,7 @@ var AppTypeToString = map[AppType]string{
 	AppTypeImr:      "imr",
 	AppTypeCli:      "cli",
 	AppTypeReporter: "reporter",
+	AppTypeScanner:  "scanner",
 }
 
 var StringToAppType = map[string]AppType{
@@ -161,6 +119,7 @@ var StringToAppType = map[string]AppType{
 	"imr":      AppTypeImr,
 	"cli":      AppTypeCli,
 	"reporter": AppTypeReporter,
+	"scanner":  AppTypeScanner,
 }
 
 type ErrorType uint8

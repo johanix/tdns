@@ -194,12 +194,8 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*core
 		}
 	}
 
-	for _, rr := range rrset.RRs {
-		zd.Logger.Printf("%s", rr.String())
-	}
-	for _, rr := range rrset.RRSIGs {
-		zd.Logger.Printf("%s", rr.String())
-	}
+	zd.Logger.Printf("LookupRRset: rrset:\n%s", rrset.String(130))
+
 
 	log.Printf("LookupRRset: done. rrset=%v", rrset)
 	return rrset, err
@@ -307,9 +303,10 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 		rcode = r.MsgHdr.Rcode
 		if len(r.Answer) != 0 {
 			lg.Printf("*** AuthDNSQuery: there is stuff in Answer section:")
-			for _, rr := range r.Answer {
-				lg.Printf("*** AuthDNSQuery: Answer: %s", rr.String())
-			}
+			// for _, rr := range r.Answer {
+			//	lg.Printf("*** AuthDNSQuery: Answer: %s", rr.String())
+			//}
+			lg.Printf("*** AuthDNSQuery:\n%s", PrintMsgSection("Answer", r.Answer, 130))
 			for _, rr := range r.Answer {
 				switch t := rr.Header().Rrtype; t {
 				case rrtype:
@@ -441,6 +438,12 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				}
 			}
 
+			// If rrset is empty (no matching records) and rcode is NOERROR, this is NODATA, not an answer
+			if len(rrset.RRs) == 0 && rcode == dns.RcodeSuccess {
+				// This is a negative response (NODATA), not a positive answer
+				// Don't cache it here - let it fall through to be handled as negative response
+				return nil, rcode, cache.ContextNoErrNoAns, nil
+			}
 			imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 				Name:       qname,
 				RRtype:     qtype,
@@ -672,17 +675,17 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 		if crrset != nil {
 			if Globals.Debug {
 				lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
-				fmt.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)\n", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 			}
 			return crrset.RRset, int(crrset.Rcode), crrset.Context, nil
 		} else {
 			if Globals.Debug {
 				lg.Printf("IterativeDNSQuery: answer to <%s, %s> not present in cache", qname, dns.TypeToString[qtype])
-				fmt.Printf("IterativeDNSQuery: answer to <%s, %s> not present in cache\n", qname, dns.TypeToString[qtype])
 			}
 		}
 	} else {
-		lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
+		if Globals.Debug {
+			lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
+		}
 	}
 	var rrset core.RRset
 	var rcode int
@@ -721,6 +724,9 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 				lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
 				continue // go to next server
 			}
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
+			}
 
 			if r == nil {
 				continue
@@ -751,30 +757,41 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 				continue
 			}
 
-			if Globals.Debug {
-				log.Printf("IterativeDNSQuery: examining Authoritative section (%d RRs):\n", len(r.Ns))
-				for _, rr := range r.Ns {
-					if rr == nil {
-						continue
-					}
-					log.Printf("  %T %s", rr, rr.String())
-				}
-				log.Printf("IterativeDNSQuery: ---- end of Authoritative section (%d RRs):\n", len(r.Ns))
-			}
-
 			if len(r.Ns) != 0 {
-				if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r); handled {
-					return nil, rcodeNeg, ctxNeg, nil
+				kind := classifyResponse(qname, qtype, r)
+				if Globals.Debug {
+					log.Printf("IterativeDNSQuery: classified response for %s %s as %s (rcode=%s, Answer=%d, Authority=%d)",
+						qname, dns.TypeToString[qtype],	responseKindToString(kind), dns.RcodeToString[rcode], len(r.Answer), len(r.Ns))	
 				}
-				if rcode == dns.RcodeSuccess {
+
+				switch kind {
+				case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
+					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r); handled {
+						return nil, rcodeNeg, ctxNeg, nil
+					}
+					// If not handled, fall through to try next server
+					if rcode == dns.RcodeNameError {
+						log.Printf("*** IterativeDNSQuery: NXDOMAIN response lacked usable SOA for %s %s", qname, dns.TypeToString[qtype])
+					}
+					continue
+				case responseKindReferral:
 					return imr.handleReferral(ctx, qname, qtype, r, force)
-				}
-				if rcode == dns.RcodeNameError {
-					log.Printf("*** IterativeDNSQuery: NXDOMAIN response lacked usable SOA for %s %s", qname, dns.TypeToString[qtype])
+				case responseKindError:
+					log.Printf("*** IterativeDNSQuery: treating response as error for %s %s (rcode=%s)",
+						qname, dns.TypeToString[qtype], dns.RcodeToString[rcode])
+					continue
+				case responseKindUnknown:
+					if Globals.Debug {
+						log.Printf("IterativeDNSQuery: responseKindUnknown for %s %s; trying next server",
+							qname, dns.TypeToString[qtype])
+					}
+					continue
+				default:
+					// Should not reach here, but be defensive
+					log.Printf("*** IterativeDNSQuery: unexpected response kind %d for %s %s; trying next server",
+						kind, qname, dns.TypeToString[qtype])
 					continue
 				}
-				log.Printf("*** IterativeDNSQuery: surprising rcode: %s", dns.RcodeToString[rcode])
-				continue
 			}
 
 			if rcode == dns.RcodeSuccess {
@@ -1323,15 +1340,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	}
 	// return c.Exchange(m, addr)
 	r, _, err := c.Exchange(m, addr, Globals.Debug)
+	if err != nil {
+		log.Printf("tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
+		return nil, 0, err
+	}
 	if Globals.Debug {
 		if r != nil {
-			log.Printf("tryServer: query \"%s %s\" sent to %s returned response:\n%s", qname, dns.TypeToString[qtype], addr, r.String())
+//			log.Printf("tryServer: query \"%s %s\" sent to %s returned response:\n%s", qname, dns.TypeToString[qtype], addr, r.String())
 		} else {
 			log.Printf("tryServer: query \"%s %s\" sent to %s returned no response", qname, dns.TypeToString[qtype], addr)
 		}
-	}
-	if err != nil {
-		log.Printf("tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
 	}
 	return r, 0, err
 }
@@ -1467,6 +1485,9 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section
 func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, server *cache.AuthServer, r *dns.Msg) {
+	if imr.Options[ImrOptUseTransportSignals] != "true" {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1683,6 +1704,10 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 }
 
 func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, cache.CacheContext, error, bool) {
+	
+	if Globals.Debug {
+		imr.Cache.Logger.Printf("*** handleAnswer: qname=%s, qtype=%s, rcode=%s, r: %s", qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode], PrintMsgFull(r, imr.LineWidth))
+	}
 	var rrset core.RRset
 	for _, rr := range r.Answer {
 		switch t := rr.Header().Rrtype; t {
@@ -1706,6 +1731,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 						Rcode:      uint8(rcode),
 						RRset:      &rrset,
 						Context:    cache.ContextAnswer,
+						// Should there not be some state here? State:      vstate,
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 					})
 					return &rrset, rcode, cache.ContextAnswer, nil, true
@@ -1724,10 +1750,16 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		vstate := cache.ValidationStateNone
 		var err error
 		if len(rrset.RRSIGs) > 0 {
-			_, vstate, err = imr.Cache.ValidateRRset(ctx, &rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			if Globals.Debug {
+				imr.Cache.Logger.Printf("*** handleAnswer: validating RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
+			}
+			vstate, err = imr.Cache.ValidateRRset(ctx, &rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
 			if err != nil {
 				log.Printf("handleAnswer: failed to validate RRset: %v", err)
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err, false
+			}
+			if Globals.Debug {
+				imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 			}
 		}
 		cr := &cache.CachedRRset{
@@ -1736,7 +1768,6 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			Rcode:      uint8(r.MsgHdr.Rcode),
 			RRset:      &rrset,
 			Context:    cache.ContextAnswer,
-			Validated:  vstate == cache.ValidationStateSecure,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 		}
@@ -1749,25 +1780,9 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 				imr.Cache.StoreTLSAForServer(base, qname, &rrset, vstate)
 			}
 		}
-		// If this is a validated DNSKEY RRset with secure state, cache its keys as trusted anchors with TTL-based expiration
-		// Only add to DnskeyCache if validated and secure, as DnskeyCache is used for validation of other data
-		if qtype == dns.TypeDNSKEY && vstate == cache.ValidationStateSecure {
-			// derive expiration from just-cached rrset
-			exp := cr.Expiration
-			for _, rr := range rrset.RRs {
-				if dk, ok := rr.(*dns.DNSKEY); ok {
-					cache.DnskeyCache.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &cache.CachedDnskeyRRset{
-						Name:       dns.Fqdn(dk.Hdr.Name),
-						Keyid:      dk.KeyTag(),
-						Validated:  vstate == cache.ValidationStateSecure,
-						Trusted:    true,
-						State:      vstate,
-						Dnskey:     *dk,
-						Expiration: exp,
-					})
-				}
-			}
-		}
+		// Note: DNSKEYs are added to DnskeyCache by ValidateDNSKEYs() upon successful validation,
+		// so we don't need to add them here. This ensures keys are available immediately for
+		// validating subsequent RRsets (e.g., A records signed by ZSKs).
 		return &rrset, r.MsgHdr.Rcode, cache.ContextAnswer, nil, true
 	}
 	return nil, r.MsgHdr.Rcode, cache.ContextFailure, nil, false
@@ -1810,11 +1825,6 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	if Globals.Debug {
 		imr.Cache.Logger.Printf("*** handleReferral: zone name is %q, nsRRset: %+v", zonename, nsRRset)
 	}
-	// ensure we collect all the NS addresses
-	if err := imr.CollectNSAddresses(ctx, nsRRset, nil); err != nil {
-		log.Printf("*** handleReferral: Error from CollectNSAddresses: %v", err)
-		return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
-	}
 	if len(nsRRset.RRs) != 0 {
 		nsRRset.Name = zonename
 		nsRRset.Class = dns.ClassINET
@@ -1826,7 +1836,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		vstate := cache.ValidationStateNone
 		var err error
 		if len(nsRRset.RRSIGs) > 0 {
-			_, vstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			vstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
 			if err != nil {
 				log.Printf("handleReferral: failed to validate NS RRset: %v", err)
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
@@ -1838,7 +1848,6 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			Rcode:      uint8(r.MsgHdr.Rcode),
 			RRset:      nsRRset,
 			Context:    cache.ContextReferral,
-			Validated:  vstate == cache.ValidationStateSecure,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(nsRRset.RRs)),
 		})
@@ -1869,7 +1878,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		vstate := cache.ValidationStateNone
 		var err error
 		if len(dsSigs) > 0 {
-			_, vstate, err = imr.Cache.ValidateRRset(ctx, dsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			vstate, err = imr.Cache.ValidateRRset(ctx, dsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
 			if err != nil {
 				log.Printf("handleReferral: failed to validate DS RRset: %v", err)
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
@@ -1881,7 +1890,6 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			Rcode:      uint8(r.MsgHdr.Rcode),
 			RRset:      dsRRset,
 			Context:    cache.ContextReferral,
-			Validated:  vstate == cache.ValidationStateSecure,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(dsRRs)),
 		})
@@ -1901,6 +1909,46 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		log.Printf("*** handleReferral: Error from CollectNSAddressesFromAdditional: %v", err)
 		return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
 	}
+
+	// For out-of-bailiwick nameservers, we still need their addresses if they
+	// are not already present in cache. In-bailiwick NS should primarily use
+	// glue (and, when ImrOptRevalidateNS is enabled, will later be
+	// revalidated by scheduleReferralNSRevalidation / revalidateInBailiwickGlue).
+	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
+		inBailiwick := func(host, zone string) bool {
+			h := strings.ToLower(dns.Fqdn(host))
+			z := strings.ToLower(dns.Fqdn(zone))
+			return h == z || strings.HasSuffix(h, "."+z)
+		}
+
+		var oobRRset core.RRset
+		for _, rr := range nsRRset.RRs {
+			ns, ok := rr.(*dns.NS)
+			if !ok {
+				continue
+			}
+			if inBailiwick(ns.Ns, zonename) {
+				// in-bailiwick: prefer glue; any needed revalidation is handled
+				// by scheduleReferralNSRevalidation below.
+				continue
+			}
+			// out-of-bailiwick: only bother if we don't already have addresses cached
+			if cA := imr.Cache.Get(ns.Ns, dns.TypeA); cA != nil && cA.RRset != nil && len(cA.RRset.RRs) > 0 {
+				continue
+			}
+			if cAAAA := imr.Cache.Get(ns.Ns, dns.TypeAAAA); cAAAA != nil && cAAAA.RRset != nil && len(cAAAA.RRset.RRs) > 0 {
+				continue
+			}
+			oobRRset.RRs = append(oobRRset.RRs, rr)
+		}
+		if len(oobRRset.RRs) > 0 {
+			if err := imr.CollectNSAddresses(ctx, &oobRRset, nil); err != nil {
+				log.Printf("*** handleReferral: Error from CollectNSAddresses (out-of-bailiwick): %v", err)
+				// Non-fatal: we can still proceed with whatever glue we have.
+			}
+		}
+	}
+
 	if len(serverMap) == 0 {
 		return nil, r.MsgHdr.Rcode, cache.ContextReferral, nil
 	}
@@ -1947,30 +1995,6 @@ func cloneServerMap(src map[string]*cache.AuthServer) map[string]*cache.AuthServ
 	return dst
 }
 
-/*
-func markNSRevalidation(rrcache *cache.RRsetCacheT, zone string) bool {
-	rrcache.nsRevalidateMu.Lock()
-	defer rrcache.nsRevalidateMu.Unlock()
-	if rrcache.nsRevalidateInFlight == nil {
-		rrcache.nsRevalidateInFlight = make(map[string]struct{})
-	}
-	if _, ok := rrcache.nsRevalidateInFlight[zone]; ok {
-		return false
-	}
-	rrcache.nsRevalidateInFlight[zone] = struct{}{}
-	return true
-}
-
-func clearNSRevalidation(rrcache *cache.RRsetCacheT, zone string) {
-	rrcache.nsRevalidateMu.Lock()
-	defer rrcache.nsRevalidateMu.Unlock()
-	if rrcache.nsRevalidateInFlight == nil {
-		return
-	}
-	delete(rrcache.nsRevalidateInFlight, zone)
-}
-*/
-
 func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serverMap map[string]*cache.AuthServer) {
 	imr.Cache.Logger.Printf("*** revalidateReferralNS: revalidating NS for zone %s", zonename)
 	if imr.Cache == nil || imr.Options[ImrOptRevalidateNS] != "true" || zonename == "" || len(serverMap) == 0 {
@@ -2005,7 +2029,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 	rrset.RRtype = dns.TypeNS
 	vstate := cache.ValidationStateNone
 	if len(rrset.RRSIGs) > 0 {
-		_, vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+		vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** revalidateReferralNS: Error from ValidateRRset: %v", err)
 		}
@@ -2015,7 +2039,6 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 			Rcode:      uint8(rcode),
 			RRset:      rrset,
 			Context:    cache.ContextAnswer,
-			Validated:  vstate == cache.ValidationStateSecure,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 		})
@@ -2098,7 +2121,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 
 	vstate := cache.ValidationStateNone
 	if len(rrset.RRSIGs) > 0 {
-		_, vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+		vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
 		}
@@ -2109,10 +2132,134 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 		Rcode:      uint8(dns.RcodeSuccess),
 		RRset:      rrset,
 		Context:    cache.ContextAnswer,
-		Validated:  vstate == cache.ValidationStateSecure,
 		State:      vstate,
 		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
 	})
+}
+
+// responseKind describes the high-level semantics of a DNS response
+// as seen by the iterative resolver.
+type responseKind int
+
+const (
+	responseKindUnknown responseKind = iota
+	responseKindAnswer
+	responseKindReferral
+	responseKindNegativeNoData
+	responseKindNegativeNXDOMAIN
+	responseKindError
+)
+
+func responseKindToString(k responseKind) string {
+	switch k {
+	case responseKindAnswer:
+		return "answer"
+	case responseKindReferral:
+		return "referral"
+	case responseKindNegativeNoData:
+		return "negative-noerror-nodata"
+	case responseKindNegativeNXDOMAIN:
+		return "negative-nxdomain"
+	case responseKindError:
+		return "error"
+	case responseKindUnknown:
+		fallthrough
+	default:
+		return "unknown"
+	}
+}
+
+// classifyResponse inspects a DNS message and classifies it into one of a small
+// set of semantic categories. This is used to decide whether to treat
+// an empty-answer response with Authority data as a negative response
+// (NXDOMAIN / NOERROR-NODATA) or as a referral.
+//
+// The rules are intentionally conservative:
+//   - Any non-empty Answer -> responseKindAnswer
+//   - NXDOMAIN + SOA in authority that can speak for qname -> NegativeNXDOMAIN
+//   - NOERROR + SOA in authority that can speak for qname -> NegativeNoData
+//   - Otherwise, if there is at least one NS in authority -> Referral
+//   - All other shapes are classified as Unknown/Error and left to callers.
+func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
+	if r == nil {
+		return responseKindError
+	}
+	// Any non-empty Answer is considered an "answer" here, even if it also
+	// contains referral-ish NS in Authority; the caller is responsible for
+	// deciding whether to also treat embedded NS as a referral.
+	if len(r.Answer) > 0 {
+		return responseKindAnswer
+	}
+
+	rcode := r.MsgHdr.Rcode
+
+	// No Authority section: can't be a referral or a well-formed negative.
+	if len(r.Ns) == 0 {
+		if rcode == dns.RcodeSuccess {
+			return responseKindUnknown
+		}
+		return responseKindError
+	}
+
+	hasSOA := false
+	hasNS := false
+	var soaOwner string
+
+	for _, rr := range r.Ns {
+		if rr == nil {
+			continue
+		}
+		switch rr.Header().Rrtype {
+		case dns.TypeSOA:
+			hasSOA = true
+			if soaOwner == "" {
+				soaOwner = rr.Header().Name
+			}
+		case dns.TypeNS:
+			hasNS = true
+		}
+	}
+
+	// Helper: does this SOA plausibly speak for qname?
+	soaSpeaksForQname := func() bool {
+		if !hasSOA || soaOwner == "" {
+			return false
+		}
+		// Canonicalise for a simple suffix check.
+		q := dns.Fqdn(strings.ToLower(qname))
+		s := dns.Fqdn(strings.ToLower(soaOwner))
+		return q == s || strings.HasSuffix(q, "."+s) || s == "."
+	}
+
+	switch rcode {
+	case dns.RcodeNameError:
+		// For NXDOMAIN, we require a SOA to be present, but we're more lenient
+		// about whether it "speaks for" qname. If there's a SOA present, we
+		// accept it as a valid NXDOMAIN response even if the SOA owner doesn't
+		// exactly match qname (some servers may return SOA for parent zone).
+		if hasSOA {
+			return responseKindNegativeNXDOMAIN
+		}
+		// NXDOMAIN without any SOA should be treated as an error and
+		// the caller will typically try the next server.
+		return responseKindError
+
+	case dns.RcodeSuccess:
+		// Prefer interpreting SOA as a negative response when it can
+		// plausibly speak for qname, per RFC 2308 (NOERROR/NODATA).
+		if soaSpeaksForQname() {
+			return responseKindNegativeNoData
+		}
+		// Otherwise, if there are NS records, this looks like a referral.
+		if hasNS {
+			return responseKindReferral
+		}
+		// Anything else is ambiguous / unexpected.
+		return responseKindUnknown
+
+	default:
+		return responseKindError
+	}
 }
 
 func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.CacheContext, int, bool) {
@@ -2126,6 +2273,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		negContext = cache.ContextNXDOMAIN
 	case dns.RcodeSuccess:
 		if len(r.Answer) != 0 {
+			// We should not get here, but if we do, it's a failure
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
 		}
 		negContext = cache.ContextNoErrNoAns
@@ -2203,7 +2351,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 	skipDNSKEYValidation := qtype == dns.TypeDNSKEY
 	hasValidatedDS := false
 	if skipDNSKEYValidation {
-		if ds := imr.Cache.Get(qname, dns.TypeDS); ds != nil && ds.RRset != nil && len(ds.RRset.RRs) > 0 && ds.Validated {
+		if ds := imr.Cache.Get(qname, dns.TypeDS); ds != nil && ds.RRset != nil && len(ds.RRset.RRs) > 0 && ds.State == cache.ValidationStateSecure {
 			hasValidatedDS = true
 		}
 	}
@@ -2211,7 +2359,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 	soaVstate := cache.ValidationStateNone
 	var err error
 	if !skipDNSKEYValidation && len(soarrset.RRSIGs) > 0 {
-		_, soaVstate, err = imr.Cache.ValidateRRset(context.Background(), soarrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+		soaVstate, err = imr.Cache.ValidateRRset(context.Background(), soarrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
 		if err != nil {
 			log.Printf("handleNegative: failed to validate SOA RRset: %v", err)
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
@@ -2241,24 +2389,34 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		edeText = fmt.Sprintf("no DNSKEY matches DS for zone %s", zone)
 	}
 
-	negValidated := false
 	vstate := cache.ValidationStateNone
 	if !skipDNSKEYValidation && len(negAuthority) > 0 {
-		negValidated, vstate, err = imr.Cache.ValidateNegativeResponse(context.Background(), qname, qtype, negAuthority, imr.IterativeDNSQueryFetcher())
+		vstate, err = imr.Cache.ValidateNegativeResponse(context.Background(), qname, qtype, negAuthority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			log.Printf("handleNegative: failed to validate negative response: %v", err)
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
 		}
 	}
 
+	// Ensure RCODE matches the context we're caching
+	// If we're caching as NXDOMAIN, the RCODE must be NXDOMAIN
+	// If we're caching as NODATA, the RCODE must be NOERROR
+	cachedRcode := uint8(r.MsgHdr.Rcode)
+	if negContext == cache.ContextNXDOMAIN && cachedRcode != uint8(dns.RcodeNameError) {
+		log.Printf("*** handleNegative: WARNING - caching as NXDOMAIN but RCODE is %s (expected NXDOMAIN)", dns.RcodeToString[r.MsgHdr.Rcode])
+		cachedRcode = uint8(dns.RcodeNameError)
+	} else if negContext == cache.ContextNoErrNoAns && cachedRcode != uint8(dns.RcodeSuccess) {
+		log.Printf("*** handleNegative: WARNING - caching as NODATA but RCODE is %s (expected NOERROR)", dns.RcodeToString[r.MsgHdr.Rcode])
+		cachedRcode = uint8(dns.RcodeSuccess)
+	}
+	
 	imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 		Name:         qname,
 		RRtype:       qtype,
-		Rcode:        uint8(r.MsgHdr.Rcode),
+		Rcode:        cachedRcode,
 		RRset:        soarrset,
 		NegAuthority: negAuthority,
 		Context:      negContext,
-		Validated:    negValidated,
 		State:        vstate,
 		Expiration:   expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
 		EDECode:      edeCode,
@@ -2276,7 +2434,6 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		Rcode:      uint8(dns.RcodeSuccess),
 		RRset:      soarrset,
 		Context:    cache.ContextAnswer,
-		Validated:  soaVstate == cache.ValidationStateSecure,
 		State:      soaVstate,
 		Expiration: expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
 	})

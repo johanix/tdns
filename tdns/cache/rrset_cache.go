@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 var DnskeyCache = NewDnskeyCache()
@@ -64,6 +64,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
         ZoneMap:                core.NewCmap[*Zone](), // zone -> *Zone
 		DnskeyCache:            DnskeyCache,
 		Logger:                 lg,
+		LineWidth:              130, // default line width for truncating long lines in logging and output
 		Verbose:                verbose,
 		Debug:                  debug,
 		DNSClient:              client,
@@ -599,18 +600,31 @@ func (rrcache *RRsetCacheT) IsPrimed() bool {
 }
 
 func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetcher) error {
-	// Verify root hints file exists
-	if _, err := os.Stat(hintsfile); err != nil {
-		return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
+	var data []byte
+	var err error
+	var source string
+
+	// If no hints file is configured, use compiled-in hints
+	if hintsfile == "" || strings.TrimSpace(hintsfile) == "" {
+		log.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
+		data = []byte(CompiledInRootHints)
+		source = "compiled-in"
+	} else {
+		// Verify root hints file exists
+		if _, err := os.Stat(hintsfile); err != nil {
+			return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
+		}
+
+		log.Printf("PrimeWithHints: reading root hints from file %s", hintsfile)
+		// Read and parse root hints file
+		data, err = os.ReadFile(hintsfile)
+		if err != nil {
+			return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
+		}
+		source = hintsfile
 	}
 
-	log.Printf("PrimeWithHints: reading root hints %s", hintsfile)
-	// Read and parse root hints file
-	data, err := os.ReadFile(hintsfile)
-	if err != nil {
-		return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
-	}
-	zp := dns.NewZoneParser(strings.NewReader(string(data)), ".", hintsfile)
+	zp := dns.NewZoneParser(strings.NewReader(string(data)), ".", source)
 	zp.SetIncludeAllowed(true)
 
 	// Maps to collect NS and A/AAAA records
@@ -640,7 +654,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 				PrefTransport: core.TransportDo53,
 			}
 			rootns = append(rootns, nsname)
-			log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
+			if rrcache.Debug {
+				log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
+			}
 
 		case dns.TypeA, dns.TypeAAAA:
 			// log.Printf("PWH: read address RR: %s", rr.String())
@@ -650,7 +666,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 	}
 
 	if err := zp.Err(); err != nil {
-		return fmt.Errorf("Error parsing root hints file %s: %v", hintsfile, err)
+		return fmt.Errorf("Error parsing root hints from %s: %v", source, err)
 	}
 
 	// Store NS records for root
@@ -669,7 +685,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 			},
 		})
 	} else {
-		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
+		return fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
 	// Store root zone data
@@ -700,7 +716,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 			}
 		}
 		authMap[name] = tmpsrv
-		log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
+		if rrcache.Debug {
+			log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
+		}
 
 		// Create RRset for each type
 		for rrtype, records := range typeGroups {
@@ -724,20 +742,12 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 	rrcache.ServerMap.Set(".", authMap)
 	rrcache.Servers.Set(".", servers)
 
-	log.Printf("PrimeWithHints: serverMap:")
-	for k, v := range authMap {
-		log.Printf("server: %q data: %+v", k, v)
-	}
-
-	// dump.P(authMap)
-
-	// rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
 	rrset, err := fetcher(context.Background(), ".", dns.TypeNS, authMap) // force re-query bypassing cache
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}
 	if rrset == nil {
-		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
+		return fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
 	log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
@@ -839,7 +849,7 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 			Context: ContextAnswer,
 		}
 	}
-	cached.Bogus = true
+	cached.State = ValidationStateBogus
 	if edeCode != 0 {
 		cached.EDECode = edeCode
 		cached.EDEText = edeText
@@ -866,7 +876,7 @@ func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, 
 			continue
 		}
 		ds := rrcache.Get(signer, dns.TypeDS)
-		if ds == nil || ds.RRset == nil || len(ds.RRset.RRs) == 0 || !ds.Validated {
+		if ds == nil || ds.RRset == nil || len(ds.RRset.RRs) == 0 || ds.State != ValidationStateSecure {
 			continue
 		}
 		dnskey := rrcache.Get(signer, dns.TypeDNSKEY)

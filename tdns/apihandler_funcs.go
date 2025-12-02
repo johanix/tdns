@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/miekg/dns"
 	cache "github.com/johanix/tdns/tdns/cache"
+	"github.com/miekg/dns"
 )
 
 func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
@@ -488,6 +488,69 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true
 		}
+	}
+}
+
+func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		decoder := json.NewDecoder(r.Body)
+		var sp ScannerPost
+		err := decoder.Decode(&sp)
+		if err != nil {
+			log.Println("APIscanner: error decoding scanner post:", err)
+		}
+
+		log.Printf("API: received /scanner request (cmd: %s) from %s.\n",
+			sp.Command, r.RemoteAddr)
+
+		resp := ScannerResponse{
+			AppName: Globals.App.Name,
+			Time:    time.Now(),
+		}
+
+		switch sp.Command {
+		case "scan":
+			log.Printf("APIscanner: processing scan request")
+
+			respch := make(chan ScanResponse, 1)
+
+			scannerq <- ScanRequest{
+				Cmd: sp.Command,
+				ParentZone: sp.ParentZone,
+				ScanZones: sp.ScanZones,
+				ScanType: sp.ScanType,
+				Response: respch,
+			}
+			select {
+			case sr := <-respch:
+				resp.Msg = sr.Msg
+				resp.Status = "ok"
+				resp.Time = sr.Time
+				if sr.Error {
+					resp.Error = true
+					resp.ErrorMsg = sr.ErrorMsg
+				}
+			case <-time.After(4 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "Timeout waiting for scan response"
+			}
+			if resp.Msg == "" {
+				resp.Msg = fmt.Sprintf("Scan request processed")
+			}
+
+		case "status": // XXX: this should not be about general config status, but about scanner specific details
+			log.Printf("APIscanner: scanner status inquiry")
+			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
+				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
+
+		default:
+			resp.ErrorMsg = fmt.Sprintf("Unknown scanner command: %s", sp.Command)
+			resp.Error = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 

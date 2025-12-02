@@ -1,8 +1,6 @@
-recursorengine:
-   active:              true
-   root-hints:          "/etc/tdns/root.hints"
-
 imrengine:
+   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
+   root-hints:          "/etc/tdns/root.hints"   # Optional: path to root hints file. If empty, uses compiled-in hints.
    addresses:           [ 127.0.0.1:99, '[::1]:99']
    transports:          [ do53, dot, doq ]
    certfile:            /etc/hsync-test/certs/hoola.bandoola..crt

@@ -278,7 +278,7 @@ func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 }
 
 func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
-	dsync_target, err := LookupDSYNCTarget(KeyName, Globals.IMR, dns.TypeANY, core.SchemeUpdate)
+	dsync_target, err := Globals.ImrEngine.LookupDSYNCTarget(KeyName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("could not find DSYNC target: %v", err)
 	}

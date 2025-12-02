@@ -15,13 +15,13 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest) error {
+func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, imr *Imr) error {
 	// var ds DelegationSyncRequest
-	var imr = viper.GetString("resolver.address")
-	if imr == "" {
-		log.Printf("DelegationSyncEngine: resolver address not specified. Terminating.")
-		return fmt.Errorf("DelegationSyncEngine: resolver address not specified")
-	}
+//	var imr = viper.GetString("resolver.address")
+//	if imr == "" {
+//		log.Printf("DelegationSyncEngine: resolver address not specified. Terminating.")
+//		return fmt.Errorf("DelegationSyncEngine: resolver address not specified")
+//	}
 
 	// time.Sleep(5 * time.Second) // Allow time for zones to load
 
@@ -66,7 +66,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "DELEGATION-STATUS":
 				log.Printf("DelegationSyncher: Zone %s request for delegation status.", zd.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation()
+				syncstate, err := zd.AnalyseZoneDelegation(imr)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 					syncstate.Error = true
@@ -82,14 +82,14 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					len(dss.NsRemoves), len(dss.NsAdds), len(dss.ARemoves), len(dss.AAdds), len(dss.AAAARemoves), len(dss.AAAAAdds))
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = ParentZone(zd.ZoneName, imr)
+					zd.Parent, err = imr.ParentZone(zd.ZoneName)
 					if err != nil {
 						log.Printf("DelegationSyncher: Zone %s: Error from ParentZone(): %v. Ignoring sync request.", ds.ZoneName, err)
 						continue
 					}
 				}
 
-				msg, rcode, ur, err := zd.SyncZoneDelegation(kdb, notifyq, ds.SyncStatus)
+				msg, rcode, ur, err := zd.SyncZoneDelegation(kdb, notifyq, ds.SyncStatus, imr)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 					continue
@@ -100,7 +100,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "EXPLICIT-SYNC-DELEGATION":
 				log.Printf("DelegationSyncher: Zone %s request for explicit delegation sync.", ds.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation()
+				syncstate, err := zd.AnalyseZoneDelegation(imr)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
 					syncstate.Error = true
@@ -121,7 +121,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, ur, err := zd.SyncZoneDelegation(kdb, notifyq, syncstate)
+				msg, rcode, ur, err := zd.SyncZoneDelegation(kdb, notifyq, syncstate, imr)
 				if err != nil {
 					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
 					syncstate.Error = true
@@ -332,7 +332,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 // tdns.DelegationDataChanged() is used for implicit delegation synchronization.
 
 // SyncZoneDelegation() is used for delegation synchronization request via API.
-func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus, imr *Imr) (string, uint8, UpdateResult, error) {
 
 	//	syncstate, err := AnalyseZoneDelegation(conf, zd)
 	//	if err != nil {
@@ -364,7 +364,7 @@ func (zd *ZoneData) SyncZoneDelegation(kdb *KeyDB, notifyq chan NotifyRequest, s
 	// 	return fmt.Sprintf("Error from LookupDSYNCTarget(%s, %s): %v", zd.Parent, zd.ParentServers[0], err), err
 	// }
 
-	scheme, dsynctarget, err := zd.BestSyncScheme()
+	scheme, dsynctarget, err := zd.BestSyncScheme(imr)
 	if err != nil {
 		log.Printf("DelegationSyncEngine: Zone %s: Error from BestSyncScheme(): %v. Ignoring sync request.", zd.ZoneName, err)
 		return "", 0, UpdateResult{}, err

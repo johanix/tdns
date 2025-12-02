@@ -7,14 +7,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
-	core "github.com/johanix/tdns/tdns/core"
 	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -120,7 +118,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			rr := resp.RRset
 			vstate := cache.ValidationStateNone
 			if len(rr.RRSIGs) > 0 {
-				_, vstate, err = imr.Cache.ValidateRRset(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+				vstate, err = imr.Cache.ValidateRRset(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
 				if err != nil {
 					log.Printf("maybeQueryTLSA: failed to validate TLSA RRset: %v", err)
 					return
@@ -189,167 +187,4 @@ func cloneRRs(rrs []dns.RR) []dns.RR {
 		out = append(out, dns.Copy(rr))
 	}
 	return out
-}
-
-// XXX: Is this still in use?
-func (imr *Imr) PrimeWithHints(hintsfile string) error {
-	// Verify root hints file exists
-	if _, err := os.Stat(hintsfile); err != nil {
-		return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
-	}
-
-	log.Printf("PrimeWithHints: reading root hints %s", hintsfile)
-	// Read and parse root hints file
-	data, err := os.ReadFile(hintsfile)
-	if err != nil {
-		return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
-	}
-	zp := dns.NewZoneParser(strings.NewReader(string(data)), ".", hintsfile)
-	zp.SetIncludeAllowed(true)
-
-	// Maps to collect NS and A/AAAA records
-	nsRecords := []dns.RR{}
-	glueRecords := map[string][]dns.RR{}
-	nsMap := map[string]bool{}
-	authMap := map[string]*cache.AuthServer{}
-
-	var rootns []string
-
-	// Parse all records from the root hints file
-	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		switch rr.Header().Rrtype {
-		case dns.TypeNS:
-			if rr.Header().Name != "." {
-				log.Printf("Non-root NS record among hints: %v. Ignored.", rr.String())
-				continue
-			}
-			nsRecords = append(nsRecords, rr)
-			nsname := rr.(*dns.NS).Ns
-			nsMap[nsname] = true
-			authMap[nsname] = &cache.AuthServer{
-				Name:          nsname,
-				Alpn:          []string{"do53"},
-				Transports:    []core.Transport{core.TransportDo53},
-				Src:           "hint",
-				PrefTransport: core.TransportDo53,
-			}
-			rootns = append(rootns, nsname)
-			log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
-
-		case dns.TypeA, dns.TypeAAAA:
-			// log.Printf("PWH: read address RR: %s", rr.String())
-			name := rr.Header().Name
-			glueRecords[name] = append(glueRecords[name], rr)
-		}
-	}
-
-	if err := zp.Err(); err != nil {
-		return fmt.Errorf("Error parsing root hints file %s: %v", hintsfile, err)
-	}
-
-	// Store NS records for root
-	if len(nsRecords) > 0 {
-		log.Printf("Found %d NS RRs", len(nsRecords))
-		imr.Cache.Set(".", dns.TypeNS, &cache.CachedRRset{
-			Name:    ".",
-			RRtype:  dns.TypeNS,
-			Context: cache.ContextHint,
-			RRset: &core.RRset{
-				Name:   ".",
-				RRtype: dns.TypeNS,
-				Class:  dns.ClassINET,
-				RRs:    nsRecords,
-				RRSIGs: nil, // No DNSSEC in root hints
-			},
-		})
-	} else {
-		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
-	}
-
-	// Store root zone data
-	// cache.Data["."] = rootData
-	var servers []string
-
-	// Store glue records for root nameservers
-	log.Printf("Found %d glue records", len(glueRecords))
-	for name, rrs := range glueRecords {
-		if !nsMap[name] {
-			log.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)
-			continue
-		}
-
-		// Group records by type (A or AAAA)
-		typeGroups := map[uint16][]dns.RR{}
-		tmpsrv := authMap[name]
-		for _, rr := range rrs {
-			rrtype := rr.Header().Rrtype
-			typeGroups[rrtype] = append(typeGroups[rrtype], rr)
-			switch rr.Header().Rrtype {
-			case dns.TypeA:
-				servers = append(servers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
-				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.A).A.String())
-			case dns.TypeAAAA:
-				servers = append(servers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
-				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.AAAA).AAAA.String())
-			}
-		}
-		authMap[name] = tmpsrv
-		log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
-
-		// Create RRset for each type
-		for rrtype, records := range typeGroups {
-			imr.Cache.Set(name, rrtype, &cache.CachedRRset{
-				Name:    name,
-				RRtype:  rrtype,
-				Context: cache.ContextHint,
-				RRset: &core.RRset{
-					Name:   name,
-					Class:  dns.ClassINET,
-					RRtype: rrtype,
-					RRs:    records,
-					RRSIGs: nil, // No DNSSEC in root hints
-				},
-			})
-		}
-
-		// cache.Data[name] = ownerData
-	}
-
-	imr.Cache.ServerMap.Set(".", authMap)
-	imr.Cache.Servers.Set(".", servers)
-
-	log.Printf("PrimeWithHints: serverMap:")
-	for k, v := range authMap {
-		log.Printf("server: %q data: %+v", k, v)
-	}
-
-	// dump.P(authMap)
-
-	// rrset, _, _, err := rrcache.IterativeDNSQuery(".", dns.TypeNS, rootns, true) // force re-query bypassing cache
-	rrset, _, _, err := imr.IterativeDNSQuery(context.Background(), ".", dns.TypeNS, authMap, Globals.Debug) // force re-query bypassing cache
-	if err != nil {
-		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
-	}
-	if rrset == nil {
-		return fmt.Errorf("No NS records found in root hints file %s", hintsfile)
-	}
-
-	log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
-
-	imr.Cache.SetPrimed(true)
-
-	return nil
-}
-
-func XXXgetMinTTL(rrs []dns.RR) time.Duration {
-	if len(rrs) == 0 {
-		return 0
-	}
-	min := rrs[0].Header().Ttl
-	for _, rr := range rrs[1:] {
-		if rr.Header().Ttl < min {
-			min = rr.Header().Ttl
-		}
-	}
-	return time.Duration(min) * time.Second
 }

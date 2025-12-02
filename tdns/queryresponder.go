@@ -58,7 +58,7 @@ var standardDNSTypes = map[uint16]bool{
 // 5. Give up.
 
 func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
-	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
 
 	// Track if the configured transport signal is already present in the Answer section
 	transportSignalInAnswer := false
@@ -159,10 +159,10 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	// 0. Is this a DS query? If so, trap it ASAP and try to find the parent zone
 	if qtype == dns.TypeDS {
 		zd.Logger.Printf("QueryResponder: DS query for %s. Trying to find parent zone.", qname)
-		SetupIMR()
-		m := new(dns.Msg)
-		m.SetReply(r)
-		parent, err := ParentZone(zd.ZoneName, Globals.IMR)
+		// SetupIMR()
+		// m := new(dns.Msg)
+		// m.SetReply(r)
+		parent, err := imr.ParentZone(zd.ZoneName)
 		if err != nil {
 			log.Printf("QueryResponder: failed to find parent zone for %s to handle DS query", qname)
 			m.MsgHdr.Rcode = dns.RcodeServerFailure
@@ -174,6 +174,9 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			// we don't have the parent zone
 			m.MsgHdr.Rcode = dns.RcodeSuccess
 			m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+			if msgoptions.DO {
+				AddCDEResponse(m, qname, apex, nil)
+			}
 			w.WriteMsg(m)
 			return nil
 		}

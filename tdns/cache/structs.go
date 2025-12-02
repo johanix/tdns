@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 // type TAStore map[string]map[uint16]TrustAnchor
@@ -38,8 +38,8 @@ type CachedRRset struct {
 	NegAuthority []*core.RRset
 	Ttl          uint32
 	Context      CacheContext
-	Validated    bool
-	Bogus        bool
+	// OBE Validated    bool
+	// OBE Bogus        bool
 	State        ValidationState
 	Expiration   time.Time
 	EDECode      uint16
@@ -56,6 +56,7 @@ type RRsetCacheT struct {
 	//Options                map[ImrOption]string
 	Primed                 bool
 	Logger                 *log.Logger
+	LineWidth              int
 	Verbose                bool
 	Debug                  bool
 	transportQueryMu       sync.Mutex

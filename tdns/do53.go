@@ -35,7 +35,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
 	authDNSHandler := createAuthDnsHandler(conf)
-	
+
 	// Create a local ServeMux for DnsEngine to avoid conflicts with other engines
 	dnsMux := dns.NewServeMux()
 	dnsMux.HandleFunc(".", authDNSHandler)
@@ -51,7 +51,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			srv := &dns.Server{
 				Addr:          addr,
 				Net:           transport,
-				Handler:       dnsMux, // Use local mux instead of global handler
+				Handler:       dnsMux,        // Use local mux instead of global handler
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 			}
 			// Must bump the buffer size of incoming UDP msgs, as updates
@@ -233,13 +233,13 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 				}
 
 				log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
-				err := zd.QueryResponder(w, r, qname, qtype, msgoptions, kdb)
+				err := zd.QueryResponder(w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
 				if err != nil {
 					log.Printf("Error in QueryResponder: %v", err)
+					m := new(dns.Msg)
+					m.SetRcode(r, dns.RcodeServerFailure)
+					w.WriteMsg(m)
 				}
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeServerFailure)
-				w.WriteMsg(m)
 				return
 			}
 
@@ -314,7 +314,7 @@ func createAuthDnsHandler(conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)
-			err := zd.QueryResponder(w, r, qname, qtype, msgoptions, kdb)
+			err := zd.QueryResponder(w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
 			if err != nil {
 				log.Printf("Error in QueryResponder: %v", err)
 			}

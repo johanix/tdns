@@ -23,11 +23,12 @@ import (
 )
 
 type Imr struct {
-    Cache *cache.RRsetCacheT
+	Cache       *cache.RRsetCacheT
 	DnskeyCache *cache.DnskeyCacheT
-	Options map[ImrOption]string
-	Verbose bool
-	Debug   bool
+	Options     map[ImrOption]string
+	LineWidth   int // used to truncate long lines in logging and output (eg. DNSKEYs and RRSIGs)
+	Verbose     bool
+	Debug       bool
 }
 
 type ImrRequest struct {
@@ -54,8 +55,11 @@ type ImrResponse struct {
 func (conf *Config) RecursorEngine(ctx context.Context) {
 	var recursorch = conf.Internal.RecursorCh
 
-	if !viper.GetBool("recursorengine.active") {
-		log.Printf("RecursorEngine is NOT active.")
+	// IMR is active by default unless explicitly set to false
+	isActive := conf.ImrEngine.Active == nil || *conf.ImrEngine.Active
+
+	if !isActive {
+		log.Printf("RecursorEngine is NOT active (imrengine.active explicitly set to false).")
 		for {
 			select {
 			case <-ctx.Done():
@@ -75,20 +79,20 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 
 	// 1. Create the cache
 	var err error
-	// RecursorCache, err = NewRRsetCacheNG(viper.GetString("recursorengine.root-hints"))
 	rrcache := cache.NewRRsetCache(log.Default(), conf.ImrEngine.Verbose, conf.ImrEngine.Debug)
 
 	conf.Internal.RRsetCache = rrcache
 	imr := &Imr{
-		Cache: rrcache,
+		Cache:       rrcache,
 		DnskeyCache: rrcache.DnskeyCache, // Use the same DnskeyCache instance as the cache
-		Options: conf.ImrEngine.Options,
-		Verbose: conf.ImrEngine.Verbose,
-		Debug: conf.ImrEngine.Debug,
+		Options:     conf.ImrEngine.Options,
+		LineWidth:   130, // default line width for truncating long lines in logging and output
+		Verbose:     conf.ImrEngine.Verbose,
+		Debug:       conf.ImrEngine.Debug,
 	}
 
 	if !rrcache.IsPrimed() {
-		err = rrcache.PrimeWithHints(viper.GetString("recursorengine.root-hints"), imr.IterativeDNSQueryFetcher())
+		err = rrcache.PrimeWithHints(conf.ImrEngine.RootHints, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			Shutdowner(conf, fmt.Sprintf("RecursorEngine: failed to initialize RecursorCache w/ root hints: %v", err))
 		}
@@ -113,6 +117,7 @@ func (conf *Config) RecursorEngine(ctx context.Context) {
 	go imr.ImrEngine(ctx, conf)
 
 	conf.Internal.ImrEngine = imr
+	Globals.ImrEngine = imr
 
 	for {
 		select {
@@ -186,6 +191,8 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			respch <- &resp
 		}()
 	}
+
+//	dump.P(imr)
 
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {
@@ -593,26 +600,24 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		if msgoptions.DO {
 			m.Answer = append(m.Answer, rrset.RRSIGs...)
 		}
-		// Set AD if this RRset is validated (from cache or on-the-fly)
-		var validated bool
+		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
 		vstate := cache.ValidationStateNone
 		var err error
 		shouldValidate := msgoptions.DO && !msgoptions.CD
 		if imr.Cache != nil && shouldValidate {
 			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.State == cache.ValidationStateSecure {
-				validated = true
+				vstate = c.State
 			} else {
-				_, vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+				vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
 				if err != nil {
 					log.Printf("ProcessAuthDNSResponse: failed to validate RRset: %v", err)
 					m.SetRcode(r, dns.RcodeServerFailure)
 					w.WriteMsg(m)
 					return false, err
 				}
-				validated = vstate == cache.ValidationStateSecure
 			}
 		}
-		if validated && shouldValidate {
+		if vstate == cache.ValidationStateSecure && shouldValidate {
 			m.AuthenticatedData = true
 			w.WriteMsg(m)
 			return true, nil
@@ -759,7 +764,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	if !msgoptions.DO {
 		if cached != nil && cached.RRset != nil {
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
-			if cached.Validated {
+			if cached.State == cache.ValidationStateSecure {
 				resp.AuthenticatedData = true
 			}
 			attachNegativeEDE(resp, msgoptions, cached)
@@ -774,7 +779,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	if cached != nil && len(cached.NegAuthority) > 0 {
 		neg = cached.NegAuthority
 		if appendNegAuthorityToMessage(resp, neg, msgoptions) {
-			if cached.Validated && msgoptions.DO {
+			if cached.State == cache.ValidationStateSecure && msgoptions.DO {
 				resp.AuthenticatedData = true
 			}
 			attachNegativeEDE(resp, msgoptions, cached)
@@ -783,7 +788,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	}
 	if cached != nil && cached.RRset != nil {
 		appendSOAToMessage(cached.RRset, msgoptions, resp)
-		if cached.Validated {
+		if cached.State == cache.ValidationStateSecure {
 			resp.AuthenticatedData = true
 		}
 		attachNegativeEDE(resp, msgoptions, cached)
@@ -819,7 +824,7 @@ func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uin
 		return false
 	}
 	appendSOAToMessage(cached.RRset, msgoptions, m)
-	if cached.Validated {
+	if cached.State == cache.ValidationStateSecure {
 		m.AuthenticatedData = true
 	}
 	return true
@@ -852,13 +857,18 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 }
 
 func (imr *Imr) ImrEngine(ctx context.Context, conf *Config) error {
+	addresses := conf.ImrEngine.Addresses
+	if len(addresses) == 0 {
+		log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
+		return nil
+	}
+
 	ImrHandler := imr.createImrHandler(ctx, conf)
-	
+
 	// Create a local ServeMux for ImrEngine to avoid conflicts with other engines
 	imrMux := dns.NewServeMux()
 	imrMux.HandleFunc(".", ImrHandler)
 
-	addresses := conf.ImrEngine.Addresses
 	if CaseFoldContains(conf.ImrEngine.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
@@ -1132,7 +1142,6 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				RRtype:     dns.TypeDS,
 				RRset:      dsRRset,
 				Context:    cache.ContextPriming,
-				Validated:  true,
 				State:      cache.ValidationStateSecure,
 				Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
 			})
@@ -1159,17 +1168,17 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 		}
 
 		// Compute min TTL for expiration of added anchors
-/*
-		var minTTL uint32
-		if len(rrset.RRs) > 0 {
-			minTTL = rrset.RRs[0].Header().Ttl
-			for _, rr := range rrset.RRs[1:] {
-				if rr.Header().Ttl < minTTL {
-					minTTL = rr.Header().Ttl
+		/*
+			var minTTL uint32
+			if len(rrset.RRs) > 0 {
+				minTTL = rrset.RRs[0].Header().Ttl
+				for _, rr := range rrset.RRs[1:] {
+					if rr.Header().Ttl < minTTL {
+						minTTL = rr.Header().Ttl
+					}
 				}
 			}
-		}
-			*/
+		*/
 		minTTL := cache.GetMinTTL(rrset.RRs)
 		exp := time.Now().Add(minTTL)
 
@@ -1221,7 +1230,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 		} else {
 			// Not validated yet, validate it now
 			var err error
-			_, vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
 			if err != nil {
 				log.Printf("initializeImrTrustAnchors: failed to validate %s DNSKEY RRset: %v", anchorName, err)
 				return fmt.Errorf("failed to validate %s DNSKEY RRset: %v", anchorName, err)
@@ -1243,13 +1252,11 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 					Rcode:      uint8(dns.RcodeSuccess),
 					RRset:      rrset,
 					Context:    cache.ContextPriming,
-					Validated:  true,
 					State:      vstate,
 					Expiration: time.Now().Add(minTTL),
 				}
 			} else {
 				// Update existing cached RRset
-				crr.Validated = true
 				crr.State = vstate
 			}
 			imr.Cache.Set(anchorName, dns.TypeDNSKEY, crr)
@@ -1294,7 +1301,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			}
 		} else {
 			// Not validated yet, validate it now
-			_, nsVstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+			nsVstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
 			if err != nil {
 				log.Printf("initializeImrTrustAnchors: warning: failed to validate %s NS RRset: %v (continuing)", anchorName, err)
 				continue // Continue with next zone
@@ -1316,13 +1323,11 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 					Rcode:      uint8(dns.RcodeSuccess),
 					RRset:      nsRRset,
 					Context:    cache.ContextPriming,
-					Validated:  true,
 					State:      nsVstate,
 					Expiration: time.Now().Add(minTTL),
 				}
 			} else {
 				// Update existing cached RRset
-				nsCrr.Validated = true
 				nsCrr.State = nsVstate
 			}
 			imr.Cache.Set(anchorName, dns.TypeNS, nsCrr)

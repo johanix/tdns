@@ -13,7 +13,8 @@ import (
 )
 
 type GlobalStuff struct {
-	IMR         string
+	IMR         string  // trying to get rid of this, use Imr instead
+	ImrEngine   *Imr
 	Verbose     bool
 	Debug       bool
 	Zonename    string

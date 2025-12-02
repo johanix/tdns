@@ -9,9 +9,9 @@ import (
 	"log"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 // Note that there are two types of determining whether delegation synchronization is needed:
@@ -25,13 +25,13 @@ import (
 // 4. When all parent-side data is collected, compare to the data in the ZoneData struct
 
 // Return insync (bool), adds, removes ([]dns.RR) and error
-func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
+func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
 		Time:     time.Now(),
 	}
 
-	err := zd.FetchParentData()
+	err := zd.FetchParentData(imr)
 	if err != nil {
 		return resp, err
 	}

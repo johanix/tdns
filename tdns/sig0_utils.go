@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -58,7 +59,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 	}
 
 	const update_scheme = 2
-	dsynctarget, err := LookupDSYNCTarget(Globals.ParentZone, parpri, dns.StringToType["ANY"], update_scheme)
+	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("Error from LookupDSYNCTarget(%s, %s): %v",
 			Globals.ParentZone, parpri, err)

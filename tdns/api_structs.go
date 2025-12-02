@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
+	"github.com/spf13/viper"
 )
 
 type KeystorePost struct {
@@ -216,5 +216,21 @@ type MultiSignerResponse struct {
 	RRset    core.RRset
 	Msg      string
 	Error    bool
+	ErrorMsg string
+}
+
+type ScannerPost struct {
+	Command    string // "scan" | "status"
+	ParentZone string
+	ScanZones  []string
+	ScanType   string // "cds" | "csync" | "dnskey"
+}
+
+type ScannerResponse struct {
+	AppName string
+	Time time.Time
+	Status string
+	Msg string
+	Error bool
 	ErrorMsg string
 }

@@ -37,7 +37,7 @@ func (conf *Config) parseImrOptions() {
 		}
 
 		switch imrOpt {
-		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport, ImrOptQueryForTransportTLSA:
+		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport, ImrOptQueryForTransportTLSA, ImrOptUseTransportSignals:
 			if optval != "" {
 				log.Printf("ParseConfig: IMR option %q does not accept a value; provided value %q will be ignored", key, optval)
 			}

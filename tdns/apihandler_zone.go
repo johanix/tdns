@@ -224,7 +224,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 				resp.ErrorMsg = fmt.Sprintf("Parent zone to %q unknown and no resolver address configured", zd.ZoneName)
 				return
 			}
-			zd.Parent, err = ParentZone(zd.ZoneName, imr)
+			zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

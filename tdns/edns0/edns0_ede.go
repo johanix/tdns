@@ -23,7 +23,8 @@ const (
 	EDETsigRequired
 	EDETsigValidationFailure
 
-	EDEScannerNotImplemented
+	EDECDSScannerNotImplemented
+	EDECSyncScannerNotImplemented
 )
 
 var EDECodeToString = map[uint16]string{
@@ -38,6 +39,8 @@ var EDECodeToString = map[uint16]string{
 	EDEReportOptionNotFound:       "Expected Report option not found",
 	EDETsigRequired:               "TSIG required",
 	EDETsigValidationFailure:      "TSIG validation failure",
+	EDECDSScannerNotImplemented:   "CDS scanner not implemented",
+	EDECSyncScannerNotImplemented: "CSYNC scanner not implemented",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response
