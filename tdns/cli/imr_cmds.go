@@ -9,6 +9,7 @@ import (
 
 	tdns "github.com/johanix/tdns/tdns"
 	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
@@ -211,10 +212,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 				// Show received transport percentage signal (pct). If none: do53=100
 				fmt.Printf("  signal: %s\n", renderSignal(server))
 				counters := server.SnapshotCounters()
-				order := []tdns.Transport{tdns.TransportDo53, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDoQ}
+				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
 				for _, t := range order {
 					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("  %-4s: %d\n", tdns.TransportToString[t], c)
+						fmt.Printf("  %-4s: %d\n", core.TransportToString[t], c)
 					}
 				}
 			}
@@ -230,10 +231,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 				fmt.Printf("  Server: %s\n", name)
 				fmt.Printf("    signal: %s\n", renderSignal(server))
 				counters := server.SnapshotCounters()
-				order := []tdns.Transport{tdns.TransportDo53, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDoQ}
+				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
 				for _, t := range order {
 					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("    %-4s: %d\n", tdns.TransportToString[t], c)
+						fmt.Printf("    %-4s: %d\n", core.TransportToString[t], c)
 					}
 				}
 			}
@@ -418,7 +419,7 @@ var imrShowOptionsCmd = &cobra.Command{
 func renderSignal(server *cache.AuthServer) string {
 	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
 	// Order by known transports for stable output.
-	order := []tdns.Transport{tdns.TransportDoQ, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDo53}
+	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 	weights := server.TransportWeights
 	if len(weights) == 0 {
 		return "do53=100"
@@ -426,7 +427,7 @@ func renderSignal(server *cache.AuthServer) string {
 	var parts []string
 	for _, t := range order {
 		if w, ok := weights[t]; ok && w > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", tdns.TransportToString[t], int(w)))
+			parts = append(parts, fmt.Sprintf("%s=%d", core.TransportToString[t], int(w)))
 		}
 	}
 	if len(parts) == 0 {

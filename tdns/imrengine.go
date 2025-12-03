@@ -817,7 +817,9 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		// if msgoptions.DO && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, neg, imr.IterativeDNSQueryFetcher()) {
 		//	resp.AuthenticatedData = true
 		//}
-		resp.AuthenticatedData = cached.State == cache.ValidationStateSecure
+		if cached != nil {
+			resp.AuthenticatedData = cached.State == cache.ValidationStateSecure
+		}
 		attachNegativeEDE(resp, msgoptions, cached)
 		return true
 	}
@@ -1265,7 +1267,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			if crr == nil {
 				// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
 				minTTL := cache.GetMinTTL(rrset.RRs)
-				if minTTL == 0 {
+				if minTTL <= 0 {
 					minTTL = 86400 * time.Second
 				}
 				crr = &cache.CachedRRset{
@@ -1336,7 +1338,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			if nsCrr == nil {
 				// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
 				minTTL := cache.GetMinTTL(nsRRset.RRs)
-				if minTTL == 0 {
+				if minTTL <= 0 {
 					minTTL = 86400 * time.Second
 				}
 				nsCrr = &cache.CachedRRset{

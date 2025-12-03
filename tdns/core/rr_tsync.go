@@ -55,15 +55,15 @@ func (rd *TSYNC) Parse(txt []string) error {
 		if tt := dns.StringToType[txt[0]]; tt != 0 {
 			t = tt
 			idx = 1
+		} else {
+			// first token is not a type mnemonic, treat all tokens as data
+			t = TypeTSYNC
+			idx = 0
 		}
-	} else {
+	} else if len(txt) >= 1 {
 		// No explicit type token provided; default to TypeTSYNC
 		t = TypeTSYNC
 		idx = 0
-	}
-	if t == 0 {
-		// If still zero, set to TypeTSYNC as a sane default
-		t = TypeTSYNC
 	}
 
 	// Collect remaining fields; support keyed tokens in arbitrary order and legacy positional

@@ -10,13 +10,14 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // ParseTransportString parses a transport string like "doq:30,dot:20" into a map.
 // - Keys are lower-cased and trimmed
 // - Values must be integers in [0,100]
 // - Duplicate keys are rejected
-func ParseTransportString(s string) (map[string]uint8, error) {
+func xxxParseTransportString(s string) (map[string]uint8, error) {
 	transports := make(map[string]uint8)
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -111,7 +112,7 @@ func GetTransportParam(svcb *dns.SVCB) (map[string]uint8, bool, error) {
 	for _, kv := range svcb.Value {
 		if local, ok := kv.(*dns.SVCBLocal); ok {
 			if uint16(local.Key()) == SvcbTransportKey {
-				m, err := ParseTransportString(string(local.Data))
+				m, err := core.ParseTransportString(string(local.Data))
 				if err != nil {
 					return nil, true, err
 				}

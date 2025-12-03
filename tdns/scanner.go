@@ -148,7 +148,4 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			}
 		}
 	}
-
-	log.Println("ScannerEngine: terminating")
-	return nil
 }

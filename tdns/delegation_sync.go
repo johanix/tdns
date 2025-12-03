@@ -24,6 +24,10 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 //	}
 
 	// time.Sleep(5 * time.Second) // Allow time for zones to load
+	if imr == nil {
+		log.Printf("DelegationSyncher: imr is nil. Terminating.")
+		return fmt.Errorf("DelegationSyncher: imr is nil")
+	}
 
 	log.Printf("*** DelegationSyncher: starting ***")
 	var err error

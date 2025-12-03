@@ -885,9 +885,9 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			w uint8
 		}
 		var pairs []pair
-		weights := map[Transport]uint8{}
+		weights := map[core.Transport]uint8{}
 		for k, v := range kvMap {
-			t, err := StringToTransport(k)
+			t, err := core.StringToTransport(k)
 			if err != nil {
 				log.Printf("Unknown transport in transport weights for %s: %q", owner, k)
 				continue
@@ -899,10 +899,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		sort.SliceStable(pairs, func(i, j int) bool {
 			return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
 		})
-		var transports []Transport
+		var transports []core.Transport
 		var alpnOrder []string
 		for _, p := range pairs {
-			t, err := StringToTransport(p.k)
+			t, err := core.StringToTransport(p.k)
 			if err != nil {
 				continue
 			}
@@ -1005,7 +1005,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 						log.Printf("SVCB transport key for %s: %q", name, string(local.Data))
 					}
 					if applyTransportSignal(name, string(local.Data)) {
-						cache.PromoteConnMode(serverMap[name], cache.ConnModeOpportunistic)
+						serverMap[name].PromoteConnMode(cache.ConnModeOpportunistic)
 					}
 					if owner := transportOwnerForNS(name); owner != "" {
 						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
@@ -1040,7 +1040,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 					log.Printf("TSYNC transport value for %s: %q", name, val)
 					log.Printf("Additional contains TSYNC; collecting transport weights from TSYNC")
 					if applyTransportSignal(name, val) {
-						cache.PromoteConnMode(serverMap[name], cache.ConnModeOpportunistic)
+						serverMap[name].PromoteConnMode(cache.ConnModeOpportunistic)
 					}
 					if owner := transportOwnerForNS(name); owner != "" {
 						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
@@ -1079,7 +1079,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
 					log.Printf("Transport(second-pass): SVCB key for %s: %q", base, string(local.Data))
 					if applyTransportSignal(base, string(local.Data)) {
-						cache.PromoteConnMode(serverMap[base], cache.ConnModeOpportunistic)
+						serverMap[base].PromoteConnMode(cache.ConnModeOpportunistic)
 					}
 					if owner := transportOwnerForNS(base); owner != "" {
 						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
@@ -1106,7 +1106,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				}
 				log.Printf("Transport(second-pass): TSYNC value for %s: %q", base, val)
 				if applyTransportSignal(base, val) {
-					cache.PromoteConnMode(serverMap[base], cache.ConnModeOpportunistic)
+					serverMap[base].PromoteConnMode(cache.ConnModeOpportunistic)
 				}
 				if owner := transportOwnerForNS(base); owner != "" {
 					imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
@@ -1170,7 +1170,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 // parseTransportString removed; use transport.ParseTransportString
 
 // pickTransport chooses a transport based on configured weights, falling back sensibly
-func pickTransport(server *cache.AuthServer, qname string) Transport {
+func pickTransport(server *cache.AuthServer, qname string) core.Transport {
 	if server == nil {
 		return core.TransportDo53
 	}
@@ -1346,7 +1346,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	server.IncrementTransportCounter(t)
 	if Globals.Debug {
 		log.Printf("***tryServer: calling c.Exchange with Transport=%q, server=%s (addrs: %v), addr=%q, qname=%q, qtype=%q",
-			TransportToString[t], server.Name, server.Addrs, addr, qname, dns.TypeToString[qtype])
+			core.TransportToString[t], server.Name, server.Addrs, addr, qname, dns.TypeToString[qtype])
 	}
 	// return c.Exchange(m, addr)
 	r, _, err := c.Exchange(m, addr, Globals.Debug)
@@ -1380,9 +1380,9 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 		w uint8
 	}
 	var pairs []pair
-	weights := map[Transport]uint8{}
+	weights := map[core.Transport]uint8{}
 	for k, v := range kvMap {
-		t, err := StringToTransport(k)
+		t, err := core.StringToTransport(k)
 		if err != nil {
 			log.Printf("applyTransportSignalToServer: unknown transport for %s: %q", server.Name, k)
 			continue
@@ -1393,10 +1393,10 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 	sort.SliceStable(pairs, func(i, j int) bool {
 		return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
 	})
-	var transports []Transport
+	var transports []core.Transport
 	var alpnOrder []string
 	for _, p := range pairs {
-		t, err := StringToTransport(p.k)
+		t, err := core.StringToTransport(p.k)
 		if err != nil {
 			continue
 		}
@@ -1426,7 +1426,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	if owner == "" || serverMap == nil {
 		return
 	}
-	weights := map[Transport]uint8{}
+	weights := map[core.Transport]uint8{}
 	var order []string
 	tokens := strings.Split(alpnCSV, ",")
 	for _, tok := range tokens {
@@ -1434,7 +1434,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 		if k == "" {
 			continue
 		}
-		t, err := StringToTransport(k)
+		t, err := core.StringToTransport(k)
 		if err != nil {
 			continue
 		}
@@ -1448,7 +1448,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	serverMap[owner].Alpn = order
 	serverMap[owner].Transports = nil
 	for _, k := range order {
-		if t, err := StringToTransport(k); err == nil {
+		if t, err := core.StringToTransport(k); err == nil {
 			serverMap[owner].Transports = append(serverMap[owner].Transports, t)
 		}
 	}
@@ -1462,7 +1462,7 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 	if server == nil {
 		return
 	}
-	weights := map[Transport]uint8{}
+	weights := map[core.Transport]uint8{}
 	var order []string
 	tokens := strings.Split(alpnCSV, ",")
 	for _, tok := range tokens {
@@ -1470,7 +1470,7 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 		if k == "" {
 			continue
 		}
-		t, err := StringToTransport(k)
+		t, err := core.StringToTransport(k)
 		if err != nil {
 			continue
 		}
@@ -1484,7 +1484,7 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 	server.Alpn = order
 	server.Transports = nil
 	for _, k := range order {
-		if t, err := StringToTransport(k); err == nil {
+		if t, err := core.StringToTransport(k); err == nil {
 			server.Transports = append(server.Transports, t)
 		}
 	}
@@ -1541,7 +1541,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 						log.Printf("**** parseTransportForServerFromAdditional: parsing SVCB transport value: %s", string(local.Data))
 					}
 					if imr.applyTransportSignalToServer(server, string(local.Data)) {
-						cache.PromoteConnMode(server, cache.ConnModeOpportunistic)
+						server.PromoteConnMode(cache.ConnModeOpportunistic)
 					}
 					if owner := transportOwnerForNS(server.Name); owner != "" {
 						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
@@ -1580,7 +1580,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 						log.Printf("**** parseTransportForServerFromAdditional: parsing TSYNC transport value: %s", val)
 					}
 					if imr.applyTransportSignalToServer(server, val) {
-						cache.PromoteConnMode(server, cache.ConnModeOpportunistic)
+						server.PromoteConnMode(cache.ConnModeOpportunistic)
 					}
 					if owner := transportOwnerForNS(server.Name); owner != "" {
 						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
@@ -1707,7 +1707,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 			continue
 		}
 		if applied {
-			cache.PromoteConnMode(server, targetMode)
+			server.PromoteConnMode(targetMode)
 			imr.Cache.ServerMap.Set(zone, sm)
 		}
 	}
@@ -2400,18 +2400,26 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 	}
 
 	vstate := cache.ValidationStateNone
+	negRcode := uint8(r.MsgHdr.Rcode)
 	if !skipDNSKEYValidation && len(negAuthority) > 0 {
-		vstate, err = imr.Cache.ValidateNegativeResponse(context.Background(), qname, qtype, negAuthority, imr.IterativeDNSQueryFetcher())
+		vstate, negRcode, err = imr.Cache.ValidateNegativeResponse(context.Background(), qname, qtype, negRcode, negAuthority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			log.Printf("handleNegative: failed to validate negative response: %v", err)
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
 		}
 	}
 
+	cachedRcode := uint8(r.MsgHdr.Rcode)
+    // In the specific case where ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN we propagate this change.
+	if negRcode != uint8(r.MsgHdr.Rcode) && negRcode == dns.RcodeNameError && uint8(r.MsgHdr.Rcode) == dns.RcodeSuccess {
+		log.Printf("handleNegative: ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN")
+		cachedRcode = uint8(dns.RcodeNameError)
+        negContext = cache.ContextNXDOMAIN
+	}
+
 	// Ensure RCODE matches the context we're caching
 	// If we're caching as NXDOMAIN, the RCODE must be NXDOMAIN
 	// If we're caching as NODATA, the RCODE must be NOERROR
-	cachedRcode := uint8(r.MsgHdr.Rcode)
 	if negContext == cache.ContextNXDOMAIN && cachedRcode != uint8(dns.RcodeNameError) {
 		log.Printf("*** handleNegative: WARNING - caching as NXDOMAIN but RCODE is %s (expected NXDOMAIN)", dns.RcodeToString[r.MsgHdr.Rcode])
 		cachedRcode = uint8(dns.RcodeNameError)

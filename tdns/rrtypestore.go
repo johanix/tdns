@@ -5,12 +5,12 @@ import (
 )
 
 type RRTypeStore struct {
-	data ConcurrentMap[uint16, core.RRset]
+	data core.ConcurrentMap[uint16, core.RRset]
 }
 
 func NewRRTypeStore() *RRTypeStore {
 	return &RRTypeStore{
-		data: NewWithCustomShardingFunction[uint16, core.RRset](func(key uint16) uint32 {
+		data: core.NewWithCustomShardingFunction[uint16, core.RRset](func(key uint16) uint32 {
 			return uint32(key)
 		}),
 	}

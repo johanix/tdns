@@ -50,19 +50,21 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 	}
 	switch reason {
 	case transportQueryReasonObservation:
-		if !(imr.Options[ImrOptQueryForTransport] != "true" || imr.Options[ImrOptAlwaysQueryForTransport] != "true") {
-			return
+		// Proceed if either option is enabled
+		if imr.Options[ImrOptQueryForTransport] == "true" || imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonNewServer:
-		if imr.Options[ImrOptAlwaysQueryForTransport] != "true" {
-			return
+		// Only proceed if always-query option is enabled
+		if imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	default:
-		if !(imr.Options[ImrOptQueryForTransport] != "true" || imr.Options[ImrOptAlwaysQueryForTransport] != "true") {
-			return
+		// Proceed if either option is enabled
+		if imr.Options[ImrOptQueryForTransport] == "true" || imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	}
-	imr.launchTransportSignalQuery(ctx, owner, reason)
 }
 
 func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, reason string) {

@@ -477,7 +477,7 @@ func PrintMsgSection(header string, section []dns.RR, width int) string {
 		} 
 		out += line
 	}
-return out
+	return out
 }
 
 func PrintMsgFull(m *dns.Msg, width int) string {

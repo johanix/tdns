@@ -28,8 +28,8 @@ const CompiledInRootHints = `; Root hints file - IANA root servers
 .                       3600000  IN  NS    m.root-servers.net.
 a.root-servers.net.     3600000  IN  A     198.41.0.4
 a.root-servers.net.     3600000  IN  AAAA  2001:503:ba3e::2:30
-b.root-servers.net.     3600000  IN  A     199.9.14.201
-b.root-servers.net.     3600000  IN  AAAA  2001:500:200::b
+b.root-servers.net.     3600000  IN  A     170.247.170.2
+b.root-servers.net.     3600000  IN  AAAA  2801:1b8:10::b
 c.root-servers.net.     3600000  IN  A     192.33.4.12
 c.root-servers.net.     3600000  IN  AAAA  2001:500:2::c
 d.root-servers.net.     3600000  IN  A     199.7.91.13

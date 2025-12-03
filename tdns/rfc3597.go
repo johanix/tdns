@@ -88,6 +88,9 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 		// Check the cache for negative response data - extract SOA from NegAuthority
 		// When a negative response is cached, the SOA RRset is stored in NegAuthority,
 		// and the SOA owner name is the authoritative zone (the parent)
+		if imr.Cache == nil {
+			return "", fmt.Errorf("imr.Cache is nil")
+		}
 		cached := imr.Cache.Get(upone, dns.TypeSOA)
 		if cached != nil && len(cached.NegAuthority) > 0 {
 			// Look for SOA RRset in NegAuthority

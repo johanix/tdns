@@ -20,17 +20,17 @@ dnsengine:
    addresses:           [ 127.0.0.1:5366, '[::1]:5366']
 
 imrengine:
-   active:		true   # Set to false to disable IMR. Defaults to true if not specified.
-   root-hints:		""   # Optional: path to root hints file. If empty, uses compiled-in hints.
+   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
+   root-hints:          ""   # Optional: path to root hints file. If empty, uses compiled-in hints.
 
 common:
-   command:		/usr/local/libexec/tdns-scanner
-   rootca:      	../etc/certs/PublicRootCAs.pem
-   debug:		true
-   verbose:		true
+   command:             /usr/local/libexec/tdns-scanner
+   rootca:              ../etc/certs/PublicRootCAs.pem
+   debug:               true
+   verbose:             true
 
 log:
-   file:	/var/log/axfr.net/tdns-scanner.log
+   file:                /var/log/axfr.net/tdns-scanner.log
 
 db:
-   file:	/var/tmp/scanner.db
+   file:                /var/tmp/scanner.db

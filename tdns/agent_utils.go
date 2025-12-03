@@ -14,9 +14,9 @@ import (
 	"slices"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
@@ -66,7 +66,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
-		S:              NewStringer[AgentId, *Agent](),
+		S:              core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:   make(map[ZoneName][]AgentId),
 		LocalAgent:     &conf.Agent,
 		LocateInterval: li,

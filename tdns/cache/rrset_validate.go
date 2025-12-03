@@ -54,10 +54,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 		}
 		return ValidationStateInsecure, nil // XXX: THis is wrong, we must know if the zone is insecure or not
 	}
-	if rrcache.Debug {
-		log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
-			rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
-	}
+
 	for _, rr := range rrset.RRSIGs {
 		sig, ok := rr.(*dns.RRSIG)
 		if !ok {
@@ -207,7 +204,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
 	}
 
-	if rrset.RRtype == dns.TypeNS {
+	if rrcache.Debug && rrset.RRtype == dns.TypeNS {
 		fmt.Printf("ValidateDNSKEYs: rrset:\n%s", rrset.String(rrcache.LineWidth))
 	}
 	if len(rrset.RRSIGs) == 0 {
@@ -429,9 +426,10 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	return ValidationStateBogus, nil
 }
 
-func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, negAuthority []*core.RRset, fetcher RRsetFetcher) (ValidationState, error) {
+func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, rcode uint8, 
+	negAuthority []*core.RRset, fetcher RRsetFetcher) (ValidationState, uint8, error) {
 	if len(negAuthority) == 0 {
-		return ValidationStateNone, fmt.Errorf("no negative authority RRsets to validate")
+		return ValidationStateNone, rcode, fmt.Errorf("no negative authority RRsets to validate")
 	}
 
 	if qtype == dns.TypeDNSKEY {
@@ -439,7 +437,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		if rrcache.Debug {
 			log.Printf("ValidateNegativeResponse: skipping validation for DNSKEY negative response at %q", qname)
 		}
-		return ValidationStateBogus, nil // XXX: Cannot validate negative DNSKEY responses without the zone's DNSKEYs
+		return ValidationStateBogus, rcode, nil // XXX: Cannot validate negative DNSKEY responses without the zone's DNSKEYs
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -473,14 +471,14 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		}
 	}
 	if soarrset == nil || len(soarrset.RRs) == 0 { // XXX: Here we need to know if the zone is insecure or not
-		return ValidationStateIndeterminate, fmt.Errorf("no SOA found in negative authority for %s", qname)
+		return ValidationStateIndeterminate, rcode, fmt.Errorf("no SOA found in negative authority for %s", qname)
 	}
 	zoneName := dns.CanonicalName(soarrset.Name)
 	if !strings.HasSuffix(qnameCanon, zoneName) {
-		return ValidationStateBogus, nil // XXX: The zone name does not match the qname
+		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
 	}
 	if !hasSignatures {
-		return ValidationStateInsecure, nil // XXX: Need to know if zone is secure, but for now: No signatures, so we are insecure
+		return ValidationStateInsecure, rcode, nil // XXX: Need to know if zone is secure, but for now: No signatures, so we are insecure
 	}
 	for _, set := range negAuthority {
 		if set == nil {
@@ -491,16 +489,54 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		}
 		vstate, err := rrcache.ValidateRRset(ctx, set, fetcher, rrcache.Debug)
 		if err != nil {
-			return vstate, err
+			return vstate, rcode, err
 		}
 		// The Auth section has a set of RRsets that prove non-existence. Each RRset must validate for the proof to be valid
 		if vstate == ValidationStateBogus || vstate == ValidationStateIndeterminate {
-			return vstate, fmt.Errorf("negative authority RRset for %s is bogus or indeterminate", qname)
+			return vstate, rcode, fmt.Errorf("negative authority RRset for %s is bogus or indeterminate", qname)
 		}
 	}
 
-	// NSEC case: If there are NSECs then they must cover the qname and the wildcard
+	// NSEC case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824)
 	if len(nsecs) > 0 {
+		// First, check for compact denial of existence (RFC 9824)
+		for _, nsec := range nsecs {
+			nsecOwner := dns.CanonicalName(nsec.Hdr.Name)
+			// Check if this is a compact denial NSEC: owner == qname
+			if nsecOwner == qnameCanon {
+				// Compact denial has two cases:
+				// 1. NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
+				//    This proves the name does not exist
+				// 2. NODATA: bitmap doesn't include qtype (but may include other types)
+				//    This proves the name exists but has no data for the queried type
+				
+				// Check for compact denial NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
+				if isCompactDenialNXDOMAIN(nsec.TypeBitMap) {
+					if rrcache.Debug {
+						log.Printf("ValidateNegativeResponse: compact denial NXDOMAIN (RFC 9824) validated for %s: name does not exist", qname)
+					}
+					// Note: The Rcode should be NXDOMAIN, but this function only validates
+					// the negative authority section. The caller should set Rcode appropriately.
+					return ValidationStateSecure, dns.RcodeNameError, nil
+				}
+				
+				// Check for compact denial NODATA: qtype is NOT in the type bitmap
+				if !typeInBitmap(qtype, nsec.TypeBitMap) {
+					if rrcache.Debug {
+						log.Printf("ValidateNegativeResponse: compact denial NODATA (RFC 9824) validated for %s %s: name exists but no data for type", qname, dns.TypeToString[qtype])
+					}
+					return ValidationStateSecure, rcode, nil
+				}
+				
+				// If owner == qname but qtype IS in bitmap, this is not a negative response
+				// (should not happen in negative authority section, but handle gracefully)
+				if rrcache.Debug {
+					log.Printf("ValidateNegativeResponse: NSEC owner matches qname but qtype %s is in bitmap - not a compact denial", dns.TypeToString[qtype])
+				}
+			}
+		}
+
+		// Traditional denial (NXDOMAIN): NSECs must cover both qname and wildcard
 		baseZone := strings.TrimSuffix(zoneName, ".")
 		wildcard := dns.CanonicalName("*." + baseZone)
 		coveredQname := false
@@ -516,19 +552,24 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 				break
 			}
 		}
-		if !coveredQname || !coveredWildcard { // XXX: This is incomplete, it does not deal with compact denial of existence.
-			return ValidationStateBogus, nil // XXX: The NSECs do not cover the qname and the wildcard
+		if !coveredQname || !coveredWildcard {
+			return ValidationStateBogus, rcode, nil // The NSECs do not cover the qname and the wildcard
 		}
-		return ValidationStateSecure, nil // NSECs present, we do not yet veryfy them, but we assume they are secure so we are secure
+		return ValidationStateSecure, rcode, nil // NSECs present, we do not yet verify them, but we assume they are secure so we are secure
 	}
 
-	// NSEC3 case
+	// NSEC3 case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824 NODATA)
 	if nsec3Present {
-		return ValidationStateSecure, nil // NSEC3 present, we do not yet veryfy them, but we assume they are secure
+		// TODO: Implement NSEC3 compact denial validation (RFC 9824)
+		// For NSEC3 compact denial:
+		// - NSEC3 owner (hashed) matches hashed qname
+		// - Type bitmap does NOT include qtype
+		// For now, we accept NSEC3 presence as secure (traditional denial)
+		return ValidationStateSecure, rcode, nil // NSEC3 present, we do not yet verify them, but we assume they are secure
 	}
 
 	// No NSEC, no NSEC3, must know if zone is secure or insecure
-	return ValidationStateInsecure, fmt.Errorf("no NSECs or NSEC3, so we are insecure") // XXX: Need to know if zone is secure, but for now: No NSECs or NSEC3, so we are insecure
+	return ValidationStateInsecure, rcode, fmt.Errorf("no NSECs or NSEC3, so we are insecure") // XXX: Need to know if zone is secure, but for now: No NSECs or NSEC3, so we are insecure
 }
 
 // From Mieks DNS lib:
@@ -569,4 +610,50 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 		return strings.Compare(target, owner) >= 0 && strings.Compare(target, next) < 0
 	}
 	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
+}
+
+// typeInBitmap checks if a given record type is present in an NSEC type bitmap.
+// The type bitmap is a sorted slice of uint16 values representing record types.
+func typeInBitmap(qtype uint16, bitmap []uint16) bool {
+	for _, t := range bitmap {
+		if t == qtype {
+			return true
+		}
+		// Bitmap is sorted, so if we've passed qtype, it's not present
+		if t > qtype {
+			return false
+		}
+	}
+	return false
+}
+
+// isCompactDenialNXDOMAIN checks if the type bitmap indicates compact denial NXDOMAIN.
+// According to RFC 9824, compact denial NXDOMAIN is indicated when the bitmap contains
+// exactly RRSIG, NSEC, and NXNAME (and no other types).
+func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
+	// Must have exactly 3 types: RRSIG, NSEC, and NXNAME
+	if len(bitmap) != 3 {
+		return false
+	}
+	
+	// Check that all three required types are present
+	hasRRSIG := false
+	hasNSEC := false
+	hasNXNAME := false
+	
+	for _, t := range bitmap {
+		switch t {
+		case dns.TypeRRSIG:
+			hasRRSIG = true
+		case dns.TypeNSEC:
+			hasNSEC = true
+		case dns.TypeNXNAME:
+			hasNXNAME = true
+		default:
+			// Any other type means this is not compact denial NXDOMAIN
+			return false
+		}
+	}
+	
+	return hasRRSIG && hasNSEC && hasNXNAME
 }

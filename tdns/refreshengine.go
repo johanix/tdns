@@ -9,6 +9,7 @@ import (
 	"log"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/spf13/viper"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -145,8 +146,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					dynamicRRs := zd.CollectDynamicRRs(conf)
 
 					// XXX: Should do refresh in parallel
-					go func(zd *ZoneData) {
-						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, dynamicRRs)
+					go func(zd *ZoneData, zone string, dynRRs []*core.RRset) {
+						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, dynRRs)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
@@ -155,7 +156,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 						}
-					}(zd)
+					}(zd, zone, dynamicRRs)
 
 				} else {
 					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)
@@ -198,20 +199,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if err != nil {
 						log.Printf("Error from FindSoaRefresh(%s): %v", zone, err)
 					}
-					// soa, _ := zonedata.GetSOA()
-					// if soa != nil {
-					//	refresh = soa.Refresh
-					// }
-					// Is there a max refresh counter configured, then use it.
-					// maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
-					// if maxrefresh != 0 && maxrefresh < refresh {
-					//	refresh = maxrefresh
-					//}
-
-					// not refreshing from file all the time. use reload
-					// if zr.ZoneType == tdns.Primary {
-					//	refresh = 86400 // 24h
-					// }
 
 					refreshCounters.Set(zone, &RefreshCounter{
 						Name:        zone,

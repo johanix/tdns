@@ -20,6 +20,12 @@ import (
 	}
 	if imr != nil {
 		go func() {
+			select {
+			case <-ctx.Done():
+				log.Printf("SendRfc9567ErrorReport: Context cancelled before sending report")
+				return
+			default:
+			}
 			report_qname := fmt.Sprintf("_er.%d.%s%d._er.%s", qtype, qname, ede_code, msgoptions.ErAgentDomain)
 			log.Printf("SendRfc9567ErrorReport: Sending report query %q", report_qname)
 			ir, err := imr.ImrQuery(ctx, report_qname, dns.TypeTXT, dns.ClassINET, nil)

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	core "github.com/johanix/tdns/tdns/core"
 )
 
 // canBeNil returns true if the given reflect.Value can be nil
@@ -52,8 +54,8 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 		log.Printf("deepCopyAndSanitize: ConcurrentMap found")
 		// Convert to a regular map for serialization
 		// regularMap := make(map[interface{}]interface{})
-		cMap := NewStringer[AgentId, *Agent]()
-		if cm, ok := v.(ConcurrentMap[AgentId, *Agent]); ok {
+		cMap := core.NewStringer[AgentId, *Agent]()
+		if cm, ok := v.(core.ConcurrentMap[AgentId, *Agent]); ok {
 			log.Printf("deepCopyAndSanitize: ConcurrentMap, len(m.shards)=%d", cm.NumShards())
 			if cm.NumShards() == 0 {
 				log.Printf("deepCopyAndSanitize: ConcurrentMap: num shards=0, returning empty map")

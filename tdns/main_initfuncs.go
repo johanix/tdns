@@ -390,7 +390,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	return nil
 }
 
-// StartImr starts subsystems for tdns-imr
+// StartScanner starts subsystems for tdns-scanner
 func StartScanner(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 	conf.Internal.APIStopCh = make(chan struct{})
 	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {

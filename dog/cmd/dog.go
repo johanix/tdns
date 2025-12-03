@@ -17,6 +17,7 @@ import (
 	"crypto/tls"
 
 	"github.com/johanix/tdns/tdns"
+	core "github.com/johanix/tdns/tdns/core"
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 
 	// cli "github.com/johanix/tdns/tdns/cli"
@@ -193,7 +194,7 @@ var rootCmd = &cobra.Command{
 					m.SetQuestion(qname, rrtype)
 				}
 				// Set CD (Checking Disabled) flag if requested
-				if options["cd"] == "true" {
+				if options["cd_bit"] == "true" {
 					m.MsgHdr.CheckingDisabled = true
 				}
 				// do_bit = options["do_bit"] == "true"
@@ -210,11 +211,11 @@ var rootCmd = &cobra.Command{
 					// Set DO bit (bit 15)
 					opt.Hdr.Ttl |= 1 << 15
 				}
-				if options["compact"] == "true" {
+				if options["co_bit"] == "true" {
 					// Set CO bit (bit 14)
 					opt.Hdr.Ttl |= 1 << 14
 				}
-				if options["deleg"] == "true" {
+				if options["de_bit"] == "true" {
 					// Set DE bit (bit 13)
 					opt.Hdr.Ttl |= 1 << 13
 				}
@@ -270,28 +271,28 @@ var rootCmd = &cobra.Command{
 				}
 				forceTCP := strings.EqualFold(transport, "Do53-TCP") || strings.EqualFold(transport, "tcp")
 
-				t, err := tdns.StringToTransport(transport)
+				t, err := core.StringToTransport(transport)
 				if err != nil {
 					log.Fatalf("Error: %v", err)
 				}
-				clientOpts := []tdns.DNSClientOption{}
-				if t == tdns.TransportDo53 {
+				clientOpts := []core.DNSClientOption{}
+				if t == core.TransportDo53 {
 					if forceTCP {
-						clientOpts = append(clientOpts, tdns.WithForceTCP())
+						clientOpts = append(clientOpts, core.WithForceTCP())
 						options["transport"] = "Do53-TCP"
 					} else {
-						clientOpts = append(clientOpts, tdns.WithDisableFallback())
+						clientOpts = append(clientOpts, core.WithDisableFallback())
 						options["transport"] = "do53"
 					}
 				} else {
 					options["transport"] = transport
 				}
-				client := tdns.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
-				res, _, err := client.Exchange(m, server) // FIXME: duration is always zero
-				if err == nil && res != nil && res.Truncated && t == tdns.TransportDo53 && !forceTCP {
+				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
+				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
+				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
 					fmt.Println(";; Truncated UDP response received; retrying over TCP")
-					tcpClient := tdns.NewDNSClient(tdns.TransportDo53, options["port"], tlsConfig, tdns.WithForceTCP())
-					res, _, err = tcpClient.Exchange(m, server)
+					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, core.WithForceTCP())
+					res, _, err = tcpClient.Exchange(m, server, false)
 					options["transport"] = "Do53-TCP"
 				}
 
@@ -331,17 +332,17 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 	}
 
 	switch ucarg {
-	case "+DNSSEC":
+	case "+DNSSEC", "+DO":
 		options["do_bit"] = "true"
 		return options, nil
 	case "+CD":
-		options["cd"] = "true"
+		options["cd_bit"] = "true"
 		return options, nil
-	case "+COMPACT":
-		options["compact"] = "true"
+	case "+COMPACT", "+CO":
+		options["co_bit"] = "true"
 		return options, nil
-	case "+DELEG":
-		options["deleg"] = "true"
+	case "+DELEG", "+DE":
+		options["de_bit"] = "true"
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"

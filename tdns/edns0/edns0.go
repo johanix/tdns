@@ -12,6 +12,7 @@ type MsgOptions struct {
 	RD bool
 	CD bool
 	DO bool
+	CO bool // RFC 9824: Compact Ok bit (bit 14 in OPT header TTL)
 	OtsOptIn bool
 	OtsOptOut bool
 	HasEROption bool // True if ER option is present
@@ -34,8 +35,11 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 		return msgoptions, nil
 	}
 	
-	// Extract DO bit (DNSSEC OK)
+	// Extract DO bit (DNSSEC OK) - bit 15
 	msgoptions.DO = opt.Do()
+	
+	// Extract CO bit (Compact Ok) - bit 14 (RFC 9824)
+	msgoptions.CO = (opt.Hdr.Ttl & (1 << 14)) != 0
 	
 	// Loop once through all EDNS0 options and extract them based on their code
 	for _, option := range opt.Option {

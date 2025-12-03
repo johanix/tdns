@@ -291,9 +291,9 @@ func (m *ConcurrentMap[K, V]) Items() map[K]V {
 	return tmp
 }
 
-// Iterator callbacalled for every key,value found in
+// Iterator callback called for every key,value found in
 // maps. RLock is held for all calls for a given shard
-// therefore callback sess consistent view of a shard,
+// therefore callback sees a consistent view of a shard,
 // but not across the shards
 type IterCb[K comparable, V any] func(key K, v V)
 

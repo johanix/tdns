@@ -314,6 +314,9 @@ func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq
 	c := new(dns.Client)
 	c.Timeout = 5 * time.Second
 
+	if len(dsync_target.Addresses) == 0 {
+		return fmt.Errorf("DSYNC target has no addresses for %s", KeyName)
+	}
 	r, _, err := c.Exchange(signedMsg, dsync_target.Addresses[0])
 	if err != nil {
 		return fmt.Errorf("could not send DNS request: %v", err)

@@ -119,6 +119,9 @@ func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
 
 // SnapshotCounters returns a copy of the per-transport counters.
 func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
+	if as == nil {
+		return nil
+	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	out := make(map[core.Transport]uint64, len(as.TransportCounters))
@@ -129,6 +132,9 @@ func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
 }
 
 func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
+	if as == nil {
+		return
+	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.TransportCounters == nil {
@@ -137,14 +143,14 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 	as.TransportCounters[t]++
 }
 
-func PromoteConnMode(server *AuthServer, target ConnMode) {
-	if server == nil {
+func (as *AuthServer) PromoteConnMode(target ConnMode) {
+	if as == nil {
 		return
 	}
-	server.mu.Lock()
-	defer server.mu.Unlock()
-	if server.ConnMode < target {
-		server.ConnMode = target
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.ConnMode < target {
+		as.ConnMode = target
 	}
 }
 

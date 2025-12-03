@@ -115,7 +115,7 @@ var ReportCmd = &cobra.Command{
 		log.Printf("ReportCmd: sending report to %s:%s (from DSYNC REPORT)", targetIP, port)
 
 		// Send the report
-		c := tdns.NewDNSClient(tdns.TransportDo53, port, nil)
+		c := core.NewDNSClient(core.TransportDo53, port, nil)
 
 		if reportTsig {
 			// Lookup TSIG key only when signing is requested
@@ -161,7 +161,7 @@ var ReportCmd = &cobra.Command{
 			fmt.Printf("%s\n", m.String())
 		}
 
-		resp, _, err := c.Exchange(m, targetIP)
+		resp, _, err := c.Exchange(m, targetIP, false)
 		if err != nil {
 			fmt.Printf("ReportCmd: error sending report: %v\n", err)
 			os.Exit(1)
