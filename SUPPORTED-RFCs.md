@@ -32,6 +32,31 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 - DO (DNSSEC OK) bit support
 - Negative response handling (partially complete per README)
 
+### RFC 9824 - Compact Denial of Existence for DNSSEC
+**Status**: ✅ Fully Supported  
+**Implementation**: `tdns/queryresponder.go`, `tdns/cache/rrset_validate.go`, `tdns/edns0/edns0.go`, `dog/cmd/dog.go`  
+**Notes**: 
+- **CO (Compact Ok) Bit**: Full support for the CO bit (bit 14) in EDNS(0) OPT header TTL
+  - Extracted in `ExtractFlagsAndEDNS0Options()` in `tdns/edns0/edns0.go`
+  - Supported in `dog` tool via `+CO` or `+COMPACT` option
+- **Compact Denial Responses**: Complete implementation of compact denial format
+  - **NXDOMAIN**: NSEC with owner=qname, bitmap containing exactly RRSIG, NSEC, NXNAME; Rcode=NXDOMAIN
+  - **NODATA**: NSEC with owner=qname, bitmap containing RRSIG, NSEC, and existing types (not qtype); Rcode=NOERROR
+  - Implemented in `addCDEResponse()` function
+  - Rcode handling based on CO bit: CO=1 uses compact denial Rcode semantics, CO=0 uses traditional DNSSEC
+- **Unsigned Referrals (Section 3.4)**: Full support for adding NSEC to referral responses
+  - NSEC covering the delegation point (zone cut)
+  - Type bitmap contains NS, NSEC, RRSIG (indicating delegation point exists)
+  - NextDomain correctly computed as leftmost label + "\000" + rest
+  - Implemented in `addReferralNSEC()` function
+- **NXNAME Query Rejection**: Explicit queries for NXNAME type are rejected
+  - Returns RcodeFormatError with EDE code 30 ("Invalid Query Type")
+  - NXNAME is only valid in NSEC type bitmaps, not as a query type
+- **Validation Support**: Compact denial validation in `ValidateNegativeResponse()`
+  - Detects compact denial NXDOMAIN (bitmap = RRSIG, NSEC, NXNAME)
+  - Detects compact denial NODATA (qtype not in bitmap)
+  - Modifies Rcode from NOERROR to NXDOMAIN when appropriate
+
 ---
 
 ## Extended DNS Error (EDE)
