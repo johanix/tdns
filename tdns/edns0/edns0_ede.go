@@ -11,7 +11,7 @@ import (
 
 const (
 	// Private EDE codes (above 512)
-	EDESig0KeyNotKnown            uint16 = 513 + iota
+	EDESig0KeyNotKnown uint16 = 513 + iota
 	EDESig0KeyKnownButNotTrusted
 	EDEDelegationSyncNotSupported
 	EDEZoneFrozen

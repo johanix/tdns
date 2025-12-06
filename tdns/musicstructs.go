@@ -4,8 +4,8 @@
 package tdns
 
 import (
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 type MusicSyncRequest struct {

@@ -126,7 +126,7 @@ func SendNotify(zonename string, ntype string) {
 		// remove SOA, add ntype
 		m.Question = []dns.Question{dns.Question{Name: zonename, Qtype: dns.StringToType[ntype], Qclass: dns.ClassINET}}
 
-		if tdns.Globals.Debug {
+		if tdns.Globals.Verbose {
 			fmt.Printf("Sending Notify:\n%s\n", m.String())
 		}
 
@@ -137,13 +137,12 @@ func SendNotify(zonename string, ntype string) {
 		}
 
 		if res.Rcode != dns.RcodeSuccess {
-			if tdns.Globals.Verbose {
-				fmt.Printf("... and got rcode %s back (bad)\n",
-					dns.RcodeToString[res.Rcode])
-			}
-			log.Printf("Error: Rcode: %s", dns.RcodeToString[res.Rcode])
+			fmt.Printf("Error:... and got rcode %s back (bad)\n", dns.RcodeToString[res.Rcode])
+			log.Printf("error from %s: Rcode: %s", dst, dns.RcodeToString[res.Rcode])
 		} else {
-			fmt.Printf("... and got rcode NOERROR back (good)\n")
+			if tdns.Globals.Verbose {
+				fmt.Printf("... and got rcode NOERROR back (good)\n")
+			}
 			break
 		}
 	}

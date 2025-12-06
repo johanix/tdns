@@ -46,8 +46,8 @@ var QuitCmd = &cobra.Command{
 
 func Terminate() {
 	fmt.Println("Goodbye!")
-    // Clean up terminal and exit immediately
-    restoreTTY()
+	// Clean up terminal and exit immediately
+	restoreTTY()
 	os.Exit(0)
 }
 
@@ -118,25 +118,25 @@ func restoreTTY() {
 }
 
 func StartInteractiveMode() {
-    // Capture current TTY state (prefer /dev/tty over stdin) and arrange restoration on exit/signals
-    if f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-        ttyFile = f
-        origTTYFD = int(f.Fd())
-    } else {
-        origTTYFD = int(os.Stdin.Fd())
-    }
-    if term.IsTerminal(origTTYFD) {
-        if st, err := term.GetState(origTTYFD); err == nil {
-            origTTYState = st
-        }
-    }
-    sigch := make(chan os.Signal, 2)
-    signal.Notify(sigch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-    go func() {
-        <-sigch
-        restoreTTY()
-        os.Exit(0)
-    }()
+	// Capture current TTY state (prefer /dev/tty over stdin) and arrange restoration on exit/signals
+	if f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+		ttyFile = f
+		origTTYFD = int(f.Fd())
+	} else {
+		origTTYFD = int(os.Stdin.Fd())
+	}
+	if term.IsTerminal(origTTYFD) {
+		if st, err := term.GetState(origTTYFD); err == nil {
+			origTTYState = st
+		}
+	}
+	sigch := make(chan os.Signal, 2)
+	signal.Notify(sigch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		<-sigch
+		restoreTTY()
+		os.Exit(0)
+	}()
 
 	p := prompt.New(
 		executor,
@@ -148,7 +148,7 @@ func StartInteractiveMode() {
 	)
 
 	p.Run()
-    restoreTTY()
+	restoreTTY()
 	os.Exit(0)
 }
 

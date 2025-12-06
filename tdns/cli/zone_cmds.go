@@ -279,7 +279,7 @@ var zoneListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if cr.Error {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
 			os.Exit(1)
 		}
 

@@ -337,7 +337,7 @@ func (zd *ZoneData) BestSyncScheme(imr *Imr) (string, *DsyncTarget, error) {
 	var active_scheme string
 	var dsynctarget DsyncTarget
 
-	zd.Logger.Printf("BestSyncScheme: imr=%s zone=%s", Globals.IMR, zd.ZoneName)
+	zd.Logger.Printf("BestSyncScheme: zone=%s", zd.ZoneName)
 
 	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
 	dsync_res, err := imr.DsyncDiscovery(zd.ZoneName, Globals.Verbose)

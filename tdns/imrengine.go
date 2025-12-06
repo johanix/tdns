@@ -51,7 +51,7 @@ type ImrResponse struct {
 // all dancing recursive server. It is just intended to get the job done for the particular cases
 // that we need to support.
 
-func (conf *Config) ImrEngine(ctx context.Context, quiet bool) {
+func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	var recursorch = conf.Internal.RecursorCh
 
 	// IMR is active by default unless explicitly set to false
@@ -67,10 +67,10 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) {
 				if !quiet {
 					log.Printf("ImrEngine: terminating due to context cancelled (inactive mode)")
 				}
-				return
+				return nil
 			case rrq, ok := <-recursorch:
 				if !ok {
-					return
+					return nil
 				}
 				if !quiet {
 					log.Printf("ImrEngine: not active, but got a request: %v", rrq)
@@ -138,10 +138,10 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) {
 			if !quiet {
 				log.Printf("ImrEngine: terminating due to context cancelled (active mode)")
 			}
-			return
+			return nil
 		case rrq, ok := <-recursorch:
 			if !ok {
-				return
+				return nil
 			}
 			if rrq.ResponseCh == nil {
 				if !quiet {
@@ -186,6 +186,7 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) {
 			}
 		}
 	}
+	return nil
 }
 
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
@@ -206,7 +207,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		}()
 	}
 
-//	dump.P(imr)
+	//	dump.P(imr)
 
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {

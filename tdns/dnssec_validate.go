@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/johanix/tdns/tdns/core"
 	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -235,26 +235,3 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 
 	return true, nil
 }
-
-// From Mieks DNS lib:
-// const year68 = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits.
-
-// ValidityPeriod uses RFC1982 serial arithmetic to calculate
-// if a signature period is valid. If t is the zero time, the
-// current time is taken other t is. Returns true if the signature
-// is valid at the given time, otherwise returns false.
-/*
-func xxxWithinValidityPeriod(inc, exp uint32, t time.Time) bool {
-	var utc int64
-	if t.IsZero() {
-		utc = time.Now().UTC().Unix()
-	} else {
-		utc = t.UTC().Unix()
-	}
-	modi := (int64(inc) - utc) / year68
-	mode := (int64(exp) - utc) / year68
-	ti := int64(inc) + modi*year68
-	te := int64(exp) + mode*year68
-	return ti <= utc && utc <= te
-}
-*/

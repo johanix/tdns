@@ -25,8 +25,8 @@ type CachedDnskeyRRset struct {
 	Validated   bool
 	Trusted     bool
 	TrustAnchor bool
-	Dnskey      dns.DNSKEY // just this key
-	RRset       *core.RRset     // complete RRset
+	Dnskey      dns.DNSKEY  // just this key
+	RRset       *core.RRset // complete RRset
 	Expiration  time.Time
 }
 
@@ -40,19 +40,19 @@ type CachedRRset struct {
 	Context      CacheContext
 	// OBE Validated    bool
 	// OBE Bogus        bool
-	State        ValidationState
-	Expiration   time.Time
-	EDECode      uint16
-	EDEText      string
+	State      ValidationState
+	Expiration time.Time
+	EDECode    uint16
+	EDEText    string
 }
 
 type RRsetCacheT struct {
-	RRsets                 *core.ConcurrentMap[string, CachedRRset]
-	Servers                *core.ConcurrentMap[string, []string]
-	ServerMap              *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	ZoneMap		           *core.ConcurrentMap[string, *Zone] // map[zone]*Zone
-	DnskeyCache            *DnskeyCacheT
-	DNSClient              map[core.Transport]*core.DNSClient
+	RRsets      *core.ConcurrentMap[string, CachedRRset]
+	Servers     *core.ConcurrentMap[string, []string]
+	ServerMap   *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
+	ZoneMap     *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
+	DnskeyCache *DnskeyCacheT
+	DNSClient   map[core.Transport]*core.DNSClient
 	//Options                map[ImrOption]string
 	Primed                 bool
 	Logger                 *log.Logger
@@ -83,12 +83,12 @@ type AuthServer struct {
 	// Stats (guarded by mu)
 	mu                sync.Mutex
 	TransportCounters map[core.Transport]uint64 // total queries attempted per transport
-	Src               string               // "answer", "glue", "hint", "priming", "stub", ...
+	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire            time.Time
 }
 
 type Zone struct {
-	ZoneName string
+	ZoneName         string
 	SecureDelegation bool
 }
 
@@ -215,9 +215,9 @@ const (
 )
 
 var ValidationStateToString = map[ValidationState]string{
-	ValidationStateNone: "none",
-	ValidationStateInsecure: "insecure",
-	ValidationStateSecure: "secure",
-	ValidationStateBogus: "bogus",
+	ValidationStateNone:          "none",
+	ValidationStateInsecure:      "insecure",
+	ValidationStateSecure:        "secure",
+	ValidationStateBogus:         "bogus",
 	ValidationStateIndeterminate: "indeterminate",
 }

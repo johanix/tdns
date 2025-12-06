@@ -21,7 +21,7 @@ type ScanRequest struct {
 	Cmd              string
 	ParentZone       string
 	ScanZones        []string
-	ScanType         string // "cds" | "csync" | "dnskey"	
+	ScanType         string // "cds" | "csync" | "dnskey"
 	ChildZone        string
 	CurrentChildData ChildDelegationData // Current parent-side delegation data for child
 	ZoneData         *ZoneData
@@ -31,12 +31,12 @@ type ScanRequest struct {
 }
 
 type ScanResponse struct {
-	Time    time.Time
-	Zone    string
-	RRtype  uint16
-	RRset   core.RRset
-	Msg     string
-	Error   bool
+	Time     time.Time
+	Zone     string
+	RRtype   uint16
+	RRset    core.RRset
+	Msg      string
+	Error    bool
 	ErrorMsg string
 }
 

@@ -193,12 +193,12 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 			m.Extra = append(m.Extra, cdd.A_glue...)
 			m.Extra = append(m.Extra, cdd.AAAA_glue...)
-			
+
 			// RFC 9824, Section 3.4: Add NSEC for unsigned referrals
 			if msgoptions.DO {
 				addReferralNSEC(m, cdd, apex, zd.ZoneName, MaybeSignRRset)
 			}
-			
+
 			w.WriteMsg(m)
 			return nil
 		}
@@ -336,12 +336,12 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 			m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 			m.Extra = append(m.Extra, cdd.A_glue...)
 			m.Extra = append(m.Extra, cdd.AAAA_glue...)
-			
+
 			// RFC 9824, Section 3.4: Add NSEC for unsigned referrals
 			if msgoptions.DO {
 				addReferralNSEC(m, cdd, apex, zd.ZoneName, MaybeSignRRset)
 			}
-			
+
 			w.WriteMsg(m)
 			return nil
 		}

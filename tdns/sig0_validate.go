@@ -8,8 +8,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/miekg/dns"
 	"github.com/johanix/tdns/tdns/cache"
+	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )
 

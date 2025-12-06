@@ -9,14 +9,16 @@ import (
 	"errors"
 )
 
-const TypeNOTIFY = 0x0F9A
-
-// const TypeDSYNC = 0x0F9B
 const TypeDSYNC = 0x0042 // 66 is the official IANA code
-const TypeMSIGNER = 0x0F9C
-const TypeHSYNC = 0x0F9D
-const TypeHSYNC2 = 0x0F9E
-const TypeTSYNC = 0x0F9F
+// const TypeDSYNC = 0x0F9B
+
+const (
+	TypeNOTIFY  = 0x0F9A
+	TypeMSIGNER = 0x0F9C
+	TypeHSYNC   = 0x0F9D
+	TypeHSYNC2  = 0x0F9E
+	TypeTSYNC   = 0x0F9F
+)
 
 func unpackUint8(msg []byte, off int) (i uint8, off1 int, err error) {
 	if off+1 > len(msg) {

@@ -87,7 +87,8 @@ func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 	}
 }
 
-func (rrset *RRset) Copy() *RRset {
+// trying to get rid of this in favour of Clone()
+func (rrset *RRset) xxxCopy() *RRset {
 	new_rrset := RRset{
 		Name:   rrset.Name,
 		RRs:    []dns.RR{},
@@ -126,7 +127,7 @@ func (rrset *RRset) Clone() *RRset {
 	if rrset == nil {
 		return nil
 	}
-	
+
 	clone := &RRset{
 		Name:   rrset.Name,
 		Class:  rrset.Class,

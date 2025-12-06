@@ -13,7 +13,7 @@ import (
 	"github.com/miekg/dns"
 )
 
- func (imr *Imr) SendRfc9567ErrorReport(ctx context.Context, qname string, qtype uint16, ede_code uint16, msgoptions *edns0.MsgOptions) error {
+func (imr *Imr) SendRfc9567ErrorReport(ctx context.Context, qname string, qtype uint16, ede_code uint16, msgoptions *edns0.MsgOptions) error {
 	if msgoptions == nil || !msgoptions.HasEROption || msgoptions.ErAgentDomain == "" {
 		log.Printf("SendRfc9567ErrorReport: No ER option or agent domain. Cannot send error report.")
 		return nil
@@ -36,7 +36,7 @@ import (
 			}
 		}()
 		return nil
-	} 
+	}
 	log.Printf("SendRfc9567ErrorReport: ImrEngine not active. Cannot send error report.")
 	return fmt.Errorf("ImrEngine not active. Cannot send error report.")
- }
+}

@@ -55,7 +55,6 @@ func StringToTransport(s string) (Transport, error) {
 	}
 }
 
-
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
 	Port            string
@@ -209,8 +208,18 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string, debug bool) (*dns.M
 		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
 	}
 
+	// Determine port (default to 443 for HTTPS if not specified)
+	port := c.Port
+	if port == "" {
+		port = "443"
+	}
+
+	// Use net.JoinHostPort to properly handle IPv6 addresses (adds brackets if needed)
+	// This returns format like "[::1]:8443" which is correct for URLs
+	hostPort := net.JoinHostPort(server, port)
+
 	// Create HTTP request
-	url := fmt.Sprintf("https://%s/dns-query", server)
+	url := fmt.Sprintf("https://%s/dns-query", hostPort)
 	if debug {
 		fmt.Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s\n", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
@@ -272,6 +281,7 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 		log.Printf("*** DoQ failed to open QUIC stream: %v", err)
 		return nil, 0, fmt.Errorf("failed to open QUIC stream: %v", err)
 	}
+	defer stream.Close()
 
 	// Pack the DNS message
 	packed, err := msg.Pack()
@@ -314,13 +324,13 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 	response := new(dns.Msg)
 	if err := response.Unpack(respBuf); err != nil {
 		log.Printf("*** DoQ failed to unpack response: %v", err)
-		stream.Close()
+		// stream.Close()
 		return nil, 0, fmt.Errorf("failed to unpack response: %v", err)
 	}
 
 	// Properly close the stream after we're done with it
 	stream.CancelRead(0)
-	stream.Close()
+	// stream.Close()
 
 	return response, 0, nil
 }

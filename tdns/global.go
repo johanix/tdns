@@ -13,7 +13,7 @@ import (
 )
 
 type GlobalStuff struct {
-	IMR         string  // trying to get rid of this, use Imr instead
+	// IMR         string  // trying to get rid of this, use Imr instead
 	ImrEngine   *Imr
 	Verbose     bool
 	Debug       bool
@@ -38,8 +38,8 @@ type GlobalStuff struct {
 
 var Globals = GlobalStuff{
 	//	IMR:     "8.8.8.8:53",
-	Verbose: false,
-	Debug:   false,
+	Verbose:    false,
+	Debug:      false,
 	ApiClients: map[string]*ApiClient{},
 }
 

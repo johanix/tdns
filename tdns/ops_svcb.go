@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyValue) error {

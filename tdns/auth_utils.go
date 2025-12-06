@@ -6,8 +6,8 @@ package tdns
 import (
 	"strings"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 // XXX: This should be merged with the FetchChildDelegationData() function

@@ -28,7 +28,7 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 // If a required signer key is missing, it will query for the signer's DNSKEY via the recursive
 // engine and retry using keys from the cache. Only keys marked as Trusted are accepted for
 // successful validation. Returns true if at least one signature validates and is time-valid.
-func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, verbose bool) (ValidationState,error) {
+func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, verbose bool) (ValidationState, error) {
 	if rrset == nil {
 		log.Printf("ValidateRRset: rrset is nil; nothing to validate")
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
@@ -266,17 +266,17 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			log.Printf("ValidateDNSKEYs: SUCCESS for root with keytag=%d", keyid)
 		}
 		// Add all DNSKEYs from the validated root RRset to DnskeyCache
-//		minTTL := uint32(0)
-//		for _, krr := range rrset.RRs {
-//			if _, ok := krr.(*dns.DNSKEY); ok {
-//				if minTTL == 0 || krr.Header().Ttl < minTTL {
-//					minTTL = krr.Header().Ttl
-//				}
-//			}
-//		}
-//		if minTTL == 0 {
-//			minTTL = 3600 // fallback
-//		}
+		//		minTTL := uint32(0)
+		//		for _, krr := range rrset.RRs {
+		//			if _, ok := krr.(*dns.DNSKEY); ok {
+		//				if minTTL == 0 || krr.Header().Ttl < minTTL {
+		//					minTTL = krr.Header().Ttl
+		//				}
+		//			}
+		//		}
+		//		if minTTL == 0 {
+		//			minTTL = 3600 // fallback
+		//		}
 
 		minTTL := GetMinTTL(rrset.RRs)
 
@@ -319,7 +319,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 		return ValidationStateBogus, nil // XXX: If there is a DS RRset, it must be secure
 	}
-	
+
 	// 2) For each DS: look for a matching DNSKEY (typically KSK with SEP bit),
 	// verify that the digest matches, and then look for an RRSIG(DNSKEY) made
 	// by this key. If any such combination validates, we trust the DNSKEY RRset.
@@ -426,7 +426,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	return ValidationStateBogus, nil
 }
 
-func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, rcode uint8, 
+func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, rcode uint8,
 	negAuthority []*core.RRset, fetcher RRsetFetcher) (ValidationState, uint8, error) {
 	if len(negAuthority) == 0 {
 		return ValidationStateNone, rcode, fmt.Errorf("no negative authority RRsets to validate")
@@ -509,7 +509,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 				//    This proves the name does not exist
 				// 2. NODATA: bitmap doesn't include qtype (but may include other types)
 				//    This proves the name exists but has no data for the queried type
-				
+
 				// Check for compact denial NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
 				if isCompactDenialNXDOMAIN(nsec.TypeBitMap) {
 					if rrcache.Debug {
@@ -519,7 +519,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 					// the negative authority section. The caller should set Rcode appropriately.
 					return ValidationStateSecure, dns.RcodeNameError, nil
 				}
-				
+
 				// Check for compact denial NODATA: qtype is NOT in the type bitmap
 				if !typeInBitmap(qtype, nsec.TypeBitMap) {
 					if rrcache.Debug {
@@ -527,7 +527,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 					}
 					return ValidationStateSecure, rcode, nil
 				}
-				
+
 				// If owner == qname but qtype IS in bitmap, this is not a negative response
 				// (should not happen in negative authority section, but handle gracefully)
 				if rrcache.Debug {
@@ -580,7 +580,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 // current time is taken other t is. Returns true if the signature
 // is valid at the given time, otherwise returns false.
 
-const year68     = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
+const year68 = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
 
 func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	var utc int64
@@ -635,12 +635,12 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 	if len(bitmap) != 3 {
 		return false
 	}
-	
+
 	// Check that all three required types are present
 	hasRRSIG := false
 	hasNSEC := false
 	hasNXNAME := false
-	
+
 	for _, t := range bitmap {
 		switch t {
 		case dns.TypeRRSIG:
@@ -654,6 +654,6 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 			return false
 		}
 	}
-	
+
 	return hasRRSIG && hasNSEC && hasNXNAME
 }

@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {

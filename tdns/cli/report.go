@@ -57,7 +57,7 @@ var ReportCmd = &cobra.Command{
 		if dsyncLookup {
 
 			// Initialize internal IMR
-			_, cancel, imr, err := StartImrForCli("/etc/tdns/root.hints")
+			_, cancel, imr, err := StartImrForCli("") // "" means use the default root hints
 			if err != nil {
 				log.Fatalf("Error initializing IMR: %v", err)
 			}

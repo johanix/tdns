@@ -259,10 +259,10 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 				cache.DnskeyCache.Set(k, dnskeyrr.KeyTag(), &cache.CachedDnskeyRRset{
 					Name:        k,
 					Keyid:       dnskeyrr.KeyTag(),
-					Validated:   true, // always trust config
-					Trusted:     true, // always trust config
+					Validated:   true,                        // always trust config
+					Trusted:     true,                        // always trust config
 					State:       cache.ValidationStateSecure, // always trust config
-					TrustAnchor: true, // always trust config
+					TrustAnchor: true,                        // always trust config
 					Dnskey:      *dnskeyrr,
 				})
 			}

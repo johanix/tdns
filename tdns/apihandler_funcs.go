@@ -494,20 +494,25 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
+		resp := ScannerResponse{
+			AppName: app.Name,
+			Time:    time.Now(),
+		}
+
 		decoder := json.NewDecoder(r.Body)
 		var sp ScannerPost
 		err := decoder.Decode(&sp)
 		if err != nil {
 			log.Println("APIscanner: error decoding scanner post:", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error decoding scanner post: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
 		}
 
 		log.Printf("API: received /scanner request (cmd: %s) from %s.\n",
 			sp.Command, r.RemoteAddr)
-
-		resp := ScannerResponse{
-			AppName: Globals.App.Name,
-			Time:    time.Now(),
-		}
 
 		switch sp.Command {
 		case "scan":
@@ -516,11 +521,11 @@ func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w h
 			respch := make(chan ScanResponse, 1)
 
 			scannerq <- ScanRequest{
-				Cmd: sp.Command,
+				Cmd:        sp.Command,
 				ParentZone: sp.ParentZone,
-				ScanZones: sp.ScanZones,
-				ScanType: sp.ScanType,
-				Response: respch,
+				ScanZones:  sp.ScanZones,
+				ScanType:   sp.ScanType,
+				Response:   respch,
 			}
 			select {
 			case sr := <-respch:

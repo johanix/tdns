@@ -9,7 +9,6 @@ import (
 	"log"
 	"time"
 
-	core "github.com/johanix/tdns/tdns/core"
 	"github.com/spf13/viper"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -142,12 +141,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							Zonefile:    zr.Zonefile,
 						})
 					}
-					// Collect dynamic RRs before refresh (they will be lost during refresh)
-					dynamicRRs := zd.CollectDynamicRRs(conf)
-
 					// XXX: Should do refresh in parallel
-					go func(zd *ZoneData, zone string, dynRRs []*core.RRset) {
-						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, dynRRs)
+					go func(zd *ZoneData, zone string, conf *Config) {
+						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
@@ -156,7 +152,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 						}
-					}(zd, zone, dynamicRRs)
+					}(zd, zone, conf)
 
 				} else {
 					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)
@@ -183,10 +179,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						KeyDB:           conf.Internal.KeyDB,
 					}
 
-					// Collect dynamic RRs before refresh (they will be lost during refresh)
-					dynamicRRs := zd.CollectDynamicRRs(conf)
-
-					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, dynamicRRs)
+					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
@@ -266,10 +259,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not refreshing.", zone, zd.ErrorMsg)
 						continue
 					}
-					// Collect dynamic RRs before refresh (they will be lost during refresh)
-					dynamicRRs := zd.CollectDynamicRRs(conf)
-
-					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, dynamicRRs)
+					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, conf)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zd.Refresh(%s): %v", zone, err)

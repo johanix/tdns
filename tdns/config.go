@@ -66,12 +66,12 @@ type DnsEngineConf struct {
 }
 
 type ImrEngineConf struct {
-	Active      *bool    `yaml:"active" mapstructure:"active"`     // If nil or true, IMR is active. Only false explicitly disables it.
-	RootHints   string   `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
-	Addresses   []string `yaml:"addresses" mapstructure:"addresses" validate:"required"`
-	CertFile    string   `yaml:"certfile" mapstructure:"certfile"`
-	KeyFile     string   `yaml:"keyfile" mapstructure:"keyfile"`
-	Transports  []string `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
+	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
+	Addresses   []string             `yaml:"addresses" mapstructure:"addresses" validate:"required"`
+	CertFile    string               `yaml:"certfile" mapstructure:"certfile"`
+	KeyFile     string               `yaml:"keyfile" mapstructure:"keyfile"`
+	Transports  []string             `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
 	Stubs       []ImrStubConf        `yaml:"stubs"`
 	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
 	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`

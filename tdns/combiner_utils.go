@@ -8,9 +8,9 @@ import (
 	"fmt"
 
 	"github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 var AllowedLocalRRtypes = map[uint16]bool{

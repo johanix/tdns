@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {

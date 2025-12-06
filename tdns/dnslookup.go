@@ -196,7 +196,6 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*core
 
 	zd.Logger.Printf("LookupRRset: rrset:\n%s", rrset.String(130))
 
-
 	log.Printf("LookupRRset: done. rrset=%v", rrset)
 	return rrset, err
 }
@@ -761,7 +760,7 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 				kind := classifyResponse(qname, qtype, r)
 				if Globals.Debug {
 					log.Printf("IterativeDNSQuery: classified response for %s %s as %s (rcode=%s, Answer=%d, Authority=%d)",
-						qname, dns.TypeToString[qtype],	responseKindToString(kind), dns.RcodeToString[rcode], len(r.Answer), len(r.Ns))	
+						qname, dns.TypeToString[qtype], responseKindToString(kind), dns.RcodeToString[rcode], len(r.Answer), len(r.Ns))
 				}
 
 				switch kind {
@@ -1356,7 +1355,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	}
 	if Globals.Debug {
 		if r != nil {
-//			log.Printf("tryServer: query \"%s %s\" sent to %s returned response:\n%s", qname, dns.TypeToString[qtype], addr, r.String())
+			//			log.Printf("tryServer: query \"%s %s\" sent to %s returned response:\n%s", qname, dns.TypeToString[qtype], addr, r.String())
 		} else {
 			log.Printf("tryServer: query \"%s %s\" sent to %s returned no response", qname, dns.TypeToString[qtype], addr)
 		}
@@ -1714,7 +1713,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 }
 
 func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, cache.CacheContext, error, bool) {
-	
+
 	if Globals.Debug {
 		imr.Cache.Logger.Printf("*** handleAnswer: qname=%s, qtype=%s, rcode=%s, r: %s", qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode], PrintMsgFull(r, imr.LineWidth))
 	}
@@ -1736,11 +1735,11 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 				rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
 				if tmprrset.RRs[0].Header().Rrtype != dns.TypeCNAME {
 					imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-						Name:       qname,
-						RRtype:     qtype,
-						Rcode:      uint8(rcode),
-						RRset:      &rrset,
-						Context:    cache.ContextAnswer,
+						Name:    qname,
+						RRtype:  qtype,
+						Rcode:   uint8(rcode),
+						RRset:   &rrset,
+						Context: cache.ContextAnswer,
 						// Should there not be some state here? State:      vstate,
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 					})
@@ -2410,11 +2409,11 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 	}
 
 	cachedRcode := uint8(r.MsgHdr.Rcode)
-    // In the specific case where ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN we propagate this change.
+	// In the specific case where ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN we propagate this change.
 	if negRcode != uint8(r.MsgHdr.Rcode) && negRcode == dns.RcodeNameError && uint8(r.MsgHdr.Rcode) == dns.RcodeSuccess {
 		log.Printf("handleNegative: ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN")
 		cachedRcode = uint8(dns.RcodeNameError)
-        negContext = cache.ContextNXDOMAIN
+		negContext = cache.ContextNXDOMAIN
 	}
 
 	// Ensure RCODE matches the context we're caching
@@ -2427,7 +2426,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		log.Printf("*** handleNegative: WARNING - caching as NODATA but RCODE is %s (expected NOERROR)", dns.RcodeToString[r.MsgHdr.Rcode])
 		cachedRcode = uint8(dns.RcodeSuccess)
 	}
-	
+
 	imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 		Name:         qname,
 		RRtype:       qtype,

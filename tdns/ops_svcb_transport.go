@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 // ParseTransportString parses a transport string like "doq:30,dot:20" into a map.

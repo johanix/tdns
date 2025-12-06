@@ -110,8 +110,8 @@ func main() {
 			if err := tdns.DnsEngine(ctx, &conf); err != nil {
 				tdns.Shutdowner(&conf, fmt.Sprintf("error channel server: %v", err))
 			}
+			fmt.Printf("Started DNS engine for error channel reporting (RFC9567) on %s\n", errorChannelAddr)
 		}()
-		fmt.Printf("Started DNS engine for error channel reporting (RFC9567) on %s\n", errorChannelAddr)
 	}
 
 	// Simple signal loop for graceful shutdown

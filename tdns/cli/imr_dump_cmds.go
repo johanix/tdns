@@ -244,10 +244,10 @@ var dumpDnskeysCmd = &cobra.Command{
 			pub         string
 		}
 		type dsView struct {
-			state cache.ValidationState
-			expires   string
-			rrs       []string
-			sigs      []string
+			state   cache.ValidationState
+			expires string
+			rrs     []string
+			sigs    []string
 		}
 		type ownerView struct {
 			ds     *dsView
@@ -301,8 +301,8 @@ var dumpDnskeysCmd = &cobra.Command{
 				owners[parts[0]] = ov
 			}
 			dsv := &dsView{
-				state: val.State,
-				expires:   tdns.TtlPrint(val.Expiration),
+				state:   val.State,
+				expires: tdns.TtlPrint(val.Expiration),
 			}
 			if val.RRset != nil {
 				// sort DS lines by key tag

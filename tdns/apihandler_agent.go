@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"os"
 	"time"
-	
+
 	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )

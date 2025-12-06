@@ -246,5 +246,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ## Last Updated
 
+**Date**: 2025-12-03
+
 This document was last updated based on codebase analysis. RFC support status should be verified against the actual implementation when making changes.
 

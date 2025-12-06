@@ -22,24 +22,24 @@ func AddOTSOption(opt *dns.OPT, payload uint8) error {
 	if opt == nil {
 		return fmt.Errorf("OPT RR is nil")
 	}
-	
+
 	if payload != OTS_OPT_IN && payload != OTS_OPT_OUT {
-		return fmt.Errorf("invalid OTS payload value: %d (must be %d or %d)", 
+		return fmt.Errorf("invalid OTS payload value: %d (must be %d or %d)",
 			payload, OTS_OPT_IN, OTS_OPT_OUT)
 	}
-	
+
 	// Create the option data (1 octet payload)
 	optionData := []byte{payload}
-	
+
 	// Create the EDNS0 option
 	option := &dns.EDNS0_LOCAL{
 		Code: EDNS0_OTS_OPTION_CODE,
 		Data: optionData,
 	}
-	
+
 	// Add the option to the OPT RR
 	opt.Option = append(opt.Option, option)
-	
+
 	return nil
 }
 
@@ -49,7 +49,7 @@ func ExtractOTSOption(opt *dns.OPT) (uint8, bool) {
 	if opt == nil {
 		return 0, false
 	}
-	
+
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			if localOpt.Code == EDNS0_OTS_OPTION_CODE {
@@ -59,7 +59,7 @@ func ExtractOTSOption(opt *dns.OPT) (uint8, bool) {
 			}
 		}
 	}
-	
+
 	return 0, false
 }
 
@@ -83,7 +83,7 @@ func RemoveOTSOption(opt *dns.OPT) {
 	if opt == nil {
 		return
 	}
-	
+
 	var newOptions []dns.EDNS0
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
@@ -93,13 +93,13 @@ func RemoveOTSOption(opt *dns.OPT) {
 		}
 		newOptions = append(newOptions, option)
 	}
-	
+
 	opt.Option = newOptions
 }
 
 // AddEDNS0WithOTS adds an EDNS0 OPT RR to a message and includes the OTS option
 func AddOTSToMessage(msg *dns.Msg, otsPayload uint8) error {
-    
+
 	if msg == nil {
 		return fmt.Errorf("message is nil")
 	}
@@ -113,4 +113,3 @@ func AddOTSToMessage(msg *dns.Msg, otsPayload uint8) error {
 	RemoveOTSOption(opt)
 	return AddOTSOption(opt, otsPayload)
 }
- 

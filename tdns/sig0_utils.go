@@ -58,11 +58,10 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 		removes = []dns.RR{}
 	}
 
-	const update_scheme = 2
 	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
-		return fmt.Errorf("Error from LookupDSYNCTarget(%s, %s): %v",
-			Globals.ParentZone, parpri, err)
+		return fmt.Errorf("Error from LookupDSYNCTarget for parent zone %s (scheme=UPDATE): %v",
+			Globals.ParentZone, err)
 	}
 
 	msg, err := CreateChildUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)

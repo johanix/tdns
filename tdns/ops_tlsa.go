@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {

@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
 )
-
 
 // ParseTransportString parses a transport string like "doq:30,dot:20" into a map.
 // - Keys are lower-cased and trimmed

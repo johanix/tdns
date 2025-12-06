@@ -89,14 +89,14 @@ type ZoneData struct {
 	KeyDB              *KeyDB
 	AppType            AppType
 	SyncQ              chan SyncRequest
-	Error              bool      // zone is broken and cannot be used
-	ErrorType          ErrorType // "config" | "refresh" | "notify" | "update"
-	ErrorMsg           string    // reason for the error (if known)
-	LatestError        time.Time // time of latest error
-	RefreshCount       int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh      time.Time // time of latest successful refresh
-	TransportSignal    *core.RRset    // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal bool      // whether to attach TransportSignal in responses
+	Error              bool        // zone is broken and cannot be used
+	ErrorType          ErrorType   // "config" | "refresh" | "notify" | "update"
+	ErrorMsg           string      // reason for the error (if known)
+	LatestError        time.Time   // time of latest error
+	RefreshCount       int         // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	LatestRefresh      time.Time   // time of latest successful refresh
+	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
+	AddTransportSignal bool        // whether to attach TransportSignal in responses
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -303,8 +303,8 @@ type CachedDnskeyRRset struct {
 	Validated   bool
 	Trusted     bool
 	TrustAnchor bool
-	Dnskey      dns.DNSKEY // just this key
-	RRset       *core.RRset     // complete RRset
+	Dnskey      dns.DNSKEY  // just this key
+	RRset       *core.RRset // complete RRset
 	Expiration  time.Time
 }
 

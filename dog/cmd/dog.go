@@ -433,9 +433,13 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		if strings.HasPrefix(strings.ToUpper(ucarg), "+WIDTH") {
 			parts := strings.SplitN(ucarg, "=", 2)
 			if len(parts) > 1 {
+				if _, err := strconv.Atoi(parts[1]); err != nil {
+					return nil, fmt.Errorf("Error: +WIDTH option requires a valid integer width")
+				}
 				options["width"] = parts[1]
 				return options, nil
 			}
+			return nil, fmt.Errorf("Error: +WIDTH option requires a valid integer width (e.g., +WIDTH=100)")
 		}
 
 		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)

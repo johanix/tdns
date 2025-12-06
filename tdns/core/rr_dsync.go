@@ -28,8 +28,8 @@ type DSYNC struct {
 type DsyncScheme uint8
 
 const (
-	SchemeNotify = 1
-	SchemeUpdate = 2
+	SchemeNotify  = 1
+	SchemeUpdate  = 2
 	SchemeScanner = 3
 	SchemeAPI     = 4
 	// Private schemes:
@@ -38,10 +38,10 @@ const (
 )
 
 var SchemeToString = map[DsyncScheme]string{
-	SchemeNotify: "NOTIFY",
-	SchemeUpdate: "UPDATE",
+	SchemeNotify:  "NOTIFY",
+	SchemeUpdate:  "UPDATE",
 	SchemeScanner: "SCANNER",
-	SchemeAPI:    "API",
+	SchemeAPI:     "API",
 	// Private schemes:
 	SchemeMSUpdate: "MSUPDATE", // MSUPDATE is used in a multi-signer context and indicates a DNS UPDATE sent from a signer to the upstream unsigned zone.
 	SchemeReport:   "REPORT",

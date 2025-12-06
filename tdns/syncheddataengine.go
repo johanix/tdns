@@ -55,7 +55,7 @@ type ZoneUpdate struct {
 	Zone    ZoneName
 	AgentId AgentId
 	RRsets  map[uint16]core.RRset // remote updates are only per RRset (i.e. full replace)
-	RRs     []dns.RR         // local updates can be per RR
+	RRs     []dns.RR              // local updates can be per RR
 }
 
 type AgentId string

@@ -16,14 +16,7 @@ import (
 )
 
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, imr *Imr) error {
-	// var ds DelegationSyncRequest
-//	var imr = viper.GetString("resolver.address")
-//	if imr == "" {
-//		log.Printf("DelegationSyncEngine: resolver address not specified. Terminating.")
-//		return fmt.Errorf("DelegationSyncEngine: resolver address not specified")
-//	}
-
-	// time.Sleep(5 * time.Second) // Allow time for zones to load
+	
 	if imr == nil {
 		log.Printf("DelegationSyncher: imr is nil. Terminating.")
 		return fmt.Errorf("DelegationSyncher: imr is nil")

@@ -13,13 +13,16 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
-func (zd *ZoneData) Refresh(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
+func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
+
+	// Collect dynamic RRs before refresh (they will be lost during refresh)
+	dynamicRRs := zd.CollectDynamicRRs(conf)
 
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 	// 	ZoneTypeToString[zd.ZoneType], force)
@@ -1236,7 +1239,7 @@ type DelegationData struct {
 	BailiwickNS []string
 	A_glue      map[string]*core.RRset // map[nsname]
 	AAAA_glue   map[string]*core.RRset // map[nsname]
-	Actions     []dns.RR          // actions are DNS UPDATE actions that modify delegation data
+	Actions     []dns.RR               // actions are DNS UPDATE actions that modify delegation data
 	Time        time.Time
 }
 

@@ -83,7 +83,3 @@ var DsyncDiscoveryCmd = &cobra.Command{
 		}
 	},
 }
-
-func init() {
-	// No longer need IMR flag since we use internal IMR
-}

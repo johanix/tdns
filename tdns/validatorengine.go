@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/spf13/viper"
 	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // The ValidatorEngine is responsible for validating RRsets on request. The reason to have it as a separate

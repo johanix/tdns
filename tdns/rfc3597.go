@@ -152,29 +152,25 @@ func (zd *ZoneData) FetchParentData(imr *Imr) error {
 
 	if len(zd.ParentServers) == 0 {
 		zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", zd.Parent)
+		ctx := context.Background()
 		for _, ns := range zd.ParentNS {
 			for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-				m := new(dns.Msg)
-				m.SetQuestion(ns, rrtype)
-
-				r, err := dns.Exchange(m, Globals.IMR)
+				resp, err := imr.ImrQuery(ctx, ns, rrtype, dns.ClassINET, nil)
 				if err != nil {
 					return err
 				}
-				if r != nil {
-					if len(r.Answer) > 0 {
-						for _, rr := range r.Answer {
-							if rr.Header().Name == ns {
-								switch rr := rr.(type) {
-								case *dns.A:
-									zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.A.String(), "53"))
-								case *dns.AAAA:
-									zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.AAAA.String(), "53"))
-								default:
-									return fmt.Errorf("unexpected RRtype: %s (should be %s)",
-										dns.TypeToString[rr.Header().Rrtype],
-										dns.TypeToString[rrtype])
-								}
+				if resp != nil && resp.RRset != nil && len(resp.RRset.RRs) > 0 {
+					for _, rr := range resp.RRset.RRs {
+						if rr.Header().Name == ns {
+							switch rr := rr.(type) {
+							case *dns.A:
+								zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.A.String(), "53"))
+							case *dns.AAAA:
+								zd.ParentServers = append(zd.ParentServers, net.JoinHostPort(rr.AAAA.String(), "53"))
+							default:
+								return fmt.Errorf("unexpected RRtype: %s (should be %s)",
+									dns.TypeToString[rr.Header().Rrtype],
+									dns.TypeToString[rrtype])
 							}
 						}
 					}

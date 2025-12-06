@@ -388,21 +388,28 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 		}
 	}
 
+	var err error
 	fmt.Printf("\n;; QUESTION SECTION:\n")
 	for _, rr := range m.Question {
 		fmt.Printf("%s\n", rr.String())
 	}
 	fmt.Printf("\n;; ANSWER SECTION:\n")
 	for _, rr := range m.Answer {
-		PrintRR(rr, leftpad, options)
+		if err = PrintRR(rr, leftpad, options); err != nil {
+			fmt.Printf("Error from PrintRR: %v\n", err)
+		}
 	}
 	fmt.Printf("\n;; AUTHORITY SECTION:\n")
 	for _, rr := range m.Ns {
-		PrintRR(rr, leftpad, options)
+		if err = PrintRR(rr, leftpad, options); err != nil {
+			fmt.Printf("Error from PrintRR: %v\n", err)
+		}
 	}
 	fmt.Printf("\n;; ADDITIONAL SECTION:\n")
 	for _, rr := range m.Extra {
-		PrintRR(rr, leftpad, options)
+		if err = PrintRR(rr, leftpad, options); err != nil {
+			fmt.Printf("Error from PrintRR: %v\n", err)
+		}
 	}
 
 	transport := "UDP"
@@ -474,7 +481,7 @@ func PrintMsgSection(header string, section []dns.RR, width int) string {
 		line := fmt.Sprintf("%s\n", rr.String())
 		if len(line) > width {
 			line = line[:width-4] + "...\n"
-		} 
+		}
 		out += line
 	}
 	return out

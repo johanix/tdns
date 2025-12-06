@@ -9,8 +9,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func NSInBailiwick(zone string, ns *dns.NS) bool {

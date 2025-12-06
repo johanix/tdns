@@ -9,8 +9,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
@@ -363,4 +363,3 @@ func xxxRRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log
 	}
 	return rrsets_differ, adds, removes
 }
-

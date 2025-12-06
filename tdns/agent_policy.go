@@ -138,7 +138,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						msg = fmt.Sprintf("Adding %s %s RRset to agent %q",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
-						cur_rrset = *rrset.Copy()
+						cur_rrset = *rrset.Clone()
 						changed = true
 					} else {
 						for _, rr := range rrset.RRs {

@@ -227,10 +227,10 @@ type ScannerPost struct {
 }
 
 type ScannerResponse struct {
-	AppName string
-	Time time.Time
-	Status string
-	Msg string
-	Error bool
+	AppName  string
+	Time     time.Time
+	Status   string
+	Msg      string
+	Error    bool
 	ErrorMsg string
 }

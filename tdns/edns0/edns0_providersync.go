@@ -29,10 +29,10 @@ const (
 
 // ProviderSyncOption represents the parsed Provider-Synchronization EDNS(0) option
 type ProviderSyncOption struct {
-	Operation          uint8
-	Transport          uint8
-	Synchronization    uint8
-	OperationBody      []byte // Variable length, may be empty
+	Operation       uint8
+	Transport       uint8
+	Synchronization uint8
+	OperationBody   []byte // Variable length, may be empty
 }
 
 // CreateProviderSyncOption creates a ProviderSyncOption struct
@@ -77,7 +77,7 @@ func AddProviderSyncOption(opt *dns.OPT, pso *ProviderSyncOption) error {
 	}
 	optionData := SerializeProviderSyncOption(pso)
 	if len(optionData) > 0xFFFF {
-			return fmt.Errorf("provider-sync option too large: %d bytes", len(optionData))
+		return fmt.Errorf("provider-sync option too large: %d bytes", len(optionData))
 	}
 
 	option := &dns.EDNS0_LOCAL{

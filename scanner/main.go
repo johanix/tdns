@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -49,7 +50,9 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				continue
+				if err := tconf.ParseConfig(true); err != nil {
+					log.Printf("SIGHUP reload failed: %v", err)
+				}
 			}
 		}
 	}()

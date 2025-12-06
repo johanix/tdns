@@ -50,7 +50,7 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 
 // func NewRRsetCache(lg *log.Logger, verbose, debug bool, options map[ImrOption]string) *RRsetCacheT {
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
-		var client = map[core.Transport]*core.DNSClient{}
+	var client = map[core.Transport]*core.DNSClient{}
 
 	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil)
 	client[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "853", nil)
@@ -61,7 +61,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		RRsets:                 core.NewCmap[CachedRRset](),
 		Servers:                core.NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
 		ServerMap:              core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
-        ZoneMap:                core.NewCmap[*Zone](), // zone -> *Zone
+		ZoneMap:                core.NewCmap[*Zone](),                  // zone -> *Zone
 		DnskeyCache:            DnskeyCache,
 		Logger:                 lg,
 		LineWidth:              130, // default line width for truncating long lines in logging and output
@@ -75,7 +75,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 }
 
 func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
-	
+
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
 	crrset, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
@@ -109,7 +109,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
 		return
 	}
-	
+
 	// Compute min TTL and set Expiration accordingly when RRset present
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
 		minTTL := crrset.RRset.RRs[0].Header().Ttl
@@ -458,7 +458,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				if err != nil {
 					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 					// Skip invalid ALPN value
-					continue 
+					continue
 				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
 					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
 				}
@@ -764,7 +764,6 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 
 	return nil
 }
-
 
 func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[string]*AuthServer, error) {
 	// Iterate through known zone names and return the longest match.

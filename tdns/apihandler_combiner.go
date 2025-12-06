@@ -19,7 +19,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 		var cp CombinerPost
 		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APICombiner: error decoding combiner command post:", err)
+			log.Println("APIcombiner: error decoding combiner command post:", err)
 		}
 
 		log.Printf("API: received /combiner request (cmd: %s) from %s.\n",

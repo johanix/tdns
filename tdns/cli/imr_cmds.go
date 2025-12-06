@@ -62,18 +62,15 @@ var ImrQueryCmd = &cobra.Command{
 			if Conf.Internal.RRsetCache != nil {
 				cached = Conf.Internal.RRsetCache.Get(qname, qtype)
 			}
-			
+
 			if cached != nil && (cached.Context == cache.ContextNXDOMAIN || cached.Context == cache.ContextNoErrNoAns) {
 				// This is a negative response
 				vstate := cached.State
 				stateStr := cache.ValidationStateToString[vstate]
 				ctxStr := cache.CacheContextToString[cached.Context]
-				
-				switch cached.Context {
-				case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:
-					fmt.Printf("%s %s (state: %s)\n", qname, ctxStr, stateStr)
-				}
-				
+
+				fmt.Printf("%s %s (state: %s)\n", qname, ctxStr, stateStr)
+
 				// Print negative authority proof if present (only in verbose mode)
 				// Check the global verbose flag set by the root command's PersistentFlags
 				if tdns.Globals.Verbose {
@@ -107,7 +104,7 @@ var ImrQueryCmd = &cobra.Command{
 					vstate = cached.State
 				}
 				suffix := fmt.Sprintf(" (state: %s)", cache.ValidationStateToString[vstate])
-				
+
 				for _, rr := range r.RRset.RRs {
 					switch rr.Header().Rrtype {
 					case qtype, dns.TypeCNAME:

@@ -9,8 +9,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 // matchesConfiguredAddrs returns true if any RR in rrset matches a configured address.

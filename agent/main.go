@@ -19,8 +19,6 @@ import (
 )
 
 func main() {
-	// var conf tdns.Config
-
 	tdns.Globals.App.Type = tdns.AppTypeAgent
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
