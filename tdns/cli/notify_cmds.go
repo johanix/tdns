@@ -103,13 +103,13 @@ func SendNotify(zonename string, ntype string) {
 
 	// New approach: use internal IMR
 	// LookupDSYNCTarget will discover the parent zone internally for CDS/CSYNC
-	_, cancel, imr, err := StartImrForCli("")
+	ctx, cancel, imr, err := StartImrForCli("")
 	if err != nil {
 		log.Fatalf("Error initializing IMR: %v", err)
 	}
 	defer cancel()
 
-	dsynctarget, err = imr.LookupDSYNCTarget(zonename, dtype, notify_scheme)
+	dsynctarget, err = imr.LookupDSYNCTarget(ctx, zonename, dtype, notify_scheme)
 	if err != nil {
 		log.Fatalf("Error from LookupDSYNCTarget(%s): %v", zonename, err)
 	}

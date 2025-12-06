@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -26,7 +27,7 @@ import (
 // XXX: FIXME: This is only used from the CLI. It should change into code used by TDNS-SERVER and
 //
 //	accessed via API. The code should store the newly generated key in the keystore.
-func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
+func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string, gennewkey bool) error {
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		return fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
@@ -58,7 +59,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 		removes = []dns.RR{}
 	}
 
-	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
+	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(ctx, Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("Error from LookupDSYNCTarget for parent zone %s (scheme=UPDATE): %v",
 			Globals.ParentZone, err)

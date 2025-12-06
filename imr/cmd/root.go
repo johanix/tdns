@@ -39,7 +39,7 @@ var rootCmd = &cobra.Command{
 				return
 			} else {
 				fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
-				tdns.MainLoop(appCtx, appCancel, &cli.Conf)
+				cli.Conf.MainLoop(appCtx, appCancel)
 			}
 		}
 	},
@@ -158,7 +158,7 @@ func initImr() {
 		}
 	}()
 
-	err = tdns.StartImr(appCtx, &cli.Conf, nil)
+	err = cli.Conf.StartImr(appCtx, nil)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}

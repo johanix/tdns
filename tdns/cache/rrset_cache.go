@@ -35,7 +35,9 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	}
 	if tmp.Expiration.Before(time.Now()) {
 		dkc.Map.Remove(lookupKey)
-		log.Printf("DnskeyCache: Removed expired key %s", lookupKey)
+		// if dkc.Debug {
+		//	log.Printf("DnskeyCache: Removed expired key %s", lookupKey)
+		//}
 		return nil
 	}
 	return &tmp
@@ -248,31 +250,6 @@ const (
 	transportQueryReasonObservation = "opportunistic-signal"
 	transportQueryReasonNewServer   = "new-auth-server"
 )
-
-/*
-func (rrcache *RRsetCacheT) TransportSignalRRType() uint16 {
-	if rrcache == nil {
-		return dns.TypeSVCB
-	}
-	if val, ok := rrcache.Options[ImrOptTransportSignalType]; ok {
-		switch strings.ToLower(val) {
-		case "tsync":
-			return core.TypeTSYNC
-		}
-	}
-	return dns.TypeSVCB
-}
-
-func (rrcache *RRsetCacheT) TransportSignalCached(owner string) bool {
-	if owner == "" || rrcache == nil {
-		return false
-	}
-	if c := rrcache.Get(owner, rrcache.TransportSignalRRType()); c != nil && c.RRset != nil && len(c.RRset.RRs) > 0 {
-		return true
-	}
-	return false
-}
-*/
 
 func (rrcache *RRsetCacheT) MarkTransportQuery(owner string) bool {
 	rrcache.transportQueryMu.Lock()
@@ -792,7 +769,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 
 	if rrcache.Debug {
 		auths := []string{}
-		for name, _ := range servers {
+		for name := range servers {
 			auths = append(auths, name)
 		}
 		log.Printf("FindClosestKnownZone: authservers for zone %q: %s", qname, strings.Join(auths, ", "))

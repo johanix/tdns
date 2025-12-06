@@ -52,6 +52,12 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *core.RRset) {
 	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
 	// dump.P(nsrrs)
+	if len(nsrrs.RRs) == 0 {
+		if zd.Debug {
+			zd.Logger.Printf("FindGlue: nsrrs is empty")
+		}
+		return nil, nil
+	}
 	var v4glue, v6glue, maybe_4glue, maybe_6glue core.RRset
 	var nsname string
 	zone := nsrrs.RRs[0].Header().Name
@@ -112,6 +118,12 @@ func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *co
 func (zd *ZoneData) FindGlueSimple(nsrrs core.RRset, dnssec_ok bool) ([]dns.RR, []dns.RR, []dns.RR, []dns.RR) {
 	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
 	// dump.P(nsrrs)
+	if len(nsrrs.RRs) == 0 {
+		if zd.Debug {
+			zd.Logger.Printf("FindGlueSimple: nsrrs is empty")
+		}
+		return nil, nil, nil, nil
+	}
 	var v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs []dns.RR
 	var nsname string
 	zone := nsrrs.RRs[0].Header().Name

@@ -5,7 +5,6 @@
 package main
 
 import (
-	// "flag"
 	"context"
 	"fmt"
 	"log"
@@ -27,17 +26,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	err := tdns.Conf.MainInit(ctx, tdns.DefaultAgentCfgFile)
-	conf := tdns.Conf
+	conf := &tdns.Conf
+	err := conf.MainInit(ctx, tdns.DefaultAgentCfgFile)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
-
-	apirouter, err := tdns.SetupAPIRouter(&conf)
+	apirouter, err := conf.SetupAPIRouter(ctx)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
+
 	// SIGHUP reload watcher
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -55,10 +54,10 @@ func main() {
 		}
 	}()
 
-	err = tdns.StartAgent(ctx, &conf, apirouter)
+	err = conf.StartAgent(ctx, apirouter)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
-	tdns.MainLoop(ctx, stop, &conf)
+	conf.MainLoop(ctx, stop)
 }

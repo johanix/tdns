@@ -12,16 +12,28 @@ const (
 	ConnModeStrict
 )
 
-var ConnModeToString = map[ConnMode]string{
+var connModeToString = map[ConnMode]string{
 	ConnModeLegacy:        "legacy",
 	ConnModeOpportunistic: "opportunistic",
 	ConnModeValidated:     "validated",
 	ConnModeStrict:        "strict",
 }
 
-var StringToConnMode = map[string]ConnMode{
+var stringToConnMode = map[string]ConnMode{
 	"legacy":        ConnModeLegacy,
 	"opportunistic": ConnModeOpportunistic,
 	"validated":     ConnModeValidated,
 	"strict":        ConnModeStrict,
+}
+
+func (m ConnMode) String() string {
+	if s, ok := connModeToString[m]; ok {
+		return s
+	}
+	return "unknown"
+}
+
+func ParseConnMode(s string) (ConnMode, bool) {
+	m, ok := stringToConnMode[s]
+	return m, ok
 }

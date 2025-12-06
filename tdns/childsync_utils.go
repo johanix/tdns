@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -299,6 +300,7 @@ func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
 	return ns_inbailiwick, nil
 }
 
+/*
 func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]string, []string) {
 	fmt.Printf("%d old NS RRs, %d new NS RRs\n", len(oldnsrrset), len(newnsrrset))
 	if Globals.Debug {
@@ -330,9 +332,10 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 
 	return new_ns_inb, old_ns_inb
 }
+*/
 
 // Find the best scheme (from the POV of the child) to sync the deletation with the parent
-func (zd *ZoneData) BestSyncScheme(imr *Imr) (string, *DsyncTarget, error) {
+func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *DsyncTarget, error) {
 	var active_drr *core.DSYNC
 	var active_scheme string
 	var dsynctarget DsyncTarget
@@ -340,7 +343,7 @@ func (zd *ZoneData) BestSyncScheme(imr *Imr) (string, *DsyncTarget, error) {
 	zd.Logger.Printf("BestSyncScheme: zone=%s", zd.ZoneName)
 
 	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
-	dsync_res, err := imr.DsyncDiscovery(zd.ZoneName, Globals.Verbose)
+	dsync_res, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
 	if err != nil {
 		zd.Logger.Printf("BestSyncScheme: Error from DsyncDiscovery(): %v", err)
 		return "", nil, err

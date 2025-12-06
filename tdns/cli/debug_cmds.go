@@ -185,8 +185,8 @@ var debugShowTACmd = &cobra.Command{
 		if len(dr.TrustedDnskeys) > 0 {
 			fmt.Printf("Known DNSKEYs:\n")
 			for _, ta := range dr.TrustedDnskeys {
-				out = append(out, fmt.Sprintf("DNSKEY|%s|%d|%v|%v|%.70s...",
-					ta.Name, ta.Keyid, ta.Validated, ta.Trusted, ta.Dnskey.String()))
+				out = append(out, fmt.Sprintf("DNSKEY|%s|%d|%v|%.70s...",
+					ta.Name, ta.Keyid, ta.Trusted, ta.Dnskey.String()))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))

@@ -35,7 +35,9 @@ type ProviderSyncOption struct {
 	OperationBody   []byte // Variable length, may be empty
 }
 
-// CreateProviderSyncOption creates a ProviderSyncOption struct
+// CreateProviderSyncOption creates a new ProviderSyncOption with the specified
+// operation code, transport bitmask, synchronization model bitmask, and optional body.
+// Returns a pointer to the newly created ProviderSyncOption.
 func CreateProviderSyncOption(op, transport, sync uint8, body []byte) *ProviderSyncOption {
 	return &ProviderSyncOption{
 		Operation:       op,

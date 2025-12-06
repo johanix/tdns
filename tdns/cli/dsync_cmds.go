@@ -61,14 +61,14 @@ var DsyncDiscoveryCmd = &cobra.Command{
 		tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
 
 		// Initialize internal IMR
-		_, cancel, imr, err := StartImrForCli("")
+		ctx, cancel, imr, err := StartImrForCli("")
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
 		defer cancel()
 
 		// Use internal IMR to discover DSYNC records
-		dsync_res, err := imr.DsyncDiscovery(tdns.Globals.Zonename, tdns.Globals.Verbose)
+		dsync_res, err := imr.DsyncDiscovery(ctx, tdns.Globals.Zonename, tdns.Globals.Verbose)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}

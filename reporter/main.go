@@ -30,7 +30,7 @@ func main() {
 		tdns.Shutdowner(&conf, fmt.Sprintf("init: %v", err))
 	}
 
-	router, err := tdns.SetupReporterAPIRouter(&conf)
+	router, err := conf.SetupReporterAPIRouter(context.Background())
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("router: %v", err))
 	}
@@ -83,7 +83,7 @@ func main() {
 	if startNotify {
 		notifyAddr := viper.GetString("reporters.notify.listen")
 		if notifyAddr == "" {
-			notifyAddr = ":53"
+			notifyAddr = ":5353"
 		}
 		var err error
 		stopDNS, err = tdns.NotifyReporter(&conf, tsigSecrets, notifyAddr)
@@ -107,10 +107,10 @@ func main() {
 
 		// Start DnsEngine in a goroutine (it handles shutdown via context cancellation)
 		go func() {
+			fmt.Printf("Started DNS engine for error channel reporting (RFC9567) on %s\n", errorChannelAddr)
 			if err := tdns.DnsEngine(ctx, &conf); err != nil {
 				tdns.Shutdowner(&conf, fmt.Sprintf("error channel server: %v", err))
 			}
-			fmt.Printf("Started DNS engine for error channel reporting (RFC9567) on %s\n", errorChannelAddr)
 		}()
 	}
 

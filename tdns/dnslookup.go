@@ -831,6 +831,94 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 	return nil
 }
 
+// parseOwnerName extracts the base server name from an owner name, handling both
+// direct nameserver names and OTS transport signal owners (_dns.{nsname}).
+// Returns: baseName, isOTSOwner, originalOwner
+func parseOwnerName(owner string) (baseName string, isOTSOwner bool, originalOwner string) {
+	originalOwner = owner
+	if strings.HasPrefix(owner, "_dns.") {
+		isOTSOwner = true
+		baseName = strings.TrimPrefix(owner, "_dns.")
+	} else {
+		baseName = owner
+	}
+	return baseName, isOTSOwner, originalOwner
+}
+
+// parseSVCBTransportSignal extracts and applies transport signals from an SVCB record.
+// Returns true if a transport signal was successfully applied.
+func (imr *Imr) parseSVCBTransportSignal(rr *dns.SVCB, serverName string, serverMap map[string]*cache.AuthServer, ctx context.Context) bool {
+	if rr == nil {
+		return false
+	}
+	server, ok := serverMap[serverName]
+	if !ok {
+		return false
+	}
+
+	haveLocal := false
+	for _, kv := range rr.Value {
+		if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
+			if !imr.Quiet {
+				log.Printf("SVCB transport key for %s: %q", serverName, string(local.Data))
+			}
+			if imr.applyTransportSignalToServer(server, string(local.Data)) {
+				server.PromoteConnMode(cache.ConnModeOpportunistic)
+			}
+			if owner := transportOwnerForNS(serverName); owner != "" {
+				imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
+			}
+			imr.maybeQueryTLSA(ctx, serverName)
+			haveLocal = true
+			break
+		}
+	}
+	if !haveLocal {
+		for _, kv := range rr.Value {
+			if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
+				if !imr.Quiet {
+					log.Printf("SVCB ALPN for %s: %v", serverName, a.Alpn)
+				}
+				applyAlpnSignal(serverName, strings.Join(a.Alpn, ","), serverMap)
+				return true
+			}
+		}
+	}
+	return haveLocal
+}
+
+// parseTSYNCTransportSignal extracts and applies transport signals from a TSYNC record.
+// Returns true if a transport signal was successfully applied.
+func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, serverMap map[string]*cache.AuthServer, ctx context.Context) bool {
+	if rr == nil {
+		return false
+	}
+	ts, ok := rr.Data.(*core.TSYNC)
+	if !ok || ts == nil || ts.Transports == "" {
+		return false
+	}
+	server, ok := serverMap[serverName]
+	if !ok {
+		return false
+	}
+
+	val := ts.Transports
+	if strings.HasPrefix(val, "transport=") {
+		val = strings.TrimPrefix(val, "transport=")
+	}
+	if !imr.Quiet {
+		log.Printf("TSYNC transport value for %s: %q", serverName, val)
+	}
+	if imr.applyTransportSignalToServer(server, val) {
+		server.PromoteConnMode(cache.ConnModeOpportunistic)
+	}
+	if owner := transportOwnerForNS(serverName); owner != "" {
+		imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
+	}
+	imr.maybeQueryTLSA(ctx, serverName)
+	return true
+}
+
 func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrset *core.RRset, zonename string,
 	nsMap map[string]bool, r *dns.Msg) (map[string]*cache.AuthServer, error) {
 	if ctx == nil {
@@ -851,13 +939,11 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		log.Printf("*** ParseAdditionalForNSAddrs: zonename: %q\nnsMap: %+v", zonename, nsMap)
 	}
 
-	// 2. Collect any glue from Additional
+	// Collect any glue from Additional
 	glue4Map := map[string]core.RRset{}
 	glue6Map := map[string]core.RRset{}
-	// var servers []string
 	serverMap, exist := imr.Cache.ServerMap.Get(zonename)
 	if !exist {
-		// log.Printf("ParseAdditionalForNSAddrs: *** warning: serverMap entry for zone %q not found, creating new", zonename)
 		serverMap = map[string]*cache.AuthServer{}
 	}
 	// Prune expired auth servers for this zone before updating
@@ -871,78 +957,78 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 	}
 
-	// Helper to parse and apply transport signal (common for SVCB local key and TSYNC)
-	applyTransportSignal := func(owner string, s string) bool {
-		kvMap, err := core.ParseTransportString(s)
-		if err != nil {
-			log.Printf("Invalid transport string for %s: %q: %v", owner, s, err)
-			return false
-		}
-		// Build weights and ordered transports by descending weight
-		type pair struct {
-			k string
-			w uint8
-		}
-		var pairs []pair
-		weights := map[core.Transport]uint8{}
-		for k, v := range kvMap {
-			t, err := core.StringToTransport(k)
-			if err != nil {
-				log.Printf("Unknown transport in transport weights for %s: %q", owner, k)
-				continue
-			}
-			pairs = append(pairs, pair{k: k, w: v})
-			weights[t] = v
-		}
-		// sort by weight desc, stable on key
-		sort.SliceStable(pairs, func(i, j int) bool {
-			return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
-		})
-		var transports []core.Transport
-		var alpnOrder []string
-		for _, p := range pairs {
-			t, err := core.StringToTransport(p.k)
-			if err != nil {
-				continue
-			}
-			transports = append(transports, t)
-			alpnOrder = append(alpnOrder, p.k)
-		}
-		serverMap[owner].Transports = transports
-		if len(transports) > 0 {
-			serverMap[owner].PrefTransport = transports[0]
-		}
-		// keep textual order for display/debug
-		serverMap[owner].Alpn = alpnOrder
-		serverMap[owner].TransportWeights = weights
-		return len(transports) > 0
-	}
-
+	// Single pass through Additional section: handle glue records and transport signals
 	for _, rr := range r.Extra {
-		name := rr.Header().Name
-		isOTSOwner := false
-		if strings.HasPrefix(name, "_dns.") {
-			isOTSOwner = true
-			name = strings.TrimPrefix(name, "_dns.")
-		}
-		if _, exist := nsMap[name]; !exist {
+		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
 			if !imr.Quiet {
-				log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
+				log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
 			}
+		}
+
+		owner := rr.Header().Name
+		baseName, isOTSOwner, _ := parseOwnerName(owner)
+
+		// Determine which server name to use and whether to process this record
+		var serverName string
+		var isGlueRecord bool
+		var shouldProcessTransportSignal bool
+
+		switch rr.(type) {
+		case *dns.A, *dns.AAAA:
+			// Glue records must match an NS name directly (not _dns.*)
+			if !isOTSOwner {
+				if _, exist := nsMap[baseName]; exist {
+					serverName = baseName
+					isGlueRecord = true
+				} else {
+					if !imr.Quiet {
+						log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
+					}
+					continue
+				}
+			} else {
+				// A/AAAA with _dns. prefix is not glue, skip
+				continue
+			}
+		case *dns.SVCB, *dns.PrivateRR:
+			// Transport signals: process if:
+			// 1. First pass equivalent: isOTSOwner AND baseName in nsMap (will create server entry)
+			// 2. Second pass equivalent: isOTSOwner AND baseName in serverMap (server already exists)
+			if isOTSOwner {
+				_, inNsMap := nsMap[baseName]
+				_, inServerMap := serverMap[baseName]
+				if inNsMap || inServerMap {
+					serverName = baseName
+					shouldProcessTransportSignal = true
+				} else {
+					// OTS owner but server not in nsMap or serverMap, skip
+					continue
+				}
+			} else {
+				// Not OTS owner, skip transport signals (they should be _dns.*)
+				if !imr.Quiet {
+					log.Printf("*** IterativeDNSQuery: non-glue record in Additional: %q", rr.String())
+				}
+				continue
+			}
+		default:
+			// Unknown record type, skip
 			continue
 		}
-		serversrc := ""
-		_, exist := serverMap[name]
+
+		// Create server entry if it doesn't exist (for glue records or transport signals with nsMap match)
+		_, exist := serverMap[serverName]
 		justCreated := false
-		if !exist {
+		if !exist && (isGlueRecord || shouldProcessTransportSignal) {
+			serversrc := ""
 			switch src {
 			case "answer":
 				serversrc = "answer"
 			case "authority":
 				serversrc = "referral"
 			}
-			serverMap[name] = &cache.AuthServer{
-				Name:     name,
+			serverMap[serverName] = &cache.AuthServer{
+				Name:     serverName,
 				Alpn:     []string{"do53"},
 				Src:      serversrc,
 				ConnMode: cache.ConnModeLegacy,
@@ -951,166 +1037,50 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 
 		if justCreated {
-			if owner := transportOwnerForNS(name); owner != "" {
+			if owner := transportOwnerForNS(serverName); owner != "" {
 				imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonNewServer)
 			}
-			imr.maybeQueryTLSA(ctx, name)
+			imr.maybeQueryTLSA(ctx, serverName)
 		}
 
-		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
-			if !imr.Quiet {
-				log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
-			}
-		}
-		// log.Printf("ParseAdditionalForNSAddrs: processing rr: %s", rr.String())
-		switch rr.(type) {
+		// Process the record based on type
+		switch rr := rr.(type) {
 		case *dns.A:
-			addr := rr.(*dns.A).A.String()
-			// servers = append(servers, net.JoinHostPort(addr, "53"))
-			if !slices.Contains(serverMap[name].Addrs, addr) {
-				serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
+			addr := rr.A.String()
+			if !slices.Contains(serverMap[serverName].Addrs, addr) {
+				serverMap[serverName].Addrs = append(serverMap[serverName].Addrs, addr)
 			}
 			// set expiry for this server mapping from glue TTL
-			serverMap[name].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
-			tmp := glue4Map[name]
+			serverMap[serverName].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			tmp := glue4Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
-			glue4Map[name] = tmp
+			glue4Map[serverName] = tmp
 
 		case *dns.AAAA:
-			addr := rr.(*dns.AAAA).AAAA.String()
-			// servers = append(servers, net.JoinHostPort(addr, "53"))
-			if !slices.Contains(serverMap[name].Addrs, addr) {
-				serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
+			addr := rr.AAAA.String()
+			if !slices.Contains(serverMap[serverName].Addrs, addr) {
+				serverMap[serverName].Addrs = append(serverMap[serverName].Addrs, addr)
 			}
 			// set expiry for this server mapping from glue TTL
-			serverMap[name].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
-			tmp := glue6Map[name]
+			serverMap[serverName].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			tmp := glue6Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
-			glue6Map[name] = tmp
+			glue6Map[serverName] = tmp
 
 		case *dns.SVCB:
-			if !isOTSOwner && !imr.Quiet {
-				log.Printf("Additional contains an SVCB, but owner is not _dns.{nsname}, skipping")
-				continue
-			}
-			if !imr.Quiet {
-				log.Printf("Additional contains an SVCB; rr: %s", rr.String())
-			}
-			svcb := rr.(*dns.SVCB)
-			haveLocal := false
-			for _, kv := range svcb.Value {
-				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
-					if !imr.Quiet {
-						log.Printf("SVCB transport key for %s: %q", name, string(local.Data))
-					}
-					if applyTransportSignal(name, string(local.Data)) {
-						serverMap[name].PromoteConnMode(cache.ConnModeOpportunistic)
-					}
-					if owner := transportOwnerForNS(name); owner != "" {
-						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-					}
-					imr.maybeQueryTLSA(ctx, name)
-					haveLocal = true
-					break
+			if shouldProcessTransportSignal {
+				if !imr.Quiet {
+					log.Printf("Additional contains an SVCB; rr: %s", rr.String())
 				}
+				imr.parseSVCBTransportSignal(rr, serverName, serverMap, ctx)
 			}
-			if !haveLocal {
-				for _, kv := range svcb.Value {
-					if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-						log.Printf("SVCB ALPN for %s: %v", name, a.Alpn)
-						applyAlpnSignal(name, strings.Join(a.Alpn, ","), serverMap)
-						break
-					}
-				}
-			}
+
 		case *dns.PrivateRR:
-			// TSYNC transport signal
-			if !isOTSOwner && !imr.Quiet {
-				log.Printf("Additional contains a Private RR (TSYNC?), but owner is not _dns.{nsname}, skipping")
-				continue
-			}
-			if ts, ok := rr.(*dns.PrivateRR).Data.(*core.TSYNC); ok && ts != nil {
-				if ts.Transports != "" {
-					val := ts.Transports
-					if strings.HasPrefix(val, "transport=") {
-						val = strings.TrimPrefix(val, "transport=")
-					}
+			if shouldProcessTransportSignal {
+				if !imr.Quiet {
 					log.Printf("Additional contains TSYNC; rr: %s", rr.String())
-					log.Printf("TSYNC transport value for %s: %q", name, val)
-					log.Printf("Additional contains TSYNC; collecting transport weights from TSYNC")
-					if applyTransportSignal(name, val) {
-						serverMap[name].PromoteConnMode(cache.ConnModeOpportunistic)
-					}
-					if owner := transportOwnerForNS(name); owner != "" {
-						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-					}
-					imr.maybeQueryTLSA(ctx, name)
 				}
-			}
-		default:
-		}
-	}
-
-	// Second pass: parse transport signals irrespective of earlier non-glue filtering,
-	// but only apply to known NS owners for this zone (present in serverMap).
-	for _, rr := range r.Extra {
-		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
-			if !imr.Quiet {
-				log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
-			}
-		}
-
-		// log.Printf("ParseAdditionalForNSAddrs: second-pass processing rr: %s", rr.String())
-		owner := rr.Header().Name
-		if !strings.HasPrefix(owner, "_dns.") {
-			continue
-		}
-		base := strings.TrimPrefix(owner, "_dns.")
-		// Only apply to owners we track for this zone
-		if _, ok := serverMap[base]; !ok {
-			continue
-		}
-		switch rr.(type) {
-		case *dns.SVCB:
-			svcb := rr.(*dns.SVCB)
-			haveLocal := false
-			for _, kv := range svcb.Value {
-				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
-					log.Printf("Transport(second-pass): SVCB key for %s: %q", base, string(local.Data))
-					if applyTransportSignal(base, string(local.Data)) {
-						serverMap[base].PromoteConnMode(cache.ConnModeOpportunistic)
-					}
-					if owner := transportOwnerForNS(base); owner != "" {
-						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-					}
-					imr.maybeQueryTLSA(ctx, base)
-					haveLocal = true
-					break
-				}
-			}
-			if !haveLocal {
-				for _, kv := range svcb.Value {
-					if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-						log.Printf("Transport(second-pass): SVCB ALPN for %s: %v", base, a.Alpn)
-						applyAlpnSignal(base, strings.Join(a.Alpn, ","), serverMap)
-						break
-					}
-				}
-			}
-		case *dns.PrivateRR:
-			if ts, ok := rr.(*dns.PrivateRR).Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
-				val := ts.Transports
-				if strings.HasPrefix(val, "transport=") {
-					val = strings.TrimPrefix(val, "transport=")
-				}
-				log.Printf("Transport(second-pass): TSYNC value for %s: %q", base, val)
-				if applyTransportSignal(base, val) {
-					serverMap[base].PromoteConnMode(cache.ConnModeOpportunistic)
-				}
-				if owner := transportOwnerForNS(base); owner != "" {
-					imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-				}
-				imr.maybeQueryTLSA(ctx, base)
+				imr.parseTSYNCTransportSignal(rr, serverName, serverMap, ctx)
 			}
 		}
 	}
@@ -1337,6 +1307,12 @@ func buildQuery(qname string, qtype uint16) (*dns.Msg, error) {
 }
 
 func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, m *dns.Msg, qname string, qtype uint16) (*dns.Msg, time.Duration, error) {
+	select {
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	default:
+	}
+
 	t := pickTransport(server, qname)
 	c, exist := imr.Cache.DNSClient[t]
 	if !exist {
@@ -1741,6 +1717,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 						RRset:   &rrset,
 						Context: cache.ContextAnswer,
 						// Should there not be some state here? State:      vstate,
+						State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 					})
 					return &rrset, rcode, cache.ContextAnswer, nil, true
@@ -2246,7 +2223,7 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 		// about whether it "speaks for" qname. If there's a SOA present, we
 		// accept it as a valid NXDOMAIN response even if the SOA owner doesn't
 		// exactly match qname (some servers may return SOA for parent zone).
-		if hasSOA {
+		if soaSpeaksForQname() {
 			return responseKindNegativeNXDOMAIN
 		}
 		// NXDOMAIN without any SOA should be treated as an error and
@@ -2421,10 +2398,12 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 	// If we're caching as NODATA, the RCODE must be NOERROR
 	if negContext == cache.ContextNXDOMAIN && cachedRcode != uint8(dns.RcodeNameError) {
 		log.Printf("*** handleNegative: WARNING - caching as NXDOMAIN but RCODE is %s (expected NXDOMAIN)", dns.RcodeToString[r.MsgHdr.Rcode])
-		cachedRcode = uint8(dns.RcodeNameError)
+		// cachedRcode = uint8(dns.RcodeNameError)
+		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	} else if negContext == cache.ContextNoErrNoAns && cachedRcode != uint8(dns.RcodeSuccess) {
 		log.Printf("*** handleNegative: WARNING - caching as NODATA but RCODE is %s (expected NOERROR)", dns.RcodeToString[r.MsgHdr.Rcode])
-		cachedRcode = uint8(dns.RcodeSuccess)
+		// cachedRcode = uint8(dns.RcodeSuccess)
+		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
 
 	imr.Cache.Set(qname, qtype, &cache.CachedRRset{

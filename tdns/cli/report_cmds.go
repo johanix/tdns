@@ -39,11 +39,14 @@ var ReportCmd = &cobra.Command{
 			dsyncLookup = false
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
 		tdns.Globals.App.Type = tdns.AppTypeCli
 		if tdns.Globals.Debug {
 			fmt.Printf("ReportCmd: Calling Conf.MainInit(%q)\n", tdns.DefaultCliCfgFile)
 		}
-		if err := Conf.MainInit(context.Background(), tdns.DefaultCliCfgFile); err != nil {
+		if err := Conf.MainInit(ctx, tdns.DefaultCliCfgFile); err != nil {
 			tdns.Shutdowner(&Conf, fmt.Sprintf("Error initializing tdns-cli: %v", err))
 		}
 
@@ -67,7 +70,7 @@ var ReportCmd = &cobra.Command{
 			log.Printf("ReportCmd: Discovering DSYNC via IMR for %s", tdns.Globals.Zonename)
 
 			// New approach: use imr.DsyncDiscovery() directly
-			dsyncRes, derr := imr.DsyncDiscovery(tdns.Globals.Zonename, tdns.Globals.Verbose)
+			dsyncRes, derr := imr.DsyncDiscovery(ctx, tdns.Globals.Zonename, tdns.Globals.Verbose)
 			if derr != nil {
 				log.Printf("ReportCmd: DSYNC discovery error: %v", derr)
 				return

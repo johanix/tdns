@@ -10,7 +10,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
@@ -84,9 +83,8 @@ func (imr *Imr) extractDsyncFromResponse(qname string, resp *ImrResponse, verbos
 	return dsyncrrs, "", nil
 }
 
-func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) {
+func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) (DsyncResult, error) {
 	var dr DsyncResult
-	ctx := context.Background()
 	if !imr.Quiet {
 		log.Printf("Discovering DSYNC for parent of child zone %q ...\n", child)
 	}
@@ -168,6 +166,7 @@ func (imr *Imr) DsyncDiscovery(child string, verbose bool) (DsyncResult, error) 
 	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
 }
 
+/*
 // DsyncDiscovery is the standalone function that uses external IMR (fallback)
 func xxxDsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 	var dr DsyncResult
@@ -224,8 +223,10 @@ func xxxDsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 
 	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
 }
+*/
 
-func DsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, error) {
+/*
+func xxxDsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, core.TypeDSYNC)
 
@@ -296,6 +297,7 @@ func DsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, error) 
 
 	return dsyncrrs, "", nil
 }
+*/
 
 type DsyncTarget struct {
 	Name      string
@@ -307,12 +309,12 @@ type DsyncTarget struct {
 
 // dtype = the type of DSYNC RR to look for (dns.TypeCDS, dns.TypeCSYNC, dns.TypeANY, ...)
 // scheme = the DSYNC scheme (SchemeNotify | SchemeUpdate)
-func (imr *Imr) LookupDSYNCTarget(childzone string, dtype uint16, scheme core.DsyncScheme) (*DsyncTarget, error) {
+func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype uint16, scheme core.DsyncScheme) (*DsyncTarget, error) {
 	var addrs []string
 	var dsynctarget DsyncTarget
 
 	// Use internal IMR to discover DSYNC records
-	dsync_res, err := imr.DsyncDiscovery(childzone, Globals.Verbose)
+	dsync_res, err := imr.DsyncDiscovery(ctx, childzone, Globals.Verbose)
 	if err != nil {
 		return nil, err
 	}
@@ -361,6 +363,7 @@ func (imr *Imr) LookupDSYNCTarget(childzone string, dtype uint16, scheme core.Ds
 	return &dsynctarget, nil
 }
 
+/*
 // LookupDSYNCTarget is the standalone function that uses external IMR (fallback)
 func xxxLookupDSYNCTarget(childzone, imr string, dtype uint16, scheme core.DsyncScheme) (*DsyncTarget, error) {
 	var addrs []string
@@ -415,3 +418,4 @@ func xxxLookupDSYNCTarget(childzone, imr string, dtype uint16, scheme core.Dsync
 
 	return &dsynctarget, nil
 }
+*/

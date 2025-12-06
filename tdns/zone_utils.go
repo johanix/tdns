@@ -973,15 +973,19 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			const fetchZoneDnskeysSql = `
 SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
 			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
+			defer rows.Close()
 			if err == nil {
-				defer rows.Close()
 				for rows.Next() {
 					var keyid, flags, algorithm string
 					var keyrr string
-					if err := rows.Scan(&keyid, &flags, &algorithm, &keyrr); err == nil {
-						if rr, err := dns.NewRR(keyrr); err == nil {
-							publishkeys = append(publishkeys, rr)
-						}
+					if err := rows.Scan(&keyid, &flags, &algorithm, &keyrr); err != nil {
+						zd.Logger.Printf("CollectDynamicRRs: failed to scan DNSKEY row for zone %s: %v", zd.ZoneName, err)
+						continue
+					}
+					if rr, err := dns.NewRR(keyrr); err == nil {
+						publishkeys = append(publishkeys, rr)
+					} else {
+						zd.Logger.Printf("CollectDynamicRRs: failed to parse DNSKEY RR from %s for zone %s: %v", keyrr, zd.ZoneName, err)
 					}
 				}
 			}

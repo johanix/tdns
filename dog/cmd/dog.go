@@ -537,6 +537,8 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
 			}
 		} else if net.ParseIP(host) != nil {
+			// XXX: This is not correct, as it will not work for IPv6 addresses in brackets
+			// 
 			// Valid IP address (IPv4 or IPv6) without port - use as-is
 			// net.ParseIP handles both IPv4 and IPv6 correctly
 			// No need to split, it's just the IP address

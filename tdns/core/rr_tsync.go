@@ -169,14 +169,23 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 	if err != nil {
 		return off, err
 	}
+	// Alias is mandatory - if buffer ends here, it's an error
 	if off == len(buf) {
-		return off, nil
+		return off, errors.New("TSYNC: missing mandatory Alias field")
 	}
 	rd.Alias, off, err = dns.UnpackDomainName(buf, off)
 	if err != nil {
 		return off, err
 	}
+	// Validate that Alias is not empty
+	if rd.Alias == "" {
+		return off, errors.New("TSYNC: Alias field cannot be empty")
+	}
+	// Remaining fields are optional - if buffer ends, set to empty strings
 	if off == len(buf) {
+		rd.Transports = ""
+		rd.V4addr = ""
+		rd.V6addr = ""
 		return off, nil
 	}
 	rd.Transports, off, err = unpackString(buf, off)
@@ -184,6 +193,8 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 		return off, err
 	}
 	if off == len(buf) {
+		rd.V4addr = ""
+		rd.V6addr = ""
 		return off, nil
 	}
 	rd.V4addr, off, err = unpackString(buf, off)
@@ -191,6 +202,7 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 		return off, err
 	}
 	if off == len(buf) {
+		rd.V6addr = ""
 		return off, nil
 	}
 	rd.V6addr, off, err = unpackString(buf, off)
@@ -202,7 +214,10 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 
 func (rd *TSYNC) Copy(dest dns.PrivateRdata) error {
 	// Copy via field assignment (safe, strings are immutable header pairs)
-	d := dest.(*TSYNC)
+	d, ok := dest.(*TSYNC)
+	if !ok {
+		return fmt.Errorf("TSYNC: Copy: dest is not a *TSYNC")
+	}
 	d.Type = rd.Type
 	d.Alias = rd.Alias
 	d.Transports = rd.Transports

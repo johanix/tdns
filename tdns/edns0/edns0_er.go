@@ -124,7 +124,7 @@ func AddERToMessage(msg *dns.Msg, agentDomain string) error {
 
 // sendErrorResponse sends a FormatError response for invalid error channel queries
 func sendErrorResponse(w dns.ResponseWriter, r *dns.Msg, format string, args ...interface{}) {
-	fmt.Printf(format, args...)
+	log.Printf(format, args...)
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeFormatError)
 	_ = w.WriteMsg(m)

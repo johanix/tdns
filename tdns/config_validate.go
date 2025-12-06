@@ -90,7 +90,7 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 	for k, data := range configsections {
 		log.Printf("%s: Validating config for %q section\n", strings.ToUpper(Globals.App.Name), k)
 		if err := validate.Struct(data); err != nil {
-			log.Printf("ValidateBySection ERROR: %q section failed validation: %v\ndata:\n%+v", k, err, data)
+			// log.Printf("ValidateBySection ERROR: %q section failed validation: %v\ndata:\n%+v", k, err, data)
 			return fmt.Sprintf("%s: Config %s, section %q: missing required attributes:\n%v",
 				strings.ToUpper(Globals.App.Name), cfgfile, k, err), err
 		}

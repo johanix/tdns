@@ -16,8 +16,6 @@ import (
 )
 
 func main() {
-	var tconf tdns.Config
-
 	tdns.Globals.App.Type = tdns.AppTypeScanner
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
@@ -26,18 +24,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	err := tconf.MainInit(ctx, tdns.DefaultScannerCfgFile)
+	conf := &tdns.Conf
+	err := conf.MainInit(ctx, tdns.DefaultScannerCfgFile)
 	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing TDNS: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
-	apirouter, err := tdns.SetupAPIRouter(&tconf) // sidecar mgmt API is a combo of TDNS and MUSIC
+	apirouter, err := conf.SetupAPIRouter(ctx) // sidecar mgmt API is a combo of TDNS and MUSIC
 	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error setting up API router: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
-	err = tdns.StartScanner(ctx, &tconf, apirouter)
+	err = conf.StartScanner(ctx, apirouter)
 	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
 	// SIGHUP reload watcher
@@ -50,12 +49,12 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if err := tconf.ParseConfig(true); err != nil {
+				if err := conf.ParseConfig(true); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}
 		}
 	}()
 
-	tdns.MainLoop(ctx, stop, &tconf)
+	conf.MainLoop(ctx, stop)
 }

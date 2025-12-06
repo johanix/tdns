@@ -86,9 +86,17 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		return rrset, err
 	}
 
+	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
+
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		log.Fatalf("QueryResponder: failed to get apex data for zone %s", zd.ZoneName)
+		log.Printf("QueryResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return fmt.Errorf("failed to get apex data for zone %s: %v", zd.ZoneName, err)
 	}
 
 	if msgoptions.DO {
@@ -103,11 +111,6 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		}
 		apex.RRtypes.Set(dns.TypeNS, nsRRset)
 	}
-
-	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
 
 	// Reject explicit queries for NXNAME type (RFC 9824)
 	// NXNAME is only used in NSEC type bitmaps, not as a query type

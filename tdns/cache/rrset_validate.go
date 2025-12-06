@@ -96,7 +96,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 					if rrcache.Debug {
 						log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
 					}
-					// Add fetched keys to cache (not trusted by default). Trust must be established elsewhere.
+					// Add fetched keys to cache only after DS-based validation has been performed. 
 					// Compute min TTL for expiration.
 					minTTL := dkeys.RRs[0].Header().Ttl
 					for _, krr := range dkeys.RRs[1:] {
@@ -121,7 +121,6 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 								dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 									Name:       dns.Fqdn(dk.Hdr.Name),
 									Keyid:      dk.KeyTag(),
-									Validated:  true,
 									State:      vstate,
 									Trusted:    true,
 									Dnskey:     *dk,
@@ -177,6 +176,15 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 				}
 				zone.SecureDelegation = true
 				rrcache.ZoneMap.Set(rrset.Name, zone)
+			}
+			// cap ttl to the signature expiration
+			expirationTime := time.Unix(int64(sig.Expiration), 0)
+			remaining := time.Until(expirationTime)
+			ttl := time.Duration(remaining.Seconds()) * time.Second
+			if ttl < time.Duration(GetMinTTL(rrset.RRs))*time.Second {
+				if len(rrset.RRs) > 0 {
+					rrset.RRs[0].Header().Ttl = uint32(ttl.Seconds())
+				} 
 			}
 			return ValidationStateSecure, nil
 		}
@@ -265,6 +273,18 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		if verbose {
 			log.Printf("ValidateDNSKEYs: SUCCESS for root with keytag=%d", keyid)
 		}
+		// Cap TTL to signature expiration
+		expirationTime := time.Unix(int64(rootSig.Expiration), 0)
+		remaining := time.Until(expirationTime)
+		ttl := time.Duration(remaining.Seconds()) * time.Second
+		if ttl < time.Duration(GetMinTTL(rrset.RRs))*time.Second {
+			if len(rrset.RRs) > 0 {
+				ttlSeconds := uint32(ttl.Seconds())
+				for _, krr := range rrset.RRs {
+					krr.Header().Ttl = ttlSeconds
+				}
+			}
+		}
 		// Add all DNSKEYs from the validated root RRset to DnskeyCache
 		//		minTTL := uint32(0)
 		//		for _, krr := range rrset.RRs {
@@ -286,7 +306,6 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 					Name:       dns.Fqdn(dk.Hdr.Name),
 					Keyid:      dk.KeyTag(),
-					Validated:  true,
 					State:      ValidationStateSecure,
 					Trusted:    true,
 					Dnskey:     *dk,
@@ -395,6 +414,18 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		if verbose {
 			log.Printf("ValidateDNSKEYs: SUCCESS for %s with DS-backed keytag=%d", name, keyid)
 		}
+		// Cap TTL to signature expiration
+		expirationTime := time.Unix(int64(sigForKey.Expiration), 0)
+		remaining := time.Until(expirationTime)
+		ttl := time.Duration(remaining.Seconds()) * time.Second
+		if ttl < time.Duration(GetMinTTL(rrset.RRs))*time.Second {
+			if len(rrset.RRs) > 0 {
+				ttlSeconds := uint32(ttl.Seconds())
+				for _, krr := range rrset.RRs {
+					krr.Header().Ttl = ttlSeconds
+				}
+			}
+		}
 		// Add all DNSKEYs from the validated RRset to DnskeyCache so they're available
 		// for validating other RRsets (e.g., A records signed by ZSKs).
 		// This is a validation-time concern: the validator needs keys available immediately.
@@ -406,7 +437,6 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
 					Name:       dns.Fqdn(dk.Hdr.Name),
 					Keyid:      dk.KeyTag(),
-					Validated:  true,
 					State:      ValidationStateSecure,
 					Trusted:    true,
 					Dnskey:     *dk,

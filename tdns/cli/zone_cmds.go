@@ -40,11 +40,7 @@ var zoneReloadCmd = &cobra.Command{
 		})
 
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -56,7 +52,7 @@ var zoneReloadCmd = &cobra.Command{
 
 var zoneNsecCmd = &cobra.Command{
 	Use:   "nsec",
-	Short: "Prefix command, not useable by itself",
+	Short: "Prefix command, not usable by itself",
 }
 
 var zoneSignCmd = &cobra.Command{
@@ -77,11 +73,7 @@ var zoneSignCmd = &cobra.Command{
 			Force:   force,
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -109,11 +101,7 @@ var zoneWriteCmd = &cobra.Command{
 			Force:   force,
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -141,11 +129,7 @@ var zoneNsecGenerateCmd = &cobra.Command{
 			Force:   force,
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -172,11 +156,7 @@ var zoneNsecShowCmd = &cobra.Command{
 			Force:   force,
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -208,11 +188,7 @@ var zoneFreezeCmd = &cobra.Command{
 			Force:   force,
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -239,11 +215,7 @@ var zoneThawCmd = &cobra.Command{
 			Force:   force,
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -255,7 +227,7 @@ var zoneThawCmd = &cobra.Command{
 
 var ZoneCmd = &cobra.Command{
 	Use:   "zone",
-	Short: "Prefix command, not useable by itself",
+	Short: "Prefix command, not usable by itself",
 }
 
 var zoneListCmd = &cobra.Command{
@@ -275,11 +247,7 @@ var zoneListCmd = &cobra.Command{
 			Command: "list-zones",
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if cr.Error {
-			fmt.Printf("Error from %s: %s\n", cr.AppName, cr.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 			os.Exit(1)
 		}
 
@@ -313,11 +281,7 @@ var zoneSerialBumpCmd = &cobra.Command{
 		})
 
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+			fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
 			os.Exit(1)
 		}
 

@@ -23,7 +23,7 @@ import (
 	// "github.com/orcaman/concurrent-map/v2"
 )
 
-func MainLoop(ctx context.Context, cancel context.CancelFunc, conf *Config) {
+func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 	if Globals.Debug {
 		debug.SetTraceback("all")
 	}
@@ -176,7 +176,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	return nil
 }
 
-func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) MainStartThreads(ctx context.Context, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 
 	conf.Internal.APIStopCh = make(chan struct{})
@@ -198,7 +198,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 		// the HsyncEngine starts listening for incoming connections
 		go HsyncEngine(ctx, conf, conf.Internal.AgentQs) // Only used by agent
 		go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs)
-		syncrtr, err := SetupAgentSyncRouter(conf)
+		syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
 		}
@@ -263,7 +263,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 }
 
 // StartImr starts subsystems for tdns-imr
-func StartImr(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
 	conf.Internal.APIStopCh = make(chan struct{})
 	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
 		return fmt.Errorf("Error starting API dispatcher: %v", err)
@@ -279,7 +279,7 @@ func StartImr(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 }
 
 // StartCombiner starts subsystems for tdns-combiner
-func StartCombiner(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
 	conf.Internal.APIStopCh = make(chan struct{})
 	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
 		return fmt.Errorf("Error starting API dispatcher: %v", err)
@@ -298,7 +298,7 @@ func StartCombiner(ctx context.Context, conf *Config, apirouter *mux.Router) err
 }
 
 // StartServer starts subsystems for tdns-server
-func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartServer(ctx context.Context, apirouter *mux.Router) error {
 	if conf.Internal.ValidatorCh == nil {
 		conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	}
@@ -348,7 +348,7 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 }
 
 // StartAgent starts subsystems for tdns-agent
-func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	conf.Internal.APIStopCh = make(chan struct{})
 	if conf.Internal.RefreshZoneCh == nil {
@@ -367,7 +367,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	// Agent-specific
 	go HsyncEngine(ctx, conf, conf.Internal.AgentQs)
 	go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs)
-	syncrtr, err := SetupAgentSyncRouter(conf)
+	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 	if err != nil {
 		return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
 	}
@@ -391,7 +391,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 }
 
 // StartScanner starts subsystems for tdns-scanner
-func StartScanner(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) error {
 	conf.Internal.APIStopCh = make(chan struct{})
 	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
 		return fmt.Errorf("Error starting API dispatcher: %v", err)

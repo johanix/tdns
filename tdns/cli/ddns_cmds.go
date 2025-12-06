@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -118,7 +119,11 @@ var ddnsRollCmd = &cobra.Command{
 			fmt.Printf("Error from NewKeyDB(): %v\n", err)
 			os.Exit(1)
 		}
-		err = kdb.SendSig0KeyUpdate(childpri, parpri, true)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		err = kdb.SendSig0KeyUpdate(ctx, childpri, parpri, true)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}
@@ -136,7 +141,11 @@ var ddnsUploadCmd = &cobra.Command{
 			fmt.Printf("Error from NewKeyDB(): %v\n", err)
 			os.Exit(1)
 		}
-		err = kdb.SendSig0KeyUpdate(childpri, parpri, false)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		err = kdb.SendSig0KeyUpdate(ctx, childpri, parpri, false)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}

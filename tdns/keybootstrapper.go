@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
@@ -24,7 +25,7 @@ const (
 	kbCmdUpdateKeyState   = "UPDATE_KEYSTATE"
 )
 
-func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
+func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 	keybootstrapperq := kdb.KeyBootstrapperQ
 	var utr KeyBootstrapperRequest
 
@@ -39,9 +40,13 @@ func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stopchan:
-				log.Println("KeyBootstrapper: Received stop signal")
+			case <-ctx.Done():
+				log.Println("KeyBootstrapper: Received context done signal")
 				return
+			// XXX: stopchan is being deprecated
+			//			case <-stopchan:
+			//				log.Println("KeyBootstrapper: Received stop signal")
+			//				return
 			case utr = <-keybootstrapperq:
 
 				fmt.Printf("KeyBootstrapper: Received request: %v\n", utr)
@@ -180,7 +185,7 @@ func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 					keyid, _ := strconv.ParseUint(tmp[1], 10, 16)
 					fmt.Printf("KeyBootstrapper: Updating key state for %s, keyid %d\n", keyname, keyid)
 
-					go kdb.UpdateKeyState(keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
+					go kdb.UpdateKeyState(ctx, keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
 				}
 
 				// Uppdatera keystate för alla aktiva nycklar
@@ -191,7 +196,7 @@ func (kdb *KeyDB) KeyBootstrapper(stopchan chan struct{}) error {
 				}
 
 				for _, key := range sak.Keys {
-					go kdb.UpdateKeyState(key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
+					go kdb.UpdateKeyState(ctx, key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
 				}
 			}
 		}
@@ -277,8 +282,8 @@ func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 	return nameservers, nil
 }
 
-func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
-	dsync_target, err := Globals.ImrEngine.LookupDSYNCTarget(KeyName, dns.TypeANY, core.SchemeUpdate)
+func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
+	dsync_target, err := Globals.ImrEngine.LookupDSYNCTarget(ctx, KeyName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("could not find DSYNC target: %v", err)
 	}
@@ -373,7 +378,7 @@ func (kdb *KeyDB) UpdateKeyState(KeyName string, keyid uint16, kkeybootstrapperq
 
 		zd, _ := FindZone(KeyName)
 
-		zd.BootstrapSig0KeyWithParent(algorithm)
+		zd.BootstrapSig0KeyWithParent(ctx, algorithm)
 
 	}
 

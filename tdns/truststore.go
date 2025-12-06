@@ -14,6 +14,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
+
 	// "github.com/gookit/goutil/dump"
 	cache "github.com/johanix/tdns/tdns/cache"
 )
@@ -259,7 +260,6 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 				cache.DnskeyCache.Set(k, dnskeyrr.KeyTag(), &cache.CachedDnskeyRRset{
 					Name:        k,
 					Keyid:       dnskeyrr.KeyTag(),
-					Validated:   true,                        // always trust config
 					Trusted:     true,                        // always trust config
 					State:       cache.ValidationStateSecure, // always trust config
 					TrustAnchor: true,                        // always trust config

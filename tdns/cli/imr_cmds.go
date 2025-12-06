@@ -326,8 +326,8 @@ var imrShowConfigCmd = &cobra.Command{
 			sort.Strings(taKeys)
 			for _, key := range taKeys {
 				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
-					fmt.Printf("    %s keyid=%d (validated=%t trusted=%t expires=%s)\n",
-						val.Name, val.Keyid, val.Validated, val.Trusted, tdns.TtlPrint(val.Expiration))
+					fmt.Printf("    %s keyid=%d (trusted=%t expires=%s)\n",
+						val.Name, val.Keyid, val.Trusted, tdns.TtlPrint(val.Expiration))
 				}
 			}
 		}

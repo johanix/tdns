@@ -22,7 +22,6 @@ type CachedDnskeyRRset struct {
 	Name        string
 	Keyid       uint16
 	State       ValidationState
-	Validated   bool
 	Trusted     bool
 	TrustAnchor bool
 	Dnskey      dns.DNSKEY  // just this key
@@ -178,6 +177,7 @@ var CacheContextToString = map[CacheContext]string{
 	ContextFailure:    "failure",
 }
 
+/*
 type ImrOption uint8
 
 const (
@@ -203,6 +203,7 @@ var StringToImrOption = map[string]ImrOption{
 	"transport-signal-type":      ImrOptTransportSignalType,
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 }
+*/
 
 type ValidationState uint8
 

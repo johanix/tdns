@@ -122,10 +122,7 @@ var dumpAuthServersCmd = &cobra.Command{
 					src = "-"
 				}
 				transports := formatTransportWeights(server)
-				conn := cache.ConnModeToString[server.ConnectionMode()]
-				if conn == "" {
-					conn = "legacy"
-				}
+				conn := server.ConnectionMode().String()
 				lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s", name, src, addrs, transports, conn))
 				if tdns.Globals.Verbose {
 					fmt.Printf("  Server: %s\n", name)
@@ -146,15 +143,13 @@ var dumpAuthServersCmd = &cobra.Command{
 						sort.Strings(owners)
 						for _, owner := range owners {
 							rec := tlsaSnapshot[owner]
-							stateStr := "none"
-							if rec != nil {
-								stateStr = cache.ValidationStateToString[rec.State]
-								if stateStr == "" {
-									stateStr = "none"
-								}
+							if rec == nil {
+								fmt.Printf("      %s (no TLSA record)\n", owner)
+								continue
 							}
+							stateStr := validationStateString(rec.State)
 							fmt.Printf("      %s (state: %s)\n", owner, stateStr)
-							if rec != nil && rec.RRset != nil {
+							if rec.RRset != nil {
 								for _, rr := range rec.RRset.RRs {
 									fmt.Printf("        %s\n", rr.String())
 								}
@@ -270,7 +265,6 @@ var dumpDnskeysCmd = &cobra.Command{
 			ov.dnskey = append(ov.dnskey, dnskeyView{
 				name:        val.Name,
 				keyid:       val.Keyid,
-				validated:   val.Validated,
 				trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
 				expires:     tdns.TtlPrint(val.Expiration),
@@ -354,10 +348,7 @@ var dumpDnskeysCmd = &cobra.Command{
 				var stateStr string
 				if Conf.Internal.RRsetCache != nil {
 					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil {
-						stateStr = cache.ValidationStateToString[c.State]
-						if stateStr == "" {
-							stateStr = "none"
-						}
+						stateStr = validationStateString(c.State)
 						if c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
 							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
 								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
@@ -388,19 +379,13 @@ var dumpDnskeysCmd = &cobra.Command{
 					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDNSKEY); c != nil {
 						rrsetState = c.State
 						rrsetTTL = tdns.TtlPrint(c.Expiration)
-						stateStr = cache.ValidationStateToString[c.State]
-						if stateStr == "" {
-							stateStr = "none"
-						}
+						stateStr = validationStateString(c.State)
 						if rrsetState == cache.ValidationStateSecure && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
 							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
 								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
 							}
 						}
 					}
-				}
-				if stateStr == "" {
-					stateStr = "none"
 				}
 				vStr := "insecure"
 				if rrsetState == cache.ValidationStateSecure {
@@ -457,12 +442,11 @@ func formatTransportWeights(server *cache.AuthServer) string {
 	return "[]"
 }
 
-func connectionModeString(server *cache.AuthServer) string {
-	mode := server.ConnectionMode()
-	if s := cache.ConnModeToString[mode]; s != "" {
+func validationStateString(state cache.ValidationState) string {
+	if s := cache.ValidationStateToString[state]; s != "" {
 		return s
 	}
-	return "legacy"
+	return "none"
 }
 
 func printAuthServerVerbose(name string, server *cache.AuthServer) {
@@ -471,7 +455,7 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("    Addresses: %s\n", formatList(server.Addrs))
 	fmt.Printf("    ALPN: %s\n", formatList(server.Alpn))
 	fmt.Printf("    Transports: %s\n", formatTransportWeights(server))
-	fmt.Printf("    Connection mode: %s\n", connectionModeString(server))
+	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {
 		fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
 	}
@@ -484,25 +468,21 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 		sort.Strings(owners)
 		for _, owner := range owners {
 			rec := tlsaSnapshot[owner]
-			stateStr := "none"
-			if rec != nil {
-				stateStr = cache.ValidationStateToString[rec.State]
-				if stateStr == "" {
-					stateStr = "none"
-				}
+			if rec == nil {
+				fmt.Printf("      %s (no TLSA record)\n", owner)
+				continue
 			}
+			stateStr := validationStateString(rec.State)
 			ttlStr := "-"
 			expires := "-"
-			if rec != nil {
 				if rec.RRset != nil && len(rec.RRset.RRs) > 0 {
 					ttlStr = fmt.Sprintf("%d", rec.RRset.RRs[0].Header().Ttl)
 				}
 				if !rec.Expiration.IsZero() {
 					expires = tdns.TtlPrint(rec.Expiration)
 				}
-			}
 			fmt.Printf("      %s (state: %s, TTL: %s, Expires: %s)\n", owner, stateStr, ttlStr, expires)
-			if rec != nil && rec.RRset != nil {
+			if rec.RRset != nil {
 				for _, rr := range rec.RRset.RRs {
 					fmt.Printf("        %s\n", rr.String())
 				}
@@ -605,10 +585,7 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 	}
 
 	rrtype := dns.TypeToString[uint16(tmp)]
-	stateStr := cache.ValidationStateToString[item.Val.State]
-	if stateStr == "" {
-		stateStr = "none"
-	}
+	stateStr := validationStateString(item.Val.State)
 	ttlStr := tdns.TtlPrint(item.Val.Expiration)
 	fmt.Printf("\n%s %s (state: %s, TTL: %s)\n", parts[0], rrtype, stateStr, ttlStr)
 

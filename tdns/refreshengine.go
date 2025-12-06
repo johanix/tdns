@@ -142,8 +142,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						})
 					}
 					// XXX: Should do refresh in parallel
-					go func(zd *ZoneData, zone string, conf *Config) {
-						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
+					go func(zd *ZoneData, zone string, force bool, conf *Config) {
+						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
@@ -152,7 +152,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 						}
-					}(zd, zone, conf)
+					}(zd, zone, zr.Force, conf)
 
 				} else {
 					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)

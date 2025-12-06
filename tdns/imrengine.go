@@ -186,7 +186,6 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 			}
 		}
 	}
-	return nil
 }
 
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
@@ -357,7 +356,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		if Globals.Debug {
 			auths := []string{}
-			for name, _ := range authservers {
+			for name := range authservers {
 				auths = append(auths, name)
 			}
 			log.Printf("ImrQuery: sending query \"%s %s\" to %d auth servers: %s", qname, dns.TypeToString[qtype], len(authservers), strings.Join(auths, ", "))
@@ -895,11 +894,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	if CaseFoldContains(conf.Imr.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
-		if len(addresses) == 0 {
-			if !imr.Quiet {
-				log.Printf("ImrEngine: no addresses provided. The ImrEngine will only be an internal recursive resolver.")
-			}
-		}
+		
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
 				server := &dns.Server{
@@ -1104,7 +1099,6 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			imr.DnskeyCache.Set(name, dk.KeyTag(), &cache.CachedDnskeyRRset{
 				Name:        name,
 				Keyid:       dk.KeyTag(),
-				Validated:   true,
 				Trusted:     true,
 				State:       cache.ValidationStateSecure,
 				TrustAnchor: true,
@@ -1230,7 +1224,6 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 						cdr := cache.CachedDnskeyRRset{
 							Name:       dns.Fqdn(dk.Hdr.Name),
 							Keyid:      keyid,
-							Validated:  true,
 							Trusted:    true,
 							State:      cache.ValidationStateSecure,
 							Dnskey:     *dk,
@@ -1294,7 +1287,6 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				cdr := cache.CachedDnskeyRRset{
 					Name:       anchorName,
 					Keyid:      dk.KeyTag(),
-					Validated:  true,
 					Trusted:    true,
 					State:      cache.ValidationStateSecure,
 					Dnskey:     *dk,

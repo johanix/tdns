@@ -18,33 +18,23 @@ import (
 )
 
 func main() {
-	var tconf tdns.Config
-	// var mconf music.Config
-
 	tdns.Globals.App.Type = tdns.AppTypeCombiner
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
-
-	// These are set here to enable various config reload functions to reload from the correct files.
-	// tconf.Internal.CfgFile = tdns.DefaultCombinerCfgFile
-	// tconf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
-
+	
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	err := tconf.MainInit(ctx, tdns.DefaultCombinerCfgFile)
+	conf := &tdns.Conf
+	err := conf.MainInit(ctx, tdns.DefaultCombinerCfgFile)
 	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error initializing TDNS: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
-	apirouter, err := tdns.SetupAPIRouter(&tconf) // sidecar mgmt API is a combo of TDNS and MUSIC
+	apirouter, err := conf.SetupAPIRouter(ctx) // sidecar mgmt API is a combo of TDNS and MUSIC
 	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error setting up API router: %v", err))
-	}
-	err = tdns.StartCombiner(ctx, &tconf, apirouter)
-	if err != nil {
-		tdns.Shutdowner(&tconf, fmt.Sprintf("Error starting TDNS threads: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
 
 	// SIGHUP reload watcher
@@ -57,12 +47,17 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, err := tconf.ParseZones(ctx, true); err != nil {
+				if _, err := conf.ParseZones(ctx, true); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}
 		}
 	}()
 
-	tdns.MainLoop(ctx, stop, &tconf)
+	err = conf.StartCombiner(ctx, apirouter)
+	if err != nil {
+		tdns.Shutdowner(conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
+	}
+
+	conf.MainLoop(ctx, stop)
 }
