@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/johanix/tdns/tdns"
+	"github.com/johanix/tdns/tdns/core"
 )
 
 var NotifyCmd = &cobra.Command{
@@ -76,40 +77,15 @@ func SendNotify(zonename string, ntype string) {
 		os.Exit(1)
 	}
 
-	const notify_scheme = 1
 	dtype := dns.StringToType[ntype]
 
-	// Old approach: using external IMR and manual parent zone specification (commented out)
-	// var lookupzone, lookupserver string
-	// if childpri == "" {
-	// 	log.Fatalf("Error: child primary nameserver not specified.")
-	// }
-	// switch ntype {
-	// case "DNSKEY":
-	// 	lookupzone = zonename
-	// 	lookupserver = childpri
-	// default:
-	// 	if tdns.Globals.ParentZone == "" {
-	// 		log.Fatalf("Error: parent zone name not specified.")
-	// 	}
-	// 	tdns.Globals.ParentZone = dns.Fqdn(tdns.Globals.ParentZone)
-	// 	if parpri == "" {
-	// 		log.Fatalf("Error: parent primary nameserver not specified.")
-	// 	}
-	// 	lookupzone = tdns.Globals.ParentZone
-	// 	lookupserver = parpri
-	// }
-	// dsynctarget, err = tdns.LookupDSYNCTarget(lookupzone, lookupserver, dtype, notify_scheme)
-
-	// New approach: use internal IMR
-	// LookupDSYNCTarget will discover the parent zone internally for CDS/CSYNC
 	ctx, cancel, imr, err := StartImrForCli("")
 	if err != nil {
 		log.Fatalf("Error initializing IMR: %v", err)
 	}
 	defer cancel()
 
-	dsynctarget, err = imr.LookupDSYNCTarget(ctx, zonename, dtype, notify_scheme)
+	dsynctarget, err = imr.LookupDSYNCTarget(ctx, zonename, dtype, core.SchemeNotify)
 	if err != nil {
 		log.Fatalf("Error from LookupDSYNCTarget(%s): %v", zonename, err)
 	}

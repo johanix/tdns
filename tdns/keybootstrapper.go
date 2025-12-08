@@ -50,7 +50,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 			case utr = <-keybootstrapperq:
 
 				fmt.Printf("KeyBootstrapper: Received request: %v\n", utr)
-				fmt.Printf("KeyBootstrapper: Begäran detaljer:\n")
+				fmt.Printf("KeyBootstrapper: Request details:\n")
 				fmt.Printf("KeyBootstrapper: Cmd: %s\n", utr.Cmd)
 				fmt.Printf("KeyBootstrapper: KeyName: %s\n", utr.KeyName)
 				fmt.Printf("KeyBootstrapper: ZoneName: %s\n", utr.ZoneName)
@@ -58,9 +58,9 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 				fmt.Printf("KeyBootstrapper: Key: %v\n", utr.Key)
 				fmt.Printf("KeyBootstrapper: ZoneData: %v\n", utr.ZoneData)
 				if utr.ResponseChan != nil {
-					fmt.Printf("KeyBootstrapper: ResponseChan: [finns]\n")
+					fmt.Printf("KeyBootstrapper: ResponseChan: [exists]\n")
 				} else {
-					fmt.Printf("KeyBootstrapper: ResponseChan: [saknas]\n")
+					fmt.Printf("KeyBootstrapper: ResponseChan: [missing]\n")
 				}
 
 				switch utr.Cmd {
@@ -376,10 +376,22 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 	// If the key is unknown, bootstrap it with parent
 	if keystate.KeyState == edns0.KeyStateUnknown {
 
-		zd, _ := FindZone(KeyName)
+		zd, ok := FindZone(KeyName)
+		if !ok {
+			log.Printf("Keybootstrapper: Error getting zone data for %s: %v", KeyName, err)
+			return fmt.Errorf("could not get zone data for %s: %v", KeyName, err)
+		}
 
-		zd.BootstrapSig0KeyWithParent(ctx, algorithm)
+		if zd == nil {
+			log.Printf("Keybootstrapper: Zone data not found for %s", KeyName)
+			return fmt.Errorf("zone data not found for %s", KeyName)
+		}
 
+		_, _, err = zd.BootstrapSig0KeyWithParent(ctx, algorithm)
+		if err != nil {
+			log.Printf("Keybootstrapper: Error bootstrapping key for %s: %v", KeyName, err)
+			return fmt.Errorf("could not bootstrap key for %s: %v", KeyName, err)
+		}
 	}
 
 	return nil

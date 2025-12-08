@@ -53,6 +53,12 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 			log.Printf("ValidateRRset: no RRSIGs present for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
 		return ValidationStateInsecure, nil // XXX: THis is wrong, we must know if the zone is insecure or not
+		// XXX: The code returns ValidationStateInsecure when RRSIGs are absent (lines 55, 222) but cannot distinguish whether
+		// the zone is legitimately unsigned or whether signatures are absent due to incomplete response data. This
+		// limitation is systemic—XXX comments at lines 503, 508, 511, 518, and 602 document similar gaps in negative
+		// response validation and NSEC proof logic. Properly determining zone security requires querying DS records at 
+		// the parent zone, which would require significant architectural changes to the validation engine. This is a
+		// known design limitation acknowledged throughout the file and should be tracked as a future enhancement.
 	}
 
 	for _, rr := range rrset.RRSIGs {

@@ -59,6 +59,11 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 		removes = []dns.RR{}
 	}
 
+	if Globals.ImrEngine == nil {
+		return fmt.Errorf("ImrEngine not initialized: cannot lookup DSYNC target for parent zone %s (scheme=UPDATE)",
+			Globals.ParentZone)
+	}
+
 	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(ctx, Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("Error from LookupDSYNCTarget for parent zone %s (scheme=UPDATE): %v",

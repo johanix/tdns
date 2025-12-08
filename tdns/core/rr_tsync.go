@@ -17,11 +17,12 @@ func init() {
 }
 
 // TSYNC is a private/custom RRtype similar in style to DSYNC.
-// RDATA fields:
+// RDATA fields (wire format order):
 // - Type: uint16 (the RRtype variant within TSYNC namespace; typically dns.TypeTSYNC)
-// - Transports: string (e.g., "doq=30,dot=20")
-// - V4addr: comma-separated list of IPv4 addresses
-// - V6addr: comma-separated list of IPv6 addresses
+// - Alias: domain name (mandatory; must be a valid FQDN, cannot be empty)
+// - Transports: string (optional; e.g., "doq=30,dot=20", can be empty)
+// - V4addr: string (optional; comma-separated list of IPv4 addresses, can be empty)
+// - V6addr: string (optional; comma-separated list of IPv6 addresses, can be empty)
 type TSYNC struct {
 	Type       uint16
 	Alias      string

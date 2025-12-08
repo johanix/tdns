@@ -127,7 +127,9 @@ func sendErrorResponse(w dns.ResponseWriter, r *dns.Msg, format string, args ...
 	log.Printf(format, args...)
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeFormatError)
-	_ = w.WriteMsg(m)
+	if err := w.WriteMsg(m); err != nil {
+		log.Printf("ErrorChannelReporter: Error writing response: %v", err)
+	}
 }
 
 // ErrorChannelReporter parses and prints an RFC9567 error channel query
@@ -214,11 +216,13 @@ func ErrorChannelReporter(qname string, qtype uint16, w dns.ResponseWriter, r *d
 	}
 
 	// Print the error report
-	fmt.Printf("ErrorChannelReport: EDE Code: %d (%s), Original Query: %s %s, Agent Domain: %s, From: %s\n",
+	log.Printf("ErrorChannelReport: EDE Code: %d (%s), Original Query: %s %s, Agent Domain: %s, From: %s\n",
 		edeCode, edeText, originalQname, qtypeName, agentDomain, w.RemoteAddr())
 
 	// Send a successful response (the query itself is the report)
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeSuccess)
-	_ = w.WriteMsg(m)
+	if err := w.WriteMsg(m); err != nil {
+		log.Printf("ErrorChannelReporter: Error writing response: %v", err)
+	}
 }

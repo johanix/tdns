@@ -31,7 +31,13 @@ func StartImrForCli(rootHints string) (context.Context, context.CancelFunc, *tdn
 	// Start ImrEngine to initialize the internal IMR
 	// Pass quiet=true to suppress startup logging
 	ctx, cancel := context.WithCancel(context.Background())
-	go Conf.ImrEngine(ctx, true)
+	go func() {
+		err := Conf.ImrEngine(ctx, true)
+		if err != nil {
+			cancel()
+			log.Fatalf("Error: %v", err)
+		}
+	}()
 
 	// Wait for ImrEngine to initialize and create the Imr instance
 	// ImrEngine creates the Imr synchronously before entering its main loop
