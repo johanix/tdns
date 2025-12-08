@@ -78,7 +78,10 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	case dns.TypeCSYNC, dns.TypeCDS:
 		// Here we need the parent notify receiver addresses
 		if zd.Parent == "." {
-			zd.Parent, err = ParentZone(zd.ZoneName, Globals.IMR)
+			if Globals.ImrEngine == nil {
+				return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: ImrEngine not active. Ignoring notify request", zd.ZoneName)
+			}
+			zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 			if err != nil {
 				return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: failure locating parent zone name. Ignoring notify request", zd.ZoneName)
 			}

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -128,7 +129,7 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S              ConcurrentMap[AgentId, *Agent]
+	S              core.ConcurrentMap[AgentId, *Agent]
 	RegularS       map[AgentId]*Agent
 	RemoteAgents   map[ZoneName][]AgentId
 	mu             sync.RWMutex    // protects remoteAgents

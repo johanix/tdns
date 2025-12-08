@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -73,7 +74,7 @@ var delStatusCmd = &cobra.Command{
 		for _, rr := range dr.SyncStatus.AAAAAdds {
 			out = append(out, fmt.Sprintf("ADD IPv6 GLUE|%s", rr.String()))
 		}
-		for _, rr := range dr.SyncStatus.AAAAAdds {
+		for _, rr := range dr.SyncStatus.AAAARemoves {
 			out = append(out, fmt.Sprintf("DEL IPv6 GLUE|%s", rr.String()))
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
@@ -107,6 +108,8 @@ var delSyncCmd = &cobra.Command{
 	},
 }
 
+var childpri, parpri string
+
 // Send a SIG(0) key rollover request to parent directly from CLI (not via tdns-server). This is mostly a debug command.
 var ddnsRollCmd = &cobra.Command{
 	Use:   "roll",
@@ -118,7 +121,11 @@ var ddnsRollCmd = &cobra.Command{
 			fmt.Printf("Error from NewKeyDB(): %v\n", err)
 			os.Exit(1)
 		}
-		err = kdb.SendSig0KeyUpdate(childpri, parpri, true)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		err = kdb.SendSig0KeyUpdate(ctx, childpri, parpri, true)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}
@@ -136,7 +143,11 @@ var ddnsUploadCmd = &cobra.Command{
 			fmt.Printf("Error from NewKeyDB(): %v\n", err)
 			os.Exit(1)
 		}
-		err = kdb.SendSig0KeyUpdate(childpri, parpri, false)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		err = kdb.SendSig0KeyUpdate(ctx, childpri, parpri, false)
 		if err != nil {
 			fmt.Printf("Error from SendSig0KeyUpdate(): %v", err)
 		}

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -18,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -25,7 +27,7 @@ import (
 // XXX: FIXME: This is only used from the CLI. It should change into code used by TDNS-SERVER and
 //
 //	accessed via API. The code should store the newly generated key in the keystore.
-func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) error {
+func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string, gennewkey bool) error {
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		return fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
@@ -57,11 +59,15 @@ func (kdb *KeyDB) SendSig0KeyUpdate(childpri, parpri string, gennewkey bool) err
 		removes = []dns.RR{}
 	}
 
-	const update_scheme = 2
-	dsynctarget, err := LookupDSYNCTarget(Globals.ParentZone, parpri, dns.StringToType["ANY"], update_scheme)
+	if Globals.ImrEngine == nil {
+		return fmt.Errorf("ImrEngine not initialized: cannot lookup DSYNC target for parent zone %s (scheme=UPDATE)",
+			Globals.ParentZone)
+	}
+
+	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(ctx, Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
-		return fmt.Errorf("Error from LookupDSYNCTarget(%s, %s): %v",
-			Globals.ParentZone, parpri, err)
+		return fmt.Errorf("Error from LookupDSYNCTarget for parent zone %s (scheme=UPDATE): %v",
+			Globals.ParentZone, err)
 	}
 
 	msg, err := CreateChildUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)

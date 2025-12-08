@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	cache "github.com/johanix/tdns/tdns/cache"
 	"github.com/miekg/dns"
 )
 
@@ -138,9 +139,9 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		switch tp.Command {
 		case "list-dnskey":
 			log.Printf("tdnsd truststore list-dnskey inquiry")
-			tmp1 := map[string]CachedDnskeyRRset{}
-			for _, key := range DnskeyCache.Map.Keys() {
-				if val, ok := DnskeyCache.Map.Get(key); ok {
+			tmp1 := map[string]cache.CachedDnskeyRRset{}
+			for _, key := range cache.DnskeyCache.Map.Keys() {
+				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
 					tmp1[key] = val
 				}
 			}
@@ -459,10 +460,10 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-ta":
 			log.Printf("tdnsd debug show-ta")
-			resp.Msg = fmt.Sprintf("TAStore: %v", DnskeyCache.Map.Keys())
-			cdrs := []CachedDnskeyRRset{}
-			for _, taname := range DnskeyCache.Map.Keys() {
-				cdr, ok := DnskeyCache.Map.Get(taname)
+			resp.Msg = fmt.Sprintf("TAStore: %v", cache.DnskeyCache.Map.Keys())
+			cdrs := []cache.CachedDnskeyRRset{}
+			for _, taname := range cache.DnskeyCache.Map.Keys() {
+				cdr, ok := cache.DnskeyCache.Map.Get(taname)
 				if !ok {
 					continue
 				}
@@ -473,7 +474,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "show-rrsetcache":
 			log.Printf("%s debug show-rrsetcache", Globals.App.Name)
 			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
-			rrsets := []CachedRRset{}
+			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
 				rrset, ok := conf.Internal.RRsetCache.RRsets.Get(rrsetkey)
 				if !ok {
@@ -487,6 +488,74 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true
 		}
+	}
+}
+
+func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		resp := ScannerResponse{
+			AppName: app.Name,
+			Time:    time.Now(),
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		var sp ScannerPost
+		err := decoder.Decode(&sp)
+		if err != nil {
+			log.Println("APIscanner: error decoding scanner post:", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Error decoding scanner post: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		log.Printf("API: received /scanner request (cmd: %s) from %s.\n",
+			sp.Command, r.RemoteAddr)
+
+		switch sp.Command {
+		case "scan":
+			log.Printf("APIscanner: processing scan request")
+
+			respch := make(chan ScanResponse, 1)
+
+			scannerq <- ScanRequest{
+				Cmd:        sp.Command,
+				ParentZone: sp.ParentZone,
+				ScanZones:  sp.ScanZones,
+				ScanType:   sp.ScanType,
+				Response:   respch,
+			}
+			select {
+			case sr := <-respch:
+				resp.Msg = sr.Msg
+				resp.Status = "ok"
+				resp.Time = sr.Time
+				if sr.Error {
+					resp.Error = true
+					resp.ErrorMsg = sr.ErrorMsg
+				}
+			case <-time.After(4 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "Timeout waiting for scan response"
+			}
+			if resp.Msg == "" {
+				resp.Msg = fmt.Sprintf("Scan request processed")
+			}
+
+		case "status": // XXX: this should not be about general config status, but about scanner specific details
+			log.Printf("APIscanner: scanner status inquiry")
+			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
+				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
+
+		default:
+			resp.ErrorMsg = fmt.Sprintf("Unknown scanner command: %s", sp.Command)
+			resp.Error = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 

@@ -2,7 +2,7 @@
  * Stolen from Mieks DNS lib
  */
 
-package tdns
+package core
 
 import (
 	"encoding/base64"

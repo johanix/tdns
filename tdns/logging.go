@@ -27,3 +27,15 @@ func SetupLogging(logfile string) error {
 
 	return nil
 }
+
+// SetupCliLogging sets up logging for CLI commands with file/line info when verbose or debug mode is enabled.
+// This is called for CLI commands that may not have a log file configured.
+// Default CLI logging has no timestamps; verbose/debug mode adds file/line info.
+func SetupCliLogging() {
+	if Globals.Verbose || Globals.Debug {
+		log.SetFlags(log.Lshortfile | log.Ltime)
+	} else {
+		// Remove timestamps from default CLI output
+		log.SetFlags(0)
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -65,7 +66,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
-		S:              NewStringer[AgentId, *Agent](),
+		S:              core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:   make(map[ZoneName][]AgentId),
 		LocalAgent:     &conf.Agent,
 		LocateInterval: li,
@@ -488,7 +489,7 @@ func (ar *AgentRegistry) GetAgentInfo(identity AgentId) (*Agent, error) {
 func (ar *AgentRegistry) xxxIdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([]*Agent, error) {
 	var agents []*Agent
 
-	rrset, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
+	rrset, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
 	if err != nil {
 		return nil, fmt.Errorf("error getting HSYNC records: %v", err)
 	}
@@ -496,7 +497,7 @@ func (ar *AgentRegistry) xxxIdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([
 	// Look for HSYNC records where Target is NOT our identity
 	for _, rr := range rrset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
 				if hsync.Identity == string(ourIdentity) {
 					continue
 				}
@@ -582,7 +583,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		return nil, fmt.Errorf("error getting apex for zone %q: %v", zonename, err)
 	}
 
-	hsyncRRset := apex.RRtypes.GetOnlyRRSet(TypeHSYNC)
+	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC)
 	if len(hsyncRRset.RRs) == 0 {
 		log.Printf("GetZoneAgentData: zone %q has no HSYNC RRset", zonename)
 		return nil, fmt.Errorf("zone %q has no HSYNC RRset", zonename)
@@ -596,7 +597,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	for _, rr := range hsyncRRset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
 				// Skip if this is our own identity
 				if hsync.Identity == ar.LocalAgent.Identity {
 					zad.MyUpstream = AgentId(hsync.Upstream)
@@ -645,7 +646,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	// Handle new HSYNC records
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
 				log.Printf("UpdateAgents: Zone %s: analysing HSYNC: %q", zonename, hsync.String())
 
 				updatedIdentities[AgentId(hsync.Identity)] = true
@@ -720,7 +721,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	// Handle removed HSYNC records
 	for _, rr := range req.SyncStatus.HsyncRemoves {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
 				if updatedIdentities[AgentId(hsync.Identity)] {
 					// Don't remove an agent that's still in the HSYNC RRset; it has only changed
 					log.Printf("UpdateAgents: Zone %q: not removing agent %q, HSYNC RR changed", zonename, hsync.Identity)

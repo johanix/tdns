@@ -17,6 +17,7 @@ import (
 	"crypto/tls"
 
 	"github.com/johanix/tdns/tdns"
+	core "github.com/johanix/tdns/tdns/core"
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 
 	// cli "github.com/johanix/tdns/tdns/cli"
@@ -46,6 +47,24 @@ var defaultPorts = map[string]string{
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
+	Long:  `dog is a CLI utility used issue DNS queries and present the result.
+	
+	Options:
+		+DNSSEC: Set the DO (DNSEC OK) bit in queries
+		+CD: Set the CD (Checking Disabled) bit in queries
+		+COMPACT: Set the COMPACT bit in queries (for compact denial of existence proofs)
+		+TCP: Force TCP transport
+		+TLS: Force TLS transport
+		+HTTPS: Force HTTPS transport
+		+QUIC: Force QUIC transport
+		+WIDTH=N: Set the width of the output to N characters
+		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
+		+OTS=opt_in|opt_out: Set the OTS (transport signaling) EDNS(0)option
+		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
+		+DO_BIT: Set the DO (DNSEC OK) bit
+		+DELEG: Set the DELEG bit in queries
+		+MULTI: Present RRs in multi-line format
+	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
 
@@ -174,6 +193,10 @@ var rootCmd = &cobra.Command{
 				} else {
 					m.SetQuestion(qname, rrtype)
 				}
+				// Set CD (Checking Disabled) flag if requested
+				if options["cd_bit"] == "true" {
+					m.MsgHdr.CheckingDisabled = true
+				}
 				// do_bit = options["do_bit"] == "true"
 				// m.SetEdns0(4096, do_bit)
 				opt := &dns.OPT{
@@ -188,11 +211,11 @@ var rootCmd = &cobra.Command{
 					// Set DO bit (bit 15)
 					opt.Hdr.Ttl |= 1 << 15
 				}
-				if options["compact"] == "true" {
+				if options["co_bit"] == "true" {
 					// Set CO bit (bit 14)
 					opt.Hdr.Ttl |= 1 << 14
 				}
-				if options["deleg"] == "true" {
+				if options["de_bit"] == "true" {
 					// Set DE bit (bit 13)
 					opt.Hdr.Ttl |= 1 << 13
 				}
@@ -207,6 +230,13 @@ var rootCmd = &cobra.Command{
 					err := edns0.AddOTSOption(opt, otsValue)
 					if err != nil {
 						fmt.Printf("Error from AddOTSOption: %v", err)
+						os.Exit(1)
+					}
+				}
+				if erDomain, ok := options["er"]; ok {
+					err := edns0.AddEROption(opt, erDomain)
+					if err != nil {
+						fmt.Printf("Error from AddEROption: %v", err)
 						os.Exit(1)
 					}
 				}
@@ -241,28 +271,28 @@ var rootCmd = &cobra.Command{
 				}
 				forceTCP := strings.EqualFold(transport, "Do53-TCP") || strings.EqualFold(transport, "tcp")
 
-				t, err := tdns.StringToTransport(transport)
+				t, err := core.StringToTransport(transport)
 				if err != nil {
 					log.Fatalf("Error: %v", err)
 				}
-				clientOpts := []tdns.DNSClientOption{}
-				if t == tdns.TransportDo53 {
+				clientOpts := []core.DNSClientOption{}
+				if t == core.TransportDo53 {
 					if forceTCP {
-						clientOpts = append(clientOpts, tdns.WithForceTCP())
+						clientOpts = append(clientOpts, core.WithForceTCP())
 						options["transport"] = "Do53-TCP"
 					} else {
-						clientOpts = append(clientOpts, tdns.WithDisableFallback())
+						clientOpts = append(clientOpts, core.WithDisableFallback())
 						options["transport"] = "do53"
 					}
 				} else {
 					options["transport"] = transport
 				}
-				client := tdns.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
-				res, _, err := client.Exchange(m, server) // FIXME: duration is always zero
-				if err == nil && res != nil && res.Truncated && t == tdns.TransportDo53 && !forceTCP {
+				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
+				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
+				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
 					fmt.Println(";; Truncated UDP response received; retrying over TCP")
-					tcpClient := tdns.NewDNSClient(tdns.TransportDo53, options["port"], tlsConfig, tdns.WithForceTCP())
-					res, _, err = tcpClient.Exchange(m, server)
+					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, core.WithForceTCP())
+					res, _, err = tcpClient.Exchange(m, server, false)
 					options["transport"] = "Do53-TCP"
 				}
 
@@ -302,14 +332,17 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 	}
 
 	switch ucarg {
-	case "+DNSSEC":
+	case "+DNSSEC", "+DO":
 		options["do_bit"] = "true"
 		return options, nil
-	case "+COMPACT":
-		options["compact"] = "true"
+	case "+CD":
+		options["cd_bit"] = "true"
 		return options, nil
-	case "+DELEG":
-		options["deleg"] = "true"
+	case "+COMPACT", "+CO":
+		options["co_bit"] = "true"
+		return options, nil
+	case "+DELEG", "+DE":
+		options["de_bit"] = "true"
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
@@ -381,6 +414,32 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 			} else {
 				return nil, fmt.Errorf("Error: Unknown OTS option: %s", otsArg)
 			}
+		}
+
+		// Add support for +ER={agent domain} (RFC9567: DNS Error Reporting)
+		if strings.HasPrefix(strings.ToUpper(ucarg), "+ER") {
+			if !strings.Contains(ucarg, "=") {
+				return nil, fmt.Errorf("Error: +ER option requires an agent domain (e.g., +ER=agent.example.com)")
+			}
+			parts := strings.SplitN(ucarg, "=", 2)
+			if len(parts) > 1 && parts[1] != "" {
+				options["er"] = parts[1]
+				return options, nil
+			} else {
+				return nil, fmt.Errorf("Error: +ER option requires a non-empty agent domain")
+			}
+		}
+
+		if strings.HasPrefix(strings.ToUpper(ucarg), "+WIDTH") {
+			parts := strings.SplitN(ucarg, "=", 2)
+			if len(parts) > 1 {
+				if _, err := strconv.Atoi(parts[1]); err != nil {
+					return nil, fmt.Errorf("Error: +WIDTH option requires a valid integer width")
+				}
+				options["width"] = parts[1]
+				return options, nil
+			}
+			return nil, fmt.Errorf("Error: +WIDTH option requires a valid integer width (e.g., +WIDTH=100)")
 		}
 
 		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)
@@ -466,11 +525,30 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Extract host and port
 	host := u.Host
 	port := ""
+	
+	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
-		var portErr error
-		host, port, portErr = net.SplitHostPort(host)
-		if portErr != nil {
-			return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+		// Check if it's an IPv6 address in brackets (e.g., [::1]:port)
+		if strings.HasPrefix(host, "[") && strings.Contains(host, "]:") {
+			// IPv6 with port: [::1]:5354
+			var portErr error
+			host, port, portErr = net.SplitHostPort(host)
+			if portErr != nil {
+				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+			}
+		} else if net.ParseIP(host) != nil {
+			// XXX: This is not correct, as it will not work for IPv6 addresses in brackets
+			// 
+			// Valid IP address (IPv4 or IPv6) without port - use as-is
+			// net.ParseIP handles both IPv4 and IPv6 correctly
+			// No need to split, it's just the IP address
+		} else {
+			// Try to split as host:port (for hostnames with ports)
+			var portErr error
+			host, port, portErr = net.SplitHostPort(host)
+			if portErr != nil {
+				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
+			}
 		}
 	}
 	options["server"] = host

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 type SynchedDataUpdate struct {
@@ -55,7 +55,7 @@ type ZoneUpdate struct {
 	Zone    ZoneName
 	AgentId AgentId
 	RRsets  map[uint16]core.RRset // remote updates are only per RRset (i.e. full replace)
-	RRs     []dns.RR         // local updates can be per RR
+	RRs     []dns.RR              // local updates can be per RR
 }
 
 type AgentId string
@@ -72,11 +72,11 @@ func (name ZoneName) String() string {
 
 type ZoneDataRepo struct {
 	// Repo map[ZoneName]ZoneRepo // map[zonename]ZoneRepo
-	Repo ConcurrentMap[ZoneName, *AgentRepo] // map[zonename]ZoneRepo
+	Repo core.ConcurrentMap[ZoneName, *AgentRepo] // map[zonename]ZoneRepo
 }
 type AgentRepo struct {
 	// Data map[AgentId]OwnerData // map[agentid]data
-	Data ConcurrentMap[AgentId, *OwnerData] // map[agentid]data
+	Data core.ConcurrentMap[AgentId, *OwnerData] // map[agentid]data
 }
 
 func (ar *AgentRepo) Get(agentId AgentId) (*OwnerData, bool) {
@@ -90,13 +90,13 @@ func (ar *AgentRepo) Set(agentId AgentId, ownerData *OwnerData) {
 
 func NewAgentRepo() (*AgentRepo, error) {
 	return &AgentRepo{
-		Data: NewStringer[AgentId, *OwnerData](),
+		Data: core.NewStringer[AgentId, *OwnerData](),
 	}, nil
 }
 
 func NewZoneDataRepo() (*ZoneDataRepo, error) {
 	return &ZoneDataRepo{
-		Repo: NewStringer[ZoneName, *AgentRepo](),
+		Repo: core.NewStringer[ZoneName, *AgentRepo](),
 	}, nil
 }
 

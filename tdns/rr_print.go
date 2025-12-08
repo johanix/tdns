@@ -9,9 +9,75 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )
+
+func printFieldsWithWrap(initial string, fields []string, leftpad, rightmargin int, closing string) {
+	spaces := strings.Repeat(" ", leftpad)
+	current := initial
+	if strings.TrimSpace(current) == "" {
+		current = spaces
+	}
+
+	appendField := func(field string) {
+		if len(field) == 0 {
+			return
+		}
+		trimmed := strings.TrimSpace(current)
+		sep := " "
+		if trimmed == "" || strings.HasSuffix(strings.TrimRight(current, " "), "(") {
+			sep = ""
+		}
+		if len(current)+len(sep)+len(field) > rightmargin && trimmed != "" {
+			fmt.Printf("%s\n", strings.TrimRight(current, " "))
+			current = spaces + field
+		} else {
+			if sep == "" && trimmed != "" {
+				current += " " + field
+			} else if trimmed == "" {
+				current = spaces + field
+			} else {
+				if sep == "" {
+					current += field
+				} else {
+					current += sep + field
+				}
+			}
+		}
+	}
+
+	for _, field := range fields {
+		appendField(field)
+	}
+
+	if closing != "" {
+		if len(current)+len(closing) > rightmargin {
+			fmt.Printf("%s\n", strings.TrimRight(current, " "))
+			current = spaces + strings.TrimSpace(closing)
+		} else {
+			current += closing
+		}
+	}
+
+	fmt.Printf("%s\n", strings.TrimRight(current, " "))
+}
+
+func chunkString(s string, width int) []string {
+	if width <= 0 || len(s) <= width {
+		return []string{s}
+	}
+	var parts []string
+	for len(s) > width {
+		parts = append(parts, s[:width])
+		s = s[width:]
+	}
+	if len(s) > 0 {
+		parts = append(parts, s)
+	}
+	return parts
+}
 
 // leftpad = amount of white space instead of the domain name on continuation lines during multiline output
 func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmargin int) {
@@ -24,26 +90,51 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 	if len(namepad) < 1 {
 		namepad = " "
 	}
-	// name ttl class type keyid alg
-	fmt.Printf("%s%s%s %s %s %s %s %s (\n", p[0], namepad, p[1], p[2], p[3], p[4], p[5], p[6])
-	spaces := strings.Repeat(" ", leftpad)
-	var keyparts []string
-	keystr := p[7]
-	for len(keystr) > rightmargin-len(spaces) {
-		keyparts = append(keyparts, keystr[:rightmargin-len(spaces)])
-		keystr = keystr[rightmargin-len(spaces):]
+	// name ttl class type flags protocol alg
+	initial := fmt.Sprintf("%s%s%s %s", p[0], namepad, p[1], p[2])
+	fields := []string{p[3], p[4], p[5], p[6]}
+
+	sigWidth := rightmargin - leftpad - 1
+	if sigWidth < 10 {
+		sigWidth = rightmargin - leftpad
 	}
-	keyparts = append(keyparts, keystr)
-	for idx, part := range keyparts {
-		if idx == len(keyparts)-1 {
-			fmt.Printf("%s %s )\n", spaces, part)
-		} else {
-			fmt.Printf("%s %s\n", spaces, part)
-		}
-	}
+	keyparts := chunkString(p[7], sigWidth)
+
+	fields = append(fields, "(")
+	fields = append(fields, keyparts...)
 	alg, _ := strconv.Atoi(p[6])
 	algstr := dns.AlgorithmToString[uint8(alg)]
-	fmt.Printf("%s ; %s alg = %s ; key id = %d\n", spaces, ktype, algstr, keyid)
+	commentStr := fmt.Sprintf("; %s alg = %s ; key id = %d", ktype, algstr, keyid)
+	closing := " ) " + commentStr
+	printFieldsWithWrap(initial, fields, leftpad, rightmargin, closing)
+}
+
+func PrintDsRR(rr dns.RR, leftpad, rightmargin int) {
+	if leftpad == 0 {
+		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
+	}
+	p := strings.Fields(rr.String())
+	if len(p) < 8 {
+		fmt.Printf("%s\n", rr.String())
+		return
+	}
+	namepad := strings.Repeat(" ", leftpad-len(p[0])-len(p[1]))
+	if len(namepad) < 1 {
+		namepad = " "
+	}
+
+	initial := fmt.Sprintf("%s%s%s %s %s %s", p[0], namepad, p[1], p[2], p[3], p[4])
+	fields := []string{p[5], p[6]}
+
+	sigWidth := rightmargin - leftpad - 1
+	if sigWidth < 10 {
+		sigWidth = rightmargin - leftpad
+	}
+	digestParts := chunkString(p[7], sigWidth)
+	fields = append(fields, "(")
+	fields = append(fields, digestParts...)
+
+	printFieldsWithWrap(initial, fields, leftpad, rightmargin, " )")
 }
 
 func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
@@ -56,24 +147,23 @@ func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
 	if len(namepad) < 1 {
 		namepad = " "
 	}
-	fmt.Printf("%s%s%s %s (\n", p[0], namepad, p[1], strings.Join(p[2:8], " "))
-	// spaces := strings.Repeat(" ", len(parts[0])+1)
+	if len(p) < 13 {
+		fmt.Printf("%s%s%s %s\n", p[0], namepad, p[1], strings.Join(p[2:], " "))
+		return
+	}
+
+	initial := fmt.Sprintf("%s%s%s %s", p[0], namepad, p[1], p[2])
+	headerAndMiddle := append([]string{}, p[3:12]...)
+	printFieldsWithWrap(initial, headerAndMiddle, leftpad, rightmargin, " (")
+
 	spaces := strings.Repeat(" ", leftpad)
-	fmt.Printf("%s %s %s %s %s\n", spaces, p[8], p[9], p[10], p[11])
-	var rrsigparts []string
-	part := p[12]
-	for len(part) > rightmargin-len(spaces) {
-		rrsigparts = append(rrsigparts, part[:rightmargin-len(spaces)])
-		part = part[rightmargin-len(spaces):]
+
+	sigWidth := rightmargin - leftpad - 1
+	if sigWidth < 10 {
+		sigWidth = rightmargin - leftpad
 	}
-	rrsigparts = append(rrsigparts, part)
-	for idx, part := range rrsigparts {
-		if idx == len(rrsigparts)-1 {
-			fmt.Printf("%s %s )\n", spaces, part)
-		} else {
-			fmt.Printf("%s %s\n", spaces, part)
-		}
-	}
+	sigParts := chunkString(p[12], sigWidth)
+	printFieldsWithWrap(spaces, sigParts, leftpad, rightmargin, " )")
 }
 
 func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
@@ -85,7 +175,7 @@ func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 	if len(namepad) < 1 {
 		namepad = " "
 	}
-	spaces := strings.Repeat(" ", leftpad)
+	// spaces := strings.Repeat(" ", leftpad)
 	if len(p) < 6 {
 		fmt.Printf(rr.String())
 		return
@@ -99,24 +189,8 @@ func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 
 	// Print line, then subsequent fields, wrapping at rightmargin
 	//fmt.Printf("%s (\n", line)
-	currentLine := line + " ("
-	for i := 6; i < len(p); i++ {
-		item := p[i]
-		// If currentLine is just spaces, no leading space before item, else add one.
-		sep := ""
-		if len(strings.TrimSpace(currentLine)) > 0 {
-			sep = " "
-		}
-		if len(currentLine)+len(sep)+len(item) > rightmargin {
-			// Line would exceed rightmargin, flush and start a new one
-			fmt.Printf("%s\n", currentLine)
-			currentLine = spaces + sep + item
-		} else {
-			currentLine += sep + item
-		}
-	}
-	// Print the remainder and close bracket
-	fmt.Printf("%s )\n", currentLine)
+	fields := p[6:]
+	printFieldsWithWrap(line+" (", fields, leftpad, rightmargin, " )")
 }
 
 func PrintSoaRR(rr dns.RR, leftpad, rightmargin int) {
@@ -158,7 +232,16 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 		msg.SetAxfr(zname)
 	}
 
+	var err error
 	rightmargin := 78
+	if options["width"] != "" {
+		width, err := strconv.Atoi(options["width"])
+		if err != nil {
+			fmt.Printf("Error from strconv.Atoi: %v\n", err)
+			return err
+		}
+		rightmargin = width - 2
+	}
 
 	transfer := new(dns.Transfer)
 	answerChan, err := transfer.In(msg, upstream)
@@ -219,7 +302,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 
 				case *dns.SVCB, *dns.PrivateRR:
 					switch rr.Header().Rrtype {
-					case TypeDELEG, dns.TypeSVCB:
+					case core.TypeDELEG, dns.TypeSVCB:
 						PrintSvcbRR(rr, leftpad, rightmargin)
 
 					default:
@@ -305,21 +388,28 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 		}
 	}
 
+	var err error
 	fmt.Printf("\n;; QUESTION SECTION:\n")
 	for _, rr := range m.Question {
 		fmt.Printf("%s\n", rr.String())
 	}
 	fmt.Printf("\n;; ANSWER SECTION:\n")
 	for _, rr := range m.Answer {
-		PrintRR(rr, leftpad, options)
+		if err = PrintRR(rr, leftpad, options); err != nil {
+			fmt.Printf("Error from PrintRR: %v\n", err)
+		}
 	}
 	fmt.Printf("\n;; AUTHORITY SECTION:\n")
 	for _, rr := range m.Ns {
-		PrintRR(rr, leftpad, options)
+		if err = PrintRR(rr, leftpad, options); err != nil {
+			fmt.Printf("Error from PrintRR: %v\n", err)
+		}
 	}
 	fmt.Printf("\n;; ADDITIONAL SECTION:\n")
 	for _, rr := range m.Extra {
-		PrintRR(rr, leftpad, options)
+		if err = PrintRR(rr, leftpad, options); err != nil {
+			fmt.Printf("Error from PrintRR: %v\n", err)
+		}
 	}
 
 	transport := "UDP"
@@ -346,28 +436,62 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 	fmt.Printf(";; MSG SIZE rcvd: %d\n", len(buf))
 }
 
-func PrintRR(rr dns.RR, leftpad int, options map[string]string) {
+func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 	if !(options["multi"] == "true") {
 		fmt.Printf("%s\n", rr.String())
-		return
+		return nil
+	}
+
+	rightmargin := 78
+	if options["width"] != "" {
+		width, err := strconv.Atoi(options["width"])
+		if err != nil {
+			fmt.Printf("Error from strconv.Atoi: %v\n", err)
+			return err
+		}
+		rightmargin = width - 2
 	}
 
 	switch rr := rr.(type) {
 	case *dns.SOA:
-		PrintSoaRR(rr, leftpad, 78)
+		PrintSoaRR(rr, leftpad, rightmargin)
 	case *dns.DNSKEY:
 		t := " ZSK ;"
 		if rr.Flags&0x0001 == 1 {
 			t = " KSK ;"
 		}
-		PrintKeyRR(rr, "DNSKEY", t, rr.KeyTag(), leftpad, 78)
+		PrintKeyRR(rr, "DNSKEY", t, rr.KeyTag(), leftpad, rightmargin)
 	case *dns.KEY:
-		PrintKeyRR(rr, "KEY", "", rr.KeyTag(), leftpad, 78)
+		PrintKeyRR(rr, "KEY", "", rr.KeyTag(), leftpad, rightmargin)
+	case *dns.DS:
+		PrintDsRR(rr, leftpad, rightmargin)
 	case *dns.RRSIG:
-		PrintRrsigRR(rr, leftpad, 78)
+		PrintRrsigRR(rr, leftpad, rightmargin)
 	case *dns.SVCB:
-		PrintSvcbRR(rr, leftpad, 78)
+		PrintSvcbRR(rr, leftpad, rightmargin)
 	default:
-		PrintGenericRR(rr, leftpad, 78)
+		PrintGenericRR(rr, leftpad, rightmargin)
 	}
+	return nil
+}
+
+func PrintMsgSection(header string, section []dns.RR, width int) string {
+	out := fmt.Sprintf("%s:\n", header)
+	for _, rr := range section {
+		line := fmt.Sprintf("%s\n", rr.String())
+		if len(line) > width {
+			line = line[:width-4] + "...\n"
+		}
+		out += line
+	}
+	return out
+}
+
+func PrintMsgFull(m *dns.Msg, width int) string {
+	out := fmt.Sprintf(";; MSG ID: %d\n", m.MsgHdr.Id)
+	// out += fmt.Sprintf("Question:\n%s", m.Question.String())
+	out += PrintMsgSection("Answer", m.Answer, width)
+	out += PrintMsgSection("Authority", m.Ns, width)
+	out += PrintMsgSection("Additional", m.Extra, width)
+	return out
 }

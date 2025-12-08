@@ -10,11 +10,11 @@ import (
 )
 
 type ReportOption struct {
-	EDECode uint16
+	EDECode  uint16
 	Severity uint8
 	ZoneName string
-	Sender string
-	Details string
+	Sender   string
+	Details  string
 }
 
 func ReportOptionToEDNS0Local(reportOption *ReportOption) (*dns.EDNS0_LOCAL, error) {
@@ -45,9 +45,9 @@ func ReportOptionToEDNS0Local(reportOption *ReportOption) (*dns.EDNS0_LOCAL, err
 	copy(data[off:], []byte(reportOption.Details))
 
 	return &dns.EDNS0_LOCAL{
-			Code: EDNS0_REPORT_OPTION_CODE,
-			Data: data,
-		}, nil
+		Code: EDNS0_REPORT_OPTION_CODE,
+		Data: data,
+	}, nil
 }
 
 // AddReportOption adds an EDNS(0) Report option to an existing OPT RR
@@ -56,15 +56,15 @@ func AddReportOption(opt *dns.OPT, edns0local *dns.EDNS0_LOCAL) error {
 	if opt == nil {
 		return fmt.Errorf("OPT RR is nil")
 	}
-	
+
 	if edns0local.Code != EDNS0_REPORT_OPTION_CODE {
-		return fmt.Errorf("invalid Report payload value: %d (must be %d)", 
+		return fmt.Errorf("invalid Report payload value: %d (must be %d)",
 			edns0local.Code, EDNS0_REPORT_OPTION_CODE)
 	}
 
 	// Add the option to the OPT RR
 	opt.Option = append(opt.Option, edns0local)
-	
+
 	return nil
 }
 
@@ -74,7 +74,7 @@ func ExtractReportOption(opt *dns.OPT) (*ReportOption, bool) {
 	if opt == nil {
 		return nil, false
 	}
-	
+
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			if localOpt.Code == EDNS0_REPORT_OPTION_CODE {
@@ -107,7 +107,7 @@ func ExtractReportOption(opt *dns.OPT) (*ReportOption, bool) {
 			}
 		}
 	}
-	
+
 	return nil, false
 }
 
@@ -122,7 +122,7 @@ func RemoveReportOption(opt *dns.OPT) {
 	if opt == nil {
 		return
 	}
-	
+
 	var newOptions []dns.EDNS0
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
@@ -132,13 +132,13 @@ func RemoveReportOption(opt *dns.OPT) {
 		}
 		newOptions = append(newOptions, option)
 	}
-	
+
 	opt.Option = newOptions
 }
 
 // AddReportToMessage adds an EDNS(0) OPT RR to a message and includes the Report option
 func AddReportOptionToMessage(msg *dns.Msg, reportPayload *ReportOption) error {
-    
+
 	if msg == nil {
 		return fmt.Errorf("message is nil")
 	}

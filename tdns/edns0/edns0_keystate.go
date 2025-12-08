@@ -51,22 +51,7 @@ func CreateKeyStateOption(keyID uint16, keyState uint8, extraText string) *dns.E
 	}
 }
 
-func createKeyStateData(keyID uint16, keyState uint8, extraText string) []byte {
-	// KEY-ID (2 bytes)
-	data := make([]byte, 3+len(extraText))
-	data[0] = byte(keyID >> 8)
-	data[1] = byte(keyID & 0xFF)
-
-	// KEY-STATE (1 byte)
-	data[2] = keyState
-
-	// EXTRA-TEXT (variable length)
-	copy(data[3:], []byte(extraText))
-
-	return data
-}
-
-// ParseKeyStateOption extraherar KeyState-data från en EDNS0_LOCAL option
+// ParseKeyStateOption extracts KeyState data from an EDNS0_LOCAL option
 func ParseKeyStateOption(opt *dns.EDNS0_LOCAL) (*KeyStateOption, error) {
 	if len(opt.Data) < 3 {
 		return nil, fmt.Errorf("invalid KeyState option data length")
@@ -105,23 +90,28 @@ func keyStateToString(state uint8) string {
 	return "Unknown State"
 }
 
-func ExtractKeyStateFromMsg(msg *dns.Msg) (*KeyStateOption, error) {
-	if opt := msg.IsEdns0(); opt != nil {
-		for _, option := range opt.Option {
-			if local, ok := option.(*dns.EDNS0_LOCAL); ok {
-				if local.Code == EDNS0_KEYSTATE_OPTION_CODE {
-					keystate, err := ParseKeyStateOption(local)
-					if err != nil {
-						log.Printf("Error parsing KeyState option: %v", err)
-						return nil, err
-					}
-					return keystate, nil
+// ExtractKeyStateOption extracts the KeyState EDNS0 option from an OPT RR
+// Returns the KeyStateOption and true if found, or nil and false if not found
+// This function follows the same pattern as ExtractOTSOption and ExtractEdns0EROption
+func ExtractKeyStateOption(opt *dns.OPT) (*KeyStateOption, bool) {
+	if opt == nil {
+		return nil, false
+	}
+
+	for _, option := range opt.Option {
+		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
+			if localOpt.Code == EDNS0_KEYSTATE_OPTION_CODE {
+				keystate, err := ParseKeyStateOption(localOpt)
+				if err != nil {
+					log.Printf("Error parsing KeyState option: %v", err)
+					return nil, false
 				}
+				return keystate, true
 			}
 		}
 	}
 
-	return nil, nil
+	return nil, false
 }
 
 func AttachKeyStateToResponse(msg *dns.Msg, keyStateOpt *KeyStateOption) {

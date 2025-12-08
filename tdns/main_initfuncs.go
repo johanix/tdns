@@ -23,7 +23,7 @@ import (
 	// "github.com/orcaman/concurrent-map/v2"
 )
 
-func MainLoop(ctx context.Context, cancel context.CancelFunc, conf *Config) {
+func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 	if Globals.Debug {
 		debug.SetTraceback("all")
 	}
@@ -176,7 +176,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	return nil
 }
 
-func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) MainStartThreads(ctx context.Context, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 
 	conf.Internal.APIStopCh = make(chan struct{})
@@ -198,7 +198,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 		// the HsyncEngine starts listening for incoming connections
 		go HsyncEngine(ctx, conf, conf.Internal.AgentQs) // Only used by agent
 		go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs)
-		syncrtr, err := SetupAgentSyncRouter(conf)
+		syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 		if err != nil {
 			return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
 		}
@@ -212,7 +212,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 	switch Globals.App.Type {
 	case AppTypeServer, AppTypeAgent:
 		go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-		go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+		go ScannerEngine(ctx, conf)
 
 		kdb.UpdateQ = make(chan UpdateRequest, 10)
 		conf.Internal.UpdateQ = kdb.UpdateQ
@@ -223,7 +223,7 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 		go kdb.DeferredUpdaterEngine(ctx)
 
 		go UpdateHandler(ctx, conf)
-		go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+		go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf.Internal.ImrEngine)
 		log.Printf("TDNS %s (%s): starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	default:
 		log.Printf("TDNS %s (%s): not starting: authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher", Globals.App.Name, AppTypeToString[Globals.App.Type])
@@ -251,19 +251,19 @@ func MainStartThreads(ctx context.Context, conf *Config, apirouter *mux.Router) 
 	switch Globals.App.Type {
 	case AppTypeImr:
 		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-		go conf.RecursorEngine(ctx)
-		// go ImrEngine(conf, stopCh) // ImrEngine is now started from RecursorEngine, as they share cache
-		log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		go conf.ImrEngine(ctx, false) // Server mode: not quiet
+		// go ImrEngine(conf, stopCh) // ImrEngine is now started from ImrEngine, as they share cache
+		log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 
 	default:
-		log.Printf("TDNS %s (%s): not starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		log.Printf("TDNS %s (%s): not starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	}
 
 	return nil
 }
 
 // StartImr starts subsystems for tdns-imr
-func StartImr(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
 	conf.Internal.APIStopCh = make(chan struct{})
 	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
 		return fmt.Errorf("Error starting API dispatcher: %v", err)
@@ -273,13 +273,13 @@ func StartImr(ctx context.Context, conf *Config, apirouter *mux.Router) error {
 	}
 	go ValidatorEngine(ctx, conf)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
-	go conf.RecursorEngine(ctx)
-	log.Printf("TDNS %s (%s): starting: recursorengine, imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	go conf.ImrEngine(ctx, false) // Server mode: not quiet
+	log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }
 
 // StartCombiner starts subsystems for tdns-combiner
-func StartCombiner(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
 	conf.Internal.APIStopCh = make(chan struct{})
 	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
 		return fmt.Errorf("Error starting API dispatcher: %v", err)
@@ -298,11 +298,22 @@ func StartCombiner(ctx context.Context, conf *Config, apirouter *mux.Router) err
 }
 
 // StartServer starts subsystems for tdns-server
-func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartServer(ctx context.Context, apirouter *mux.Router) error {
 	if conf.Internal.ValidatorCh == nil {
 		conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	}
 	go ValidatorEngine(ctx, conf)
+
+	// IMR is active by default unless explicitly set to false
+	isActive := conf.Imr.Active == nil || *conf.Imr.Active
+	if isActive {
+		conf.Internal.RecursorCh = make(chan ImrRequest, 10)
+		go conf.ImrEngine(ctx, false) // Server mode: not quiet
+		log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	} else {
+		log.Printf("TDNS %s (%s): NOT starting: imrengine (imrengine.active explicitly set to false)", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	}
+
 	kdb := conf.Internal.KeyDB
 	conf.Internal.APIStopCh = make(chan struct{})
 	if conf.Internal.RefreshZoneCh == nil {
@@ -319,7 +330,7 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 	go RefreshEngine(ctx, conf)
 	go Notifier(ctx, conf.Internal.NotifyQ)
 	go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-	go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+	go ScannerEngine(ctx, conf)
 	kdb.UpdateQ = make(chan UpdateRequest, 10)
 	conf.Internal.UpdateQ = kdb.UpdateQ
 	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
@@ -327,7 +338,7 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 	go kdb.ZoneUpdaterEngine(ctx)
 	go kdb.DeferredUpdaterEngine(ctx)
 	go UpdateHandler(ctx, conf)
-	go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+	go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf.Internal.ImrEngine)
 	go NotifyHandler(ctx, conf)
 	go DnsEngine(ctx, conf)
 	conf.Internal.ResignQ = make(chan *ZoneData, 10)
@@ -337,7 +348,7 @@ func StartServer(ctx context.Context, conf *Config, apirouter *mux.Router) error
 }
 
 // StartAgent starts subsystems for tdns-agent
-func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error {
+func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error {
 	kdb := conf.Internal.KeyDB
 	conf.Internal.APIStopCh = make(chan struct{})
 	if conf.Internal.RefreshZoneCh == nil {
@@ -356,7 +367,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	// Agent-specific
 	go HsyncEngine(ctx, conf, conf.Internal.AgentQs)
 	go conf.SynchedDataEngine(ctx, conf.Internal.AgentQs)
-	syncrtr, err := SetupAgentSyncRouter(conf)
+	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 	if err != nil {
 		return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
 	}
@@ -364,7 +375,7 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	log.Printf("TDNS %s (%s): starting: agent-to-agent sync engines", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	// Common engines
 	go AuthQueryEngine(ctx, conf.Internal.AuthQueryQ)
-	go ScannerEngine(ctx, conf.Internal.ScannerQ, conf.Internal.AuthQueryQ)
+	go ScannerEngine(ctx, conf)
 	kdb.UpdateQ = make(chan UpdateRequest, 10)
 	conf.Internal.UpdateQ = kdb.UpdateQ
 	kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
@@ -372,10 +383,26 @@ func StartAgent(ctx context.Context, conf *Config, apirouter *mux.Router) error 
 	go kdb.ZoneUpdaterEngine(ctx)
 	go kdb.DeferredUpdaterEngine(ctx)
 	go UpdateHandler(ctx, conf)
-	go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ)
+	go kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf.Internal.ImrEngine)
 	go NotifyHandler(ctx, conf)
 	go DnsEngine(ctx, conf)
 	log.Printf("TDNS %s (%s): starting: refreshengine, authquery, scanner, zoneupdater, deferredupdater, updatehandler, delegation syncher, notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+	return nil
+}
+
+// StartScanner starts subsystems for tdns-scanner
+func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) error {
+	conf.Internal.APIStopCh = make(chan struct{})
+	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
+		return fmt.Errorf("Error starting API dispatcher: %v", err)
+	}
+	if conf.Internal.ValidatorCh == nil {
+		conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
+	}
+	go ValidatorEngine(ctx, conf)
+	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
+	go conf.ImrEngine(ctx, false) // Server mode: not quiet
+	log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }
 

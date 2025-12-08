@@ -16,4 +16,5 @@ const (
 	//	DefaultMSACfgFile      = "/etc/tdns/tdns-msa.yaml"
 	DefaultCombinerCfgFile = "/etc/tdns/tdns-combiner.yaml"
 	DefaultReporterCfgFile = "/etc/tdns/tdns-reporter.yaml"
+	DefaultScannerCfgFile  = "/etc/tdns/tdns-scanner.yaml"
 )

@@ -44,7 +44,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	configsections["log"] = config.Log
 	switch Globals.App.Type {
 	case AppTypeImr:
-		configsections["imrengine"] = config.ImrEngine
+		configsections["imrengine"] = config.Imr
 	case AppTypeReporter:
 		configsections["apiserver"] = config.ApiServer
 	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
@@ -90,6 +90,7 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 	for k, data := range configsections {
 		log.Printf("%s: Validating config for %q section\n", strings.ToUpper(Globals.App.Name), k)
 		if err := validate.Struct(data); err != nil {
+			// log.Printf("ValidateBySection ERROR: %q section failed validation: %v\ndata:\n%+v", k, err, data)
 			return fmt.Sprintf("%s: Config %s, section %q: missing required attributes:\n%v",
 				strings.ToUpper(Globals.App.Name), cfgfile, k, err), err
 		}

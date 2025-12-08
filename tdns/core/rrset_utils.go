@@ -9,6 +9,7 @@ import (
 	"github.com/miekg/dns"
 )
 
+// XXX: Would be nicer if this was a receiver function or rrset*
 func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]
@@ -86,7 +87,8 @@ func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 	}
 }
 
-func (rrset *RRset) Copy() *RRset {
+// trying to get rid of this in favour of Clone()
+func (rrset *RRset) xxxCopy() *RRset {
 	new_rrset := RRset{
 		Name:   rrset.Name,
 		RRs:    []dns.RR{},
@@ -119,4 +121,46 @@ func (rrset *RRset) Delete(rr dns.RR) {
 		}
 	}
 	// log.Printf("rrset.Delete: RR not found: %s", rr.String())
+}
+
+func (rrset *RRset) Clone() *RRset {
+	if rrset == nil {
+		return nil
+	}
+
+	clone := &RRset{
+		Name:   rrset.Name,
+		Class:  rrset.Class,
+		RRtype: rrset.RRtype,
+	}
+	for _, rr := range rrset.RRs {
+		if rr != nil {
+			clone.RRs = append(clone.RRs, dns.Copy(rr))
+		}
+	}
+	for _, sig := range rrset.RRSIGs {
+		if sig != nil {
+			clone.RRSIGs = append(clone.RRSIGs, dns.Copy(sig))
+		}
+	}
+	return clone
+}
+
+func (rrset *RRset) String(maxlen int) string {
+	out := ""
+	for _, rr := range rrset.RRs {
+		rrstr := rr.String() + "\n"
+		if maxlen > 0 && len(rrstr) > maxlen {
+			rrstr = rrstr[:maxlen-4] + "...\n"
+		}
+		out += rrstr
+	}
+	for _, sig := range rrset.RRSIGs {
+		sigstr := sig.String() + "\n"
+		if maxlen > 0 && len(sigstr) > maxlen {
+			sigstr = sigstr[:maxlen-4] + "...\n"
+		}
+		out += sigstr
+	}
+	return out
 }

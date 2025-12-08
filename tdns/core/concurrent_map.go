@@ -1,14 +1,17 @@
-package tdns
+/*
+ * Slightly tweaked version of github.com/orcaman/concurrent-mapv2
+ */
+
+package core
 
 import (
 	"encoding/json"
 	"fmt"
 	"sync"
-
-	"github.com/gookit/goutil/dump"
+	// "github.com/gookit/goutil/dump"
 )
 
-const shardCount = 3
+const shardCount = 16
 
 type Stringer interface {
 	fmt.Stringer
@@ -75,7 +78,7 @@ func (m *ConcurrentMap[K, V]) MSet(data map[K]V) {
 }
 
 // Sets the given value under the specified key.
-func (m ConcurrentMap[K, V]) Set(key K, value V) {
+func (m *ConcurrentMap[K, V]) Set(key K, value V) {
 	// Get map shard.
 	shard := m.GetShard(key)
 	shard.Lock()
@@ -223,8 +226,13 @@ func (m *ConcurrentMap[K, V]) IterBuffered() <-chan Tuple[K, V] {
 
 // Clear removes all items from map.
 func (m *ConcurrentMap[K, V]) Clear() {
-	for item := range m.IterBuffered() {
-		m.Remove(item.Key)
+	// for item := range m.IterBuffered() {
+	// 	m.Remove(item.Key)
+	// }
+	for _, shard := range m.shards {
+		shard.Lock()
+		shard.items = make(map[K]V)
+		shard.Unlock()
 	}
 }
 
@@ -235,7 +243,7 @@ func (m *ConcurrentMap[K, V]) Clear() {
 func snapshot[K comparable, V any](m *ConcurrentMap[K, V]) (chans []chan Tuple[K, V]) {
 	//When you access map items before initializing.
 	if len(m.shards) == 0 {
-		dump.P(m)
+		// dump.P(m)
 		panic(`cmap.ConcurrentMap is not initialized. Should run NewCmap() before usage.`)
 	}
 	chans = make([]chan Tuple[K, V], shardCount)
@@ -287,9 +295,9 @@ func (m *ConcurrentMap[K, V]) Items() map[K]V {
 	return tmp
 }
 
-// Iterator callbacalled for every key,value found in
+// Iterator callback called for every key,value found in
 // maps. RLock is held for all calls for a given shard
-// therefore callback sess consistent view of a shard,
+// therefore callback sees a consistent view of a shard,
 // but not across the shards
 type IterCb[K comparable, V any] func(key K, v V)
 

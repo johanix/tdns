@@ -10,27 +10,34 @@ import (
 	"log"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type ScanRequest struct {
 	Cmd              string
+	ParentZone       string
+	ScanZones        []string
+	ScanType         string // "cds" | "csync" | "dnskey"
 	ChildZone        string
 	CurrentChildData ChildDelegationData // Current parent-side delegation data for child
 	ZoneData         *ZoneData
 	RRtype           uint16
+	Edns0Options     *edns0.MsgOptions
 	Response         chan ScanResponse
 }
 
 type ScanResponse struct {
-	Time    time.Time
-	Zone    string
-	RRtype  uint16
-	Result  core.RRset
-	Message string
+	Time     time.Time
+	Zone     string
+	RRtype   uint16
+	RRset    core.RRset
+	Msg      string
+	Error    bool
+	ErrorMsg string
 }
 
 //
@@ -76,8 +83,9 @@ func (scanner *Scanner) AddLogger(rrtype string) error {
 	return nil
 }
 
-func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq chan AuthQueryRequest) error {
-	//	scannerq := conf.Internal.ScannerQ
+func ScannerEngine(ctx context.Context, conf *Config) error {
+	scannerq := conf.Internal.ScannerQ
+	authqueryq := conf.Internal.AuthQueryQ
 	interval := viper.GetInt("scanner.interval")
 	if interval < 10 {
 		interval = 10
@@ -121,7 +129,16 @@ func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq ch
 				switch sr.RRtype {
 				case dns.TypeCDS:
 					log.Printf("go scanner.CheckCDS(sr)")
+					err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECDSScannerNotImplemented, sr.Edns0Options)
+					if err != nil {
+						log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+					}
+					// go scanner.CheckCDS(sr, &sr.CurrentChildData)
 				case dns.TypeCSYNC:
+					err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
+					if err != nil {
+						log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+					}
 					go scanner.CheckCSYNC(sr, &sr.CurrentChildData)
 				case dns.TypeDNSKEY:
 					log.Printf("go scanner.CheckDNSKEY(sr)")
@@ -131,7 +148,4 @@ func ScannerEngine(ctx context.Context, scannerq chan ScanRequest, authqueryq ch
 			}
 		}
 	}
-
-	log.Println("ScannerEngine: terminating")
-	return nil
 }

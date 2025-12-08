@@ -12,6 +12,7 @@ server/tdns-server
 agent/tdns-agent
 combiner/tdns-combiner
 reporter/tdns-reporter
+scanner/tdns-scanner
 imr/tdns-imr
 cli/tdns-cli
 dog/dog

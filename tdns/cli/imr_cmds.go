@@ -3,10 +3,13 @@ package cli
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	tdns "github.com/johanix/tdns/tdns"
+	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
@@ -25,7 +28,7 @@ var ImrQueryCmd = &cobra.Command{
 			_ = cmd.Usage()
 			return
 		}
-		fmt.Printf("Querying %s for %s records\n", args[0], args[1])
+		fmt.Printf("Querying %s for %s records (verbose mode: %t)\n", args[0], args[1], tdns.Globals.Verbose)
 
 		qname := dns.Fqdn(args[0])
 		if _, ok := dns.IsDomainName(qname); !ok {
@@ -54,19 +57,54 @@ var ImrQueryCmd = &cobra.Command{
 
 		select {
 		case r := <-resp:
-			if r.RRset != nil {
-				// fmt.Printf("%v\n", r.RRset)
-				// Determine validation status from cache for the queried <qname,qtype>
-				isValidated := false
-				if Conf.Internal.RRsetCache != nil {
-					if c := Conf.Internal.RRsetCache.Get(qname, qtype); c != nil && c.Validated {
-						isValidated = true
+			// Check cache entry to determine if this is a negative response
+			var cached *cache.CachedRRset
+			if Conf.Internal.RRsetCache != nil {
+				cached = Conf.Internal.RRsetCache.Get(qname, qtype)
+			}
+
+			if cached != nil && (cached.Context == cache.ContextNXDOMAIN || cached.Context == cache.ContextNoErrNoAns) {
+				// This is a negative response
+				vstate := cached.State
+				stateStr := cache.ValidationStateToString[vstate]
+				ctxStr := cache.CacheContextToString[cached.Context]
+
+				fmt.Printf("%s %s (state: %s)\n", qname, ctxStr, stateStr)
+
+				// Print negative authority proof if present (only in verbose mode)
+				// Check the global verbose flag set by the root command's PersistentFlags
+				if tdns.Globals.Verbose {
+					if len(cached.NegAuthority) > 0 {
+						fmt.Printf("Proof:\n")
+						for _, negRRset := range cached.NegAuthority {
+							if negRRset != nil {
+								for _, rr := range negRRset.RRs {
+									fmt.Printf("  %s\n", rr.String())
+								}
+								for _, rr := range negRRset.RRSIGs {
+									fmt.Printf("  %s\n", rr.String())
+								}
+							}
+						}
+					} else if cached.RRset != nil {
+						// Fallback: print SOA if present
+						for _, rr := range cached.RRset.RRs {
+							if rr.Header().Rrtype == dns.TypeSOA {
+								fmt.Printf("  %s\n", rr.String())
+							}
+						}
 					}
+				} else {
+					fmt.Printf("Proof only presented in verbose mode\n")
 				}
-				suffix := ""
-				if isValidated {
-					suffix = " (validated)"
+			} else if r.RRset != nil {
+				// Positive response
+				vstate := cache.ValidationStateNone
+				if cached != nil {
+					vstate = cached.State
 				}
+				suffix := fmt.Sprintf(" (state: %s)", cache.ValidationStateToString[vstate])
+
 				for _, rr := range r.RRset.RRs {
 					switch rr.Header().Rrtype {
 					case qtype, dns.TypeCNAME:
@@ -171,10 +209,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 				// Show received transport percentage signal (pct). If none: do53=100
 				fmt.Printf("  signal: %s\n", renderSignal(server))
 				counters := server.SnapshotCounters()
-				order := []tdns.Transport{tdns.TransportDo53, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDoQ}
+				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
 				for _, t := range order {
 					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("  %-4s: %d\n", tdns.TransportToString[t], c)
+						fmt.Printf("  %-4s: %d\n", core.TransportToString[t], c)
 					}
 				}
 			}
@@ -190,10 +228,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 				fmt.Printf("  Server: %s\n", name)
 				fmt.Printf("    signal: %s\n", renderSignal(server))
 				counters := server.SnapshotCounters()
-				order := []tdns.Transport{tdns.TransportDo53, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDoQ}
+				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
 				for _, t := range order {
 					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("    %-4s: %d\n", tdns.TransportToString[t], c)
+						fmt.Printf("    %-4s: %d\n", core.TransportToString[t], c)
 					}
 				}
 			}
@@ -268,10 +306,10 @@ var imrShowConfigCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("IMR configuration summary:")
 
-		if len(Conf.ImrEngine.Addresses) == 0 {
+		if len(Conf.Imr.Addresses) == 0 {
 			fmt.Println("  Listening addresses: (none configured)")
 		} else {
-			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.ImrEngine.Addresses, ", "))
+			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.Imr.Addresses, ", "))
 		}
 
 		primed := false
@@ -280,25 +318,25 @@ var imrShowConfigCmd = &cobra.Command{
 		}
 		fmt.Printf("  Cache primed: %t\n", primed)
 
-		taKeys := tdns.DnskeyCache.Map.Keys()
+		taKeys := cache.DnskeyCache.Map.Keys()
 		if len(taKeys) == 0 {
 			fmt.Println("  Trust anchors: (none)")
 		} else {
 			fmt.Println("  Trust anchors:")
 			sort.Strings(taKeys)
 			for _, key := range taKeys {
-				if val, ok := tdns.DnskeyCache.Map.Get(key); ok {
-					fmt.Printf("    %s keyid=%d (validated=%t trusted=%t expires=%s)\n",
-						val.Name, val.Keyid, val.Validated, val.Trusted, tdns.TtlPrint(val.Expiration))
+				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
+					fmt.Printf("    %s keyid=%d (trusted=%t expires=%s)\n",
+						val.Name, val.Keyid, val.Trusted, tdns.TtlPrint(val.Expiration))
 				}
 			}
 		}
 
-		if len(Conf.ImrEngine.Stubs) == 0 {
+		if len(Conf.Imr.Stubs) == 0 {
 			fmt.Println("  Stub zones: (none)")
 		} else {
 			fmt.Println("  Stub zones:")
-			for _, stub := range Conf.ImrEngine.Stubs {
+			for _, stub := range Conf.Imr.Stubs {
 				var servers []string
 				for _, server := range stub.Servers {
 					servers = append(servers, fmt.Sprintf("%s (%s)", server.Name, strings.Join(server.Addrs, ", ")))
@@ -313,7 +351,7 @@ var imrShowOptionsCmd = &cobra.Command{
 	Use:   "options",
 	Short: "Show configured IMR options",
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(Conf.ImrEngine.OptionsStrs) == 0 && len(Conf.ImrEngine.Options) == 0 {
+		if len(Conf.Imr.OptionsStrs) == 0 && len(Conf.Imr.Options) == 0 {
 			fmt.Println("No IMR options configured.")
 			return
 		}
@@ -325,7 +363,7 @@ var imrShowOptionsCmd = &cobra.Command{
 		}
 		var rows []optionView
 		normNames := make(map[string]struct{})
-		for opt, val := range Conf.ImrEngine.Options {
+		for opt, val := range Conf.Imr.Options {
 			name, ok := tdns.ImrOptionToString[opt]
 			if !ok {
 				name = fmt.Sprintf("unknown(%d)", opt)
@@ -347,7 +385,7 @@ var imrShowOptionsCmd = &cobra.Command{
 			}
 		}
 		var invalid []string
-		for _, raw := range Conf.ImrEngine.OptionsStrs {
+		for _, raw := range Conf.Imr.OptionsStrs {
 			name := raw
 			if idx := strings.IndexAny(name, ":="); idx != -1 {
 				name = name[:idx]
@@ -375,10 +413,10 @@ var imrShowOptionsCmd = &cobra.Command{
 }
 
 // renderSignal formats the received transport percentage signal. If none, returns "do53=100".
-func renderSignal(server *tdns.AuthServer) string {
+func renderSignal(server *cache.AuthServer) string {
 	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
 	// Order by known transports for stable output.
-	order := []tdns.Transport{tdns.TransportDoQ, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDo53}
+	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 	weights := server.TransportWeights
 	if len(weights) == 0 {
 		return "do53=100"
@@ -386,13 +424,47 @@ func renderSignal(server *tdns.AuthServer) string {
 	var parts []string
 	for _, t := range order {
 		if w, ok := weights[t]; ok && w > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", tdns.TransportToString[t], int(w)))
+			parts = append(parts, fmt.Sprintf("%s=%d", core.TransportToString[t], int(w)))
 		}
 	}
 	if len(parts) == 0 {
 		return "do53=100"
 	}
 	return strings.Join(parts, ",")
+}
+
+var ImrSetCmd = &cobra.Command{
+	Use:   "set",
+	Short: "Set IMR runtime parameters",
+}
+
+var imrSetLineWidthCmd = &cobra.Command{
+	Use:   "linewidth [num]",
+	Short: "Set line width for debug output",
+	Long:  `Set the line width used to truncate long lines in logging and output (e.g., DNSKEYs and RRSIGs)`,
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		width, err := strconv.Atoi(args[0])
+		if err != nil {
+			fmt.Printf("Error: %q is not a valid number: %v\n", args[0], err)
+			return
+		}
+		if width < 1 {
+			fmt.Printf("Error: line width must be at least 1\n")
+			return
+		}
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("Error: RRset cache is not initialized")
+			return
+		}
+		if Conf.Internal.ImrEngine == nil {
+			fmt.Println("Error: IMR engine is not initialized")
+			return
+		}
+		Conf.Internal.RRsetCache.LineWidth = width
+		Conf.Internal.ImrEngine.LineWidth = width
+		fmt.Printf("Line width set to %d\n", width)
+	},
 }
 
 func init() {
@@ -411,4 +483,5 @@ func init() {
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
 	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)
+	ImrSetCmd.AddCommand(imrSetLineWidthCmd)
 }

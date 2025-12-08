@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/spf13/viper"
+	cache "github.com/johanix/tdns/tdns/cache"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/spf13/viper"
 )
 
 type KeystorePost struct {
@@ -59,7 +60,7 @@ type TruststoreResponse struct {
 	Time          time.Time
 	Status        string
 	Zone          string
-	ChildDnskeys  map[string]CachedDnskeyRRset
+	ChildDnskeys  map[string]cache.CachedDnskeyRRset
 	ChildSig0keys map[string]Sig0Key
 	Msg           string
 	Error         bool
@@ -176,9 +177,9 @@ type DebugResponse struct {
 	RRset      core.RRset
 	//	TrustedDnskeys	map[string]dns.DNSKEY
 	//	TrustedSig0keys	map[string]dns.KEY
-	TrustedDnskeys  []CachedDnskeyRRset
+	TrustedDnskeys  []cache.CachedDnskeyRRset
 	TrustedSig0keys map[string]Sig0Key
-	CachedRRsets    []CachedRRset
+	CachedRRsets    []cache.CachedRRset
 	Validated       bool
 	Msg             string
 	Error           bool
@@ -213,6 +214,22 @@ type MultiSignerResponse struct {
 	AppName  string
 	Time     time.Time
 	RRset    core.RRset
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
+type ScannerPost struct {
+	Command    string // "scan" | "status"
+	ParentZone string
+	ScanZones  []string
+	ScanType   string // "cds" | "csync" | "dnskey"
+}
+
+type ScannerResponse struct {
+	AppName  string
+	Time     time.Time
+	Status   string
 	Msg      string
 	Error    bool
 	ErrorMsg string

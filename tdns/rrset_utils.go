@@ -9,8 +9,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
@@ -302,65 +302,5 @@ func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport s
 
 	resp := <-response
 	return resp.rrset, resp.err
-}
-
-func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger) (bool, []dns.RR, []dns.RR) {
-	var match, rrsets_differ bool
-	typestr := dns.TypeToString[rrtype]
-	adds := []dns.RR{}
-	removes := []dns.RR{}
-
-	if Globals.Debug {
-		lg.Printf("*** RRD: Comparing %s RRsets for %s:", typestr, zone)
-		lg.Printf("-------- Old set for %s %s:", zone, typestr)
-		for _, rr := range oldrrs {
-			lg.Printf("%s", rr.String())
-		}
-		lg.Printf("-------- New set for %s %s:", zone, typestr)
-		for _, rr := range newrrs {
-			lg.Printf("%s", rr.String())
-		}
-	}
-	// compare oldrrs to newrrs
-	for _, orr := range oldrrs {
-		if dns.TypeToString[orr.Header().Rrtype] == "RRSIG" {
-			continue
-		}
-		match = false
-		for _, nrr := range newrrs {
-			if dns.IsDuplicate(orr, nrr) {
-				match = true
-				break
-			}
-		}
-		// if we get here w/o match then this orr has no equal nrr
-		if !match {
-			rrsets_differ = true
-			removes = append(removes, orr)
-		}
-	}
-
-	// compare newrrs to oldrrs
-	for _, nrr := range newrrs {
-		if dns.TypeToString[nrr.Header().Rrtype] == "RRSIG" {
-			continue
-		}
-		match = false
-		for _, orr := range oldrrs {
-			if dns.IsDuplicate(nrr, orr) {
-				match = true
-				break
-			}
-		}
-		// if we get here w/o match then this nrr has no equal orr
-		if !match {
-			rrsets_differ = true
-			adds = append(adds, nrr)
-		}
-	}
-	if Globals.Verbose {
-		lg.Printf("*** RRD: RRsetDiffer: Zone %s %s rrsets_differ: %v\n***Adds: %v\n***Removes: %v", zone, typestr, rrsets_differ, adds, removes)
-	}
-	return rrsets_differ, adds, removes
 }
 

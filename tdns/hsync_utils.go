@@ -9,8 +9,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
@@ -59,7 +59,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	// log.Printf("*** newzd.PrintApexRRs()")
 	// newzd.PrintApexRRs()
 
-	newhsync, err := newzd.GetRRset(zd.ZoneName, TypeHSYNC)
+	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC)
 	if err != nil {
 		return false, nil, err
 	}
@@ -76,7 +76,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 
 	var oldhsync *core.RRset
 
-	if rrset, exists := oldapex.RRtypes.Get(TypeHSYNC); exists {
+	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNC); exists {
 		oldhsync = &rrset
 	} else {
 		oldhsync = nil
@@ -90,7 +90,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		oldRRs = oldhsync.RRs
 	}
 
-	differ, hss.HsyncAdds, hss.HsyncRemoves = RRsetDiffer(zd.ZoneName, newRRs, oldRRs, TypeHSYNC, zd.Logger)
+	differ, hss.HsyncAdds, hss.HsyncRemoves = core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC, zd.Logger, Globals.Verbose, Globals.Debug)
 	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
 	return differ, &hss, nil
 }
@@ -103,7 +103,7 @@ func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 		return false, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	hsyncrrset, exists := apex.RRtypes.Get(TypeHSYNC)
+	hsyncrrset, exists := apex.RRtypes.Get(core.TypeHSYNC)
 	if !exists || len(hsyncrrset.RRs) == 0 {
 		return false, nil
 	}
@@ -116,11 +116,11 @@ func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 		return true, nil
 	}
 
-	hsync := hsyncrrset.RRs[0].(*dns.PrivateRR).Data.(*HSYNC)
+	hsync := hsyncrrset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNC)
 	nsmgmt := hsync.NSmgmt
 
 	for _, rr := range hsyncrrset.RRs[1:] {
-		hsync := rr.(*dns.PrivateRR).Data.(*HSYNC)
+		hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
 		if hsync.NSmgmt != nsmgmt {
 			return false, fmt.Errorf("NSmgmt is not consistent across the HSYNC RRs")
 		}

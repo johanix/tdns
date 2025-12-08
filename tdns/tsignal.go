@@ -9,8 +9,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/miekg/dns"
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 // matchesConfiguredAddrs returns true if any RR in rrset matches a configured address.
@@ -308,15 +308,15 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 				// Prefer explicit TSYNC at _dns.<nsName>; handle indirect via alias if present
 				ownerName := "_dns." + nsName
 				if ownerData, ok := zd.Data.Get(ownerName); ok {
-					existingTS := ownerData.RRtypes.GetOnlyRRSet(TypeTSYNC)
+					existingTS := ownerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
 					if len(existingTS.RRs) > 0 {
 						// Base RRset is the explicit TSYNC
-						zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
+						zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: core.TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
 						zd.AddTransportSignal = true
 						// Check for alias indirection
 						alias := "."
 						if prr, ok := existingTS.RRs[0].(*dns.PrivateRR); ok {
-							if ts, ok2 := prr.Data.(*TSYNC); ok2 && ts != nil && ts.Alias != "" {
+							if ts, ok2 := prr.Data.(*core.TSYNC); ok2 && ts != nil && ts.Alias != "" {
 								alias = ts.Alias
 							}
 						}
@@ -327,7 +327,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 								targetOwner := "_dns." + alias
 								log.Printf("createTransportSignalTSYNC: Resolved %s TSYNC alias target to %s", ownerName, targetOwner)
 								if tOwnerData, ok := bestZD.Data.Get(targetOwner); ok {
-									targetTS := tOwnerData.RRtypes.GetOnlyRRSet(TypeTSYNC)
+									targetTS := tOwnerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
 									log.Printf("Found %d TSYNC RRs at target %s", len(targetTS.RRs), targetOwner)
 									if len(targetTS.RRs) > 0 {
 										zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetTS.RRs...)
@@ -377,13 +377,13 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 					continue
 				}
 				// Store in zone data
-				existing := nsData.RRtypes.GetOnlyRRSet(TypeTSYNC)
+				existing := nsData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
 				if len(existing.RRs) == 0 {
-					nsData.RRtypes.Set(TypeTSYNC, core.RRset{RRs: []dns.RR{trr}})
+					nsData.RRtypes.Set(core.TypeTSYNC, core.RRset{RRs: []dns.RR{trr}})
 				} else {
-					nsData.RRtypes.Set(TypeTSYNC, core.RRset{RRs: append(existing.RRs, trr)})
+					nsData.RRtypes.Set(core.TypeTSYNC, core.RRset{RRs: append(existing.RRs, trr)})
 				}
-				zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: TypeTSYNC, RRs: []dns.RR{trr}}
+				zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
 				zd.AddTransportSignal = true
 				log.Printf("createTransportSignalTSYNC: Added TSYNC to zone %s for in-bailiwick NS %s: %s", zd.ZoneName, nsName, trr.String())
 				// Sign TSYNC if online signing is enabled; QueryResponder will include RRSIGs when present

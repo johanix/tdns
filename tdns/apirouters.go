@@ -31,7 +31,7 @@ func WalkRoutes(router *mux.Router, address string) {
 	//	return nil
 }
 
-func SetupReporterAPIRouter(conf *Config) (*mux.Router, error) {
+func (conf *Config) SetupReporterAPIRouter(ctx context.Context) (*mux.Router, error) {
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
 	if apikey == "" {
@@ -43,7 +43,7 @@ func SetupReporterAPIRouter(conf *Config) (*mux.Router, error) {
 	return rtr, nil
 }
 
-func SetupAPIRouter(conf *Config) (*mux.Router, error) {
+func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
@@ -63,7 +63,7 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 	if Globals.App.Type == AppTypeServer || Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/keystore", kdb.APIkeystore()).Methods("POST")
 		sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
-		sr.HandleFunc("/zone/dsync", APIzoneDsync(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/zone/dsync", APIzoneDsync(ctx, &Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 		sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	}
 
@@ -75,8 +75,11 @@ func SetupAPIRouter(conf *Config) (*mux.Router, error) {
 		sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
 		// }
 	}
+	if Globals.App.Type == AppTypeScanner {
+		sr.HandleFunc("/scanner", APIscanner(&Globals.App, conf.Internal.ScannerQ, kdb)).Methods("POST")
+	}
 	if Globals.App.Type == AppTypeCombiner {
-		sr.HandleFunc("/combiner", APICombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	}
 
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
@@ -133,7 +136,7 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 */
 
 // This is the agent-to-agent sync API router.
-func SetupAgentSyncRouter(conf *Config) (*mux.Router, error) {
+func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, error) {
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "AgentSyncApi: Root endpoint is not allowed", http.StatusForbidden)

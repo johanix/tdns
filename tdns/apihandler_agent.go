@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -98,7 +99,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			// Get the HSYNC RRset from the apex
-			hsyncRRset := owner.RRtypes.GetOnlyRRSet(TypeHSYNC)
+			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC)
 			if len(hsyncRRset.RRs) == 0 {
 				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC RRset", amp.Zone)
 				return

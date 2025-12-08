@@ -1,7 +1,7 @@
 /*
  * Stolen from https://github.com/miekg/dns/blob/master/scan.go
  */
-package tdns
+package core
 
 import (
 	"bufio"

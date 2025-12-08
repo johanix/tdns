@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 	// "github.com/miekg/dns"
 )
 
@@ -176,7 +176,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 	}
 }
 
-func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		decoder := json.NewDecoder(r.Body)
@@ -218,13 +218,12 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 		}
 
 		if zd.Parent == "" {
-			imr := viper.GetString("resolver.address")
-			if imr == "" {
+			if Globals.ImrEngine == nil {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Parent zone to %q unknown and no resolver address configured", zd.ZoneName)
+				resp.ErrorMsg = fmt.Sprintf("Zone %q: error: ImrEngine not active. Cannot determine parent zone", zd.ZoneName)
 				return
 			}
-			zd.Parent, err = ParentZone(zd.ZoneName, imr)
+			zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -273,7 +272,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 
 		case "bootstrap-sig0-key":
 			resp.Msg = fmt.Sprintf("Zone %s: bootstrapping published SIG(0) with parent", zd.ZoneName)
-			resp.Msg, resp.UpdateResult, err = zd.BootstrapSig0KeyWithParent(zdp.Algorithm)
+			resp.Msg, resp.UpdateResult, err = zd.BootstrapSig0KeyWithParent(ctx, zdp.Algorithm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -291,7 +290,7 @@ func APIzoneDsync(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func
 			case "update-local":
 				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: UPDATING LOCAL KEYSTORE", zd.ZoneName)
 			}
-			resp.Msg, resp.OldKeyID, resp.NewKeyID, resp.UpdateResult, err = zd.RolloverSig0KeyWithParent(zdp.Algorithm, zdp.Action)
+			resp.Msg, resp.OldKeyID, resp.NewKeyID, resp.UpdateResult, err = zd.RolloverSig0KeyWithParent(ctx, zdp.Algorithm, zdp.Action)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

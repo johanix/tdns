@@ -10,9 +10,10 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
+	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	cmap "github.com/orcaman/concurrent-map/v2"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 type ZoneStore uint8
@@ -88,14 +89,14 @@ type ZoneData struct {
 	KeyDB              *KeyDB
 	AppType            AppType
 	SyncQ              chan SyncRequest
-	Error              bool      // zone is broken and cannot be used
-	ErrorType          ErrorType // "config" | "refresh" | "notify" | "update"
-	ErrorMsg           string    // reason for the error (if known)
-	LatestError        time.Time // time of latest error
-	RefreshCount       int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh      time.Time // time of latest successful refresh
-	TransportSignal    *core.RRset    // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal bool      // whether to attach TransportSignal in responses
+	Error              bool        // zone is broken and cannot be used
+	ErrorType          ErrorType   // "config" | "refresh" | "notify" | "update"
+	ErrorMsg           string      // reason for the error (if known)
+	LatestError        time.Time   // time of latest error
+	RefreshCount       int         // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	LatestRefresh      time.Time   // time of latest successful refresh
+	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
+	AddTransportSignal bool        // whether to attach TransportSignal in responses
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -264,6 +265,7 @@ type ZoneRefresher struct {
 	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile     string
 	Options      map[ZoneOption]bool
+	Edns0Options *edns0.MsgOptions
 	UpdatePolicy UpdatePolicy
 	DnssecPolicy string
 	MultiSigner  string
@@ -301,8 +303,8 @@ type CachedDnskeyRRset struct {
 	Validated   bool
 	Trusted     bool
 	TrustAnchor bool
-	Dnskey      dns.DNSKEY // just this key
-	RRset       *core.RRset     // complete RRset
+	Dnskey      dns.DNSKEY  // just this key
+	RRset       *core.RRset // complete RRset
 	Expiration  time.Time
 }
 
@@ -338,105 +340,6 @@ type DnssecKey struct {
 	PrivateKey string //
 	Key        dns.DNSKEY
 	Keystr     string
-}
-
-type CachedRRset struct {
-	Name         string
-	RRtype       uint16
-	Rcode        uint8
-	RRset        *core.RRset
-	NegAuthority []*core.RRset
-	Ttl          uint32
-	Context      CacheContext
-	Validated    bool
-	Bogus        bool
-	Expiration   time.Time
-	EDECode      uint16
-	EDEText      string
-}
-
-type AuthServer struct {
-	Name             string
-	Addrs            []string
-	Alpn             []string // {"do53", "doq", "dot", "doh"}
-	Transports       []Transport
-	PrefTransport    Transport           // "doq" | "dot" | "doh" | "do53"
-	TransportWeights map[Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
-	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
-	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
-	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`
-	ConnMode        ConnMode                `yaml:"connmode" mapstructure:"connmode"`
-	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
-	// Stats (guarded by mu)
-	mu                sync.Mutex
-	TransportCounters map[Transport]uint64 // total queries attempted per transport
-	Src               string               // "answer", "glue", "hint", "priming", "stub", ...
-	Expire            time.Time
-}
-
-func (as *AuthServer) ConnectionMode() ConnMode {
-	if as == nil {
-		return ConnModeLegacy
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return as.ConnMode
-}
-
-func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
-	if as == nil {
-		return nil
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if len(as.TLSARecords) == 0 {
-		return nil
-	}
-	snap := make(map[string]*CachedRRset, len(as.TLSARecords))
-	for owner, rec := range as.TLSARecords {
-		snap[owner] = rec
-	}
-	return snap
-}
-
-// SnapshotCounters returns a copy of the per-transport counters.
-func (as *AuthServer) SnapshotCounters() map[Transport]uint64 {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	out := make(map[Transport]uint64, len(as.TransportCounters))
-	for t, c := range as.TransportCounters {
-		out[t] = c
-	}
-	return out
-}
-
-func promoteConnMode(server *AuthServer, target ConnMode) {
-	if server == nil {
-		return
-	}
-	server.mu.Lock()
-	defer server.mu.Unlock()
-	if server.ConnMode < target {
-		server.ConnMode = target
-	}
-}
-
-type RRsetCacheT struct {
-	RRsets                 *ConcurrentMap[string, CachedRRset]
-	Servers                *ConcurrentMap[string, []string]
-	ServerMap              *ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	DNSClient              map[Transport]*DNSClient
-	Options                map[ImrOption]string
-	Primed                 bool
-	Logger                 *log.Logger
-	Verbose                bool
-	Debug                  bool
-	transportQueryMu       sync.Mutex
-	transportQueryInFlight map[string]struct{}
-	nsRevalidateMu         sync.Mutex
-	nsRevalidateInFlight   map[string]struct{}
-	tlsaQueryMu            sync.Mutex
-	tlsaQueryInFlight      map[string]struct{}
 }
 
 type DelegationSyncRequest struct {

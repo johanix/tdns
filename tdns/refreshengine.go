@@ -142,8 +142,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						})
 					}
 					// XXX: Should do refresh in parallel
-					go func(zd *ZoneData) {
-						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
+					go func(zd *ZoneData, zone string, force bool, conf *Config) {
+						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
 						if err != nil {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
@@ -152,7 +152,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 						}
-					}(zd)
+					}(zd, zone, zr.Force, conf)
 
 				} else {
 					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)
@@ -179,7 +179,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						KeyDB:           conf.Internal.KeyDB,
 					}
 
-					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force)
+					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
@@ -192,20 +192,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if err != nil {
 						log.Printf("Error from FindSoaRefresh(%s): %v", zone, err)
 					}
-					// soa, _ := zonedata.GetSOA()
-					// if soa != nil {
-					//	refresh = soa.Refresh
-					// }
-					// Is there a max refresh counter configured, then use it.
-					// maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
-					// if maxrefresh != 0 && maxrefresh < refresh {
-					//	refresh = maxrefresh
-					//}
-
-					// not refreshing from file all the time. use reload
-					// if zr.ZoneType == tdns.Primary {
-					//	refresh = 86400 // 24h
-					// }
 
 					refreshCounters.Set(zone, &RefreshCounter{
 						Name:        zone,
@@ -273,7 +259,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not refreshing.", zone, zd.ErrorMsg)
 						continue
 					}
-					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false)
+					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, conf)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zd.Refresh(%s): %v", zone, err)

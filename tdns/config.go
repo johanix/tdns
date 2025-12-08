@@ -11,23 +11,25 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	cache "github.com/johanix/tdns/tdns/cache"
 )
 
+var Conf Config
+
 type Config struct {
-	// OBE App            AppDetails
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
-	ImrEngine      ImrEngineConf
+	Imr            ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
-	// Zones          map[string]ZoneConf
-	Zones      []ZoneConf `yaml:"zones"`
-	Templates  []ZoneConf `yaml:"templates"`
-	Keys       KeyConf
-	Db         DbConf
-	Registrars map[string][]string
-	Log        struct {
+	Zones          []ZoneConf                 `yaml:"zones"`
+	Templates      []ZoneConf                 `yaml:"templates"`
+	Keys           KeyConf
+	Db             DbConf
+	Registrars     map[string][]string
+	Log            struct {
 		File string `validate:"required"`
 	}
 	Agent    LocalAgentConf
@@ -64,10 +66,12 @@ type DnsEngineConf struct {
 }
 
 type ImrEngineConf struct {
-	Addresses   []string `validate:"required"`
-	CertFile    string
-	KeyFile     string
-	Transports  []string             `validate:"required"` // "do53", "dot", "doh", "doq"
+	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
+	Addresses   []string             `yaml:"addresses" mapstructure:"addresses" validate:"required"`
+	CertFile    string               `yaml:"certfile" mapstructure:"certfile"`
+	KeyFile     string               `yaml:"keyfile" mapstructure:"keyfile"`
+	Transports  []string             `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
 	Stubs       []ImrStubConf        `yaml:"stubs"`
 	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
 	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
@@ -83,7 +87,7 @@ type ImrEngineConf struct {
 type ImrStubConf struct {
 	Zone string `validate:"required"`
 	// Servers []StubServerConf `validate:"required"`
-	Servers []AuthServer `validate:"required"`
+	Servers []cache.AuthServer `validate:"required"`
 }
 
 // type StubServerConf struct {
@@ -189,7 +193,8 @@ type InternalConf struct {
 	SyncStatusQ     chan SyncStatus
 	AgentRegistry   *AgentRegistry
 	ZoneDataRepo    *ZoneDataRepo
-	RRsetCache      *RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	RRsetCache      *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine       *Imr
 }
 
 type AgentQs struct {

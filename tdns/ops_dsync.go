@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 func (zd *ZoneData) PublishDsyncRRs() error {
@@ -21,7 +21,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	// Verify that there is no DSYNC RRset already present
 	owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
 	if owner != nil {
-		rrset.RRs = owner.RRtypes.GetOnlyRRSet(TypeDSYNC).RRs
+		rrset.RRs = owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
 		if len(rrset.RRs) > 0 {
 			zd.Logger.Printf("PublishDsyncRRs: zone: %s DSYNC RRset already present; not synthesizing DSYNC RRset", zd.ZoneName)
 			return nil

@@ -7,6 +7,7 @@ all:
 	$(MAKE) -C ./combiner/
 	$(MAKE) -C ./imr/
 	$(MAKE) -C ./reporter/
+	$(MAKE) -C ./scanner/
 #	$(MAKE) -C ./msa/
 #	$(MAKE) -C ./sidecar-cli/
 
@@ -18,6 +19,7 @@ clean:
 	$(MAKE) -C ./combiner/ clean
 	$(MAKE) -C ./imr/ clean
 	$(MAKE) -C ./reporter/ clean
+	$(MAKE) -C ./scanner/ clean
 #	$(MAKE) -C ./msa/ clean
 #	$(MAKE) -C ./sidecar-cli/ clean
 
@@ -29,6 +31,7 @@ install:
 	$(MAKE) -C ./combiner/ install
 	$(MAKE) -C ./imr/ install
 	$(MAKE) -C ./reporter/ install
+	$(MAKE) -C ./scanner/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install
 

@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/rand"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 func sigLifetime(t time.Time, lifetime uint32) (uint32, uint32) {

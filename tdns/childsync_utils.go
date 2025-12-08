@@ -4,12 +4,14 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"strings"
 
+	core "github.com/johanix/tdns/tdns/core"
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -238,7 +240,7 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 		}
 	}
 
-	differ, adds, removes := RRsetDiffer(owner, rrs_child, rrs_parent, rrtype, log.Default())
+	differ, adds, removes := core.RRsetDiffer(owner, rrs_child, rrs_parent, rrtype, log.Default(), Globals.Verbose, Globals.Debug)
 	if differ {
 		fmt.Printf("Parent and child %s RRsets differ. To get parent in sync:\n", rrname)
 		for _, rr := range removes {
@@ -298,6 +300,7 @@ func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
 	return ns_inbailiwick, nil
 }
 
+/*
 func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]string, []string) {
 	fmt.Printf("%d old NS RRs, %d new NS RRs\n", len(oldnsrrset), len(newnsrrset))
 	if Globals.Debug {
@@ -329,17 +332,18 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 
 	return new_ns_inb, old_ns_inb
 }
+*/
 
 // Find the best scheme (from the POV of the child) to sync the deletation with the parent
-func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
-	var active_drr *DSYNC
+func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *DsyncTarget, error) {
+	var active_drr *core.DSYNC
 	var active_scheme string
 	var dsynctarget DsyncTarget
 
-	zd.Logger.Printf("BestSyncScheme: imr=%s zone=%s", Globals.IMR, zd.ZoneName)
+	zd.Logger.Printf("BestSyncScheme: zone=%s", zd.ZoneName)
 
 	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
-	dsync_res, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
+	dsync_res, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
 	if err != nil {
 		zd.Logger.Printf("BestSyncScheme: Error from DsyncDiscovery(): %v", err)
 		return "", nil, err
@@ -362,7 +366,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 		case "update":
 			log.Printf("BestSyncScheme(): checking UPDATE alternative:")
 			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == SchemeUpdate {
+				if drr.Scheme == core.SchemeUpdate {
 					active_drr = drr
 					break
 				}
@@ -379,7 +383,7 @@ func (zd *ZoneData) BestSyncScheme() (string, *DsyncTarget, error) {
 			}
 			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
+				if drr.Scheme == core.SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
 					active_drr = drr
 					break
 				}

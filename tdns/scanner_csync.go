@@ -9,6 +9,7 @@ import (
 	"log"
 	"strings"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -303,7 +304,7 @@ func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, cdd *Chi
 	}
 
 	//	if !RRsetsAreEqual(zone, new_v4glue, cur_v4glue, "A", scanner.Log["CSYNC"],
-	if changed, _, _ := RRsetDiffer(zone, new_v4glue, cur_v4glue, dns.TypeA, scanner.Log["CSYNC"]); changed {
+	if changed, _, _ := core.RRsetDiffer(zone, new_v4glue, cur_v4glue, dns.TypeA, scanner.Log["CSYNC"], scanner.Verbose, scanner.Debug); changed {
 		if scanner.Verbose {
 			scanner.Log["CSYNC"].Printf("Zone %s: IPv4 glue has changed. DB update needed.", zone)
 		}
@@ -358,7 +359,7 @@ func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, cdd *
 		new_v6glue = append(new_v6glue, nsv6addrs.RRs...)
 	}
 
-	if changed, _, _ := RRsetDiffer(zone, new_v6glue, cur_v6glue, dns.TypeAAAA, scanner.Log["CSYNC"]); changed {
+	if changed, _, _ := core.RRsetDiffer(zone, new_v6glue, cur_v6glue, dns.TypeAAAA, scanner.Log["CSYNC"], scanner.Verbose, scanner.Debug); changed {
 		if scanner.Verbose {
 			scanner.Log["CSYNC"].Printf("Zone %s: IPv6 glue has changed. DB update needed.", zone)
 		}
@@ -402,7 +403,7 @@ func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([
 			fmt.Errorf("zone %s CSYNC analysis: New NS RRset not authenticated. Aborting", zone)
 	}
 
-	if changed, _, _ := RRsetDiffer(zone, new_rrs.RRs, cur_NSrrs, dns.TypeNS, scanner.Log["CSYNC"]); changed {
+	if changed, _, _ := core.RRsetDiffer(zone, new_rrs.RRs, cur_NSrrs, dns.TypeNS, scanner.Log["CSYNC"], scanner.Verbose, scanner.Debug); changed {
 		if scanner.Verbose {
 			scanner.Log["CSYNC"].Printf("Zone %s: NS RRset has changed. DB update needed.", zone)
 		}

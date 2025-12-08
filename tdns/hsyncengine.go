@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
 type SyncRequest struct {

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/tdns"
+	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -25,7 +27,7 @@ var ImrDumpCmd = &cobra.Command{
 		}
 
 		// Collect and sort items by owner name, comparing labels from right to left
-		items := []tdns.Tuple[string, tdns.CachedRRset]{}
+		items := []core.Tuple[string, cache.CachedRRset]{}
 		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
 			items = append(items, item)
 		}
@@ -55,7 +57,7 @@ var dumpSuffixCmd = &cobra.Command{
 		fmt.Printf("Listing records in the RRsetCache with owner names ending in %q\n", suffix)
 
 		// Collect and sort items by owner name (reverse label order)
-		items := []tdns.Tuple[string, tdns.CachedRRset]{}
+		items := []core.Tuple[string, cache.CachedRRset]{}
 		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
 			if suffix == "" || strings.HasSuffix(item.Val.Name, suffix) {
 				items = append(items, item)
@@ -120,10 +122,7 @@ var dumpAuthServersCmd = &cobra.Command{
 					src = "-"
 				}
 				transports := formatTransportWeights(server)
-				conn := tdns.ConnModeToString[server.ConnectionMode()]
-				if conn == "" {
-					conn = "legacy"
-				}
+				conn := server.ConnectionMode().String()
 				lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s", name, src, addrs, transports, conn))
 				if tdns.Globals.Verbose {
 					fmt.Printf("  Server: %s\n", name)
@@ -144,12 +143,13 @@ var dumpAuthServersCmd = &cobra.Command{
 						sort.Strings(owners)
 						for _, owner := range owners {
 							rec := tlsaSnapshot[owner]
-							status := "unvalidated"
-							if rec != nil && rec.Validated {
-								status = "validated"
+							if rec == nil {
+								fmt.Printf("      %s (no TLSA record)\n", owner)
+								continue
 							}
-							fmt.Printf("      %s (%s)\n", owner, status)
-							if rec != nil && rec.RRset != nil {
+							stateStr := validationStateString(rec.State)
+							fmt.Printf("      %s (state: %s)\n", owner, stateStr)
+							if rec.RRset != nil {
 								for _, rr := range rec.RRset.RRs {
 									fmt.Printf("        %s\n", rr.String())
 								}
@@ -239,10 +239,10 @@ var dumpDnskeysCmd = &cobra.Command{
 			pub         string
 		}
 		type dsView struct {
-			validated bool
-			expires   string
-			rrs       []string
-			sigs      []string
+			state   cache.ValidationState
+			expires string
+			rrs     []string
+			sigs    []string
 		}
 		type ownerView struct {
 			ds     *dsView
@@ -251,9 +251,9 @@ var dumpDnskeysCmd = &cobra.Command{
 		owners := map[string]*ownerView{}
 
 		// DNSKEY trust anchors
-		keys := tdns.DnskeyCache.Map.Keys()
+		keys := cache.DnskeyCache.Map.Keys()
 		for _, k := range keys {
-			val, ok := tdns.DnskeyCache.Map.Get(k)
+			val, ok := cache.DnskeyCache.Map.Get(k)
 			if !ok {
 				continue
 			}
@@ -265,7 +265,6 @@ var dumpDnskeysCmd = &cobra.Command{
 			ov.dnskey = append(ov.dnskey, dnskeyView{
 				name:        val.Name,
 				keyid:       val.Keyid,
-				validated:   val.Validated,
 				trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
 				expires:     tdns.TtlPrint(val.Expiration),
@@ -296,8 +295,8 @@ var dumpDnskeysCmd = &cobra.Command{
 				owners[parts[0]] = ov
 			}
 			dsv := &dsView{
-				validated: val.Validated,
-				expires:   tdns.TtlPrint(val.Expiration),
+				state:   val.State,
+				expires: tdns.TtlPrint(val.Expiration),
 			}
 			if val.RRset != nil {
 				// sort DS lines by key tag
@@ -341,19 +340,26 @@ var dumpDnskeysCmd = &cobra.Command{
 			// DS first
 			if ov.ds != nil {
 				valStr := "unvalidated"
-				if ov.ds.validated {
-					valStr = "validated"
+				if ov.ds.state == cache.ValidationStateSecure {
+					valStr = "secure"
 				}
 				// Include signer name and keyid in header if present in cached RRset
 				var signerInfo string
+				var stateStr string
 				if Conf.Internal.RRsetCache != nil {
-					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
-						if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
-							signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
+					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil {
+						stateStr = validationStateString(c.State)
+						if c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
+							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
+								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
+							}
 						}
 					}
 				}
-				fmt.Printf("\n%s DS (%s%s, TTL: %s)\n", owner, valStr, signerInfo, ov.ds.expires)
+				if stateStr == "" {
+					stateStr = "none"
+				}
+				fmt.Printf("\n%s DS (%s, state: %s%s, TTL: %s)\n", owner, valStr, stateStr, signerInfo, ov.ds.expires)
 				for _, s := range ov.ds.rrs {
 					fmt.Printf("  %s\n", maskDsLine(s))
 				}
@@ -365,25 +371,27 @@ var dumpDnskeysCmd = &cobra.Command{
 			if len(ov.dnskey) > 0 {
 				sort.Slice(ov.dnskey, func(i, j int) bool { return ov.dnskey[i].keyid < ov.dnskey[j].keyid })
 				// Try to fetch DNSKEY RRset from cache to get RRset-level validated + TTL
-				var rrsetValidated bool
+				var rrsetState cache.ValidationState
 				var rrsetTTL string = "-"
 				var signerInfo string
+				var stateStr string
 				if Conf.Internal.RRsetCache != nil {
 					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDNSKEY); c != nil {
-						rrsetValidated = c.Validated
+						rrsetState = c.State
 						rrsetTTL = tdns.TtlPrint(c.Expiration)
-						if rrsetValidated && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
+						stateStr = validationStateString(c.State)
+						if rrsetState == cache.ValidationStateSecure && c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
 							if s, ok := c.RRset.RRSIGs[0].(*dns.RRSIG); ok {
 								signerInfo = fmt.Sprintf(", signer: %s keyid: %d", s.SignerName, s.KeyTag)
 							}
 						}
 					}
 				}
-				vStr := "unvalidated"
-				if rrsetValidated {
-					vStr = "validated"
+				vStr := "insecure"
+				if rrsetState == cache.ValidationStateSecure {
+					vStr = "secure"
 				}
-				fmt.Printf("\n%s DNSKEY (%s%s, TTL: %s)\n", owner, vStr, signerInfo, rrsetTTL)
+				fmt.Printf("\n%s DNSKEY (%s, state: %s%s, TTL: %s)\n", owner, vStr, stateStr, signerInfo, rrsetTTL)
 				lines := []string{"KeyID | Flags | TTL | Details"}
 				for _, v := range ov.dnskey {
 					detail := fmt.Sprintf("%s DNSKEY %d %d %d %s", v.name, v.flags, v.protocol, v.alg, formatKeySnippet(v.pub))
@@ -405,13 +413,13 @@ func formatList(items []string) string {
 	return fmt.Sprintf("[%s]", strings.Join(items, " "))
 }
 
-func formatTransportWeights(server *tdns.AuthServer) string {
+func formatTransportWeights(server *cache.AuthServer) string {
 	if len(server.TransportWeights) > 0 {
-		order := []tdns.Transport{tdns.TransportDoQ, tdns.TransportDoT, tdns.TransportDoH, tdns.TransportDo53}
+		order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 		var parts []string
 		for _, t := range order {
 			if w, ok := server.TransportWeights[t]; ok && w > 0 {
-				parts = append(parts, fmt.Sprintf("%s:%d", tdns.TransportToString[t], w))
+				parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], w))
 			}
 		}
 		if len(parts) > 0 {
@@ -421,7 +429,7 @@ func formatTransportWeights(server *tdns.AuthServer) string {
 	if len(server.Transports) > 0 {
 		var parts []string
 		for _, t := range server.Transports {
-			name := tdns.TransportToString[t]
+			name := core.TransportToString[t]
 			if name == "" {
 				continue
 			}
@@ -434,21 +442,20 @@ func formatTransportWeights(server *tdns.AuthServer) string {
 	return "[]"
 }
 
-func connectionModeString(server *tdns.AuthServer) string {
-	mode := server.ConnectionMode()
-	if s := tdns.ConnModeToString[mode]; s != "" {
+func validationStateString(state cache.ValidationState) string {
+	if s := cache.ValidationStateToString[state]; s != "" {
 		return s
 	}
-	return "legacy"
+	return "none"
 }
 
-func printAuthServerVerbose(name string, server *tdns.AuthServer) {
+func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("  Server: %s\n", name)
 	fmt.Printf("    Source: %s\n", server.Src)
 	fmt.Printf("    Addresses: %s\n", formatList(server.Addrs))
 	fmt.Printf("    ALPN: %s\n", formatList(server.Alpn))
 	fmt.Printf("    Transports: %s\n", formatTransportWeights(server))
-	fmt.Printf("    Connection mode: %s\n", connectionModeString(server))
+	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {
 		fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
 	}
@@ -461,22 +468,21 @@ func printAuthServerVerbose(name string, server *tdns.AuthServer) {
 		sort.Strings(owners)
 		for _, owner := range owners {
 			rec := tlsaSnapshot[owner]
-			status := "unvalidated"
-			if rec != nil && rec.Validated {
-				status = "validated"
+			if rec == nil {
+				fmt.Printf("      %s (no TLSA record)\n", owner)
+				continue
 			}
+			stateStr := validationStateString(rec.State)
 			ttlStr := "-"
 			expires := "-"
-			if rec != nil {
 				if rec.RRset != nil && len(rec.RRset.RRs) > 0 {
 					ttlStr = fmt.Sprintf("%d", rec.RRset.RRs[0].Header().Ttl)
 				}
 				if !rec.Expiration.IsZero() {
 					expires = tdns.TtlPrint(rec.Expiration)
 				}
-			}
-			fmt.Printf("      %s (%s, TTL: %s, Expires: %s)\n", owner, status, ttlStr, expires)
-			if rec != nil && rec.RRset != nil {
+			fmt.Printf("      %s (state: %s, TTL: %s, Expires: %s)\n", owner, stateStr, ttlStr, expires)
+			if rec.RRset != nil {
 				for _, rr := range rec.RRset.RRs {
 					fmt.Printf("        %s\n", rr.String())
 				}
@@ -548,7 +554,7 @@ func init() {
 	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
 }
 
-func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
+func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 
 	parts := strings.Split(item.Key, "::")
 	if len(parts) != 2 {
@@ -579,28 +585,17 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 	}
 
 	rrtype := dns.TypeToString[uint16(tmp)]
-	// Unified header format: "<owner> <TYPE> (validated|unvalidated, TTL: X)"
-	valStr := "unvalidated"
-	if item.Val.Validated {
-		valStr = "validated"
-	}
+	stateStr := validationStateString(item.Val.State)
 	ttlStr := tdns.TtlPrint(item.Val.Expiration)
-	fmt.Printf("\n%s %s (%s, TTL: %s", parts[0], rrtype, valStr, ttlStr)
-	if item.Val.Bogus {
-		fmt.Printf(", bogus")
-	}
-	fmt.Printf(")\n")
+	fmt.Printf("\n%s %s (state: %s, TTL: %s)\n", parts[0], rrtype, stateStr, ttlStr)
 
 	switch item.Val.Context {
-	case tdns.ContextNXDOMAIN:
+	case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:
 		// NXDOMAIN: no RRset to list
-		fmt.Printf("  %s NXDOMAIN (%s)\n", item.Val.Name, tdns.CacheContextToString[item.Val.Context])
-	case tdns.ContextNoErrNoAns:
-		// Negative response type 0 (NOERROR/NODATA)
-		fmt.Printf("  %s NODATA (%s)\n", item.Val.Name, tdns.CacheContextToString[item.Val.Context])
-	case tdns.ContextAnswer, tdns.ContextGlue, tdns.ContextHint, tdns.ContextPriming, tdns.ContextReferral:
+		fmt.Printf("  %s %s\n", item.Val.Name, cache.CacheContextToString[item.Val.Context])
+	case cache.ContextAnswer, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextReferral:
 		// Print each RR in the RRset (no RRSIGs filtering unless requested)
-		ctxLabel := fmt.Sprintf("(%s)", tdns.CacheContextToString[item.Val.Context])
+		ctxLabel := fmt.Sprintf("(%s)", cache.CacheContextToString[item.Val.Context])
 		if item.Val.RRset == nil {
 			fmt.Printf("  %s %s (no RRset)\n", item.Val.Name, ctxLabel)
 			return
@@ -618,16 +613,13 @@ func PrintCacheItem(item tdns.Tuple[string, tdns.CachedRRset], suffix string) {
 			default:
 				fmt.Printf("  %s %s", rr.String(), ctxLabel)
 			}
-			if item.Val.Bogus {
-				fmt.Printf(" [bogus]")
-			}
-			fmt.Println()
+			fmt.Printf(" (state: %s)\n", cache.ValidationStateToString[item.Val.State])
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("  %s %s\n", maskRrsigLine(rr.String()), ctxLabel)
 		}
 	default:
-		fmt.Printf("  Context: %q", tdns.CacheContextToString[item.Val.Context])
+		fmt.Printf("  Context: %q", cache.CacheContextToString[item.Val.Context])
 	}
 }
 

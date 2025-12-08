@@ -9,6 +9,7 @@ import (
 	"log"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -24,13 +25,13 @@ import (
 // 4. When all parent-side data is collected, compare to the data in the ZoneData struct
 
 // Return insync (bool), adds, removes ([]dns.RR) and error
-func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
+func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
 		Time:     time.Now(),
 	}
 
-	err := zd.FetchParentData()
+	err := zd.FetchParentData(imr)
 	if err != nil {
 		return resp, err
 	}
@@ -62,8 +63,8 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 		return resp, err
 	}
 
-	differ, adds, removes := RRsetDiffer(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
-		p_nsrrs, dns.TypeNS, zd.Logger)
+	differ, adds, removes := core.RRsetDiffer(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
+		p_nsrrs, dns.TypeNS, zd.Logger, Globals.Verbose, Globals.Debug)
 	resp.InSync = !differ
 	// log.Printf("AnalyseZoneDelegation: Zone %s: NS RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 
@@ -85,8 +86,8 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 		if err != nil {
 			log.Printf("Error from AuthQuery(%s, %s, A): %v", pserver, child_inb, err)
 		}
-		gluediff, adds, removes := RRsetDiffer(ns, child_a_glue, parent_a_glue,
-			dns.TypeA, zd.Logger)
+		gluediff, adds, removes := core.RRsetDiffer(ns, child_a_glue, parent_a_glue,
+			dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
 		// log.Printf("AnalyseZoneDelegation: Zone %s: A RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 		if gluediff {
 			resp.InSync = false
@@ -99,8 +100,8 @@ func (zd *ZoneData) AnalyseZoneDelegation() (DelegationSyncStatus, error) {
 		if err != nil {
 			log.Printf("Error from AuthQuery(%s, %s, AAAA): %v", pserver, child_inb, err)
 		}
-		differ, adds, removes = RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
-			dns.TypeAAAA, zd.Logger)
+		differ, adds, removes = core.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
+			dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
 		// log.Printf("AnalyseZoneDelegation: Zone %s: AAAA RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 		if differ {
 			resp.InSync = false
@@ -213,8 +214,8 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 
 	var nsdiff bool
 
-	nsdiff, dss.NsAdds, dss.NsRemoves = RRsetDiffer(zd.ZoneName, newapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
-		oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs, dns.TypeNS, zd.Logger)
+	nsdiff, dss.NsAdds, dss.NsRemoves = core.RRsetDiffer(zd.ZoneName, newapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
+		oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs, dns.TypeNS, zd.Logger, Globals.Verbose, Globals.Debug)
 
 	dss.InSync = !nsdiff
 
@@ -291,13 +292,13 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			}
 			// dump.P(newowner.RRtypes[dns.TypeA])
 			// dump.P(oldowner.RRtypes[dns.TypeA])
-			diff, adds, removes := RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, dns.TypeA, zd.Logger)
+			diff, adds, removes := core.RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
 			if diff {
 				dss.AAdds = append(dss.AAdds, adds...)
 				dss.ARemoves = append(dss.ARemoves, removes...)
 				dss.InSync = false
 			}
-			diff, adds, removes = RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, dns.TypeAAAA, zd.Logger)
+			diff, adds, removes = core.RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
 			if diff {
 				dss.AAAAAdds = append(dss.AAAAAdds, adds...)
 				dss.AAAARemoves = append(dss.AAAARemoves, removes...)
@@ -340,7 +341,7 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 		return false, dss, err
 	}
 
-	differ, dss.DNSKEYAdds, dss.DNSKEYRemoves = RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger)
+	differ, dss.DNSKEYAdds, dss.DNSKEYRemoves = core.RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
 	if differ {
 		dss.Time = time.Now()
 		dss.InSync = false
@@ -372,6 +373,6 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	}
 
 	log.Printf("DnskeysChanged: newkeys: %+v oldkeys: %+v", newkeys.RRs, oldkeys.RRs)
-	differ, _, _ = RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger)
+	differ, _, _ = core.RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ, nil
 }

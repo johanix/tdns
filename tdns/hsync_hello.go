@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -144,7 +145,7 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	// Check if zone has HSYNC RRset
-	hsyncRR, err := zd.GetRRset(zd.ZoneName, TypeHSYNC)
+	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
 	if err != nil {
 		log.Printf("EvaluateHello: Error: Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
 		return false, fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err), nil
@@ -159,7 +160,7 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	foundYou := false
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*HSYNC); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
 				if hsync.Identity == ar.LocalAgent.Identity {
 					foundMe = true
 				}

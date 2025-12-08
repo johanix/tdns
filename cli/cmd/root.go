@@ -24,6 +24,11 @@ var LocalConfig string
 var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
 	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Set up CLI logging with file/line info when verbose or debug mode is enabled
+		// This runs after flags are parsed, so Globals.Verbose and Globals.Debug are available
+		tdns.SetupCliLogging()
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

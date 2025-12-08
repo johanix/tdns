@@ -13,13 +13,16 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	core "github.com/johanix/tdns/tdns/core"
 )
 
-func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
+func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
+
+	// Collect dynamic RRs before refresh (they will be lost during refresh)
+	dynamicRRs := zd.CollectDynamicRRs(conf)
 
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 	// 	ZoneTypeToString[zd.ZoneType], force)
@@ -34,7 +37,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
 	case Primary:
 		// zd.Logger.Printf("zd.Refresh(): Should reload zone %s from file %s", zd.ZoneName, zd.ZoneFile)
 
-		updated, err := zd.FetchFromFile(verbose, debug, force)
+		updated, err := zd.FetchFromFile(verbose, debug, force, dynamicRRs)
 		if err != nil {
 			return false, err
 		}
@@ -53,7 +56,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool) (bool, error) {
 			} else if force {
 				zd.Logger.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose, debug)
+			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs)
 			if err != nil {
 				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
 				return false, err
@@ -119,7 +122,7 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 }
 
 // Return updated, error
-func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
+func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
 
@@ -195,6 +198,10 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 	zd.Ready = true
 	zd.mu.Unlock()
 
+	// Repopulate all dynamically generated RRs after zone refresh
+	// (they may have been lost if not present in the zone file)
+	zd.RepopulateDynamicRRs(dynamicRRs)
+
 	// If the delegation has changed, send an update to the DelegationSyncEngine
 	if zd.Options[OptDelSyncChild] && delchanged {
 		zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
@@ -260,7 +267,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool) (bool, error) {
 }
 
 // Return updated, err
-func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
+func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	log.Printf("Transferring zone %s via AXFR from %s\n", zd.ZoneName, zd.Upstream)
 
@@ -335,6 +342,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool) (bool, error) {
 	zd.Data = new_zd.Data
 	zd.Ready = true
 	zd.mu.Unlock()
+
+	// Repopulate all dynamically generated RRs after zone refresh
+	// (they may have been lost if not present in the transferred zone)
+	zd.RepopulateDynamicRRs(dynamicRRs)
 
 	// Can only test for differences between old and new zone data if the zone data is ready.
 	if delchanged && zd.Options[OptDelSyncChild] {
@@ -864,7 +875,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
 		owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
-		dsync_rrset, exist := owner.RRtypes.Get(TypeDSYNC)
+		dsync_rrset, exist := owner.RRtypes.Get(core.TypeDSYNC)
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
@@ -923,6 +934,235 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	}
 
 	return nil
+}
+
+// CollectDynamicRRs collects all dynamically generated RRsets for a zone that need to be
+// repopulated after refresh. These RRs are stored outside ZoneData (in database or generated
+// from config) and will be lost when the zone is reloaded.
+//
+// Returns a slice of RRsets that should be repopulated into the zone after refresh:
+// - DNSKEY records (from DnssecKeyStore database, if online-signing enabled)
+// - SIG(0) KEY records (from Sig0KeyStore database, if needed)
+// - Transport signals (SVCB/TSYNC) - if Config provided and add-transport-signal enabled
+func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
+	var dynamicRRs []*core.RRset
+
+	if !zd.Options[OptAllowUpdates] || zd.KeyDB == nil {
+		return dynamicRRs
+	}
+
+	// 1. Collect DNSKEY records (if online-signing enabled)
+	if zd.Options[OptOnlineSigning] {
+		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			zd.Logger.Printf("CollectDynamicRRs: failed to get DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+		} else if dak != nil {
+			var publishkeys []dns.RR
+			for _, ksk := range dak.KSKs {
+				publishkeys = append(publishkeys, dns.RR(&ksk.DnskeyRR))
+			}
+			for _, zsk := range dak.ZSKs {
+				// If a ZSK has flags = 257 then it is a clone of a KSK and should not be included twice
+				if zsk.DnskeyRR.Flags == 257 {
+					continue
+				}
+				publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
+			}
+
+			// Also include published/retired/foreign keys from database
+			const fetchZoneDnskeysSql = `
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
+			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
+			defer rows.Close()
+			if err == nil {
+				for rows.Next() {
+					var keyid, flags, algorithm string
+					var keyrr string
+					if err := rows.Scan(&keyid, &flags, &algorithm, &keyrr); err != nil {
+						zd.Logger.Printf("CollectDynamicRRs: failed to scan DNSKEY row for zone %s: %v", zd.ZoneName, err)
+						continue
+					}
+					if rr, err := dns.NewRR(keyrr); err == nil {
+						publishkeys = append(publishkeys, rr)
+					} else {
+						zd.Logger.Printf("CollectDynamicRRs: failed to parse DNSKEY RR from %s for zone %s: %v", keyrr, zd.ZoneName, err)
+					}
+				}
+			}
+
+			if len(publishkeys) > 0 {
+				dynamicRRs = append(dynamicRRs, &core.RRset{
+					Name:   zd.ZoneName,
+					Class:  dns.ClassINET,
+					RRtype: dns.TypeDNSKEY,
+					RRs:    publishkeys,
+				})
+			}
+		}
+	}
+
+	// 2. Collect SIG(0) KEY records (if they should be published)
+	if !zd.Options[OptDontPublishKey] {
+		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+		if err != nil {
+			// Not an error if no SIG(0) keys exist
+			if Globals.Debug {
+				zd.Logger.Printf("CollectDynamicRRs: no active SIG(0) keys for zone %s (or error): %v", zd.ZoneName, err)
+			}
+		} else if sak != nil && len(sak.Keys) > 0 {
+			var keyRRs []dns.RR
+			for _, pkc := range sak.Keys {
+				if strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
+					keyRRs = append(keyRRs, &pkc.KeyRR)
+				}
+			}
+			if len(keyRRs) > 0 {
+				dynamicRRs = append(dynamicRRs, &core.RRset{
+					Name:   zd.ZoneName,
+					Class:  dns.ClassINET,
+					RRtype: dns.TypeKEY,
+					RRs:    keyRRs,
+				})
+			}
+		}
+	}
+
+	// 3. Collect transport signals (if add-transport-signal enabled)
+	// Collect from zd.TransportSignal if it exists, and also from zone data at _dns.* owners
+	if zd.Options[OptAddTransportSignal] {
+		// Collect from zd.TransportSignal field
+		if zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
+			// Clone the transport signal RRset
+			tsClone := &core.RRset{
+				Name:   zd.TransportSignal.Name,
+				Class:  dns.ClassINET,
+				RRtype: zd.TransportSignal.RRtype,
+				RRs:    make([]dns.RR, len(zd.TransportSignal.RRs)),
+				RRSIGs: make([]dns.RR, len(zd.TransportSignal.RRSIGs)),
+			}
+			for i, rr := range zd.TransportSignal.RRs {
+				tsClone.RRs[i] = dns.Copy(rr)
+			}
+			for i, rr := range zd.TransportSignal.RRSIGs {
+				tsClone.RRSIGs[i] = dns.Copy(rr)
+			}
+			dynamicRRs = append(dynamicRRs, tsClone)
+		}
+
+		// Also collect transport signals from zone data at _dns.* owners
+		// (they may exist in zone data even if TransportSignal field is not set)
+		for item := range zd.Data.IterBuffered() {
+			owner := item.Key
+			if strings.HasPrefix(owner, "_dns.") {
+				od := item.Val
+				// Check for SVCB
+				if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 {
+					svcbClone := &core.RRset{
+						Name:   owner,
+						Class:  dns.ClassINET,
+						RRtype: dns.TypeSVCB,
+						RRs:    make([]dns.RR, len(svcbRRset.RRs)),
+						RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
+					}
+					for i, rr := range svcbRRset.RRs {
+						svcbClone.RRs[i] = dns.Copy(rr)
+					}
+					for i, rr := range svcbRRset.RRSIGs {
+						svcbClone.RRSIGs[i] = dns.Copy(rr)
+					}
+					dynamicRRs = append(dynamicRRs, svcbClone)
+				}
+				// Check for TSYNC
+				if tsyncRRset, exists := od.RRtypes.Get(core.TypeTSYNC); exists && len(tsyncRRset.RRs) > 0 {
+					tsyncClone := &core.RRset{
+						Name:   owner,
+						Class:  dns.ClassINET,
+						RRtype: core.TypeTSYNC,
+						RRs:    make([]dns.RR, len(tsyncRRset.RRs)),
+						RRSIGs: make([]dns.RR, len(tsyncRRset.RRSIGs)),
+					}
+					for i, rr := range tsyncRRset.RRs {
+						tsyncClone.RRs[i] = dns.Copy(rr)
+					}
+					for i, rr := range tsyncRRset.RRSIGs {
+						tsyncClone.RRSIGs[i] = dns.Copy(rr)
+					}
+					dynamicRRs = append(dynamicRRs, tsyncClone)
+				}
+			}
+		}
+	}
+
+	return dynamicRRs
+}
+
+// RepopulateDynamicRRs repopulates dynamically generated RRsets into the zone data after refresh.
+// The RRsets are passed in from RefreshEngine which collected them before the refresh.
+func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
+	if len(dynamicRRs) == 0 {
+		return
+	}
+
+	for _, rrset := range dynamicRRs {
+		if rrset == nil || len(rrset.RRs) == 0 {
+			continue
+		}
+
+		owner, err := zd.GetOwner(rrset.Name)
+		if err != nil || owner == nil {
+			// Owner doesn't exist, create it
+			if zd.ZoneStore == MapZone {
+				owner = &OwnerData{
+					Name:    rrset.Name,
+					RRtypes: NewRRTypeStore(),
+				}
+				zd.Data.Set(rrset.Name, *owner)
+			} else {
+				zd.Logger.Printf("RepopulateDynamicRRs: failed to get/create owner %s for zone %s: %v", rrset.Name, zd.ZoneName, err)
+				continue
+			}
+		}
+
+		// Get existing RRset if any, or create new one
+		existing, exists := owner.RRtypes.Get(rrset.RRtype)
+		if exists {
+			// Merge: add any RRs that don't already exist
+			for _, newRR := range rrset.RRs {
+				present := false
+				for _, oldRR := range existing.RRs {
+					if dns.IsDuplicate(newRR, oldRR) {
+						present = true
+						break
+					}
+				}
+				if !present {
+					existing.RRs = append(existing.RRs, newRR)
+				}
+			}
+			// Merge RRSIGs (replace if new ones exist)
+			if len(rrset.RRSIGs) > 0 {
+				existing.RRSIGs = rrset.RRSIGs
+			}
+			owner.RRtypes.Set(rrset.RRtype, existing)
+		} else {
+			// Set new RRset
+			owner.RRtypes.Set(rrset.RRtype, *rrset)
+		}
+
+		// Update owner in zone data (in case we created it or modified it)
+		if zd.ZoneStore == MapZone {
+			zd.Data.Set(rrset.Name, *owner)
+		}
+
+		// Special handling for transport signals: also set zd.TransportSignal
+		// Use the first transport signal RRset found as the primary one
+		if (rrset.RRtype == dns.TypeSVCB || rrset.RRtype == core.TypeTSYNC) && zd.TransportSignal == nil {
+			zd.TransportSignal = rrset
+			zd.AddTransportSignal = true
+		}
+	}
+
+	zd.Logger.Printf("RepopulateDynamicRRs: repopulated %d dynamic RRsets for zone %s", len(dynamicRRs), zd.ZoneName)
 }
 
 func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
@@ -1003,7 +1243,7 @@ type DelegationData struct {
 	BailiwickNS []string
 	A_glue      map[string]*core.RRset // map[nsname]
 	AAAA_glue   map[string]*core.RRset // map[nsname]
-	Actions     []dns.RR          // actions are DNS UPDATE actions that modify delegation data
+	Actions     []dns.RR               // actions are DNS UPDATE actions that modify delegation data
 	Time        time.Time
 }
 

@@ -5,7 +5,6 @@
 package main
 
 import (
-	// "flag"
 	"context"
 	"fmt"
 	"log"
@@ -19,34 +18,25 @@ import (
 )
 
 func main() {
-	var conf tdns.Config
-
 	tdns.Globals.App.Type = tdns.AppTypeAgent
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
 
-	// These are the defaults, but they are defined here to make it possible for eg. MUSIC to use a different defaul
-	// conf.Internal.ZonesCfgFile = tdns.ZonesCfgFile
-	// conf.Internal.CfgFile = tdns.DefaultAgentCfgFile
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	conf := &tdns.Conf
 	err := conf.MainInit(ctx, tdns.DefaultAgentCfgFile)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error initializing TDNS: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
-	// _, err = tdns.ParseZones(&conf, conf.Internal.RefreshZoneCh, false) // false = !reload, initial config
-	// if err != nil {
-	// 	tdns.Shutdowner(&conf, fmt.Sprintf("Error parsing zones: %v", err))
-	// }
-
-	apirouter, err := tdns.SetupAPIRouter(&conf)
+	apirouter, err := conf.SetupAPIRouter(ctx)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error setting up API router: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}
+
 	// SIGHUP reload watcher
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -64,10 +54,10 @@ func main() {
 		}
 	}()
 
-	err = tdns.StartAgent(ctx, &conf, apirouter)
+	err = conf.StartAgent(ctx, apirouter)
 	if err != nil {
-		tdns.Shutdowner(&conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
+		tdns.Shutdowner(conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}
 
-	tdns.MainLoop(ctx, stop, &conf)
+	conf.MainLoop(ctx, stop)
 }

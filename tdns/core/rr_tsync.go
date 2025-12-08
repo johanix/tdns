@@ -2,7 +2,7 @@
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  */
 
-package tdns
+package core
 
 import (
 	"errors"
@@ -17,11 +17,12 @@ func init() {
 }
 
 // TSYNC is a private/custom RRtype similar in style to DSYNC.
-// RDATA fields:
+// RDATA fields (wire format order):
 // - Type: uint16 (the RRtype variant within TSYNC namespace; typically dns.TypeTSYNC)
-// - Transports: string (e.g., "doq=30,dot=20")
-// - V4addr: comma-separated list of IPv4 addresses
-// - V6addr: comma-separated list of IPv6 addresses
+// - Alias: domain name (mandatory; must be a valid FQDN, cannot be empty)
+// - Transports: string (optional; e.g., "doq=30,dot=20", can be empty)
+// - V4addr: string (optional; comma-separated list of IPv4 addresses, can be empty)
+// - V6addr: string (optional; comma-separated list of IPv6 addresses, can be empty)
 type TSYNC struct {
 	Type       uint16
 	Alias      string
@@ -43,10 +44,10 @@ func (rd TSYNC) String() string {
 }
 
 func (rd *TSYNC) Parse(txt []string) error {
-	// Accept either 4 tokens (<TYPE> <transports> <v4addr> <v6addr>) or 3 tokens (<transports> <v4addr> <v6addr>)
+	// Accept either 5 tokens (<TYPE> <alias> <transports> <v4addr> <v6addr>) or 4 tokens (<TYPE> <alias> <transports> <v4addr> <v6addr>)
 	// Also accept empty/missing v4/v6 as empty strings.
-	if len(txt) < 1 {
-		return errors.New("TSYNC: missing fields")
+	if len(txt) < 4 {
+		return errors.New("TSYNC: requires at least 4 fields")
 	}
 	var t uint16
 	idx := 0
@@ -55,15 +56,15 @@ func (rd *TSYNC) Parse(txt []string) error {
 		if tt := dns.StringToType[txt[0]]; tt != 0 {
 			t = tt
 			idx = 1
+		} else {
+			// first token is not a type mnemonic, treat all tokens as data
+			t = TypeTSYNC
+			idx = 0
 		}
-	} else {
+	} else if len(txt) >= 1 {
 		// No explicit type token provided; default to TypeTSYNC
 		t = TypeTSYNC
 		idx = 0
-	}
-	if t == 0 {
-		// If still zero, set to TypeTSYNC as a sane default
-		t = TypeTSYNC
 	}
 
 	// Collect remaining fields; support keyed tokens in arbitrary order and legacy positional
@@ -169,14 +170,23 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 	if err != nil {
 		return off, err
 	}
+	// Alias is mandatory - if buffer ends here, it's an error
 	if off == len(buf) {
-		return off, nil
+		return off, errors.New("TSYNC: missing mandatory Alias field")
 	}
 	rd.Alias, off, err = dns.UnpackDomainName(buf, off)
 	if err != nil {
 		return off, err
 	}
+	// Validate that Alias is not empty
+	if rd.Alias == "" {
+		return off, errors.New("TSYNC: Alias field cannot be empty")
+	}
+	// Remaining fields are optional - if buffer ends, set to empty strings
 	if off == len(buf) {
+		rd.Transports = ""
+		rd.V4addr = ""
+		rd.V6addr = ""
 		return off, nil
 	}
 	rd.Transports, off, err = unpackString(buf, off)
@@ -184,6 +194,8 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 		return off, err
 	}
 	if off == len(buf) {
+		rd.V4addr = ""
+		rd.V6addr = ""
 		return off, nil
 	}
 	rd.V4addr, off, err = unpackString(buf, off)
@@ -191,6 +203,7 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 		return off, err
 	}
 	if off == len(buf) {
+		rd.V6addr = ""
 		return off, nil
 	}
 	rd.V6addr, off, err = unpackString(buf, off)
@@ -202,7 +215,10 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 
 func (rd *TSYNC) Copy(dest dns.PrivateRdata) error {
 	// Copy via field assignment (safe, strings are immutable header pairs)
-	d := dest.(*TSYNC)
+	d, ok := dest.(*TSYNC)
+	if !ok {
+		return fmt.Errorf("TSYNC: Copy: dest is not a *TSYNC")
+	}
 	d.Type = rd.Type
 	d.Alias = rd.Alias
 	d.Transports = rd.Transports
