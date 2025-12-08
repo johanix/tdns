@@ -1401,6 +1401,10 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	if owner == "" || serverMap == nil {
 		return
 	}
+	server, ok := serverMap[owner]
+	if !ok {
+		return
+	}
 	weights := map[core.Transport]uint8{}
 	var order []string
 	tokens := strings.Split(alpnCSV, ",")
@@ -1419,17 +1423,18 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	if len(order) == 0 {
 		return
 	}
-	serverMap[owner].TransportWeights = weights
-	serverMap[owner].Alpn = order
-	serverMap[owner].Transports = nil
+	server.TransportWeights = weights
+	server.Alpn = order
+	server.Transports = nil
 	for _, k := range order {
 		if t, err := core.StringToTransport(k); err == nil {
-			serverMap[owner].Transports = append(serverMap[owner].Transports, t)
+			server.Transports = append(server.Transports, t)
 		}
 	}
-	if len(serverMap[owner].Transports) > 0 {
-		serverMap[owner].PrefTransport = serverMap[owner].Transports[0]
+	if len(server.Transports) > 0 {
+		server.PrefTransport = server.Transports[0]
 	}
+	serverMap[owner] = server
 }
 
 // applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
@@ -1437,6 +1442,7 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 	if server == nil {
 		return
 	}
+
 	weights := map[core.Transport]uint8{}
 	var order []string
 	tokens := strings.Split(alpnCSV, ",")
@@ -1998,11 +2004,13 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 	if len(addrs) > maxNSRevalidateServers {
 		addrs = addrs[:maxNSRevalidateServers]
 	}
+
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
+
 	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zonename, dns.TypeNS, addrs, imr.Cache.Logger, imr.Cache.Verbose)
 	if err != nil || rrset == nil || len(rrset.RRs) == 0 {
 		if imr.Cache.Debug && err != nil {
@@ -2019,6 +2027,9 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 		if err != nil {
 			imr.Cache.Logger.Printf("*** revalidateReferralNS: Error from ValidateRRset: %v", err)
 		}
+	}
+
+	if err == nil {
 		imr.Cache.Set(zonename, dns.TypeNS, &cache.CachedRRset{
 			Name:       zonename,
 			RRtype:     dns.TypeNS,
@@ -2249,7 +2260,10 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 }
 
 func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.CacheContext, int, bool) {
-	if r == nil || len(r.Ns) == 0 {
+	if r == nil {
+		return cache.ContextFailure, dns.RcodeServerFailure, false
+	}
+	if len(r.Ns) == 0 {
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
 
@@ -2434,7 +2448,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		Expiration: expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
 	})
 
-	return negContext, r.MsgHdr.Rcode, true
+	return negContext, int(cachedRcode), true
 }
 
 func nsecCoversName(name string, nsec *dns.NSEC) bool {

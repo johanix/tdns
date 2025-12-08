@@ -39,15 +39,23 @@ type ProviderSyncOption struct {
 // operation code, transport bitmask, synchronization model bitmask, and optional body.
 // Returns a pointer to the newly created ProviderSyncOption.
 func CreateProviderSyncOption(op, transport, sync uint8, body []byte) *ProviderSyncOption {
+	var bodycopy []byte
+	if body != nil {
+		bodycopy = make([]byte, len(body))
+		copy(bodycopy, body)
+	}
 	return &ProviderSyncOption{
 		Operation:       op,
 		Transport:       transport,
 		Synchronization: sync,
-		OperationBody:   body,
+		OperationBody:   bodycopy,
 	}
 }
 
 // SerializeProviderSyncOption serializes the ProviderSyncOption to wire format ([]byte)
+// SerializeProviderSyncOption converts a ProviderSyncOption to wire format.
+// Returns a byte slice containing the 4-byte header (operation, transport,
+// synchronization, reserved) followed by the operation body.
 func SerializeProviderSyncOption(opt *ProviderSyncOption) []byte {
 	bodyLen := len(opt.OperationBody)
 	data := make([]byte, 4+bodyLen)
@@ -59,16 +67,22 @@ func SerializeProviderSyncOption(opt *ProviderSyncOption) []byte {
 	return data
 }
 
-// ParseProviderSyncOption parses the wire format ([]byte) into a ProviderSyncOption struct
+// ParseProviderSyncOption parses wire format bytes into a ProviderSyncOption.
+// Returns an error if the data is shorter than the minimum 4-byte header.
 func ParseProviderSyncOption(data []byte) (*ProviderSyncOption, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("ProviderSyncOption: data too short")
 	}
+
+    body := data[4:]
+	bodycopy := make([]byte, len(body))
+	copy(bodycopy, body)
+
 	return &ProviderSyncOption{
 		Operation:       data[0],
 		Transport:       data[1],
 		Synchronization: data[2],
-		OperationBody:   data[4:],
+		OperationBody:   bodycopy,
 	}, nil
 }
 

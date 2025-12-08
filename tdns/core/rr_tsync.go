@@ -44,10 +44,10 @@ func (rd TSYNC) String() string {
 }
 
 func (rd *TSYNC) Parse(txt []string) error {
-	// Accept either 4 tokens (<TYPE> <transports> <v4addr> <v6addr>) or 3 tokens (<transports> <v4addr> <v6addr>)
+	// Accept either 5 tokens (<TYPE> <alias> <transports> <v4addr> <v6addr>) or 4 tokens (<TYPE> <alias> <transports> <v4addr> <v6addr>)
 	// Also accept empty/missing v4/v6 as empty strings.
-	if len(txt) < 1 {
-		return errors.New("TSYNC: missing fields")
+	if len(txt) < 4 {
+		return errors.New("TSYNC: requires at least 4 fields")
 	}
 	var t uint16
 	idx := 0

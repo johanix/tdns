@@ -74,7 +74,7 @@ var delStatusCmd = &cobra.Command{
 		for _, rr := range dr.SyncStatus.AAAAAdds {
 			out = append(out, fmt.Sprintf("ADD IPv6 GLUE|%s", rr.String()))
 		}
-		for _, rr := range dr.SyncStatus.AAAAAdds {
+		for _, rr := range dr.SyncStatus.AAAARemoves {
 			out = append(out, fmt.Sprintf("DEL IPv6 GLUE|%s", rr.String()))
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))
@@ -107,6 +107,8 @@ var delSyncCmd = &cobra.Command{
 		fmt.Printf("%s\n", dr.Msg)
 	},
 }
+
+var childpri, parpri string
 
 // Send a SIG(0) key rollover request to parent directly from CLI (not via tdns-server). This is mostly a debug command.
 var ddnsRollCmd = &cobra.Command{

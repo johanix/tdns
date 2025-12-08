@@ -58,6 +58,10 @@ func AddEROption(opt *dns.OPT, agentDomain string) error {
 		return fmt.Errorf("invalid agent domain name: %q", agentDomain)
 	}
 
+	if HasEROption(opt) {
+		return fmt.Errorf("ER option already present")
+	}
+
 	// Pack the domain name into DNS wire format
 	// Domain names in wire format can be up to 255 bytes (RFC1035)
 	domainBytes := make([]byte, 255)
@@ -154,7 +158,7 @@ func ErrorChannelReporter(qname string, qtype uint16, w dns.ResponseWriter, r *d
 	rest := strings.TrimPrefix(qname, "_er.")
 
 	// Find the second "_er." separator
-	erIndex := strings.Index(rest, "._er.")
+	erIndex := strings.LastIndex(rest, "._er.")
 	if erIndex == -1 {
 		sendErrorResponse(w, r, "ErrorChannelReporter: Invalid error channel QNAME format: %s (expected second '_er.' separator)\n", qname)
 		return

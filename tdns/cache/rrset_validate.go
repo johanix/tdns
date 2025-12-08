@@ -188,9 +188,9 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 			remaining := time.Until(expirationTime)
 			ttl := time.Duration(remaining.Seconds()) * time.Second
 			if ttl < time.Duration(GetMinTTL(rrset.RRs))*time.Second {
-				if len(rrset.RRs) > 0 {
-					rrset.RRs[0].Header().Ttl = uint32(ttl.Seconds())
-				} 
+				for _, rr := range rrset.RRs {
+					rr.Header().Ttl = uint32(ttl.Seconds())
+				}
 			}
 			return ValidationStateSecure, nil
 		}
@@ -202,7 +202,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 	if rrcache.Verbose {
 		log.Printf("ValidateRRset: no acceptable signature validated for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 	}
-	return ValidationStateInsecure, nil
+	return ValidationStateBogus, nil
 }
 
 // ValidateDNSKEYs validates a DNSKEY RRset using DS from the parent and the specific KSK named in the RRSIG.
@@ -218,8 +218,8 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
 	}
 
-	if rrcache.Debug && rrset.RRtype == dns.TypeNS {
-		fmt.Printf("ValidateDNSKEYs: rrset:\n%s", rrset.String(rrcache.LineWidth))
+	if rrcache.Debug {
+		log.Printf("ValidateDNSKEYs: rrset:\n%s", rrset.String(rrcache.LineWidth))
 	}
 	if len(rrset.RRSIGs) == 0 {
 		if verbose {
@@ -601,7 +601,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		// - NSEC3 owner (hashed) matches hashed qname
 		// - Type bitmap does NOT include qtype
 		// For now, we accept NSEC3 presence as secure (traditional denial)
-		return ValidationStateSecure, rcode, nil // NSEC3 present, we do not yet verify them, but we assume they are secure
+		return ValidationStateIndeterminate, rcode, nil // NSEC3 present, we do not yet verify them, but we assume they are secure
 	}
 
 	// No NSEC, no NSEC3, must know if zone is secure or insecure

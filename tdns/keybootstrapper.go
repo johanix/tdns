@@ -185,7 +185,12 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 					keyid, _ := strconv.ParseUint(tmp[1], 10, 16)
 					fmt.Printf("KeyBootstrapper: Updating key state for %s, keyid %d\n", keyname, keyid)
 
-					go kdb.UpdateKeyState(ctx, keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
+					go func() {
+						err := kdb.UpdateKeyState(ctx, keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
+						if err != nil {
+							log.Printf("KeyBootstrapper:Error updating key state for %s, keyid %d: %v", keyname, keyid, err)
+						}
+					}()
 				}
 
 				// Uppdatera keystate för alla aktiva nycklar
@@ -196,7 +201,12 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 				}
 
 				for _, key := range sak.Keys {
-					go kdb.UpdateKeyState(ctx, key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
+					go func() {
+						err := kdb.UpdateKeyState(ctx, key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
+						if err != nil {
+							log.Printf("KeyBootstrapper: Error updating key state for %s, keyid %d: %v", key.KeyRR.Header().Name, key.KeyRR.KeyTag(), err)
+						}
+					}()
 				}
 			}
 		}
