@@ -158,7 +158,11 @@ func initImr() {
 		}
 	}()
 
-	err = cli.Conf.StartImr(appCtx, nil)
+	imrrouter, err := conf.SetupAPIRouter(ctx)
+	if err != nil {
+		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error setting up IMR API router: %v", err))
+	}
+	err = cli.Conf.StartImr(appCtx, imrrouter)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
 	}

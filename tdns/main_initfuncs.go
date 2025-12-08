@@ -310,13 +310,6 @@ func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
 	go conf.ImrEngine(ctx, false) // Server mode: not quiet
 	log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
 
-	imrrouter, err := conf.SetupAPIRouter(ctx)
-	if err != nil {
-		return fmt.Errorf("Error setting up IMR API router: %v", err)
-	}
-	if err := APIdispatcher(conf, imrrouter, conf.Internal.APIStopCh); err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
 	return nil
 }
 
@@ -336,13 +329,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	go NotifyHandler(ctx, conf)
 	go DnsEngine(ctx, conf)
 	log.Printf("TDNS %s (%s): starting: notifyhandler, dnsengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	combinerrouter, err := conf.SetupAPIRouter(ctx)
-	if err != nil {
-		return fmt.Errorf("Error setting up Combiner API router: %v", err)
-	}
-	if err := APIdispatcher(conf, combinerrouter, conf.Internal.APIStopCh); err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
+
 	return nil
 }
 
@@ -456,13 +443,6 @@ func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) err
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
 	go conf.ImrEngine(ctx, false) // Server mode: not quiet
 	log.Printf("TDNS %s (%s): starting: imrengine", Globals.App.Name, AppTypeToString[Globals.App.Type])
-	apirouter, err := conf.SetupAPIRouter(ctx)
-	if err != nil {
-		return fmt.Errorf("Error setting up Scanner API router: %v", err)
-	}
-	if err := APIdispatcher(conf, apirouter, conf.Internal.APIStopCh); err != nil {
-		return fmt.Errorf("Error starting API dispatcher: %v", err)
-	}
 	return nil
 }
 

@@ -1934,9 +1934,17 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		}
 
 		var oobRRset core.RRset
+		// Initialize oobRRset with proper fields from nsRRset
+		oobRRset.Name = zonename
+		oobRRset.Class = dns.ClassINET
+		oobRRset.RRtype = dns.TypeNS
 		for _, rr := range nsRRset.RRs {
 			ns, ok := rr.(*dns.NS)
 			if !ok {
+				continue
+			}
+			// Ensure RR header matches the RRset
+			if rr.Header().Rrtype != dns.TypeNS {
 				continue
 			}
 			if inBailiwick(ns.Ns, zonename) {
