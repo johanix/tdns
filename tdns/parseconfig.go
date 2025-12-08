@@ -314,7 +314,7 @@ func (conf *Config) InitializeKeyDB() error {
 		return fmt.Errorf("invalid database file: '%s'", dbFile)
 	}
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
 
 		// Verify that we have a MUSIC DB file.
 		fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)

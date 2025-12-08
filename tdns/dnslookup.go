@@ -723,12 +723,16 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 				lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
 				continue // go to next server
 			}
-			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
-			}
 
 			if r == nil {
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: nil response from tryServer(dns.Exchange) qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
+				}
 				continue
+			}
+
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
 			}
 			rcode = r.MsgHdr.Rcode
 
@@ -808,8 +812,18 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 		return fmt.Errorf("rrset is nil or empty")
 	}
 
+	// Defensive check: ensure this is actually an NS RRset
+	if rrset.RRtype != dns.TypeNS {
+		return fmt.Errorf("CollectNSAddresses: expected NS RRset, got %s", dns.TypeToString[rrset.RRtype])
+	}
+
 	for _, rr := range rrset.RRs {
-		nsname := rr.(*dns.NS).Ns
+		// Defensive check: ensure each RR is actually an NS record
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			return fmt.Errorf("CollectNSAddresses: expected NS record, got %s", dns.TypeToString[rr.Header().Rrtype])
+		}
+		nsname := ns.Ns
 		// Query for A records
 		go func(nsname string) {
 			// log.Printf("CollectNSAddresses: querying for %s A records", nsname)
@@ -1695,6 +1709,12 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 }
 
 func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, cache.CacheContext, error, bool) {
+	if r == nil {
+		if Globals.Debug {
+			imr.Cache.Logger.Printf("*** handleAnswer: nil response for qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
+		}
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, fmt.Errorf("nil response in handleAnswer"), false
+	}
 
 	if Globals.Debug {
 		imr.Cache.Logger.Printf("*** handleAnswer: qname=%s, qtype=%s, rcode=%s, r: %s", qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode], PrintMsgFull(r, imr.LineWidth))

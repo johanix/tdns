@@ -195,6 +195,7 @@ type InternalConf struct {
 	ZoneDataRepo    *ZoneDataRepo
 	RRsetCache      *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine       *Imr
+	Scanner         *Scanner // Scanner instance for async job tracking
 }
 
 type AgentQs struct {

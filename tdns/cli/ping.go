@@ -17,7 +17,7 @@ import (
 func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
 	var clientKey string
 	switch parent {
-	case "server":
+	case "auth", "server":
 		clientKey = "tdns-server"
 	case "combiner":
 		clientKey = "tdns-combiner"
@@ -25,6 +25,10 @@ func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
 		clientKey = "tdns-msa"
 	case "agent":
 		clientKey = "tdns-agent"
+	case "scanner":
+		clientKey = "tdns-scanner"
+	case "imr":
+		clientKey = "tdns-imr"
 	default:
 		if dieOnError {
 			log.Fatalf("Unknown parent command: %s", parent)
@@ -45,7 +49,7 @@ func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
 	}
 
 	if tdns.Globals.Debug {
-		fmt.Printf("Using API client for %q\n", clientKey)
+		fmt.Printf("Using API client for %q:\nBaseUrl: %s\n", clientKey, client.BaseUrl)
 	}
 	return client, nil
 }
@@ -137,4 +141,5 @@ var PingCmd = &cobra.Command{
 func init() {
 	CombinerCmd.AddCommand(PingCmd)
 	AgentCmd.AddCommand(PingCmd)
+	// ScannerCmd.AddCommand will be called from scanner_cmds.go init()
 }

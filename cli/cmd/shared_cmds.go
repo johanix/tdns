@@ -68,5 +68,14 @@ func init() {
 	// From ../tdns/cli/base32_cmds.go
 	rootCmd.AddCommand(cli.Base32Cmd)
 
+	// From ../tdns/cli/scanner_cmds.go:
+	rootCmd.AddCommand(cli.ScannerCmd)
+
+	// From ../tdns/cli/imr_cmds.go:
+	rootCmd.AddCommand(cli.ImrCmd)
+
+	// From ../tdns/cli/auth_cmds.go:
+	rootCmd.AddCommand(cli.AuthCmd)
+
 	rootCmd.AddCommand(cli.VersionCmd)
 }

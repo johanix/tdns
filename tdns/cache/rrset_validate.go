@@ -104,13 +104,8 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 					}
 					// Add fetched keys to cache only after DS-based validation has been performed. 
 					// Compute min TTL for expiration.
-					minTTL := dkeys.RRs[0].Header().Ttl
-					for _, krr := range dkeys.RRs[1:] {
-						if krr.Header().Ttl < minTTL {
-							minTTL = krr.Header().Ttl
-						}
-					}
-					exp := time.Now().Add(time.Duration(minTTL) * time.Second)
+					exp := time.Now().Add(GetMinTTL(dkeys.RRs))
+					
 					// Attempt to validate the fetched DNSKEY RRset using DS before adding to DnskeyCache
 					// Only add validated/secure DNSKEYs to DnskeyCache, as it's used for validation of other data
 					vstate, err := rrcache.ValidateDNSKEYs(ctx, dkeys, fetcher, verbose)

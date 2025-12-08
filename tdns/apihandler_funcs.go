@@ -491,9 +491,9 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-
+		
 		resp := ScannerResponse{
 			AppName: app.Name,
 			Time:    time.Now(),
@@ -514,37 +514,38 @@ func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w h
 		log.Printf("API: received /scanner request (cmd: %s) from %s.\n",
 			sp.Command, r.RemoteAddr)
 
+		sp.Command = strings.ToUpper(sp.Command)
+
 		switch sp.Command {
-		case "scan":
-			log.Printf("APIscanner: processing scan request")
-
-			respch := make(chan ScanResponse, 1)
-
-			scannerq <- ScanRequest{
+		case "SCAN":
+			log.Printf("APIscanner: processing scan request with %d tuples", len(sp.ScanTuples))
+			
+			// Generate job ID
+			jobID := GenerateJobID()
+			
+			// Send request to scanner queue (non-blocking)
+			select {
+			case scannerq <- ScanRequest{
 				Cmd:        sp.Command,
 				ParentZone: sp.ParentZone,
 				ScanZones:  sp.ScanZones,
 				ScanType:   sp.ScanType,
-				Response:   respch,
-			}
-			select {
-			case sr := <-respch:
-				resp.Msg = sr.Msg
-				resp.Status = "ok"
-				resp.Time = sr.Time
-				if sr.Error {
-					resp.Error = true
-					resp.ErrorMsg = sr.ErrorMsg
-				}
-			case <-time.After(4 * time.Second):
+				ScanTuples: sp.ScanTuples,
+				JobID:      jobID,
+			}:
+				// Request queued successfully
+				resp.Status = "queued"
+				resp.JobID = jobID
+				resp.Msg = fmt.Sprintf("Scan request queued with job ID: %s", jobID)
+				log.Printf("APIscanner: scan request queued with job ID: %s", jobID)
+			default:
+				// Queue is full
 				resp.Error = true
-				resp.ErrorMsg = "Timeout waiting for scan response"
-			}
-			if resp.Msg == "" {
-				resp.Msg = fmt.Sprintf("Scan request processed")
+				resp.ErrorMsg = "Scanner queue is full, please try again later"
 			}
 
-		case "status": // XXX: this should not be about general config status, but about scanner specific details
+		case "status":
+			// General status (job status is handled by separate endpoint)
 			log.Printf("APIscanner: scanner status inquiry")
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
@@ -592,4 +593,94 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	//		Data:   resp,
 	//	}
 	return resp, nil
+}
+
+// APIscannerStatus handles GET requests for scan job status
+func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID := r.URL.Query().Get("job_id")
+		
+		if conf.Internal.Scanner == nil {
+			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
+			return
+		}
+
+		conf.Internal.Scanner.JobsMutex.RLock()
+		defer conf.Internal.Scanner.JobsMutex.RUnlock()
+
+		if jobID == "" {
+			// Return all jobs
+			log.Printf("APIscannerStatus: listing all jobs")
+			jobs := make([]*ScanJobStatus, 0, len(conf.Internal.Scanner.Jobs))
+			for _, job := range conf.Internal.Scanner.Jobs {
+				jobs = append(jobs, job)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(jobs)
+			return
+		}
+
+		// Return specific job
+		log.Printf("APIscannerStatus: job status inquiry for job ID: %s", jobID)
+		job, exists := conf.Internal.Scanner.Jobs[jobID]
+
+		if !exists {
+			http.Error(w, fmt.Sprintf("Job ID not found: %s", jobID), http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(job)
+	}
+}
+
+// APIscannerDelete handles DELETE requests for scan job deletion
+func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID := r.URL.Query().Get("job_id")
+		deleteAll := r.URL.Query().Get("all") == "true"
+		
+		if conf.Internal.Scanner == nil {
+			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
+			return
+		}
+
+		conf.Internal.Scanner.JobsMutex.Lock()
+		defer conf.Internal.Scanner.JobsMutex.Unlock()
+
+		resp := ScannerResponse{
+			AppName: Globals.App.Name,
+			Time:    time.Now(),
+		}
+
+		if deleteAll {
+			// Delete all jobs
+			count := len(conf.Internal.Scanner.Jobs)
+			conf.Internal.Scanner.Jobs = make(map[string]*ScanJobStatus)
+			log.Printf("APIscannerDelete: deleted all %d jobs", count)
+			resp.Msg = fmt.Sprintf("Deleted all %d jobs", count)
+			resp.Status = "success"
+		} else if jobID != "" {
+			// Delete specific job
+			_, exists := conf.Internal.Scanner.Jobs[jobID]
+			if !exists {
+				http.Error(w, fmt.Sprintf("Job ID not found: %s", jobID), http.StatusNotFound)
+				return
+			}
+			delete(conf.Internal.Scanner.Jobs, jobID)
+			log.Printf("APIscannerDelete: deleted job %s", jobID)
+			resp.Msg = fmt.Sprintf("Deleted job %s", jobID)
+			resp.Status = "success"
+		} else {
+			resp.Error = true
+			resp.ErrorMsg = "Either job_id or all=true must be specified"
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
 }

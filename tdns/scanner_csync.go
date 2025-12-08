@@ -393,8 +393,8 @@ func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([
 	validated := true
 	new_rrs, err := scanner.AuthQueryNG(zone, zone, dns.TypeNS, "tcp")
 	if err != nil {
-		scanner.Log["CSYNC"].Printf("Error from RecursiveDNSQuery(%s) to imr %s: %v",
-			zone, scanner.IMR, err)
+		scanner.Log["CSYNC"].Printf("Error from RecursiveDNSQuery(%s) to imr <internal>: %v",
+			zone, err)
 		return []dns.RR{}, false, err
 	}
 

@@ -16,6 +16,12 @@ import (
 
 var Conf tdns.Config
 
+// ImrCmd is the parent command for all IMR-related commands
+var ImrCmd = &cobra.Command{
+	Use:   "imr",
+	Short: "Interact with tdns-imr via API",
+}
+
 // Query command - takes name and type
 var ImrQueryCmd = &cobra.Command{
 	Use:   "query [name] [type]",
@@ -484,4 +490,11 @@ func init() {
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
 	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)
 	ImrSetCmd.AddCommand(imrSetLineWidthCmd)
+
+	// Add all IMR subcommands to ImrCmd
+	ImrCmd.AddCommand(ImrQueryCmd, ImrZoneCmd, ImrStatsCmd, ImrShowCmd, ImrFlushCmd, ImrSetCmd)
+	
+	// Add ping and daemon commands to ImrCmd (PingCmd and DaemonCmd are defined elsewhere)
+	ImrCmd.AddCommand(PingCmd)
+	ImrCmd.AddCommand(DaemonCmd)
 }
