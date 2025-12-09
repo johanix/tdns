@@ -821,7 +821,8 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 		// Defensive check: ensure each RR is actually an NS record
 		ns, ok := rr.(*dns.NS)
 		if !ok {
-			return fmt.Errorf("CollectNSAddresses: expected NS record, got %s", dns.TypeToString[rr.Header().Rrtype])
+			// return fmt.Errorf("CollectNSAddresses: expected NS record, got %s", dns.TypeToString[rr.Header().Rrtype])
+			continue
 		}
 		nsname := ns.Ns
 		// Query for A records

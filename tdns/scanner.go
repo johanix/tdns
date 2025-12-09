@@ -85,7 +85,10 @@ func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) Scanner {
 // GenerateJobID generates a unique job ID
 func GenerateJobID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fall back to time-based ID if crypto/rand fails
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -199,10 +202,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							defer wg.Done()
 							scanner.CheckCDS(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
 						}(tuple)
-						err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECDSScannerNotImplemented, sr.Edns0Options)
-						if err != nil {
-							log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
-						}
+						// err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECDSScannerNotImplemented, sr.Edns0Options)
+						//if err != nil {
+						//	log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+						//}
 					case ScanCSYNC:
 						go func(t ScanTuple) {
 							defer wg.Done()
@@ -247,8 +250,6 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			}
 		}
 	}
-
-	return nil
 }
 
 // findEnclosingZoneNS determines the enclosing zone for a given name and returns

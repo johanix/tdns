@@ -30,7 +30,7 @@ func main() {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
-	apirouter, err := conf.SetupAPIRouter(ctx) // sidecar mgmt API is a combo of TDNS and MUSIC
+	apirouter, err := conf.SetupSimpleAPIRouter(ctx) // sidecar mgmt API is a combo of TDNS and MUSIC
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error setting up API router: %v", err))
 	}

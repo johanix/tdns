@@ -158,7 +158,7 @@ func initImr() {
 		}
 	}()
 
-	imrrouter, err := conf.SetupAPIRouter(ctx)
+	imrrouter, err := cli.Conf.SetupSimpleAPIRouter(appCtx)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error setting up IMR API router: %v", err))
 	}

@@ -30,7 +30,7 @@ func main() {
 		tdns.Shutdowner(&conf, fmt.Sprintf("init: %v", err))
 	}
 
-	router, err := conf.SetupReporterAPIRouter(context.Background())
+	router, err := conf.SetupSimpleAPIRouter(context.Background())
 	if err != nil {
 		tdns.Shutdowner(&conf, fmt.Sprintf("router: %v", err))
 	}
