@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -23,10 +24,14 @@ import (
 	// "github.com/orcaman/concurrent-map/v2"
 )
 
+var engineWg sync.WaitGroup
+
 // startEngine wraps engine functions in a goroutine with error handling.
 // It logs errors if the engine function returns an error, preventing silent failures.
 func startEngine(app *AppDetails, name string, engineFunc func() error) {
+	engineWg.Add(1)
 	go func() {
+		defer engineWg.Done()
 		log.Printf("TDNS %s (%s): starting: %s", app.Name, AppTypeToString[app.Type], name)
 		if err := engineFunc(); err != nil {
 			log.Printf("Error from %s engine: %v", name, err)
@@ -37,7 +42,9 @@ func startEngine(app *AppDetails, name string, engineFunc func() error) {
 // startEngineNoError wraps engine functions that don't return errors.
 // This is for engines that handle errors internally or never fail during startup.
 func startEngineNoError(app *AppDetails, name string, engineFunc func()) {
+	engineWg.Add(1)
 	go func() {
+		defer engineWg.Done()
 		log.Printf("TDNS %s (%s): starting: %s", app.Name, AppTypeToString[app.Type], name)
 		engineFunc()
 	}()
@@ -312,6 +319,8 @@ func Shutdowner(conf *Config, msg string) {
 			close(conf.Internal.APIStopCh)
 		})
 	}
+	engineWg.Wait()  // Wait for all engines to finish (let's see if this works
+	log.Printf("%s: all engines finished", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
 }

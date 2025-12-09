@@ -149,6 +149,18 @@ func NeedsResigning(rrsig *dns.RRSIG) bool {
 	return false
 }
 
+// refreshActiveDnssecKeys invalidates the cache and re-fetches active DNSSEC keys.
+// context is used in error messages to indicate when/why the refresh occurred.
+func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*DnssecKeys, error) {
+	delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	if err != nil {
+		log.Printf("ensureActiveDnssecKeys: failed to get DNSSEC active keys for zone %s %s: %v", zd.ZoneName, context, err)
+		return nil, err
+	}
+	return dak, nil
+}
+
 // ensureActiveDnssecKeys ensures that a zone has active DNSSEC keys.
 // If no active keys exist, it will:
 // 1. Try to promote published keys to active (if available)
@@ -234,10 +246,8 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		}
 		log.Printf("ensureActiveDnssecKeys: %s", msg)
 		// Invalidate cache and re-fetch active keys after KSK generation
-		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		dak, err = zd.refreshActiveDnssecKeys(kdb, "after KSK generation")
 		if err != nil {
-			log.Printf("ensureActiveDnssecKeys: failed to get DNSSEC active keys for zone %s after KSK generation", zd.ZoneName)
 			return nil, err
 		}
 	}
@@ -260,10 +270,8 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		}
 		log.Printf("ensureActiveDnssecKeys: %s", msg)
 		// Invalidate cache and re-fetch active keys after ZSK generation
-		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		dak, err = zd.refreshActiveDnssecKeys(kdb, "after ZSK generation")
 		if err != nil {
-			log.Printf("ensureActiveDnssecKeys: failed to get DNSSEC active keys for zone %s after ZSK generation", zd.ZoneName)
 			return nil, err
 		}
 	}
@@ -273,10 +281,8 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	}
 
 	// Ensure we have fresh data before publishing (invalidate cache and re-fetch)
-	delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-	dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	dak, err = zd.refreshActiveDnssecKeys(kdb, "before publishing")
 	if err != nil {
-		log.Printf("ensureActiveDnssecKeys: failed to get fresh DNSSEC active keys for zone %s before publishing", zd.ZoneName)
 		return nil, err
 	}
 

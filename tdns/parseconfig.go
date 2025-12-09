@@ -143,6 +143,15 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// log.Printf("Before decoding configuration")
 	}
 
+	// Set default for apiserver.usetls (default: true) before decoding
+	// Check if usetls was explicitly set in the config by checking the raw map
+	if apiserverMap, ok := configMap["apiserver"].(map[string]interface{}); ok {
+		if _, explicitlySet := apiserverMap["usetls"]; !explicitlySet {
+			// usetls was not explicitly set, set default to true in the map
+			apiserverMap["usetls"] = true
+		}
+	}
+
 	// Decode the entire config at once
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding config: %v", err)

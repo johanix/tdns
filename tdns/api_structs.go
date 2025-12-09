@@ -345,6 +345,8 @@ type ScanJobStatus struct {
 	StartedAt  *time.Time         `json:"started_at,omitempty"`
 	CompletedAt *time.Time        `json:"completed_at,omitempty"`
 	TotalTuples int              `json:"total_tuples"`
+	IgnoredTuples int            `json:"ignored_tuples"`
+	ErrorTuples int            `json:"error_tuples"`
 	ProcessedTuples int          `json:"processed_tuples"`
 	Responses  []ScanTupleResponse `json:"responses,omitempty"`
 	Error      bool               `json:"error,omitempty"`

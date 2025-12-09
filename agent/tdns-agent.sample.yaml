@@ -19,12 +19,6 @@ agent:
       baseurl:		dns://dns.{TARGET}:{PORT}/ # TARGET will be expanded to identity
       port:		8998
 
-cli:
-   tdnsd:
-      baseurl:          https://127.0.0.1:8989/api/v1
-      apikey:           winter-is-coming-santa-stuck-in-chimney
-      authmethod:       X-API-Key
-
 service:
    name:		TDNS-AGENT
    verbose:		true
@@ -41,7 +35,6 @@ dnsengine:
       filetmpl:		"%s/%s.zone.new"		# zonename.zone
 
 apiserver:
-   usetls:		true
    addresses:     	[ 127.0.0.1:8987 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
    certfile:		/etc/tdns/certs/localhost..crt

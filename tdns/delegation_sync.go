@@ -18,8 +18,9 @@ import (
 
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, conf *Config) error {
 
-	time.Sleep(2 * time.Second)
 	log.Printf("DelegationSyncher: sleeping for 2 seconds to allow ImrEngine to start")
+	time.Sleep(2 * time.Second)
+
 	if conf.Internal.ImrEngine == nil {
 		log.Printf("DelegationSyncher: imr is nil. Terminating.")
 		return fmt.Errorf("DelegationSyncher: imr is nil")

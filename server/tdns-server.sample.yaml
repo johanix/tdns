@@ -162,8 +162,8 @@ log:
    file:		/var/log/axfr.net/tdns-server.log
 
 common:
-   servername:		tdnsd
-   command:		/usr/local/libexec/tdnsd
+   servername:		tdns-server
+   command:		/usr/local/libexec/tdns-server
 
 # This is where registrars are declared, including where they want notifications/updates.
 # There is a mapping from child zones (per parent zone) to these registrars and that will

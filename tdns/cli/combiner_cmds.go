@@ -74,36 +74,48 @@ func readZoneFile(filename string) (map[string][]string, error) {
 	return data, nil
 }
 
+// Helper function to execute a combiner API request
+func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*tdns.CombinerResponse, error) {
+	parent, _ := getCommandContext(cmdName)
+	
+	api, err := getApiClient(parent, true)
+	if err != nil {
+		return nil, fmt.Errorf("error getting API client: %v", err)
+	}
+
+	req := tdns.CombinerPost{
+		Command: command,
+		Zone:    zone,
+		Data:    data,
+	}
+
+	_, buf, err := api.RequestNG("POST", "/combiner", req, true)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %v", err)
+	}
+
+	var resp tdns.CombinerResponse
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if resp.Error {
+		return nil, fmt.Errorf("API error: %s", resp.ErrorMsg)
+	}
+
+	return &resp, nil
+}
+
 var combinerListDataCmd = &cobra.Command{
 	Use:   "list-data [zone]",
 	Short: "List local data added to a zone in the combiner",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("list-data")
 		zone := args[0]
 
-		api, err := getApiClient(parent, true)
+		resp, err := executeCombinerRequest("list-data", zone, "list", nil)
 		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
-		req := tdns.CombinerPost{
-			Command: "list",
-			Zone:    zone,
-		}
-
-		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var resp tdns.CombinerResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
+			log.Fatalf("%v", err)
 		}
 
 		if len(resp.Data) == 0 {
@@ -157,7 +169,6 @@ Example contents (for a zone named "example.com"):
 `,
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("add-data")
 		zone := dns.Fqdn(args[0])
 		file := args[1]
 
@@ -167,29 +178,9 @@ Example contents (for a zone named "example.com"):
 			log.Fatalf("Error reading zone file: %v", err)
 		}
 
-		api, err := getApiClient(parent, true)
+		resp, err := executeCombinerRequest("add-data", zone, "add", data)
 		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
-		req := tdns.CombinerPost{
-			Command: "add",
-			Zone:    zone,
-			Data:    data,
-		}
-
-		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var resp tdns.CombinerResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
+			log.Fatalf("%v", err)
 		}
 
 		fmt.Println(resp.Msg)
@@ -208,7 +199,6 @@ Example contents (for a zone named "example.com"):
 `,
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("remove-data")
 		zone := dns.Fqdn(args[0])
 		file := args[1]
 
@@ -218,29 +208,9 @@ Example contents (for a zone named "example.com"):
 			log.Fatalf("Error reading zone file: %v", err)
 		}
 
-		api, err := getApiClient(parent, true)
+		resp, err := executeCombinerRequest("remove-data", zone, "remove", data)
 		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
-		req := tdns.CombinerPost{
-			Command: "remove",
-			Zone:    zone,
-			Data:    data,
-		}
-
-		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var resp tdns.CombinerResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
+			log.Fatalf("%v", err)
 		}
 
 		fmt.Println(resp.Msg)

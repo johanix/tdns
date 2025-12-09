@@ -715,7 +715,6 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		}
 
 		conf.Internal.Scanner.JobsMutex.RLock()
-		defer conf.Internal.Scanner.JobsMutex.RUnlock()
 
 		if jobID == "" {
 			// Return all jobs - create deep copies to avoid race conditions during encoding
@@ -724,6 +723,7 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			for _, job := range conf.Internal.Scanner.Jobs {
 				jobs = append(jobs, deepCopyScanJobStatus(job))
 			}
+			conf.Internal.Scanner.JobsMutex.RUnlock()
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(jobs)
 			return
@@ -738,8 +738,11 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
+		job = deepCopyScanJobStatus(job)
+		conf.Internal.Scanner.JobsMutex.RUnlock()
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(deepCopyScanJobStatus(job))
+		json.NewEncoder(w).Encode(job)
 	}
 }
 

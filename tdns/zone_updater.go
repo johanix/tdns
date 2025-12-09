@@ -539,12 +539,6 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	// dump.P(ur)
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
-	zd.mu.Lock()
-	defer func() {
-		zd.mu.Unlock()
-		zd.BumpSerial()
-	}()
-
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil && zd.Options[OptOnlineSigning] {
 		log.Printf("ApplyZoneUpdateToZoneData: GetDnssecKeys failed for zone %s (online-signing enabled), attempting to ensure keys exist", zd.ZoneName)
@@ -570,6 +564,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	}
 
 	var updated bool
+
+	zd.mu.Lock()
+	defer func() {
+		zd.mu.Unlock()
+		zd.BumpSerial()
+	}()
 
 	log.Printf("ApplyZoneUpdateToZoneData: processing %d actions for zone %s", len(ur.Actions), zd.ZoneName)
 	for _, rr := range ur.Actions {
@@ -629,7 +629,11 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
 			} else {
-				zd.SignRRset(&rrset, ownerName, dak, true)
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true)
+				if err != nil {
+					log.Printf("ApplyUpdateToZoneData: Error signing %s RRset for %s: %v", rrtypestr, ownerName, err)
+					// Continue anyway - the record is still added, just not signed
+				}
 				owner.RRtypes.Set(rrtype, rrset)
 			}
 			updated = true
@@ -664,7 +668,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			log.Printf("ApplyUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
-			_, err := zd.SignRRset(&rrset, ownerName, dak, true)
+			_, err = zd.SignRRset(&rrset, ownerName, dak, true)
 			if err != nil {
 				log.Printf("ApplyUpdateToZoneData: Error signing %s RRset for %s: %v", rrtypestr, ownerName, err)
 				// Continue anyway - the record is still added, just not signed

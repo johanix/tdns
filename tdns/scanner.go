@@ -154,6 +154,8 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					Status:         "processing",
 					CreatedAt:      time.Now(),
 					TotalTuples:    len(sr.ScanTuples),
+					IgnoredTuples:  0,
+					ErrorTuples:    0,
 					ProcessedTuples: 0,
 				}
 				startedAt := time.Now()
@@ -170,6 +172,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 				for _, tuple := range sr.ScanTuples {
 					if tuple.Zone == "" {
 						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
+						job.IgnoredTuples++
 						continue
 					}
 					
@@ -177,12 +180,13 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					wg.Add(1)
 
 					switch sr.ScanType {
+					/*
 					case ScanRRtype:
 						log.Printf("ScannerEngine: ScanRRtype not implemented")
-						err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
-						if err != nil {
-							log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
-						}
+						err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
+						//if err != nil {
+						//	log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+						//}
 						go func(t ScanTuple) {
 							defer wg.Done()
 							newData := CurrentScanData{}
@@ -196,6 +200,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							}
 							responseCh <- response
 						}(tuple)
+					*/
 					case ScanCDS:
 						log.Printf("go scanner.CheckCDS(sr)")
 						go func(t ScanTuple) {
@@ -451,8 +456,8 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 		}
 		if resp == nil || resp.RRset == nil {
 			lg.Printf("CheckCDS: Zone %s: no CDS RRset found", zone)
-			response.Error = true
-			response.ErrorMsg = "no CDS RRset found"
+			response.Error = false
+			response.DataChanged = false
 			responseCh <- response
 			return
 		}
