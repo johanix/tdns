@@ -43,7 +43,7 @@ var ScanCdsCmd = &cobra.Command{
 
 		// Get zones from command arguments
 		var zones []string
-		
+
 		// First, use zones from command arguments if provided
 		if len(args) > 0 {
 			for _, arg := range args {
@@ -53,7 +53,7 @@ var ScanCdsCmd = &cobra.Command{
 				}
 			}
 		}
-		
+
 		// If no zones from arguments, fall back to --zone flag (single zone)
 		if len(zones) == 0 {
 			if tdns.Globals.Zonename == "" {
@@ -352,7 +352,7 @@ var DeleteCmd = &cobra.Command{
 		}
 
 		deleteAll, _ := cmd.Flags().GetBool("all")
-		
+
 		var endpoint string
 		if deleteAll {
 			endpoint = "/scanner/delete?all=true"
@@ -395,29 +395,28 @@ var DeleteCmd = &cobra.Command{
 func init() {
 	// Add scan subcommands
 	ScanCmd.AddCommand(ScanCdsCmd)
-	
+
 	// Add --delete flag to ResultsCmd
 	ResultsCmd.Flags().Bool("delete", false, "Delete the job after retrieving results")
-	
+
 	// Add --all flag to DeleteCmd
 	DeleteCmd.Flags().Bool("all", false, "Delete all jobs")
-	
+
 	// Add scan to scanner
 	ScannerCmd.AddCommand(ScanCmd)
-	
+
 	// Add status command to scanner
 	ScannerCmd.AddCommand(StatusCmd)
-	
+
 	// Add results command to scanner
 	ScannerCmd.AddCommand(ResultsCmd)
-	
+
 	// Add delete command to scanner
 	ScannerCmd.AddCommand(DeleteCmd)
-	
+
 	// Add ping to scanner (PingCmd is defined in ping.go)
 	ScannerCmd.AddCommand(PingCmd)
-	
+
 	// Add daemon commands to scanner (DaemonCmd is defined in start_cmds.go)
 	ScannerCmd.AddCommand(DaemonCmd)
 }
-

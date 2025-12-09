@@ -303,4 +303,3 @@ func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport s
 	resp := <-response
 	return resp.rrset, resp.err
 }
-

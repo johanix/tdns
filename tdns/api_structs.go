@@ -231,14 +231,14 @@ const (
 
 var ScanTypeToString = map[ScanType]string{
 	ScanRRtype: "rrtype",
-	ScanCDS: "cds",
-	ScanCSYNC: "csync",
+	ScanCDS:    "cds",
+	ScanCSYNC:  "csync",
 	ScanDNSKEY: "dnskey",
 }
 
 var StringToScanType = map[string]ScanType{
 	"rrtype": ScanRRtype,
-	"cds": ScanCDS,
+	"cds":    ScanCDS,
 	"csync":  ScanCSYNC,
 	"dnskey": ScanDNSKEY,
 }
@@ -301,30 +301,30 @@ func rrsetToString(rrset *core.RRset) *core.RRsetString {
 }
 
 type ScanTuple struct {
-	Zone string	// zone to scan	// 
+	Zone string // zone to scan	//
 	// Type ScanType	// type of test to perform	// ScanRRtype | ScanCSYNC | ScanDNSKEY
-	CurrentData CurrentScanData	// current data for the test
-	Options     []string  // "all-ns", ...
+	CurrentData CurrentScanData // current data for the test
+	Options     []string        // "all-ns", ...
 }
 
 // ScanTupleResponse contains the result of scanning a single ScanTuple
 type ScanTupleResponse struct {
-	Qname        string              // The qname that was queried
-	ScanType     ScanType            // The type of scan performed
-	Options      []string            // Options that were used (e.g., "all-ns")
-	NewData      CurrentScanDataJSON // The new data retrieved from the scan (JSON-serializable)
-	DataChanged  bool                // Whether the new data differs from the old data (from ScanTuple.CurrentData)
-	AllNSInSync  bool                // If "all-ns" option was set, whether all NS were in sync (false if not applicable)
-	Error        bool                // Whether an error occurred
-	ErrorMsg     string              // Error message if Error is true
+	Qname       string              // The qname that was queried
+	ScanType    ScanType            // The type of scan performed
+	Options     []string            // Options that were used (e.g., "all-ns")
+	NewData     CurrentScanDataJSON // The new data retrieved from the scan (JSON-serializable)
+	DataChanged bool                // Whether the new data differs from the old data (from ScanTuple.CurrentData)
+	AllNSInSync bool                // If "all-ns" option was set, whether all NS were in sync (false if not applicable)
+	Error       bool                // Whether an error occurred
+	ErrorMsg    string              // Error message if Error is true
 }
 
 type ScannerPost struct {
-	Command    string       // "scan" | "status"
-	ParentZone string       // Legacy field
-	ScanZones  []string     // Legacy field
-	ScanType   ScanType       // Legacy field: "cds" | "csync" | "dnskey"
-	ScanTuples []ScanTuple  // New field: list of scan tuples for scan requests
+	Command    string      // "scan" | "status"
+	ParentZone string      // Legacy field
+	ScanZones  []string    // Legacy field
+	ScanType   ScanType    // Legacy field: "cds" | "csync" | "dnskey"
+	ScanTuples []ScanTuple // New field: list of scan tuples for scan requests
 }
 
 type ScannerResponse struct {
@@ -339,16 +339,16 @@ type ScannerResponse struct {
 
 // ScanJobStatus represents the status of a scan job
 type ScanJobStatus struct {
-	JobID      string             `json:"job_id"`
-	Status     string             `json:"status"` // "queued", "processing", "completed", "failed"
-	CreatedAt  time.Time          `json:"created_at"`
-	StartedAt  *time.Time         `json:"started_at,omitempty"`
-	CompletedAt *time.Time        `json:"completed_at,omitempty"`
-	TotalTuples int              `json:"total_tuples"`
-	IgnoredTuples int            `json:"ignored_tuples"`
-	ErrorTuples int            `json:"error_tuples"`
-	ProcessedTuples int          `json:"processed_tuples"`
-	Responses  []ScanTupleResponse `json:"responses,omitempty"`
-	Error      bool               `json:"error,omitempty"`
-	ErrorMsg   string             `json:"error_msg,omitempty"`
+	JobID           string              `json:"job_id"`
+	Status          string              `json:"status"` // "queued", "processing", "completed", "failed"
+	CreatedAt       time.Time           `json:"created_at"`
+	StartedAt       *time.Time          `json:"started_at,omitempty"`
+	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
+	TotalTuples     int                 `json:"total_tuples"`
+	IgnoredTuples   int                 `json:"ignored_tuples"`
+	ErrorTuples     int                 `json:"error_tuples"`
+	ProcessedTuples int                 `json:"processed_tuples"`
+	Responses       []ScanTupleResponse `json:"responses,omitempty"`
+	Error           bool                `json:"error,omitempty"`
+	ErrorMsg        string              `json:"error_msg,omitempty"`
 }

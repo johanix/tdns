@@ -54,7 +54,7 @@ type Scanner struct {
 	// Conf  *Config
 	// LabDB *LabDB
 	// RRtype  string
-	AuthQueryQ  chan AuthQueryRequest
+	AuthQueryQ chan AuthQueryRequest
 	// IMR         string
 	ImrEngine   *Imr
 	LogFile     string
@@ -63,8 +63,8 @@ type Scanner struct {
 	Verbose     bool
 	Debug       bool
 	// Job storage for async scan requests
-	Jobs        map[string]*ScanJobStatus
-	JobsMutex   sync.RWMutex
+	Jobs      map[string]*ScanJobStatus
+	JobsMutex sync.RWMutex
 }
 
 func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) Scanner {
@@ -119,7 +119,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	scanner.AddLogger("CSYNC")
 	scanner.AddLogger("DNSKEY")
 	scanner.AddLogger("GENERIC")
-	
+
 	// Store scanner instance in Config for API handler access
 	conf.Internal.Scanner = &scanner
 
@@ -142,64 +142,64 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			case "SCAN":
 				log.Printf("ScannerEngine: Received SCAN request with %d tuples to scan (JobID: %s)", len(sr.ScanTuples), sr.JobID)
 				scanner.ImrEngine = conf.Internal.ImrEngine
-				
+
 				// Create or update job status
 				jobID := sr.JobID
 				if jobID == "" {
 					jobID = GenerateJobID()
 				}
-				
+
 				job := &ScanJobStatus{
-					JobID:          jobID,
-					Status:         "processing",
-					CreatedAt:      time.Now(),
-					TotalTuples:    len(sr.ScanTuples),
-					IgnoredTuples:  0,
-					ErrorTuples:    0,
+					JobID:           jobID,
+					Status:          "processing",
+					CreatedAt:       time.Now(),
+					TotalTuples:     len(sr.ScanTuples),
+					IgnoredTuples:   0,
+					ErrorTuples:     0,
 					ProcessedTuples: 0,
 				}
 				startedAt := time.Now()
 				job.StartedAt = &startedAt
-				
+
 				scanner.JobsMutex.Lock()
 				scanner.Jobs[jobID] = job
 				scanner.JobsMutex.Unlock()
-				
+
 				// Create response channel for collecting all scan results
 				responseCh := make(chan ScanTupleResponse, len(sr.ScanTuples))
 				var wg sync.WaitGroup
-				
+
 				for _, tuple := range sr.ScanTuples {
 					if tuple.Zone == "" {
 						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
 						job.IgnoredTuples++
 						continue
 					}
-					
+
 					log.Printf("ScannerEngine: Zone %q, Current data:\n%+v", tuple.Zone, tuple.CurrentData)
 					wg.Add(1)
 
 					switch sr.ScanType {
 					/*
-					case ScanRRtype:
-						log.Printf("ScannerEngine: ScanRRtype not implemented")
-						err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
-						//if err != nil {
-						//	log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
-						//}
-						go func(t ScanTuple) {
-							defer wg.Done()
-							newData := CurrentScanData{}
-							response := ScanTupleResponse{
-								Qname:    t.Zone,
-								ScanType: sr.ScanType,
-								Options:  t.Options,
-								NewData:  newData.ToJSON(),
-								Error:    true,
-								ErrorMsg: "ScanRRtype not implemented",
-							}
-							responseCh <- response
-						}(tuple)
+						case ScanRRtype:
+							log.Printf("ScannerEngine: ScanRRtype not implemented")
+							err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
+							//if err != nil {
+							//	log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+							//}
+							go func(t ScanTuple) {
+								defer wg.Done()
+								newData := CurrentScanData{}
+								response := ScanTupleResponse{
+									Qname:    t.Zone,
+									ScanType: sr.ScanType,
+									Options:  t.Options,
+									NewData:  newData.ToJSON(),
+									Error:    true,
+									ErrorMsg: "ScanRRtype not implemented",
+								}
+								responseCh <- response
+							}(tuple)
 					*/
 					case ScanCDS:
 						log.Printf("go scanner.CheckCDS(sr)")
@@ -224,18 +224,18 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						}(tuple)
 					}
 				}
-				
+
 				// Wait for all scans to complete and collect responses
 				go func(jobID string) {
 					wg.Wait()
 					close(responseCh)
-					
+
 					// Collect all responses
 					var responses []ScanTupleResponse
 					for resp := range responseCh {
 						responses = append(responses, resp)
 					}
-					
+
 					// Update job status
 					scanner.JobsMutex.Lock()
 					job, exists := scanner.Jobs[jobID]
@@ -247,7 +247,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						job.CompletedAt = &completedAt
 					}
 					scanner.JobsMutex.Unlock()
-					
+
 					log.Printf("ScannerEngine: Job %s completed with %d scan responses", jobID, len(responses))
 				}(jobID)
 			default:
@@ -527,7 +527,7 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 		response.DataChanged = true // New data found where none existed before
 		lg.Printf("CheckCDS: Zone %s: CDS RRset retrieved (no previous data to compare)", zone)
 	}
-	
+
 	responseCh <- response
 }
 
@@ -537,7 +537,7 @@ func (scanner *Scanner) CheckCSYNC_NG(ctx context.Context, tuple ScanTuple, scan
 	if err != nil {
 		log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
 	}
-	
+
 	// Send response indicating not implemented
 	newData := CurrentScanData{}
 	response := ScanTupleResponse{
@@ -557,7 +557,7 @@ func (scanner *Scanner) CheckDNSKEY(ctx context.Context, tuple ScanTuple, scanTy
 	if err != nil {
 		log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
 	}
-	
+
 	// Send response indicating not implemented
 	newData := CurrentScanData{}
 	response := ScanTupleResponse{

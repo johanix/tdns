@@ -18,4 +18,3 @@ func init() {
 	AuthCmd.AddCommand(PingCmd)
 	AuthCmd.AddCommand(DaemonCmd)
 }
-

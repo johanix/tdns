@@ -260,7 +260,9 @@ func (conf *Config) StartServer(ctx context.Context, apirouter *mux.Router) erro
 	startEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
 	startEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
 	startEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
-	startEngine(&Globals.App, "DelegationSyncher", func() error { return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf) })
+	startEngine(&Globals.App, "DelegationSyncher", func() error {
+		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
+	})
 	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	startEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
@@ -303,7 +305,9 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	startEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
 	startEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
 	startEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
-	startEngine(&Globals.App, "DelegationSyncher", func() error { return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf) })
+	startEngine(&Globals.App, "DelegationSyncher", func() error {
+		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
+	})
 	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	return nil
@@ -319,7 +323,7 @@ func Shutdowner(conf *Config, msg string) {
 			close(conf.Internal.APIStopCh)
 		})
 	}
-	engineWg.Wait()  // Wait for all engines to finish (let's see if this works
+	engineWg.Wait() // Wait for all engines to finish (let's see if this works
 	log.Printf("%s: all engines finished", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)

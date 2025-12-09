@@ -164,7 +164,7 @@ func (conf *Config) SetupApiTransport() error {
 			return nil
 		},
 	)
-	
+
 	// Non-blocking send: if channel is full, return error instead of blocking
 	select {
 	case conf.Internal.DeferredUpdateQ <- du:

@@ -74,7 +74,7 @@ func ParseProviderSyncOption(data []byte) (*ProviderSyncOption, error) {
 		return nil, fmt.Errorf("ProviderSyncOption: data too short")
 	}
 
-    body := data[4:]
+	body := data[4:]
 	bodycopy := make([]byte, len(body))
 	copy(bodycopy, body)
 

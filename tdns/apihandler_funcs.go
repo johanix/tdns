@@ -494,7 +494,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		
+
 		resp := ScannerResponse{
 			AppName: app.Name,
 			Time:    time.Now(),
@@ -520,10 +520,10 @@ func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *K
 		switch sp.Command {
 		case "SCAN":
 			log.Printf("APIscanner: processing scan request with %d tuples", len(sp.ScanTuples))
-			
+
 			// Generate job ID
 			jobID := GenerateJobID()
-			
+
 			// Send request to scanner queue (non-blocking)
 			select {
 			case scannerq <- ScanRequest{
@@ -604,13 +604,13 @@ func deepCopyScanJobStatus(src *ScanJobStatus) *ScanJobStatus {
 	}
 
 	dst := &ScanJobStatus{
-		JobID:          src.JobID,
-		Status:         src.Status,
-		CreatedAt:      src.CreatedAt,
-		TotalTuples:    src.TotalTuples,
+		JobID:           src.JobID,
+		Status:          src.Status,
+		CreatedAt:       src.CreatedAt,
+		TotalTuples:     src.TotalTuples,
 		ProcessedTuples: src.ProcessedTuples,
-		Error:          src.Error,
-		ErrorMsg:       src.ErrorMsg,
+		Error:           src.Error,
+		ErrorMsg:        src.ErrorMsg,
 	}
 
 	// Deep copy time pointers
@@ -708,7 +708,7 @@ func deepCopyRRsetString(src *core.RRsetString) *core.RRsetString {
 func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jobID := r.URL.Query().Get("job_id")
-		
+
 		if conf.Internal.Scanner == nil {
 			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
 			return
@@ -751,7 +751,7 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 	return func(w http.ResponseWriter, r *http.Request) {
 		jobID := r.URL.Query().Get("job_id")
 		deleteAll := r.URL.Query().Get("all") == "true"
-		
+
 		if conf.Internal.Scanner == nil {
 			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
 			return

@@ -80,7 +80,7 @@ func executeCombinerRequest(cmdName, zone, command string, data map[string][]str
 	if err != nil {
 		return nil, fmt.Errorf("getting command context: %w", err)
 	}
-	
+
 	api, err := getApiClient(parent, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
@@ -115,7 +115,7 @@ var combinerListDataCmd = &cobra.Command{
 	Long:  `List local data added to a zone in the combiner. Zone can be specified via --zone flag.`,
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-        PrepArgs("zonename")
+		PrepArgs("zonename")
 
 		resp, err := executeCombinerRequest("list-data", tdns.Globals.Zonename, "list", nil)
 		if err != nil {
@@ -171,9 +171,9 @@ Example contents (for a zone named "example.com"):
   example.com. 86400 IN NS ns1.provider.com.
   example.com. 86400 IN NS ns2.service.net.
 `,
-	Args:  cobra.ExactArgs(1),
+	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-        PrepArgs("zonename")
+		PrepArgs("zonename")
 		file := args[0]
 
 		// Read and parse the zone file
@@ -202,9 +202,9 @@ Example contents (for a zone named "example.com"):
   example.com. 86400 IN NS ns1.provider.com.
   example.com. 86400 IN NS ns2.service.net.
 `,
-	Args:  cobra.ExactArgs(1),
+	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-        PrepArgs("zonename")
+		PrepArgs("zonename")
 		file := args[0]
 
 		// Read and parse the zone file
