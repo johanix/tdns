@@ -540,22 +540,13 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil && zd.Options[OptOnlineSigning] {
+	if err != nil && zd.Options[OptOnlineSigning] && (err != nil || dak == nil || len(dak.KSKs) == 0) {
 		log.Printf("ApplyZoneUpdateToZoneData: GetDnssecKeys failed for zone %s (online-signing enabled), attempting to ensure keys exist", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
 		dak, err = zd.ensureActiveDnssecKeys(kdb)
 		if err != nil {
 			log.Printf("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys for zone %s: %v", zd.ZoneName, err)
 			return false, err
-		}
-	}
-	if (dak == nil || len(dak.KSKs) == 0) && zd.Options[OptOnlineSigning] {
-		log.Printf("ApplyZoneUpdateToZoneData: zone %s has no active KSKs and online-signing is enabled, attempting to ensure keys exist", zd.ZoneName)
-		// Try to ensure active keys exist (will generate if needed)
-		dak, err = zd.ensureActiveDnssecKeys(kdb)
-		if err != nil {
-			log.Printf("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys for zone %s: %v", zd.ZoneName, err)
-			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected: %v", zd.ZoneName, err)
 		}
 		if dak == nil || len(dak.KSKs) == 0 {
 			log.Printf("ApplyZoneUpdateToZoneData: zone %s still has no active KSKs after ensureActiveDnssecKeys", zd.ZoneName)

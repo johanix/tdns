@@ -466,9 +466,9 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 		}
 		PrintKeyRR(rr, "DNSKEY", t, rr.KeyTag(), leftpad, rightmargin)
 	case *dns.KEY:
-		PrintKeyRR(rr, "KEY", "", rr.KeyTag(), leftpad, rightmargin)
+		PrintKeyRR(rr, "KEY", " KEY ;", rr.KeyTag(), leftpad, rightmargin)
 	case *dns.CDNSKEY:
-		PrintKeyRR(rr, "CDNSKEY", "", rr.KeyTag(), leftpad, rightmargin)
+		PrintKeyRR(rr, "CDNSKEY", " CDNSKEY ;", rr.KeyTag(), leftpad, rightmargin)
 	case *dns.DS:
 		PrintDsRR(rr, leftpad, rightmargin)
 	case *dns.RRSIG:

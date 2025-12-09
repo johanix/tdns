@@ -100,11 +100,11 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 	//api.Verbose = Globals.Verbose
 	// log.Printf("client is a: %T\n", api.Client)
 
-	if Globals.Debug {
-		log.Printf("Setting up %s API client:\n", name)
-		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
-			api.BaseUrl, api.apiKey, api.AuthMethod)
-	}
+//	if Globals.Debug {
+//		log.Printf("Setting up %s API client:\n", name)
+//		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
+//			api.BaseUrl, api.apiKey, api.AuthMethod)
+//	}
 
 	return &api
 }

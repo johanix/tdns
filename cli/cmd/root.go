@@ -118,6 +118,9 @@ type ApiDetails struct {
 }
 
 func initApi() {
+	if tdns.Globals.Debug {
+		fmt.Printf("initApi: setting up API clients for:")
+	}
 	for _, val := range cconf.ApiServers {
 		// XXX: here we should validate the conf for this apiserver
 		tmp := tdns.NewClient("tdns-cli", val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
@@ -126,8 +129,12 @@ func initApi() {
 		}
 		tdns.Globals.ApiClients[val.Name] = tmp
 		if tdns.Globals.Debug {
-			fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
+			// fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
+			fmt.Printf(" %s ", val.Name)
 		}
+	}
+	if tdns.Globals.Debug {
+		fmt.Printf("\n")
 	}
 
 	// for convenience we store the API client for "server" in the old place also

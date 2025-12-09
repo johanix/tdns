@@ -69,7 +69,7 @@ func getCommandContext(cmdName string) (parent string, chain []string) {
 				parent = "server" // Default to "server" for backward compatibility
 			}
 			if tdns.Globals.Debug {
-				fmt.Printf("getCommandContext: parent: %s, chain: %v\n", parent, args[:i+1])
+				// fmt.Printf("getCommandContext: parent: %s, chain: %v\n", parent, args[:i+1])
 			}
 			return parent, args[:i+1]
 		}
