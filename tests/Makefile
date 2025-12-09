@@ -1,0 +1,3 @@
+.PHONY: integration
+integration:
+	go test -count=1 -tags integration -run TestIntegration* -v ./...
