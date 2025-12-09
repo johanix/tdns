@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -569,13 +570,13 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		path, err := route.GetPathTemplate()
 		if err != nil {
-			log.Printf("ShowAPI: error getting path template: %v", err)
-			return err
+			// Skip routes without path templates (e.g., middleware routes)
+			return nil
 		}
 		methods, err := route.GetMethods()
 		if err != nil {
-			log.Printf("ShowAPI: error getting methods: %v", err)
-			return err
+			// Skip routes without methods (e.g., subrouters, middleware)
+			return nil
 		}
 		for _, m := range methods {
 			resp = append(resp, fmt.Sprintf("%-6s %s", m, path))
@@ -595,6 +596,114 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	return resp, nil
 }
 
+// deepCopyScanJobStatus creates a deep copy of a ScanJobStatus to avoid race conditions
+// during JSON encoding. All exported fields are copied, including nested slices and pointers.
+func deepCopyScanJobStatus(src *ScanJobStatus) *ScanJobStatus {
+	if src == nil {
+		return nil
+	}
+
+	dst := &ScanJobStatus{
+		JobID:          src.JobID,
+		Status:         src.Status,
+		CreatedAt:      src.CreatedAt,
+		TotalTuples:    src.TotalTuples,
+		ProcessedTuples: src.ProcessedTuples,
+		Error:          src.Error,
+		ErrorMsg:       src.ErrorMsg,
+	}
+
+	// Deep copy time pointers
+	if src.StartedAt != nil {
+		startedAtCopy := *src.StartedAt
+		dst.StartedAt = &startedAtCopy
+	}
+	if src.CompletedAt != nil {
+		completedAtCopy := *src.CompletedAt
+		dst.CompletedAt = &completedAtCopy
+	}
+
+	// Deep copy Responses slice
+	if src.Responses != nil {
+		dst.Responses = make([]ScanTupleResponse, len(src.Responses))
+		for i, resp := range src.Responses {
+			dst.Responses[i] = deepCopyScanTupleResponse(resp)
+		}
+	}
+
+	return dst
+}
+
+// deepCopyScanTupleResponse creates a deep copy of a ScanTupleResponse
+func deepCopyScanTupleResponse(src ScanTupleResponse) ScanTupleResponse {
+	dst := ScanTupleResponse{
+		Qname:       src.Qname,
+		ScanType:    src.ScanType,
+		DataChanged: src.DataChanged,
+		AllNSInSync: src.AllNSInSync,
+		Error:       src.Error,
+		ErrorMsg:    src.ErrorMsg,
+	}
+
+	// Deep copy Options slice
+	if src.Options != nil {
+		dst.Options = make([]string, len(src.Options))
+		copy(dst.Options, src.Options)
+	}
+
+	// Deep copy NewData (CurrentScanDataJSON)
+	dst.NewData = deepCopyCurrentScanDataJSON(src.NewData)
+
+	return dst
+}
+
+// deepCopyCurrentScanDataJSON creates a deep copy of CurrentScanDataJSON
+func deepCopyCurrentScanDataJSON(src CurrentScanDataJSON) CurrentScanDataJSON {
+	dst := CurrentScanDataJSON{}
+
+	// Deep copy RRsetString pointers
+	if src.RRset != nil {
+		dst.RRset = deepCopyRRsetString(src.RRset)
+	}
+	if src.CDS != nil {
+		dst.CDS = deepCopyRRsetString(src.CDS)
+	}
+	if src.CSYNC != nil {
+		dst.CSYNC = deepCopyRRsetString(src.CSYNC)
+	}
+	if src.DNSKEY != nil {
+		dst.DNSKEY = deepCopyRRsetString(src.DNSKEY)
+	}
+
+	return dst
+}
+
+// deepCopyRRsetString creates a deep copy of RRsetString
+func deepCopyRRsetString(src *core.RRsetString) *core.RRsetString {
+	if src == nil {
+		return nil
+	}
+
+	dst := &core.RRsetString{
+		Name:   src.Name,
+		RRtype: src.RRtype,
+	}
+
+	// Deep copy RRs slice
+	if src.RRs != nil {
+		dst.RRs = make([]string, len(src.RRs))
+		copy(dst.RRs, src.RRs)
+	}
+
+	// Deep copy RRSIGs slice
+	if src.RRSIGs != nil {
+		dst.RRSIGs = make([]string, len(src.RRSIGs))
+		copy(dst.RRSIGs, src.RRSIGs)
+	}
+
+	return dst
+}
+
 // APIscannerStatus handles GET requests for scan job status
 func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -609,18 +718,18 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		defer conf.Internal.Scanner.JobsMutex.RUnlock()
 
 		if jobID == "" {
-			// Return all jobs
+			// Return all jobs - create deep copies to avoid race conditions during encoding
 			log.Printf("APIscannerStatus: listing all jobs")
 			jobs := make([]*ScanJobStatus, 0, len(conf.Internal.Scanner.Jobs))
 			for _, job := range conf.Internal.Scanner.Jobs {
-				jobs = append(jobs, job)
+				jobs = append(jobs, deepCopyScanJobStatus(job))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(jobs)
 			return
 		}
 
-		// Return specific job
+		// Return specific job - create deep copy to avoid race conditions during encoding
 		log.Printf("APIscannerStatus: job status inquiry for job ID: %s", jobID)
 		job, exists := conf.Internal.Scanner.Jobs[jobID]
 
@@ -630,7 +739,7 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(job)
+		json.NewEncoder(w).Encode(deepCopyScanJobStatus(job))
 	}
 }
 

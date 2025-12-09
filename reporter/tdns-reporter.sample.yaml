@@ -12,26 +12,24 @@ reporters:
 
    notify:
       listen:		127.0.0.1:9998
-
    errorchannel:
       listen:		127.0.0.1:9999
 
 keys:
    tsig:
-      - name:		johani.key.
-        algorithm:	hmac-sha256
-        secret:		fjvJ7KwoL7oX9n+L5sOwYJqyuxS8Jwt5k2M+JIwTQ7E=
+      - name:           johani.key.
+        algorithm:      hmac-sha256
+        secret:         fjvJ7KwoL7oX9n+L5sOwYJqyuxS8Jwt5k2M+JIwTQ7E=
 
-      - name:		jonathan.key.
-        algorithm:	hmac-sha256
-        secret:		jkYMg8gccGs1upIgE+tLGAyquXDZyuc06YuFUPoM6Ac=
+      - name:           jonathan.key.
+        algorithm:      hmac-sha256
+        secret:         jkYMg8gccGs1upIgE+tLGAyquXDZyuc06YuFUPoM6Ac=
 
 apiserver:
    addresses:     	[ 127.0.0.1:8991 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
-   certfile:		/etc/tdns/certs/abra.ca.dabra..crt
-   keyfile:		/etc/tdns/certs/abra.ca.dabra..key
+   certfile:		   /etc/tdns/certs/localhost..crt
+   keyfile:		      /etc/tdns/certs/localhost..key
 
 log:
-   file:		/var/log/tdns/tdns-reporter.log
-
+   file:		         /var/log/tdns/tdns-reporter.log

@@ -547,14 +547,31 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil && zd.Options[OptOnlineSigning] {
-		return false, err
+		log.Printf("ApplyZoneUpdateToZoneData: GetDnssecKeys failed for zone %s (online-signing enabled), attempting to ensure keys exist", zd.ZoneName)
+		// Try to ensure active keys exist (will generate if needed)
+		dak, err = zd.ensureActiveDnssecKeys(kdb)
+		if err != nil {
+			log.Printf("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+			return false, err
+		}
 	}
-	if len(dak.KSKs) == 0 && zd.Options[OptOnlineSigning] {
-		return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
+	if (dak == nil || len(dak.KSKs) == 0) && zd.Options[OptOnlineSigning] {
+		log.Printf("ApplyZoneUpdateToZoneData: zone %s has no active KSKs and online-signing is enabled, attempting to ensure keys exist", zd.ZoneName)
+		// Try to ensure active keys exist (will generate if needed)
+		dak, err = zd.ensureActiveDnssecKeys(kdb)
+		if err != nil {
+			log.Printf("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected: %v", zd.ZoneName, err)
+		}
+		if dak == nil || len(dak.KSKs) == 0 {
+			log.Printf("ApplyZoneUpdateToZoneData: zone %s still has no active KSKs after ensureActiveDnssecKeys", zd.ZoneName)
+			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
+		}
 	}
 
 	var updated bool
 
+	log.Printf("ApplyZoneUpdateToZoneData: processing %d actions for zone %s", len(ur.Actions), zd.ZoneName)
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
@@ -647,7 +664,11 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			log.Printf("ApplyUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
-			zd.SignRRset(&rrset, zd.ZoneName, dak, true)
+			_, err := zd.SignRRset(&rrset, ownerName, dak, true)
+			if err != nil {
+				log.Printf("ApplyUpdateToZoneData: Error signing %s RRset for %s: %v", rrtypestr, ownerName, err)
+				// Continue anyway - the record is still added, just not signed
+			}
 			updated = true
 			// zd.Options["dirty"] = true
 		}

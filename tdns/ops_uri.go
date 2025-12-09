@@ -41,6 +41,9 @@ func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) err
 	apiurl := strings.Replace(baseurl, "{TARGET}", target, 1)
 	apiurl = strings.Replace(apiurl, "{PORT}", fmt.Sprintf("%d", port), 1)
 
+	// Ensure owner is FQDN
+	owner = dns.Fqdn(owner)
+
 	var uri = dns.URI{
 		Priority: 1,
 		Weight:   1,
@@ -53,6 +56,8 @@ func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) err
 		Class:  dns.ClassINET,
 		Ttl:    7200,
 	}
+
+	log.Printf("PublishUriRR: publishing URI RR: %s", uri.String())
 
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{

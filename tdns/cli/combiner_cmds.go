@@ -147,6 +147,14 @@ var combinerListDataCmd = &cobra.Command{
 var combinerAddDataCmd = &cobra.Command{
 	Use:   "add-data [zone] [file]",
 	Short: "Add local data to a zone passing through the combiner",
+	Long: `Add local data to a zone passing through the combiner.
+
+The file should contain one RR per line.
+
+Example contents (for a zone named "example.com"):
+  example.com. 86400 IN NS ns1.provider.com.
+  example.com. 86400 IN NS ns2.service.net.
+`,
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		parent, _ := getCommandContext("add-data")
@@ -188,7 +196,57 @@ var combinerAddDataCmd = &cobra.Command{
 	},
 }
 
+var combinerRemoveDataCmd = &cobra.Command{
+	Use:   "remove-data [zone] [file]",
+	Short: "Remove local data from a zone passing through the combiner",
+	Long: `Remove local data from a zone passing through the combiner.
+The file should contain one RR per line.
+
+Example contents (for a zone named "example.com"):
+  example.com. 86400 IN NS ns1.provider.com.
+  example.com. 86400 IN NS ns2.service.net.
+`,
+	Args:  cobra.ExactArgs(2),
+	Run: func(cmd *cobra.Command, args []string) {
+		parent, _ := getCommandContext("remove-data")
+		zone := dns.Fqdn(args[0])
+		file := args[1]
+
+		// Read and parse the zone file
+		data, err := readZoneFile(file)
+		if err != nil {
+			log.Fatalf("Error reading zone file: %v", err)
+		}
+
+		api, err := getApiClient(parent, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := tdns.CombinerPost{
+			Command: "remove",
+			Zone:    zone,
+			Data:    data,
+		}
+
+		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
+		if err != nil {
+			log.Fatalf("API request failed: %v", err)
+		}
+
+		var resp tdns.CombinerResponse
+		if err := json.Unmarshal(buf, &resp); err != nil {
+			log.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if resp.Error {
+			log.Fatalf("API error: %s", resp.ErrorMsg)
+		}
+
+		fmt.Println(resp.Msg)
+	},
+}
+
 func init() {
-	CombinerCmd.AddCommand(combinerAddDataCmd)
-	CombinerCmd.AddCommand(combinerListDataCmd)
+	CombinerCmd.AddCommand(combinerAddDataCmd, combinerRemoveDataCmd, combinerListDataCmd)
 }

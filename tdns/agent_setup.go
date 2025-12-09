@@ -66,6 +66,12 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 	} else {
 		zd.DnssecPolicy = &tmp
 	}
+
+	_, err = zd.SignZone(conf.Internal.KeyDB, true)
+	if err != nil {
+		return nil, fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
+	}
+
 	err = zd.SetupZoneSigning(conf.Internal.ResignQ)
 	if err != nil {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to set up zone signing: %v", err)

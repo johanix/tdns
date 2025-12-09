@@ -658,7 +658,6 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 
 	if Globals.Debug {
 		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
-		fmt.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers\n", qname, dns.TypeToString[qtype], len(serverMap))
 	}
 	var servernames []string
 	for k, _ := range serverMap {
@@ -666,7 +665,6 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 	}
 	if Globals.Debug {
 		lg.Printf("IterativeDNSQuery: servers for %q: %+v", qname, servernames)
-		fmt.Printf("IterativeDNSQuery: servers for %q: %+v\n", qname, servernames)
 	}
 
 	if !force {
@@ -1105,7 +1103,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if Globals.Debug {
+		if Globals.Debug && !imr.Quiet {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue)\n", nsname)
 		}
 		imr.Cache.Set(nsname, dns.TypeA, &cache.CachedRRset{
@@ -1122,7 +1120,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if Globals.Debug {
+		if Globals.Debug && !imr.Quiet {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue)\n", nsname)
 		}
 		imr.Cache.Set(nsname, dns.TypeAAAA, &cache.CachedRRset{
@@ -1134,13 +1132,13 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		})
 	}
 
-	if Globals.Debug {
+	if Globals.Debug && !imr.Quiet {
 		log.Printf("*** ParseAdditionalForNSAddrs: adding %d servers for zone %q to cache", len(serverMap), zonename)
 	}
 	// rrcache.Servers.Set(zonename, servers)
 	imr.Cache.AddServers(zonename, serverMap)
 
-	if Globals.Debug {
+	if Globals.Debug && !imr.Quiet {
 		log.Printf("ParseAdditionalForNSAddrs: serverMap:")
 		for n, as := range serverMap {
 			log.Printf("server: %s: %s (addrs: %v)", n, as.Name, as.Addrs)
@@ -1339,7 +1337,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			core.TransportToString[t], server.Name, server.Addrs, addr, qname, dns.TypeToString[qtype])
 	}
 	// return c.Exchange(m, addr)
-	r, _, err := c.Exchange(m, addr, Globals.Debug)
+	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
 	if err != nil {
 		log.Printf("tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
 		return nil, 0, err
@@ -1830,19 +1828,19 @@ func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, strin
 }
 
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, cache.CacheContext, error) {
-	if Globals.Debug {
+	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
 	nsRRset, zonename, nsMap := extractReferral(r, qname, qtype)
 
-	if Globals.Debug {
+	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: zone name is %q, nsRRset: %+v", zonename, nsRRset)
 	}
 	if len(nsRRset.RRs) != 0 {
 		nsRRset.Name = zonename
 		nsRRset.Class = dns.ClassINET
 		nsRRset.RRtype = dns.TypeNS
-		if Globals.Debug {
+		if Globals.Debug && !imr.Quiet {
 			fmt.Printf("handleReferral: Calling rrcache.Set for <%s, NS>\n", zonename)
 		}
 		// Validate NS RRset if signatures are present

@@ -18,13 +18,13 @@ zones:
      notify:	      [ 127.0.0.1:5366 ]
 
    - name:            johani.org.
-     zonefile:        /etc/axfr.net/zones/johani.org
+     zonefile:        /etc/tdns/zones/johani.org
      options:	      [ online-signing ]
      template:        secondary
 
    # Commented zones kept for reference
    # child.test.net:
    #    name:         child.test.net
-   #    zonefile:     /etc/axfr.net/zones/child.test.net
+   #    zonefile:     /etc/tdns/zones/child.test.net
    #    template:     child-primary
    # ... other commented zones ...

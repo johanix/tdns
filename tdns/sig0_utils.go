@@ -126,6 +126,10 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		mode = viper.GetString(modekey)
 	}
 	mode = strings.ToLower(mode)
+	if mode == "" {
+		mode = "internal"
+		log.Printf("GenerateKeypair: no mode specified (resignerengine.keygen.mode is unset), using default mode: %q", mode)
+	}
 
 	var bits int
 	switch alg {

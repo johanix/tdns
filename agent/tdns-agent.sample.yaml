@@ -10,8 +10,8 @@ agent:
          listen:	[ 127.0.0.1:8999 ]
       baseurl:		https://api.{TARGET}:{PORT}/api/v1 # TARGET will be expanded to identity
       port:		8999
-      cert:		/etc/tdns/certs/agent.provider..crt
-      key:		/etc/tdns/certs/agent.provider..key
+      certfile:		/etc/tdns/certs/agent.provider..crt
+      keyfile:		/etc/tdns/certs/agent.provider..key
    dns:
       addresses:
          publish:	[ 1.2.3.4 ]
@@ -31,24 +31,17 @@ service:
    debug:		true   # writes processed zone to disk
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
-#   reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
-   resign:		true	# re-sign primary zones as needed
 
 dnsengine:
    addresses:		[ 127.0.0.1:5357, '[::1]:5357']
+   transports:		[ doq, dot, do53 ]
    zones:
-#      config:		/etc/axfr.net/tdns-zones.yaml
-      filedir:		/etc/axfr.net/zones
+#      config:		/etc/tdns/tdns-zones.yaml
+      filedir:		/etc/tdns/zones
       filetmpl:		"%s/%s.zone.new"		# zonename.zone
 
-resignerengine:
-   interval:		300 # seconds between runs. Reasonable value is likely ~3600
-   keygen:
-      mode:		internal # internal | external
-      generator:	/opt/local/bin/dnssec-keygen
-#      algorithm:	ED25519	# moved to the dnssec policy
-   
 apiserver:
+   usetls:		true
    addresses:     	[ 127.0.0.1:8987 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
    certfile:		/etc/tdns/certs/localhost..crt
@@ -56,7 +49,7 @@ apiserver:
 
 server:
    id:			ooga booga boo
-   version:		tdnsd {version}
+   version:		tdns-agent {version}
    hostname:		there-is-no-place-like-127.0.0.1
 
 validator:
@@ -65,15 +58,13 @@ validator:
    debug:		true
    dnskey:
       trusted:
-         file:		/etc/axfr.net/trust-anchors.yaml
+         file:		/etc/tdns/trust-anchors.yaml
    sig0:
       trusted:
-         file:		/etc/axfr.net/sig0-keys.yaml
+         file:		/etc/tdns/sig0-keys.yaml
 
 resolver:
    address:		8.8.8.8:53 
-#   address:		172.16.1.11:53 
-#   address:		10.0.1.1:53
 
 delegationsync:
    parent:
@@ -137,53 +128,12 @@ dnssecpolicies:
          lifetime:      none
          sigvalidity:   168h
 
-multisigner:
-   mstest:
-      controller:
-         notify:
-            target:		music.{ZONENAME}
-            addresses:		[ 127.0.0.1, '::1' ]	# must be no '[]' around v6 addresses here.
-            port:		"5355"
-            publish-dsync:	false # in a multi-signer sidecar setup, the zone should typically not publish any DSYNC DNSKEY RR
-         api:
-            baseurl:	http://127.0.0.1:8990/api/v1
-            apikey:	lets-make-some-noise
-            authmethod:	X-API-Key
-            usetls:	true
-   broken:
-      controller:
-         notify:
-            address:	127..0.0.1
-         api:
-            baseurl:	foo://bar.se/
-
-# scanner:
-#    interval:    	60
-
 db:
    file:		/var/tmp/tdns-agent.db
 
 log:
-   file:		/var/log/axfr.net/tdns-agent.log
+   file:		/var/log/tdns/tdns-agent.log
 
 common:
    servername:		tdns-agent
    command:		/usr/local/libexec/tdns-agent
-
-# This is where registrars are declared, including where they want notifications/updates.
-# There is a mapping from child zones (per parent zone) to these registrars and that will
-# (should) cause a runtime generation of a suitable DSYNC RRset in response to queries for
-# child._dsync.parent. DSYNC
-registrars:
-   ooga-reg:
-      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.ooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.ooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 updates.ooga-reg.axfr.net.
-   booga-reg:
-      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.booga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.booga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.booga-reg.axfr.net.
-   mooga-reg:
-      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.mooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.mooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.mooga-reg.axfr.net.
