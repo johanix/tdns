@@ -23,7 +23,7 @@ var CombinerCmd = &cobra.Command{
 }
 
 // Helper function to compute the Rdlength for an RR
-func computeRdlen(rr dns.RR) (int, error) {
+func xxxcomputeRdlen(rr dns.RR) (int, error) {
 	// Create a buffer to pack the RR
 	buf := make([]byte, 4096)
 	off, err := dns.PackRR(rr, buf, 0, nil, false)
@@ -76,10 +76,7 @@ func readZoneFile(filename string) (map[string][]string, error) {
 
 // Helper function to execute a combiner API request
 func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*tdns.CombinerResponse, error) {
-	parent, err := getCommandContext(cmdName)
-	if err != nil {
-		return nil, fmt.Errorf("getting command context: %w", err)
-	}
+	parent, _ := getCommandContext(cmdName)
 
 	api, err := getApiClient(parent, true)
 	if err != nil {
