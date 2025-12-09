@@ -31,6 +31,8 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 	switch zd.ZoneStore {
 	case SliceZone:
 		// TODO: Implement this
+	case XfrZone:
+		// TODO: Implement this
 	case MapZone:
 		// Iterate over all owners in the CombinerData
 		for item := range zd.CombinerData.IterBuffered() {
@@ -73,8 +75,6 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 			zd.Data.Set(ownerName, existingOwnerData)
 		}
 		return modified, nil
-	case XfrZone:
-		// TODO: Implement this
 	}
 
 	return false, fmt.Errorf("Not implemented")
@@ -168,7 +168,7 @@ func (zd *ZoneData) AddCombinerDataNG(data map[string][]string) error {
 		for _, rrString := range rrStrings {
 			rr, err := dns.NewRR(rrString)
 			if err != nil {
-				return fmt.Errorf("error parsing RR: %v", err)
+				return fmt.Errorf("error parsing RR string %q: %v", rrString, err)
 			}
 			rrs = append(rrs, rr)
 		}

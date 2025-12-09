@@ -27,6 +27,9 @@ func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) err
 		return fmt.Errorf("target must be a valid domain name")
 	}
 
+	// Ensure owner is FQDN
+	owner = dns.Fqdn(owner)
+
 	if !strings.HasSuffix(owner, zd.ZoneName) {
 		return fmt.Errorf("owner must be a subdomain of the zone name")
 	}
@@ -53,6 +56,8 @@ func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) err
 		Class:  dns.ClassINET,
 		Ttl:    7200,
 	}
+
+	log.Printf("PublishUriRR: publishing URI RR: %s", uri.String())
 
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{

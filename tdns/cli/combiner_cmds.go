@@ -23,7 +23,7 @@ var CombinerCmd = &cobra.Command{
 }
 
 // Helper function to compute the Rdlength for an RR
-func computeRdlen(rr dns.RR) (int, error) {
+func xxxcomputeRdlen(rr dns.RR) (int, error) {
 	// Create a buffer to pack the RR
 	buf := make([]byte, 4096)
 	off, err := dns.PackRR(rr, buf, 0, nil, false)
@@ -74,44 +74,57 @@ func readZoneFile(filename string) (map[string][]string, error) {
 	return data, nil
 }
 
+// Helper function to execute a combiner API request
+func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*tdns.CombinerResponse, error) {
+	parent, _ := getCommandContext(cmdName)
+
+	api, err := getApiClient(parent, true)
+	if err != nil {
+		return nil, fmt.Errorf("error getting API client: %w", err)
+	}
+
+	req := tdns.CombinerPost{
+		Command: command,
+		Zone:    dns.Fqdn(zone),
+		Data:    data,
+	}
+
+	_, buf, err := api.RequestNG("POST", "/combiner", req, true)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+
+	var resp tdns.CombinerResponse
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.Error {
+		return nil, fmt.Errorf("API error: %s", resp.ErrorMsg)
+	}
+
+	return &resp, nil
+}
+
 var combinerListDataCmd = &cobra.Command{
-	Use:   "list-data [zone]",
+	Use:   "list-data",
 	Short: "List local data added to a zone in the combiner",
-	Args:  cobra.ExactArgs(1),
+	Long:  `List local data added to a zone in the combiner. Zone can be specified via --zone flag.`,
+	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("list-data")
-		zone := args[0]
+		PrepArgs("zonename")
 
-		api, err := getApiClient(parent, true)
+		resp, err := executeCombinerRequest("list-data", tdns.Globals.Zonename, "list", nil)
 		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
-		req := tdns.CombinerPost{
-			Command: "list",
-			Zone:    zone,
-		}
-
-		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var resp tdns.CombinerResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
+			log.Fatalf("%v", err)
 		}
 
 		if len(resp.Data) == 0 {
-			fmt.Printf("No local data found for zone %s\n", zone)
+			fmt.Printf("No local data found for zone %s\n", tdns.Globals.Zonename)
 			return
 		}
 
-		fmt.Printf("Local data for zone %s:\n", zone)
+		fmt.Printf("Local data for zone %s:\n", tdns.Globals.Zonename)
 
 		// Get sorted list of owners for consistent output
 		owners := make([]string, 0, len(resp.Data))
@@ -145,13 +158,20 @@ var combinerListDataCmd = &cobra.Command{
 }
 
 var combinerAddDataCmd = &cobra.Command{
-	Use:   "add-data [zone] [file]",
+	Use:   "add-data [file]",
 	Short: "Add local data to a zone passing through the combiner",
-	Args:  cobra.ExactArgs(2),
+	Long: `Add local data to a zone passing through the combiner.
+
+Zone can be specified via --zone flag. The file should contain one RR per line.
+
+Example contents (for a zone named "example.com"):
+  example.com. 86400 IN NS ns1.provider.com.
+  example.com. 86400 IN NS ns2.service.net.
+`,
+	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("add-data")
-		zone := dns.Fqdn(args[0])
-		file := args[1]
+		PrepArgs("zonename")
+		file := args[0]
 
 		// Read and parse the zone file
 		data, err := readZoneFile(file)
@@ -159,29 +179,40 @@ var combinerAddDataCmd = &cobra.Command{
 			log.Fatalf("Error reading zone file: %v", err)
 		}
 
-		api, err := getApiClient(parent, true)
+		resp, err := executeCombinerRequest("add-data", tdns.Globals.Zonename, "add", data)
 		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
+			log.Fatalf("%v", err)
 		}
 
-		req := tdns.CombinerPost{
-			Command: "add",
-			Zone:    zone,
-			Data:    data,
-		}
+		fmt.Println(resp.Msg)
+	},
+}
 
-		_, buf, err := api.RequestNG("POST", "/combiner", req, true)
+var combinerRemoveDataCmd = &cobra.Command{
+	Use:   "remove-data [file]",
+	Short: "Remove local data from a zone passing through the combiner",
+	Long: `Remove local data from a zone passing through the combiner.
+
+Zone can be specified via --zone flag. The file should contain one RR per line.
+
+Example contents (for a zone named "example.com"):
+  example.com. 86400 IN NS ns1.provider.com.
+  example.com. 86400 IN NS ns2.service.net.
+`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		file := args[0]
+
+		// Read and parse the zone file
+		data, err := readZoneFile(file)
 		if err != nil {
-			log.Fatalf("API request failed: %v", err)
+			log.Fatalf("Error reading zone file: %v", err)
 		}
 
-		var resp tdns.CombinerResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
+		resp, err := executeCombinerRequest("remove-data", tdns.Globals.Zonename, "remove", data)
+		if err != nil {
+			log.Fatalf("%v", err)
 		}
 
 		fmt.Println(resp.Msg)
@@ -189,6 +220,5 @@ var combinerAddDataCmd = &cobra.Command{
 }
 
 func init() {
-	CombinerCmd.AddCommand(combinerAddDataCmd)
-	CombinerCmd.AddCommand(combinerListDataCmd)
+	CombinerCmd.AddCommand(combinerAddDataCmd, combinerRemoveDataCmd, combinerListDataCmd)
 }

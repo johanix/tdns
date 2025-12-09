@@ -106,7 +106,7 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 	algstr := dns.AlgorithmToString[uint8(alg)]
 	commentStr := fmt.Sprintf("; %s alg = %s ; key id = %d", ktype, algstr, keyid)
 	closing := " ) " + commentStr
-	printFieldsWithWrap(initial, fields, leftpad, rightmargin, closing)
+	printFieldsWithWrap(initial, fields, leftpad+1, rightmargin, closing)
 }
 
 func PrintDsRR(rr dns.RR, leftpad, rightmargin int) {
@@ -134,7 +134,7 @@ func PrintDsRR(rr dns.RR, leftpad, rightmargin int) {
 	fields = append(fields, "(")
 	fields = append(fields, digestParts...)
 
-	printFieldsWithWrap(initial, fields, leftpad, rightmargin, " )")
+	printFieldsWithWrap(initial, fields, leftpad+1, rightmargin, " )")
 }
 
 func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
@@ -154,7 +154,7 @@ func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
 
 	initial := fmt.Sprintf("%s%s%s %s", p[0], namepad, p[1], p[2])
 	headerAndMiddle := append([]string{}, p[3:12]...)
-	printFieldsWithWrap(initial, headerAndMiddle, leftpad, rightmargin, " (")
+	printFieldsWithWrap(initial, headerAndMiddle, leftpad+1, rightmargin, " (")
 
 	spaces := strings.Repeat(" ", leftpad)
 
@@ -163,7 +163,7 @@ func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
 		sigWidth = rightmargin - leftpad
 	}
 	sigParts := chunkString(p[12], sigWidth)
-	printFieldsWithWrap(spaces, sigParts, leftpad, rightmargin, " )")
+	printFieldsWithWrap(spaces, sigParts, leftpad+1, rightmargin, " )")
 }
 
 func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
@@ -190,7 +190,7 @@ func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
 	// Print line, then subsequent fields, wrapping at rightmargin
 	//fmt.Printf("%s (\n", line)
 	fields := p[6:]
-	printFieldsWithWrap(line+" (", fields, leftpad, rightmargin, " )")
+	printFieldsWithWrap(line+" (", fields, leftpad+1, rightmargin, " )")
 }
 
 func PrintSoaRR(rr dns.RR, leftpad, rightmargin int) {
@@ -296,6 +296,10 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 						t = " KSK ;"
 					}
 					PrintKeyRR(rr, "DNSKEY", t, keyid, leftpad, rightmargin)
+				case *dns.CDNSKEY:
+					keyid := rr.KeyTag()
+					t := " CDNSKEY ;"
+					PrintKeyRR(rr, "CDNSKEY", t, keyid, leftpad, rightmargin)
 
 				case *dns.RRSIG:
 					PrintRrsigRR(rr, leftpad, rightmargin)
@@ -462,7 +466,9 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 		}
 		PrintKeyRR(rr, "DNSKEY", t, rr.KeyTag(), leftpad, rightmargin)
 	case *dns.KEY:
-		PrintKeyRR(rr, "KEY", "", rr.KeyTag(), leftpad, rightmargin)
+		PrintKeyRR(rr, "KEY", " KEY ;", rr.KeyTag(), leftpad, rightmargin)
+	case *dns.CDNSKEY:
+		PrintKeyRR(rr, "CDNSKEY", " CDNSKEY ;", rr.KeyTag(), leftpad, rightmargin)
 	case *dns.DS:
 		PrintDsRR(rr, leftpad, rightmargin)
 	case *dns.RRSIG:

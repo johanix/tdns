@@ -1,13 +1,6 @@
 # Main TDNS configuration
 include:
-  - server-templates.yaml
-  - server-zones.yaml
-
-cli:
-   tdnsd:
-      baseurl:          https://127.0.0.1:8989/api/v1
-      apikey:           winter-is-coming-santa-stuck-in-chimney
-      authmethod:       X-API-Key
+   - tdns-zones.yaml
 
 service:
    name:		TDNS-SERVER
@@ -16,42 +9,43 @@ service:
    debug:		true   # writes processed zone to disk
    refresh:		true
    maxrefresh:		1800    # seconds. Cap refresh counter to max this
-   resign:		true	# re-sign primary zones as needed
+   reset_soa_serial:	false	# replace inbound SOA serial with unixtime.
+   
    transport:
-      mode:		svcb	# svcb | tsync | none ; default=none
-      signal:		"doq:20,dot:30"	# comma sep list of doq,dot,doh and do53. Sum <= 100
+      type:		svcb # svcb | tsync | none; default is none
+      signal:		"doq:20,dot:10" # # comma sep list of doq,dot,doh and do53 with amount of total traffic ok
 
 dnsengine:
-   addresses:		[ 127.0.0.1:5355, '[::1]:5355']
-   transports:		[ do53, doq, dot, doh ]
+   addresses:           [ 127.0.0.1:5354, '[::1]:5354' ]
+   transports:		[ doq, dot, doh ]
    ports:
      do53:		[ 53 ]
      doq:		[ 853 ]
      dot:		[ 853 ]
      doh:		[ 443 ]
-   certfile:		/etc/axfr.net/certs/servers/localhost..crt
-   keyfile:		/etc/axfr.net/certs/servers/localhost..key
+   certfile:		/etc/tdns/certs/servers/localhost..crt
+   keyfile:		/etc/tdns/certs/servers/localhost..key
    zones:
-      config:		/etc/axfr.net/tdns-zones.yaml
-      filedir:		/etc/axfr.net/zones
-      filetmpl:		"%s/%s.zone.new"		# zonename.zone
+      config:		/etc/tdns/tdns-zones.yaml
+      filedir:		/etc/tdns/zones
+      filetmpl:		"%s/%s.zone"		# zonename.zone
 
 resignerengine:
    interval:		300 # seconds between runs. Reasonable value is likely ~3600
    keygen:
-      mode:		internal # internal | external
-      generator:	/opt/local/bin/dnssec-keygen
-   
+      mode:             internal # internal | external
+      generator:        /usr/sbin/dnssec-keygen
+
 imrengine:
-   active:		true
-   root-hints:		/etc/tdns/root.hints # optional, will use compiled-in hints if absent
-   trust-anchor-file:	/etc/tdns/root.key   # not optional, no DNSSEC validation if absent
+   active:		true # true | false, default is true
+   root-hints:		/etc/tdns/root.hints # optional, default is compiled-in hints
+   trust-anchor-file:   /etc/tdns/root.key # not optional, no DNSSEC validation without this
 
 apiserver:
    addresses:     	[ 127.0.0.1:8989 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
-   certfile:		/etc/axfr.net/certs/servers/localhost..crt
-   keyfile:		/etc/axfr.net/certs/servers/localhost..key
+   certfile:		/etc/tdns/certs/servers/localhost..crt
+   keyfile:		/etc/tdns/certs/servers/localhost..key
 
 server:
    id:			ooga booga boo
@@ -65,16 +59,19 @@ validator:
    debug:		true
    dnskey:
       trusted:
-         file:		/etc/axfr.net/trust-anchors.yaml
+         file:		/etc/tdns/trust-anchors.yaml
    sig0:
       trusted:
-         file:		/etc/axfr.net/sig0-keys.yaml
+         file:		/etc/tdns/sig0-keys.yaml
 
-# This entire section should probably die.
-resolver:
-   address:		8.8.8.8:53 
-#   address:		172.16.1.11:53 
-#   address:		10.0.1.1:53
+
+childsync:		# What to do when we are the child
+   schemes:		[ update ] #, notify ] # this child will use either
+   update-ns:		true
+   update-a:		true
+   update-aaaa:		true
+   sync-on-boot:	false
+   syncwithparent:	true
 
 delegationsync:
    parent:
@@ -103,7 +100,7 @@ delegationsync:
       schemes:		[ notify, update ]
       update:
          keygen:
-            mode:	external # internal | external
+            mode:	internal # internal | external
             generator:	/opt/local/bin/dnssec-keygen
             algorithm:	ED25519
 
@@ -158,9 +155,6 @@ multisigner:
          api:
             baseurl:	foo://bar.se/
 
-# scanner:
-#    interval:    	60
-
 db:
    file:		/var/tmp/tdns.db
 
@@ -168,8 +162,8 @@ log:
    file:		/var/log/axfr.net/tdns-server.log
 
 common:
-   servername:		tdnsd
-   command:		/usr/local/libexec/tdnsd
+   servername:		tdns-server
+   command:		/usr/local/libexec/tdns-server
 
 # This is where registrars are declared, including where they want notifications/updates.
 # There is a mapping from child zones (per parent zone) to these registrars and that will

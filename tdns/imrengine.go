@@ -894,7 +894,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	if CaseFoldContains(conf.Imr.Transports, "do53") {
 		log.Printf("ImrEngine: UDP/TCP addresses: %v", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
-		
+
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
 				server := &dns.Server{

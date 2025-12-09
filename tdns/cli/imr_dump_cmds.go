@@ -475,12 +475,12 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 			stateStr := validationStateString(rec.State)
 			ttlStr := "-"
 			expires := "-"
-				if rec.RRset != nil && len(rec.RRset.RRs) > 0 {
-					ttlStr = fmt.Sprintf("%d", rec.RRset.RRs[0].Header().Ttl)
-				}
-				if !rec.Expiration.IsZero() {
-					expires = tdns.TtlPrint(rec.Expiration)
-				}
+			if rec.RRset != nil && len(rec.RRset.RRs) > 0 {
+				ttlStr = fmt.Sprintf("%d", rec.RRset.RRs[0].Header().Ttl)
+			}
+			if !rec.Expiration.IsZero() {
+				expires = tdns.TtlPrint(rec.Expiration)
+			}
 			fmt.Printf("      %s (state: %s, TTL: %s, Expires: %s)\n", owner, stateStr, ttlStr, expires)
 			if rec.RRset != nil {
 				for _, rr := range rec.RRset.RRs {

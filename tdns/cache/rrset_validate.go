@@ -56,7 +56,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 		// XXX: The code returns ValidationStateInsecure when RRSIGs are absent (lines 55, 222) but cannot distinguish whether
 		// the zone is legitimately unsigned or whether signatures are absent due to incomplete response data. This
 		// limitation is systemic—XXX comments at lines 503, 508, 511, 518, and 602 document similar gaps in negative
-		// response validation and NSEC proof logic. Properly determining zone security requires querying DS records at 
+		// response validation and NSEC proof logic. Properly determining zone security requires querying DS records at
 		// the parent zone, which would require significant architectural changes to the validation engine. This is a
 		// known design limitation acknowledged throughout the file and should be tracked as a future enhancement.
 	}
@@ -102,15 +102,10 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 					if rrcache.Debug {
 						log.Printf("ValidateRRset: fetched %d DNSKEY RRs for %q", len(dkeys.RRs), signer)
 					}
-					// Add fetched keys to cache only after DS-based validation has been performed. 
+					// Add fetched keys to cache only after DS-based validation has been performed.
 					// Compute min TTL for expiration.
-					minTTL := dkeys.RRs[0].Header().Ttl
-					for _, krr := range dkeys.RRs[1:] {
-						if krr.Header().Ttl < minTTL {
-							minTTL = krr.Header().Ttl
-						}
-					}
-					exp := time.Now().Add(time.Duration(minTTL) * time.Second)
+					exp := time.Now().Add(GetMinTTL(dkeys.RRs))
+
 					// Attempt to validate the fetched DNSKEY RRset using DS before adding to DnskeyCache
 					// Only add validated/secure DNSKEYs to DnskeyCache, as it's used for validation of other data
 					vstate, err := rrcache.ValidateDNSKEYs(ctx, dkeys, fetcher, verbose)

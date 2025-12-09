@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 	cache "github.com/johanix/tdns/tdns/cache"
+	core "github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
 )
 
@@ -491,7 +492,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		resp := ScannerResponse{
@@ -514,37 +515,38 @@ func APIscanner(app *AppDetails, scannerq chan ScanRequest, kdb *KeyDB) func(w h
 		log.Printf("API: received /scanner request (cmd: %s) from %s.\n",
 			sp.Command, r.RemoteAddr)
 
+		sp.Command = strings.ToUpper(sp.Command)
+
 		switch sp.Command {
-		case "scan":
-			log.Printf("APIscanner: processing scan request")
+		case "SCAN":
+			log.Printf("APIscanner: processing scan request with %d tuples", len(sp.ScanTuples))
 
-			respch := make(chan ScanResponse, 1)
+			// Generate job ID
+			jobID := GenerateJobID()
 
-			scannerq <- ScanRequest{
+			// Send request to scanner queue (non-blocking)
+			select {
+			case scannerq <- ScanRequest{
 				Cmd:        sp.Command,
 				ParentZone: sp.ParentZone,
 				ScanZones:  sp.ScanZones,
 				ScanType:   sp.ScanType,
-				Response:   respch,
-			}
-			select {
-			case sr := <-respch:
-				resp.Msg = sr.Msg
-				resp.Status = "ok"
-				resp.Time = sr.Time
-				if sr.Error {
-					resp.Error = true
-					resp.ErrorMsg = sr.ErrorMsg
-				}
-			case <-time.After(4 * time.Second):
+				ScanTuples: sp.ScanTuples,
+				JobID:      jobID,
+			}:
+				// Request queued successfully
+				resp.Status = "queued"
+				resp.JobID = jobID
+				resp.Msg = fmt.Sprintf("Scan request queued with job ID: %s", jobID)
+				log.Printf("APIscanner: scan request queued with job ID: %s", jobID)
+			default:
+				// Queue is full
 				resp.Error = true
-				resp.ErrorMsg = "Timeout waiting for scan response"
-			}
-			if resp.Msg == "" {
-				resp.Msg = fmt.Sprintf("Scan request processed")
+				resp.ErrorMsg = "Scanner queue is full, please try again later"
 			}
 
-		case "status": // XXX: this should not be about general config status, but about scanner specific details
+		case "status":
+			// General status (job status is handled by separate endpoint)
 			log.Printf("APIscanner: scanner status inquiry")
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
@@ -568,13 +570,13 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		path, err := route.GetPathTemplate()
 		if err != nil {
-			log.Printf("ShowAPI: error getting path template: %v", err)
-			return err
+			// Skip routes without path templates (e.g., middleware routes)
+			return nil
 		}
 		methods, err := route.GetMethods()
 		if err != nil {
-			log.Printf("ShowAPI: error getting methods: %v", err)
-			return err
+			// Skip routes without methods (e.g., subrouters, middleware)
+			return nil
 		}
 		for _, m := range methods {
 			resp = append(resp, fmt.Sprintf("%-6s %s", m, path))
@@ -592,4 +594,205 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	//		Data:   resp,
 	//	}
 	return resp, nil
+}
+
+// deepCopyScanJobStatus creates a deep copy of a ScanJobStatus to avoid race conditions
+// during JSON encoding. All exported fields are copied, including nested slices and pointers.
+func deepCopyScanJobStatus(src *ScanJobStatus) *ScanJobStatus {
+	if src == nil {
+		return nil
+	}
+
+	dst := &ScanJobStatus{
+		JobID:           src.JobID,
+		Status:          src.Status,
+		CreatedAt:       src.CreatedAt,
+		TotalTuples:     src.TotalTuples,
+		ProcessedTuples: src.ProcessedTuples,
+		Error:           src.Error,
+		ErrorMsg:        src.ErrorMsg,
+	}
+
+	// Deep copy time pointers
+	if src.StartedAt != nil {
+		startedAtCopy := *src.StartedAt
+		dst.StartedAt = &startedAtCopy
+	}
+	if src.CompletedAt != nil {
+		completedAtCopy := *src.CompletedAt
+		dst.CompletedAt = &completedAtCopy
+	}
+
+	// Deep copy Responses slice
+	if src.Responses != nil {
+		dst.Responses = make([]ScanTupleResponse, len(src.Responses))
+		for i, resp := range src.Responses {
+			dst.Responses[i] = deepCopyScanTupleResponse(resp)
+		}
+	}
+
+	return dst
+}
+
+// deepCopyScanTupleResponse creates a deep copy of a ScanTupleResponse
+func deepCopyScanTupleResponse(src ScanTupleResponse) ScanTupleResponse {
+	dst := ScanTupleResponse{
+		Qname:       src.Qname,
+		ScanType:    src.ScanType,
+		DataChanged: src.DataChanged,
+		AllNSInSync: src.AllNSInSync,
+		Error:       src.Error,
+		ErrorMsg:    src.ErrorMsg,
+	}
+
+	// Deep copy Options slice
+	if src.Options != nil {
+		dst.Options = make([]string, len(src.Options))
+		copy(dst.Options, src.Options)
+	}
+
+	// Deep copy NewData (CurrentScanDataJSON)
+	dst.NewData = deepCopyCurrentScanDataJSON(src.NewData)
+
+	return dst
+}
+
+// deepCopyCurrentScanDataJSON creates a deep copy of CurrentScanDataJSON
+func deepCopyCurrentScanDataJSON(src CurrentScanDataJSON) CurrentScanDataJSON {
+	dst := CurrentScanDataJSON{}
+
+	// Deep copy RRsetString pointers
+	if src.RRset != nil {
+		dst.RRset = deepCopyRRsetString(src.RRset)
+	}
+	if src.CDS != nil {
+		dst.CDS = deepCopyRRsetString(src.CDS)
+	}
+	if src.CSYNC != nil {
+		dst.CSYNC = deepCopyRRsetString(src.CSYNC)
+	}
+	if src.DNSKEY != nil {
+		dst.DNSKEY = deepCopyRRsetString(src.DNSKEY)
+	}
+
+	return dst
+}
+
+// deepCopyRRsetString creates a deep copy of RRsetString
+func deepCopyRRsetString(src *core.RRsetString) *core.RRsetString {
+	if src == nil {
+		return nil
+	}
+
+	dst := &core.RRsetString{
+		Name:   src.Name,
+		RRtype: src.RRtype,
+	}
+
+	// Deep copy RRs slice
+	if src.RRs != nil {
+		dst.RRs = make([]string, len(src.RRs))
+		copy(dst.RRs, src.RRs)
+	}
+
+	// Deep copy RRSIGs slice
+	if src.RRSIGs != nil {
+		dst.RRSIGs = make([]string, len(src.RRSIGs))
+		copy(dst.RRSIGs, src.RRSIGs)
+	}
+
+	return dst
+}
+
+// APIscannerStatus handles GET requests for scan job status
+func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID := r.URL.Query().Get("job_id")
+
+		if conf.Internal.Scanner == nil {
+			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
+			return
+		}
+
+		conf.Internal.Scanner.JobsMutex.RLock()
+
+		if jobID == "" {
+			// Return all jobs - create deep copies to avoid race conditions during encoding
+			log.Printf("APIscannerStatus: listing all jobs")
+			jobs := make([]*ScanJobStatus, 0, len(conf.Internal.Scanner.Jobs))
+			for _, job := range conf.Internal.Scanner.Jobs {
+				jobs = append(jobs, deepCopyScanJobStatus(job))
+			}
+			conf.Internal.Scanner.JobsMutex.RUnlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(jobs)
+			return
+		}
+
+		// Return specific job - create deep copy to avoid race conditions during encoding
+		log.Printf("APIscannerStatus: job status inquiry for job ID: %s", jobID)
+		job, exists := conf.Internal.Scanner.Jobs[jobID]
+
+		if !exists {
+			http.Error(w, fmt.Sprintf("Job ID not found: %s", jobID), http.StatusNotFound)
+			return
+		}
+
+		job = deepCopyScanJobStatus(job)
+		conf.Internal.Scanner.JobsMutex.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(job)
+	}
+}
+
+// APIscannerDelete handles DELETE requests for scan job deletion
+func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID := r.URL.Query().Get("job_id")
+		deleteAll := r.URL.Query().Get("all") == "true"
+
+		if conf.Internal.Scanner == nil {
+			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
+			return
+		}
+
+		conf.Internal.Scanner.JobsMutex.Lock()
+		defer conf.Internal.Scanner.JobsMutex.Unlock()
+
+		resp := ScannerResponse{
+			AppName: Globals.App.Name,
+			Time:    time.Now(),
+		}
+
+		if deleteAll {
+			// Delete all jobs
+			count := len(conf.Internal.Scanner.Jobs)
+			conf.Internal.Scanner.Jobs = make(map[string]*ScanJobStatus)
+			log.Printf("APIscannerDelete: deleted all %d jobs", count)
+			resp.Msg = fmt.Sprintf("Deleted all %d jobs", count)
+			resp.Status = "success"
+		} else if jobID != "" {
+			// Delete specific job
+			_, exists := conf.Internal.Scanner.Jobs[jobID]
+			if !exists {
+				http.Error(w, fmt.Sprintf("Job ID not found: %s", jobID), http.StatusNotFound)
+				return
+			}
+			delete(conf.Internal.Scanner.Jobs, jobID)
+			log.Printf("APIscannerDelete: deleted job %s", jobID)
+			resp.Msg = fmt.Sprintf("Deleted job %s", jobID)
+			resp.Status = "success"
+		} else {
+			resp.Error = true
+			resp.ErrorMsg = "Either job_id or all=true must be specified"
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
 }

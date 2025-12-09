@@ -3,8 +3,8 @@
 ## Description
 
 **tdns-scanner** is a service that accepts scanning requests via a REST API. 
-Requests list one or more zones and one or more things to lookup and compare
-to possible existing data. Typical data to lookup include child CDS and CSYNC
+Requests list one or more zones and one or more things to look up and compare
+to possible existing data. Typical data to look up include child CDS and CSYNC
 records (CDS, CSYNC) and DNSKEY records. It analyzes CSYNC records according to
 RFC 7477 to detect and process delegation changes in child zones.
 

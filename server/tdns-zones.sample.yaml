@@ -19,15 +19,14 @@ templates:
      options:         [ delegation-sync-child, allow-updates, online-signing, add-transport-signal ]
 zones:
    - name:            test.net
-     zonefile:        /etc/axfr.net/zones/test.net
+     zonefile:        /etc/tdns/zones/test.net
      template:        parent-primary
 
    - name:            .
-     zonefile:        /etc/axfr.net/zones/root
+     zonefile:        /etc/tdns/zones/root
      template:        parent-primary
 
-   # Commented zones kept for reference
-   #  - name:         child.test.net
-   #    zonefile:     /etc/axfr.net/zones/child.test.net
-   #    template:     child-primary
-   # ... other commented zones ...
+# Commented zones kept for reference
+#  - name:         child.test.net
+#    zonefile:     /etc/tdns/zones/child.test.net
+#    template:     child-primary

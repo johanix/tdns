@@ -2,10 +2,11 @@ include:
    - combiner-zones.yaml
 
 apiserver:
-   addresses:           [ 127.0.0.1:8082 ]
+   usetls:		true
+   addresses:           [ 127.0.0.1:8085 ]
    apikey:              you-have-stolen-my-frotzblinger
-   certFile:            /etc/tdns/certs/localhost.crt
-   keyFile:             /etc/tdns/certs/localhost.key
+   certFile:            /etc/tdns/certs/localhost..crt
+   keyFile:             /etc/tdns/certs/localhost..key
 
 service:
    name:                TDNS-COMBINER
@@ -13,31 +14,23 @@ service:
    debug:               true   # writes processed zone to disk
    refresh:             true
    maxrefresh:          1800    # seconds. Cap refresh counter to max this
-#   reset_soa_serial:   false   # replace inbound SOA serial with unixtime.
-   resign:              false    # re-sign primary zones as needed
 
 dnsengine:
    addresses:           [ 127.0.0.1:5366, '[::1]:5366']
+   transports:		[ doq, dot, do53 ]
    zones:
       config:           /etc/tdns/tdns-czones.yaml
-      filedir:          /etc/axfr.net/zones
+      filedir:          /etc/tdns/czones
       filetmpl:         "%s/%s.zone.new"                # zonename.zone
 
-resignerengine:
-   interval:            300 # seconds between runs. Reasonable value is likely ~3600
-   keygen:
-      mode:             internal # internal | external
-      generator:        /opt/local/bin/dnssec-keygen
-#      algorithm:       ED25519 # moved to the dnssec policy
-
 common:
-   command:	/usr/local/libexec/tdns-combiner
-   rootca:      ../etc/certs/PublicRootCAs.pem
-   debug:	true
-   verbose:	true
+   command:		/usr/local/libexec/tdns-combiner
+   rootca:      	../etc/certs/PublicRootCAs.pem
+   debug:		true
+   verbose:		true
 
 log:
-   file:	/var/log/axfr.net/tdns-combiner.log
+   file:		/var/log/tdns/tdns-combiner.log
 
 db:
-   file:	/var/tmp/combiner.db
+   file:		/var/tmp/tdns-combiner.db

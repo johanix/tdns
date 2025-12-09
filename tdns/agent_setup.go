@@ -66,6 +66,12 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 	} else {
 		zd.DnssecPolicy = &tmp
 	}
+
+	_, err = zd.SignZone(conf.Internal.KeyDB, true)
+	if err != nil {
+		return nil, fmt.Errorf("SetupAgentAutoZone: failed to sign zone: %v", err)
+	}
+
 	err = zd.SetupZoneSigning(conf.Internal.ResignQ)
 	if err != nil {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to set up zone signing: %v", err)
@@ -158,7 +164,14 @@ func (conf *Config) SetupApiTransport() error {
 			return nil
 		},
 	)
-	conf.Internal.DeferredUpdateQ <- du
+
+	// Non-blocking send: if channel is full, return error instead of blocking
+	select {
+	case conf.Internal.DeferredUpdateQ <- du:
+		// Successfully queued
+	default:
+		return fmt.Errorf("SetupApiTransport: deferred update queue is full, cannot queue API transport setup for agent %q", identity)
+	}
 	return nil
 }
 
@@ -248,7 +261,13 @@ func (conf *Config) SetupDnsTransport() error {
 			return nil
 		},
 	)
-	conf.Internal.DeferredUpdateQ <- du
+	// Non-blocking send: if channel is full, return error instead of blocking
+	select {
+	case conf.Internal.DeferredUpdateQ <- du:
+		// Successfully queued
+	default:
+		return fmt.Errorf("SetupDnsTransport: deferred update queue is full, cannot queue DNS transport setup for agent %q", identity)
+	}
 	return nil
 }
 

@@ -31,14 +31,21 @@ func WalkRoutes(router *mux.Router, address string) {
 	//	return nil
 }
 
-func (conf *Config) SetupReporterAPIRouter(ctx context.Context) (*mux.Router, error) {
+// The simple API router is sufficient for tdns-imr, tdns-scanner and tdns-reporter.
+func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, error) {
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
+
 	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+
+	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
+	sr.HandleFunc("/command", APIcommand(conf, rtr)).Methods("POST")
+	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
+	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 
 	return rtr, nil
 }
@@ -76,7 +83,9 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		// }
 	}
 	if Globals.App.Type == AppTypeScanner {
-		sr.HandleFunc("/scanner", APIscanner(&Globals.App, conf.Internal.ScannerQ, kdb)).Methods("POST")
+		sr.HandleFunc("/scanner", APIscanner(conf, &Globals.App, conf.Internal.ScannerQ, kdb)).Methods("POST")
+		sr.HandleFunc("/scanner/status", APIscannerStatus(conf)).Methods("GET")
+		sr.HandleFunc("/scanner/delete", APIscannerDelete(conf)).Methods("DELETE")
 	}
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
@@ -208,6 +217,10 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	addresses := conf.ApiServer.Addresses
 	certFile := conf.ApiServer.CertFile
 	keyFile := conf.ApiServer.KeyFile
+
+	if Globals.Debug {
+		log.Printf("APIdispatcher: addresses: %v, certFile: %s, keyFile: %s", addresses, certFile, keyFile)
+	}
 
 	if len(addresses) == 0 {
 		log.Println("APIdispatcher: no addresses to listen on (key 'apiserver.addresses' not set). Not starting.")

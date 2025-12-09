@@ -9,19 +9,24 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
-func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, imr *Imr) error {
+func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, conf *Config) error {
 
-	if imr == nil {
+	log.Printf("DelegationSyncher: sleeping for 2 seconds to allow ImrEngine to start")
+	time.Sleep(2 * time.Second)
+
+	if conf.Internal.ImrEngine == nil {
 		log.Printf("DelegationSyncher: imr is nil. Terminating.")
 		return fmt.Errorf("DelegationSyncher: imr is nil")
 	}
 
+	imr := conf.Internal.ImrEngine
 	log.Printf("*** DelegationSyncher: starting ***")
 	var err error
 	for {
