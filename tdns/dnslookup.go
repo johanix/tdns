@@ -503,14 +503,15 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					rrset.Name = zonename
 					rrset.Class = dns.ClassINET
 					rrset.RRtype = dns.TypeNS
-					imr.Cache.Set(zonename, dns.TypeNS, &cache.CachedRRset{
-						Name:       zonename,
-						RRtype:     dns.TypeNS,
-						Rcode:      uint8(rcode),
-						RRset:      &rrset,
-						Context:    cache.ContextReferral,
-						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
-					})
+				imr.Cache.Set(zonename, dns.TypeNS, &cache.CachedRRset{
+					Name:       zonename,
+					RRtype:     dns.TypeNS,
+					Rcode:      uint8(rcode),
+					RRset:      &rrset,
+					Context:    cache.ContextReferral,
+					State:      cache.ValidationStateIndeterminate,
+					Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+				})
 				}
 
 				// 2. Collect any glue from Additional
@@ -593,6 +594,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						RRtype:     dns.TypeA,
 						RRset:      &rrset,
 						Context:    cache.ContextGlue,
+						State:      cache.ValidationStateIndeterminate,
 						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 					})
 				}
@@ -607,6 +609,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						RRtype:     dns.TypeAAAA,
 						RRset:      &rrset,
 						Context:    cache.ContextGlue,
+						State:      cache.ValidationStateIndeterminate,
 						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 					})
 				}
@@ -670,10 +673,29 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 	if !force {
 		crrset := imr.Cache.Get(qname, qtype)
 		if crrset != nil {
-			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+			// Only use cached answer if it's a direct answer or negative response.
+			// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
+			// to get DNSSEC signatures and upgrade the quality of the data.
+			switch crrset.Context {
+			case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
+				// These are direct answers or negative responses - safe to use
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+				}
+				return crrset.RRset, int(crrset.Rcode), crrset.Context, nil
+			case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
+				// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with context=%s, but issuing direct query to upgrade quality and get DNSSEC signatures", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+				}
+				// Fall through to issue query
+			default:
+				// Unknown context - be safe and issue query
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with unknown context=%s, issuing query", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+				}
+				// Fall through to issue query
 			}
-			return crrset.RRset, int(crrset.Rcode), crrset.Context, nil
 		} else {
 			if Globals.Debug {
 				lg.Printf("IterativeDNSQuery: answer to <%s, %s> not present in cache", qname, dns.TypeToString[qtype])
@@ -1111,6 +1133,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			RRtype:     dns.TypeA,
 			RRset:      &rrset,
 			Context:    cache.ContextGlue,
+			State:      cache.ValidationStateIndeterminate,
 			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 		})
 	}
@@ -1128,6 +1151,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			RRtype:     dns.TypeAAAA,
 			RRset:      &rrset,
 			Context:    cache.ContextGlue,
+			State:      cache.ValidationStateIndeterminate,
 			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 		})
 	}
@@ -1853,6 +1877,10 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
 			}
 		}
+		// If validation state is None (not validated), set to Indeterminate for referral data
+		if vstate == cache.ValidationStateNone {
+			vstate = cache.ValidationStateIndeterminate
+		}
 		imr.Cache.Set(zonename, dns.TypeNS, &cache.CachedRRset{
 			Name:       zonename,
 			RRtype:     dns.TypeNS,
@@ -1895,6 +1923,10 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
 			}
 		}
+		// If validation state is None (not validated), set to Indeterminate for referral data
+		if vstate == cache.ValidationStateNone {
+			vstate = cache.ValidationStateIndeterminate
+		}
 		imr.Cache.Set(zonename, dns.TypeDS, &cache.CachedRRset{
 			Name:       zonename,
 			RRtype:     dns.TypeDS,
@@ -1920,12 +1952,12 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
 		_, exists := imr.Cache.ZoneMap.Get(zonename)
 		if !exists {
-			// Zone not in ZoneMap yet, add it as insecure
-			z := &cache.Zone{
-				ZoneName:         zonename,
-				Secure:           false,
-			}
-			imr.Cache.ZoneMap.Set(zonename, z)
+		// Zone not in ZoneMap yet, add it as insecure
+		z := &cache.Zone{
+			ZoneName:         zonename,
+			Secure:           false,
+		}
+		imr.Cache.ZoneMap.Set(zonename, z)
 		}
 	}
 	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, nsMap, r)

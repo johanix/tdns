@@ -22,7 +22,7 @@ type CachedDnskeyRRset struct {
 	Name        string
 	Keyid       uint16
 	State       ValidationState
-	Trusted     bool
+	// Trusted     bool
 	TrustAnchor bool
 	Dnskey      dns.DNSKEY  // just this key
 	RRset       *core.RRset // complete RRset

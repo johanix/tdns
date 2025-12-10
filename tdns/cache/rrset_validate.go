@@ -26,8 +26,8 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 
 // ValidateRRset attempts to validate the provided RRset using DNSKEYs present in the DnskeyCache.
 // If a required signer key is missing, it will query for the signer's DNSKEY via the recursive
-// engine and retry using keys from the cache. Only keys marked as Trusted are accepted for
-// successful validation. Returns true if at least one signature validates and is time-valid.
+// engine and retry using keys from the cache. Only keys marked as ValidateionStateSecure are accepted for
+// successful validation. Returns ValidationStateSecure if at least one signature validates and is time-valid.
 func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, verbose bool) (ValidationState, error) {
 	if rrset == nil {
 		log.Printf("ValidateRRset: rrset is nil; nothing to validate")
@@ -123,7 +123,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 									Name:       dns.Fqdn(dk.Hdr.Name),
 									Keyid:      dk.KeyTag(),
 									State:      vstate,
-									Trusted:    true,
+									//Trusted:    true,
 									Dnskey:     *dk,
 									Expiration: exp,
 								})
@@ -141,12 +141,12 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 			dkrr = dkc.Get(signer, keyid)
 		}
 		// Require a trusted key for a positive validation result
-		if dkrr == nil || !dkrr.Trusted {
+		if dkrr == nil || dkrr.State != ValidationStateSecure {
 			if rrcache.Debug {
 				if dkrr == nil {
-					log.Printf("ValidateRRset: no TA in cache for %q::%d", signer, keyid)
+					log.Printf("ValidateRRset: no DNSKEY in cache for %q::%d", signer, keyid)
 				} else {
-					log.Printf("ValidateRRset: TA present but not trusted for %q::%d", signer, keyid)
+					log.Printf("ValidateRRset: DNSKEY present but not secure for %q::%d", signer, keyid)
 				}
 			}
 			continue
@@ -247,18 +247,18 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			return ValidationStateBogus, nil
 		}
 		keyid := rootSig.KeyTag
-		ta := dkc.Get(name, keyid)
-		if ta == nil || !ta.Trusted {
+		dk := dkc.Get(name, keyid)
+		if dk == nil || dk.State != ValidationStateSecure {
 			if verbose {
-				if ta == nil {
-					log.Printf("ValidateDNSKEYs: no TA for root keyid=%d", keyid)
+				if dk == nil {
+					log.Printf("ValidateDNSKEYs: no DNSKEY for root keyid=%d", keyid)
 				} else {
-					log.Printf("ValidateDNSKEYs: root TA present but not trusted for keyid=%d", keyid)
+					log.Printf("ValidateDNSKEYs: root DNSKEY present but not secure for keyid=%d", keyid)
 				}
 			}
 			return ValidationStateIndeterminate, nil // XXX: No trust anchor for root
 		}
-		if err := rootSig.Verify(&ta.Dnskey, rrset.RRs); err != nil {
+		if err := rootSig.Verify(&dk.Dnskey, rrset.RRs); err != nil {
 			if verbose {
 				log.Printf("ValidateDNSKEYs: root signature verify FAILED: %v", err)
 			}
@@ -275,31 +275,19 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			log.Printf("ValidateDNSKEYs: SUCCESS for root with keytag=%d", keyid)
 		}
 		// Cap TTL to signature expiration
+		minTTL := GetMinTTL(rrset.RRs)
+
 		expirationTime := time.Unix(int64(rootSig.Expiration), 0)
 		remaining := time.Until(expirationTime)
-		ttl := time.Duration(remaining.Seconds()) * time.Second
-		if ttl < time.Duration(GetMinTTL(rrset.RRs))*time.Second {
+		expttl := time.Duration(remaining.Seconds()) * time.Second
+		if expttl < time.Duration(minTTL)*time.Second {
 			if len(rrset.RRs) > 0 {
-				ttlSeconds := uint32(ttl.Seconds())
+				expttlSeconds := uint32(expttl.Seconds())
 				for _, krr := range rrset.RRs {
-					krr.Header().Ttl = ttlSeconds
+					krr.Header().Ttl = expttlSeconds
 				}
 			}
 		}
-		// Add all DNSKEYs from the validated root RRset to DnskeyCache
-		//		minTTL := uint32(0)
-		//		for _, krr := range rrset.RRs {
-		//			if _, ok := krr.(*dns.DNSKEY); ok {
-		//				if minTTL == 0 || krr.Header().Ttl < minTTL {
-		//					minTTL = krr.Header().Ttl
-		//				}
-		//			}
-		//		}
-		//		if minTTL == 0 {
-		//			minTTL = 3600 // fallback
-		//		}
-
-		minTTL := GetMinTTL(rrset.RRs)
 
 		exp := time.Now().Add(time.Duration(minTTL) * time.Second)
 		for _, krr := range rrset.RRs {
@@ -308,7 +296,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 					Name:       dns.Fqdn(dk.Hdr.Name),
 					Keyid:      dk.KeyTag(),
 					State:      ValidationStateSecure,
-					Trusted:    true,
+					// Trusted:    true,
 					Dnskey:     *dk,
 					Expiration: exp,
 				})
@@ -416,21 +404,22 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			log.Printf("ValidateDNSKEYs: SUCCESS for %s with DS-backed keytag=%d", name, keyid)
 		}
 		// Cap TTL to signature expiration
+		minTTL := GetMinTTL(rrset.RRs)
+
 		expirationTime := time.Unix(int64(sigForKey.Expiration), 0)
 		remaining := time.Until(expirationTime)
-		ttl := time.Duration(remaining.Seconds()) * time.Second
-		if ttl < time.Duration(GetMinTTL(rrset.RRs))*time.Second {
+		expttl := time.Duration(remaining.Seconds()) * time.Second
+		if expttl < time.Duration(minTTL)*time.Second {
 			if len(rrset.RRs) > 0 {
-				ttlSeconds := uint32(ttl.Seconds())
+				expttlSeconds := uint32(expttl.Seconds())
 				for _, krr := range rrset.RRs {
-					krr.Header().Ttl = ttlSeconds
+					krr.Header().Ttl = expttlSeconds
 				}
 			}
 		}
 		// Add all DNSKEYs from the validated RRset to DnskeyCache so they're available
 		// for validating other RRsets (e.g., A records signed by ZSKs).
 		// This is a validation-time concern: the validator needs keys available immediately.
-		minTTL := GetMinTTL(rrset.RRs)
 
 		exp := time.Now().Add(time.Duration(minTTL) * time.Second)
 		for _, krr := range rrset.RRs {
@@ -439,7 +428,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 					Name:       dns.Fqdn(dk.Hdr.Name),
 					Keyid:      dk.KeyTag(),
 					State:      ValidationStateSecure,
-					Trusted:    true,
+					// Trusted:    true,
 					Dnskey:     *dk,
 					Expiration: exp,
 				})

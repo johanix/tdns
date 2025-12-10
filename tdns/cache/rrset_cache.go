@@ -19,6 +19,7 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
+// This is still global, but also present in the RRsetCacheT struct
 var DnskeyCache = NewDnskeyCache()
 
 func NewDnskeyCache() *DnskeyCacheT {
@@ -657,6 +658,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 			Name:    ".",
 			RRtype:  dns.TypeNS,
 			Context: ContextHint,
+			State:   ValidationStateIndeterminate,
 			RRset: &core.RRset{
 				Name:   ".",
 				RRtype: dns.TypeNS,
@@ -709,6 +711,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 				Name:    name,
 				RRtype:  rrtype,
 				Context: ContextHint,
+				State:   ValidationStateIndeterminate,
 				RRset: &core.RRset{
 					Name:   name,
 					Class:  dns.ClassINET,
@@ -750,14 +753,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	if rrcache.Debug {
 		log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
 	}
-	// for item := range rrcache.Servers.IterBuffered() {
-	//	z := item.Key
-	//	ss := item.Val
-	//	if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
-	//		bestmatch = z
-	//		servers = ss
-	//	}
-	// }
+	
 	for item := range rrcache.ServerMap.IterBuffered() {
 		z := item.Key
 		ss := item.Val

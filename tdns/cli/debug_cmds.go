@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/tdns"
+	cache "github.com/johanix/tdns/tdns/cache"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -184,9 +185,9 @@ var debugShowTACmd = &cobra.Command{
 
 		if len(dr.TrustedDnskeys) > 0 {
 			fmt.Printf("Known DNSKEYs:\n")
-			for _, ta := range dr.TrustedDnskeys {
-				out = append(out, fmt.Sprintf("DNSKEY|%s|%d|%v|%.70s...",
-					ta.Name, ta.Keyid, ta.Trusted, ta.Dnskey.String()))
+			for _, dk := range dr.TrustedDnskeys {
+				out = append(out, fmt.Sprintf("DNSKEY|%s|%d|%s|%.70s...",
+					dk.Name, dk.Keyid, cache.ValidationStateToString[dk.State], dk.Dnskey.String()))
 			}
 		}
 		fmt.Printf("%s\n", columnize.SimpleFormat(out))

@@ -194,7 +194,6 @@ var dumpZonesCmd = &cobra.Command{
 			if zone.Secure {
 				secureStatus = "secure"
 			}
-			// Right-align zone name (first column), left-align status (second column)
 			t.Row(item.Key, secureStatus)
 		}
 		fmt.Println(t.String())
@@ -267,8 +266,8 @@ var dumpDnskeysCmd = &cobra.Command{
 		type dnskeyView struct {
 			name        string
 			keyid       uint16
-			validated   bool
-			trusted     bool
+			// validated   bool
+			// trusted     bool
 			trustanchor bool
 			expires     string
 			protocol    uint8
@@ -303,7 +302,7 @@ var dumpDnskeysCmd = &cobra.Command{
 			ov.dnskey = append(ov.dnskey, dnskeyView{
 				name:        val.Name,
 				keyid:       val.Keyid,
-				trusted:     val.Trusted,
+				// trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
 				expires:     tdns.TtlPrint(val.Expiration),
 				alg:         val.Dnskey.Algorithm,
@@ -377,10 +376,6 @@ var dumpDnskeysCmd = &cobra.Command{
 			ov := owners[owner]
 			// DS first
 			if ov.ds != nil {
-				valStr := "unvalidated"
-				if ov.ds.state == cache.ValidationStateSecure {
-					valStr = "secure"
-				}
 				// Include signer name and keyid in header if present in cached RRset
 				var signerInfo string
 				var stateStr string
@@ -397,7 +392,7 @@ var dumpDnskeysCmd = &cobra.Command{
 				if stateStr == "" {
 					stateStr = "none"
 				}
-				fmt.Printf("\n%s DS (%s, state: %s%s, TTL: %s)\n", owner, valStr, stateStr, signerInfo, ov.ds.expires)
+				fmt.Printf("\n%s DS (state: %s%s, TTL: %s)\n", owner, stateStr, signerInfo, ov.ds.expires)
 				for _, s := range ov.ds.rrs {
 					fmt.Printf("  %s\n", maskDsLine(s))
 				}
@@ -425,15 +420,16 @@ var dumpDnskeysCmd = &cobra.Command{
 						}
 					}
 				}
-				vStr := "insecure"
-				if rrsetState == cache.ValidationStateSecure {
-					vStr = "secure"
-				}
-				fmt.Printf("\n%s DNSKEY (%s, state: %s%s, TTL: %s)\n", owner, vStr, stateStr, signerInfo, rrsetTTL)
+
+				fmt.Printf("\n%s DNSKEY (state: %s%s, TTL: %s)\n", owner, stateStr, signerInfo, rrsetTTL)
 				lines := []string{"KeyID | Flags | TTL | Details"}
 				for _, v := range ov.dnskey {
+					ta := ""
+					if v.trustanchor {
+						ta = "trust anchor"
+					}
 					detail := fmt.Sprintf("%s DNSKEY %d %d %d %s", v.name, v.flags, v.protocol, v.alg, formatKeySnippet(v.pub))
-					lines = append(lines, fmt.Sprintf("%d | %s | %s | %s", v.keyid, dnskeyFlagList(v.validated, v.trusted, v.trustanchor), v.expires, detail))
+					lines = append(lines, fmt.Sprintf("%d | %s | %s | %s", v.keyid, ta, v.expires, detail))
 				}
 				fmt.Println(columnize.SimpleFormat(lines))
 				// for range ov.dnskey {
@@ -484,7 +480,7 @@ func validationStateString(state cache.ValidationState) string {
 	if s := cache.ValidationStateToString[state]; s != "" {
 		return s
 	}
-	return "none"
+	return "[unset]"
 }
 
 func printAuthServerVerbose(name string, server *cache.AuthServer) {
@@ -534,22 +530,22 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	}
 }
 
-func dnskeyFlagList(validated, trusted, trustanchor bool) string {
-	var flags []string
-	if validated {
-		flags = append(flags, "validated")
-	}
-	if trusted {
-		flags = append(flags, "trusted")
-	}
-	if trustanchor {
-		flags = append(flags, "trust-anchor")
-	}
-	if len(flags) == 0 {
-		flags = append(flags, "-")
-	}
-	return fmt.Sprintf("[%s]", strings.Join(flags, " "))
-}
+// func dnskeyFlagList(validated, trusted, trustanchor bool) string {
+//	var flags []string
+//	if validated {
+//		flags = append(flags, "validated")
+//	}
+//	if trusted {
+//		flags = append(flags, "trusted")
+//	}
+//	if trustanchor {
+//		flags = append(flags, "trust anchor")
+//	}
+//	if len(flags) == 0 {
+//		flags = append(flags, "-")
+//	}
+//	return fmt.Sprintf("[%s]", strings.Join(flags, " "))
+//}
 
 func formatKeySnippet(key string) string {
 	if len(key) <= 15 {
