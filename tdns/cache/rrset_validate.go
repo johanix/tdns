@@ -175,7 +175,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 						ZoneName: rrset.Name,
 					}
 				}
-				zone.SecureDelegation = true
+				zone.Secure = true
 				rrcache.ZoneMap.Set(rrset.Name, zone)
 			}
 			// cap ttl to the signature expiration

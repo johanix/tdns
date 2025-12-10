@@ -13,6 +13,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"zgo.at/acidtab"
 )
 
 var ImrDumpCmd = &cobra.Command{
@@ -160,6 +161,43 @@ var dumpAuthServersCmd = &cobra.Command{
 			}
 			fmt.Println(columnize.SimpleFormat(lines))
 		}
+	},
+}
+
+var dumpZonesCmd = &cobra.Command{
+	Use:   "zones",
+	Short: "List all zones in the ZoneMap with their secure delegation status",
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+
+		// Collect all zones from ZoneMap
+		zones := []core.Tuple[string, *cache.Zone]{}
+		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
+			zones = append(zones, item)
+		}
+
+		// Sort zones by name (reverse label order)
+		sort.Slice(zones, func(i, j int) bool {
+			return lessByReverseLabels(zones[i].Key, zones[j].Key)
+		})
+
+		// Use acidtab for right-aligned zone names
+		t := acidtab.New("Zone", "Status")
+		t.AlignCol(0, acidtab.Right)
+		t.AlignCol(1, acidtab.Right)
+		for _, item := range zones {
+			zone := item.Val
+			secureStatus := "insecure"
+			if zone.Secure {
+				secureStatus = "secure"
+			}
+			// Right-align zone name (first column), left-align status (second column)
+			t.Row(item.Key, secureStatus)
+		}
+		fmt.Println(t.String())
 	},
 }
 
@@ -549,7 +587,7 @@ func maskRrsigLine(line string) string {
 
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd)
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd)
 	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd())
 	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
 }

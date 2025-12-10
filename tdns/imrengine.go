@@ -1107,6 +1107,18 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			})
 			log.Printf("initializeImrTrustAnchors: zone %q added DNSKEY TA (keyid: %d) (expires %v)", name, dk.KeyTag(), exp)
 		}
+		// Add zone to ZoneMap as secure when DNSKEY trust anchor is added
+		z, exists := imr.Cache.ZoneMap.Get(name)
+		if !exists {
+			z = &cache.Zone{
+				ZoneName: name,
+			}
+		}
+		z.Secure = true
+		imr.Cache.ZoneMap.Set(name, z)
+		if Globals.Debug {
+			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DNSKEY trust anchor)", name)
+		}
 	}
 
 	// For each anchored name we know about (from DS or direct DNSKEY), fetch and validate
@@ -1186,18 +1198,6 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			return fmt.Errorf("no %s DNSKEY RRset found", anchorName)
 		}
 
-		// Compute min TTL for expiration of added anchors
-		/*
-			var minTTL uint32
-			if len(rrset.RRs) > 0 {
-				minTTL = rrset.RRs[0].Header().Ttl
-				for _, rr := range rrset.RRs[1:] {
-					if rr.Header().Ttl < minTTL {
-						minTTL = rr.Header().Ttl
-					}
-				}
-			}
-		*/
 		minTTL := cache.GetMinTTL(rrset.RRs)
 		exp := time.Now().Add(minTTL)
 
@@ -1296,6 +1296,18 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 				log.Printf("initializeImrTrustAnchors: DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
 			}
 		}
+		// Add zone to ZoneMap as secure when DNSKEY RRset validates (DS trust anchor validated)
+		z, exists := imr.Cache.ZoneMap.Get(anchorName)
+		if !exists {
+			z = &cache.Zone{
+				ZoneName: anchorName,
+			}
+		}
+		z.Secure = true
+		imr.Cache.ZoneMap.Set(anchorName, z)
+		if Globals.Debug {
+			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DS trust anchor validated)", anchorName)
+		}
 
 		// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
 		nsRRset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true)
@@ -1350,6 +1362,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			imr.Cache.Set(anchorName, dns.TypeNS, nsCrr)
 		}
 	}
+
 	// fmt.Printf("initializeImrTrustAnchors: completed. DnskeyCache has %d items\n", imr.Cache.DnskeyCache.Map.Count())
 	// for item := range imr.Cache.DnskeyCache.Map.IterBuffered() {
 	// 	fmt.Printf("initializeImrTrustAnchors: DnskeyCache item: %+v\n", item)

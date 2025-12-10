@@ -1911,7 +1911,20 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 					ZoneName: zonename,
 				}
 			}
-			z.SecureDelegation = true
+			z.Secure = true
+			imr.Cache.ZoneMap.Set(zonename, z)
+		}
+	}
+	// If we have an NS RRset but no DS record (or DS validation didn't result in secure state),
+	// add the zone to ZoneMap as insecure (unsigned delegation)
+	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
+		_, exists := imr.Cache.ZoneMap.Get(zonename)
+		if !exists {
+			// Zone not in ZoneMap yet, add it as insecure
+			z := &cache.Zone{
+				ZoneName:         zonename,
+				Secure:           false,
+			}
 			imr.Cache.ZoneMap.Set(zonename, z)
 		}
 	}

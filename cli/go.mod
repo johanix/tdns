@@ -46,6 +46,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.57.0 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
@@ -66,4 +67,7 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	zgo.at/acidtab v1.1.0 // indirect
+	zgo.at/runewidth v0.1.0 // indirect
+	zgo.at/termtext v1.5.0 // indirect
 )

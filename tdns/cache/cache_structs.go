@@ -88,7 +88,7 @@ type AuthServer struct {
 
 type Zone struct {
 	ZoneName         string
-	SecureDelegation bool
+	Secure			 bool
 }
 
 func (as *AuthServer) ConnectionMode() ConnMode {
