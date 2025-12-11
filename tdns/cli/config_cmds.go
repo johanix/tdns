@@ -99,6 +99,24 @@ var configStatusCmd = &cobra.Command{
 			} else {
 				fmt.Printf("DnsEngine: not listening on any addresses\n")
 			}
+			if len(resp.DnsEngine.Options) > 0 {
+				fmt.Printf("DnsEngine: auth options:\n")
+				for opt, val := range resp.DnsEngine.Options {
+					optName := tdns.AuthOptionToString[opt]
+					if val != "" {
+						fmt.Printf("  %s: %s\n", optName, val)
+					} else {
+						fmt.Printf("  %s: (enabled)\n", optName)
+					}
+				}
+			} else if len(resp.DnsEngine.OptionsStrs) > 0 {
+				fmt.Printf("DnsEngine: auth options:\n")
+				for _, optStr := range resp.DnsEngine.OptionsStrs {
+					fmt.Printf("  %s\n", optStr)
+				}
+			} else {
+				fmt.Printf("DnsEngine: no auth options configured\n")
+			}
 			if len(resp.Identities) > 0 {
 				fmt.Printf("Identities: %v\n", resp.Identities)
 			} else {

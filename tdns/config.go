@@ -59,10 +59,12 @@ type TransportConf struct {
 }
 
 type DnsEngineConf struct {
-	Addresses  []string `yaml:"addresses" validate:"required"`
-	CertFile   string   `yaml:"certfile,omitempty"`
-	KeyFile    string   `yaml:"keyfile,omitempty"`
-	Transports []string `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
+	Addresses  []string             `yaml:"addresses" validate:"required"`
+	CertFile   string               `yaml:"certfile,omitempty"`
+	KeyFile    string               `yaml:"keyfile,omitempty"`
+	Transports []string             `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
+	OptionsStrs []string            `yaml:"options" mapstructure:"options"`
+	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
 }
 
 type ImrEngineConf struct {

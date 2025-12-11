@@ -255,6 +255,10 @@ type DelegationSyncStatus struct {
 	Error         bool
 	ErrorMsg      string
 	UpdateResult  UpdateResult // Experimental
+	// Complete new delegation data for replace mode
+	NewNS    []dns.RR // Complete NS RRset after update
+	NewA     []dns.RR // Complete A glue RRs after update
+	NewAAAA  []dns.RR // Complete AAAA glue RRs after update
 }
 
 type ZoneRefresher struct {
@@ -450,6 +454,7 @@ type KeyDB struct {
 	UpdateQ             chan UpdateRequest
 	DeferredUpdateQ     chan DeferredUpdate
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
+	Options             *map[AuthOption]string
 }
 
 type Tx struct {

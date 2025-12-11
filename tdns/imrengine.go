@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -324,30 +325,32 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				for _, rr := range rrresp.RRset.RRs {
 					switch rr := rr.(type) {
 					case *dns.A:
-						// servers = []]string{rr.A.String()}
-						authservers[rr.Header().Name] = &cache.AuthServer{
-							Name:          rr.Header().Name,
-							Addrs:         []string{rr.A.String()},
-							Alpn:          []string{"do53"},
-							Transports:    []core.Transport{core.TransportDo53},
-							PrefTransport: core.TransportDo53,
-							Src:           "answer",
-							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						// Use shared AuthServer instance (ensures single instance per nameserver)
+						server := imr.Cache.GetOrCreateAuthServer(rr.Header().Name)
+						addr := rr.A.String()
+						if !slices.Contains(server.Addrs, addr) {
+							server.Addrs = append(server.Addrs, addr)
 						}
+						if server.Src == "" || server.Src == "unknown" {
+							server.Src = "answer"
+						}
+						server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+						authservers[rr.Header().Name] = server
 						if Globals.Debug {
 							log.Printf("ImrResponder: using resolved A address: %+v", authservers)
 						}
 					case *dns.AAAA:
-						// servers = []string{rr.AAAA.String()}
-						authservers[rr.Header().Name] = &cache.AuthServer{
-							Name:          rr.Header().Name,
-							Addrs:         []string{rr.AAAA.String()},
-							Alpn:          []string{"do53"},
-							Transports:    []core.Transport{core.TransportDo53},
-							PrefTransport: core.TransportDo53,
-							Src:           "answer",
-							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						// Use shared AuthServer instance (ensures single instance per nameserver)
+						server := imr.Cache.GetOrCreateAuthServer(rr.Header().Name)
+						addr := rr.AAAA.String()
+						if !slices.Contains(server.Addrs, addr) {
+							server.Addrs = append(server.Addrs, addr)
 						}
+						if server.Src == "" || server.Src == "unknown" {
+							server.Src = "answer"
+						}
+						server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+						authservers[rr.Header().Name] = server
 						if Globals.Debug {
 							log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
 						}
@@ -571,28 +574,30 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 						nsname := rr.Header().Name
 						switch rr := rr.(type) {
 						case *dns.A:
-							// servers = []]string{rr.A.String()}
-							authservers[nsname] = &cache.AuthServer{
-								Name:          nsname,
-								Addrs:         []string{rr.A.String()},
-								Alpn:          []string{"do53"},
-								Transports:    []core.Transport{core.TransportDo53},
-								PrefTransport: core.TransportDo53,
-								Src:           "answer",
-								Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							// Use shared AuthServer instance (ensures single instance per nameserver)
+							server := imr.Cache.GetOrCreateAuthServer(nsname)
+							addr := rr.A.String()
+							if !slices.Contains(server.Addrs, addr) {
+								server.Addrs = append(server.Addrs, addr)
 							}
+							if server.Src == "" || server.Src == "unknown" {
+								server.Src = "answer"
+							}
+							server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+							authservers[nsname] = server
 							log.Printf("ImrResponder: using resolved A address: %+v", authservers[nsname])
 						case *dns.AAAA:
-							// servers = []string{rr.AAAA.String()}
-							authservers[nsname] = &cache.AuthServer{
-								Name:          nsname,
-								Addrs:         []string{rr.AAAA.String()},
-								Alpn:          []string{"do53"},
-								Transports:    []core.Transport{core.TransportDo53},
-								PrefTransport: core.TransportDo53,
-								Src:           "answer",
-								Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+							// Use shared AuthServer instance (ensures single instance per nameserver)
+							server := imr.Cache.GetOrCreateAuthServer(nsname)
+							addr := rr.AAAA.String()
+							if !slices.Contains(server.Addrs, addr) {
+								server.Addrs = append(server.Addrs, addr)
 							}
+							if server.Src == "" || server.Src == "unknown" {
+								server.Src = "answer"
+							}
+							server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+							authservers[nsname] = server
 							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
 						}
 						rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)

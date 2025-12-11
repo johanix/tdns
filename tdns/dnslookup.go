@@ -529,12 +529,18 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					case *dns.A:
 						addr := rr.(*dns.A).A.String()
 						servers = append(servers, net.JoinHostPort(addr, "53"))
-						serverMap[name] = &cache.AuthServer{
-							Name:       name,
-							Alpn:       []string{"do53"},
-							Transports: []core.Transport{core.TransportDo53},
-							Src:        "answer",
+						// Use shared AuthServer instance across all zones
+						server := imr.Cache.GetOrCreateAuthServer(name)
+						if !slices.Contains(server.Addrs, addr) {
+							server.Addrs = append(server.Addrs, addr)
 						}
+						if server.Src == "" || server.Src == "unknown" {
+							server.Src = "answer"
+						}
+						if !server.Debug && imr.Debug {
+							server.Debug = imr.Debug
+						}
+						serverMap[name] = server
 						tmp := glue4Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue4Map[name] = tmp
@@ -542,12 +548,18 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					case *dns.AAAA:
 						addr := rr.(*dns.AAAA).AAAA.String()
 						servers = append(servers, net.JoinHostPort(addr, "53"))
-						serverMap[name] = &cache.AuthServer{
-							Name:       name,
-							Alpn:       []string{"do53"},
-							Transports: []core.Transport{core.TransportDo53},
-							Src:        "answer",
+						// Use shared AuthServer instance across all zones
+						server := imr.Cache.GetOrCreateAuthServer(name)
+						if !slices.Contains(server.Addrs, addr) {
+							server.Addrs = append(server.Addrs, addr)
 						}
+						if server.Src == "" || server.Src == "unknown" {
+							server.Src = "answer"
+						}
+						if !server.Debug && imr.Debug {
+							server.Debug = imr.Debug
+						}
+						serverMap[name] = server
 						tmp := glue6Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue6Map[name] = tmp
@@ -738,9 +750,9 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 					addr, server.Alpn, qname, dns.TypeToString[qtype])
 			}
 
-			r, rtt, err := imr.tryServer(ctx, server, addr, m, qname, qtype)
+			r, _, err := imr.tryServer(ctx, server, addr, m, qname, qtype)
 			if err != nil && imr.Cache.Verbose {
-				lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
+				// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
 				continue // go to next server
 			}
 
@@ -758,8 +770,8 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 
 			if len(r.Answer) != 0 {
 				// Parse any transport signal for this specific server even on final answers
+				// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
 				imr.parseTransportForServerFromAdditional(ctx, server, r)
-				imr.persistServerTransportUpdate(server)
 				tmprrset, rcode2, ctx2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force)
 				if err != nil || done {
 					return tmprrset, rcode2, ctx2, err
@@ -977,10 +989,17 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// Collect any glue from Additional
 	glue4Map := map[string]core.RRset{}
 	glue6Map := map[string]core.RRset{}
-	serverMap, exist := imr.Cache.ServerMap.Get(zonename)
-	if !exist {
-		serverMap = map[string]*cache.AuthServer{}
+	serverMapOrig, exist := imr.Cache.ServerMap.Get(zonename)
+	
+	// Create a copy of the map to avoid concurrent map read/write errors
+	// The original map is stored in a concurrent map and may be read by other goroutines
+	serverMap := make(map[string]*cache.AuthServer)
+	if exist {
+		for k, v := range serverMapOrig {
+			serverMap[k] = v
+		}
 	}
+	
 	// Prune expired auth servers for this zone before updating
 	now := time.Now()
 	for name, srv := range serverMap {
@@ -1062,11 +1081,14 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			case "authority":
 				serversrc = "referral"
 			}
-			serverMap[serverName] = &cache.AuthServer{
-				Name:     serverName,
-				Alpn:     []string{"do53"},
-				Src:      serversrc,
-				ConnMode: cache.ConnModeLegacy,
+			// Use shared AuthServer instance across all zones
+			serverMap[serverName] = imr.Cache.GetOrCreateAuthServer(serverName)
+			// Update fields for this specific context
+			if serverMap[serverName].Src == "" || serverMap[serverName].Src == "unknown" {
+				serverMap[serverName].Src = serversrc
+			}
+			if !serverMap[serverName].Debug && imr.Debug {
+				serverMap[serverName].Debug = imr.Debug
 			}
 			justCreated = true
 		}
@@ -1357,20 +1379,22 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	}
 	server.IncrementTransportCounter(t)
 	if Globals.Debug {
-		log.Printf("***tryServer: calling c.Exchange with Transport=%q, server=%s (addrs: %v), addr=%q, qname=%q, qtype=%q",
+		log.Printf("*** tryServer: calling c.Exchange with Transport=%q, server=%s (addrs: %v), addr=%q, qname=%q, qtype=%q",
 			core.TransportToString[t], server.Name, server.Addrs, addr, qname, dns.TypeToString[qtype])
 	}
 	// return c.Exchange(m, addr)
 	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
 	if err != nil {
-		log.Printf("tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
+		log.Printf("*** tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
+		server.RecordAddressFailure(addr, err)
 		return nil, 0, err
 	}
+	if r != nil {
+		server.RecordAddressSuccess(addr)
+	}
 	if Globals.Debug {
-		if r != nil {
-			//			log.Printf("tryServer: query \"%s %s\" sent to %s returned response:\n%s", qname, dns.TypeToString[qtype], addr, r.String())
-		} else {
-			log.Printf("tryServer: query \"%s %s\" sent to %s returned no response", qname, dns.TypeToString[qtype], addr)
+		if r == nil {
+			log.Printf("*** tryServer: query \"%s %s\" sent to %s returned no response", qname, dns.TypeToString[qtype], addr)
 		}
 	}
 	return r, 0, err
@@ -1610,19 +1634,6 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 	}
 }
 
-// persistServerTransportUpdate writes the updated server transport info back into the global ServerMap
-// XXX: This should be safe as ServerMap is a concurrent map.
-func (imr *Imr) persistServerTransportUpdate(server *cache.AuthServer) {
-	if server == nil {
-		return
-	}
-	for zone, sm := range imr.Cache.ServerMap.Items() {
-		if _, ok := sm[server.Name]; ok {
-			sm[server.Name] = server
-			imr.Cache.ServerMap.Set(zone, sm)
-		}
-	}
-}
 
 func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, vstate cache.ValidationState) {
 	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {

@@ -1,0 +1,291 @@
+/*
+ * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ */
+package cache
+
+import (
+	"strings"
+	"sync"
+	"time"
+
+	core "github.com/johanix/tdns/tdns/core"
+)
+
+// AddressBackoff tracks backoff state for a single server address.
+// Used to avoid repeatedly querying addresses that don't respond or have routing issues.
+type AddressBackoff struct {
+	NextTry      time.Time // When this address can be tried again
+	FailureCount uint8     // Number of consecutive failures (1 = first failure, 2+ = second+ failure)
+	LastError    string    // Last error message (stored when debug mode is enabled)
+}
+
+type AuthServer struct {
+	Name             string
+	Addrs            []string
+	Alpn             []string // {"do53", "doq", "dot", "doh"}
+	Transports       []core.Transport
+	PrefTransport    core.Transport           // "doq" | "dot" | "doh" | "do53"
+	TransportWeights map[core.Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
+	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
+	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`
+	ConnMode        ConnMode                `yaml:"connmode" mapstructure:"connmode"`
+	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
+	// Stats (guarded by mu)
+	mu                sync.Mutex
+	TransportCounters map[core.Transport]uint64 // total queries attempted per transport
+	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
+	Expire            time.Time
+	Debug             bool // If true, store error messages in AddressBackoff.LastError
+	// Backoff tracking (guarded by mu)
+	AddressBackoffs map[string]*AddressBackoff // keyed by address string (e.g., "1.2.3.4:53" or "[2001:db8::1]:53")
+}
+
+func (as *AuthServer) ConnectionMode() ConnMode {
+	if as == nil {
+		return ConnModeLegacy
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.ConnMode
+}
+
+func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.TLSARecords) == 0 {
+		return nil
+	}
+	snap := make(map[string]*CachedRRset, len(as.TLSARecords))
+	for owner, rec := range as.TLSARecords {
+		snap[owner] = rec
+	}
+	return snap
+}
+
+// SnapshotCounters returns a copy of the per-transport counters.
+func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	out := make(map[core.Transport]uint64, len(as.TransportCounters))
+	for t, c := range as.TransportCounters {
+		out[t] = c
+	}
+	return out
+}
+
+// SnapshotAddressBackoffs returns a copy of the address backoff map.
+// Only includes addresses that are currently in backoff (NextTry > now).
+func (as *AuthServer) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
+		return nil
+	}
+	snap := make(map[string]*AddressBackoff)
+	for addr, backoff := range as.AddressBackoffs {
+		if backoff.NextTry.After(now) {
+			// Create a copy of the backoff struct
+			snap[addr] = &AddressBackoff{
+				NextTry:      backoff.NextTry,
+				FailureCount: backoff.FailureCount,
+				LastError:    backoff.LastError,
+			}
+		}
+	}
+	if len(snap) == 0 {
+		return nil
+	}
+	return snap
+}
+
+func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.TransportCounters == nil {
+		as.TransportCounters = make(map[core.Transport]uint64)
+	}
+	as.TransportCounters[t]++
+}
+
+func (as *AuthServer) PromoteConnMode(target ConnMode) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.ConnMode < target {
+		as.ConnMode = target
+	}
+}
+
+// IsAddressAvailable returns true if the given address is not in backoff or backoff has expired.
+// Thread-safe: acquires mu lock.
+func (as *AuthServer) IsAddressAvailable(addr string) bool {
+	if as == nil {
+		return false
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.AddressBackoffs == nil {
+		return true // No backoffs recorded, address is available
+	}
+	backoff, exists := as.AddressBackoffs[addr]
+	if !exists {
+		return true // No backoff for this address
+	}
+	// Check if backoff has expired
+	return time.Now().After(backoff.NextTry)
+}
+
+// categorizeError analyzes the error and returns the appropriate backoff duration.
+// Routing errors (no route to host) get 1 hour immediately as they're unlikely to resolve soon.
+// Timeout errors get 2 minutes as they might be temporary.
+// Other errors default to 2 minutes for first failure, 1 hour for subsequent failures.
+func categorizeError(err error, isFirstFailure bool) time.Duration {
+	if err == nil {
+		// No error provided, use default behavior
+		if isFirstFailure {
+			return 2 * time.Minute
+		}
+		return 1 * time.Hour
+	}
+	errStr := err.Error()
+	
+	// Check for routing errors - these are unlikely to resolve soon, so backoff 1 hour immediately
+	if strings.Contains(errStr, "no route to host") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "host unreachable") {
+		return 1 * time.Hour
+	}
+	
+	// Check for timeout errors - these might be temporary, so backoff 2 minutes
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "deadline exceeded") {
+		return 2 * time.Minute
+	}
+	
+	// Other errors: 2 minutes for first failure, 1 hour for subsequent
+	if isFirstFailure {
+		return 2 * time.Minute
+	}
+	return 1 * time.Hour
+}
+
+// RecordAddressFailure records a failure for the given address and sets appropriate backoff.
+// The error parameter is analyzed to determine backoff duration:
+//   - Routing errors ("no route to host"): 1 hour immediately
+//   - Timeout errors: 2 minutes
+//   - Other errors: 2 minutes for first failure, 1 hour for subsequent failures
+// If as.Debug is true, the error message is stored in LastError for debugging purposes.
+// Thread-safe: acquires mu lock.
+func (as *AuthServer) RecordAddressFailure(addr string, err error) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.AddressBackoffs == nil {
+		as.AddressBackoffs = make(map[string]*AddressBackoff)
+	}
+	backoff, exists := as.AddressBackoffs[addr]
+	errMsg := ""
+	if as.Debug && err != nil {
+		errMsg = err.Error()
+	}
+	if !exists {
+		// First failure: determine backoff based on error type
+		backoffDuration := categorizeError(err, true)
+		as.AddressBackoffs[addr] = &AddressBackoff{
+			NextTry:      time.Now().Add(backoffDuration),
+			FailureCount: 1,
+			LastError:    errMsg,
+		}
+		return
+	}
+	// Subsequent failure: determine backoff based on error type
+	backoffDuration := categorizeError(err, false)
+	backoff.NextTry = time.Now().Add(backoffDuration)
+	backoff.LastError = errMsg // Update last error even if not first failure
+	if backoff.FailureCount < 255 { // Prevent overflow
+		backoff.FailureCount++
+	}
+}
+
+// RecordAddressSuccess clears any backoff for the given address.
+// Thread-safe: acquires mu lock.
+func (as *AuthServer) RecordAddressSuccess(addr string) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.AddressBackoffs != nil {
+		delete(as.AddressBackoffs, addr)
+		// If map is empty, we could nil it out, but keeping it is fine for efficiency
+	}
+}
+
+// AllAddressesInBackoff returns true if all addresses for this server are currently in backoff.
+// Thread-safe: acquires mu lock.
+func (as *AuthServer) AllAddressesInBackoff() bool {
+	if as == nil || len(as.Addrs) == 0 {
+		return false
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
+		return false // No backoffs recorded
+	}
+	now := time.Now()
+	for _, addr := range as.Addrs {
+		backoff, exists := as.AddressBackoffs[addr]
+		if !exists {
+			return false // At least one address has no backoff
+		}
+		if now.After(backoff.NextTry) {
+			return false // At least one address's backoff has expired
+		}
+	}
+	return true // All addresses are in active backoff
+}
+
+// GetAvailableAddresses returns a list of addresses that are currently available (not in backoff).
+// Thread-safe: acquires mu lock.
+func (as *AuthServer) GetAvailableAddresses() []string {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.Addrs) == 0 {
+		return nil
+	}
+	var available []string
+	now := time.Now()
+	for _, addr := range as.Addrs {
+		if as.AddressBackoffs == nil {
+			available = append(available, addr)
+			continue
+		}
+		backoff, exists := as.AddressBackoffs[addr]
+		if !exists || now.After(backoff.NextTry) {
+			available = append(available, addr)
+		}
+	}
+	return available
+}
+

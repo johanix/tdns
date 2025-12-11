@@ -391,24 +391,46 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 
 	// dump.P(syncstate)
 
-	// Ensure that we don't count any changes twice.
-	syncstate.Adds = []dns.RR{}
-	syncstate.Removes = []dns.RR{}
+	// Check the parent-update option to determine whether to use replace or delta mode
+	updateMode := "replace" // default
+	if kdb.Options != nil {
+		if mode, exists := (*kdb.Options)[AuthOptParentUpdate]; exists {
+			updateMode = mode
+		}
+	}
 
-	// If UPDATE:
-	// 2. Create DNS UPDATE msg
-	// var adds, removes []dns.RR
-	syncstate.Adds = append(syncstate.Adds, syncstate.NsAdds...)
-	syncstate.Adds = append(syncstate.Adds, syncstate.AAdds...)
-	syncstate.Adds = append(syncstate.Adds, syncstate.AAAAAdds...)
-	syncstate.Removes = append(syncstate.Removes, syncstate.NsRemoves...)
-	syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
-	syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
+	var m *dns.Msg
+	var err error
 
-	// dump.P(syncstate)
-	m, err := CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
-	if err != nil {
-		return "", 0, UpdateResult{}, err
+	if updateMode == "replace" {
+		// Replace mode: remove all existing delegation data and add new complete data
+		log.Printf("SyncZoneDelegationViaUpdate: Using replace mode for zone %s", zd.ZoneName)
+		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA)
+		if err != nil {
+			return "", 0, UpdateResult{}, err
+		}
+	} else {
+		// Delta mode: use adds and removes (existing behavior)
+		log.Printf("SyncZoneDelegationViaUpdate: Using delta mode for zone %s", zd.ZoneName)
+		// Ensure that we don't count any changes twice.
+		syncstate.Adds = []dns.RR{}
+		syncstate.Removes = []dns.RR{}
+
+		// If UPDATE:
+		// 2. Create DNS UPDATE msg
+		// var adds, removes []dns.RR
+		syncstate.Adds = append(syncstate.Adds, syncstate.NsAdds...)
+		syncstate.Adds = append(syncstate.Adds, syncstate.AAdds...)
+		syncstate.Adds = append(syncstate.Adds, syncstate.AAAAAdds...)
+		syncstate.Removes = append(syncstate.Removes, syncstate.NsRemoves...)
+		syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
+		syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
+
+		// dump.P(syncstate)
+		m, err = CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
+		if err != nil {
+			return "", 0, UpdateResult{}, err
+		}
 	}
 
 	// 3. Fetch the SIG(0) key from the keystore

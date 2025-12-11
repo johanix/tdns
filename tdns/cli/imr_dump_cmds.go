@@ -164,6 +164,65 @@ var dumpAuthServersCmd = &cobra.Command{
 	},
 }
 
+var dumpAuthServersErrorsCmd = &cobra.Command{
+	Use:   "errors",
+	Short: "List auth servers with connection issues (addresses in backoff)",
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+
+		now := time.Now()
+		hasErrors := false
+		var lines []string
+
+		// Traverse AuthServerMap to find servers with backoff issues
+		for item := range Conf.Internal.RRsetCache.AuthServerMap.IterBuffered() {
+			nsname := item.Key
+			server := item.Val
+
+			// Get snapshot of addresses in backoff (thread-safe)
+			backoffs := server.SnapshotAddressBackoffs(now)
+			if backoffs != nil && len(backoffs) > 0 {
+				hasErrors = true
+				// Sort addresses for consistent output
+				addrs := make([]string, 0, len(backoffs))
+				for addr := range backoffs {
+					addrs = append(addrs, addr)
+				}
+				sort.Strings(addrs)
+
+				// Collect information for addresses in backoff
+				for _, addr := range addrs {
+					backoff := backoffs[addr]
+					timeUntilRetry := backoff.NextTry.Sub(now)
+					line := fmt.Sprintf("%s | %s | retry in %s", nsname, addr, formatDuration(timeUntilRetry))
+					if backoff.FailureCount > 0 {
+						line += fmt.Sprintf(" | failures: %d", backoff.FailureCount)
+					}
+					if backoff.LastError != "" {
+						line += fmt.Sprintf(" | error: %s", backoff.LastError)
+					}
+					lines = append(lines, line)
+				}
+			}
+		}
+
+		if !hasErrors {
+			fmt.Println("No auth servers with connection issues found.")
+			return
+		}
+
+		// Print header and results
+		fmt.Println("Nameserver | Address | Backoff Time | Failures | Error")
+		fmt.Println(strings.Repeat("-", 80))
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+	},
+}
+
 var dumpZonesCmd = &cobra.Command{
 	Use:   "zones",
 	Short: "List all zones in the ZoneMap with their secure delegation status",
@@ -581,10 +640,25 @@ func maskRrsigLine(line string) string {
 	return strings.Join(parts, " ")
 }
 
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%.0fm", d.Minutes())
+	}
+	hours := d.Hours()
+	if hours < 24 {
+		return fmt.Sprintf("%.1fh", hours)
+	}
+	days := hours / 24
+	return fmt.Sprintf("%.1fd", days)
+}
+
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
 	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd)
-	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd())
+	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd(), dumpAuthServersErrorsCmd)
 	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
 }
 
