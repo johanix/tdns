@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"crypto"
 	"database/sql"
 	"fmt"
 	"log"
@@ -71,10 +72,38 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
 		log.Printf("[Sig0KeyMgmt]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
-		// res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
-		// 	dns.AlgorithmToString[pkc.Algorithm], pkc.K, pkc.KeyRR.String())
+		
+		// Convert private key to PEM format for storage
+		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
+		var privkey crypto.PrivateKey
+		if pkc.K != nil {
+			privkey = pkc.K
+		} else {
+			// Reconstruct from PrivateKey string (BIND format) and public key RR
+			// We need to parse the private key using the public key RR
+			if pkc.KeyType == dns.TypeKEY {
+				bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
+				if err != nil {
+					return &resp, fmt.Errorf("failed to convert private key to BIND format: %v", err)
+				}
+				reconstructedPkc, err := PrepareKeyCache(bindFormat, pkc.KeyRR.String())
+				if err != nil {
+					return &resp, fmt.Errorf("failed to reconstruct private key: %v", err)
+				}
+				privkey = reconstructedPkc.K
+			} else {
+				return &resp, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
+			}
+		}
+		
+		privkeyPEM, err := PrivateKeyToPEM(privkey)
+		if err != nil {
+			log.Printf("Error from PrivateKeyToPEM: %v", err)
+			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
+		}
+		
 		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
-			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.PrivateKey, pkc.KeyRR.String())
+			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.KeyRR.String())
 		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
 			log.Printf("Error: %v", err)
@@ -281,14 +310,39 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		resp.Msg = "Here are all the DNSSEC keys that we know"
 
 	case "add": // AKA "import"
-		//		res, err = tx.Exec(addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm],
-		//			kp.PrivateKey, kp.DnskeyRR)
-
 		pkc := kp.PrivateKeyCache
-		//		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
-		//			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.K, pkc.DnskeyRR.String())
+		
+		// Convert private key to PEM format for storage
+		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
+		var privkey crypto.PrivateKey
+		if pkc.K != nil {
+			privkey = pkc.K
+		} else {
+			// Reconstruct from PrivateKey string (BIND format) and public key RR
+			// We need to parse the private key using the public key RR
+			if pkc.KeyType == dns.TypeDNSKEY {
+				bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
+				if err != nil {
+					return &resp, fmt.Errorf("failed to convert private key to BIND format: %v", err)
+				}
+				reconstructedPkc, err := PrepareKeyCache(bindFormat, pkc.DnskeyRR.String())
+				if err != nil {
+					return &resp, fmt.Errorf("failed to reconstruct private key: %v", err)
+				}
+				privkey = reconstructedPkc.K
+			} else {
+				return &resp, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
+			}
+		}
+		
+		privkeyPEM, err := PrivateKeyToPEM(privkey)
+		if err != nil {
+			log.Printf("Error from PrivateKeyToPEM: %v", err)
+			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
+		}
+		
 		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
-			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", pkc.PrivateKey, pkc.DnskeyRR.String())
+			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.DnskeyRR.String())
 
 		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
@@ -416,15 +470,23 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 			continue
 		}
 
-		bpk, err := PrivKeyToBindFormat(privatekey, algorithm)
+		// Parse private key, detecting old BIND format or new PEM format
+		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrivKeyToBindFormat(): %v", err)
+			log.Printf("Error from ParsePrivateKeyFromDB(): %v", err)
 			return nil, err
 		}
-		pkc, err := PrepareKeyCache(bpk, keyrrstr)
+
+		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
+		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
 			return nil, err
+		}
+
+		// Ensure the parsed algorithm matches
+		if pkc.Algorithm != alg {
+			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
 		}
 
 		sak.Keys = append(sak.Keys, pkc)
@@ -486,16 +548,23 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 		keysfound = true
 
-		bpk, err := PrivKeyToBindFormat(privatekey, algorithm)
+		// Parse private key, detecting old BIND format or new PEM format
+		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrivkeyToBindFormat(): %v", err)
+			log.Printf("Error from ParsePrivateKeyFromDB(): %v", err)
 			return nil, err
 		}
-		pkc, err := PrepareKeyCache(bpk, keyrrstr)
+
+		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
+		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
 		if err != nil {
 			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
 			return nil, err
+		}
 
+		// Ensure the parsed algorithm matches
+		if pkc.Algorithm != alg {
+			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
 		}
 
 		if (flags & 0x0001) != 0 {
