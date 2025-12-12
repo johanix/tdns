@@ -70,7 +70,7 @@ type RRsetCacheT struct {
 
 type Zone struct {
 	ZoneName         string
-	Secure			 bool
+	State            ValidationState
 }
 
 type CacheContext uint8

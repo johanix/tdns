@@ -835,7 +835,7 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 			continue
 		}
 	}
-	return &rrset, rcode, cache.ContextNoErrNoAns, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+	return &rrset, rcode, cache.ContextNoErrNoAns, fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
 }
 
 // CollectNSAddresses - given an NS RRset, chase down the A and AAAA records corresponding to each nsname
@@ -1793,20 +1793,19 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		rrset.Class = dns.ClassINET
 		rrset.RRtype = qtype
 		// Validate the RRset (if possible) using DnskeyCache
-		vstate := cache.ValidationStateNone
+		// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
+		var vstate cache.ValidationState
 		var err error
-		if len(rrset.RRSIGs) > 0 {
-			if Globals.Debug {
-				imr.Cache.Logger.Printf("*** handleAnswer: validating RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
-			}
-			vstate, err = imr.Cache.ValidateRRset(ctx, &rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
-			if err != nil {
-				log.Printf("handleAnswer: failed to validate RRset: %v", err)
-				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err, false
-			}
-			if Globals.Debug {
-				imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
-			}
+		if Globals.Debug {
+			imr.Cache.Logger.Printf("*** handleAnswer: validating RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
+		}
+		vstate, err = imr.Cache.ValidateRRset(ctx, &rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+		if err != nil {
+			log.Printf("handleAnswer: failed to validate RRset: %v", err)
+			return nil, r.MsgHdr.Rcode, cache.ContextFailure, err, false
+		}
+		if Globals.Debug {
+			imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
 		cr := &cache.CachedRRset{
 			Name:       qname,
@@ -1934,10 +1933,8 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
 			}
 		}
-		// If validation state is None (not validated), set to Indeterminate for referral data
-		if vstate == cache.ValidationStateNone {
-			vstate = cache.ValidationStateIndeterminate
-		}
+        // XXX: ValidateRRset *must* return one of secure or indeterminate. There is
+		// a DS, so insecure or none should not be possible.
 		imr.Cache.Set(zonename, dns.TypeDS, &cache.CachedRRset{
 			Name:       zonename,
 			RRtype:     dns.TypeDS,
@@ -1947,28 +1944,52 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(dsRRs)),
 		})
-		if vstate == cache.ValidationStateSecure { // If vstate for a DS RRset is secure, then the zone is a secure zone
-			z, ok := imr.Cache.ZoneMap.Get(zonename)
-			if !ok {
-				z = &cache.Zone{
-					ZoneName: zonename,
-				}
+		// Update ZoneMap based on DS validation state
+		z, ok := imr.Cache.ZoneMap.Get(zonename)
+		if !ok {
+			z = &cache.Zone{
+				ZoneName: zonename,
+				State:    cache.ValidationStateIndeterminate,
 			}
-			z.Secure = true
-			imr.Cache.ZoneMap.Set(zonename, z)
 		}
+		switch vstate {
+		case cache.ValidationStateSecure, cache.ValidationStateIndeterminate:
+			z.State = vstate
+		default:
+			log.Printf("handleReferral: ERROR (should not happen): invalid DS validation state: %s", vstate)
+		}
+		imr.Cache.ZoneMap.Set(zonename, z)
 	}
 	// If we have an NS RRset but no DS record (or DS validation didn't result in secure state),
-	// add the zone to ZoneMap as insecure (unsigned delegation)
+	// add the zone to ZoneMap. State depends on whether we have trust anchors:
+	// - If trust anchors exist and zone is unsigned: ValidationStateInsecure
+	// - If no trust anchors: ValidationStateIndeterminate
 	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
 		_, exists := imr.Cache.ZoneMap.Get(zonename)
 		if !exists {
-		// Zone not in ZoneMap yet, add it as insecure
-		z := &cache.Zone{
-			ZoneName:         zonename,
-			Secure:           false,
-		}
-		imr.Cache.ZoneMap.Set(zonename, z)
+			// Zone not in ZoneMap yet. Check if we have trust anchors to determine state.
+			// If no trust anchors configured, state is indeterminate (we can't validate).
+			// If trust anchors exist but zone is unsigned, state is insecure.
+			state := cache.ValidationStateIndeterminate
+			hasTrustAnchors := false
+			if imr.Cache.DnskeyCache != nil {
+				// Check if there are any trust anchors (DNSKEYs with TrustAnchor=true)
+				for _, key := range imr.Cache.DnskeyCache.Map.Keys() {
+					if val, ok := imr.Cache.DnskeyCache.Map.Get(key); ok && val.TrustAnchor {
+						hasTrustAnchors = true
+						break
+					}
+				}
+			}
+			if hasTrustAnchors {
+				// We have trust anchors, so unsigned zone is insecure
+				state = cache.ValidationStateInsecure
+			}
+			z := &cache.Zone{
+				ZoneName: zonename,
+				State:    state,
+			}
+			imr.Cache.ZoneMap.Set(zonename, z)
 		}
 	}
 	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, nsMap, r)
@@ -2199,12 +2220,11 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 		return
 	}
 
-	vstate := cache.ValidationStateNone
-	if len(rrset.RRSIGs) > 0 {
-		vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
-		if err != nil {
-			imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
-		}
+	// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
+	var vstate cache.ValidationState
+	vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+	if err != nil {
+		imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
 	}
 	imr.Cache.Set(host, rrtype, &cache.CachedRRset{
 		Name:       host,
@@ -2477,8 +2497,15 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 	if !skipDNSKEYValidation && len(negAuthority) > 0 {
 		vstate, negRcode, err = imr.Cache.ValidateNegativeResponse(context.Background(), qname, qtype, negRcode, negAuthority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
-			log.Printf("handleNegative: failed to validate negative response: %v", err)
-			return cache.ContextFailure, r.MsgHdr.Rcode, false
+			// If validation returns ValidationStateIndeterminate (e.g., no trust anchors),
+			// we should still cache and return the response, not treat it as a failure.
+			if vstate == cache.ValidationStateIndeterminate {
+				log.Printf("handleNegative: validation returned indeterminate state (likely no trust anchors): %v", err)
+				// Continue to cache with indeterminate state
+			} else {
+				log.Printf("handleNegative: failed to validate negative response: %v", err)
+				return cache.ContextFailure, r.MsgHdr.Rcode, false
+			}
 		}
 	}
 

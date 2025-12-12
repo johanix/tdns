@@ -4,6 +4,7 @@
 package core
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/miekg/dns"
@@ -146,21 +147,77 @@ func (rrset *RRset) Clone() *RRset {
 	return clone
 }
 
-func (rrset *RRset) String(maxlen int) string {
-	out := ""
-	for _, rr := range rrset.RRs {
-		rrstr := rr.String() + "\n"
-		if maxlen > 0 && len(rrstr) > maxlen {
-			rrstr = rrstr[:maxlen-4] + "...\n"
+func (rrset *RRset) String(maxlen int) (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("RRset.String: panic recovered: %v", r)
+			if out == "" {
+				out = fmt.Sprintf("(RRset.String panic: %v)\n", r)
+			}
 		}
-		out += rrstr
-	}
-	for _, sig := range rrset.RRSIGs {
-		sigstr := sig.String() + "\n"
-		if maxlen > 0 && len(sigstr) > maxlen {
-			sigstr = sigstr[:maxlen-4] + "...\n"
+		if out == "" {
+			// Fallback: ensure we always return something
+			log.Printf("RRset.String: WARNING - returning empty string, using fallback")
+			out = "(RRset.String returned empty string - this should not happen)\n"
 		}
-		out += sigstr
+	}()
+	
+	if rrset == nil {
+		return "(nil RRset)\n"
 	}
+	
+	out = ""
+	rrCount := 0
+	if rrset.RRs != nil {
+		rrCount = len(rrset.RRs)
+		for _, rr := range rrset.RRs {
+			if rr == nil {
+				continue
+			}
+			rrstr := rr.String() + "\n"
+			if maxlen > 0 && len(rrstr) > maxlen {
+				rrstr = rrstr[:maxlen-4] + "...\n"
+			}
+			out += rrstr
+		}
+	}
+	sigCount := 0
+	if rrset.RRSIGs != nil {
+		sigCount = len(rrset.RRSIGs)
+		for _, sig := range rrset.RRSIGs {
+			if sig == nil {
+				continue
+			}
+			sigstr := sig.String() + "\n"
+			if maxlen > 0 && len(sigstr) > maxlen {
+				sigstr = sigstr[:maxlen-4] + "...\n"
+			}
+			out += sigstr
+		}
+	}
+	
+	if out == "" {
+		typeStr := "UNKNOWN"
+		if rrset.RRtype > 0 {
+			if int(rrset.RRtype) < len(dns.TypeToString) && dns.TypeToString[rrset.RRtype] != "" {
+				typeStr = dns.TypeToString[rrset.RRtype]
+			} else {
+				typeStr = fmt.Sprintf("TYPE%d", rrset.RRtype)
+			}
+		}
+		name := rrset.Name
+		if name == "" {
+			name = "(empty)"
+		}
+		out = fmt.Sprintf("(empty RRset: name=%q type=%s rrs=%d rrsigs=%d)\n", 
+			name, typeStr, rrCount, sigCount)
+	}
+	
+	// Debug: log if we're about to return empty
+	if out == "" {
+		log.Printf("RRset.String: CRITICAL - out is empty before return! name=%q type=%d rrs=%d rrsigs=%d", 
+			rrset.Name, rrset.RRtype, rrCount, sigCount)
+	}
+	
 	return out
 }

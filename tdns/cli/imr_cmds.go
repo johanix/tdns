@@ -80,7 +80,10 @@ var ImrQueryCmd = &cobra.Command{
 				// Print negative authority proof if present (only in verbose mode)
 				// Check the global verbose flag set by the root command's PersistentFlags
 				if tdns.Globals.Verbose {
-					if len(cached.NegAuthority) > 0 {
+					// For indeterminate zones, proof cannot be validated, so don't show it
+					if vstate == cache.ValidationStateIndeterminate {
+						fmt.Printf("Proof: not possible for zone in state=indeterminate\n")
+					} else if len(cached.NegAuthority) > 0 {
 						fmt.Printf("Proof:\n")
 						for _, negRRset := range cached.NegAuthority {
 							if negRRset != nil {

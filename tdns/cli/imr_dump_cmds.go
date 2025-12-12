@@ -249,9 +249,9 @@ var dumpZonesCmd = &cobra.Command{
 		t.AlignCol(1, acidtab.Right)
 		for _, item := range zones {
 			zone := item.Val
-			secureStatus := "insecure"
-			if zone.Secure {
-				secureStatus = "secure"
+			secureStatus := cache.ValidationStateToString[zone.State]
+			if secureStatus == "" {
+				secureStatus = "none"
 			}
 			t.Row(item.Key, secureStatus)
 		}

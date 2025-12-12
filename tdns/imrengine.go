@@ -282,113 +282,48 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		switch {
 		case len(authservers) == 0:
-			log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
-			cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
-			if cnsrrset == nil {
-				log.Printf("*** ImrResponder: we also have no nameservers for zone %q, giving up", bestmatch)
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
-				return &resp, nil
-			}
-
-			log.Printf("*** but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
-
-			// Create response channel for A and AAAA queries
-			respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
-			// Note: We don't need to close the channel here as it will be garbage collected
-			// when it goes out of scope, even if there are still pending writes to it
-
-			// Launch parallel queries for each nameserver
-			err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+			// Use helper function to resolve NS addresses
+			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
+				rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+				if err != nil {
+					log.Printf("Error from IterativeDNSQuery: %v", err)
+					return false, nil // Continue trying
+				}
+				if rrset != nil {
+					if Globals.Debug {
+						log.Printf("ImrQuery: received response from IterativeDNSQuery:")
+						for _, rr := range rrset.RRs {
+							log.Printf("ImrQuery: %s", rr.String())
+						}
+					}
+					resp.RRset = rrset
+					return true, nil // Success, stop trying
+				}
+				if rcode == dns.RcodeNameError {
+					// this is a negative response, which we need to figure out how to represent
+					if !imr.Quiet {
+						log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
+					}
+					resp.Msg = "NXDOMAIN (negative response type 3)"
+					return true, nil // Success (negative response), stop trying
+				}
+				switch context {
+				case cache.ContextReferral:
+					return false, nil // Continue trying
+				case cache.ContextNoErrNoAns:
+					resp.Msg = "negative response type 0"
+					return true, nil // Success (negative response), stop trying
+				}
+				return false, nil // Continue trying
+			})
 			if err != nil {
-				log.Printf("Error from CollectNSAddresses: %v", err)
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Error from CollectNSAddresses: %v", err)
+				resp.ErrorMsg = err.Error()
 				return &resp, err
 			}
-
-			// Process a bounded number of responses until we get a usable address
-			want := len(cnsrrset.RRset.RRs) * 2
-			for i := 0; i < want; i++ {
-				var rrresp *ImrResponse
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case rrresp = <-respch:
-				case <-time.After(3 * time.Second):
-					rrresp = nil
-				}
-				if rrresp == nil || rrresp.RRset == nil {
-					continue
-				}
-
-				for _, rr := range rrresp.RRset.RRs {
-					switch rr := rr.(type) {
-					case *dns.A:
-						// Use shared AuthServer instance (ensures single instance per nameserver)
-						server := imr.Cache.GetOrCreateAuthServer(rr.Header().Name)
-						addr := rr.A.String()
-						if !slices.Contains(server.Addrs, addr) {
-							server.Addrs = append(server.Addrs, addr)
-						}
-						if server.Src == "" || server.Src == "unknown" {
-							server.Src = "answer"
-						}
-						server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
-						authservers[rr.Header().Name] = server
-						if Globals.Debug {
-							log.Printf("ImrResponder: using resolved A address: %+v", authservers)
-						}
-					case *dns.AAAA:
-						// Use shared AuthServer instance (ensures single instance per nameserver)
-						server := imr.Cache.GetOrCreateAuthServer(rr.Header().Name)
-						addr := rr.AAAA.String()
-						if !slices.Contains(server.Addrs, addr) {
-							server.Addrs = append(server.Addrs, addr)
-						}
-						if server.Src == "" || server.Src == "unknown" {
-							server.Src = "answer"
-						}
-						server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
-						authservers[rr.Header().Name] = server
-						if Globals.Debug {
-							log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
-						}
-					}
-
-					rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
-					if err != nil {
-						log.Printf("Error from IterativeDNSQuery: %v", err)
-						continue
-					}
-					if rrset != nil {
-						if Globals.Debug {
-							log.Printf("ImrQuery: received response from IterativeDNSQuery:")
-							for _, rr := range rrset.RRs {
-								log.Printf("ImrQuery: %s", rr.String())
-							}
-						}
-						resp.RRset = rrset
-						return &resp, nil
-					}
-					if rcode == dns.RcodeNameError {
-						// this is a negative response, which we need to figure out how to represent
-						if !imr.Quiet {
-							log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
-						}
-						resp.Msg = "NXDOMAIN (negative response type 3)"
-						return &resp, nil
-					}
-					switch context {
-					case cache.ContextReferral:
-						continue // if all is good we will now hit the new referral and get further
-					case cache.ContextNoErrNoAns:
-						resp.Msg = "negative response type 0"
-						return &resp, nil
-					}
-				}
+			if done {
+				return &resp, nil
 			}
-
 			// If we get here, we tried all responses without finding a usable address
 			log.Printf("*** ImrQuery: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
 			resp.Error = true
@@ -442,6 +377,109 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			return &resp, nil
 		}
 	}
+}
+
+// processAddressRecords processes A and AAAA records from an RRset and adds them to authservers
+func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]*cache.AuthServer) {
+	if rrset == nil {
+		return
+	}
+	for _, rr := range rrset.RRs {
+		var nsname string
+		var addr string
+		var rrType string
+		var ttl uint32
+		switch rr := rr.(type) {
+		case *dns.A:
+			nsname = rr.Header().Name
+			addr = rr.A.String()
+			rrType = "A"
+			ttl = rr.Header().Ttl
+		case *dns.AAAA:
+			nsname = rr.Header().Name
+			addr = rr.AAAA.String()
+			rrType = "AAAA"
+			ttl = rr.Header().Ttl
+		default:
+			continue
+		}
+
+		// Use shared AuthServer instance (ensures single instance per nameserver)
+		server := imr.Cache.GetOrCreateAuthServer(nsname)
+		if !slices.Contains(server.Addrs, addr) {
+			server.Addrs = append(server.Addrs, addr)
+		}
+		if server.Src == "" || server.Src == "unknown" {
+			server.Src = "answer"
+		}
+		server.Expire = time.Now().Add(time.Duration(ttl) * time.Second)
+		authservers[nsname] = server
+		if Globals.Debug {
+			log.Printf("processAddressRecords: using resolved %s address: %+v", rrType, authservers[nsname])
+		}
+	}
+}
+
+// resolveNSAddresses resolves nameserver addresses when authservers is empty.
+// It calls onResponse for each successful address resolution, allowing the caller
+// to handle the response appropriately. Returns true if a response was successfully
+// handled, false if no usable address was found, and an error if something went wrong.
+func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname string, qtype uint16,
+	authservers map[string]*cache.AuthServer,
+	onResponse func(authservers map[string]*cache.AuthServer) (bool, error)) (bool, error) {
+
+	log.Printf("resolveNSAddresses: we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
+	cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
+	if cnsrrset == nil {
+		log.Printf("resolveNSAddresses: we also have no nameservers for zone %q, giving up", bestmatch)
+		return false, fmt.Errorf("no nameservers for zone %q", bestmatch)
+	}
+
+	log.Printf("resolveNSAddresses: but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
+
+	// Create response channel for A and AAAA queries
+	respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
+	// Note: We don't need to close the channel here as it will be garbage collected
+	// when it goes out of scope, even if there are still pending writes to it
+
+	// Launch parallel queries for each nameserver
+	err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+	if err != nil {
+		log.Printf("resolveNSAddresses: Error from CollectNSAddresses: %v", err)
+		return false, err
+	}
+
+	// Process a bounded number of responses until we get a usable address
+	want := len(cnsrrset.RRset.RRs) * 2
+	for i := 0; i < want; i++ {
+		var rrresp *ImrResponse
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case rrresp = <-respch:
+		case <-time.After(3 * time.Second):
+			rrresp = nil
+		}
+		if rrresp == nil || rrresp.RRset == nil {
+			continue
+		}
+
+		// Process A/AAAA records and add to authservers
+		imr.processAddressRecords(rrresp.RRset, authservers)
+
+		// Call the callback to handle the response
+		done, err := onResponse(authservers)
+		if err != nil {
+			return false, err
+		}
+		if done {
+			return true, nil
+		}
+	}
+
+	// If we get here, we tried all responses without finding a usable address
+	log.Printf("resolveNSAddresses: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
+	return false, nil
 }
 
 func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
@@ -528,97 +566,36 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 			switch {
 			case len(authservers) == 0:
-				log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
-				cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
-				if cnsrrset == nil {
-					log.Printf("*** ImrResponder: we also have no nameservers for zone %q, giving up", bestmatch)
-					// m.SetRcode(r, dns.RcodeServerFailure)
-					w.WriteMsg(m)
-					return
-				}
-
-				log.Printf("*** but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
-
-				// Create response channel for A and AAAA queries
-				respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
-				// Note: We don't need to close the channel here as it will be garbage collected
-				// when it goes out of scope, even if there are still pending writes to it
-
-				// Launch parallel queries for each nameserver
-				err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+				// Use helper function to resolve NS addresses
+				// Note: The callback is called after processing each A/AAAA response.
+				// We try the query for each address we discover, similar to the original code.
+				done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
+					// Try querying with the current set of authservers
+					rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+					if err != nil {
+						log.Printf("Error from IterativeDNSQuery: %v", err)
+						return false, nil // Continue trying with next address
+					}
+					done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
+					if err != nil {
+						return true, err // Error occurred, stop trying
+					}
+					if done {
+						return true, nil // Success, stop trying
+					}
+					return false, nil // Continue trying with next address
+				})
 				if err != nil {
-					log.Printf("Error from CollectNSAddresses: %v", err)
-					// m.SetRcode(r, dns.RcodeServerFailure)
+					m.SetRcode(r, dns.RcodeServerFailure)
 					w.WriteMsg(m)
 					return
 				}
-
-				// Process a bounded number of responses until we get a usable address
-				want := len(cnsrrset.RRset.RRs) * 2
-				for i := 0; i < want; i++ {
-					var resp *ImrResponse
-					select {
-					case <-ctx.Done():
-						m.SetRcode(r, dns.RcodeServerFailure)
-						w.WriteMsg(m)
-						return
-					case resp = <-respch:
-					case <-time.After(3 * time.Second):
-						resp = nil
-					}
-					if resp == nil || resp.RRset == nil {
-						continue
-					}
-
-					for _, rr := range resp.RRset.RRs {
-						nsname := rr.Header().Name
-						switch rr := rr.(type) {
-						case *dns.A:
-							// Use shared AuthServer instance (ensures single instance per nameserver)
-							server := imr.Cache.GetOrCreateAuthServer(nsname)
-							addr := rr.A.String()
-							if !slices.Contains(server.Addrs, addr) {
-								server.Addrs = append(server.Addrs, addr)
-							}
-							if server.Src == "" || server.Src == "unknown" {
-								server.Src = "answer"
-							}
-							server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
-							authservers[nsname] = server
-							log.Printf("ImrResponder: using resolved A address: %+v", authservers[nsname])
-						case *dns.AAAA:
-							// Use shared AuthServer instance (ensures single instance per nameserver)
-							server := imr.Cache.GetOrCreateAuthServer(nsname)
-							addr := rr.AAAA.String()
-							if !slices.Contains(server.Addrs, addr) {
-								server.Addrs = append(server.Addrs, addr)
-							}
-							if server.Src == "" || server.Src == "unknown" {
-								server.Src = "answer"
-							}
-							server.Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
-							authservers[nsname] = server
-							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
-						}
-						rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
-						if err != nil {
-							log.Printf("Error from IterativeDNSQuery: %v", err)
-							continue
-						}
-						done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
-						if err != nil {
-							return
-						}
-						if done {
-							return
-						}
-						continue // try next nameserver
-					}
+				if done {
+					return
 				}
-
 				// If we get here, we tried all responses without finding a usable address
 				log.Printf("*** ImrResponder: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
-				// m.SetRcode(r, dns.RcodeServerFailure)
+				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
 				return
 			}
@@ -1154,9 +1131,10 @@ func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSK
 		if !exists {
 			z = &cache.Zone{
 				ZoneName: name,
+				State:    cache.ValidationStateSecure,
 			}
 		}
-		z.Secure = true
+		z.State = cache.ValidationStateSecure
 		imr.Cache.ZoneMap.Set(name, z)
 		if Globals.Debug {
 			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DNSKEY trust anchor)", name)
@@ -1233,7 +1211,9 @@ func (imr *Imr) matchDSTrustAnchorsToDNSKEYs(anchorName string, dslist []*dns.DS
 	}
 }
 
-// validateAndCacheDNSKEYRRset validates the DNSKEY RRset and caches it.
+// validateAndCacheDNSKEYRRset validates the DNSKEY RRset using trust anchors directly,
+// bypassing the normal validation chain which may fail for indeterminate zones.
+// It uses helper functions to validate against DS TAs and direct DNSKEY TAs.
 func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName string, rrset *core.RRset) error {
 	// Check if the DNSKEY RRset is already validated in cache (from IterativeDNSQuery)
 	crr := imr.Cache.Get(anchorName, dns.TypeDNSKEY)
@@ -1245,17 +1225,54 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 			log.Printf("initializeImrTrustAnchors: %s DNSKEY RRset already validated in cache", anchorName)
 		}
 	} else {
-		// Not validated yet, validate it now
-		var err error
-		vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
-		if err != nil {
-			log.Printf("validateAndCacheDNSKEYRRset: failed to validate %s DNSKEY RRset: %v", anchorName, err)
-			return fmt.Errorf("failed to validate %s DNSKEY RRset: %v", anchorName, err)
+		// Not validated yet, validate using trust anchors directly
+		// This bypasses the normal validation chain which may fail for indeterminate zones
+		verbose := Globals.Debug
+		name := dns.Fqdn(anchorName)
+		validated := false
+
+		// First, try validation using seeded DS trust anchors
+		seededDS := imr.Cache.Get(anchorName, dns.TypeDS)
+		if seededDS != nil && seededDS.State == cache.ValidationStateSecure && seededDS.RRset != nil {
+			for _, rr := range seededDS.RRset.RRs {
+				ds, ok := rr.(*dns.DS)
+				if !ok {
+					continue
+				}
+				valid, _ := cache.ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
+				if valid {
+					validated = true
+					if verbose {
+						log.Printf("validateAndCacheDNSKEYRRset: %s DNSKEY RRset validated using DS trust anchor (keytag=%d)", anchorName, ds.KeyTag)
+					}
+					break
+				}
+			}
 		}
-		if vstate != cache.ValidationStateSecure {
-			log.Printf("validateAndCacheDNSKEYRRset: %q DNSKEY RRset failed to validate (vstate: %s)", anchorName, cache.ValidationStateToString[vstate])
-			return fmt.Errorf("failed to validate %q DNSKEY RRset (vstate: %s)", anchorName, cache.ValidationStateToString[vstate])
+
+		// If DS validation didn't work, try direct DNSKEY trust anchors
+		if !validated {
+			dkc := imr.DnskeyCache
+			for item := range dkc.Map.IterBuffered() {
+				if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
+					valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
+					if valid {
+						validated = true
+						if verbose {
+							log.Printf("validateAndCacheDNSKEYRRset: %s DNSKEY RRset validated using direct DNSKEY trust anchor (keytag=%d)", anchorName, item.Val.Keyid)
+						}
+						break
+					}
+				}
+			}
 		}
+
+		if !validated {
+			log.Printf("validateAndCacheDNSKEYRRset: %q DNSKEY RRset failed to validate using trust anchors", anchorName)
+			return fmt.Errorf("failed to validate %q DNSKEY RRset using trust anchors", anchorName)
+		}
+
+		vstate = cache.ValidationStateSecure
 		// Update cached RRset with validated state
 		if crr == nil {
 			// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
@@ -1428,9 +1445,10 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	if !exists {
 		z = &cache.Zone{
 			ZoneName: anchorName,
+			State:    cache.ValidationStateIndeterminate,
 		}
 	}
-	z.Secure = true
+	z.State = cache.ValidationStateSecure
 	imr.Cache.ZoneMap.Set(anchorName, z)
 		if Globals.Debug {
 			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DS trust anchor validated)", anchorName)
