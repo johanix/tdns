@@ -61,7 +61,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				State:      state,
 				Algorithm:  algorithm,
 				Creator:    creator,
-				PrivateKey: fmt.Sprintf("%s*****%s", privatekey[0:4], privatekey[len(privatekey)-4:]),
+				PrivateKey: "-***-",
 				Keystr:     keyrrstr,
 			}
 		}
@@ -302,7 +302,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				Flags:      uint16(flags),
 				Algorithm:  algorithm,
 				Creator:    creator,
-				PrivateKey: fmt.Sprintf("%s***%s", privatekey[0:5], privatekey[len(privatekey)-5:]),
+				PrivateKey: "-***-",
 				Keystr:     keyrrstr,
 			}
 		}

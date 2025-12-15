@@ -287,7 +287,8 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
 				if err != nil {
 					log.Printf("Error from IterativeDNSQuery: %v", err)
-					return false, nil // Continue trying
+					// return false, nil // Continue trying
+					return false, err
 				}
 				if rrset != nil {
 					if Globals.Debug {
@@ -653,7 +654,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.State == cache.ValidationStateSecure {
 				vstate = c.State
 			} else {
-				vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+				vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
 					log.Printf("ProcessAuthDNSResponse: failed to validate RRset: %v", err)
 					m.SetRcode(r, dns.RcodeServerFailure)
@@ -1364,7 +1365,7 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 		}
 	} else {
 		// Not validated yet, validate it now
-		nsVstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+		nsVstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 		if err != nil {
 			log.Printf("initializeImrTrustAnchors: warning: failed to validate %s NS RRset: %v (continuing)", anchorName, err)
 			return

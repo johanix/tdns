@@ -24,39 +24,62 @@ const dnskeyFlagSEP = 1 << 8
 // and returns the fetched RRset or an error.
 type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers map[string]*AuthServer) (*core.RRset, error)
 
+// ParentZoneFinder finds the authoritative zone for a given domain name.
+// It should check the cache first and only query if necessary.
+// Returns the zone name and an error if not found.
+type ParentZoneFinder func(name string) (string, error)
+
 // validateRRsetWithRRSIG validates a single RRSIG against an RRset.
 // Returns:
 //   - valid: true if the signature is valid and time-valid
 //   - shouldReturnEarly: true if we should return early (signer zone indeterminate or DNSKEY validation indeterminate)
 //   - returnState: the state to return if shouldReturnEarly is true
 //   - err: error if something went wrong
-func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *core.RRset, sig *dns.RRSIG, dkc *DnskeyCacheT, fetcher RRsetFetcher, verbose bool) (valid bool, shouldReturnEarly bool, returnState ValidationState, err error) {
+func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *core.RRset, sig *dns.RRSIG, dkc *DnskeyCacheT, fetcher RRsetFetcher) (valid bool, shouldReturnEarly bool, returnState ValidationState, err error) {
 	signer := dns.Fqdn(sig.SignerName)
 	keyid := sig.KeyTag
 	if rrcache.Debug {
 		log.Printf("ValidateRRset: evaluating signature: signer=%q keyid=%d covered=%s inception=%d expiration=%d",
 			signer, keyid, dns.TypeToString[sig.TypeCovered], sig.Inception, sig.Expiration)
 	}
-	// Check the signer zone's state in ZoneMap. If indeterminate, we cannot validate.
-		if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.State == ValidationStateIndeterminate {
+	// Check the signer zone's state in ZoneMap. If indeterminate or insecure, we cannot validate.
+	if zone, ok := rrcache.ZoneMap.Get(signer); ok {
+		switch zone.State {
+		case ValidationStateIndeterminate:
 			if rrcache.Debug {
 				log.Printf("ValidateRRset: signer zone %q is indeterminate; returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
 			}
 			return false, true, ValidationStateIndeterminate, nil
+		case ValidationStateInsecure:
+			// Unsigned zone - signed RRsets cannot be validated (no chain of trust)
+			if rrcache.Verbose {
+				log.Printf("ValidateRRset: signer zone %q is insecure (unsigned); cannot validate signed RRset %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+			return false, true, ValidationStateInsecure, nil
 		}
+	}
 
 	dkrr := dkc.Get(signer, keyid)
 	if rrcache.Debug {
 		log.Printf("ValidateRRset: TA %q::%d in cache: %+v", signer, keyid, dkrr)
 	}
 	if dkrr == nil && ctx != nil {
-		// Before attempting to fetch, check again if signer zone is indeterminate
+		// Before attempting to fetch, check again if signer zone is indeterminate or insecure
 		// (it might have been added to ZoneMap since the initial check)
-		if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.State == ValidationStateIndeterminate {
-			if rrcache.Verbose {
-				log.Printf("ValidateRRset: signer zone %q is indeterminate; skipping DNSKEY fetch and returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+		if zone, ok := rrcache.ZoneMap.Get(signer); ok {
+			switch zone.State {
+			case ValidationStateIndeterminate:
+				if rrcache.Verbose {
+					log.Printf("ValidateRRset: signer zone %q is indeterminate; skipping DNSKEY fetch and returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return false, true, ValidationStateIndeterminate, nil
+			case ValidationStateInsecure:
+				// Unsigned zone - cannot fetch DNSKEYs for validation
+				if rrcache.Verbose {
+					log.Printf("ValidateRRset: signer zone %q is insecure (unsigned); skipping DNSKEY fetch and returning bogus state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return false, true, ValidationStateInsecure, nil
 			}
-			return false, true, ValidationStateIndeterminate, nil
 		}
 		if rrcache.Verbose {
 			log.Printf("ValidateRRset: signer DNSKEY %q::%d not in cache; attempting to obtain keys", signer, keyid)
@@ -80,12 +103,21 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 			}
 		}
 		if len(servers) > 0 && fetcher != nil {
-			// Final check before issuing query: if signer zone is indeterminate, don't query
-			if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.State == ValidationStateIndeterminate {
-				if rrcache.Verbose {
-					log.Printf("ValidateRRset: signer zone %q is indeterminate; skipping DNSKEY query and returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+			// Final check before issuing query: if signer zone is indeterminate or insecure, don't query
+			if zone, ok := rrcache.ZoneMap.Get(signer); ok {
+				switch zone.State {
+				case ValidationStateIndeterminate:
+					if rrcache.Verbose {
+						log.Printf("ValidateRRset: signer zone %q is indeterminate; skipping DNSKEY query and returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+					}
+					return false, true, ValidationStateIndeterminate, nil
+				case ValidationStateInsecure:
+					// Unsigned zone - cannot query DNSKEYs
+					if rrcache.Verbose {
+						log.Printf("ValidateRRset: signer zone %q is insecure (unsigned); skipping DNSKEY query and returning bogus state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+					}
+					return false, true, ValidationStateInsecure, nil
 				}
-				return false, true, ValidationStateIndeterminate, nil
 			}
 			log.Printf("ValidateRRset: issuing a DNS query for DNSKEY RRset from the signer zone %q", signer)
 			// Fetch DNSKEYs from the signer zone
@@ -99,13 +131,13 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 
 				// Attempt to validate the fetched DNSKEY RRset using DS before adding to DnskeyCache
 				// Only add validated/secure DNSKEYs to DnskeyCache, as it's used for validation of other data
-				vstate, err := rrcache.ValidateDNSKEYs(ctx, dkeys, fetcher, verbose)
+				vstate, err := rrcache.ValidateDNSKEYs(ctx, dkeys, fetcher)
 				if err != nil {
 					log.Printf("ValidateRRset: failed validating DNSKEYs for %q: %v", signer, err)
 					return false, true, vstate, err
 				}
 				if vstate == ValidationStateSecure {
-					if verbose {
+					if rrcache.Verbose {
 						log.Printf("ValidateRRset: signer DNSKEY RRset for %q validated; adding keys to DnskeyCache", signer)
 					}
 					for _, krr := range dkeys.RRs {
@@ -138,21 +170,30 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 					}
 					return false, true, ValidationStateIndeterminate, nil
 				} else {
-					if verbose {
+					if rrcache.Verbose {
 						log.Printf("ValidateRRset: signer DNSKEY RRset for %q did not validate (vstate: %s); not adding to DnskeyCache", signer, ValidationStateToString[vstate])
 					}
 				}
-			} else if err != nil && verbose {
+			} else if err != nil && rrcache.Verbose {
 				log.Printf("ValidateRRset: failed fetching DNSKEY for %q: %v", signer, err)
 			}
 		}
-		// After attempting to fetch, check again if signer zone became indeterminate
+		// After attempting to fetch, check again if signer zone became indeterminate or insecure
 		// (might have been marked during DNSKEY validation)
-		if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.State == ValidationStateIndeterminate {
-			if rrcache.Verbose {
-				log.Printf("ValidateRRset: signer zone %q is indeterminate (after DNSKEY fetch attempt); returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+		if zone, ok := rrcache.ZoneMap.Get(signer); ok {
+			switch zone.State {
+			case ValidationStateIndeterminate:
+				if rrcache.Verbose {
+					log.Printf("ValidateRRset: signer zone %q is indeterminate (after DNSKEY fetch attempt); returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return false, true, ValidationStateIndeterminate, nil
+			case ValidationStateInsecure:
+				// Unsigned zone detected after fetch attempt
+				if rrcache.Verbose {
+					log.Printf("ValidateRRset: signer zone %q is insecure (after DNSKEY fetch attempt); returning bogus state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return false, true, ValidationStateBogus, nil
 			}
-			return false, true, ValidationStateIndeterminate, nil
 		}
 		dkrr = dkc.Get(signer, keyid)
 	}
@@ -165,18 +206,27 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 				log.Printf("ValidateRRset: DNSKEY present but not secure for %q::%d", signer, keyid)
 			}
 		}
-		// Before continuing, check if signer zone is indeterminate (might have been added to ZoneMap during DNSKEY fetch)
-		if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.State == ValidationStateIndeterminate {
-			if rrcache.Verbose {
-				log.Printf("ValidateRRset: signer zone %q is indeterminate; returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+		// Before continuing, check if signer zone is indeterminate or insecure (might have been added to ZoneMap during DNSKEY fetch)
+		if zone, ok := rrcache.ZoneMap.Get(signer); ok {
+			switch zone.State {
+			case ValidationStateIndeterminate:
+				if rrcache.Verbose {
+					log.Printf("ValidateRRset: signer zone %q is indeterminate; returning indeterminate state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return false, true, ValidationStateIndeterminate, nil
+			case ValidationStateInsecure:
+				// Unsigned zone - cannot validate signed RRsets
+				if rrcache.Verbose {
+					log.Printf("ValidateRRset: signer zone %q is insecure (unsigned); returning bogus state for %s %s", signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return false, true, ValidationStateInsecure, nil
 			}
-			return false, true, ValidationStateIndeterminate, nil
 		}
 
 		return false, false, ValidationStateNone, nil
 	}
 	if err := sig.Verify(&dkrr.Dnskey, rrset.RRs); err != nil {
-		if verbose {
+		if rrcache.Verbose {
 			log.Printf("ValidateRRset: signature verify FAILED for %s %s using %s::%d: %v",
 				rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, err)
 		}
@@ -225,7 +275,14 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 // If a required signer key is missing, it will query for the signer's DNSKEY via the recursive
 // engine and retry using keys from the cache. Only keys marked as ValidateionStateSecure are accepted for
 // successful validation. Returns ValidationStateSecure if at least one signature validates and is time-valid.
-func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, verbose bool) (ValidationState, error) {
+func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher) (ValidationState, error) {
+	return rrcache.ValidateRRsetWithParentZone(ctx, rrset, fetcher, nil)
+}
+
+// ValidateRRsetWithParentZone validates an RRset, optionally using a ParentZoneFinder to find the authoritative zone.
+// If parentZoneFinder is nil, it falls back to checking ZoneMap by walking up the domain name.
+// If the RRset is already cached with a validation state, that state is returned without re-validating.
+func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, parentZoneFinder ParentZoneFinder) (ValidationState, error) {
 	if rrcache == nil {
 		log.Printf("ValidateRRset: rrcache is nil; nothing to validate")
 		return ValidationStateNone, fmt.Errorf("rrcache is nil; nothing to validate")
@@ -233,6 +290,77 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 	if rrset == nil {
 		log.Printf("ValidateRRset: rrset is nil; nothing to validate")
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
+	}
+
+	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state
+	cached := rrcache.Get(rrset.Name, rrset.RRtype)
+	if cached != nil && cached.State != ValidationStateNone {
+		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
+		// But we double-check expiration to be explicit about the semantics
+		if cached.Expiration.Before(time.Now()) {
+			if rrcache.Verbose {
+				log.Printf("ValidateRRset: cached RRset for %s %s has expired, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+			// Fall through to re-validate
+		} else if cached.RRset != nil {
+			// Check if the RRset content has changed by comparing RRs and RRSIGs
+			// Use RRsetDiffer for RRs (it skips RRSIGs, which is what we want for data comparison)
+			// Then separately compare RRSIGs
+			rrsetDiffer, _, _ := core.RRsetDiffer(rrset.Name, rrset.RRs, cached.RRset.RRs, rrset.RRtype, nil, false, false)
+			rrsigDiffer := false
+			if len(rrset.RRSIGs) != len(cached.RRset.RRSIGs) {
+				rrsigDiffer = true
+			} else {
+				// Compare RRSIGs using RRsetDiffer logic
+				for _, csig := range cached.RRset.RRSIGs {
+					found := false
+					for _, cursig := range rrset.RRSIGs {
+						if dns.IsDuplicate(csig, cursig) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						rrsigDiffer = true
+						break
+					}
+				}
+				if !rrsigDiffer {
+					// Check the other direction
+					for _, cursig := range rrset.RRSIGs {
+						found := false
+						for _, csig := range cached.RRset.RRSIGs {
+							if dns.IsDuplicate(cursig, csig) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							rrsigDiffer = true
+							break
+						}
+					}
+				}
+			}
+			
+			if !rrsetDiffer && !rrsigDiffer {
+				// RRset hasn't changed and hasn't expired - reuse cached validation state
+				if rrcache.Debug {
+					log.Printf("ValidateRRset: using cached validation state %s for %s %s (RRset unchanged, not expired)", ValidationStateToString[cached.State], rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return cached.State, nil
+			} else {
+				if rrcache.Debug {
+					log.Printf("ValidateRRset: cached RRset for %s %s has changed (RRs differ: %v, RRSIGs differ: %v), re-validating", rrset.Name, dns.TypeToString[rrset.RRtype], rrsetDiffer, rrsigDiffer)
+				}
+				// Fall through to re-validate
+			}
+		} else {
+			// Cached RRset is nil - fall through to validate
+			if rrcache.Debug {
+				log.Printf("ValidateRRset: cached entry for %s %s has no RRset, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+		}
 	}
 
 	dkc := rrcache.DnskeyCache
@@ -246,30 +374,74 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 	log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 		rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 	
+	// Early check: if the zone containing this RRset is insecure (unsigned), 
+	// return insecure state (regardless of whether RRset has RRSIGs or not)
+	zoneName := dns.Fqdn(rrset.Name)
+	if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.State == ValidationStateInsecure {
+		if rrcache.Verbose {
+			log.Printf("ValidateRRset: zone %q is insecure (unsigned); returning insecure state for %s %s", zoneName, rrset.Name, dns.TypeToString[rrset.RRtype])
+		}
+		return ValidationStateInsecure, nil
+	}
+	
 	// Special-case DNSKEY RRset validation: must anchor via DS and the specific KSK
 	if rrset.RRtype == dns.TypeDNSKEY {
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: validating %s DNSKEY RRset; handing over to ValidateDNSKEYs", rrset.Name)
 		}
 		// ValidateDNSKEYs will add keys to DnskeyCache upon successful validation
-		return rrcache.ValidateDNSKEYs(ctx, rrset, fetcher, verbose)
+		return rrcache.ValidateDNSKEYs(ctx, rrset, fetcher)
 	}
 	if len(rrset.RRSIGs) == 0 {
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: no RRSIGs present for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
 		// Check zone state to determine appropriate return value
-		// Find the zone for this RRset
-		zoneName := dns.Fqdn(rrset.Name)
-		if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
-			switch zone.State {
+		// Find the authoritative zone for this RRset (rrset.Name might be a nameserver name for glue records, not the zone name)
+		name := dns.Fqdn(rrset.Name)
+		var foundZone *Zone
+		var foundZoneName string
+		
+		if parentZoneFinder != nil {
+			// Use ParentZoneFinder to find the authoritative zone (checks cache first, queries if needed)
+			zoneName, err := parentZoneFinder(name)
+			if err == nil && zoneName != "" {
+				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
+					foundZone = zone
+					foundZoneName = zoneName
+				}
+			}
+		}
+		
+		// Fallback: walk up the domain name and check ZoneMap
+		if foundZone == nil {
+			labels := strings.Split(name, ".")
+			for i := 0; i < len(labels)-1; i++ {
+				zoneName := strings.Join(labels[i:], ".")
+				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
+					foundZone = zone
+					foundZoneName = zoneName
+					break
+				}
+			}
+		}
+		
+		if foundZone != nil {
+			if rrcache.Debug {
+				log.Printf("ValidateRRset: found zone %q for %s %s (state=%s)", foundZoneName, rrset.Name, dns.TypeToString[rrset.RRtype], ValidationStateToString[foundZone.State])
+			}
+			switch foundZone.State {
 			case ValidationStateIndeterminate, ValidationStateInsecure:
-				return zone.State, nil
+				return foundZone.State, nil
 			default:
 				return ValidationStateInsecure, nil
 			}
 		}
-		log.Printf("ValidateRRset: ERROR (should not happen): no zone state found for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
+		// No zone found - return indeterminate without flagging an error
+		// This can happen during priming before zone state is established
+		if rrcache.Verbose {
+			log.Printf("ValidateRRset: no zone found for %s %s; returning indeterminate", rrset.Name, dns.TypeToString[rrset.RRtype])
+		}
 		return ValidationStateIndeterminate, nil
 	}
 
@@ -281,7 +453,7 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 			}
 			continue
 		}
-		valid, shouldReturnEarly, returnState, err := rrcache.validateRRsetWithRRSIG(ctx, rrset, sig, dkc, fetcher, verbose)
+		valid, shouldReturnEarly, returnState, err := rrcache.validateRRsetWithRRSIG(ctx, rrset, sig, dkc, fetcher)
 		if err != nil {
 			return returnState, err
 		}
@@ -427,7 +599,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 // 3) Ensure a validated DS RRset for this apex exists in the cache.
 // 4) Match the DNSKEY against any DS digest present.
 // 5) Verify the DNSKEY RRset RRSIG with the matched DNSKEY and time window.
-func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, verbose bool) (ValidationState, error) {
+func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher) (ValidationState, error) {
 	if rrcache == nil {
 		return ValidationStateNone, fmt.Errorf("rrcache is nil")
 	}
@@ -445,7 +617,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 
 	dkc := rrcache.DnskeyCache
 	name := dns.Fqdn(rrset.Name)
-	if verbose {
+	if rrcache.Verbose {
 		log.Printf("ValidateDNSKEYs: start: owner=%q rrs=%d sigs=%d", name, len(rrset.RRs), len(rrset.RRSIGs))
 	}
 
@@ -456,7 +628,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		zstate = zone.State
 		switch zstate {
 		case ValidationStateIndeterminate, ValidationStateInsecure:
-			if verbose {
+			if rrcache.Verbose {
 				log.Printf("ValidateDNSKEYs: zone %q is %s; returning %s state", name, ValidationStateToString[zstate], ValidationStateToString[zstate])
 			}
 			return zstate, nil
@@ -473,7 +645,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 					State:    dsRRs.State,
 				}
 				rrcache.ZoneMap.Set(name, zone)
-				if verbose {
+				if rrcache.Verbose {
 					log.Printf("ValidateDNSKEYs: zone %q not in ZoneMap but DS is %s; marking zone as %s and returning", name, ValidationStateToString[dsRRs.State], ValidationStateToString[dsRRs.State])
 				}
 				return dsRRs.State, nil
@@ -500,7 +672,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				zone.State = dsRRs.State
 				rrcache.ZoneMap.Set(name, zone)
 			}
-			if verbose {
+			if rrcache.Verbose {
 				log.Printf("ValidateDNSKEYs: DS for %q is %s; cannot validate DNSKEYs, returning %s", name, ValidationStateToString[dsRRs.State], ValidationStateToString[dsRRs.State])
 			}
 			return dsRRs.State, nil
@@ -515,7 +687,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			if !ok {
 				continue
 			}
-			valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
+			valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, rrcache.Verbose)
 			if !valid {
 				continue
 			}
@@ -534,12 +706,12 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 					})
 				}
 			}
-			if verbose {
+			if rrcache.Verbose {
 				log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q", len(rrset.RRs), name)
 			}
 			return ValidationStateSecure, nil
 		}
-		if verbose {
+			if rrcache.Verbose {
 			log.Printf("ValidateDNSKEYs: no DS-backed DNSKEY/RRSIG combination validated for %s", name)
 		}
 		return ValidationStateBogus, nil
@@ -567,7 +739,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		if len(taKeys) > 0 {
 		for _, taKey := range taKeys {
 			// Validate using direct DNSKEY trust anchor
-			valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, name, &taKey.Dnskey, verbose)
+			valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, name, &taKey.Dnskey, rrcache.Verbose)
 			if !valid {
 				continue
 			}
@@ -592,7 +764,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 					})
 				}
 			}
-			if verbose {
+			if rrcache.Verbose {
 				log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q", len(rrset.RRs), name)
 			}
 			return ValidationStateSecure, nil
@@ -604,7 +776,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	// If we get here then there is no secure DS to validate against, so existence of seeded DS are the last hope
 	// If we have seeded DS records, try those
 	if len(seededDSs) > 0 {
-		if verbose {
+		if rrcache.Verbose {
 			log.Printf("ValidateDNSKEYs: no DS RRset for %q but has %d seeded DS", name, len(seededDSs))
 		}
 		// If we're in TA initialization with seeded DS records, validate using those
@@ -618,7 +790,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				if !ok {
 					continue
 				}
-				valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
+				valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, rrcache.Verbose)
 				if !valid {
 					continue
 				}
@@ -637,21 +809,21 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 						})
 					}
 				}
-				if verbose {
+				if rrcache.Verbose {
 					log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q (validated against seeded DS)", len(rrset.RRs), name)
 				}
 				return ValidationStateSecure, nil
 			}
 		}
 		// None of the seeded DS records validated
-		if verbose {
+		if rrcache.Verbose {
 			log.Printf("ValidateDNSKEYs: no DNSKEY/RRSIG combination validated against seeded DS for %s", name)
 		}
 		return ValidationStateBogus, nil
 	}
 
 	// No DS, no TA keys, no seededDSs - cannot validate
-	if verbose {
+	if rrcache.Verbose {
 		if name == "." {
 			log.Printf("ValidateDNSKEYs: root zone (no public DS by definition, no trust anchors found)")
 		} else {
@@ -722,7 +894,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		if len(set.RRSIGs) == 0 {
 			continue // XXX: Here we need to know if the zone is insecure or not, for now: no signatures, so we are insecure
 		}
-		vstate, err := rrcache.ValidateRRset(ctx, set, fetcher, rrcache.Debug)
+		vstate, err := rrcache.ValidateRRset(ctx, set, fetcher)
 		if err != nil {
 			return vstate, rcode, err
 		}
@@ -861,6 +1033,7 @@ func typeInBitmap(qtype uint16, bitmap []uint16) bool {
 	}
 	return false
 }
+
 
 // isCompactDenialNXDOMAIN checks if the type bitmap indicates compact denial NXDOMAIN.
 // According to RFC 9824, compact denial NXDOMAIN is indicated when the bitmap contains

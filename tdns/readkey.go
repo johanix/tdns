@@ -234,6 +234,8 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
 	err = yaml.Unmarshal([]byte(privkey), &bpk)
 	if err != nil {
+		log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
+		fmt.Printf("Stuff we're trying to yaml.Unmarshal:\n%s\n", string(privkey))
 		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 	}
 
@@ -366,10 +368,9 @@ func ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr string) (crypto.Priva
 			return nil, 0, "", fmt.Errorf("unexpected RR type: %T", rr)
 		}
 
-		bindFormat, err = PrivKeyToBindFormat(bindPrivKeyStr, algorithm)
-		if err != nil {
-			return nil, 0, "", fmt.Errorf("failed to convert to BIND format: %v", err)
-		}
+		// PrivateKeyString() already returns the full BIND format string (with headers),
+		// so we should use it directly instead of wrapping it again with PrivKeyToBindFormat
+		bindFormat = bindPrivKeyStr
 	} else {
 		// Old format: BIND format
 		// privatekey is just the base64 string, need to wrap it in BIND format

@@ -120,7 +120,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			rr := resp.RRset
 			vstate := cache.ValidationStateNone
 			if len(rr.RRSIGs) > 0 {
-				vstate, err = imr.Cache.ValidateRRset(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.Cache.Debug)
+				vstate, err = imr.Cache.ValidateRRsetWithParentZone(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
 					log.Printf("maybeQueryTLSA: failed to validate TLSA RRset: %v", err)
 					return
