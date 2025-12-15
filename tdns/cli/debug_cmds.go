@@ -181,7 +181,7 @@ var debugShowTACmd = &cobra.Command{
 			Verbose: true,
 		})
 
-		var out = []string{"Type|Signer|KeyID|Validated|Trusted|Record"}
+		var out = []string{"Type|Signer|KeyID|State|Record"}
 
 		if len(dr.TrustedDnskeys) > 0 {
 			fmt.Printf("Known DNSKEYs:\n")

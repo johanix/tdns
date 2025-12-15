@@ -43,6 +43,38 @@ type AuthServer struct {
 	AddressBackoffs map[string]*AddressBackoff // keyed by address string (e.g., "1.2.3.4:53" or "[2001:db8::1]:53")
 }
 
+// NewAuthServer creates a new AuthServer instance with default values.
+// The name parameter is required and identifies the nameserver.
+// All other fields are initialized with safe defaults:
+//   - Alpn: ["do53"]
+//   - Transports: [TransportDo53]
+//   - PrefTransport: TransportDo53
+//   - Src: "unknown"
+//   - ConnMode: ConnModeLegacy
+//   - Other fields: nil or zero values
+func NewAuthServer(name string) *AuthServer {
+	if name == "" {
+		return nil
+	}
+	return &AuthServer{
+		Name:          name,
+		Alpn:          []string{"do53"},
+		Transports:    []core.Transport{core.TransportDo53},
+		PrefTransport: core.TransportDo53,
+		Src:           "unknown",
+		ConnMode:      ConnModeLegacy,
+		// Other fields are zero-initialized:
+		// Addrs: nil
+		// TransportWeights: nil
+		// TransportSignal: ""
+		// TLSARecords: nil
+		// TransportCounters: nil (will be initialized on first use)
+		// Expire: zero time
+		// Debug: false
+		// AddressBackoffs: nil (will be initialized on first use)
+	}
+}
+
 func (as *AuthServer) ConnectionMode() ConnMode {
 	if as == nil {
 		return ConnModeLegacy
@@ -50,6 +82,290 @@ func (as *AuthServer) ConnectionMode() ConnMode {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	return as.ConnMode
+}
+
+// GetAddrs returns a copy of the addresses slice. Thread-safe.
+func (as *AuthServer) GetAddrs() []string {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.Addrs) == 0 {
+		return nil
+	}
+	addrs := make([]string, len(as.Addrs))
+	copy(addrs, as.Addrs)
+	return addrs
+}
+
+// AddAddr adds an address if it doesn't already exist. Thread-safe.
+func (as *AuthServer) AddAddr(addr string) {
+	if as == nil || addr == "" {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	for _, a := range as.Addrs {
+		if a == addr {
+			return // Already exists
+		}
+	}
+	as.Addrs = append(as.Addrs, addr)
+}
+
+// SetAddrs sets the addresses slice. Thread-safe.
+func (as *AuthServer) SetAddrs(addrs []string) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(addrs) == 0 {
+		as.Addrs = nil
+		return
+	}
+	as.Addrs = make([]string, len(addrs))
+	copy(as.Addrs, addrs)
+}
+
+// GetAlpn returns a copy of the ALPN slice. Thread-safe.
+func (as *AuthServer) GetAlpn() []string {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.Alpn) == 0 {
+		return nil
+	}
+	alpn := make([]string, len(as.Alpn))
+	copy(alpn, as.Alpn)
+	return alpn
+}
+
+// AddAlpn adds an ALPN value if it doesn't already exist. Thread-safe.
+func (as *AuthServer) AddAlpn(alpn string) {
+	if as == nil || alpn == "" {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	for _, a := range as.Alpn {
+		if a == alpn {
+			return // Already exists
+		}
+	}
+	as.Alpn = append(as.Alpn, alpn)
+}
+
+// SetAlpn sets the ALPN slice. Thread-safe.
+func (as *AuthServer) SetAlpn(alpn []string) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(alpn) == 0 {
+		as.Alpn = nil
+		return
+	}
+	as.Alpn = make([]string, len(alpn))
+	copy(as.Alpn, alpn)
+}
+
+// GetTransports returns a copy of the transports slice. Thread-safe.
+func (as *AuthServer) GetTransports() []core.Transport {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.Transports) == 0 {
+		return nil
+	}
+	transports := make([]core.Transport, len(as.Transports))
+	copy(transports, as.Transports)
+	return transports
+}
+
+// AddTransport adds a transport if it doesn't already exist. Thread-safe.
+func (as *AuthServer) AddTransport(t core.Transport) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	for _, tr := range as.Transports {
+		if tr == t {
+			return // Already exists
+		}
+	}
+	as.Transports = append(as.Transports, t)
+}
+
+// SetTransports sets the transports slice. Thread-safe.
+func (as *AuthServer) SetTransports(transports []core.Transport) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(transports) == 0 {
+		as.Transports = nil
+		return
+	}
+	as.Transports = make([]core.Transport, len(transports))
+	copy(as.Transports, transports)
+}
+
+// GetSrc returns the source string. Thread-safe.
+func (as *AuthServer) GetSrc() string {
+	if as == nil {
+		return ""
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.Src
+}
+
+// SetSrc sets the source string if it's more specific than the current value. Thread-safe.
+func (as *AuthServer) SetSrc(src string) {
+	if as == nil || src == "" {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.Src == "" || as.Src == "unknown" {
+		as.Src = src
+	}
+}
+
+// ForceSetSrc sets the source string unconditionally. Thread-safe.
+func (as *AuthServer) ForceSetSrc(src string) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.Src = src
+}
+
+// GetDebug returns the debug flag. Thread-safe.
+func (as *AuthServer) GetDebug() bool {
+	if as == nil {
+		return false
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.Debug
+}
+
+// SetDebug sets the debug flag. Thread-safe.
+func (as *AuthServer) SetDebug(debug bool) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.Debug = debug
+}
+
+// PromoteDebug sets debug to true if not already set. Thread-safe.
+func (as *AuthServer) PromoteDebug() {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if !as.Debug {
+		as.Debug = true
+	}
+}
+
+// GetExpire returns the expiration time. Thread-safe.
+func (as *AuthServer) GetExpire() time.Time {
+	if as == nil {
+		return time.Time{}
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.Expire
+}
+
+// SetExpire sets the expiration time. Thread-safe.
+func (as *AuthServer) SetExpire(expire time.Time) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.Expire = expire
+}
+
+// GetPrefTransport returns the preferred transport. Thread-safe.
+func (as *AuthServer) GetPrefTransport() core.Transport {
+	if as == nil {
+		return core.TransportDo53
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.PrefTransport
+}
+
+// SetPrefTransport sets the preferred transport. Thread-safe.
+func (as *AuthServer) SetPrefTransport(t core.Transport) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.PrefTransport = t
+}
+
+// GetTransportWeights returns a copy of the transport weights map. Thread-safe.
+func (as *AuthServer) GetTransportWeights() map[core.Transport]uint8 {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.TransportWeights) == 0 {
+		return nil
+	}
+	weights := make(map[core.Transport]uint8, len(as.TransportWeights))
+	for k, v := range as.TransportWeights {
+		weights[k] = v
+	}
+	return weights
+}
+
+// SetTransportWeight sets a single transport weight. Thread-safe.
+func (as *AuthServer) SetTransportWeight(t core.Transport, weight uint8) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.TransportWeights == nil {
+		as.TransportWeights = make(map[core.Transport]uint8)
+	}
+	as.TransportWeights[t] = weight
+}
+
+// MergeTransportWeights merges the provided weights into the existing map. Thread-safe.
+func (as *AuthServer) MergeTransportWeights(weights map[core.Transport]uint8) {
+	if as == nil || len(weights) == 0 {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.TransportWeights == nil {
+		as.TransportWeights = make(map[core.Transport]uint8)
+	}
+	for k, v := range weights {
+		as.TransportWeights[k] = v
+	}
 }
 
 func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
@@ -172,6 +488,7 @@ func (as *AuthServer) IsAddressAvailable(addr string) bool {
 // - If the error message contains routing indicators ("no route to host", "network is unreachable", "host unreachable"): return 1 hour.
 // - If the error message contains timeout indicators ("timeout", "i/o timeout", "deadline exceeded"): return 2 minutes.
 // - For all other errors: return 2 minutes for a first failure, 1 hour otherwise.
+
 func categorizeError(err error, isFirstFailure bool) time.Duration {
 	if err == nil {
 		// No error provided, use default behavior
@@ -191,7 +508,6 @@ func categorizeError(err error, isFirstFailure bool) time.Duration {
 
 	// Check for timeout errors - these might be temporary, so backoff 2 minutes
 	if strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "i/o timeout") ||
 		strings.Contains(errStr, "deadline exceeded") {
 		return 2 * time.Minute
 	}
@@ -245,7 +561,6 @@ func (as *AuthServer) RecordAddressFailure(addr string, err error) {
 }
 
 // RecordAddressFailureForRcode records a failure for the given address based on a DNS response code.
-// REFUSED responses (lame delegations) get 1 hour backoff immediately as they're unlikely to resolve soon.
 // Thread-safe: acquires mu lock.
 func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	if as == nil {
@@ -262,7 +577,7 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	var backoffDuration time.Duration
 	var errMsg string
 	switch rcode {
-	case dns.RcodeServerFailure, dns.RcodeNotImplemented: // lame delegation
+	case dns.RcodeNotImplemented:
 		backoffDuration = 1 * time.Hour
 		if as.Debug {
 			errMsg = fmt.Sprintf("rcode=%d", rcode)
@@ -313,18 +628,27 @@ func (as *AuthServer) RecordAddressSuccess(addr string) {
 }
 
 // AllAddressesInBackoff returns true if all addresses for this server are currently in backoff.
-// Thread-safe: acquires mu lock.
+// Thread-safe: acquires mu lock once for the entire operation.
 func (as *AuthServer) AllAddressesInBackoff() bool {
-	if as == nil || len(as.Addrs) == 0 {
+	if as == nil {
 		return false
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+
+	// Copy Addrs while holding the lock to avoid TOCTOU
+	if len(as.Addrs) == 0 {
+		return false
+	}
+	addrs := make([]string, len(as.Addrs))
+	copy(addrs, as.Addrs)
+
+	// Check backoffs while still holding the same lock
 	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
 		return false // No backoffs recorded
 	}
 	now := time.Now()
-	for _, addr := range as.Addrs {
+	for _, addr := range addrs {
 		backoff, exists := as.AddressBackoffs[addr]
 		if !exists {
 			return false // At least one address has no backoff
@@ -337,19 +661,25 @@ func (as *AuthServer) AllAddressesInBackoff() bool {
 }
 
 // GetAvailableAddresses returns a list of addresses that are currently available (not in backoff).
-// Thread-safe: acquires mu lock.
+// Thread-safe: acquires mu lock once for the entire operation.
 func (as *AuthServer) GetAvailableAddresses() []string {
 	if as == nil {
 		return nil
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+
+	// Copy Addrs while holding the lock to avoid TOCTOU
 	if len(as.Addrs) == 0 {
 		return nil
 	}
+	addrs := make([]string, len(as.Addrs))
+	copy(addrs, as.Addrs)
+
+	// Check backoffs while still holding the same lock
 	var available []string
 	now := time.Now()
-	for _, addr := range as.Addrs {
+	for _, addr := range addrs {
 		if as.AddressBackoffs == nil {
 			available = append(available, addr)
 			continue

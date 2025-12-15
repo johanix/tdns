@@ -74,7 +74,29 @@ type Zone struct {
 	// Zone-specific address backoffs: map[address]*AddressBackoff
 	// Tracks per-zone, per-address failures (e.g., REFUSED for this zone from this address)
 	AddressBackoffs map[string]*AddressBackoff
-	mu              sync.Mutex // Protects AddressBackoffs
+	mu              sync.Mutex // Protects State and AddressBackoffs
+}
+
+// GetState returns the current validation state of the zone.
+// Thread-safe: acquires mu lock.
+func (z *Zone) GetState() ValidationState {
+	if z == nil {
+		return ValidationStateNone
+	}
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return z.State
+}
+
+// SetState sets the validation state of the zone.
+// Thread-safe: acquires mu lock.
+func (z *Zone) SetState(state ValidationState) {
+	if z == nil {
+		return
+	}
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.State = state
 }
 
 type CacheContext uint8

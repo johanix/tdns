@@ -1160,6 +1160,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	new_bailiwick_ns, err := BailiwickNS(zd.ZoneName, dss.NewNS)
 	if err != nil {
 		log.Printf("ZUCDDNG: Error computing bailiwick NS: %v", err)
+		return dss, err
 	} else {
 		// Build maps of current glue for quick lookup
 		current_a_glue := make(map[string][]dns.RR)
@@ -1183,7 +1184,8 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if glue, exists := current_a_glue[nsname]; exists {
 				for i := len(glue) - 1; i >= 0; i-- {
 					if dns.IsDuplicate(glue[i], remove) {
-						current_a_glue[nsname] = append(glue[:i], glue[i+1:]...)
+						glue = append(glue[:i], glue[i+1:]...)
+						current_a_glue[nsname] = glue
 						break
 					}
 				}
@@ -1194,7 +1196,8 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if glue, exists := current_aaaa_glue[nsname]; exists {
 				for i := len(glue) - 1; i >= 0; i-- {
 					if dns.IsDuplicate(glue[i], remove) {
-						current_aaaa_glue[nsname] = append(glue[:i], glue[i+1:]...)
+						glue = append(glue[:i], glue[i+1:]...)
+						current_aaaa_glue[nsname] = glue
 						break
 					}
 				}

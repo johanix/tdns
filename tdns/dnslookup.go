@@ -531,14 +531,10 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						servers = append(servers, net.JoinHostPort(addr, "53"))
 						// Use shared AuthServer instance across all zones
 						server := imr.Cache.GetOrCreateAuthServer(name)
-						if !slices.Contains(server.Addrs, addr) {
-							server.Addrs = append(server.Addrs, addr)
-						}
-						if server.Src == "" || server.Src == "unknown" {
-							server.Src = "answer"
-						}
-						if !server.Debug && imr.Debug {
-							server.Debug = imr.Debug
+						server.AddAddr(addr)
+						server.SetSrc("answer")
+						if imr.Debug {
+							server.PromoteDebug()
 						}
 						serverMap[name] = server
 						tmp := glue4Map[name]
@@ -550,14 +546,10 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						servers = append(servers, net.JoinHostPort(addr, "53"))
 						// Use shared AuthServer instance across all zones
 						server := imr.Cache.GetOrCreateAuthServer(name)
-						if !slices.Contains(server.Addrs, addr) {
-							server.Addrs = append(server.Addrs, addr)
-						}
-						if server.Src == "" || server.Src == "unknown" {
-							server.Src = "answer"
-						}
-						if !server.Debug && imr.Debug {
-							server.Debug = imr.Debug
+						server.AddAddr(addr)
+						server.SetSrc("answer")
+						if imr.Debug {
+							server.PromoteDebug()
 						}
 						serverMap[name] = server
 						tmp := glue6Map[name]
@@ -567,6 +559,9 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					case *dns.SVCB:
 						log.Printf("Additional contains an SVCB, here we should collect the ALPN")
 						svcb := rr.(*dns.SVCB)
+						// Ensure we have a shared AuthServer instance for this NS
+						server := imr.Cache.GetOrCreateAuthServer(name)
+						serverMap[name] = server
 						for _, kv := range svcb.Value {
 							if kv.Key() == dns.SVCB_ALPN {
 								if alpn, ok := kv.(*dns.SVCBAlpn); ok {
@@ -582,8 +577,8 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 										}
 									}
 									if alpn, ok := kv.(*dns.SVCBAlpn); ok {
-										serverMap[name].Alpn = alpn.Alpn
-										serverMap[name].Transports = transports
+										server.SetAlpn(alpn.Alpn)
+										server.SetTransports(transports)
 										log.Printf("Found ALPN values for %s: %v", name, alpn.Alpn)
 									}
 								}
@@ -1169,11 +1164,9 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			// Use shared AuthServer instance across all zones
 			serverMap[serverName] = imr.Cache.GetOrCreateAuthServer(serverName)
 			// Update fields for this specific context
-			if serverMap[serverName].Src == "" || serverMap[serverName].Src == "unknown" {
-				serverMap[serverName].Src = serversrc
-			}
-			if !serverMap[serverName].Debug && imr.Debug {
-				serverMap[serverName].Debug = imr.Debug
+			serverMap[serverName].SetSrc(serversrc)
+			if imr.Debug {
+				serverMap[serverName].PromoteDebug()
 			}
 			justCreated = true
 		}
@@ -2059,7 +2052,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		}
 		switch vstate {
 		case cache.ValidationStateSecure, cache.ValidationStateIndeterminate:
-			z.State = vstate
+			z.SetState(vstate)
 		default:
 			log.Printf("handleReferral: ERROR (should not happen): invalid DS validation state: %s", vstate)
 		}
@@ -2327,7 +2320,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 
 	// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
 	var vstate cache.ValidationState
-	vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher())
+	vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 	if err != nil {
 		imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
 	}

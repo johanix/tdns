@@ -102,7 +102,10 @@ var configStatusCmd = &cobra.Command{
 			if len(resp.DnsEngine.Options) > 0 {
 				fmt.Printf("DnsEngine: auth options:\n")
 				for opt, val := range resp.DnsEngine.Options {
-					optName := tdns.AuthOptionToString[opt]
+					optName, ok := tdns.AuthOptionToString[opt]
+					if !ok {
+						optName = fmt.Sprintf("unknown option %d", opt)
+					}
 					if val != "" {
 						fmt.Printf("  %s: %s\n", optName, val)
 					} else {

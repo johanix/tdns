@@ -332,13 +332,15 @@ func (rrcache *RRsetCacheT) ClearTLSAQuery(owner string) {
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
 	for _, server := range servers {
-		tmpauthserver := &AuthServer{
-			Name:     server.Name,
-			Addrs:    server.Addrs,
-			Alpn:     server.Alpn,
-			Src:      "stub",
-			ConnMode: server.ConnMode,
+		tmpauthserver := NewAuthServer(server.Name)
+		if tmpauthserver == nil {
+			continue // Skip invalid server names
 		}
+		// Override defaults with config values
+		tmpauthserver.SetAddrs(server.Addrs)
+		tmpauthserver.SetAlpn(server.Alpn)
+		tmpauthserver.ForceSetSrc("stub")
+		tmpauthserver.PromoteConnMode(server.ConnMode)
 		// New: prefer explicit transport signal string when provided
 		if server.TransportSignal != "" {
 			kvMap, err := core.ParseTransportString(server.TransportSignal)
@@ -382,22 +384,22 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 					alpnOrder = append(alpnOrder, p.k)
 					weights[t] = p.w
 				}
-				tmpauthserver.Alpn = alpnOrder
-				tmpauthserver.Transports = transports
+				tmpauthserver.SetAlpn(alpnOrder)
+				tmpauthserver.SetTransports(transports)
 				if len(transports) > 0 {
-					tmpauthserver.PrefTransport = transports[0]
+					tmpauthserver.SetPrefTransport(transports[0])
 				}
-				tmpauthserver.TransportWeights = weights
+				tmpauthserver.MergeTransportWeights(weights)
 			}
 		} else {
 			// Back-compat: use ALPN order to set transports (no weights)
 			if len(server.Alpn) == 0 {
-				tmpauthserver.Alpn = []string{"do53"}
-				tmpauthserver.Transports = []core.Transport{core.TransportDo53}
-				tmpauthserver.TransportWeights = map[core.Transport]uint8{core.TransportDo53: 100}
-				tmpauthserver.PrefTransport = core.TransportDo53
+				tmpauthserver.SetAlpn([]string{"do53"})
+				tmpauthserver.SetTransports([]core.Transport{core.TransportDo53})
+				tmpauthserver.MergeTransportWeights(map[core.Transport]uint8{core.TransportDo53: 100})
+				tmpauthserver.SetPrefTransport(core.TransportDo53)
 			} else {
-				tmpauthserver.Alpn = server.Alpn
+				tmpauthserver.SetAlpn(server.Alpn)
 				var transports []core.Transport
 				weights := map[core.Transport]uint8{}
 				for _, alpn := range server.Alpn {
@@ -406,10 +408,10 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 						weights[t] = 100
 					}
 				}
-				tmpauthserver.Transports = transports
-				tmpauthserver.TransportWeights = weights
+				tmpauthserver.SetTransports(transports)
+				tmpauthserver.MergeTransportWeights(weights)
 				if len(transports) > 0 {
-					tmpauthserver.PrefTransport = transports[0]
+					tmpauthserver.SetPrefTransport(transports[0])
 				}
 			}
 		}
@@ -438,11 +440,9 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 		// Ensure we use a shared AuthServer instance across all zones
 		sharedServer := rrcache.GetOrCreateAuthServer(name)
 
-		// Merge data from the input server into the shared instance
+		// Merge data from the input server into the shared instance using thread-safe accessors
 		for _, addr := range server.Addrs {
-			if !slices.Contains(sharedServer.Addrs, addr) {
-				sharedServer.Addrs = append(sharedServer.Addrs, addr)
-			}
+			sharedServer.AddAddr(addr)
 		}
 		for _, alpn := range server.Alpn {
 			t, err := core.StringToTransport(alpn)
@@ -450,39 +450,31 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 				log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 				continue
 			}
-			if !slices.Contains(sharedServer.Alpn, alpn) {
-				sharedServer.Alpn = append(sharedServer.Alpn, alpn)
-			}
-			if !slices.Contains(sharedServer.Transports, t) {
-				sharedServer.Transports = append(sharedServer.Transports, t)
-			}
+			sharedServer.AddAlpn(alpn)
+			sharedServer.AddTransport(t)
 		}
 		// Merge/overwrite transport weights if provided
 		if len(server.TransportWeights) > 0 {
-			if sharedServer.TransportWeights == nil {
-				sharedServer.TransportWeights = make(map[core.Transport]uint8)
-			}
-			for k, v := range server.TransportWeights {
-				sharedServer.TransportWeights[k] = v
-			}
+			sharedServer.MergeTransportWeights(server.TransportWeights)
 		}
 		// Update other fields if they're more specific
-		if server.Src != "" && (sharedServer.Src == "" || sharedServer.Src == "unknown") {
-			sharedServer.Src = server.Src
+		if server.Src != "" {
+			sharedServer.SetSrc(server.Src)
 		}
-		if server.ConnMode != ConnModeLegacy && sharedServer.ConnMode == ConnModeLegacy {
-			sharedServer.ConnMode = server.ConnMode
+		if server.ConnMode != ConnModeLegacy {
+			sharedServer.PromoteConnMode(server.ConnMode)
 		}
-		if server.Debug && !sharedServer.Debug {
-			sharedServer.Debug = server.Debug
+		if server.Debug {
+			sharedServer.PromoteDebug()
 		}
 
 		// Always assign the shared instance to this zone's map
 		serverMap[name] = sharedServer
 
 		// Set preferred transport if we have valid transports
-		if len(sharedServer.Transports) > 0 {
-			sharedServer.PrefTransport = sharedServer.Transports[0]
+		transports := sharedServer.GetTransports()
+		if len(transports) > 0 {
+			sharedServer.SetPrefTransport(transports[0])
 		}
 	}
 	if rrcache.Debug {
@@ -502,13 +494,7 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 	}
 
 	// No instance exists - create a new one
-	newServer := &AuthServer{
-		Name:       nsname,
-		Alpn:       []string{"do53"},
-		Transports: []core.Transport{core.TransportDo53},
-		Src:        "unknown",
-		ConnMode:   ConnModeLegacy,
-	}
+	newServer := NewAuthServer(nsname)
 
 	// Store it in the global map (use SetIfAbsent to handle race conditions)
 	if rrcache.AuthServerMap.SetIfAbsent(nsname, newServer) {
@@ -536,7 +522,7 @@ func tlsaOwnersForServer(base string, server *AuthServer) []string {
 		owners[owner] = struct{}{}
 	}
 	if server != nil {
-		for _, t := range server.Transports {
+		for _, t := range server.GetTransports() {
 			switch t {
 			case core.TransportDoT:
 				addOwner("tcp")

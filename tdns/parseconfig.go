@@ -337,7 +337,7 @@ func (conf *Config) InitializeKeyDB() error {
 			log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
 			return errors.New("ParseConfig: TDNS DB file does not exist")
 		}
-		kdb, err := NewKeyDB(dbFile, false, &conf.DnsEngine.Options)
+		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
 		if err != nil {
 			return fmt.Errorf("Error from NewKeyDB: %v", err)
 		}

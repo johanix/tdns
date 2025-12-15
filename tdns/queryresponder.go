@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -176,7 +177,15 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	if err != nil {
 		log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
 	}
-	zd.signApexRRsets(apex, msgoptions, kdb, dak)
+	// Use parent zone's own keys; let signRRsetForZone fetch them via kdb.
+	if err := zd.signApexRRsets(apex, msgoptions, kdb, nil); err != nil { // force fetch parent zone's DNSSEC keys
+		log.Printf("QueryResponder: failed to sign parent apex RRsets for DS query: %v", err)
+		if msgoptions.DO {
+			m.MsgHdr.Rcode = dns.RcodeServerFailure
+			w.WriteMsg(m)
+			return fmt.Errorf("failed to sign parent apex RRsets for DS query: %v", err)
+		}
+	}
 	m.MsgHdr.Rcode = dns.RcodeSuccess
 	dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
 	if err != nil {
@@ -290,7 +299,7 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 
 // handleCNAMEChain handles CNAME responses, including following CNAME chains across zones.
 // Returns true if a CNAME response was handled and the message should be sent, false otherwise.
-func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, owner *OwnerData,
+func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner *OwnerData,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, transportSignalInAnswer *bool) (bool, error) {
 
 	if owner.RRtypes.Count() != 1 {
@@ -314,7 +323,11 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 		if err != nil {
 			log.Printf("QueryResponder: failed to sign initial CNAME RRset for qname %s: %v", qname, err)
 			// Still add the CNAME even if signing failed
-			m.Answer = append(m.Answer, v.RRs...)
+			// m.Answer = append(m.Answer, v.RRs...)
+			// DNSSEC requested but failed to sign, return NXDOMAIN
+			m.MsgHdr.Rcode = dns.RcodeServerFailure
+			w.WriteMsg(m)
+			return false, fmt.Errorf("failed to sign initial CNAME RRset for qname %s: %v", qname, err)
 		} else {
 			owner.RRtypes.Set(dns.TypeCNAME, rrset)
 			m.Answer = append(m.Answer, v.RRs...)
@@ -330,6 +343,9 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 	maxDepth := 10
 	depth := 0
 
+	visited := make(map[string]bool)
+	visited[qname] = true
+
 	for depth < maxDepth {
 		// Get the current CNAME target
 		if currentOwner.RRtypes.Count() != 1 {
@@ -344,6 +360,12 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 		}
 		tgt := currentCNAME.RRs[0].(*dns.CNAME).Target
 		log.Printf("QueryResponder: CNAME chain depth %d: %s -> %s", depth+1, currentName, tgt)
+
+		if visited[tgt] {
+			log.Printf("QueryResponder: CNAME chain loop detected: %s -> %s", currentName, tgt)
+			break
+		}
+		visited[tgt] = true
 
 		// Find which zone the target belongs to
 		tgtZone, _ := FindZone(tgt)
@@ -368,6 +390,9 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 				tgtRRset, err := tgtZone.signRRsetForZone(tgtrrset, tgt, msgoptions, kdb, nil)
 				if err != nil {
 					log.Printf("QueryResponder: failed to sign final answer RRset for CNAME target %s: %v", tgt, err)
+					m.MsgHdr.Rcode = dns.RcodeServerFailure
+					w.WriteMsg(m)
+					return false, fmt.Errorf("failed to sign final answer RRset for CNAME target %s: %v", tgt, err)
 				} else {
 					tgtOwner.RRtypes.Set(qtype, tgtRRset)
 					m.Answer = append(m.Answer, tgtRRset.RRSIGs...)
@@ -385,6 +410,9 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 					rrset, err := tgtZone.signRRsetForZone(nextCNAME, tgt, msgoptions, kdb, nil)
 					if err != nil {
 						log.Printf("QueryResponder: failed to sign intermediate CNAME RRset for %s: %v", tgt, err)
+						m.MsgHdr.Rcode = dns.RcodeServerFailure
+						w.WriteMsg(m)
+						return false, fmt.Errorf("failed to sign intermediate CNAME RRset for %s: %v", tgt, err)
 					} else {
 						tgtOwner.RRtypes.Set(dns.TypeCNAME, rrset)
 						m.Answer = append(m.Answer, rrset.RRSIGs...)
@@ -429,9 +457,19 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 	return true, nil
 }
 
-func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
+func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
 	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
 
+	select {
+	case <-ctx.Done():
+		log.Printf("QueryResponder: context cancelled")
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return ctx.Err()
+	default:
+	}
 	// Track if the configured transport signal is already present in the Answer section
 	transportSignalInAnswer := false
 
@@ -458,7 +496,14 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		return fmt.Errorf("failed to get apex data for zone %s: %v", zd.ZoneName, err)
 	}
 
-	zd.signApexRRsets(apex, msgoptions, kdb, dak)
+	if err := zd.signApexRRsets(apex, msgoptions, kdb, dak); err != nil {
+		log.Printf("QueryResponder: failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
+		if msgoptions.DO {
+			m.MsgHdr.Rcode = dns.RcodeServerFailure
+			w.WriteMsg(m)
+			return fmt.Errorf("failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
+		}
+	}
 
 	// Reject explicit queries for NXNAME type (RFC 9824)
 	// NXNAME is only used in NSEC type bitmaps, not as a query type
@@ -515,6 +560,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 		soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
 		if err != nil {
 			log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
+			if msgoptions.DO {
+				m.MsgHdr.Rcode = dns.RcodeServerFailure
+				w.WriteMsg(m)
+				return fmt.Errorf("failed to sign SOA RRset before NXDOMAIN: %v", err)
+			}
 		} else {
 			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 		}
@@ -525,9 +575,11 @@ func (zd *ZoneData) QueryResponder(w dns.ResponseWriter, r *dns.Msg,
 	if len(qname) > len(zd.ZoneName) {
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
-		handled, err := zd.handleCNAMEChain(m, qname, qtype, owner, msgoptions, kdb, apex, &transportSignalInAnswer)
+		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, msgoptions, kdb, apex, &transportSignalInAnswer)
 		if err != nil {
 			log.Printf("QueryResponder: error handling CNAME chain: %v", err)
+			// Error response already sent by handleCNAMEChain
+			return nil
 		}
 		if handled {
 			w.WriteMsg(m)
