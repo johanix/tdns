@@ -4,9 +4,12 @@
 package tdns
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"log"
 
 	"fmt"
@@ -231,6 +234,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
 	err = yaml.Unmarshal([]byte(privkey), &bpk)
 	if err != nil {
+		// log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
 		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 	}
 
@@ -251,6 +255,140 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	//		rr.Header().Name, dns.AlgorithmToString[pkc.Algorithm], pkc.KeyId, pkc.PrivateKey, pubkey, pkc.K)
 
 	return &pkc, err
+}
+
+// PrivateKeyToPEM converts a crypto.PrivateKey to PKCS#8 PEM format.
+// This format works for all key types (RSA, ECDSA, ED25519, etc.) and preserves all key material.
+func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
+	if privkey == nil {
+		return "", fmt.Errorf("private key is nil")
+	}
+
+	// Marshal the private key to PKCS#8 DER format
+	derBytes, err := x509.MarshalPKCS8PrivateKey(privkey)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal private key to PKCS#8: %v", err)
+	}
+
+	// Encode to PEM format
+	pemBlock := &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: derBytes,
+	}
+
+	pemBytes := pem.EncodeToMemory(pemBlock)
+	return string(pemBytes), nil
+}
+
+// PEMToPrivateKey converts a PKCS#8 PEM-encoded private key back to crypto.PrivateKey.
+func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {
+	if pemData == "" {
+		return nil, fmt.Errorf("PEM data is empty")
+	}
+
+	// Decode PEM block
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block")
+	}
+
+	if block.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("PEM block type is %q, expected \"PRIVATE KEY\"", block.Type)
+	}
+
+	// Parse PKCS#8 private key
+	privkey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKCS#8 private key: %v", err)
+	}
+
+	return privkey, nil
+}
+
+// IsPEMFormat detects if a stored private key is in PKCS#8 PEM format (new format)
+// or BIND format (old format). Returns true if PEM, false if BIND format.
+func IsPEMFormat(keyData string) bool {
+	if keyData == "" {
+		return false
+	}
+
+	// PEM format starts with "-----BEGIN PRIVATE KEY-----"
+	// BIND format starts with "Private-key-format:" or is just base64
+	trimmed := strings.TrimSpace(keyData)
+	if strings.HasPrefix(trimmed, "-----BEGIN") && strings.Contains(trimmed, "PRIVATE KEY") {
+		return true
+	}
+
+	// Try to decode as PEM to be sure
+	block, _ := pem.Decode([]byte(keyData))
+	if block != nil && block.Type == "PRIVATE KEY" {
+		return true
+	}
+
+	return false
+}
+
+// ParsePrivateKeyFromDB parses a private key from the database, detecting whether
+// it's in old BIND format or new PEM format, and returns a crypto.PrivateKey.
+// It also returns the algorithm and a BIND-format string for backward compatibility.
+func ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr string) (crypto.PrivateKey, uint8, string, error) {
+	var privkey crypto.PrivateKey
+	var alg uint8
+	var bindFormat string
+	var err error
+
+	// Parse algorithm string to uint8
+	alg, ok := dns.StringToAlgorithm[strings.ToUpper(algorithm)]
+	if !ok {
+		return nil, 0, "", fmt.Errorf("unknown algorithm: %s", algorithm)
+	}
+
+	if IsPEMFormat(privatekey) {
+		// New format: PKCS#8 PEM
+		privkey, err = PEMToPrivateKey(privatekey)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("failed to parse PEM private key: %v", err)
+		}
+
+		// For backward compatibility, we need to create a BIND format string
+		// so that PrepareKeyCache can work. We'll parse the public key RR to get the algorithm.
+		rr, err := dns.NewRR(keyrrstr)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("failed to parse public key RR: %v", err)
+		}
+
+		var bindPrivKeyStr string
+		switch rr := rr.(type) {
+		case *dns.DNSKEY:
+			bindPrivKeyStr = rr.PrivateKeyString(privkey)
+		case *dns.KEY:
+			bindPrivKeyStr = rr.PrivateKeyString(privkey)
+		default:
+			return nil, 0, "", fmt.Errorf("unexpected RR type: %T", rr)
+		}
+
+		// PrivateKeyString() already returns the full BIND format string (with headers),
+		// so we should use it directly instead of wrapping it again with PrivKeyToBindFormat
+		bindFormat = bindPrivKeyStr
+	} else {
+		// Old format: BIND format
+		// privatekey is just the base64 string, need to wrap it in BIND format
+		bindFormat, err = PrivKeyToBindFormat(privatekey, algorithm)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("failed to convert to BIND format: %v", err)
+		}
+
+		// Parse using existing PrepareKeyCache logic
+		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
+		if err != nil {
+			return nil, 0, "", fmt.Errorf("failed to prepare key cache: %v", err)
+		}
+
+		privkey = pkc.K
+		// alg is already set from the algorithm parameter above
+	}
+
+	return privkey, alg, bindFormat, nil
 }
 
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {

@@ -195,8 +195,15 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			return nil, "", fmt.Errorf("Error: unknown private key type: %T", privkey)
 		}
 
-		var privkeystr string
+		// Convert private key to PKCS#8 PEM format for storage
+		privkeyPEM, err := PrivateKeyToPEM(pk)
+		if err != nil {
+			return nil, "", fmt.Errorf("Error from PrivateKeyToPEM: %v", err)
+		}
 
+		// For PrepareKeyCache, we still need BIND format temporarily
+		// (PrepareKeyCache will be updated to handle PEM, but for now we convert)
+		var privkeystr string
 		switch rrtype {
 		case dns.TypeKEY:
 			privkeystr = nkey.(*dns.KEY).PrivateKeyString(pk) // Convert to BIND private key format
@@ -205,6 +212,12 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		}
 
 		pkc, err = PrepareKeyCache(privkeystr, nkey.String())
+		if err != nil {
+			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
+		}
+
+		// Replace PrivateKey field with PEM format for storage
+		pkc.PrivateKey = privkeyPEM
 		if err != nil {
 			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
 		}
@@ -302,6 +315,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 
 	switch rrtype {
 	case dns.TypeKEY:
+		// pkc.PrivateKey should already be in PEM format from above
 		_, err = tx.Exec(addSig0KeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], creator, pkc.PrivateKey, pkc.KeyRR.String())
 
@@ -310,6 +324,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 		if keytype == "ZSK" {
 			flags = 256
 		}
+		// pkc.PrivateKey should already be in PEM format from above
 		_, err = tx.Exec(addDnssecKeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
 	}

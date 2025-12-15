@@ -4,11 +4,13 @@
 package cache
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/tdns/core"
+	"github.com/miekg/dns"
 )
 
 // AddressBackoff tracks backoff state for a single server address.
@@ -154,6 +156,7 @@ func (as *AuthServer) IsAddressAvailable(addr string) bool {
 // Routing errors (no route to host) get 1 hour immediately as they're unlikely to resolve soon.
 // Timeout errors get 2 minutes as they might be temporary.
 // Other errors default to 2 minutes for first failure, 1 hour for subsequent failures.
+// Note: REFUSED responses are handled separately via RecordAddressFailureForRcode().
 func categorizeError(err error, isFirstFailure bool) time.Duration {
 	if err == nil {
 		// No error provided, use default behavior
@@ -163,21 +166,21 @@ func categorizeError(err error, isFirstFailure bool) time.Duration {
 		return 1 * time.Hour
 	}
 	errStr := err.Error()
-	
+
 	// Check for routing errors - these are unlikely to resolve soon, so backoff 1 hour immediately
 	if strings.Contains(errStr, "no route to host") ||
 		strings.Contains(errStr, "network is unreachable") ||
 		strings.Contains(errStr, "host unreachable") {
 		return 1 * time.Hour
 	}
-	
+
 	// Check for timeout errors - these might be temporary, so backoff 2 minutes
 	if strings.Contains(errStr, "timeout") ||
 		strings.Contains(errStr, "i/o timeout") ||
 		strings.Contains(errStr, "deadline exceeded") {
 		return 2 * time.Minute
 	}
-	
+
 	// Other errors: 2 minutes for first failure, 1 hour for subsequent
 	if isFirstFailure {
 		return 2 * time.Minute
@@ -190,6 +193,7 @@ func categorizeError(err error, isFirstFailure bool) time.Duration {
 //   - Routing errors ("no route to host"): 1 hour immediately
 //   - Timeout errors: 2 minutes
 //   - Other errors: 2 minutes for first failure, 1 hour for subsequent failures
+//
 // If as.Debug is true, the error message is stored in LastError for debugging purposes.
 // Thread-safe: acquires mu lock.
 func (as *AuthServer) RecordAddressFailure(addr string, err error) {
@@ -219,7 +223,61 @@ func (as *AuthServer) RecordAddressFailure(addr string, err error) {
 	// Subsequent failure: determine backoff based on error type
 	backoffDuration := categorizeError(err, false)
 	backoff.NextTry = time.Now().Add(backoffDuration)
-	backoff.LastError = errMsg // Update last error even if not first failure
+	backoff.LastError = errMsg      // Update last error even if not first failure
+	if backoff.FailureCount < 255 { // Prevent overflow
+		backoff.FailureCount++
+	}
+}
+
+// RecordAddressFailureForRcode records a failure for the given address based on a DNS response code.
+// REFUSED responses (lame delegations) get 1 hour backoff immediately as they're unlikely to resolve soon.
+// Thread-safe: acquires mu lock.
+func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.AddressBackoffs == nil {
+		as.AddressBackoffs = make(map[string]*AddressBackoff)
+	}
+	backoff, exists := as.AddressBackoffs[addr]
+
+	// Determine backoff duration based on rcode
+	var backoffDuration time.Duration
+	var errMsg string
+	switch rcode {
+	case dns.RcodeServerFailure, dns.RcodeNotImplemented: // lame delegation
+		backoffDuration = 1 * time.Hour
+		if as.Debug {
+			errMsg = fmt.Sprintf("rcode=%d", rcode)
+		}
+	default:
+		// For other rcodes, use default behavior (2 min first, 1 hour subsequent)
+		if !exists {
+			backoffDuration = 2 * time.Minute
+		} else {
+			backoffDuration = 1 * time.Hour
+		}
+		if as.Debug {
+			errMsg = fmt.Sprintf("rcode=%d", rcode)
+		}
+	}
+
+	if !exists {
+		// First failure
+		as.AddressBackoffs[addr] = &AddressBackoff{
+			NextTry:      time.Now().Add(backoffDuration),
+			FailureCount: 1,
+			LastError:    errMsg,
+		}
+		return
+	}
+	// Subsequent failure
+	backoff.NextTry = time.Now().Add(backoffDuration)
+	if as.Debug {
+		backoff.LastError = errMsg
+	}
 	if backoff.FailureCount < 255 { // Prevent overflow
 		backoff.FailureCount++
 	}
@@ -288,4 +346,3 @@ func (as *AuthServer) GetAvailableAddresses() []string {
 	}
 	return available
 }
-

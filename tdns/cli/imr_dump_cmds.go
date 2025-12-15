@@ -323,8 +323,8 @@ var dumpDnskeysCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Combined, sorted-by-owner (reverse labels): DS (first) then DNSKEYs
 		type dnskeyView struct {
-			name        string
-			keyid       uint16
+			name  string
+			keyid uint16
 			// validated   bool
 			// trusted     bool
 			trustanchor bool
@@ -359,8 +359,8 @@ var dumpDnskeysCmd = &cobra.Command{
 				owners[val.Name] = ov
 			}
 			ov.dnskey = append(ov.dnskey, dnskeyView{
-				name:        val.Name,
-				keyid:       val.Keyid,
+				name:  val.Name,
+				keyid: val.Keyid,
 				// trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
 				expires:     tdns.TtlPrint(val.Expiration),
