@@ -16,6 +16,12 @@ import (
 	"github.com/spf13/viper"
 )
 
+// Update mode constants for parent delegation updates
+const (
+	UpdateModeReplace = "replace" // Replace all existing delegation data with new data
+	UpdateModeDelta   = "delta"   // Use incremental adds/removes (delta updates)
+)
+
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, conf *Config) error {
 
 	log.Printf("DelegationSyncher: sleeping for 2 seconds to allow ImrEngine to start")
@@ -392,7 +398,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	// dump.P(syncstate)
 
 	// Check the parent-update option to determine whether to use replace or delta mode
-	updateMode := "replace" // default
+	updateMode := UpdateModeReplace // default
 	if kdb.Options != nil {
 		if mode, exists := kdb.Options[AuthOptParentUpdate]; exists {
 			updateMode = mode
@@ -402,7 +408,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	var m *dns.Msg
 	var err error
 
-	if updateMode == "replace" {
+	if updateMode == UpdateModeReplace {
 		// Replace mode: remove all existing delegation data and add new complete data
 		log.Printf("SyncZoneDelegationViaUpdate: Using replace mode for zone %s", zd.ZoneName)
 		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA)

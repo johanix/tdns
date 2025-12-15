@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1205,7 +1204,7 @@ func (imr *Imr) matchDSTrustAnchorsToDNSKEYs(anchorName string, dslist []*dns.DS
 					Dnskey:      *dk,
 					Expiration:  exp,
 				}
-				imr.DnskeyCache.Set(cdr.Name+"::"+strconv.Itoa(int(cdr.Keyid)), cdr.Keyid, &cdr)
+				imr.DnskeyCache.Set(cdr.Name, cdr.Keyid, &cdr)
 				log.Printf("initializeImrTrustAnchors: DS matched DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
 			}
 		}

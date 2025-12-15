@@ -196,14 +196,14 @@ PrivateKey: %s`,
 // difference being that here we read the private key from a string, whereas in the
 // PrepareKeyCache creates a PrivateKeyCache from a private-key string and a public-key RR string.
 // It parses the public-key RR to determine key type, algorithm, and key tag, parses the private-key
-// material from the provided privkey string (expected to be BIND Private-key-format YAML with a
-// `PrivateKey` field), and populates the returned cache with the parsed crypto.PrivateKey (K),
+// material from the provided privkey string (accepts either PKCS#8 PEM format or BIND Private-key-format
+// YAML with a `PrivateKey` field), and populates the returned cache with the parsed crypto.PrivateKey (K),
 // a concrete key select (CS) of the appropriate type, the RD type (KEY/DNSKEY), Algorithm, KeyId,
 // and the corresponding DNS RR (DnskeyRR or KeyRR).
 //
 // The function returns an error if the public-key RR cannot be parsed, if the private key cannot be
-// created from the provided strings, if the privkey YAML cannot be unmarshaled, or if the algorithm
-// is not supported.
+// created from the provided strings, if the privkey YAML cannot be unmarshaled (for BIND format), or
+// if the algorithm is not supported.
 func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// log.Printf("PrepareKeyCache: privkey:\n%s\npubkey: %s", privkey, pubkey)
 	rr, err := dns.NewRR(pubkey)
@@ -212,42 +212,88 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	}
 
 	var pkc PrivateKeyCache
+	var privKeyBase64 string // For storing the base64 private key material
 
-	switch rr := rr.(type) {
-	case *dns.DNSKEY:
-		pkc.K, err = rr.NewPrivateKey(privkey)
+	// Check if privkey is in PEM format
+	if IsPEMFormat(privkey) {
+		// PEM format: parse directly to crypto.PrivateKey
+		pkc.K, err = PEMToPrivateKey(privkey)
 		if err != nil {
-			log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
-			return nil, fmt.Errorf("Error reading private key file '%s': %v", "foo", err)
+			return nil, fmt.Errorf("Error parsing PEM private key: %v", err)
 		}
-		pkc.KeyType = dns.TypeDNSKEY
-		pkc.Algorithm = rr.Algorithm
-		pkc.KeyId = rr.KeyTag()
-		pkc.DnskeyRR = *rr
 
-	case *dns.KEY:
-		pkc.K, err = rr.NewPrivateKey(privkey)
+		// Convert to BIND format for the PrivateKey field (for backward compatibility)
+		switch rr := rr.(type) {
+		case *dns.DNSKEY:
+			bindFormat := rr.PrivateKeyString(pkc.K)
+			// Extract the base64 part from BIND format
+			var bpk BindPrivateKey
+			err = yaml.Unmarshal([]byte(bindFormat), &bpk)
+			if err != nil {
+				return nil, fmt.Errorf("Error converting PEM to BIND format: %v", err)
+			}
+			privKeyBase64 = bpk.PrivateKey
+			pkc.KeyType = dns.TypeDNSKEY
+			pkc.Algorithm = rr.Algorithm
+			pkc.KeyId = rr.KeyTag()
+			pkc.DnskeyRR = *rr
+
+		case *dns.KEY:
+			bindFormat := rr.PrivateKeyString(pkc.K)
+			// Extract the base64 part from BIND format
+			var bpk BindPrivateKey
+			err = yaml.Unmarshal([]byte(bindFormat), &bpk)
+			if err != nil {
+				return nil, fmt.Errorf("Error converting PEM to BIND format: %v", err)
+			}
+			privKeyBase64 = bpk.PrivateKey
+			pkc.KeyType = dns.TypeKEY
+			pkc.Algorithm = rr.Algorithm
+			pkc.KeyId = rr.KeyTag()
+			pkc.KeyRR = *rr
+
+		default:
+			return nil, fmt.Errorf("rr is of type %v", "foo")
+		}
+	} else {
+		// BIND format: use existing logic
+		switch rr := rr.(type) {
+		case *dns.DNSKEY:
+			pkc.K, err = rr.NewPrivateKey(privkey)
+			if err != nil {
+				log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
+				return nil, fmt.Errorf("Error reading private key file '%s': %v", "foo", err)
+			}
+			pkc.KeyType = dns.TypeDNSKEY
+			pkc.Algorithm = rr.Algorithm
+			pkc.KeyId = rr.KeyTag()
+			pkc.DnskeyRR = *rr
+
+		case *dns.KEY:
+			pkc.K, err = rr.NewPrivateKey(privkey)
+			if err != nil {
+				return nil, fmt.Errorf("PrepareKeyCache: error parsing KEY private key: %v", err)
+			}
+			pkc.KeyType = dns.TypeKEY
+			pkc.Algorithm = rr.Algorithm
+			pkc.KeyId = rr.KeyTag()
+			pkc.KeyRR = *rr
+
+		default:
+			return nil, fmt.Errorf("rr is of type %v", "foo")
+		}
+
+		// Extract PrivateKey field from BIND format YAML
+		var bpk BindPrivateKey
+		err = yaml.Unmarshal([]byte(privkey), &bpk)
 		if err != nil {
-			return nil, fmt.Errorf("PrepareKeyCache: error parsing KEY private key: %v", err)
+			// log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
+			return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 		}
-		pkc.KeyType = dns.TypeKEY
-		pkc.Algorithm = rr.Algorithm
-		pkc.KeyId = rr.KeyTag()
-		pkc.KeyRR = *rr
-
-	default:
-		return nil, fmt.Errorf("rr is of type %v", "foo")
+		privKeyBase64 = bpk.PrivateKey
 	}
 
-	var bpk BindPrivateKey
-	// err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
-	err = yaml.Unmarshal([]byte(privkey), &bpk)
-	if err != nil {
-		// log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
-		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
-	}
-
-	pkc.PrivateKey = bpk.PrivateKey
+	pkc.PrivateKey = privKeyBase64
 
 	switch pkc.Algorithm {
 	case dns.RSASHA256, dns.RSASHA512:
@@ -318,29 +364,14 @@ func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {
 	return privkey, nil
 }
 
-// IsPEMFormat detects if a stored private key is in PKCS#8 PEM format (new format)
-// IsPEMFormat reports whether keyData appears to be a PKCS#8 PEM-encoded private key.
-// It returns true when the data starts with a PEM header containing "PRIVATE KEY" or
-// decodes to a PEM block of type "PRIVATE KEY"; otherwise it returns false.
+// IsPEMFormat detects if a stored private key is in PKCS#8 PEM format (new format).
+// It returns true if the data decodes to a PEM block of type "PRIVATE KEY"; otherwise false.
 func IsPEMFormat(keyData string) bool {
 	if keyData == "" {
 		return false
 	}
-
-	// PEM format starts with "-----BEGIN PRIVATE KEY-----"
-	// BIND format starts with "Private-key-format:" or is just base64
-	trimmed := strings.TrimSpace(keyData)
-	if strings.HasPrefix(trimmed, "-----BEGIN") && strings.Contains(trimmed, "PRIVATE KEY") {
-		return true
-	}
-
-	// Try to decode as PEM to be sure
 	block, _ := pem.Decode([]byte(keyData))
-	if block != nil && block.Type == "PRIVATE KEY" {
-		return true
-	}
-
-	return false
+	return block != nil && block.Type == "PRIVATE KEY"
 }
 
 // ParsePrivateKeyFromDB parses a private key from the database, detecting whether

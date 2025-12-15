@@ -161,7 +161,8 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 							ZoneName: signer,
 							State:    ValidationStateIndeterminate,
 						}
-					} else {
+					}
+					if ok {
 						zone.SetState(ValidationStateIndeterminate)
 					}
 					rrcache.ZoneMap.Set(signer, zone)

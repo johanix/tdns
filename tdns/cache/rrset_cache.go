@@ -328,13 +328,15 @@ func (rrcache *RRsetCacheT) ClearTLSAQuery(owner string) {
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
 	for _, server := range servers {
-		tmpauthserver := &AuthServer{
-			Name:     server.Name,
-			Addrs:    server.Addrs,
-			Alpn:     server.Alpn,
-			Src:      "stub",
-			ConnMode: server.ConnMode,
+		tmpauthserver := NewAuthServer(server.Name)
+		if tmpauthserver == nil {
+			continue // Skip invalid server names
 		}
+		// Override defaults with config values
+		tmpauthserver.SetAddrs(server.Addrs)
+		tmpauthserver.SetAlpn(server.Alpn)
+		tmpauthserver.ForceSetSrc("stub")
+		tmpauthserver.PromoteConnMode(server.ConnMode)
 		// New: prefer explicit transport signal string when provided
 		if server.TransportSignal != "" {
 			kvMap, err := core.ParseTransportString(server.TransportSignal)
@@ -378,22 +380,22 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 					alpnOrder = append(alpnOrder, p.k)
 					weights[t] = p.w
 				}
-				tmpauthserver.Alpn = alpnOrder
-				tmpauthserver.Transports = transports
+				tmpauthserver.SetAlpn(alpnOrder)
+				tmpauthserver.SetTransports(transports)
 				if len(transports) > 0 {
-					tmpauthserver.PrefTransport = transports[0]
+					tmpauthserver.SetPrefTransport(transports[0])
 				}
-				tmpauthserver.TransportWeights = weights
+				tmpauthserver.MergeTransportWeights(weights)
 			}
 		} else {
 			// Back-compat: use ALPN order to set transports (no weights)
 			if len(server.Alpn) == 0 {
-				tmpauthserver.Alpn = []string{"do53"}
-				tmpauthserver.Transports = []core.Transport{core.TransportDo53}
-				tmpauthserver.TransportWeights = map[core.Transport]uint8{core.TransportDo53: 100}
-				tmpauthserver.PrefTransport = core.TransportDo53
+				tmpauthserver.SetAlpn([]string{"do53"})
+				tmpauthserver.SetTransports([]core.Transport{core.TransportDo53})
+				tmpauthserver.MergeTransportWeights(map[core.Transport]uint8{core.TransportDo53: 100})
+				tmpauthserver.SetPrefTransport(core.TransportDo53)
 			} else {
-				tmpauthserver.Alpn = server.Alpn
+				tmpauthserver.SetAlpn(server.Alpn)
 				var transports []core.Transport
 				weights := map[core.Transport]uint8{}
 				for _, alpn := range server.Alpn {
@@ -402,10 +404,10 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 						weights[t] = 100
 					}
 				}
-				tmpauthserver.Transports = transports
-				tmpauthserver.TransportWeights = weights
+				tmpauthserver.SetTransports(transports)
+				tmpauthserver.MergeTransportWeights(weights)
 				if len(transports) > 0 {
-					tmpauthserver.PrefTransport = transports[0]
+					tmpauthserver.SetPrefTransport(transports[0])
 				}
 			}
 		}
@@ -488,13 +490,7 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 	}
 
 	// No instance exists - create a new one
-	newServer := &AuthServer{
-		Name:       nsname,
-		Alpn:       []string{"do53"},
-		Transports: []core.Transport{core.TransportDo53},
-		Src:        "unknown",
-		ConnMode:   ConnModeLegacy,
-	}
+	newServer := NewAuthServer(nsname)
 
 	// Store it in the global map (use SetIfAbsent to handle race conditions)
 	if rrcache.AuthServerMap.SetIfAbsent(nsname, newServer) {

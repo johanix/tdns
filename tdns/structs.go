@@ -296,22 +296,6 @@ type ValidatorResponse struct {
 	Msg       string
 }
 
-// type TAStore map[string]map[uint16]TrustAnchor
-type xxxDnskeyCacheT struct {
-	Map cmap.ConcurrentMap[string, xxxCachedDnskeyRRset]
-}
-
-type xxxCachedDnskeyRRset struct {
-	Name        string
-	Keyid       uint16
-	Validated   bool
-	Trusted     bool
-	TrustAnchor bool
-	Dnskey      dns.DNSKEY  // just this key
-	RRset       *core.RRset // complete RRset
-	Expiration  time.Time
-}
-
 type Sig0StoreT struct {
 	Map cmap.ConcurrentMap[string, Sig0Key]
 }
@@ -339,8 +323,6 @@ type DnssecKey struct {
 	Flags     uint16
 	Algorithm string
 	Creator   string
-	// Validated  bool   // has this key been DNSSEC validated
-	// Trusted    bool   // is this key trusted
 	PrivateKey string //
 	Key        dns.DNSKEY
 	Keystr     string

@@ -201,22 +201,14 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			return nil, "", fmt.Errorf("Error from PrivateKeyToPEM: %v", err)
 		}
 
-		// For PrepareKeyCache, we still need BIND format temporarily
-		// (PrepareKeyCache will be updated to handle PEM, but for now we convert)
-		var privkeystr string
-		switch rrtype {
-		case dns.TypeKEY:
-			privkeystr = nkey.(*dns.KEY).PrivateKeyString(pk) // Convert to BIND private key format
-		case dns.TypeDNSKEY:
-			privkeystr = nkey.(*dns.DNSKEY).PrivateKeyString(pk) // Convert to BIND private key format
-		}
-
-		pkc, err = PrepareKeyCache(privkeystr, nkey.String())
+		// PrepareKeyCache now accepts PEM format directly
+		pkc, err = PrepareKeyCache(privkeyPEM, nkey.String())
 		if err != nil {
 			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
 		}
 
-		// Replace PrivateKey field with PEM format for storage
+		// Replace PrivateKey field with PEM format for storage (PrepareKeyCache converts PEM to BIND
+		// for the PrivateKey field, but we want to store PEM in the database)
 		pkc.PrivateKey = privkeyPEM
 
 	case "external":

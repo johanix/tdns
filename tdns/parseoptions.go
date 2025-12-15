@@ -67,7 +67,7 @@ func (conf *Config) parseAuthOptions() {
 	clean := make(map[AuthOption]string)
 
 	// Apply defaults for options that have them, even when no options are configured
-	clean[AuthOptParentUpdate] = "replace"
+	clean[AuthOptParentUpdate] = UpdateModeReplace
 
 	if len(raw) == 0 {
 		conf.DnsEngine.Options = clean
@@ -100,14 +100,14 @@ func (conf *Config) parseAuthOptions() {
 		case AuthOptParentUpdate:
 			val := strings.ToLower(optval)
 			if val == "" {
-				val = "replace"
+				val = UpdateModeReplace
 			}
 			switch val {
-			case "replace", "delta":
+			case UpdateModeReplace, UpdateModeDelta:
 				clean[authOpt] = val
 			default:
-				log.Printf("ParseConfig: Auth option %q has invalid value %q (allowed: replace|delta); defaulting to replace", key, optval)
-				clean[authOpt] = "replace"
+				log.Printf("ParseConfig: Auth option %q has invalid value %q (allowed: %s|%s); defaulting to %s", key, optval, UpdateModeReplace, UpdateModeDelta, UpdateModeReplace)
+				clean[authOpt] = UpdateModeReplace
 			}
 		default:
 			clean[authOpt] = optval

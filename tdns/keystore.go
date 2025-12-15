@@ -566,6 +566,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
 			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
+			return nil, fmt.Errorf("Error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
 		if (flags & 0x0001) != 0 {

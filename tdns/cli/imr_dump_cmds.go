@@ -197,6 +197,9 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 				for _, addr := range addrs {
 					backoff := backoffs[addr]
 					timeUntilRetry := backoff.NextTry.Sub(now)
+					if timeUntilRetry < 0 {
+						timeUntilRetry = 0
+					}
 					// Always include all 5 columns for alignment
 					failures := "0"
 					if backoff.FailureCount > 0 {
@@ -252,10 +255,7 @@ var dumpZonesCmd = &cobra.Command{
 		t.AlignCol(1, acidtab.Right)
 		for _, item := range zones {
 			zone := item.Val
-			secureStatus := cache.ValidationStateToString[zone.GetState()]
-			if secureStatus == "" {
-				secureStatus = "[unknown]"
-			}
+			secureStatus := validationStateString(zone.GetState())
 			t.Row(item.Key, secureStatus)
 		}
 		fmt.Println(t.String())

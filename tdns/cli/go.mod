@@ -10,6 +10,8 @@ require (
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/johanix/tdns/tdns v0.0.0-20251115235005-48e48cb765aa
+	github.com/johanix/tdns/tdns/cache v0.0.0-20251209183459-2d9962c12f9f
+	github.com/johanix/tdns/tdns/core v0.0.0-20251122130747-9c54a3943883
 	github.com/johanix/tdns/tdns/edns0 v0.0.0-20251121102720-aa307d56701e
 	github.com/miekg/dns v1.1.68
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -17,6 +19,7 @@ require (
 	github.com/spf13/viper v1.16.0
 	golang.org/x/term v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
+	zgo.at/acidtab v1.1.0
 )
 
 require (
@@ -28,7 +31,6 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns/tdns/core v0.0.0-20251122130244-bf33deb9fd20 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
@@ -41,6 +43,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.57.0 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
@@ -58,4 +61,6 @@ require (
 	golang.org/x/tools v0.38.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
+	zgo.at/runewidth v0.1.0 // indirect
+	zgo.at/termtext v1.5.0 // indirect
 )

@@ -43,6 +43,38 @@ type AuthServer struct {
 	AddressBackoffs map[string]*AddressBackoff // keyed by address string (e.g., "1.2.3.4:53" or "[2001:db8::1]:53")
 }
 
+// NewAuthServer creates a new AuthServer instance with default values.
+// The name parameter is required and identifies the nameserver.
+// All other fields are initialized with safe defaults:
+//   - Alpn: ["do53"]
+//   - Transports: [TransportDo53]
+//   - PrefTransport: TransportDo53
+//   - Src: "unknown"
+//   - ConnMode: ConnModeLegacy
+//   - Other fields: nil or zero values
+func NewAuthServer(name string) *AuthServer {
+	if name == "" {
+		return nil
+	}
+	return &AuthServer{
+		Name:       name,
+		Alpn:       []string{"do53"},
+		Transports: []core.Transport{core.TransportDo53},
+		PrefTransport: core.TransportDo53,
+		Src:        "unknown",
+		ConnMode:   ConnModeLegacy,
+		// Other fields are zero-initialized:
+		// Addrs: nil
+		// TransportWeights: nil
+		// TransportSignal: ""
+		// TLSARecords: nil
+		// TransportCounters: nil (will be initialized on first use)
+		// Expire: zero time
+		// Debug: false
+		// AddressBackoffs: nil (will be initialized on first use)
+	}
+}
+
 func (as *AuthServer) ConnectionMode() ConnMode {
 	if as == nil {
 		return ConnModeLegacy
@@ -469,7 +501,6 @@ func categorizeError(err error, isFirstFailure bool) time.Duration {
 
 	// Check for timeout errors - these might be temporary, so backoff 2 minutes
 	if strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "i/o timeout") ||
 		strings.Contains(errStr, "deadline exceeded") {
 		return 2 * time.Minute
 	}
@@ -523,7 +554,6 @@ func (as *AuthServer) RecordAddressFailure(addr string, err error) {
 }
 
 // RecordAddressFailureForRcode records a failure for the given address based on a DNS response code.
-// REFUSED responses (lame delegations) get 1 hour backoff immediately as they're unlikely to resolve soon.
 // Thread-safe: acquires mu lock.
 func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	if as == nil {
@@ -540,7 +570,7 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	var backoffDuration time.Duration
 	var errMsg string
 	switch rcode {
-	case dns.RcodeServerFailure, dns.RcodeNotImplemented: // lame delegation
+	case dns.RcodeNotImplemented:
 		backoffDuration = 1 * time.Hour
 		if as.Debug {
 			errMsg = fmt.Sprintf("rcode=%d", rcode)
@@ -591,17 +621,22 @@ func (as *AuthServer) RecordAddressSuccess(addr string) {
 }
 
 // AllAddressesInBackoff returns true if all addresses for this server are currently in backoff.
-// Thread-safe: acquires mu lock.
+// Thread-safe: acquires mu lock once for the entire operation.
 func (as *AuthServer) AllAddressesInBackoff() bool {
 	if as == nil {
 		return false
 	}
-	addrs := as.GetAddrs()
-	if len(addrs) == 0 {
-		return false
-	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	
+	// Copy Addrs while holding the lock to avoid TOCTOU
+	if len(as.Addrs) == 0 {
+		return false
+	}
+	addrs := make([]string, len(as.Addrs))
+	copy(addrs, as.Addrs)
+	
+	// Check backoffs while still holding the same lock
 	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
 		return false // No backoffs recorded
 	}
@@ -619,17 +654,22 @@ func (as *AuthServer) AllAddressesInBackoff() bool {
 }
 
 // GetAvailableAddresses returns a list of addresses that are currently available (not in backoff).
-// Thread-safe: acquires mu lock.
+// Thread-safe: acquires mu lock once for the entire operation.
 func (as *AuthServer) GetAvailableAddresses() []string {
 	if as == nil {
 		return nil
 	}
-	addrs := as.GetAddrs()
-	if len(addrs) == 0 {
-		return nil
-	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	
+	// Copy Addrs while holding the lock to avoid TOCTOU
+	if len(as.Addrs) == 0 {
+		return nil
+	}
+	addrs := make([]string, len(as.Addrs))
+	copy(addrs, as.Addrs)
+	
+	// Check backoffs while still holding the same lock
 	var available []string
 	now := time.Now()
 	for _, addr := range addrs {

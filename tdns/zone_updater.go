@@ -1160,6 +1160,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	new_bailiwick_ns, err := BailiwickNS(zd.ZoneName, dss.NewNS)
 	if err != nil {
 		log.Printf("ZUCDDNG: Error computing bailiwick NS: %v", err)
+		return dss, err
 	} else {
 		// Build maps of current glue for quick lookup
 		current_a_glue := make(map[string][]dns.RR)
