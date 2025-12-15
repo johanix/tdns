@@ -234,8 +234,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
 	err = yaml.Unmarshal([]byte(privkey), &bpk)
 	if err != nil {
-		log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
-		fmt.Printf("Stuff we're trying to yaml.Unmarshal:\n%s\n", string(privkey))
+		// log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
 		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
 	}
 

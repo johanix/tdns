@@ -58,25 +58,34 @@ var standardDNSTypes = map[uint16]bool{
 // 5. Give up.
 
 // signApexRRsets signs the SOA and NS RRsets at the zone apex if DNSSEC is requested.
-func (zd *ZoneData) signApexRRsets(apex *OwnerData, msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys) {
+func (zd *ZoneData) signApexRRsets(apex *OwnerData, msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys) error {
 	if !msgoptions.DO {
-		return
+		return nil
 	}
 	signFunc := func(rrset core.RRset, qname string) (core.RRset, error) {
 		return zd.signRRsetForZone(rrset, qname, msgoptions, kdb, dak)
 	}
+
+	var errs []error
+
 	soaRRset, err := signFunc(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
 	if err != nil {
 		log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
+		errs = append(errs, err)
 	} else {
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 	}
 	nsRRset, err := signFunc(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName)
 	if err != nil {
 		log.Printf("QueryResponder: failed to sign NS RRset for zone %s: %v", zd.ZoneName, err)
+		errs = append(errs, err)
 	} else {
 		apex.RRtypes.Set(dns.TypeNS, nsRRset)
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to sign apex RRsets for zone %s: %v", zd.ZoneName, errs)
+	}
+	return nil
 }
 
 // signRRsetForZone signs an RRset using a zone's DNSSEC keys.
@@ -266,24 +275,17 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool) {
 	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 	soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-	zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs),
-		zd.ZoneName, soaRRset)
+	zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs),	zd.ZoneName, soaRRset)
 	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 	m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
-	zd.addNSAndGlue(m, apex, msgoptions)
-	zd.addTransportSignal(m, msgoptions, *transportSignalInAnswer)
 	if msgoptions.DO {
 		log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
 		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 		// Note: NS and glue RRSIGs are already added by addNSAndGlue
-		if zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil {
-			if !*transportSignalInAnswer {
-				m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
-			}
-		}
-		// TSYNC has no signatures to add
 	}
+	zd.addNSAndGlue(m, apex, msgoptions)
+	zd.addTransportSignal(m, msgoptions, *transportSignalInAnswer)
 }
 
 // handleCNAMEChain handles CNAME responses, including following CNAME chains across zones.
@@ -363,7 +365,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 			// Found final answer - add it to answer
 			m.Answer = append(m.Answer, tgtrrset.RRs...)
 			if msgoptions.DO {
-				tgtRRset, err := zd.signRRsetForZone(tgtrrset, tgt, msgoptions, kdb, nil)
+				tgtRRset, err := tgtZone.signRRsetForZone(tgtrrset, tgt, msgoptions, kdb, nil)
 				if err != nil {
 					log.Printf("QueryResponder: failed to sign final answer RRset for CNAME target %s: %v", tgt, err)
 				} else {
@@ -380,7 +382,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, own
 				// Add this CNAME to the answer and continue
 				m.Answer = append(m.Answer, nextCNAME.RRs...)
 				if msgoptions.DO {
-					rrset, err := zd.signRRsetForZone(nextCNAME, tgt, msgoptions, kdb, nil)
+					rrset, err := tgtZone.signRRsetForZone(nextCNAME, tgt, msgoptions, kdb, nil)
 					if err != nil {
 						log.Printf("QueryResponder: failed to sign intermediate CNAME RRset for %s: %v", tgt, err)
 					} else {

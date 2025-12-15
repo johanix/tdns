@@ -42,7 +42,7 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 	case dns.RcodeNotImplemented:
 		backoffDuration = 6 * time.Hour
 		if debug {
-			errMsg = fmt.Sprintf("rcode=NOTIMP; backoff=6h", rcode)
+			errMsg = fmt.Sprintf("rcode=NOTIMP; backoff=6h")
 		}
 	default:
 		// For other rcodes, use default behavior (2 min first, 1 hour subsequent)

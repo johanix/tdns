@@ -71,6 +71,104 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 	return rrsets_differ, adds, removes
 }
 
+func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
+	var match, rrsets_differ bool
+	typestr := dns.TypeToString[rrset.RRtype]
+	adds := []dns.RR{}
+	removes := []dns.RR{}
+
+	if debug {
+		lg.Printf("*** RRD: Comparing %s RRsets for %s:", typestr, rrset.Name)
+		lg.Printf("-------- Old set for %s %s:", rrset.Name, typestr)
+		for _, rr := range rrset.RRs {
+			lg.Printf("%s", rr.String())
+		}
+		lg.Printf("-------- New set for %s %s:", rrset.Name, typestr)
+		for _, rr := range newrrset.RRs {
+			lg.Printf("%s", rr.String())
+		}
+	}
+	// compare oldrrs to newrrs
+	for _, orr := range rrset.RRs {
+		if orr.Header().Rrtype == dns.TypeRRSIG {
+			continue
+		}
+		match = false
+		for _, nrr := range newrrset.RRs {
+			if dns.IsDuplicate(orr, nrr) {
+				match = true
+				break
+			}
+		}
+		// if we get here w/o match then this orr has no equal nrr
+		if !match {
+			rrsets_differ = true
+			removes = append(removes, orr)
+		}
+	}
+
+	// compare newrrs to oldrrs
+	for _, nrr := range newrrset.RRs {
+		if nrr.Header().Rrtype == dns.TypeRRSIG {
+			continue
+		}
+		match = false
+		for _, orr := range rrset.RRs {
+			if dns.IsDuplicate(nrr, orr) {
+				match = true
+				break
+			}
+		}
+		// if we get here w/o match then this nrr has no equal orr
+		if !match {
+			rrsets_differ = true
+			adds = append(adds, nrr)
+		}
+	}
+	if verbose {
+		lg.Printf("*** RRD: RRsetDiffer: Zone %s %s rrsets_differ: %v\n***Adds: %v\n***Removes: %v", rrset.Name, typestr, rrsets_differ, adds, removes)
+	}
+	return rrsets_differ, adds, removes
+}
+
+// RRSIGsDiffer compares two slices of RRSIGs and returns true if they differ.
+// Two RRSIG slices are considered equal if they contain the same RRSIGs (using dns.IsDuplicate for comparison),
+// regardless of order. Returns true if the RRSIGs differ, false if they are the same.
+func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
+	oldRRSIGs := rrset.RRSIGs
+	newRRSIGs := newrrset.RRSIGs
+	if len(oldRRSIGs) != len(newRRSIGs) {
+		return true
+	}
+	// Compare old RRSIGs to new RRSIGs
+	for _, oldSig := range oldRRSIGs {
+		found := false
+		for _, newSig := range newRRSIGs {
+			if dns.IsDuplicate(oldSig, newSig) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+	}
+	// Compare new RRSIGs to old RRSIGs (check the other direction)
+	for _, newSig := range newRRSIGs {
+		found := false
+		for _, oldSig := range oldRRSIGs {
+			if dns.IsDuplicate(newSig, oldSig) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
+}
+
 func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 	if debug {
 		log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
@@ -86,18 +184,6 @@ func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 			return
 		}
 	}
-}
-
-// trying to get rid of this in favour of Clone()
-func (rrset *RRset) xxxCopy() *RRset {
-	new_rrset := RRset{
-		Name:   rrset.Name,
-		RRs:    []dns.RR{},
-		RRSIGs: []dns.RR{},
-	}
-	new_rrset.RRs = append(new_rrset.RRs, rrset.RRs...)
-	new_rrset.RRSIGs = append(new_rrset.RRSIGs, rrset.RRSIGs...)
-	return &new_rrset
 }
 
 // Add adds a RR to the RRset if it is not already present.
@@ -161,11 +247,11 @@ func (rrset *RRset) String(maxlen int) (out string) {
 			out = "(RRset.String returned empty string - this should not happen)\n"
 		}
 	}()
-	
+
 	if rrset == nil {
 		return "(nil RRset)\n"
 	}
-	
+
 	out = ""
 	rrCount := 0
 	if rrset.RRs != nil {
@@ -195,7 +281,7 @@ func (rrset *RRset) String(maxlen int) (out string) {
 			out += sigstr
 		}
 	}
-	
+
 	if out == "" {
 		typeStr := "UNKNOWN"
 		if rrset.RRtype > 0 {
@@ -209,15 +295,15 @@ func (rrset *RRset) String(maxlen int) (out string) {
 		if name == "" {
 			name = "(empty)"
 		}
-		out = fmt.Sprintf("(empty RRset: name=%q type=%s rrs=%d rrsigs=%d)\n", 
+		out = fmt.Sprintf("(empty RRset: name=%q type=%s rrs=%d rrsigs=%d)\n",
 			name, typeStr, rrCount, sigCount)
 	}
-	
+
 	// Debug: log if we're about to return empty
 	if out == "" {
-		log.Printf("RRset.String: CRITICAL - out is empty before return! name=%q type=%d rrs=%d rrsigs=%d", 
+		log.Printf("RRset.String: CRITICAL - out is empty before return! name=%q type=%d rrs=%d rrsigs=%d",
 			rrset.Name, rrset.RRtype, rrCount, sigCount)
 	}
-	
+
 	return out
 }
