@@ -197,6 +197,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
 github.com/quic-go/quic-go v0.57.0 h1:AsSSrrMs4qI/hLrKlTH/TGQeTMY0ib1pAOX7vA3AdqE=
 github.com/quic-go/quic-go v0.57.0/go.mod h1:ly4QBAjHA2VhdnxhojRsCUOeJwKYg+taDlos92xb1+s=
+github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
+github.com/rivo/uniseg v0.4.7/go.mod h1:FN3SvrM+Zdj16jyLfmOkMNblXMcoc8DfTHruCPUcx88=
 github.com/rogpeppe/go-internal v1.3.0/go.mod h1:M8bDsm7K2OlrFYOpmOWEs/qY81heoFRclV5y23lUDJ4=
 github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjRBZyWFQ=
 github.com/rogpeppe/go-internal v1.10.0/go.mod h1:UQnix2H7Ngw/k4C5ijL5+65zddjncjaFoBhdsK/akog=
@@ -577,3 +579,9 @@ honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9
 rsc.io/binaryregexp v0.2.0/go.mod h1:qTv7/COck+e2FymRvadv62gMdZztPaShugOCi3I+8D8=
 rsc.io/quote/v3 v3.1.0/go.mod h1:yEA65RcK8LyAZtP9Kv3t0HmxON59tX3rD+tICJqUlj0=
 rsc.io/sampler v1.3.0/go.mod h1:T1hPZKmBbMNahiBKFy5HrXp6adAjACjK9JXDnKaTXpA=
+zgo.at/acidtab v1.1.0 h1:R584LYBpvIjOHqAnUscuXpWvEKtITDG04LnAeBgFhI4=
+zgo.at/acidtab v1.1.0/go.mod h1:xee1o6KZBsb1Rmj4ZzNXyI/bjRzaoByDeqUCXM9ylJQ=
+zgo.at/runewidth v0.1.0 h1:ED4PzJpYJlZMDEkoz+iPKjb5NrwbKnWPXDMJlNlfk9g=
+zgo.at/runewidth v0.1.0/go.mod h1:Ugl6FGPF5Ib/NRu2UAV2wVthEgYfEz51Bu/uyNbWZSw=
+zgo.at/termtext v1.5.0 h1:4p9GVUDYUR8oWvpxOZsO5ZrNSkA99bp8gXNKxKj+Kl0=
+zgo.at/termtext v1.5.0/go.mod h1:AcdAAiydkqSFadljJaEj9jv7bpyJxfQqGtPWyZCLenQ=

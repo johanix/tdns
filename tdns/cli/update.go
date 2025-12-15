@@ -95,7 +95,7 @@ func init() {
 }
 
 func CreateUpdate(updateType string) {
-	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false, nil)
 	if err != nil {
 		fmt.Printf("Error from NewKeyDB(): %v\n", err)
 		os.Exit(1)

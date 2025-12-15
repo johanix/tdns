@@ -109,7 +109,7 @@ func LeaveVerifyCDSRemoval(zone *music.Zone) bool {
 	return true
 }
 
-// The code below is on "Paus" until we figure out what we want to do with https://github.com/DNSSEC-Provisioning/music/issues/96
+// The code below is on "Pause" until we figure out what we want to do with https://github.com/DNSSEC-Provisioning/music/issues/96
 /*
 func LeaveParentDsSyncedAction(z *music.Zone) bool {
 	log.Printf("%s: Removing CDS/CDNSKEY record sets", z.Name)
@@ -154,7 +154,7 @@ func LeaveVerifyCDSRemoval(zone *music.Zone) bool {
 	for _, rrType := range rrTypes {
 		for signerName, signer := range zone.SGroup.SignerMap {
 			updater := music.GetUpdater(signer.Method)
-			err, rrSet := updater.FetchRRset(signer, zone.Name, zone.Name, rrType)
+			rrSet, err := updater.FetchRRset(signer, zone.Name, zone.Name, rrType)
 			if err != nil {
 				zone.SetStopReason(fmt.Sprintf("Couldn't Fetch %s RRset from %s\n", dns.TypeToString[rrType], signerName))
 			}

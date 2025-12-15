@@ -80,7 +80,10 @@ var ImrQueryCmd = &cobra.Command{
 				// Print negative authority proof if present (only in verbose mode)
 				// Check the global verbose flag set by the root command's PersistentFlags
 				if tdns.Globals.Verbose {
-					if len(cached.NegAuthority) > 0 {
+					// For indeterminate zones, proof cannot be validated, so don't show it
+					if vstate == cache.ValidationStateIndeterminate {
+						fmt.Printf("Proof: not possible for zone in state=indeterminate\n")
+					} else if len(cached.NegAuthority) > 0 {
 						fmt.Printf("Proof:\n")
 						for _, negRRset := range cached.NegAuthority {
 							if negRRset != nil {
@@ -324,16 +327,21 @@ var imrShowConfigCmd = &cobra.Command{
 		}
 		fmt.Printf("  Cache primed: %t\n", primed)
 
-		taKeys := cache.DnskeyCache.Map.Keys()
-		if len(taKeys) == 0 {
+		dkKeys := cache.DnskeyCache.Map.Keys()
+		if tdns.Globals.Debug {
+			fmt.Printf("  DnskeyCache keys: %v\n", dkKeys)
+		}
+		if len(dkKeys) == 0 {
 			fmt.Println("  Trust anchors: (none)")
 		} else {
 			fmt.Println("  Trust anchors:")
-			sort.Strings(taKeys)
-			for _, key := range taKeys {
+			sort.Strings(dkKeys)
+			for _, key := range dkKeys {
 				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
-					fmt.Printf("    %s keyid=%d (trusted=%t expires=%s)\n",
-						val.Name, val.Keyid, val.Trusted, tdns.TtlPrint(val.Expiration))
+					if val.TrustAnchor {
+						fmt.Printf("    %s keyid=%d (TrustAnchor, state=%s expires=%s)\n",
+							val.Name, val.Keyid, cache.ValidationStateToString[val.State], tdns.TtlPrint(val.Expiration))
+					}
 				}
 			}
 		}

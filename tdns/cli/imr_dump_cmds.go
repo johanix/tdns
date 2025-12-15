@@ -13,6 +13,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
+	"zgo.at/acidtab"
 )
 
 var ImrDumpCmd = &cobra.Command{
@@ -163,6 +164,104 @@ var dumpAuthServersCmd = &cobra.Command{
 	},
 }
 
+var dumpAuthServersErrorsCmd = &cobra.Command{
+	Use:   "errors",
+	Short: "List auth servers with connection issues (addresses in backoff)",
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+
+		now := time.Now()
+		hasErrors := false
+		var lines []string
+
+		// Traverse AuthServerMap to find servers with backoff issues
+		for item := range Conf.Internal.RRsetCache.AuthServerMap.IterBuffered() {
+			nsname := item.Key
+			server := item.Val
+
+			// Get snapshot of addresses in backoff (thread-safe)
+			backoffs := server.SnapshotAddressBackoffs(now)
+			if backoffs != nil && len(backoffs) > 0 {
+				hasErrors = true
+				// Sort addresses for consistent output
+				addrs := make([]string, 0, len(backoffs))
+				for addr := range backoffs {
+					addrs = append(addrs, addr)
+				}
+				sort.Strings(addrs)
+
+				// Collect information for addresses in backoff
+				for _, addr := range addrs {
+					backoff := backoffs[addr]
+					timeUntilRetry := backoff.NextTry.Sub(now)
+					if timeUntilRetry < 0 {
+						timeUntilRetry = 0
+					}
+					// Always include all 5 columns for alignment
+					failures := "0"
+					if backoff.FailureCount > 0 {
+						failures = fmt.Sprintf("%d", backoff.FailureCount)
+					}
+					errorMsg := "-"
+					if backoff.LastError != "" {
+						errorMsg = backoff.LastError
+					}
+					line := fmt.Sprintf("%s | %s | retry in %s | %s | %s", nsname, addr, formatDuration(timeUntilRetry), failures, errorMsg)
+					lines = append(lines, line)
+				}
+			}
+		}
+
+		if !hasErrors {
+			fmt.Println("No auth servers with connection issues found.")
+			return
+		}
+
+		// Print header and results
+		fmt.Println("Nameserver | Address | Backoff Time | Failures | Error")
+		fmt.Println(strings.Repeat("-", 80))
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+	},
+}
+
+var dumpZonesCmd = &cobra.Command{
+	Use:   "zones",
+	Short: "List all zones in the ZoneMap with their secure delegation status",
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+
+		// Collect all zones from ZoneMap
+		zones := []core.Tuple[string, *cache.Zone]{}
+		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
+			zones = append(zones, item)
+		}
+
+		// Sort zones by name (reverse label order)
+		sort.Slice(zones, func(i, j int) bool {
+			return lessByReverseLabels(zones[i].Key, zones[j].Key)
+		})
+
+		// Use acidtab for right-aligned zone names
+		t := acidtab.New("Zone", "Status")
+		t.AlignCol(0, acidtab.Right)
+		t.AlignCol(1, acidtab.Right)
+		for _, item := range zones {
+			zone := item.Val
+			secureStatus := validationStateString(zone.GetState())
+			t.Row(item.Key, secureStatus)
+		}
+		fmt.Println(t.String())
+	},
+}
+
 var dumpZoneCmd = &cobra.Command{
 	Use:   "zone",
 	Short: "Zone-specific dumps",
@@ -227,10 +326,10 @@ var dumpDnskeysCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Combined, sorted-by-owner (reverse labels): DS (first) then DNSKEYs
 		type dnskeyView struct {
-			name        string
-			keyid       uint16
-			validated   bool
-			trusted     bool
+			name  string
+			keyid uint16
+			// validated   bool
+			// trusted     bool
 			trustanchor bool
 			expires     string
 			protocol    uint8
@@ -263,9 +362,9 @@ var dumpDnskeysCmd = &cobra.Command{
 				owners[val.Name] = ov
 			}
 			ov.dnskey = append(ov.dnskey, dnskeyView{
-				name:        val.Name,
-				keyid:       val.Keyid,
-				trusted:     val.Trusted,
+				name:  val.Name,
+				keyid: val.Keyid,
+				// trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
 				expires:     tdns.TtlPrint(val.Expiration),
 				alg:         val.Dnskey.Algorithm,
@@ -339,10 +438,6 @@ var dumpDnskeysCmd = &cobra.Command{
 			ov := owners[owner]
 			// DS first
 			if ov.ds != nil {
-				valStr := "unvalidated"
-				if ov.ds.state == cache.ValidationStateSecure {
-					valStr = "secure"
-				}
 				// Include signer name and keyid in header if present in cached RRset
 				var signerInfo string
 				var stateStr string
@@ -359,7 +454,7 @@ var dumpDnskeysCmd = &cobra.Command{
 				if stateStr == "" {
 					stateStr = "none"
 				}
-				fmt.Printf("\n%s DS (%s, state: %s%s, TTL: %s)\n", owner, valStr, stateStr, signerInfo, ov.ds.expires)
+				fmt.Printf("\n%s DS (state: %s%s, TTL: %s)\n", owner, stateStr, signerInfo, ov.ds.expires)
 				for _, s := range ov.ds.rrs {
 					fmt.Printf("  %s\n", maskDsLine(s))
 				}
@@ -387,15 +482,16 @@ var dumpDnskeysCmd = &cobra.Command{
 						}
 					}
 				}
-				vStr := "insecure"
-				if rrsetState == cache.ValidationStateSecure {
-					vStr = "secure"
-				}
-				fmt.Printf("\n%s DNSKEY (%s, state: %s%s, TTL: %s)\n", owner, vStr, stateStr, signerInfo, rrsetTTL)
+
+				fmt.Printf("\n%s DNSKEY (state: %s%s, TTL: %s)\n", owner, stateStr, signerInfo, rrsetTTL)
 				lines := []string{"KeyID | Flags | TTL | Details"}
 				for _, v := range ov.dnskey {
+					ta := ""
+					if v.trustanchor {
+						ta = "trust anchor"
+					}
 					detail := fmt.Sprintf("%s DNSKEY %d %d %d %s", v.name, v.flags, v.protocol, v.alg, formatKeySnippet(v.pub))
-					lines = append(lines, fmt.Sprintf("%d | %s | %s | %s", v.keyid, dnskeyFlagList(v.validated, v.trusted, v.trustanchor), v.expires, detail))
+					lines = append(lines, fmt.Sprintf("%d | %s | %s | %s", v.keyid, ta, v.expires, detail))
 				}
 				fmt.Println(columnize.SimpleFormat(lines))
 				// for range ov.dnskey {
@@ -446,7 +542,7 @@ func validationStateString(state cache.ValidationState) string {
 	if s := cache.ValidationStateToString[state]; s != "" {
 		return s
 	}
-	return "none"
+	return "[unset]"
 }
 
 func printAuthServerVerbose(name string, server *cache.AuthServer) {
@@ -496,22 +592,22 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	}
 }
 
-func dnskeyFlagList(validated, trusted, trustanchor bool) string {
-	var flags []string
-	if validated {
-		flags = append(flags, "validated")
-	}
-	if trusted {
-		flags = append(flags, "trusted")
-	}
-	if trustanchor {
-		flags = append(flags, "trust-anchor")
-	}
-	if len(flags) == 0 {
-		flags = append(flags, "-")
-	}
-	return fmt.Sprintf("[%s]", strings.Join(flags, " "))
-}
+// func dnskeyFlagList(validated, trusted, trustanchor bool) string {
+//	var flags []string
+//	if validated {
+//		flags = append(flags, "validated")
+//	}
+//	if trusted {
+//		flags = append(flags, "trusted")
+//	}
+//	if trustanchor {
+//		flags = append(flags, "trust anchor")
+//	}
+//	if len(flags) == 0 {
+//		flags = append(flags, "-")
+//	}
+//	return fmt.Sprintf("[%s]", strings.Join(flags, " "))
+//}
 
 func formatKeySnippet(key string) string {
 	if len(key) <= 15 {
@@ -547,10 +643,25 @@ func maskRrsigLine(line string) string {
 	return strings.Join(parts, " ")
 }
 
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%.0fm", d.Minutes())
+	}
+	hours := d.Hours()
+	if hours < 24 {
+		return fmt.Sprintf("%.1fh", hours)
+	}
+	days := hours / 24
+	return fmt.Sprintf("%.1fd", days)
+}
+
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd)
-	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd())
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd)
+	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd(), dumpAuthServersErrorsCmd)
 	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
 }
 

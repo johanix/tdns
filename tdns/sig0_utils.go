@@ -195,19 +195,21 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			return nil, "", fmt.Errorf("Error: unknown private key type: %T", privkey)
 		}
 
-		var privkeystr string
-
-		switch rrtype {
-		case dns.TypeKEY:
-			privkeystr = nkey.(*dns.KEY).PrivateKeyString(pk) // Convert to BIND private key format
-		case dns.TypeDNSKEY:
-			privkeystr = nkey.(*dns.DNSKEY).PrivateKeyString(pk) // Convert to BIND private key format
+		// Convert private key to PKCS#8 PEM format for storage
+		privkeyPEM, err := PrivateKeyToPEM(pk)
+		if err != nil {
+			return nil, "", fmt.Errorf("Error from PrivateKeyToPEM: %v", err)
 		}
 
-		pkc, err = PrepareKeyCache(privkeystr, nkey.String())
+		// PrepareKeyCache now accepts PEM format directly
+		pkc, err = PrepareKeyCache(privkeyPEM, nkey.String())
 		if err != nil {
 			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
 		}
+
+		// Replace PrivateKey field with PEM format for storage (PrepareKeyCache converts PEM to BIND
+		// for the PrivateKey field, but we want to store PEM in the database)
+		pkc.PrivateKey = privkeyPEM
 
 	case "external":
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
@@ -302,6 +304,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 
 	switch rrtype {
 	case dns.TypeKEY:
+		// pkc.PrivateKey should already be in PEM format from above
 		_, err = tx.Exec(addSig0KeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], creator, pkc.PrivateKey, pkc.KeyRR.String())
 
@@ -310,6 +313,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 		if keytype == "ZSK" {
 			flags = 256
 		}
+		// pkc.PrivateKey should already be in PEM format from above
 		_, err = tx.Exec(addDnssecKeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
 	}

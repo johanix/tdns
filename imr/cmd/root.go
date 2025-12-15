@@ -139,7 +139,7 @@ func initImr() {
 	}
 
 	if tdns.Globals.Debug {
-		fmt.Printf("initImr: Calling tdns.MainStartThreads()\n")
+		fmt.Printf("initImr: Calling conf.StartImr()\n")
 	}
 
 	// SIGHUP reload watcher

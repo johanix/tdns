@@ -232,6 +232,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 	return &resp, nil
 }
 
+// XXX: This should die now that we have a real IMR
 func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 	// If a validator trusted key config file is found, read it in.
 	tafile := viper.GetString("validator.dnskey.trusted.file")
@@ -260,7 +261,6 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 				cache.DnskeyCache.Set(k, dnskeyrr.KeyTag(), &cache.CachedDnskeyRRset{
 					Name:        k,
 					Keyid:       dnskeyrr.KeyTag(),
-					Trusted:     true,                        // always trust config
 					State:       cache.ValidationStateSecure, // always trust config
 					TrustAnchor: true,                        // always trust config
 					Dnskey:      *dnskeyrr,

@@ -19,6 +19,7 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
+// This is still global, but also present in the RRsetCacheT struct
 var DnskeyCache = NewDnskeyCache()
 
 func NewDnskeyCache() *DnskeyCacheT {
@@ -63,6 +64,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		RRsets:                 core.NewCmap[CachedRRset](),
 		Servers:                core.NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
 		ServerMap:              core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		AuthServerMap:          core.NewCmap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:                core.NewCmap[*Zone](),                  // zone -> *Zone
 		DnskeyCache:            DnskeyCache,
 		Logger:                 lg,
@@ -326,13 +328,15 @@ func (rrcache *RRsetCacheT) ClearTLSAQuery(owner string) {
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
 	for _, server := range servers {
-		tmpauthserver := &AuthServer{
-			Name:     server.Name,
-			Addrs:    server.Addrs,
-			Alpn:     server.Alpn,
-			Src:      "stub",
-			ConnMode: server.ConnMode,
+		tmpauthserver := NewAuthServer(server.Name)
+		if tmpauthserver == nil {
+			continue // Skip invalid server names
 		}
+		// Override defaults with config values
+		tmpauthserver.SetAddrs(server.Addrs)
+		tmpauthserver.SetAlpn(server.Alpn)
+		tmpauthserver.ForceSetSrc("stub")
+		tmpauthserver.PromoteConnMode(server.ConnMode)
 		// New: prefer explicit transport signal string when provided
 		if server.TransportSignal != "" {
 			kvMap, err := core.ParseTransportString(server.TransportSignal)
@@ -376,22 +380,22 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 					alpnOrder = append(alpnOrder, p.k)
 					weights[t] = p.w
 				}
-				tmpauthserver.Alpn = alpnOrder
-				tmpauthserver.Transports = transports
+				tmpauthserver.SetAlpn(alpnOrder)
+				tmpauthserver.SetTransports(transports)
 				if len(transports) > 0 {
-					tmpauthserver.PrefTransport = transports[0]
+					tmpauthserver.SetPrefTransport(transports[0])
 				}
-				tmpauthserver.TransportWeights = weights
+				tmpauthserver.MergeTransportWeights(weights)
 			}
 		} else {
 			// Back-compat: use ALPN order to set transports (no weights)
 			if len(server.Alpn) == 0 {
-				tmpauthserver.Alpn = []string{"do53"}
-				tmpauthserver.Transports = []core.Transport{core.TransportDo53}
-				tmpauthserver.TransportWeights = map[core.Transport]uint8{core.TransportDo53: 100}
-				tmpauthserver.PrefTransport = core.TransportDo53
+				tmpauthserver.SetAlpn([]string{"do53"})
+				tmpauthserver.SetTransports([]core.Transport{core.TransportDo53})
+				tmpauthserver.MergeTransportWeights(map[core.Transport]uint8{core.TransportDo53: 100})
+				tmpauthserver.SetPrefTransport(core.TransportDo53)
 			} else {
-				tmpauthserver.Alpn = server.Alpn
+				tmpauthserver.SetAlpn(server.Alpn)
 				var transports []core.Transport
 				weights := map[core.Transport]uint8{}
 				for _, alpn := range server.Alpn {
@@ -400,10 +404,10 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 						weights[t] = 100
 					}
 				}
-				tmpauthserver.Transports = transports
-				tmpauthserver.TransportWeights = weights
+				tmpauthserver.SetTransports(transports)
+				tmpauthserver.MergeTransportWeights(weights)
 				if len(transports) > 0 {
-					tmpauthserver.PrefTransport = transports[0]
+					tmpauthserver.SetPrefTransport(transports[0])
 				}
 			}
 		}
@@ -417,49 +421,56 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 }
 
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
-	serverMap, ok := rrcache.ServerMap.Get(zone)
-	if !ok {
-		serverMap = map[string]*AuthServer{}
-	}
-	for name, server := range sm {
-		if _, exist := serverMap[name]; !exist {
-			serverMap[name] = server
-		} else {
-			for _, addr := range server.Addrs {
-				if !slices.Contains(serverMap[name].Addrs, addr) {
-					serverMap[name].Addrs = append(serverMap[name].Addrs, addr)
-				}
-			}
-			for _, alpn := range server.Alpn {
-				t, err := core.StringToTransport(alpn)
-				if err != nil {
-					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
-					// Skip invalid ALPN value
-					continue
-				} else if !slices.Contains(serverMap[name].Alpn, alpn) {
-					serverMap[name].Alpn = append(serverMap[name].Alpn, alpn)
-				}
-				if !slices.Contains(serverMap[name].Transports, t) {
-					serverMap[name].Transports = append(serverMap[name].Transports, t)
-				}
-			}
-			// Merge/overwrite transport weights if provided
-			if len(server.TransportWeights) > 0 {
-				if serverMap[name].TransportWeights == nil {
-					serverMap[name].TransportWeights = make(map[core.Transport]uint8)
-				}
-				for k, v := range server.TransportWeights {
-					serverMap[name].TransportWeights[k] = v
-				}
-				// Set preferred transport from provided order if available
-				if len(server.Transports) > 0 {
-					serverMap[name].PrefTransport = server.Transports[0]
-				}
-			}
+	serverMapOrig, ok := rrcache.ServerMap.Get(zone)
+
+	// Create a copy of the map to avoid concurrent map read/write errors
+	// The original map is stored in a concurrent map and may be read by other goroutines
+	serverMap := make(map[string]*AuthServer)
+	if ok {
+		for k, v := range serverMapOrig {
+			serverMap[k] = v
 		}
-		// Only set preferred transport if we have valid transports
-		if len(serverMap[name].Transports) > 0 {
-			serverMap[name].PrefTransport = serverMap[name].Transports[0]
+	}
+
+	for name, server := range sm {
+		// Ensure we use a shared AuthServer instance across all zones
+		sharedServer := rrcache.GetOrCreateAuthServer(name)
+
+		// Merge data from the input server into the shared instance using thread-safe accessors
+		for _, addr := range server.Addrs {
+			sharedServer.AddAddr(addr)
+		}
+		for _, alpn := range server.Alpn {
+			t, err := core.StringToTransport(alpn)
+			if err != nil {
+				log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
+				continue
+			}
+			sharedServer.AddAlpn(alpn)
+			sharedServer.AddTransport(t)
+		}
+		// Merge/overwrite transport weights if provided
+		if len(server.TransportWeights) > 0 {
+			sharedServer.MergeTransportWeights(server.TransportWeights)
+		}
+		// Update other fields if they're more specific
+		if server.Src != "" {
+			sharedServer.SetSrc(server.Src)
+		}
+		if server.ConnMode != ConnModeLegacy {
+			sharedServer.PromoteConnMode(server.ConnMode)
+		}
+		if server.Debug {
+			sharedServer.PromoteDebug()
+		}
+
+		// Always assign the shared instance to this zone's map
+		serverMap[name] = sharedServer
+
+		// Set preferred transport if we have valid transports
+		transports := sharedServer.GetTransports()
+		if len(transports) > 0 {
+			sharedServer.SetPrefTransport(transports[0])
 		}
 	}
 	if rrcache.Debug {
@@ -467,6 +478,29 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil
+}
+
+// GetOrCreateAuthServer returns an existing AuthServer instance for the given nameserver name,
+// or creates a new one if it doesn't exist. This ensures there is only one AuthServer instance
+// per nameserver name across all zones. Uses O(1) map lookup instead of iterating through zones.
+func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
+	// Try to get existing instance from global map (O(1) lookup)
+	if existing, ok := rrcache.AuthServerMap.Get(nsname); ok {
+		return existing
+	}
+
+	// No instance exists - create a new one
+	newServer := NewAuthServer(nsname)
+
+	// Store it in the global map (use SetIfAbsent to handle race conditions)
+	if rrcache.AuthServerMap.SetIfAbsent(nsname, newServer) {
+		// We successfully added the new server
+		return newServer
+	}
+
+	// Another goroutine created it between our Get and SetIfAbsent - get the existing one
+	existing, _ := rrcache.AuthServerMap.Get(nsname)
+	return existing
 }
 
 func tlsaOwnersForServer(base string, server *AuthServer) []string {
@@ -480,7 +514,7 @@ func tlsaOwnersForServer(base string, server *AuthServer) []string {
 		owners[owner] = struct{}{}
 	}
 	if server != nil {
-		for _, t := range server.Transports {
+		for _, t := range server.GetTransports() {
 			switch t {
 			case core.TransportDoT:
 				addOwner("tcp")
@@ -625,13 +659,18 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 			nsRecords = append(nsRecords, rr)
 			nsname := rr.(*dns.NS).Ns
 			nsMap[nsname] = true
-			authMap[nsname] = &AuthServer{
-				Name:          nsname,
-				Alpn:          []string{"do53"},
-				Transports:    []core.Transport{core.TransportDo53},
-				Src:           "hint",
-				PrefTransport: core.TransportDo53,
+			// Use shared AuthServer instance (ensures single instance per nameserver)
+			server := rrcache.GetOrCreateAuthServer(nsname)
+			if server.Src == "" || server.Src == "unknown" {
+				server.Src = "hint"
 			}
+			if len(server.Transports) == 0 {
+				server.Transports = []core.Transport{core.TransportDo53}
+			}
+			if server.PrefTransport == 0 {
+				server.PrefTransport = core.TransportDo53
+			}
+			authMap[nsname] = server
 			rootns = append(rootns, nsname)
 			if rrcache.Debug {
 				log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
@@ -657,6 +696,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 			Name:    ".",
 			RRtype:  dns.TypeNS,
 			Context: ContextHint,
+			State:   ValidationStateIndeterminate,
 			RRset: &core.RRset{
 				Name:   ".",
 				RRtype: dns.TypeNS,
@@ -709,6 +749,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 				Name:    name,
 				RRtype:  rrtype,
 				Context: ContextHint,
+				State:   ValidationStateIndeterminate,
 				RRset: &core.RRset{
 					Name:   name,
 					Class:  dns.ClassINET,
@@ -750,14 +791,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	if rrcache.Debug {
 		log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
 	}
-	// for item := range rrcache.Servers.IterBuffered() {
-	//	z := item.Key
-	//	ss := item.Val
-	//	if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
-	//		bestmatch = z
-	//		servers = ss
-	//	}
-	// }
+
 	for item := range rrcache.ServerMap.IterBuffered() {
 		z := item.Key
 		ss := item.Val

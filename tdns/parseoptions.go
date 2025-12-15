@@ -62,6 +62,61 @@ func (conf *Config) parseImrOptions() {
 	conf.Imr.Options = clean
 }
 
+func (conf *Config) parseAuthOptions() {
+	raw := conf.DnsEngine.OptionsStrs
+	clean := make(map[AuthOption]string)
+
+	// Apply defaults for options that have them, even when no options are configured
+	clean[AuthOptParentUpdate] = UpdateModeReplace
+
+	if len(raw) == 0 {
+		conf.DnsEngine.Options = clean
+		return
+	}
+
+	for _, entry := range raw {
+		val := strings.TrimSpace(entry)
+		if val == "" {
+			continue
+		}
+
+		var optval string
+		key := val
+		if idx := strings.Index(val, ":"); idx >= 0 {
+			key = val[:idx]
+			optval = val[idx+1:]
+		}
+
+		key = strings.ToLower(strings.TrimSpace(key))
+		optval = strings.TrimSpace(optval)
+
+		authOpt, ok := StringToAuthOption[key]
+		if !ok {
+			log.Printf("ParseConfig: Auth option %q is unknown and will be ignored", key)
+			continue
+		}
+
+		switch authOpt {
+		case AuthOptParentUpdate:
+			val := strings.ToLower(optval)
+			if val == "" {
+				val = UpdateModeReplace
+			}
+			switch val {
+			case UpdateModeReplace, UpdateModeDelta:
+				clean[authOpt] = val
+			default:
+				log.Printf("ParseConfig: Auth option %q has invalid value %q (allowed: %s|%s); defaulting to %s", key, optval, UpdateModeReplace, UpdateModeDelta, UpdateModeReplace)
+				clean[authOpt] = UpdateModeReplace
+			}
+		default:
+			clean[authOpt] = optval
+		}
+	}
+
+	conf.DnsEngine.Options = clean
+}
+
 func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData) map[ZoneOption]bool {
 	log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
 	options := map[ZoneOption]bool{}

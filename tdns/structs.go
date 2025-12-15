@@ -255,6 +255,10 @@ type DelegationSyncStatus struct {
 	Error         bool
 	ErrorMsg      string
 	UpdateResult  UpdateResult // Experimental
+	// Complete new delegation data for replace mode
+	NewNS   []dns.RR // Complete NS RRset after update
+	NewA    []dns.RR // Complete A glue RRs after update
+	NewAAAA []dns.RR // Complete AAAA glue RRs after update
 }
 
 type ZoneRefresher struct {
@@ -292,22 +296,6 @@ type ValidatorResponse struct {
 	Msg       string
 }
 
-// type TAStore map[string]map[uint16]TrustAnchor
-type DnskeyCacheT struct {
-	Map cmap.ConcurrentMap[string, CachedDnskeyRRset]
-}
-
-type CachedDnskeyRRset struct {
-	Name        string
-	Keyid       uint16
-	Validated   bool
-	Trusted     bool
-	TrustAnchor bool
-	Dnskey      dns.DNSKEY  // just this key
-	RRset       *core.RRset // complete RRset
-	Expiration  time.Time
-}
-
 type Sig0StoreT struct {
 	Map cmap.ConcurrentMap[string, Sig0Key]
 }
@@ -329,14 +317,12 @@ type Sig0Key struct {
 }
 
 type DnssecKey struct {
-	Name      string
-	State     string
-	Keyid     uint16
-	Flags     uint16
-	Algorithm string
-	Creator   string
-	// Validated  bool   // has this key been DNSSEC validated
-	// Trusted    bool   // is this key trusted
+	Name       string
+	State      string
+	Keyid      uint16
+	Flags      uint16
+	Algorithm  string
+	Creator    string
 	PrivateKey string //
 	Key        dns.DNSKEY
 	Keystr     string
@@ -450,6 +436,7 @@ type KeyDB struct {
 	UpdateQ             chan UpdateRequest
 	DeferredUpdateQ     chan DeferredUpdate
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
+	Options             map[AuthOption]string
 }
 
 type Tx struct {

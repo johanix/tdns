@@ -190,6 +190,68 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 	return m, nil
 }
 
+// CreateChildReplaceUpdate creates a DNS UPDATE message that replaces all delegation data
+// for a child zone. It removes all existing NS and glue records, then adds the new ones.
+func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA []dns.RR) (*dns.Msg, error) {
+	if parent == "." || parent == "" {
+		return nil, fmt.Errorf("parent zone name not specified. Terminating")
+	}
+	if child == "." || child == "" {
+		return nil, fmt.Errorf("child zone name not specified. Terminating")
+	}
+
+	m := new(dns.Msg)
+	m.SetUpdate(parent)
+
+	// Remove all existing NS records for the child zone
+	rrNS := new(dns.NS)
+	rrNS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeNS, Class: dns.ClassANY, Ttl: 3600}
+	m.RemoveRRset([]dns.RR{rrNS})
+
+	// Remove all existing glue records for in-bailiwick nameservers
+	// We need to remove glue for all NS names that might have glue
+	nsNames := make(map[string]bool)
+	for _, nsrr := range newNS {
+		if ns, ok := nsrr.(*dns.NS); ok {
+			if strings.HasSuffix(ns.Ns, child) {
+				nsNames[ns.Ns] = true
+			}
+		}
+	}
+	// Also check for any glue records being added (they might be for NS not yet in newNS)
+	for _, arr := range newA {
+		if strings.HasSuffix(arr.Header().Name, child) {
+			nsNames[arr.Header().Name] = true
+		}
+	}
+	for _, aaaarr := range newAAAA {
+		if strings.HasSuffix(aaaarr.Header().Name, child) {
+			nsNames[aaaarr.Header().Name] = true
+		}
+	}
+
+	// Remove all A and AAAA records for these nameservers
+	for nsName := range nsNames {
+		rrA := new(dns.A)
+		rrA.Hdr = dns.RR_Header{Name: nsName, Rrtype: dns.TypeA, Class: dns.ClassANY, Ttl: 3600}
+		rrAAAA := new(dns.AAAA)
+		rrAAAA.Hdr = dns.RR_Header{Name: nsName, Rrtype: dns.TypeAAAA, Class: dns.ClassANY, Ttl: 3600}
+		m.RemoveRRset([]dns.RR{rrA, rrAAAA})
+	}
+
+	// Add all new NS records
+	m.Insert(newNS)
+
+	// Add all new glue records
+	m.Insert(newA)
+	m.Insert(newAAAA)
+
+	if Globals.Debug {
+		fmt.Printf("Creating replace update msg:\n%s\n", m.String())
+	}
+	return m, nil
+}
+
 func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("CreateUpdate: Error: zone to update not specified. Terminating")

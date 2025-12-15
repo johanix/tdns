@@ -159,14 +159,36 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 			// 1. Is the answer in the cache?
 			crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
 			if crrset != nil {
-				if Globals.Debug {
-					fmt.Printf("ImrEngine: cache hit for %s %s %s\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype])
+				// Only use cached answer if it's a direct answer or negative response.
+				// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
+				// to get DNSSEC signatures and upgrade the quality of the data.
+				switch crrset.Context {
+				case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
+					// These are direct answers or negative responses - safe to use
+					if Globals.Debug {
+						fmt.Printf("ImrEngine: cache hit for %s %s %s (context=%s)\n", rrq.Qname, dns.ClassToString[rrq.Qclass], dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
+					}
+					resp = &ImrResponse{
+						RRset: crrset.RRset,
+					}
+					rrq.ResponseCh <- *resp
+					continue // Skip query, we have a good answer
+				case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
+					// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
+					if Globals.Debug {
+						log.Printf("ImrEngine: found <%s, %s> in cache with context=%s, but issuing direct query to upgrade quality and get DNSSEC signatures", rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
+					}
+					// Fall through to issue query
+				default:
+					// Unknown context - be safe and issue query
+					if Globals.Debug {
+						log.Printf("ImrEngine: found <%s, %s> in cache with unknown context=%s, issuing query", rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
+					}
+					// Fall through to issue query
 				}
-				resp = &ImrResponse{
-					RRset: crrset.RRset,
-				}
-				rrq.ResponseCh <- *resp
-			} else {
+			}
+			// Cache miss or indirect context - issue query
+			{
 				var err error
 				if Globals.Debug {
 					log.Printf("ImrEngine: <qname, qtype> tuple <%q, %s> not known, needs to be queried for", rrq.Qname, dns.TypeToString[rrq.Qtype])
@@ -202,7 +224,12 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	// If a response channel is provided, use it to send responses
 	if respch != nil {
 		defer func() {
-			respch <- &resp
+			select {
+			case respch <- &resp:
+				// sent successfully
+			case <-time.After(2 * time.Second):
+				log.Printf("ImrQuery: timed out sending response to channel for <%s, %s>", qname, dns.TypeToString[qtype])
+			}
 		}()
 	}
 
@@ -210,8 +237,30 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {
-		resp.RRset = crrset.RRset
-		return &resp, nil
+		// Only use cached answer if it's a direct answer or negative response.
+		// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
+		// to get DNSSEC signatures and upgrade the quality of the data.
+		switch crrset.Context {
+		case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
+			// These are direct answers or negative responses - safe to use
+			if Globals.Debug {
+				log.Printf("ImrQuery: found answer to <%s, %s> in cache (context=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+			}
+			resp.RRset = crrset.RRset
+			return &resp, nil
+		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
+			// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
+			if Globals.Debug {
+				log.Printf("ImrQuery: found <%s, %s> in cache with context=%s, but issuing direct query to upgrade quality and get DNSSEC signatures", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+			}
+			// Fall through to issue query
+		default:
+			// Unknown context - be safe and issue query
+			if Globals.Debug {
+				log.Printf("ImrQuery: found <%s, %s> in cache with unknown context=%s, issuing query", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+			}
+			// Fall through to issue query
+		}
 	}
 
 	for {
@@ -236,111 +285,49 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		switch {
 		case len(authservers) == 0:
-			log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
-			cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
-			if cnsrrset == nil {
-				log.Printf("*** ImrResponder: we also have no nameservers for zone %q, giving up", bestmatch)
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
-				return &resp, nil
-			}
-
-			log.Printf("*** but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
-
-			// Create response channel for A and AAAA queries
-			respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
-			// Note: We don't need to close the channel here as it will be garbage collected
-			// when it goes out of scope, even if there are still pending writes to it
-
-			// Launch parallel queries for each nameserver
-			err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+			// Use helper function to resolve NS addresses
+			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
+				rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+				if err != nil {
+					log.Printf("Error from IterativeDNSQuery: %v", err)
+					// return false, nil // Continue trying
+					return false, err
+				}
+				if rrset != nil {
+					if Globals.Debug {
+						log.Printf("ImrQuery: received response from IterativeDNSQuery:")
+						for _, rr := range rrset.RRs {
+							log.Printf("ImrQuery: %s", rr.String())
+						}
+					}
+					resp.RRset = rrset
+					return true, nil // Success, stop trying
+				}
+				if rcode == dns.RcodeNameError {
+					// this is a negative response, which we need to figure out how to represent
+					if !imr.Quiet {
+						log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
+					}
+					resp.Msg = "NXDOMAIN (negative response type 3)"
+					return true, nil // Success (negative response), stop trying
+				}
+				switch context {
+				case cache.ContextReferral:
+					return false, nil // Continue trying
+				case cache.ContextNoErrNoAns:
+					resp.Msg = "negative response type 0"
+					return true, nil // Success (negative response), stop trying
+				}
+				return false, nil // Continue trying
+			})
 			if err != nil {
-				log.Printf("Error from CollectNSAddresses: %v", err)
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Error from CollectNSAddresses: %v", err)
+				resp.ErrorMsg = err.Error()
 				return &resp, err
 			}
-
-			// Process a bounded number of responses until we get a usable address
-			want := len(cnsrrset.RRset.RRs) * 2
-			for i := 0; i < want; i++ {
-				var rrresp *ImrResponse
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case rrresp = <-respch:
-				case <-time.After(3 * time.Second):
-					rrresp = nil
-				}
-				if rrresp == nil || rrresp.RRset == nil {
-					continue
-				}
-
-				for _, rr := range rrresp.RRset.RRs {
-					switch rr := rr.(type) {
-					case *dns.A:
-						// servers = []]string{rr.A.String()}
-						authservers[rr.Header().Name] = &cache.AuthServer{
-							Name:          rr.Header().Name,
-							Addrs:         []string{rr.A.String()},
-							Alpn:          []string{"do53"},
-							Transports:    []core.Transport{core.TransportDo53},
-							PrefTransport: core.TransportDo53,
-							Src:           "answer",
-							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
-						}
-						if Globals.Debug {
-							log.Printf("ImrResponder: using resolved A address: %+v", authservers)
-						}
-					case *dns.AAAA:
-						// servers = []string{rr.AAAA.String()}
-						authservers[rr.Header().Name] = &cache.AuthServer{
-							Name:          rr.Header().Name,
-							Addrs:         []string{rr.AAAA.String()},
-							Alpn:          []string{"do53"},
-							Transports:    []core.Transport{core.TransportDo53},
-							PrefTransport: core.TransportDo53,
-							Src:           "answer",
-							Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
-						}
-						if Globals.Debug {
-							log.Printf("ImrResponder: using resolved AAAA address: %+v", authservers)
-						}
-					}
-
-					rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
-					if err != nil {
-						log.Printf("Error from IterativeDNSQuery: %v", err)
-						continue
-					}
-					if rrset != nil {
-						if Globals.Debug {
-							log.Printf("ImrQuery: received response from IterativeDNSQuery:")
-							for _, rr := range rrset.RRs {
-								log.Printf("ImrQuery: %s", rr.String())
-							}
-						}
-						resp.RRset = rrset
-						return &resp, nil
-					}
-					if rcode == dns.RcodeNameError {
-						// this is a negative response, which we need to figure out how to represent
-						if !imr.Quiet {
-							log.Printf("ImrQuery: received NXDOMAIN for qname %q, no point in continuing", qname)
-						}
-						resp.Msg = "NXDOMAIN (negative response type 3)"
-						return &resp, nil
-					}
-					switch context {
-					case cache.ContextReferral:
-						continue // if all is good we will now hit the new referral and get further
-					case cache.ContextNoErrNoAns:
-						resp.Msg = "negative response type 0"
-						return &resp, nil
-					}
-				}
+			if done {
+				return &resp, nil
 			}
-
 			// If we get here, we tried all responses without finding a usable address
 			log.Printf("*** ImrQuery: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
 			resp.Error = true
@@ -394,6 +381,105 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			return &resp, nil
 		}
 	}
+}
+
+// processAddressRecords processes A and AAAA records from an RRset and adds them to authservers
+func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]*cache.AuthServer) {
+	if rrset == nil {
+		return
+	}
+	for _, rr := range rrset.RRs {
+		var nsname string
+		var addr string
+		var rrType string
+		var ttl uint32
+		switch rr := rr.(type) {
+		case *dns.A:
+			nsname = rr.Header().Name
+			addr = rr.A.String()
+			rrType = "A"
+			ttl = rr.Header().Ttl
+		case *dns.AAAA:
+			nsname = rr.Header().Name
+			addr = rr.AAAA.String()
+			rrType = "AAAA"
+			ttl = rr.Header().Ttl
+		default:
+			continue
+		}
+
+		// Use shared AuthServer instance (ensures single instance per nameserver)
+		server := imr.Cache.GetOrCreateAuthServer(nsname)
+		server.AddAddr(addr)
+		server.SetSrc("answer")
+		server.SetExpire(time.Now().Add(time.Duration(ttl) * time.Second))
+		authservers[nsname] = server
+		if Globals.Debug {
+			log.Printf("processAddressRecords: using resolved %s address: %+v", rrType, authservers[nsname])
+		}
+	}
+}
+
+// resolveNSAddresses resolves nameserver addresses when authservers is empty.
+// It calls onResponse for each successful address resolution, allowing the caller
+// to handle the response appropriately. Returns true if a response was successfully
+// handled, false if no usable address was found, and an error if something went wrong.
+func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname string, qtype uint16,
+	authservers map[string]*cache.AuthServer,
+	onResponse func(authservers map[string]*cache.AuthServer) (bool, error)) (bool, error) {
+
+	log.Printf("resolveNSAddresses: we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
+	cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
+	if cnsrrset == nil {
+		log.Printf("resolveNSAddresses: we also have no nameservers for zone %q, giving up", bestmatch)
+		return false, fmt.Errorf("no nameservers for zone %q", bestmatch)
+	}
+
+	log.Printf("resolveNSAddresses: but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
+
+	// Create response channel for A and AAAA queries
+	respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
+	// Note: We don't need to close the channel here as it will be garbage collected
+	// when it goes out of scope, even if there are still pending writes to it
+
+	// Launch parallel queries for each nameserver
+	err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+	if err != nil {
+		log.Printf("resolveNSAddresses: Error from CollectNSAddresses: %v", err)
+		return false, err
+	}
+
+	// Process a bounded number of responses until we get a usable address
+	want := len(cnsrrset.RRset.RRs) * 2
+	for i := 0; i < want; i++ {
+		var rrresp *ImrResponse
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case rrresp = <-respch:
+		case <-time.After(3 * time.Second):
+			rrresp = nil
+		}
+		if rrresp == nil || rrresp.RRset == nil {
+			continue
+		}
+
+		// Process A/AAAA records and add to authservers
+		imr.processAddressRecords(rrresp.RRset, authservers)
+
+		// Call the callback to handle the response
+		done, err := onResponse(authservers)
+		if err != nil {
+			return false, err
+		}
+		if done {
+			return true, nil
+		}
+	}
+
+	// If we get here, we tried all responses without finding a usable address
+	log.Printf("resolveNSAddresses: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
+	return false, nil
 }
 
 func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
@@ -480,95 +566,36 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 			switch {
 			case len(authservers) == 0:
-				log.Printf("*** ImrResponder:we have no server addresses for zone %q needed to query for %q", bestmatch, qname)
-				cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
-				if cnsrrset == nil {
-					log.Printf("*** ImrResponder: we also have no nameservers for zone %q, giving up", bestmatch)
-					// m.SetRcode(r, dns.RcodeServerFailure)
-					w.WriteMsg(m)
-					return
-				}
-
-				log.Printf("*** but we do have the nameserver names: %v", cnsrrset.RRset.RRs)
-
-				// Create response channel for A and AAAA queries
-				respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
-				// Note: We don't need to close the channel here as it will be garbage collected
-				// when it goes out of scope, even if there are still pending writes to it
-
-				// Launch parallel queries for each nameserver
-				err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
+				// Use helper function to resolve NS addresses
+				// Note: The callback is called after processing each A/AAAA response.
+				// We try the query for each address we discover, similar to the original code.
+				done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
+					// Try querying with the current set of authservers
+					rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+					if err != nil {
+						log.Printf("Error from IterativeDNSQuery: %v", err)
+						return false, nil // Continue trying with next address
+					}
+					done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
+					if err != nil {
+						return true, err // Error occurred, stop trying
+					}
+					if done {
+						return true, nil // Success, stop trying
+					}
+					return false, nil // Continue trying with next address
+				})
 				if err != nil {
-					log.Printf("Error from CollectNSAddresses: %v", err)
-					// m.SetRcode(r, dns.RcodeServerFailure)
+					m.SetRcode(r, dns.RcodeServerFailure)
 					w.WriteMsg(m)
 					return
 				}
-
-				// Process a bounded number of responses until we get a usable address
-				want := len(cnsrrset.RRset.RRs) * 2
-				for i := 0; i < want; i++ {
-					var resp *ImrResponse
-					select {
-					case <-ctx.Done():
-						m.SetRcode(r, dns.RcodeServerFailure)
-						w.WriteMsg(m)
-						return
-					case resp = <-respch:
-					case <-time.After(3 * time.Second):
-						resp = nil
-					}
-					if resp == nil || resp.RRset == nil {
-						continue
-					}
-
-					for _, rr := range resp.RRset.RRs {
-						nsname := rr.Header().Name
-						switch rr := rr.(type) {
-						case *dns.A:
-							// servers = []]string{rr.A.String()}
-							authservers[nsname] = &cache.AuthServer{
-								Name:          nsname,
-								Addrs:         []string{rr.A.String()},
-								Alpn:          []string{"do53"},
-								Transports:    []core.Transport{core.TransportDo53},
-								PrefTransport: core.TransportDo53,
-								Src:           "answer",
-								Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
-							}
-							log.Printf("ImrResponder: using resolved A address: %+v", authservers[nsname])
-						case *dns.AAAA:
-							// servers = []string{rr.AAAA.String()}
-							authservers[nsname] = &cache.AuthServer{
-								Name:          nsname,
-								Addrs:         []string{rr.AAAA.String()},
-								Alpn:          []string{"do53"},
-								Transports:    []core.Transport{core.TransportDo53},
-								PrefTransport: core.TransportDo53,
-								Src:           "answer",
-								Expire:        time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
-							}
-							log.Printf("ImrResponder: using resolved AAAA address: %v", authservers[nsname])
-						}
-						rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
-						if err != nil {
-							log.Printf("Error from IterativeDNSQuery: %v", err)
-							continue
-						}
-						done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
-						if err != nil {
-							return
-						}
-						if done {
-							return
-						}
-						continue // try next nameserver
-					}
+				if done {
+					return
 				}
-
 				// If we get here, we tried all responses without finding a usable address
 				log.Printf("*** ImrResponder: failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
-				// m.SetRcode(r, dns.RcodeServerFailure)
+				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
 				return
 			}
@@ -626,7 +653,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.State == cache.ValidationStateSecure {
 				vstate = c.State
 			} else {
-				vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
+				vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
 					log.Printf("ProcessAuthDNSResponse: failed to validate RRset: %v", err)
 					m.SetRcode(r, dns.RcodeServerFailure)
@@ -1010,6 +1037,452 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	return nil
 }
 
+// parseTrustAnchorsFromConfig parses trust anchors from config and file into maps keyed by zone name.
+// Returns maps of DS and DNSKEY trust anchors.
+func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS, map[string][]*dns.DNSKEY, error) {
+	dsByName := map[string][]*dns.DS{}
+	dnskeysByName := map[string][]*dns.DNSKEY{}
+
+	taDS := strings.TrimSpace(conf.Imr.TrustAnchorDS)
+	taDNSKEY := strings.TrimSpace(conf.Imr.TrustAnchorDNSKEY)
+	taFile := strings.TrimSpace(conf.Imr.TrustAnchorFile)
+
+	// If DNSKEY TA is provided, add it directly
+	if taDNSKEY != "" {
+		rr, err := dns.NewRR(taDNSKEY)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse trust_anchor_dnskey: %v", err)
+		}
+		dk, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			return nil, nil, fmt.Errorf("trust_anchor_dnskey is not a DNSKEY RR: %T", rr)
+		}
+		name := dns.Fqdn(dk.Hdr.Name)
+		dnskeysByName[name] = append(dnskeysByName[name], dk)
+	}
+
+	// If DS TA is provided, remember it for matching after fetching DNSKEY RRset
+	if taDS != "" {
+		rr, err := dns.NewRR(taDS)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse trust_anchor_ds: %v", err)
+		}
+		ds, ok := rr.(*dns.DS)
+		if !ok {
+			return nil, nil, fmt.Errorf("trust_anchor_ds is not a DS RR: %T", rr)
+		}
+		name := dns.Fqdn(ds.Hdr.Name)
+		dsByName[name] = append(dsByName[name], ds)
+		log.Printf("parseTrustAnchorsFromConfig: configured DS TA for %s keytag=%d digesttype=%d", name, ds.KeyTag, ds.DigestType)
+	}
+
+	// If trust-anchor-file is provided, read and parse all RRs
+	if taFile != "" {
+		data, err := os.ReadFile(taFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
+		}
+		lines := strings.Split(string(data), "\n")
+		for _, ln := range lines {
+			s := strings.TrimSpace(ln)
+			if s == "" || strings.HasPrefix(s, ";") || strings.HasPrefix(s, "#") {
+				continue
+			}
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				log.Printf("parseTrustAnchorsFromConfig: skipping unparsable line in %s: %q: %v", taFile, s, err)
+				continue
+			}
+			switch t := rr.(type) {
+			case *dns.DNSKEY:
+				name := dns.Fqdn(t.Hdr.Name)
+				dnskeysByName[name] = append(dnskeysByName[name], t)
+			case *dns.DS:
+				name := dns.Fqdn(t.Hdr.Name)
+				dsByName[name] = append(dsByName[name], t)
+			default:
+				log.Printf("parseTrustAnchorsFromConfig: ignoring non-TA RR in %s: %s", taFile, rr.String())
+			}
+		}
+	}
+
+	return dsByName, dnskeysByName, nil
+}
+
+// addDirectDNSKEYTrustAnchors adds direct DNSKEY trust anchors to the cache.
+func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSKEY) {
+	for name, list := range dnskeysByName {
+		log.Printf("initializeImrTrustAnchors: zone %q has DNSKEY TAs", name)
+		exp := time.Now().Add(365 * 24 * time.Hour)
+		for _, dk := range list {
+			log.Printf("initializeImrTrustAnchors: zone %q adding DNSKEY TA (keyid: %d)", name, dk.KeyTag())
+			imr.DnskeyCache.Set(name, dk.KeyTag(), &cache.CachedDnskeyRRset{
+				Name:        name,
+				Keyid:       dk.KeyTag(),
+				State:       cache.ValidationStateSecure,
+				TrustAnchor: true,
+				Dnskey:      *dk,
+				Expiration:  exp,
+			})
+			log.Printf("initializeImrTrustAnchors: zone %q added DNSKEY TA (keyid: %d) (expires %v)", name, dk.KeyTag(), exp)
+		}
+		// Add zone to ZoneMap as secure when DNSKEY trust anchor is added
+		z, exists := imr.Cache.ZoneMap.Get(name)
+		if !exists {
+			z = &cache.Zone{
+				ZoneName: name,
+				State:    cache.ValidationStateSecure,
+			}
+		}
+		z.SetState(cache.ValidationStateSecure)
+		imr.Cache.ZoneMap.Set(name, z)
+		if Globals.Debug {
+			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DNSKEY trust anchor)", name)
+		}
+	}
+}
+
+// seedDSRRsetFromTrustAnchors seeds the DS RRset from trust anchors into the cache.
+func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS) {
+	var rrds []dns.RR
+	var minTTL uint32
+	for i, ds := range dslist {
+		rrds = append(rrds, ds)
+		if i == 0 || ds.Hdr.Ttl < minTTL {
+			minTTL = ds.Hdr.Ttl
+		}
+	}
+	// Fallback TTL if not present in TA (e.g., config without TTL)
+	if minTTL == 0 {
+		minTTL = 86400
+	}
+	dsRRset := &core.RRset{
+		Name:   anchorName,
+		Class:  dns.ClassINET,
+		RRtype: dns.TypeDS,
+		RRs:    rrds,
+		// No RRSIGs for TA-seeded DS; considered trusted
+	}
+	imr.Cache.Set(anchorName, dns.TypeDS, &cache.CachedRRset{
+		Name:       anchorName,
+		RRtype:     dns.TypeDS,
+		RRset:      dsRRset,
+		Context:    cache.ContextPriming,
+		State:      cache.ValidationStateSecure,
+		Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
+	})
+	if Globals.Debug {
+		log.Printf("initializeImrTrustAnchors: seeded validated DS RRset for %s with %d DS (TTL=%d)", anchorName, len(rrds), minTTL)
+	}
+}
+
+// matchDSTrustAnchorsToDNSKEYs matches DS trust anchors to DNSKEYs in the fetched RRset.
+func (imr *Imr) matchDSTrustAnchorsToDNSKEYs(anchorName string, dslist []*dns.DS, rrset *core.RRset, exp time.Time) {
+	for _, rr := range rrset.RRs {
+		dk, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			continue
+		}
+		keyid := dk.KeyTag()
+		for _, ds := range dslist {
+			// match keytag first
+			if ds.KeyTag != keyid {
+				continue
+			}
+			computed := dk.ToDS(ds.DigestType)
+			if computed == nil {
+				continue
+			}
+			if strings.EqualFold(computed.Digest, ds.Digest) {
+				// This DNSKEY matches the DS trust anchor, so it's validated
+				// Add it to DnskeyCache immediately so it can be used to validate the DNSKEY RRset's signatures
+				cdr := cache.CachedDnskeyRRset{
+					Name:        dns.Fqdn(dk.Hdr.Name),
+					Keyid:       keyid,
+					TrustAnchor: true,
+					State:       cache.ValidationStateSecure,
+					Dnskey:      *dk,
+					Expiration:  exp,
+				}
+				imr.DnskeyCache.Set(cdr.Name, cdr.Keyid, &cdr)
+				log.Printf("initializeImrTrustAnchors: DS matched DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
+			}
+		}
+	}
+}
+
+// validateDNSKEYRRsetUsingSeededDS attempts to validate a DNSKEY RRset using seeded DS trust anchors.
+// Returns true if validation succeeded, false otherwise.
+func (imr *Imr) validateDNSKEYRRsetUsingSeededDS(anchorName string, rrset *core.RRset, verbose bool) bool {
+	name := dns.Fqdn(anchorName)
+	seededDS := imr.Cache.Get(anchorName, dns.TypeDS)
+	if seededDS == nil || seededDS.State != cache.ValidationStateSecure || seededDS.RRset == nil {
+		return false
+	}
+	for _, rr := range seededDS.RRset.RRs {
+		ds, ok := rr.(*dns.DS)
+		if !ok {
+			continue
+		}
+		valid, _ := cache.ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
+		if valid {
+			if verbose {
+				log.Printf("validateDNSKEYRRsetUsingSeededDS: %s DNSKEY RRset validated using DS trust anchor (keytag=%d)", anchorName, ds.KeyTag)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// validateDNSKEYRRsetUsingDirectTA attempts to validate a DNSKEY RRset using direct DNSKEY trust anchors.
+// Returns true if validation succeeded, false otherwise.
+func (imr *Imr) validateDNSKEYRRsetUsingDirectTA(anchorName string, rrset *core.RRset, verbose bool) bool {
+	name := dns.Fqdn(anchorName)
+	dkc := imr.DnskeyCache
+	for item := range dkc.Map.IterBuffered() {
+		if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
+			valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
+			if valid {
+				if verbose {
+					log.Printf("validateDNSKEYRRsetUsingDirectTA: %s DNSKEY RRset validated using direct DNSKEY trust anchor (keytag=%d)", anchorName, item.Val.Keyid)
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// createOrUpdateCachedDNSKEYRRset creates a new CachedRRset or updates an existing one with validated state.
+func (imr *Imr) createOrUpdateCachedDNSKEYRRset(anchorName string, rrset *core.RRset, crr *cache.CachedRRset, vstate cache.ValidationState) *cache.CachedRRset {
+	if crr == nil {
+		// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
+		minTTL := cache.GetMinTTL(rrset.RRs)
+		if minTTL <= 0 {
+			minTTL = 86400 * time.Second
+		}
+		return &cache.CachedRRset{
+			Name:       anchorName,
+			RRtype:     dns.TypeDNSKEY,
+			Rcode:      uint8(dns.RcodeSuccess),
+			RRset:      rrset,
+			Context:    cache.ContextPriming,
+			State:      vstate,
+			Expiration: time.Now().Add(minTTL),
+		}
+	}
+	// Update existing cached RRset
+	crr.State = vstate
+	return crr
+}
+
+// validateAndCacheDNSKEYRRset validates the DNSKEY RRset using trust anchors directly,
+// bypassing the normal validation chain which may fail for indeterminate zones.
+// It uses helper functions to validate against DS TAs and direct DNSKEY TAs.
+func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName string, rrset *core.RRset) error {
+	// Check if the DNSKEY RRset is already validated in cache (from IterativeDNSQuery)
+	crr := imr.Cache.Get(anchorName, dns.TypeDNSKEY)
+	var vstate cache.ValidationState
+	if crr != nil && crr.State == cache.ValidationStateSecure {
+		// Already validated, use the cached state
+		vstate = crr.State
+		if Globals.Debug {
+			log.Printf("initializeImrTrustAnchors: %s DNSKEY RRset already validated in cache", anchorName)
+		}
+	} else {
+		// Not validated yet, validate using trust anchors directly
+		// This bypasses the normal validation chain which may fail for indeterminate zones
+		verbose := Globals.Debug
+		validated := false
+
+		// First, try validation using seeded DS trust anchors
+		if imr.validateDNSKEYRRsetUsingSeededDS(anchorName, rrset, verbose) {
+			validated = true
+		}
+
+		// If DS validation didn't work, try direct DNSKEY trust anchors
+		if !validated {
+			if imr.validateDNSKEYRRsetUsingDirectTA(anchorName, rrset, verbose) {
+				validated = true
+			}
+		}
+
+		if !validated {
+			log.Printf("validateAndCacheDNSKEYRRset: %q DNSKEY RRset failed to validate using trust anchors", anchorName)
+			return fmt.Errorf("failed to validate %q DNSKEY RRset using trust anchors", anchorName)
+		}
+
+		vstate = cache.ValidationStateSecure
+		// Update cached RRset with validated state
+		crr = imr.createOrUpdateCachedDNSKEYRRset(anchorName, rrset, crr, vstate)
+		imr.Cache.Set(anchorName, dns.TypeDNSKEY, crr)
+	}
+	return nil
+}
+
+// updateDNSKEYCacheFromRRset updates the DNSKEY cache from a validated RRset, preserving trust anchor flags.
+func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset, exp time.Time, dnskeysByName map[string][]*dns.DNSKEY) {
+	// Since the DNSKEY RRset validated, mark all contained DNSKEYs as validated in DnskeyCache.
+	// IMPORTANT: Preserve TrustAnchor flag if a DNSKEY was already marked as a trust anchor.
+	// Check both the cache and the dnskeysByName map to determine if a DNSKEY is a trust anchor.
+	trustAnchorKeys := map[uint16]bool{}
+	if dnskeyList, exists := dnskeysByName[anchorName]; exists {
+		for _, dk := range dnskeyList {
+			trustAnchorKeys[dk.KeyTag()] = true
+		}
+	}
+
+	for _, rr := range rrset.RRs {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			keyid := dk.KeyTag()
+			// Check if this DNSKEY was already in the cache as a trust anchor
+			existing := imr.DnskeyCache.Get(anchorName, keyid)
+			trustAnchor := false
+			if existing != nil {
+				trustAnchor = existing.TrustAnchor
+			}
+			// Also check if this DNSKEY was in the original trust anchor list
+			if !trustAnchor && trustAnchorKeys[keyid] {
+				trustAnchor = true
+			}
+			cdr := cache.CachedDnskeyRRset{
+				Name:        anchorName,
+				Keyid:       keyid,
+				State:       cache.ValidationStateSecure,
+				TrustAnchor: trustAnchor, // Preserve trust anchor flag
+				Dnskey:      *dk,
+				Expiration:  exp,
+			}
+			imr.DnskeyCache.Set(anchorName, keyid, &cdr)
+			if trustAnchor {
+				log.Printf("initializeImrTrustAnchors: DNSKEY %s::%d (trust anchor, expires %v)", cdr.Name, cdr.Keyid, exp)
+			} else {
+				log.Printf("initializeImrTrustAnchors: DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
+			}
+		}
+	}
+}
+
+// validateNSRRsetForAnchor validates the NS RRset for a trust anchor zone.
+func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer) {
+	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
+	nsRRset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true)
+	if err != nil {
+		log.Printf("initializeImrTrustAnchors: warning: failed to fetch %s NS RRset: %v (continuing)", anchorName, err)
+		return
+	}
+	if nsRRset == nil || len(nsRRset.RRs) == 0 {
+		log.Printf("initializeImrTrustAnchors: warning: no %s NS RRset found (continuing)", anchorName)
+		return
+	}
+	// Check if the NS RRset is already validated in cache (from IterativeDNSQuery)
+	nsCrr := imr.Cache.Get(anchorName, dns.TypeNS)
+	var nsVstate cache.ValidationState
+	if nsCrr != nil && nsCrr.State == cache.ValidationStateSecure {
+		// Already validated, use the cached state
+		nsVstate = nsCrr.State
+		if Globals.Debug {
+			log.Printf("initializeImrTrustAnchors: %s NS RRset already validated in cache", anchorName)
+		}
+	} else {
+		// Not validated yet, validate it now
+		nsVstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+		if err != nil {
+			log.Printf("initializeImrTrustAnchors: warning: failed to validate %s NS RRset: %v (continuing)", anchorName, err)
+			return
+		}
+		if nsVstate != cache.ValidationStateSecure {
+			log.Printf("initializeImrTrustAnchors: warning: %q NS RRset failed to validate (vstate: %s) (continuing)", anchorName, cache.ValidationStateToString[nsVstate])
+			return
+		}
+		// Update cached NS RRset with validated state
+		if nsCrr == nil {
+			// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
+			minTTL := cache.GetMinTTL(nsRRset.RRs)
+			if minTTL <= 0 {
+				minTTL = 86400 * time.Second
+			}
+			nsCrr = &cache.CachedRRset{
+				Name:       anchorName,
+				RRtype:     dns.TypeNS,
+				Rcode:      uint8(dns.RcodeSuccess),
+				RRset:      nsRRset,
+				Context:    cache.ContextPriming,
+				State:      nsVstate,
+				Expiration: time.Now().Add(minTTL),
+			}
+		} else {
+			// Update existing cached RRset
+			nsCrr.State = nsVstate
+		}
+		imr.Cache.Set(anchorName, dns.TypeNS, nsCrr)
+	}
+}
+
+// processTrustAnchorZone processes a single trust anchor zone: fetches, validates, and caches DNSKEY and NS RRsets.
+func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, dsByName map[string][]*dns.DS, dnskeysByName map[string][]*dns.DNSKEY) error {
+	log.Printf("initializeImrTrustAnchors: processing anchor %q", anchorName)
+
+	// Seed DS RRset from trust anchors (if provided) into cache as validated,
+	// so DNSKEY validation can find a validated DS RRset.
+	if dslist := dsByName[anchorName]; len(dslist) > 0 {
+		imr.seedDSRRsetFromTrustAnchors(anchorName, dslist)
+	}
+
+	// Fetch the DNSKEY RRset for the anchor, using current known servers
+	serverMap, ok := imr.Cache.ServerMap.Get(anchorName)
+	if !ok || len(serverMap) == 0 {
+		// fallback to root servers if we do not have a server mapping for this name yet
+		serverMap, ok = imr.Cache.ServerMap.Get(".")
+		if !ok || len(serverMap) == 0 {
+			return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
+		}
+	}
+	rrset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true)
+	if err != nil {
+		return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
+	}
+	if rrset == nil || len(rrset.RRs) == 0 {
+		return fmt.Errorf("no %s DNSKEY RRset found", anchorName)
+	}
+
+	minTTL := cache.GetMinTTL(rrset.RRs)
+	exp := time.Now().Add(minTTL)
+
+	// If DS present, match and add corresponding DNSKEY(s) to the TA store (trusted)
+	if dslist := dsByName[anchorName]; len(dslist) > 0 {
+		imr.matchDSTrustAnchorsToDNSKEYs(anchorName, dslist, rrset, exp)
+	}
+
+	// Validate and cache the DNSKEY RRset
+	if err := imr.validateAndCacheDNSKEYRRset(ctx, anchorName, rrset); err != nil {
+		return err
+	}
+
+	// Update DNSKEY cache from validated RRset, preserving trust anchor flags
+	imr.updateDNSKEYCacheFromRRset(anchorName, rrset, exp, dnskeysByName)
+
+	// Add zone to ZoneMap as secure when DNSKEY RRset validates (DS trust anchor validated)
+	z, exists := imr.Cache.ZoneMap.Get(anchorName)
+	if !exists {
+		z = &cache.Zone{
+			ZoneName: anchorName,
+			State:    cache.ValidationStateIndeterminate,
+		}
+	}
+	z.SetState(cache.ValidationStateSecure)
+	imr.Cache.ZoneMap.Set(anchorName, z)
+	if Globals.Debug {
+		log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DS trust anchor validated)", anchorName)
+	}
+
+	// Validate NS RRset (non-fatal)
+	imr.validateNSRRsetForAnchor(ctx, anchorName, serverMap)
+
+	return nil
+}
+
 // initializeImrTrustAnchors loads trust anchors from config:
 // - DS/DNSKEY strings (single)
 // - trust-anchor-file (multiple lines)
@@ -1024,92 +1497,16 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 		return nil
 	}
 
-	// Collect DS and DNSKEY anchors keyed by name
-	dsByName := map[string][]*dns.DS{}
-	dnskeysByName := map[string][]*dns.DNSKEY{}
-
-	// If DNSKEY TA is provided, add it directly
-	if taDNSKEY != "" {
-		rr, err := dns.NewRR(taDNSKEY)
-		if err != nil {
-			return fmt.Errorf("failed to parse trust_anchor_dnskey: %v", err)
-		}
-		dk, ok := rr.(*dns.DNSKEY)
-		if !ok {
-			return fmt.Errorf("trust_anchor_dnskey is not a DNSKEY RR: %T", rr)
-		}
-		name := dns.Fqdn(dk.Hdr.Name)
-		dnskeysByName[name] = append(dnskeysByName[name], dk)
+	// Parse trust anchors from config and file
+	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(conf)
+	if err != nil {
+		return err
 	}
 
-	// If DS TA is provided, remember it for matching after fetching DNSKEY RRset
-	if taDS != "" {
-		rr, err := dns.NewRR(taDS)
-		if err != nil {
-			return fmt.Errorf("failed to parse trust_anchor_ds: %v", err)
-		}
-		ds, ok := rr.(*dns.DS)
-		if !ok {
-			return fmt.Errorf("trust_anchor_ds is not a DS RR: %T", rr)
-		}
-		name := dns.Fqdn(ds.Hdr.Name)
-		dsByName[name] = append(dsByName[name], ds)
-		log.Printf("initializeImrTrustAnchors: configured DS TA for %s keytag=%d digesttype=%d", name, ds.KeyTag, ds.DigestType)
-	}
+	// Add direct DNSKEY trust anchors to cache first
+	imr.addDirectDNSKEYTrustAnchors(dnskeysByName)
 
-	// If trust-anchor-file is provided, read and parse all RRs
-	if taFile != "" {
-		data, err := os.ReadFile(taFile)
-		if err != nil {
-			return fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
-		}
-		lines := strings.Split(string(data), "\n")
-		for _, ln := range lines {
-			s := strings.TrimSpace(ln)
-			if s == "" || strings.HasPrefix(s, ";") || strings.HasPrefix(s, "#") {
-				continue
-			}
-			rr, err := dns.NewRR(s)
-			if err != nil {
-				log.Printf("initializeImrTrustAnchors: skipping unparsable line in %s: %q: %v", taFile, s, err)
-				continue
-			}
-			switch t := rr.(type) {
-			case *dns.DNSKEY:
-				name := dns.Fqdn(t.Hdr.Name)
-				dnskeysByName[name] = append(dnskeysByName[name], t)
-			case *dns.DS:
-				name := dns.Fqdn(t.Hdr.Name)
-				dsByName[name] = append(dsByName[name], t)
-			default:
-				log.Printf("initializeImrTrustAnchors: ignoring non-TA RR in %s: %s", taFile, rr.String())
-			}
-		}
-	}
-
-	// fmt.Printf("initializeImrTrustAnchors: dnskeysByName: %+v\n", dnskeysByName)
-	// fmt.Printf("initializeImrTrustAnchors: dsByName: %+v\n", dsByName)
-
-	// Add direct DNSKEY anchors to cache as trusted
-	for name, list := range dnskeysByName {
-		log.Printf("initializeImrTrustAnchors: zone %q has DNSKEY TAs", name)
-		exp := time.Now().Add(365 * 24 * time.Hour)
-		for _, dk := range list {
-			log.Printf("initializeImrTrustAnchors: zone %q adding DNSKEY TA (keyid: %d)\n", name, dk.KeyTag())
-			imr.DnskeyCache.Set(name, dk.KeyTag(), &cache.CachedDnskeyRRset{
-				Name:        name,
-				Keyid:       dk.KeyTag(),
-				Trusted:     true,
-				State:       cache.ValidationStateSecure,
-				TrustAnchor: true,
-				Dnskey:      *dk,
-				Expiration:  exp,
-			})
-			log.Printf("initializeImrTrustAnchors: zone %q added DNSKEY TA (keyid: %d) (expires %v)", name, dk.KeyTag(), exp)
-		}
-	}
-
-	// For each anchored name we know about (from DS or direct DNSKEY), fetch and validate
+	// Collect all anchor names (from both DS and DNSKEY trust anchors)
 	seenNames := map[string]bool{}
 	for name := range dnskeysByName {
 		seenNames[name] = true
@@ -1117,6 +1514,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 	for name := range dsByName {
 		seenNames[name] = true
 	}
+
 	// Process zones in deterministic order: root first, then others sorted
 	anchorNames := make([]string, 0, len(seenNames))
 	hasRoot := false
@@ -1132,228 +1530,14 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 		anchorNames = append([]string{"."}, anchorNames...)
 	}
 	log.Printf("initializeImrTrustAnchors: processing %d anchored names in order: %v", len(anchorNames), anchorNames)
+
+	// Process each trust anchor zone
 	for _, anchorName := range anchorNames {
-		log.Printf("initializeImrTrustAnchors: processing anchor %q", anchorName)
-		// Seed DS RRset from trust anchors (if provided) into cache as validated,
-		// so DNSKEY validation can find a validated DS RRset.
-		if dslist := dsByName[anchorName]; len(dslist) > 0 {
-			var rrds []dns.RR
-			var minTTL uint32
-			for i, ds := range dslist {
-				rrds = append(rrds, ds)
-				if i == 0 || ds.Hdr.Ttl < minTTL {
-					minTTL = ds.Hdr.Ttl
-				}
-			}
-			// Fallback TTL if not present in TA (e.g., config without TTL)
-			if minTTL == 0 {
-				minTTL = 86400
-			}
-			dsRRset := &core.RRset{
-				Name:   anchorName,
-				Class:  dns.ClassINET,
-				RRtype: dns.TypeDS,
-				RRs:    rrds,
-				// No RRSIGs for TA-seeded DS; considered trusted
-			}
-			imr.Cache.Set(anchorName, dns.TypeDS, &cache.CachedRRset{
-				Name:       anchorName,
-				RRtype:     dns.TypeDS,
-				RRset:      dsRRset,
-				Context:    cache.ContextPriming,
-				State:      cache.ValidationStateSecure,
-				Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
-			})
-			if Globals.Debug {
-				log.Printf("initializeImrTrustAnchors: seeded validated DS RRset for %s with %d DS (TTL=%d)", anchorName, len(rrds), minTTL)
-			}
-		}
-
-		// Fetch the DNSKEY RRset for the anchor, using current known servers
-		serverMap, ok := imr.Cache.ServerMap.Get(anchorName)
-		if !ok || len(serverMap) == 0 {
-			// fallback to root servers if we do not have a server mapping for this name yet
-			serverMap, ok = imr.Cache.ServerMap.Get(".")
-			if !ok || len(serverMap) == 0 {
-				return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
-			}
-		}
-		rrset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true)
-		if err != nil {
-			return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
-		}
-		if rrset == nil || len(rrset.RRs) == 0 {
-			return fmt.Errorf("no %s DNSKEY RRset found", anchorName)
-		}
-
-		// Compute min TTL for expiration of added anchors
-		/*
-			var minTTL uint32
-			if len(rrset.RRs) > 0 {
-				minTTL = rrset.RRs[0].Header().Ttl
-				for _, rr := range rrset.RRs[1:] {
-					if rr.Header().Ttl < minTTL {
-						minTTL = rr.Header().Ttl
-					}
-				}
-			}
-		*/
-		minTTL := cache.GetMinTTL(rrset.RRs)
-		exp := time.Now().Add(minTTL)
-
-		// If DS present, match and add corresponding DNSKEY(s) to the TA store (trusted)
-		if dslist := dsByName[anchorName]; len(dslist) > 0 {
-			for _, rr := range rrset.RRs {
-				dk, ok := rr.(*dns.DNSKEY)
-				if !ok {
-					continue
-				}
-				keyid := dk.KeyTag()
-				for _, ds := range dslist {
-					// match keytag first
-					if ds.KeyTag != keyid {
-						continue
-					}
-					computed := dk.ToDS(ds.DigestType)
-					if computed == nil {
-						continue
-					}
-					if strings.EqualFold(computed.Digest, ds.Digest) {
-						// This DNSKEY matches the DS trust anchor, so it's validated
-						// Add it to DnskeyCache immediately so it can be used to validate the DNSKEY RRset's signatures
-						cdr := cache.CachedDnskeyRRset{
-							Name:       dns.Fqdn(dk.Hdr.Name),
-							Keyid:      keyid,
-							Trusted:    true,
-							State:      cache.ValidationStateSecure,
-							Dnskey:     *dk,
-							Expiration: exp,
-						}
-						cache.DnskeyCache.Set(cdr.Name, cdr.Keyid, &cdr)
-						log.Printf("initializeImrTrustAnchors: DS matched DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
-					}
-				}
-			}
-		}
-
-		// Check if the DNSKEY RRset is already validated in cache (from IterativeDNSQuery)
-		crr := imr.Cache.Get(anchorName, dns.TypeDNSKEY)
-		var vstate cache.ValidationState
-		if crr != nil && crr.State == cache.ValidationStateSecure {
-			// Already validated, use the cached state
-			vstate = crr.State
-			if Globals.Debug {
-				log.Printf("initializeImrTrustAnchors: %s DNSKEY RRset already validated in cache", anchorName)
-			}
-		} else {
-			// Not validated yet, validate it now
-			var err error
-			vstate, err = imr.Cache.ValidateRRset(ctx, rrset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
-			if err != nil {
-				log.Printf("initializeImrTrustAnchors: failed to validate %s DNSKEY RRset: %v", anchorName, err)
-				return fmt.Errorf("failed to validate %s DNSKEY RRset: %v", anchorName, err)
-			}
-			if vstate != cache.ValidationStateSecure {
-				log.Printf("initializeImrTrustAnchors: %q DNSKEY RRset failed to validate (vstate: %s)", anchorName, cache.ValidationStateToString[vstate])
-				return fmt.Errorf("failed to validate %q DNSKEY RRset (vstate: %s)", anchorName, cache.ValidationStateToString[vstate])
-			}
-			// Update cached RRset with validated state
-			if crr == nil {
-				// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
-				minTTL := cache.GetMinTTL(rrset.RRs)
-				if minTTL <= 0 {
-					minTTL = 86400 * time.Second
-				}
-				crr = &cache.CachedRRset{
-					Name:       anchorName,
-					RRtype:     dns.TypeDNSKEY,
-					Rcode:      uint8(dns.RcodeSuccess),
-					RRset:      rrset,
-					Context:    cache.ContextPriming,
-					State:      vstate,
-					Expiration: time.Now().Add(minTTL),
-				}
-			} else {
-				// Update existing cached RRset
-				crr.State = vstate
-			}
-			imr.Cache.Set(anchorName, dns.TypeDNSKEY, crr)
-		}
-		// fmt.Printf("initializeImrTrustAnchors: cached DNSKEY RRset for %q (expires %v): %+v\n", anchorName, exp, crr)
-
-		// Since the DNSKEY RRset validated, mark all contained DNSKEYs as validated/trusted in DnskeyCache
-		for _, rr := range rrset.RRs {
-			if dk, ok := rr.(*dns.DNSKEY); ok {
-				cdr := cache.CachedDnskeyRRset{
-					Name:       anchorName,
-					Keyid:      dk.KeyTag(),
-					Trusted:    true,
-					State:      cache.ValidationStateSecure,
-					Dnskey:     *dk,
-					Expiration: exp,
-				}
-				imr.Cache.DnskeyCache.Set(anchorName, dk.KeyTag(), &cdr)
-				log.Printf("initializeImrTrustAnchors: DNSKEY %s::%d (expires %v)", cdr.Name, cdr.Keyid, exp)
-			}
-		}
-
-		// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
-		nsRRset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true)
-		if err != nil {
-			log.Printf("initializeImrTrustAnchors: warning: failed to fetch %s NS RRset: %v (continuing)", anchorName, err)
-			continue // Continue with next zone
-		}
-		if nsRRset == nil || len(nsRRset.RRs) == 0 {
-			log.Printf("initializeImrTrustAnchors: warning: no %s NS RRset found (continuing)", anchorName)
-			continue // Continue with next zone
-		}
-		// Check if the NS RRset is already validated in cache (from IterativeDNSQuery)
-		nsCrr := imr.Cache.Get(anchorName, dns.TypeNS)
-		var nsVstate cache.ValidationState
-		if nsCrr != nil && nsCrr.State == cache.ValidationStateSecure {
-			// Already validated, use the cached state
-			nsVstate = nsCrr.State
-			if Globals.Debug {
-				log.Printf("initializeImrTrustAnchors: %s NS RRset already validated in cache", anchorName)
-			}
-		} else {
-			// Not validated yet, validate it now
-			nsVstate, err = imr.Cache.ValidateRRset(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), Globals.Debug)
-			if err != nil {
-				log.Printf("initializeImrTrustAnchors: warning: failed to validate %s NS RRset: %v (continuing)", anchorName, err)
-				continue // Continue with next zone
-			}
-			if nsVstate != cache.ValidationStateSecure {
-				log.Printf("initializeImrTrustAnchors: warning: %q NS RRset failed to validate (vstate: %s) (continuing)", anchorName, cache.ValidationStateToString[nsVstate])
-				continue // Continue with next zone
-			}
-			// Update cached NS RRset with validated state
-			if nsCrr == nil {
-				// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
-				minTTL := cache.GetMinTTL(nsRRset.RRs)
-				if minTTL <= 0 {
-					minTTL = 86400 * time.Second
-				}
-				nsCrr = &cache.CachedRRset{
-					Name:       anchorName,
-					RRtype:     dns.TypeNS,
-					Rcode:      uint8(dns.RcodeSuccess),
-					RRset:      nsRRset,
-					Context:    cache.ContextPriming,
-					State:      nsVstate,
-					Expiration: time.Now().Add(minTTL),
-				}
-			} else {
-				// Update existing cached RRset
-				nsCrr.State = nsVstate
-			}
-			imr.Cache.Set(anchorName, dns.TypeNS, nsCrr)
+		if err := imr.processTrustAnchorZone(ctx, anchorName, dsByName, dnskeysByName); err != nil {
+			return err
 		}
 	}
-	// fmt.Printf("initializeImrTrustAnchors: completed. DnskeyCache has %d items\n", imr.Cache.DnskeyCache.Map.Count())
-	// for item := range imr.Cache.DnskeyCache.Map.IterBuffered() {
-	// 	fmt.Printf("initializeImrTrustAnchors: DnskeyCache item: %+v\n", item)
-	// }
+
 	return nil
 }
 

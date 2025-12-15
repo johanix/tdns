@@ -9,14 +9,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
+	"zgo.at/acidtab"
 )
 
 var ScannerCmd = &cobra.Command{
@@ -220,9 +219,7 @@ var StatusCmd = &cobra.Command{
 				return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
 			})
 
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "JOB ID\tSTATUS\tCREATED\tPROGRESS\tERROR")
-			fmt.Fprintln(w, "------\t------\t-------\t--------\t-----")
+			t := acidtab.New("JOB ID", "STATUS", "CREATED", "PROGRESS", "ERROR")
 			for _, job := range jobs {
 				progress := fmt.Sprintf("%d/%d", job.ProcessedTuples, job.TotalTuples)
 				errorStr := ""
@@ -233,10 +230,9 @@ var StatusCmd = &cobra.Command{
 					}
 				}
 				created := job.CreatedAt.Format("2006-01-02 15:04:05")
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					job.JobID, job.Status, created, progress, errorStr)
+				t.Row(job.JobID, job.Status, created, progress, errorStr)
 			}
-			w.Flush()
+			fmt.Println(t.String())
 		}
 	},
 }

@@ -19,10 +19,10 @@ type DnskeyCacheT struct {
 }
 
 type CachedDnskeyRRset struct {
-	Name        string
-	Keyid       uint16
-	State       ValidationState
-	Trusted     bool
+	Name  string
+	Keyid uint16
+	State ValidationState
+	// Trusted     bool
 	TrustAnchor bool
 	Dnskey      dns.DNSKEY  // just this key
 	RRset       *core.RRset // complete RRset
@@ -46,12 +46,13 @@ type CachedRRset struct {
 }
 
 type RRsetCacheT struct {
-	RRsets      *core.ConcurrentMap[string, CachedRRset]
-	Servers     *core.ConcurrentMap[string, []string]
-	ServerMap   *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	ZoneMap     *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
-	DnskeyCache *DnskeyCacheT
-	DNSClient   map[core.Transport]*core.DNSClient
+	RRsets        *core.ConcurrentMap[string, CachedRRset]
+	Servers       *core.ConcurrentMap[string, []string]
+	ServerMap     *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
+	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
+	DnskeyCache   *DnskeyCacheT
+	DNSClient     map[core.Transport]*core.DNSClient
 	//Options                map[ImrOption]string
 	Primed                 bool
 	Logger                 *log.Logger
@@ -67,90 +68,35 @@ type RRsetCacheT struct {
 	tlsaQueryInFlight      map[string]struct{}
 }
 
-type AuthServer struct {
-	Name             string
-	Addrs            []string
-	Alpn             []string // {"do53", "doq", "dot", "doh"}
-	Transports       []core.Transport
-	PrefTransport    core.Transport           // "doq" | "dot" | "doh" | "do53"
-	TransportWeights map[core.Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
-	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
-	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
-	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`
-	ConnMode        ConnMode                `yaml:"connmode" mapstructure:"connmode"`
-	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
-	// Stats (guarded by mu)
-	mu                sync.Mutex
-	TransportCounters map[core.Transport]uint64 // total queries attempted per transport
-	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
-	Expire            time.Time
-}
-
 type Zone struct {
-	ZoneName         string
-	SecureDelegation bool
+	ZoneName string
+	State    ValidationState
+	// Zone-specific address backoffs: map[address]*AddressBackoff
+	// Tracks per-zone, per-address failures (e.g., REFUSED for this zone from this address)
+	AddressBackoffs map[string]*AddressBackoff
+	mu              sync.Mutex // Protects State and AddressBackoffs
 }
 
-func (as *AuthServer) ConnectionMode() ConnMode {
-	if as == nil {
-		return ConnModeLegacy
+// GetState returns the current validation state of the zone.
+// Thread-safe: acquires mu lock.
+func (z *Zone) GetState() ValidationState {
+	if z == nil {
+		return ValidationStateNone
 	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return as.ConnMode
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return z.State
 }
 
-func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
-	if as == nil {
-		return nil
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if len(as.TLSARecords) == 0 {
-		return nil
-	}
-	snap := make(map[string]*CachedRRset, len(as.TLSARecords))
-	for owner, rec := range as.TLSARecords {
-		snap[owner] = rec
-	}
-	return snap
-}
-
-// SnapshotCounters returns a copy of the per-transport counters.
-func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
-	if as == nil {
-		return nil
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	out := make(map[core.Transport]uint64, len(as.TransportCounters))
-	for t, c := range as.TransportCounters {
-		out[t] = c
-	}
-	return out
-}
-
-func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
-	if as == nil {
+// SetState sets the validation state of the zone.
+// Thread-safe: acquires mu lock.
+func (z *Zone) SetState(state ValidationState) {
+	if z == nil {
 		return
 	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if as.TransportCounters == nil {
-		as.TransportCounters = make(map[core.Transport]uint64)
-	}
-	as.TransportCounters[t]++
-}
-
-func (as *AuthServer) PromoteConnMode(target ConnMode) {
-	if as == nil {
-		return
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if as.ConnMode < target {
-		as.ConnMode = target
-	}
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.State = state
 }
 
 type CacheContext uint8
@@ -176,34 +122,6 @@ var CacheContextToString = map[CacheContext]string{
 	ContextGlue:       "glue",
 	ContextFailure:    "failure",
 }
-
-/*
-type ImrOption uint8
-
-const (
-	ImrOptRevalidateNS ImrOption = iota + 1
-	ImrOptQueryForTransport
-	ImrOptAlwaysQueryForTransport
-	ImrOptTransportSignalType
-	ImrOptQueryForTransportTLSA
-)
-
-var ImrOptionToString = map[ImrOption]string{
-	ImrOptRevalidateNS:            "revalidate-ns",
-	ImrOptQueryForTransport:       "query-for-transport",
-	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
-	ImrOptTransportSignalType:     "transport-signal-type",
-	ImrOptQueryForTransportTLSA:   "query-for-transport-tlsa",
-}
-
-var StringToImrOption = map[string]ImrOption{
-	"revalidate-ns":              ImrOptRevalidateNS,
-	"query-for-transport":        ImrOptQueryForTransport,
-	"always-query-for-transport": ImrOptAlwaysQueryForTransport,
-	"transport-signal-type":      ImrOptTransportSignalType,
-	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
-}
-*/
 
 type ValidationState uint8
 

@@ -1120,6 +1120,159 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		log.Printf("ZUCDDNG: ddata:\n%+v", ddata)
 		log.Printf("ZUCDDNG: ddata.Actions:\n%s", SprintUpdates(ddata.Actions))
 	}
+
+	// Compute complete new delegation data for replace mode
+	// Start with current NS RRset
+	dss.NewNS = make([]dns.RR, 0, len(ddata.CurrentNS.RRs))
+	for _, rr := range ddata.CurrentNS.RRs {
+		dss.NewNS = append(dss.NewNS, dns.Copy(rr))
+	}
+
+	// Remove NS records that are being removed
+	for _, remove := range dss.NsRemoves {
+		for i := len(dss.NewNS) - 1; i >= 0; i-- {
+			if dns.IsDuplicate(dss.NewNS[i], remove) {
+				dss.NewNS = append(dss.NewNS[:i], dss.NewNS[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Add NS records that are being added
+	for _, add := range dss.NsAdds {
+		dup := false
+		for _, existing := range dss.NewNS {
+			if dns.IsDuplicate(existing, add) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			rrcopy := dns.Copy(add)
+			rrcopy.Header().Ttl = 3600
+			rrcopy.Header().Class = dns.ClassINET
+			dss.NewNS = append(dss.NewNS, rrcopy)
+		}
+	}
+
+	// Compute new glue records for the new NS RRset
+	// Get in-bailiwick NS names from the new NS RRset
+	new_bailiwick_ns, err := BailiwickNS(zd.ZoneName, dss.NewNS)
+	if err != nil {
+		log.Printf("ZUCDDNG: Error computing bailiwick NS: %v", err)
+		return dss, err
+	} else {
+		// Build maps of current glue for quick lookup
+		current_a_glue := make(map[string][]dns.RR)
+		current_aaaa_glue := make(map[string][]dns.RR)
+		for nsname, rrset := range ddata.A_glue {
+			current_a_glue[nsname] = make([]dns.RR, len(rrset.RRs))
+			for i, rr := range rrset.RRs {
+				current_a_glue[nsname][i] = dns.Copy(rr)
+			}
+		}
+		for nsname, rrset := range ddata.AAAA_glue {
+			current_aaaa_glue[nsname] = make([]dns.RR, len(rrset.RRs))
+			for i, rr := range rrset.RRs {
+				current_aaaa_glue[nsname][i] = dns.Copy(rr)
+			}
+		}
+
+		// Apply removes to current glue
+		for _, remove := range dss.ARemoves {
+			nsname := remove.Header().Name
+			if glue, exists := current_a_glue[nsname]; exists {
+				for i := len(glue) - 1; i >= 0; i-- {
+					if dns.IsDuplicate(glue[i], remove) {
+						glue = append(glue[:i], glue[i+1:]...)
+						current_a_glue[nsname] = glue
+						break
+					}
+				}
+			}
+		}
+		for _, remove := range dss.AAAARemoves {
+			nsname := remove.Header().Name
+			if glue, exists := current_aaaa_glue[nsname]; exists {
+				for i := len(glue) - 1; i >= 0; i-- {
+					if dns.IsDuplicate(glue[i], remove) {
+						glue = append(glue[:i], glue[i+1:]...)
+						current_aaaa_glue[nsname] = glue
+						break
+					}
+				}
+			}
+		}
+
+		// Apply adds to current glue
+		for _, add := range dss.AAdds {
+			nsname := add.Header().Name
+			if slices.Contains(new_bailiwick_ns, nsname) {
+				if glue, exists := current_a_glue[nsname]; exists {
+					dup := false
+					for _, existing := range glue {
+						if dns.IsDuplicate(existing, add) {
+							dup = true
+							break
+						}
+					}
+					if !dup {
+						rrcopy := dns.Copy(add)
+						rrcopy.Header().Ttl = 3600
+						rrcopy.Header().Class = dns.ClassINET
+						current_a_glue[nsname] = append(current_a_glue[nsname], rrcopy)
+					}
+				} else {
+					rrcopy := dns.Copy(add)
+					rrcopy.Header().Ttl = 3600
+					rrcopy.Header().Class = dns.ClassINET
+					current_a_glue[nsname] = []dns.RR{rrcopy}
+				}
+			}
+		}
+		for _, add := range dss.AAAAAdds {
+			nsname := add.Header().Name
+			if slices.Contains(new_bailiwick_ns, nsname) {
+				if glue, exists := current_aaaa_glue[nsname]; exists {
+					dup := false
+					for _, existing := range glue {
+						if dns.IsDuplicate(existing, add) {
+							dup = true
+							break
+						}
+					}
+					if !dup {
+						rrcopy := dns.Copy(add)
+						rrcopy.Header().Ttl = 3600
+						rrcopy.Header().Class = dns.ClassINET
+						current_aaaa_glue[nsname] = append(current_aaaa_glue[nsname], rrcopy)
+					}
+				} else {
+					rrcopy := dns.Copy(add)
+					rrcopy.Header().Ttl = 3600
+					rrcopy.Header().Class = dns.ClassINET
+					current_aaaa_glue[nsname] = []dns.RR{rrcopy}
+				}
+			}
+		}
+
+		// Collect all glue records for the new bailiwick NS
+		dss.NewA = []dns.RR{}
+		dss.NewAAAA = []dns.RR{}
+		for _, nsname := range new_bailiwick_ns {
+			if glue, exists := current_a_glue[nsname]; exists {
+				for _, rr := range glue {
+					dss.NewA = append(dss.NewA, dns.Copy(rr))
+				}
+			}
+			if glue, exists := current_aaaa_glue[nsname]; exists {
+				for _, rr := range glue {
+					dss.NewAAAA = append(dss.NewAAAA, dns.Copy(rr))
+				}
+			}
+		}
+	}
+
 	// dump.P(ddata)
 	// dump.P(dss)
 	return dss, nil

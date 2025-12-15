@@ -116,7 +116,7 @@ var ddnsRollCmd = &cobra.Command{
 	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
-		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false, nil)
 		if err != nil {
 			fmt.Printf("Error from NewKeyDB(): %v\n", err)
 			os.Exit(1)
@@ -138,7 +138,7 @@ var ddnsUploadCmd = &cobra.Command{
 	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone", "parentzone", "childPrimary", "parentprimary")
-		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false)
+		kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false, nil)
 		if err != nil {
 			fmt.Printf("Error from NewKeyDB(): %v\n", err)
 			os.Exit(1)

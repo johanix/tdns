@@ -89,6 +89,20 @@ var StringToImrOption = map[string]ImrOption{
 	"use-transport-signals":      ImrOptUseTransportSignals,
 }
 
+type AuthOption uint8
+
+const (
+	AuthOptParentUpdate AuthOption = iota + 1
+)
+
+var AuthOptionToString = map[AuthOption]string{
+	AuthOptParentUpdate: "parent-update",
+}
+
+var StringToAuthOption = map[string]AuthOption{
+	"parent-update": AuthOptParentUpdate,
+}
+
 type AppType uint8
 
 const (
