@@ -23,7 +23,7 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 		z.AddressBackoffs = make(map[string]*AddressBackoff)
 	}
 	backoff, exists := z.AddressBackoffs[addr]
-	
+
 	// Determine backoff duration based on rcode
 	var backoffDuration time.Duration
 	var errMsg string
@@ -55,7 +55,7 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 			errMsg = fmt.Sprintf("rcode=%d", rcode)
 		}
 	}
-	
+
 	if !exists {
 		// First failure
 		z.AddressBackoffs[addr] = &AddressBackoff{
@@ -107,4 +107,3 @@ func (z *Zone) RecordZoneAddressSuccess(addr string) {
 		// If map is empty, we could nil it out, but keeping it is fine for efficiency
 	}
 }
-

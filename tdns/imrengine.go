@@ -1172,9 +1172,9 @@ func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS)
 		State:      cache.ValidationStateSecure,
 		Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
 	})
-		if Globals.Debug {
-			log.Printf("initializeImrTrustAnchors: seeded validated DS RRset for %s with %d DS (TTL=%d)", anchorName, len(rrds), minTTL)
-		}
+	if Globals.Debug {
+		log.Printf("initializeImrTrustAnchors: seeded validated DS RRset for %s with %d DS (TTL=%d)", anchorName, len(rrds), minTTL)
+	}
 }
 
 // matchDSTrustAnchorsToDNSKEYs matches DS trust anchors to DNSKEYs in the fetched RRset.
@@ -1310,7 +1310,7 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 			trustAnchorKeys[dk.KeyTag()] = true
 		}
 	}
-	
+
 	for _, rr := range rrset.RRs {
 		if dk, ok := rr.(*dns.DNSKEY); ok {
 			keyid := dk.KeyTag()
@@ -1451,9 +1451,9 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	}
 	z.State = cache.ValidationStateSecure
 	imr.Cache.ZoneMap.Set(anchorName, z)
-		if Globals.Debug {
-			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DS trust anchor validated)", anchorName)
-		}
+	if Globals.Debug {
+		log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DS trust anchor validated)", anchorName)
+	}
 
 	// Validate NS RRset (non-fatal)
 	imr.validateNSRRsetForAnchor(ctx, anchorName, serverMap)

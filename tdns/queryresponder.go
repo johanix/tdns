@@ -112,7 +112,7 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		log.Printf("QueryResponder: RRset %s %s already has %d RRSIGs, skipping signing", name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs))
 		return rrset, nil
 	}
-	
+
 	// Get active DNSSEC keys, using provided dak or fetching from kdb
 	zoneDak := dak
 	var err error
@@ -123,7 +123,7 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 			return rrset, err
 		}
 	}
-	
+
 	if zoneDak == nil || len(zoneDak.ZSKs) == 0 {
 		// No active keys found - try to ensure they exist (promote published or generate new)
 		log.Printf("QueryResponder: no active ZSKs for zone %s, attempting to ensure keys exist", zd.ZoneName)
@@ -275,7 +275,7 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool) {
 	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 	soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-	zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs),	zd.ZoneName, soaRRset)
+	zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs), zd.ZoneName, soaRRset)
 	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 	m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
@@ -292,16 +292,16 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 // Returns true if a CNAME response was handled and the message should be sent, false otherwise.
 func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, qname string, qtype uint16, owner *OwnerData,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, transportSignalInAnswer *bool) (bool, error) {
-	
+
 	if owner.RRtypes.Count() != 1 {
 		return false, nil // Not a CNAME-only owner
 	}
-	
+
 	v, ok := owner.RRtypes.Get(dns.TypeCNAME)
 	if !ok {
 		return false, nil // No CNAME found
 	}
-	
+
 	if len(v.RRs) > 1 {
 		// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
 		log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)

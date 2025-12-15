@@ -503,15 +503,15 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					rrset.Name = zonename
 					rrset.Class = dns.ClassINET
 					rrset.RRtype = dns.TypeNS
-				imr.Cache.Set(zonename, dns.TypeNS, &cache.CachedRRset{
-					Name:       zonename,
-					RRtype:     dns.TypeNS,
-					Rcode:      uint8(rcode),
-					RRset:      &rrset,
-					Context:    cache.ContextReferral,
-					State:      cache.ValidationStateIndeterminate,
-					Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
-				})
+					imr.Cache.Set(zonename, dns.TypeNS, &cache.CachedRRset{
+						Name:       zonename,
+						RRtype:     dns.TypeNS,
+						Rcode:      uint8(rcode),
+						RRset:      &rrset,
+						Context:    cache.ContextReferral,
+						State:      cache.ValidationStateIndeterminate,
+						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+					})
 				}
 
 				// 2. Collect any glue from Additional
@@ -686,14 +686,14 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 			zone = z
 		}
 	}
-	
+
 	var tuples []ServerAddrTuple
 	// now := time.Now()
-	
+
 	for nsname, server := range serverMap {
 		// Get available addresses for this server (checks server-wide backoffs)
 		availableAddrs := server.GetAvailableAddresses()
-		
+
 		for _, addr := range availableAddrs {
 			// Check zone-specific backoff if zone exists
 			if zone != nil && !zone.IsZoneAddressAvailable(addr) {
@@ -702,7 +702,7 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 				}
 				continue
 			}
-			
+
 			tuples = append(tuples, ServerAddrTuple{
 				Server: server,
 				Addr:   addr,
@@ -710,10 +710,10 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 			})
 		}
 	}
-	
+
 	// Future: Sort by RTT or other metrics here
 	// For now, we keep the order as-is (which is essentially random map iteration order)
-	
+
 	return zoneName, zone, tuples
 }
 
@@ -801,126 +801,125 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		server := tuple.Server
 		addr := tuple.Addr
 		nsname := tuple.NSName
-		
-		
+
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: using nameserver %s@%s (ALPN: %v) for <%s, %s> query\n",
 				addr, nsname, server.Alpn, qname, dns.TypeToString[qtype])
 		}
 
 		r, _, err := imr.tryServer(ctx, server, addr, m, qname, qtype)
-			if err != nil && imr.Cache.Verbose {
-				// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
-				continue // go to next server
-			}
+		if err != nil && imr.Cache.Verbose {
+			// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
+			continue // go to next server
+		}
 
-			if r == nil {
-				if Globals.Debug {
-					lg.Printf("IterativeDNSQuery: nil response from tryServer(dns.Exchange) qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
-				}
-				continue
-			}
-
+		if r == nil {
 			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
-			}
-			rcode = r.MsgHdr.Rcode
-
-			// Check for REFUSED/NOTAUTH/NOTIMP/SERVFAIL responses (lame delegations) and record as zone-specific failure
-			switch rcode {
-			case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
-				if Globals.Debug {
-					lg.Printf("IterativeDNSQuery: %s response from %s@%s for %s %s (likely lame delegation for zone %q)", 
-						dns.RcodeToString[rcode], addr, nsname, qname, dns.TypeToString[qtype], zoneName)
-				}
-				// Record zone-specific failure (not server-wide, as server might work for other zones)
-				if zone != nil {
-					zone.RecordZoneAddressFailureForRcode(addr, uint8(rcode), Globals.Debug)
-				} else {
-					// If zone not found, fall back to server-wide backoff
-					server.RecordAddressFailureForRcode(addr, uint8(rcode))
-				}
-				continue // Try next server
-			case dns.RcodeSuccess:
-				// Successful response - clear any zone-specific backoff for this address
-				// (server-wide backoff already cleared by tryServer)
-				if zone != nil {
-					zone.RecordZoneAddressSuccess(addr)
-				}
-			default:
-				// Other rcodes (NXDOMAIN, etc.) - server responded successfully, clear zone-specific backoff
-				// (server-wide backoff already cleared by tryServer)
-				if zone != nil {
-					zone.RecordZoneAddressSuccess(addr)
-				}
-			}
-
-			if len(r.Answer) != 0 {
-				// Parse any transport signal for this specific server even on final answers
-				// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
-				imr.parseTransportForServerFromAdditional(ctx, server, r)
-				tmprrset, rcode2, ctx2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force)
-				if err != nil || done {
-					return tmprrset, rcode2, ctx2, err
-				}
-				// If not done, fall-through to process referral glue embedded with answers
-				nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
-				if len(nsRRs.RRs) > 0 {
-					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
-					if err != nil {
-						log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
-						return nil, rcode, cache.ContextFailure, err
-					}
-					if len(serverMap) == 0 {
-						return nil, rcode, cache.ContextReferral, nil
-					}
-					return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones)
-				}
-				continue
-			}
-
-			if len(r.Ns) != 0 {
-				kind := classifyResponse(qname, qtype, r)
-				if Globals.Debug {
-					log.Printf("IterativeDNSQuery: classified response for %s %s as %s (rcode=%s, Answer=%d, Authority=%d)",
-						qname, dns.TypeToString[qtype], responseKindToString(kind), dns.RcodeToString[rcode], len(r.Answer), len(r.Ns))
-				}
-
-				switch kind {
-				case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r); handled {
-						return nil, rcodeNeg, ctxNeg, nil
-					}
-					// If not handled, fall through to try next server
-					if rcode == dns.RcodeNameError {
-						log.Printf("*** IterativeDNSQuery: NXDOMAIN response lacked usable SOA for %s %s", qname, dns.TypeToString[qtype])
-					}
-					continue
-				case responseKindReferral:
-					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones)
-				case responseKindError:
-					log.Printf("*** IterativeDNSQuery: treating response as error for %s %s (rcode=%s)",
-						qname, dns.TypeToString[qtype], dns.RcodeToString[rcode])
-					continue
-				case responseKindUnknown:
-					if Globals.Debug {
-						log.Printf("IterativeDNSQuery: responseKindUnknown for %s %s; trying next server",
-							qname, dns.TypeToString[qtype])
-					}
-					continue
-				default:
-					// Should not reach here, but be defensive
-					log.Printf("*** IterativeDNSQuery: unexpected response kind %d for %s %s; trying next server",
-						kind, qname, dns.TypeToString[qtype])
-					continue
-				}
-			}
-
-			if rcode == dns.RcodeSuccess {
-				return &rrset, rcode, cache.ContextFailure, nil // no point in continuing
+				lg.Printf("IterativeDNSQuery: nil response from tryServer(dns.Exchange) qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
 			}
 			continue
 		}
+
+		if Globals.Debug {
+			lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
+		}
+		rcode = r.MsgHdr.Rcode
+
+		// Check for REFUSED/NOTAUTH/NOTIMP/SERVFAIL responses (lame delegations) and record as zone-specific failure
+		switch rcode {
+		case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: %s response from %s@%s for %s %s (likely lame delegation for zone %q)",
+					dns.RcodeToString[rcode], addr, nsname, qname, dns.TypeToString[qtype], zoneName)
+			}
+			// Record zone-specific failure (not server-wide, as server might work for other zones)
+			if zone != nil {
+				zone.RecordZoneAddressFailureForRcode(addr, uint8(rcode), Globals.Debug)
+			} else {
+				// If zone not found, fall back to server-wide backoff
+				server.RecordAddressFailureForRcode(addr, uint8(rcode))
+			}
+			continue // Try next server
+		case dns.RcodeSuccess:
+			// Successful response - clear any zone-specific backoff for this address
+			// (server-wide backoff already cleared by tryServer)
+			if zone != nil {
+				zone.RecordZoneAddressSuccess(addr)
+			}
+		default:
+			// Other rcodes (NXDOMAIN, etc.) - server responded successfully, clear zone-specific backoff
+			// (server-wide backoff already cleared by tryServer)
+			if zone != nil {
+				zone.RecordZoneAddressSuccess(addr)
+			}
+		}
+
+		if len(r.Answer) != 0 {
+			// Parse any transport signal for this specific server even on final answers
+			// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
+			imr.parseTransportForServerFromAdditional(ctx, server, r)
+			tmprrset, rcode2, ctx2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force)
+			if err != nil || done {
+				return tmprrset, rcode2, ctx2, err
+			}
+			// If not done, fall-through to process referral glue embedded with answers
+			nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
+			if len(nsRRs.RRs) > 0 {
+				serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
+				if err != nil {
+					log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
+					return nil, rcode, cache.ContextFailure, err
+				}
+				if len(serverMap) == 0 {
+					return nil, rcode, cache.ContextReferral, nil
+				}
+				return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones)
+			}
+			continue
+		}
+
+		if len(r.Ns) != 0 {
+			kind := classifyResponse(qname, qtype, r)
+			if Globals.Debug {
+				log.Printf("IterativeDNSQuery: classified response for %s %s as %s (rcode=%s, Answer=%d, Authority=%d)",
+					qname, dns.TypeToString[qtype], responseKindToString(kind), dns.RcodeToString[rcode], len(r.Answer), len(r.Ns))
+			}
+
+			switch kind {
+			case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
+				if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r); handled {
+					return nil, rcodeNeg, ctxNeg, nil
+				}
+				// If not handled, fall through to try next server
+				if rcode == dns.RcodeNameError {
+					log.Printf("*** IterativeDNSQuery: NXDOMAIN response lacked usable SOA for %s %s", qname, dns.TypeToString[qtype])
+				}
+				continue
+			case responseKindReferral:
+				return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones)
+			case responseKindError:
+				log.Printf("*** IterativeDNSQuery: treating response as error for %s %s (rcode=%s)",
+					qname, dns.TypeToString[qtype], dns.RcodeToString[rcode])
+				continue
+			case responseKindUnknown:
+				if Globals.Debug {
+					log.Printf("IterativeDNSQuery: responseKindUnknown for %s %s; trying next server",
+						qname, dns.TypeToString[qtype])
+				}
+				continue
+			default:
+				// Should not reach here, but be defensive
+				log.Printf("*** IterativeDNSQuery: unexpected response kind %d for %s %s; trying next server",
+					kind, qname, dns.TypeToString[qtype])
+				continue
+			}
+		}
+
+		if rcode == dns.RcodeSuccess {
+			return &rrset, rcode, cache.ContextFailure, nil // no point in continuing
+		}
+		continue
+	}
 	return &rrset, rcode, cache.ContextNoErrNoAns, fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
 }
 
@@ -1076,7 +1075,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	glue4Map := map[string]core.RRset{}
 	glue6Map := map[string]core.RRset{}
 	serverMapOrig, exist := imr.Cache.ServerMap.Get(zonename)
-	
+
 	// Create a copy of the map to avoid concurrent map read/write errors
 	// The original map is stored in a concurrent map and may be read by other goroutines
 	serverMap := make(map[string]*cache.AuthServer)
@@ -1085,7 +1084,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			serverMap[k] = v
 		}
 	}
-	
+
 	// Prune expired auth servers for this zone before updating
 	now := time.Now()
 	for name, srv := range serverMap {
@@ -1720,7 +1719,6 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 	}
 }
 
-
 func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, vstate cache.ValidationState) {
 	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
@@ -2034,7 +2032,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
 			}
 		}
-        // XXX: ValidateRRset *must* return one of secure or indeterminate. There is
+		// XXX: ValidateRRset *must* return one of secure or indeterminate. There is
 		// a DS, so insecure or none should not be possible.
 		imr.Cache.Set(zonename, dns.TypeDS, &cache.CachedRRset{
 			Name:       zonename,

@@ -339,8 +339,8 @@ var imrShowConfigCmd = &cobra.Command{
 			for _, key := range dkKeys {
 				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
 					if val.TrustAnchor {
-					    fmt.Printf("    %s keyid=%d (TrustAnchor, state=%s expires=%s)\n",
-						val.Name, val.Keyid, cache.ValidationStateToString[val.State], tdns.TtlPrint(val.Expiration))
+						fmt.Printf("    %s keyid=%d (TrustAnchor, state=%s expires=%s)\n",
+							val.Name, val.Keyid, cache.ValidationStateToString[val.State], tdns.TtlPrint(val.Expiration))
 					}
 				}
 			}

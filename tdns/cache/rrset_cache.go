@@ -420,7 +420,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
 	serverMapOrig, ok := rrcache.ServerMap.Get(zone)
-	
+
 	// Create a copy of the map to avoid concurrent map read/write errors
 	// The original map is stored in a concurrent map and may be read by other goroutines
 	serverMap := make(map[string]*AuthServer)
@@ -429,11 +429,11 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 			serverMap[k] = v
 		}
 	}
-	
+
 	for name, server := range sm {
 		// Ensure we use a shared AuthServer instance across all zones
 		sharedServer := rrcache.GetOrCreateAuthServer(name)
-		
+
 		// Merge data from the input server into the shared instance
 		for _, addr := range server.Addrs {
 			if !slices.Contains(sharedServer.Addrs, addr) {
@@ -472,10 +472,10 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 		if server.Debug && !sharedServer.Debug {
 			sharedServer.Debug = server.Debug
 		}
-		
+
 		// Always assign the shared instance to this zone's map
 		serverMap[name] = sharedServer
-		
+
 		// Set preferred transport if we have valid transports
 		if len(sharedServer.Transports) > 0 {
 			sharedServer.PrefTransport = sharedServer.Transports[0]
@@ -496,7 +496,7 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 	if existing, ok := rrcache.AuthServerMap.Get(nsname); ok {
 		return existing
 	}
-	
+
 	// No instance exists - create a new one
 	newServer := &AuthServer{
 		Name:       nsname,
@@ -505,13 +505,13 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 		Src:        "unknown",
 		ConnMode:   ConnModeLegacy,
 	}
-	
+
 	// Store it in the global map (use SetIfAbsent to handle race conditions)
 	if rrcache.AuthServerMap.SetIfAbsent(nsname, newServer) {
 		// We successfully added the new server
 		return newServer
 	}
-	
+
 	// Another goroutine created it between our Get and SetIfAbsent - get the existing one
 	existing, _ := rrcache.AuthServerMap.Get(nsname)
 	return existing
@@ -805,7 +805,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	if rrcache.Debug {
 		log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
 	}
-	
+
 	for item := range rrcache.ServerMap.IterBuffered() {
 		z := item.Key
 		ss := item.Val

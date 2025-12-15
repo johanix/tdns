@@ -72,7 +72,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
 		log.Printf("[Sig0KeyMgmt]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
-		
+
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
 		var privkey crypto.PrivateKey
@@ -95,13 +95,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				return &resp, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
 			}
 		}
-		
+
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
 			log.Printf("Error from PrivateKeyToPEM: %v", err)
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
-		
+
 		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.KeyRR.String())
 		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
@@ -311,7 +311,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
-		
+
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
 		var privkey crypto.PrivateKey
@@ -334,13 +334,13 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				return &resp, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
 			}
 		}
-		
+
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
 			log.Printf("Error from PrivateKeyToPEM: %v", err)
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
-		
+
 		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.DnskeyRR.String())
 

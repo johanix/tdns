@@ -19,9 +19,9 @@ type DnskeyCacheT struct {
 }
 
 type CachedDnskeyRRset struct {
-	Name        string
-	Keyid       uint16
-	State       ValidationState
+	Name  string
+	Keyid uint16
+	State ValidationState
 	// Trusted     bool
 	TrustAnchor bool
 	Dnskey      dns.DNSKEY  // just this key
@@ -46,13 +46,13 @@ type CachedRRset struct {
 }
 
 type RRsetCacheT struct {
-	RRsets      *core.ConcurrentMap[string, CachedRRset]
-	Servers     *core.ConcurrentMap[string, []string]
-	ServerMap   *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	AuthServerMap *core.ConcurrentMap[string, *AuthServer]         // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
-	ZoneMap     *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
-	DnskeyCache *DnskeyCacheT
-	DNSClient   map[core.Transport]*core.DNSClient
+	RRsets        *core.ConcurrentMap[string, CachedRRset]
+	Servers       *core.ConcurrentMap[string, []string]
+	ServerMap     *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
+	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
+	DnskeyCache   *DnskeyCacheT
+	DNSClient     map[core.Transport]*core.DNSClient
 	//Options                map[ImrOption]string
 	Primed                 bool
 	Logger                 *log.Logger
@@ -69,12 +69,12 @@ type RRsetCacheT struct {
 }
 
 type Zone struct {
-	ZoneName         string
-	State            ValidationState
+	ZoneName string
+	State    ValidationState
 	// Zone-specific address backoffs: map[address]*AddressBackoff
 	// Tracks per-zone, per-address failures (e.g., REFUSED for this zone from this address)
-	AddressBackoffs  map[string]*AddressBackoff
-	mu               sync.Mutex // Protects AddressBackoffs
+	AddressBackoffs map[string]*AddressBackoff
+	mu              sync.Mutex // Protects AddressBackoffs
 }
 
 type CacheContext uint8
