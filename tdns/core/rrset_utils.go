@@ -10,7 +10,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// XXX: Would be nicer if this was a receiver function or rrset*
+// RRsetDiffer compares old and new DNS resource record slices for a given RR type in a zone, ignoring RRSIG records.
+// It returns: a boolean that is true if the RRsets differ, a slice of records present in newrrs but not in oldrrs (adds), and a slice of records present in oldrrs but not in newrrs (removes).
+// When verbose or debug are true, comparison details are logged to lg.
 func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]

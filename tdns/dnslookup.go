@@ -1917,6 +1917,11 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 	return nil, r.MsgHdr.Rcode, cache.ContextFailure, nil, false
 }
 
+// extractReferral builds an RRset of NS records (and any RRSIGs that cover NS) from a DNS message
+// and returns that RRset, the zone name for the NS records, and a map of NS hostnames found.
+// When qtype is NS the function inspects the Answer section; otherwise it inspects the Authority section.
+// The returned RRset contains the collected NS RRs and any RRSIGs whose TypeCovered is NS.
+// zonename is set to the owner name of the NS records (if any) and the map's keys are the NS hostnames.
 func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, string, map[string]bool) {
 	nsMap := map[string]bool{}
 	zonename := ""
