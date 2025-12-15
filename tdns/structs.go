@@ -297,11 +297,11 @@ type ValidatorResponse struct {
 }
 
 // type TAStore map[string]map[uint16]TrustAnchor
-type DnskeyCacheT struct {
-	Map cmap.ConcurrentMap[string, CachedDnskeyRRset]
+type xxxDnskeyCacheT struct {
+	Map cmap.ConcurrentMap[string, xxxCachedDnskeyRRset]
 }
 
-type CachedDnskeyRRset struct {
+type xxxCachedDnskeyRRset struct {
 	Name        string
 	Keyid       uint16
 	Validated   bool
@@ -454,7 +454,7 @@ type KeyDB struct {
 	UpdateQ             chan UpdateRequest
 	DeferredUpdateQ     chan DeferredUpdate
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
-	Options             *map[AuthOption]string
+	Options             map[AuthOption]string
 }
 
 type Tx struct {

@@ -1183,7 +1183,8 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if glue, exists := current_a_glue[nsname]; exists {
 				for i := len(glue) - 1; i >= 0; i-- {
 					if dns.IsDuplicate(glue[i], remove) {
-						current_a_glue[nsname] = append(glue[:i], glue[i+1:]...)
+						glue = append(glue[:i], glue[i+1:]...)
+						current_a_glue[nsname] = glue
 						break
 					}
 				}
@@ -1194,7 +1195,8 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			if glue, exists := current_aaaa_glue[nsname]; exists {
 				for i := len(glue) - 1; i >= 0; i-- {
 					if dns.IsDuplicate(glue[i], remove) {
-						current_aaaa_glue[nsname] = append(glue[:i], glue[i+1:]...)
+						glue = append(glue[:i], glue[i+1:]...)
+						current_aaaa_glue[nsname] = glue
 						break
 					}
 				}

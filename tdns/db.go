@@ -111,7 +111,7 @@ func dbSetupTables(db *sql.DB) bool {
 	return false
 }
 
-func NewKeyDB(dbfile string, force bool, options *map[AuthOption]string) (*KeyDB, error) {
+func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB, error) {
 	// dbfile := viper.GetString("db.file")
 	if dbfile == "" {
 		return nil, fmt.Errorf("error: DB filename unspecified")

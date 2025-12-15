@@ -218,9 +218,6 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 
 		// Replace PrivateKey field with PEM format for storage
 		pkc.PrivateKey = privkeyPEM
-		if err != nil {
-			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
-		}
 
 	case "external":
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")

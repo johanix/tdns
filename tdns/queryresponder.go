@@ -176,7 +176,8 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	if err != nil {
 		log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
 	}
-	zd.signApexRRsets(apex, msgoptions, kdb, dak)
+ 	// Use parent zone's own keys; let signRRsetForZone fetch them via kdb.
+	zd.signApexRRsets(apex, msgoptions, kdb, nil) // force fetch parent zone's DNSSEC keys
 	m.MsgHdr.Rcode = dns.RcodeSuccess
 	dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
 	if err != nil {

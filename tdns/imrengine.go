@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -226,7 +225,12 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	// If a response channel is provided, use it to send responses
 	if respch != nil {
 		defer func() {
-			respch <- &resp
+			select {
+			case respch <- &resp:
+				// sent successfully
+			case <-time.After(2 * time.Second):
+				log.Printf("ImrQuery: timed out sending response to channel for <%s, %s>", qname, dns.TypeToString[qtype])
+			}
 		}()
 	}
 
@@ -407,13 +411,9 @@ func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]
 
 		// Use shared AuthServer instance (ensures single instance per nameserver)
 		server := imr.Cache.GetOrCreateAuthServer(nsname)
-		if !slices.Contains(server.Addrs, addr) {
-			server.Addrs = append(server.Addrs, addr)
-		}
-		if server.Src == "" || server.Src == "unknown" {
-			server.Src = "answer"
-		}
-		server.Expire = time.Now().Add(time.Duration(ttl) * time.Second)
+		server.AddAddr(addr)
+		server.SetSrc("answer")
+		server.SetExpire(time.Now().Add(time.Duration(ttl) * time.Second))
 		authservers[nsname] = server
 		if Globals.Debug {
 			log.Printf("processAddressRecords: using resolved %s address: %+v", rrType, authservers[nsname])
@@ -1135,7 +1135,7 @@ func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSK
 				State:    cache.ValidationStateSecure,
 			}
 		}
-		z.State = cache.ValidationStateSecure
+		z.SetState(cache.ValidationStateSecure)
 		imr.Cache.ZoneMap.Set(name, z)
 		if Globals.Debug {
 			log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DNSKEY trust anchor)", name)
@@ -1212,6 +1212,72 @@ func (imr *Imr) matchDSTrustAnchorsToDNSKEYs(anchorName string, dslist []*dns.DS
 	}
 }
 
+// validateDNSKEYRRsetUsingSeededDS attempts to validate a DNSKEY RRset using seeded DS trust anchors.
+// Returns true if validation succeeded, false otherwise.
+func (imr *Imr) validateDNSKEYRRsetUsingSeededDS(anchorName string, rrset *core.RRset, verbose bool) bool {
+	name := dns.Fqdn(anchorName)
+	seededDS := imr.Cache.Get(anchorName, dns.TypeDS)
+	if seededDS == nil || seededDS.State != cache.ValidationStateSecure || seededDS.RRset == nil {
+		return false
+	}
+	for _, rr := range seededDS.RRset.RRs {
+		ds, ok := rr.(*dns.DS)
+		if !ok {
+			continue
+		}
+		valid, _ := cache.ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
+		if valid {
+			if verbose {
+				log.Printf("validateDNSKEYRRsetUsingSeededDS: %s DNSKEY RRset validated using DS trust anchor (keytag=%d)", anchorName, ds.KeyTag)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// validateDNSKEYRRsetUsingDirectTA attempts to validate a DNSKEY RRset using direct DNSKEY trust anchors.
+// Returns true if validation succeeded, false otherwise.
+func (imr *Imr) validateDNSKEYRRsetUsingDirectTA(anchorName string, rrset *core.RRset, verbose bool) bool {
+	name := dns.Fqdn(anchorName)
+	dkc := imr.DnskeyCache
+	for item := range dkc.Map.IterBuffered() {
+		if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
+			valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
+			if valid {
+				if verbose {
+					log.Printf("validateDNSKEYRRsetUsingDirectTA: %s DNSKEY RRset validated using direct DNSKEY trust anchor (keytag=%d)", anchorName, item.Val.Keyid)
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// createOrUpdateCachedDNSKEYRRset creates a new CachedRRset or updates an existing one with validated state.
+func (imr *Imr) createOrUpdateCachedDNSKEYRRset(anchorName string, rrset *core.RRset, crr *cache.CachedRRset, vstate cache.ValidationState) *cache.CachedRRset {
+	if crr == nil {
+		// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
+		minTTL := cache.GetMinTTL(rrset.RRs)
+		if minTTL <= 0 {
+			minTTL = 86400 * time.Second
+		}
+		return &cache.CachedRRset{
+			Name:       anchorName,
+			RRtype:     dns.TypeDNSKEY,
+			Rcode:      uint8(dns.RcodeSuccess),
+			RRset:      rrset,
+			Context:    cache.ContextPriming,
+			State:      vstate,
+			Expiration: time.Now().Add(minTTL),
+		}
+	}
+	// Update existing cached RRset
+	crr.State = vstate
+	return crr
+}
+
 // validateAndCacheDNSKEYRRset validates the DNSKEY RRset using trust anchors directly,
 // bypassing the normal validation chain which may fail for indeterminate zones.
 // It uses helper functions to validate against DS TAs and direct DNSKEY TAs.
@@ -1229,42 +1295,17 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 		// Not validated yet, validate using trust anchors directly
 		// This bypasses the normal validation chain which may fail for indeterminate zones
 		verbose := Globals.Debug
-		name := dns.Fqdn(anchorName)
 		validated := false
 
 		// First, try validation using seeded DS trust anchors
-		seededDS := imr.Cache.Get(anchorName, dns.TypeDS)
-		if seededDS != nil && seededDS.State == cache.ValidationStateSecure && seededDS.RRset != nil {
-			for _, rr := range seededDS.RRset.RRs {
-				ds, ok := rr.(*dns.DS)
-				if !ok {
-					continue
-				}
-				valid, _ := cache.ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
-				if valid {
-					validated = true
-					if verbose {
-						log.Printf("validateAndCacheDNSKEYRRset: %s DNSKEY RRset validated using DS trust anchor (keytag=%d)", anchorName, ds.KeyTag)
-					}
-					break
-				}
-			}
+		if imr.validateDNSKEYRRsetUsingSeededDS(anchorName, rrset, verbose) {
+			validated = true
 		}
 
 		// If DS validation didn't work, try direct DNSKEY trust anchors
 		if !validated {
-			dkc := imr.DnskeyCache
-			for item := range dkc.Map.IterBuffered() {
-				if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
-					valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
-					if valid {
-						validated = true
-						if verbose {
-							log.Printf("validateAndCacheDNSKEYRRset: %s DNSKEY RRset validated using direct DNSKEY trust anchor (keytag=%d)", anchorName, item.Val.Keyid)
-						}
-						break
-					}
-				}
+			if imr.validateDNSKEYRRsetUsingDirectTA(anchorName, rrset, verbose) {
+				validated = true
 			}
 		}
 
@@ -1275,25 +1316,7 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 
 		vstate = cache.ValidationStateSecure
 		// Update cached RRset with validated state
-		if crr == nil {
-			// Create new cached RRset if it doesn't exist (shouldn't happen, but be safe)
-			minTTL := cache.GetMinTTL(rrset.RRs)
-			if minTTL <= 0 {
-				minTTL = 86400 * time.Second
-			}
-			crr = &cache.CachedRRset{
-				Name:       anchorName,
-				RRtype:     dns.TypeDNSKEY,
-				Rcode:      uint8(dns.RcodeSuccess),
-				RRset:      rrset,
-				Context:    cache.ContextPriming,
-				State:      vstate,
-				Expiration: time.Now().Add(minTTL),
-			}
-		} else {
-			// Update existing cached RRset
-			crr.State = vstate
-		}
+		crr = imr.createOrUpdateCachedDNSKEYRRset(anchorName, rrset, crr, vstate)
 		imr.Cache.Set(anchorName, dns.TypeDNSKEY, crr)
 	}
 	return nil
@@ -1449,7 +1472,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 			State:    cache.ValidationStateIndeterminate,
 		}
 	}
-	z.State = cache.ValidationStateSecure
+	z.SetState(cache.ValidationStateSecure)
 	imr.Cache.ZoneMap.Set(anchorName, z)
 	if Globals.Debug {
 		log.Printf("initializeImrTrustAnchors: zone %q added to ZoneMap as secure (DS trust anchor validated)", anchorName)

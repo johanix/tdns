@@ -197,13 +197,16 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 				for _, addr := range addrs {
 					backoff := backoffs[addr]
 					timeUntilRetry := backoff.NextTry.Sub(now)
-					line := fmt.Sprintf("%s | %s | retry in %s", nsname, addr, formatDuration(timeUntilRetry))
+					// Always include all 5 columns for alignment
+					failures := "0"
 					if backoff.FailureCount > 0 {
-						line += fmt.Sprintf(" | failures: %d", backoff.FailureCount)
+						failures = fmt.Sprintf("%d", backoff.FailureCount)
 					}
+					errorMsg := "-"
 					if backoff.LastError != "" {
-						line += fmt.Sprintf(" | error: %s", backoff.LastError)
+						errorMsg = backoff.LastError
 					}
+					line := fmt.Sprintf("%s | %s | retry in %s | %s | %s", nsname, addr, formatDuration(timeUntilRetry), failures, errorMsg)
 					lines = append(lines, line)
 				}
 			}
@@ -249,9 +252,9 @@ var dumpZonesCmd = &cobra.Command{
 		t.AlignCol(1, acidtab.Right)
 		for _, item := range zones {
 			zone := item.Val
-			secureStatus := cache.ValidationStateToString[zone.State]
+			secureStatus := cache.ValidationStateToString[zone.GetState()]
 			if secureStatus == "" {
-				secureStatus = "none"
+				secureStatus = "[unknown]"
 			}
 			t.Row(item.Key, secureStatus)
 		}
@@ -323,8 +326,8 @@ var dumpDnskeysCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Combined, sorted-by-owner (reverse labels): DS (first) then DNSKEYs
 		type dnskeyView struct {
-			name  string
-			keyid uint16
+			name        string
+			keyid       uint16
 			// validated   bool
 			// trusted     bool
 			trustanchor bool
@@ -359,8 +362,8 @@ var dumpDnskeysCmd = &cobra.Command{
 				owners[val.Name] = ov
 			}
 			ov.dnskey = append(ov.dnskey, dnskeyView{
-				name:  val.Name,
-				keyid: val.Keyid,
+				name:        val.Name,
+				keyid:       val.Keyid,
 				// trusted:     val.Trusted,
 				trustanchor: val.TrustAnchor,
 				expires:     tdns.TtlPrint(val.Expiration),

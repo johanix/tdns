@@ -14,26 +14,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// This is mostly used for debugging of the DNSSEC validation code
-// func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16) (string, error) {
-//	zd.Logger.Printf("LookupAndValidateRRset: Looking up %s %s in DNS", qname, dns.TypeToString[qtype])
-//	rrset, err := zd.LookupRRset(qname, qtype, true)
-//	if err != nil {
-//		return fmt.Sprintf("error from LookupRRset(%s, %s): %v", qname, dns.TypeToString[qtype], err), err
-//	}
-//	if rrset == nil {
-//		return fmt.Sprintf("LookupRRset(%s, %s) returned nil", qname, dns.TypeToString[qtype]), fmt.Errorf("LookupRRset(%s, %s) returned nil", qname, dns.TypeToString[qtype])
-//	}
-//	valid, err := zd.ValidateRRset(rrset, true)
-//	if err != nil {
-//		return fmt.Sprintf("error from ValidateRRset(%s, %s): %v", qname, dns.TypeToString[qtype], err), err
-//	}
-
-//	msg := fmt.Sprintf("LookupAndValidateRRset: Found %s %s RRset (validated: %v)", qname, dns.TypeToString[qtype], valid)
-//	zd.Logger.Printf(msg)
-//	return msg, nil
-//}
-
 // XXX: This should not be a method of ZoneData, but rather a function.
 func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error) {
 	if len(rrset.RRSIGs) == 0 {
@@ -181,7 +161,6 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 								Name:  keyname,
 								Keyid: keyid,
 								RRset: dnskeyrrset,
-								// Trusted:    true,
 								State:      cache.ValidationStateSecure,
 								Dnskey:     *dnskey,
 								Expiration: expiration,
@@ -220,7 +199,6 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 					Name:  keyname,
 					Keyid: keyid,
 					RRset: dnskeyrrset,
-					// Trusted:    true,
 					State:      cache.ValidationStateSecure,
 					Dnskey:     *dnskey,
 					Expiration: expiration,

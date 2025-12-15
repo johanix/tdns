@@ -74,6 +74,27 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 }
 
 func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
+	emptySlice := []dns.RR{}
+	
+	// Nil guard: if either RRset is nil, treat as no difference
+	if rrset == nil && newrrset == nil {
+		return false, emptySlice, emptySlice
+	}
+	if rrset == nil || newrrset == nil {
+		// One is nil, the other is not - they differ
+		return true, emptySlice, emptySlice
+	}
+	
+	// Treat nil .RRs as empty slices
+	oldrrs := rrset.RRs
+	if oldrrs == nil {
+		oldrrs = emptySlice
+	}
+	newrrs := newrrset.RRs
+	if newrrs == nil {
+		newrrs = emptySlice
+	}
+	
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrset.RRtype]
 	adds := []dns.RR{}
@@ -82,21 +103,21 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 	if debug {
 		lg.Printf("*** RRD: Comparing %s RRsets for %s:", typestr, rrset.Name)
 		lg.Printf("-------- Old set for %s %s:", rrset.Name, typestr)
-		for _, rr := range rrset.RRs {
+		for _, rr := range oldrrs {
 			lg.Printf("%s", rr.String())
 		}
 		lg.Printf("-------- New set for %s %s:", rrset.Name, typestr)
-		for _, rr := range newrrset.RRs {
+		for _, rr := range newrrs {
 			lg.Printf("%s", rr.String())
 		}
 	}
 	// compare oldrrs to newrrs
-	for _, orr := range rrset.RRs {
+	for _, orr := range oldrrs {
 		if orr.Header().Rrtype == dns.TypeRRSIG {
 			continue
 		}
 		match = false
-		for _, nrr := range newrrset.RRs {
+		for _, nrr := range newrrs {
 			if dns.IsDuplicate(orr, nrr) {
 				match = true
 				break
@@ -110,12 +131,12 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 	}
 
 	// compare newrrs to oldrrs
-	for _, nrr := range newrrset.RRs {
+	for _, nrr := range newrrs {
 		if nrr.Header().Rrtype == dns.TypeRRSIG {
 			continue
 		}
 		match = false
-		for _, orr := range rrset.RRs {
+		for _, orr := range oldrrs {
 			if dns.IsDuplicate(nrr, orr) {
 				match = true
 				break
@@ -137,8 +158,36 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 // Two RRSIG slices are considered equal if they contain the same RRSIGs (using dns.IsDuplicate for comparison),
 // regardless of order. Returns true if the RRSIGs differ, false if they are the same.
 func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
+	// Nil guard: if both RRsets are nil, RRSIGs are the same (both empty)
+	if rrset == nil && newrrset == nil {
+		return false
+	}
+	// If one is nil and the other is not, check if the non-nil one has any RRSIGs
+	if rrset == nil {
+		// Old is nil (no RRSIGs), check if new has any
+		if newrrset.RRSIGs == nil || len(newrrset.RRSIGs) == 0 {
+			return false // Both effectively empty
+		}
+		return true // New has RRSIGs, old doesn't
+	}
+	if newrrset == nil {
+		// New is nil (no RRSIGs), check if old has any
+		if rrset.RRSIGs == nil || len(rrset.RRSIGs) == 0 {
+			return false // Both effectively empty
+		}
+		return true // Old has RRSIGs, new doesn't
+	}
+	
+	// Both are non-nil, treat nil .RRSIGs as empty slices
 	oldRRSIGs := rrset.RRSIGs
+	if oldRRSIGs == nil {
+		oldRRSIGs = []dns.RR{}
+	}
 	newRRSIGs := newrrset.RRSIGs
+	if newRRSIGs == nil {
+		newRRSIGs = []dns.RR{}
+	}
+	
 	if len(oldRRSIGs) != len(newRRSIGs) {
 		return true
 	}
@@ -263,7 +312,7 @@ func (rrset *RRset) String(maxlen int) (out string) {
 				continue
 			}
 			rrstr := rr.String() + "\n"
-			if maxlen > 0 && len(rrstr) > maxlen {
+			if maxlen > 4 && len(rrstr) > maxlen {
 				rrstr = rrstr[:maxlen-4] + "...\n"
 			}
 			out += rrstr
@@ -277,7 +326,7 @@ func (rrset *RRset) String(maxlen int) (out string) {
 				continue
 			}
 			sigstr := sig.String() + "\n"
-			if maxlen > 0 && len(sigstr) > maxlen {
+			if maxlen > 4 && len(sigstr) > maxlen {
 				sigstr = sigstr[:maxlen-4] + "...\n"
 			}
 			out += sigstr
@@ -287,8 +336,8 @@ func (rrset *RRset) String(maxlen int) (out string) {
 	if out == "" {
 		typeStr := "UNKNOWN"
 		if rrset.RRtype > 0 {
-			if int(rrset.RRtype) < len(dns.TypeToString) && dns.TypeToString[rrset.RRtype] != "" {
-				typeStr = dns.TypeToString[rrset.RRtype]
+			if value, ok := dns.TypeToString[rrset.RRtype]; ok && value != "" {
+				typeStr = value
 			} else {
 				typeStr = fmt.Sprintf("TYPE%d", rrset.RRtype)
 			}
@@ -299,12 +348,6 @@ func (rrset *RRset) String(maxlen int) (out string) {
 		}
 		out = fmt.Sprintf("(empty RRset: name=%q type=%s rrs=%d rrsigs=%d)\n",
 			name, typeStr, rrCount, sigCount)
-	}
-
-	// Debug: log if we're about to return empty
-	if out == "" {
-		log.Printf("RRset.String: CRITICAL - out is empty before return! name=%q type=%d rrs=%d rrsigs=%d",
-			rrset.Name, rrset.RRtype, rrCount, sigCount)
 	}
 
 	return out
