@@ -203,7 +203,15 @@ PrivateKey: %s`,
 //
 // The function returns an error if the public-key RR cannot be parsed, if the private key cannot be
 // created from the provided strings, if the privkey YAML cannot be unmarshaled, or if the algorithm
-// is not supported.
+// PrepareKeyCache creates a PrivateKeyCache from a private-key string (BIND YAML format)
+// and a public-key DNS RR string.
+//
+// PrepareKeyCache parses the public-key RR and the private-key (expected in BIND
+// private-key-format YAML), validates supported RR types (DNSKEY or KEY) and
+// supported DNSSEC algorithms, and populates the returned PrivateKeyCache with
+// key metadata, the parsed private key, and a concrete crypto key value usable
+// for signing. It returns an error if parsing fails or the RR type/algorithm is
+// not supported.
 func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// log.Printf("PrepareKeyCache: privkey:\n%s\npubkey: %s", privkey, pubkey)
 	rr, err := dns.NewRR(pubkey)
@@ -268,7 +276,10 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 
 // PrivateKeyToPEM converts a crypto.PrivateKey to PKCS#8 PEM format.
 // PrivateKeyToPEM converts a crypto.PrivateKey to a PKCS#8 PEM-encoded string.
-// It returns the PEM-encoded private key or an error if the input is nil or if marshaling to PKCS#8 fails.
+// PrivateKeyToPEM converts a crypto.PrivateKey into a PKCS#8 PEM-encoded string.
+// 
+// It returns the PEM-formatted private key. An error is returned if the provided
+// private key is nil or if marshaling the key to PKCS#8 DER fails.
 func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
 	if privkey == nil {
 		return "", fmt.Errorf("private key is nil")
@@ -293,7 +304,8 @@ func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
 // PEMToPrivateKey parses pemData as a PKCS#8 PEM-encoded private key and returns it as a crypto.PrivateKey.
 // 
 // The input must contain a PEM block of type "PRIVATE KEY" encoded in PKCS#8. Returns an error if the input
-// is empty, no PEM block can be decoded, the PEM block type is not "PRIVATE KEY", or the PKCS#8 parsing fails.
+// PEMToPrivateKey parses a PKCS#8 PEM-encoded private key and returns the corresponding crypto.PrivateKey.
+// It returns an error if pemData is empty, if no PEM block can be decoded, if the PEM block type is not "PRIVATE KEY", or if PKCS#8 parsing fails.
 func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {
 	if pemData == "" {
 		return nil, fmt.Errorf("PEM data is empty")
@@ -321,7 +333,8 @@ func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {
 // IsPEMFormat detects if a stored private key is in PKCS#8 PEM format (new format)
 // IsPEMFormat reports whether keyData appears to be a PKCS#8 PEM-encoded private key.
 // It returns true when the data starts with a PEM header containing "PRIVATE KEY" or
-// decodes to a PEM block of type "PRIVATE KEY"; otherwise it returns false.
+// IsPEMFormat reports whether the provided key data is a PKCS#8 PEM-encoded private key.
+// It returns `true` if the input begins with a PEM header containing "PRIVATE KEY" or decodes to a PEM block of type "PRIVATE KEY", `false` otherwise.
 func IsPEMFormat(keyData string) bool {
 	if keyData == "" {
 		return false
@@ -350,7 +363,18 @@ func IsPEMFormat(keyData string) bool {
 //
 // It returns the parsed crypto.PrivateKey, the DNSSEC algorithm numeric code, and a
 // BIND-format private-key string suitable for backward compatibility. An error is
-// returned for unknown algorithms or on any parse/conversion failure.
+// ParsePrivateKeyFromDB parses a stored private key (either PKCS#8 PEM or legacy BIND format)
+// and returns the crypto.PrivateKey, the DNSSEC algorithm numeric code, and a BIND-format
+// private-key string suitable for use with PrepareKeyCache.
+//
+// If the input `privatekey` is detected as a PKCS#8 PEM, the function parses it and derives
+// a BIND-format private-key string from `keyrrstr` (a DNSKEY/KEY RR string) for compatibility.
+// If `privatekey` is not PEM, it is treated as the legacy BIND private-key material and is
+// wrapped into a full BIND-format string. The `algorithm` parameter is validated and converted
+// to the corresponding DNSSEC algorithm code.
+//
+// Returns an error if the algorithm is unknown, PEM decoding/parsing fails, the public key RR
+// cannot be parsed, conversion to BIND format fails, or the legacy BIND parsing logic fails.
 func ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr string) (crypto.PrivateKey, uint8, string, error) {
 	var privkey crypto.PrivateKey
 	var alg uint8
@@ -417,7 +441,13 @@ func ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr string) (crypto.Priva
 // If keydir is empty, the function returns an error. Only files with the
 // ".key" suffix are processed; other files are ignored. Each processed file is
 // parsed as a DNS RR and must be of type KEY; parse failures, unexpected RR
-// types, or filesystem errors produce an error.
+// ReadPubKeys reads all files with the ".key" suffix in the provided directory,
+// parses each as a DNS KEY RR, and returns a map from the RR owner name to the
+// dns.KEY value.
+//
+// The keydir parameter is the path to the directory containing public key files.
+// Non-".key" files are ignored. If any filesystem operation fails or a file
+// cannot be parsed as a DNS KEY RR, an error is returned.
 func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 
 	var keymap = make(map[string]dns.KEY, 5)

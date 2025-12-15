@@ -124,6 +124,9 @@ func initConfig() {
 	}
 }
 
+// initImr initializes the application context, prepares configuration, installs signal handlers, sets up the IMR API router, and starts the IMR service.
+// 
+// It establishes a cancellable context that is cancelled on SIGINT or SIGTERM, calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
 func initImr() {
 	// conf := cli.Conf
 

@@ -22,6 +22,8 @@ import (
 // This is still global, but also present in the RRsetCacheT struct
 var DnskeyCache = NewDnskeyCache()
 
+// NewDnskeyCache creates and returns a new DnskeyCacheT with its map initialized.
+// The returned cache has Map set to a fresh concurrent map for storing CachedDnskeyRRset entries.
 func NewDnskeyCache() *DnskeyCacheT {
 	return &DnskeyCacheT{
 		Map: cmap.New[CachedDnskeyRRset](),
@@ -51,7 +53,9 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 
 // var RRsetCache = NewRRsetCache()
 
-// func NewRRsetCache(lg *log.Logger, verbose, debug bool, options map[ImrOption]string) *RRsetCacheT {
+// NewRRsetCache creates and initializes an RRsetCacheT with per-transport DNS clients and empty concurrent maps.
+//
+// The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging; the verbose and debug flags enable their respective logging modes.
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	var client = map[core.Transport]*core.DNSClient{}
 
@@ -517,6 +521,10 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 	return existing
 }
 
+// tlsaOwnersForServer returns a sorted list of TLSA owner names for the given zone base and server.
+// It maps DoT transports to "_853._tcp.<base>" and DoQ transports to "_853._udp.<base>"; if the server has no transports
+// indicating DoT or DoQ, it yields the TCP owner by default. Returns nil when base is empty or the root ("."), and always
+// returns a deterministically sorted slice when non-nil.
 func tlsaOwnersForServer(base string, server *AuthServer) []string {
 	base = dns.Fqdn(strings.TrimSpace(base))
 	if base == "." || base == "" {

@@ -78,6 +78,9 @@ The zone to update is mandatory to specify on the command line with the --zone f
 	},
 }
 
+// init registers update-related Cobra subcommands and binds their command-line flags.
+// It wires the child, zone, and top-level update create commands and defines flags for
+// zone, parent, signer, server, and keyfile.
 func init() {
 	ChildCmd.AddCommand(childUpdateCmd)
 	childUpdateCmd.AddCommand(childUpdateCreateCmd)
@@ -94,6 +97,17 @@ func init() {
 	updateCreateCmd.Flags().StringVarP(&keyfile, "key", "K", "", "SIG(0) keyfile to use for signing the update")
 }
 
+// CreateUpdate starts an interactive CLI for composing, signing, and sending DNS UPDATEs.
+// 
+// It initializes the keystore and signing state, then enters a prompt loop that lets the
+// user add or delete RRs, view the pending update, sign it with SIG(0) keys (from a keyfile
+// or the keystore), select the target server, and send the update.
+// The function updates package-level globals such as `zone`, `signer`, and `server` as needed.
+// It may call os.Exit on fatal initialization or signing errors.
+ // 
+// The updateType parameter selects the operational context used to initialize the interactive
+// session (for example "child" or "zone") and does not affect the format of the DNS UPDATE
+// messages produced.
 func CreateUpdate(updateType string) {
 	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false, nil)
 	if err != nil {

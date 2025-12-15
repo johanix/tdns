@@ -92,6 +92,9 @@ func (db *KeyDB) Close() error {
 	return db.DB.Close()
 }
 
+// dbSetupTables creates the tables defined in DefaultTables on the given database connection.
+// It prepares and executes each table schema; prepare errors are logged and execution errors call log.Fatalf (terminating the process).
+// If Globals.Verbose is true, progress is logged. It always returns false.
 func dbSetupTables(db *sql.DB) bool {
 	if Globals.Verbose {
 		log.Printf("Setting up missing tables\n")
@@ -111,6 +114,10 @@ func dbSetupTables(db *sql.DB) bool {
 	return false
 }
 
+// NewKeyDB creates and initializes a KeyDB backed by the sqlite3 file at dbfile.
+// It validates that dbfile is provided, ensures the file is writable, opens the sqlite3 database, and sets up required tables.
+// If force is true, existing default tables are dropped before setup.
+// On success it returns a KeyDB with caches, an update channel, and Options set to the provided map; on failure it returns an error describing the problem.
 func NewKeyDB(dbfile string, force bool, options *map[AuthOption]string) (*KeyDB, error) {
 	// dbfile := viper.GetString("db.file")
 	if dbfile == "" {

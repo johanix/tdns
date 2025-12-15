@@ -156,7 +156,13 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 
 // Parent is the zone to apply the update to.
 // XXX: This is to focused on creating updates for child delegation info. Need a more general
-// function that can create updates for other things too.
+// CreateChildUpdate constructs a DNS UPDATE message for the given parent zone that applies the provided additions and removals for a child delegation.
+// 
+// If any removed RR is an NS whose target name is within the child zone, the function also removes A and AAAA glue RRsets for that NS name.
+// It validates that parent and child are non-empty and not ".", returning an error when validation fails.
+// When Globals.Debug is set, the resulting message is printed.
+// 
+// It returns the constructed DNS UPDATE message, or an error if validation fails.
 func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
@@ -191,7 +197,10 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 }
 
 // CreateChildReplaceUpdate creates a DNS UPDATE message that replaces all delegation data
-// for a child zone. It removes all existing NS and glue records, then adds the new ones.
+// CreateChildReplaceUpdate creates a DNS UPDATE message for parent that replaces the delegation for child.
+// It removes all existing NS records for the child and deletes A/AAAA glue for any in-bailiwick nameservers
+// discovered among the provided new NS, A, and AAAA records, then inserts the new NS and glue RRs.
+// Returns an error if parent or child is empty or equal to ".".
 func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
@@ -252,6 +261,10 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA []dns.R
 	return m, nil
 }
 
+// CreateUpdate creates a DNS UPDATE message for the given zone, applies the provided
+// removals and additions, and enables EDNS0 (payload 1232 with the DO bit set) so
+// that EDNS0 Extended DNS Error (EDE) information can be returned.
+// It returns the constructed *dns.Msg, or an error if the zone is empty or ".".
 func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("CreateUpdate: Error: zone to update not specified. Terminating")

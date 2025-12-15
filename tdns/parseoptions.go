@@ -117,6 +117,12 @@ func (conf *Config) parseAuthOptions() {
 	conf.DnsEngine.Options = clean
 }
 
+// parseZoneOptions validates and applies zone-specific option strings, updating zconf.Options and returning a map of enabled ZoneOption flags.
+// 
+// It parses and normalizes the options listed in zconf.OptionsStrs, enables recognized options, and ignores unknown or invalid ones.
+// For configuration problems (unknown options, missing dependencies such as DNSSEC policy for online signing or missing multisigner config/sync channel),
+// the function records a ConfigError on zd when provided and logs the issue.
+// The function returns a map whose keys are the enabled ZoneOption values.
 func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData) map[ZoneOption]bool {
 	log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
 	options := map[ZoneOption]bool{}
