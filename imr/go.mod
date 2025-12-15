@@ -31,7 +31,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/tdns/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/tdns/core v0.0.0-20251122130747-9c54a3943883 // indirect
+	github.com/johanix/tdns/tdns/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
 	github.com/johanix/tdns/tdns/edns0 v0.0.0-20251121102720-aa307d56701e // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

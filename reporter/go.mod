@@ -30,8 +30,8 @@ require (
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/tdns/core v0.0.0-20251122130747-9c54a3943883 // indirect
+	github.com/johanix/tdns/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/tdns/tdns/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
 	github.com/johanix/tdns/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
