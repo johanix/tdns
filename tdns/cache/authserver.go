@@ -156,7 +156,16 @@ func (as *AuthServer) IsAddressAvailable(addr string) bool {
 // Routing errors (no route to host) get 1 hour immediately as they're unlikely to resolve soon.
 // Timeout errors get 2 minutes as they might be temporary.
 // Other errors default to 2 minutes for first failure, 1 hour for subsequent failures.
-// Note: REFUSED responses are handled separately via RecordAddressFailureForRcode().
+// categorizeError selects a backoff duration based on the provided error text and
+// whether this is the first failure for an address.
+//
+// Rules:
+// - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
+// - If the error text indicates a routing failure (contains "no route to host",
+//   "network is unreachable", or "host unreachable"): return 1 hour.
+// - If the error text indicates a timeout (contains "timeout", "i/o timeout", or
+//   "deadline exceeded"): return 2 minutes.
+// - For all other errors: return 2 minutes for a first failure, 1 hour otherwise.
 func categorizeError(err error, isFirstFailure bool) time.Duration {
 	if err == nil {
 		// No error provided, use default behavior
