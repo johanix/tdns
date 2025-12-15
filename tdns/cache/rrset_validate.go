@@ -447,7 +447,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 // It finds the DNSKEY in the RRset that matches the DS (by keytag, SEP bit, and digest),
 // then validates the RRset signature using that DNSKEY.
 // Returns true if validation succeeds, false otherwise. Also returns the candidate DNSKEY if found.
-// This function modifies the RRset TTLs but does not modify any caches.
+// The function may modify the TTLs of RRs in rrset (capping them to signature expiration) but does not modify any caches.
 func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string, verbose bool) (bool, *dns.DNSKEY) {
 	if rrset == nil || ds == nil {
 		return false, nil
@@ -497,7 +497,7 @@ func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string
 // It finds the RRSIG(DNSKEY) signed by the specified key, verifies the signature, checks time validity,
 // and caps TTLs to signature expiration if necessary.
 // Returns true if validation succeeds, false otherwise. Also returns the RRSIG if found.
-// This function modifies the RRset TTLs but does not modify any caches.
+// signature's expiration; it does not modify any caches.
 func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName string, dnskey *dns.DNSKEY, verbose bool) (bool, *dns.RRSIG) {
 	if rrset == nil || dnskey == nil {
 		return false, nil

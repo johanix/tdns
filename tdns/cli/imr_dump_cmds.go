@@ -538,6 +538,7 @@ func formatTransportWeights(server *cache.AuthServer) string {
 	return "[]"
 }
 
+// If the state has no known mapping, it returns "[unset]".
 func validationStateString(state cache.ValidationState) string {
 	if s := cache.ValidationStateToString[state]; s != "" {
 		return s
@@ -545,6 +546,11 @@ func validationStateString(state cache.ValidationState) string {
 	return "[unset]"
 }
 
+// printAuthServerVerbose prints detailed information about the given auth server.
+// It emits the server name, source, addresses, ALPN values, transport weights or transports,
+// connection mode, and an optional raw transport signal. If TLSA records are available it
+// lists each owner with validation state, TTL, expiration and the associated RRs and RRSIG count;
+// otherwise it prints that no TLSA records are present.
 func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("  Server: %s\n", name)
 	fmt.Printf("    Source: %s\n", server.Src)
@@ -607,7 +613,9 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 //		flags = append(flags, "-")
 //	}
 //	return fmt.Sprintf("[%s]", strings.Join(flags, " "))
-//}
+// formatKeySnippet truncates a key string to a short display snippet.
+// If the key is longer than 15 characters, it returns the first 15 characters
+// followed by "..." ; otherwise it returns the key unchanged.
 
 func formatKeySnippet(key string) string {
 	if len(key) <= 15 {
@@ -634,6 +642,8 @@ func maskDsLine(line string) string {
 	return strings.Join(parts, " ")
 }
 
+// maskRrsigLine replaces the signature field in a space-separated RRSIG RR string with "[sig]".
+// If the line contains 13 or more fields, the 13th field (index 12) is replaced; otherwise the original line is returned.
 func maskRrsigLine(line string) string {
 	parts := strings.Fields(line)
 	if len(parts) <= 12 {
@@ -643,6 +653,11 @@ func maskRrsigLine(line string) string {
 	return strings.Join(parts, " ")
 }
 
+// formatDuration formats d into a compact human-readable string.
+// Durations less than 1 minute are shown in whole seconds (e.g. "12s").
+// Durations less than 1 hour are shown in whole minutes (e.g. "12m").
+// Durations less than 24 hours are shown in hours with one decimal (e.g. "2.3h").
+// Longer durations are shown in days with one decimal (e.g. "1.2d").
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%.0fs", d.Seconds())
@@ -658,6 +673,8 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%.1fd", days)
 }
 
+// init registers dump-related CLI subcommands used for inspection and diagnostics.
+// It attaches dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, and dumpZonesCmd to ImrDumpCmd, adds the keys/servers/errors subcommands under auth-servers, and attaches the zone servers subcommand under zone.
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
 	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd)
