@@ -75,7 +75,7 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 
 func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
 	emptySlice := []dns.RR{}
-	
+
 	// Nil guard: if either RRset is nil, treat as no difference
 	if rrset == nil && newrrset == nil {
 		return false, emptySlice, emptySlice
@@ -84,7 +84,7 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 		// One is nil, the other is not - they differ
 		return true, emptySlice, emptySlice
 	}
-	
+
 	// Treat nil .RRs as empty slices
 	oldrrs := rrset.RRs
 	if oldrrs == nil {
@@ -94,7 +94,7 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 	if newrrs == nil {
 		newrrs = emptySlice
 	}
-	
+
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrset.RRtype]
 	adds := []dns.RR{}
@@ -177,7 +177,7 @@ func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
 		}
 		return true // Old has RRSIGs, new doesn't
 	}
-	
+
 	// Both are non-nil, treat nil .RRSIGs as empty slices
 	oldRRSIGs := rrset.RRSIGs
 	if oldRRSIGs == nil {
@@ -187,7 +187,7 @@ func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
 	if newRRSIGs == nil {
 		newRRSIGs = []dns.RR{}
 	}
-	
+
 	if len(oldRRSIGs) != len(newRRSIGs) {
 		return true
 	}

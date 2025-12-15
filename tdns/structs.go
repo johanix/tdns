@@ -317,12 +317,12 @@ type Sig0Key struct {
 }
 
 type DnssecKey struct {
-	Name      string
-	State     string
-	Keyid     uint16
-	Flags     uint16
-	Algorithm string
-	Creator   string
+	Name       string
+	State      string
+	Keyid      uint16
+	Flags      uint16
+	Algorithm  string
+	Creator    string
 	PrivateKey string //
 	Key        dns.DNSKEY
 	Keystr     string

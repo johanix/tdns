@@ -560,7 +560,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						log.Printf("Additional contains an SVCB, here we should collect the ALPN")
 						svcb := rr.(*dns.SVCB)
 						// Ensure we have a shared AuthServer instance for this NS
-	                    server := imr.Cache.GetOrCreateAuthServer(name)
+						server := imr.Cache.GetOrCreateAuthServer(name)
 						serverMap[name] = server
 						for _, kv := range svcb.Value {
 							if kv.Key() == dns.SVCB_ALPN {

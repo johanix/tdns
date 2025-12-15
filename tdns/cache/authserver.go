@@ -57,12 +57,12 @@ func NewAuthServer(name string) *AuthServer {
 		return nil
 	}
 	return &AuthServer{
-		Name:       name,
-		Alpn:       []string{"do53"},
-		Transports: []core.Transport{core.TransportDo53},
+		Name:          name,
+		Alpn:          []string{"do53"},
+		Transports:    []core.Transport{core.TransportDo53},
 		PrefTransport: core.TransportDo53,
-		Src:        "unknown",
-		ConnMode:   ConnModeLegacy,
+		Src:           "unknown",
+		ConnMode:      ConnModeLegacy,
 		// Other fields are zero-initialized:
 		// Addrs: nil
 		// TransportWeights: nil
@@ -476,12 +476,12 @@ func (as *AuthServer) IsAddressAvailable(addr string) bool {
 // whether this is the first failure for an address.
 //
 // Rules:
-// - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
-// - If the error text indicates a routing failure (contains "no route to host",
-//   "network is unreachable", or "host unreachable"): return 1 hour.
-// - If the error text indicates a timeout (contains "timeout", "i/o timeout", or
-//   "deadline exceeded"): return 2 minutes.
-// - For all other errors: return 2 minutes for a first failure, 1 hour otherwise.
+//   - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
+//   - If the error text indicates a routing failure (contains "no route to host",
+//     "network is unreachable", or "host unreachable"): return 1 hour.
+//   - If the error text indicates a timeout (contains "timeout", "i/o timeout", or
+//     "deadline exceeded"): return 2 minutes.
+//   - For all other errors: return 2 minutes for a first failure, 1 hour otherwise.
 func categorizeError(err error, isFirstFailure bool) time.Duration {
 	if err == nil {
 		// No error provided, use default behavior
@@ -628,14 +628,14 @@ func (as *AuthServer) AllAddressesInBackoff() bool {
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	
+
 	// Copy Addrs while holding the lock to avoid TOCTOU
 	if len(as.Addrs) == 0 {
 		return false
 	}
 	addrs := make([]string, len(as.Addrs))
 	copy(addrs, as.Addrs)
-	
+
 	// Check backoffs while still holding the same lock
 	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
 		return false // No backoffs recorded
@@ -661,14 +661,14 @@ func (as *AuthServer) GetAvailableAddresses() []string {
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	
+
 	// Copy Addrs while holding the lock to avoid TOCTOU
 	if len(as.Addrs) == 0 {
 		return nil
 	}
 	addrs := make([]string, len(as.Addrs))
 	copy(addrs, as.Addrs)
-	
+
 	// Check backoffs while still holding the same lock
 	var available []string
 	now := time.Now()

@@ -337,7 +337,7 @@ func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
 }
 
 // PEMToPrivateKey parses pemData as a PKCS#8 PEM-encoded private key and returns it as a crypto.PrivateKey.
-// 
+//
 // The input must contain a PEM block of type "PRIVATE KEY" encoded in PKCS#8. Returns an error if the input
 // is empty, no PEM block can be decoded, the PEM block type is not "PRIVATE KEY", or the PKCS#8 parsing fails.
 func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {

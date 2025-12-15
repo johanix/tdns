@@ -158,9 +158,9 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 							keyname := dnskey.Header().Name
 							expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
 							cdr := cache.CachedDnskeyRRset{
-								Name:  keyname,
-								Keyid: keyid,
-								RRset: dnskeyrrset,
+								Name:       keyname,
+								Keyid:      keyid,
+								RRset:      dnskeyrrset,
 								State:      cache.ValidationStateSecure,
 								Dnskey:     *dnskey,
 								Expiration: expiration,
@@ -196,9 +196,9 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 				// lookupKey := fmt.Sprintf("%s::%d", keyname, keyid)
 				expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
 				cdr := cache.CachedDnskeyRRset{
-					Name:  keyname,
-					Keyid: keyid,
-					RRset: dnskeyrrset,
+					Name:       keyname,
+					Keyid:      keyid,
+					RRset:      dnskeyrrset,
 					State:      cache.ValidationStateSecure,
 					Dnskey:     *dnskey,
 					Expiration: expiration,
