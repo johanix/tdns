@@ -17,12 +17,6 @@ import (
 	"github.com/johanix/tdns/tdns"
 )
 
-var (
-	appName    = "tdns-kdc"
-	appVersion = "0.1.0"
-	appDate    = "2025-12-17"
-)
-
 func main() {
 	tdns.Globals.App.Type = tdns.AppTypeKdc
 	tdns.Globals.App.Version = appVersion
