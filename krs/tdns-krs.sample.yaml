@@ -1,0 +1,33 @@
+# Sample configuration file for tdns-krs (Key Receiving Service)
+# Copy this to /etc/tdns/tdns-krs.yaml and customize
+
+service:
+   name:		TDNS-KRS
+   verbose:		true
+   debug:		true
+
+log:
+   file:		/var/log/tdns/tdns-krs.log
+
+apiserver:
+   usetls:		true
+   addresses:     	[ 127.0.0.1:8990 ]
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
+   certfile:		/etc/tdns/certs/localhost.crt
+   keyfile:		/etc/tdns/certs/localhost.key
+
+krs:
+   database:
+      dsn:		/var/lib/tdns/krs.db  # SQLite database file path
+   
+   node:
+      id:			node1  # Must match node ID in KDC
+      long_term_priv_key:	/etc/tdns/krs/node1.PrivateKey  # Path to HPKE long-term private key file
+      kdc_address:		127.0.0.1:5354  # KDC server address (IP:port)
+   
+   control_zone:		kdc.example.com.  # Control zone for KMCTRL records
+   
+   dnsengine:
+      addresses:		[ 127.0.0.1:5355 ]  # Address for NOTIFY receiver
+      transports:		[ do53 ]
+
