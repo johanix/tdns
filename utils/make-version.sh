@@ -3,7 +3,7 @@ appversion=$1
 appdate=$2
 prog=$3
 
-versioned_progs="tdns-agent tdns-auth tdns-combiner tdns-cli dog tdns-imr tdns-reporter tdns-scanner"
+versioned_progs="tdns-agent tdns-auth tdns-combiner tdns-cli dog tdns-imr tdns-reporter tdns-scanner tdns-kdc tdns-krs"
 
 # Check if we're on NetBSD
 if [ "$(uname -s)" = "NetBSD" ]; then
