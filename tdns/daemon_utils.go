@@ -78,7 +78,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
 
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
 	if err != nil {
-		if strings.Contains(err.Error(), "onnection refused") {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			fmt.Printf("Daemon not responding. Starting new daemon (timeout: %d seconds)\n", maxwait)
 
 			daemonbinary := command
@@ -157,7 +157,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
 							r.Status, r.Msg)
 						os.Exit(0)
 					} else {
-						if err.Error() == "Connection refused" {
+						if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 							if Globals.Verbose {
 								fmt.Printf("Status: connection refused, but not yet giving up\n")
 							}
@@ -206,7 +206,7 @@ func (api *ApiClient) UpdateDaemon(data CommandPost, dieOnError bool) (int, Comm
 	var cr CommandResponse
 	status, buf, err := api.RequestNG(http.MethodPost, "/command", data, dieOnError)
 	if err != nil {
-		if strings.Contains(err.Error(), "connection refused") {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			return 501, cr, errors.New("connection refused")
 		} else {
 			return 501, cr, err
@@ -294,7 +294,7 @@ func (api *ApiClient) ShowApi() {
 	var cr CommandResponse
 	status, buf, err := api.RequestNG(http.MethodPost, "/command", CommandPost{Command: "api"}, true)
 	if err != nil {
-		if strings.Contains(err.Error(), "connection refused") {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			fmt.Printf("Connection refused\n")
 		} else {
 			fmt.Printf("Error: %v\n", err)

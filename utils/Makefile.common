@@ -12,8 +12,8 @@ default: ${PROG}
 
 ${PROG}: build
 
-PROGS_WITH_VERSION := tdns-auth tdns-agent tdns-scanner tdns-combiner tdns-cli tdns-imr music-sidecar
-FOO := tdns-agent
+# OBE PROGS_WITH_VERSION := tdns-auth tdns-agent tdns-scanner tdns-combiner tdns-cli tdns-imr music-sidecar
+# OBE FOO := tdns-agent
 
 all: $(PROG)
 

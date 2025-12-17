@@ -25,7 +25,7 @@ var TruststoreCmd = &cobra.Command{
 	Short: "Prefix command to access different features of tdns-auth truststore",
 	Long: `The TDNS-AUTH truststore is where SIG(0) public keys for child zones are kept.
 The CLI contains functions for listing trusted SIG(0) keys, adding and
-deleting child keys and alsowell as changing the trust state of individual keys.`,
+deleting child keys as well as changing the trust state of individual keys.`,
 	//		Run: func(cmd *cobra.Command, args []string) {
 	//			fmt.Println("truststore called. This is likely a mistake, sub command needed")
 	//	},

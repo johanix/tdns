@@ -79,8 +79,8 @@ var DaemonStartCmd = &cobra.Command{
 		}
 		daemonCommand := ""
 		if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
-			if cmd, ok := apiDetails["command"].(string); ok && cmd != "" {
-				daemonCommand = cmd
+			if cmdStr, ok := apiDetails["command"].(string); ok && cmdStr != "" {
+				daemonCommand = cmdStr
 			}
 		}
 		
@@ -121,8 +121,8 @@ var DaemonRestartCmd = &cobra.Command{
 		}
 		daemonCommand := ""
 		if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
-			if cmd, ok := apiDetails["command"].(string); ok && cmd != "" {
-				daemonCommand = cmd
+			if cmdStr, ok := apiDetails["command"].(string); ok && cmdStr != "" {
+				daemonCommand = cmdStr
 			}
 		}
 		
