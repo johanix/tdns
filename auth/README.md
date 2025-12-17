@@ -1,6 +1,6 @@
-# TDNS-SERVER
+# TDNS-AUTH
 
-**TDNS-SERVER** is small authoritative DNS name server with support for a baseline
+**TDNS-AUTH** is small authoritative DNS name server with support for a baseline
 feature set:
 
 0. Load zones from text files on disk.
@@ -13,15 +13,15 @@ feature set:
 3. Respond mostly correctly to queries with DO=1 to DNSSEC signed
    zones. The support for negative responses is not quite complete.
 
-4. TDNS-SERVER is able to sign (including generating the NSEC chain) a zone 
+4. TDNS-AUTH is able to sign (including generating the NSEC chain) a zone 
    via a command from "**tdns-cli**". It is also able to perform online 
    signing of unsigned zones that are configured to allow that (if
-   TDNS-SERVER has access to suitable keys to sign with).
+   TDNS-AUTH has access to suitable keys to sign with).
 
-The TDNS-SERVER configuration is in the file tdns-server.yaml, by default
-located in **/etc/tdns/tdns-server.yaml**
+The TDNS-AUTH configuration is in the file tdns-auth.yaml, by default
+located in **/etc/tdns/tdns-auth.yaml**
 
-In addition, TDNS-SERVER has a couple of extra features:
+In addition, TDNS-AUTH has a couple of extra features:
 
 1. There is a built in REST API, used by the mgmt tool "tdns-cli".
 
@@ -39,10 +39,10 @@ In addition, TDNS-SERVER has a couple of extra features:
    UPDATE messages.
 
 5. Support for receiving generalised notifications (as an agent for
-   the parent). Note that at present TDNS-SERVER doesn't do much with the
+   the parent). Note that at present TDNS-AUTH doesn't do much with the
    received notifications, as it does not have a built in CDS and/or
    CSYNC scanner. In the future there may be a separate scanner that
-   TDNS-SERVER will interact with.
+   TDNS-AUTH will interact with.
 
 6. Support for sending generalized notifications (as an agent
    for the child) to the parent's designated NOTIFY Receiver (as 

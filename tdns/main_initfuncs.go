@@ -75,7 +75,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	Globals.App.ServerConfigTime = time.Now()
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter:
 		pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 		pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -94,7 +94,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -115,8 +115,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	fmt.Printf("Logging to file: %s\n", logfile)
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
-		// Note that AppTypeServer and AppTypeAgent feel though into here as well.
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
+		// Note that AppTypeAuth and AppTypeAgent feel though into here as well.
 		kdb := conf.Internal.KeyDB
 		if kdb == nil {
 			err = conf.InitializeKeyDB()
@@ -148,13 +148,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
 
-	// Used by tdns-server, tdns-agent and tdns-combiner
+	// Used by tdns-auth, tdns-agent and tdns-combiner
 	conf.Internal.ScannerQ = make(chan ScanRequest, 5)
 	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest, 100)
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
 
-	// Only used by tdns-server
+	// Only used by tdns-auth
 	conf.Internal.ResignQ = make(chan *ZoneData, 10)
 
 	// Create AgentQs unconditionally (even if not used by this app type)
@@ -199,10 +199,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Initialize AgentRegistry for agent mode only
 		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
 		// dump.P(conf.Internal.AgentRegistry)
-	case AppTypeServer, AppTypeCombiner:
-		// ... existing server/combiner setup ...
+	case AppTypeAuth, AppTypeCombiner:
+		// ... existing auth/combiner setup ...
 	default:
-		// ... existing server/agent/combiner setup ...
+		// ... existing auth/agent/combiner setup ...
 	}
 
 	if Globals.Debug {
@@ -239,12 +239,12 @@ func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) err
 	return nil
 }
 
-// StartServer starts subsystems for tdns-server
-func (conf *Config) StartServer(ctx context.Context, apirouter *mux.Router) error {
+// StartAuth starts subsystems for tdns-auth
+func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error {
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	startEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
 
-	// In tdns-server, IMR is active by default unless explicitly set to false
+	// In tdns-auth, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
 		startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })

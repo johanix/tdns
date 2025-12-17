@@ -12,7 +12,7 @@ default: ${PROG}
 
 ${PROG}: build
 
-PROGS_WITH_VERSION := tdns-server tdns-agent music-sidecar
+PROGS_WITH_VERSION := tdns-auth tdns-agent tdns-scanner tdns-combiner tdns-cli tdns-imr music-sidecar
 FOO := tdns-agent
 
 all: $(PROG)

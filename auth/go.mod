@@ -1,4 +1,4 @@
-module tdns-server
+module tdns-auth
 
 go 1.24.0
 

@@ -1,6 +1,6 @@
 
 all:
-	$(MAKE) -C ./server/
+	$(MAKE) -C ./auth/
 	$(MAKE) -C ./cli/
 	$(MAKE) -C ./agent/
 	$(MAKE) -C ./dog/
@@ -12,7 +12,7 @@ all:
 #	$(MAKE) -C ./sidecar-cli/
 
 clean:
-	$(MAKE) -C ./server/ clean
+	$(MAKE) -C ./auth/ clean
 	$(MAKE) -C ./cli/ clean
 	$(MAKE) -C ./agent/ clean
 	$(MAKE) -C ./dog/ clean
@@ -24,7 +24,7 @@ clean:
 #	$(MAKE) -C ./sidecar-cli/ clean
 
 install:
-	$(MAKE) -C ./server/ install
+	$(MAKE) -C ./auth/ install
 	$(MAKE) -C ./cli/ install
 	$(MAKE) -C ./agent/ install
 	$(MAKE) -C ./dog/ install

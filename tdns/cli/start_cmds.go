@@ -71,7 +71,20 @@ var DaemonStartCmd = &cobra.Command{
 		if maxwait < MaxWait {
 			maxwait = MaxWait
 		}
-		api.StartDaemon(maxwait, tdns.Globals.Slurp)
+		
+		// Get command from CLI config if available
+		clientKey := getClientKeyFromParent(prefixcmd)
+		if clientKey == "" {
+			clientKey = "tdns-server" // fallback for unknown commands
+		}
+		daemonCommand := ""
+		if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
+			if cmd, ok := apiDetails["command"].(string); ok && cmd != "" {
+				daemonCommand = cmd
+			}
+		}
+		
+		api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand)
 	},
 }
 
@@ -100,10 +113,28 @@ var DaemonRestartCmd = &cobra.Command{
 		if maxwait < MaxWait {
 			maxwait = MaxWait
 		}
+		
+		// Get command from CLI config if available
+		clientKey := getClientKeyFromParent(prefixcmd)
+		if clientKey == "" {
+			clientKey = "tdns-server" // fallback for unknown commands
+		}
+		daemonCommand := ""
+		if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
+			if cmd, ok := apiDetails["command"].(string); ok && cmd != "" {
+				daemonCommand = cmd
+			}
+		}
+		
+		// Fallback to viper for backward compatibility
+		if daemonCommand == "" {
+			daemonCommand = viper.GetString("common.command")
+		}
+		
 		if updateBinary {
-			dstbin := viper.GetString("common.command")
+			dstbin := daemonCommand
 			if dstbin == "" {
-				fmt.Printf("Update binary: destination unspecified (key: common.command)\n")
+				fmt.Printf("Update binary: destination unspecified (key: apiservers[].command or common.command)\n")
 				os.Exit(1)
 			}
 			srcbin := "/tmp/" + filepath.Base(dstbin)
@@ -138,7 +169,7 @@ var DaemonRestartCmd = &cobra.Command{
 				fmt.Printf("%s is not newer than %s. No update.\n", srcbin, dstbin)
 			}
 		}
-		tdns.Globals.Api.StartDaemon(maxwait, false) // no slurping on restart
+		tdns.Globals.Api.StartDaemon(maxwait, false, daemonCommand) // no slurping on restart
 	},
 }
 

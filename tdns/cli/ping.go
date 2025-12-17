@@ -12,24 +12,33 @@ import (
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
-func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
-	var clientKey string
+// getClientKeyFromParent maps a parent command name to its corresponding clientKey.
+// Returns empty string if parent is unknown.
+func getClientKeyFromParent(parent string) string {
 	switch parent {
 	case "auth", "server":
-		clientKey = "tdns-server"
+		return "tdns-server"
 	case "combiner":
-		clientKey = "tdns-combiner"
+		return "tdns-combiner"
 	case "msa":
-		clientKey = "tdns-msa"
+		return "tdns-msa"
 	case "agent":
-		clientKey = "tdns-agent"
+		return "tdns-agent"
 	case "scanner":
-		clientKey = "tdns-scanner"
+		return "tdns-scanner"
 	case "imr":
-		clientKey = "tdns-imr"
+		return "tdns-imr"
 	default:
+		return ""
+	}
+}
+
+func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
+	clientKey := getClientKeyFromParent(parent)
+	if clientKey == "" {
 		if dieOnError {
 			log.Fatalf("Unknown parent command: %s", parent)
 		}
@@ -52,6 +61,31 @@ func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
 		fmt.Printf("Using API client for %q:\nBaseUrl: %s\n", clientKey, client.BaseUrl)
 	}
 	return client, nil
+}
+
+// getApiDetailsByClientKey retrieves the ApiDetails configuration for a given clientKey
+// by looking it up in the CLI config via viper.
+func getApiDetailsByClientKey(clientKey string) map[string]interface{} {
+	apiservers := viper.Get("apiservers")
+	if apiservers == nil {
+		return nil
+	}
+
+	servers, ok := apiservers.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	for _, server := range servers {
+		serverMap, ok := server.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, ok := serverMap["name"].(string); ok && name == clientKey {
+			return serverMap
+		}
+	}
+	return nil
 }
 
 // getCommandContext takes the current command name and returns both the immediate parent
