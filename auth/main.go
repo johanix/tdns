@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	tdns.Globals.App.Type = tdns.AppTypeServer
+	tdns.Globals.App.Type = tdns.AppTypeAuth
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
@@ -27,7 +27,7 @@ func main() {
 	defer stop()
 
 	conf := &tdns.Conf
-	err := conf.MainInit(ctx, tdns.DefaultServerCfgFile)
+	err := conf.MainInit(ctx, tdns.DefaultAuthCfgFile)
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
@@ -55,8 +55,7 @@ func main() {
 		}
 	}()
 
-	// err = tdns.StartServer(ctx, &conf, apirouter)
-	err = conf.StartServer(ctx, apirouter)
+	err = conf.StartAuth(ctx, apirouter)
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error starting TDNS threads: %v", err))
 	}

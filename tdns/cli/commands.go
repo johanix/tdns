@@ -17,7 +17,7 @@ var force bool
 
 var StopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Send stop command to tdns-server / tdns-agent",
+	Short: "Send stop command to tdns-auth / tdns-agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		SendCommand("stop", ".")
 	},

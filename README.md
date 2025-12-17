@@ -1,15 +1,15 @@
 # tdns
 
-tdns is a small authoritative nameserver written in Go to be used various
+TDNS started as a small authoritative nameserver written in Go to be used various
 experiments and tests. It used to be intended to be really simple to understand
 and modify as needed. Now the traditional authoritative nameserver part is still
 almost trivial, but it has sprouted a bunch of additional functionality on the side.
 
 The repo consists of several separate programs:
 
-## tdns-server
+## tdns-auth
 A simple authoritative DNS nameserver with some special features. 
-See **server/README.md**
+See **auth/README.md**
 
 ## tdns-imr
 An extremely simplistic iterative mode resolver, i.e. recursive nameserver.
@@ -66,7 +66,7 @@ TSYNC.
 
 ## Support for new DNS transports (in addition to Do53): DoT, DoH, DoQ.
 
-All three are supported in tdns-server (the authoritative server) and in dog (the testing tool similar
+All three are supported in tdns-auth (the authoritative server) and in dog (the testing tool similar
 to dig). The recursive server is able to issue queries over new transports, but does not yet listen.
 
 ## Support for DNS transport signaling

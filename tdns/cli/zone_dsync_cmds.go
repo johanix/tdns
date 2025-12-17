@@ -24,7 +24,7 @@ var zoneDsyncCmd = &cobra.Command{
 
 var zoneDsyncStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Send dsync status command to tdns-server",
+	Short: "Send dsync status command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
@@ -38,7 +38,7 @@ var zoneDsyncStatusCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -67,7 +67,7 @@ var zoneDsyncStatusCmd = &cobra.Command{
 
 var zoneDsyncBootstrapCmd = &cobra.Command{
 	Use:   "bootstrap-sig0-key",
-	Short: "Send dsync bootstrap command to tdns-server",
+	Short: "Send dsync bootstrap command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm")
 
@@ -82,7 +82,7 @@ var zoneDsyncBootstrapCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -95,7 +95,7 @@ var rollaction string
 
 var zoneDsyncRollKeyCmd = &cobra.Command{
 	Use:   "roll-sig0-key",
-	Short: "Send dsync rollover command to tdns-server",
+	Short: "Send dsync rollover command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm", "rollaction")
 
@@ -111,7 +111,7 @@ var zoneDsyncRollKeyCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -122,7 +122,7 @@ var zoneDsyncRollKeyCmd = &cobra.Command{
 
 var zoneDsyncPublishCmd = &cobra.Command{
 	Use:   "publish",
-	Short: "Send dsync publish-dsync-rrset command to tdns-server",
+	Short: "Send dsync publish-dsync-rrset command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
@@ -135,7 +135,7 @@ var zoneDsyncPublishCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -146,7 +146,7 @@ var zoneDsyncPublishCmd = &cobra.Command{
 
 var zoneDsyncUnpublishCmd = &cobra.Command{
 	Use:   "unpublish",
-	Short: "Send dsync unpublish-dsync-rrset command to tdns-server",
+	Short: "Send dsync unpublish-dsync-rrset command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
@@ -159,7 +159,7 @@ var zoneDsyncUnpublishCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-server: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -198,7 +198,7 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from tdns-server: %s", cr.ErrorMsg)
+		return cr, fmt.Errorf("error from tdns-auth: %s", cr.ErrorMsg)
 	}
 
 	return cr, nil

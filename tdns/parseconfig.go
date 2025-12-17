@@ -230,7 +230,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent:
+	case AppTypeAuth, AppTypeAgent:
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -260,13 +260,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
 		conf.parseAuthOptions()
 	}
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
 		if !reload { // || kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
@@ -280,7 +280,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
-	if Globals.App.Type == AppTypeServer && len(conf.Service.Identities) > 0 {
+	if Globals.App.Type == AppTypeAuth && len(conf.Service.Identities) > 0 {
 		var transports []string
 		for _, t := range conf.DnsEngine.Transports {
 			t = strings.ToLower(t)
@@ -328,7 +328,7 @@ func (conf *Config) InitializeKeyDB() error {
 		return fmt.Errorf("invalid database file: '%s'", dbFile)
 	}
 	switch Globals.App.Type {
-	case AppTypeServer, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
 
 		// Verify that we have a MUSIC DB file.
 		fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
@@ -560,7 +560,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		all_zones = append(all_zones, zname)
 
 		switch Globals.App.Type {
-		case AppTypeServer, AppTypeAgent, AppTypeCombiner:
+		case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
 			// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
 			// try a non-blocking send; if it would block, send from a goroutine.
 			if conf.Internal.RefreshZoneCh == nil {

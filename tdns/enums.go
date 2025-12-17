@@ -106,7 +106,7 @@ var StringToAuthOption = map[string]AuthOption{
 type AppType uint8
 
 const (
-	AppTypeServer AppType = iota + 1
+	AppTypeAuth AppType = iota + 1
 	AppTypeAgent
 	AppTypeCombiner
 	AppTypeImr // simplified recursor
@@ -116,7 +116,7 @@ const (
 )
 
 var AppTypeToString = map[AppType]string{
-	AppTypeServer:   "server",
+	AppTypeAuth:     "auth",
 	AppTypeAgent:    "agent",
 	AppTypeCombiner: "combiner",
 	AppTypeImr:      "imr",
@@ -126,9 +126,8 @@ var AppTypeToString = map[AppType]string{
 }
 
 var StringToAppType = map[string]AppType{
-	"server": AppTypeServer,
-	"agent":  AppTypeAgent,
-	//"msa":      AppTypeMSA,
+	"auth":     AppTypeAuth,
+	"agent":    AppTypeAgent,
 	"combiner": AppTypeCombiner,
 	"imr":      AppTypeImr,
 	"cli":      AppTypeCli,

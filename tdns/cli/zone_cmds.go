@@ -266,7 +266,7 @@ var zoneListCmd = &cobra.Command{
 
 var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
-	Short: "Bump SOA serial and epoch (if any) in tdns-server version of zone",
+	Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		prefixcmd, _ := getCommandContext("zone")
 		api, err := getApiClient(prefixcmd, true)

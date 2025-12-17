@@ -65,123 +65,127 @@ func (api *ApiClient) StopDaemon() {
 // problem is that connecting to stdout doesn't work well, it kills the
 // daemon after a while. So we only want to slurp when explicitly checking
 // for errors.
-func (api *ApiClient) StartDaemon(maxwait int, slurp bool) {
+// command is an optional parameter specifying the daemon binary path.
+// If empty, it falls back to viper.GetString("common.command") for backward compatibility.
+func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
 	if maxwait == 0 {
 		maxwait = 5
 	}
 
+	if Globals.Debug {
+		fmt.Printf("StartDaemon: maxwait: %d, slurp: %t, command: %q\n", maxwait, slurp, command)
+	}
+
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
 	if err != nil {
-		if err.Error() == "Connection refused" {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			fmt.Printf("Daemon not responding. Starting new daemon (timeout: %d seconds)\n", maxwait)
 
-			daemonbinary := viper.GetString("common.command")
-			daemonname := viper.GetString("common.servername")
+			daemonbinary := command
+			if daemonbinary == "" {
+				daemonbinary = viper.GetString("common.command")
+			}
+			daemonname := api.Name
 			if daemonname == "" {
-				fmt.Printf("Name of server process not set. See common.servername.\n")
+				fmt.Printf("Name of server process not set (see api name in apiservers block in tdns-cli.yaml)\n")
 				daemonname = "undefined-server"
 			}
-			if fi, err := os.Stat(daemonbinary); err == nil {
-				var stderr, stdout io.Reader
-				age := time.Since(fi.ModTime()).Round(time.Second)
-				fmt.Printf("Daemon binary \"%s\" found (%v old)\n",
-					daemonbinary, age)
-				cmd := exec.Command(daemonbinary)
+			fi, err := os.Stat(daemonbinary)
+			if err != nil {
+				fmt.Printf("Daemon binary %q does not exist. Exit.\n", daemonbinary)
+				os.Exit(1)
+			}
 
-				if slurp {
-					stderr, err = cmd.StderrPipe()
-					if err != nil {
-						log.Fatalf("StartDaemon: Error from cmd.StderrPipe(): %v", err)
-					}
+			var stderr, stdout io.Reader
+			age := time.Since(fi.ModTime()).Round(time.Second)
+			fmt.Printf("Daemon binary %q found (%v old)\n", daemonbinary, age)
+			cmd := exec.Command(daemonbinary)
 
-					stdout, err = cmd.StdoutPipe()
-					if err != nil {
-						log.Fatalf("StartDaemon: Error from cmd.StdoutPipe(): %v", err)
-					}
+			if slurp {
+				stderr, err = cmd.StderrPipe()
+				if err != nil {
+					log.Fatalf("StartDaemon: Error from cmd.StderrPipe(): %v", err)
 				}
 
-				err2 := cmd.Start()
-				if err2 != nil {
-					log.Fatalf("StartDaemon: Error from cmd.Start(): %v", err2)
-				} else {
-					to_ticker := time.NewTicker(time.Duration(maxwait) * time.Second)
-					check_ticker := time.NewTicker(time.Duration(1) * time.Second)
-					for {
-						select {
-						case <-to_ticker.C:
-							// timeout, give up
-							fmt.Printf("Timeout (%d seconds) starting daemon. Giving up.\n",
-								maxwait)
+				stdout, err = cmd.StdoutPipe()
+				if err != nil {
+					log.Fatalf("StartDaemon: Error from cmd.StdoutPipe(): %v", err)
+				}
+			}
 
-							if slurp {
-								slurperr, _ := io.ReadAll(stderr)
-								slurpout, _ := io.ReadAll(stdout)
-								fmt.Printf("*** StartDaemon: Error from Daemon status update: %v\n", err)
-								fmt.Printf("*** Here is stderr from %s:\n----------\n%s",
-									daemonname, slurperr)
-								fmt.Printf("---------\n")
-								fmt.Printf("*** And here is stdout from %s:\n----------\n%s",
-									daemonname, slurpout)
-								fmt.Printf("---------\n*** Perhaps this provides some clue to why it isn't starting properly?\n")
-							} else {
-								fmt.Printf(
-									`*** StartDaemon: daemon failed to start.
+			err2 := cmd.Start()
+			if err2 != nil {
+				log.Fatalf("StartDaemon: Error from cmd.Start(): %v", err2)
+			}
+
+			to_ticker := time.NewTicker(time.Duration(maxwait) * time.Second)
+			check_ticker := time.NewTicker(time.Duration(1) * time.Second)
+			for {
+				select {
+				case <-to_ticker.C:
+					// timeout, give up
+					fmt.Printf("Timeout (%d seconds) starting daemon. Giving up.\n",
+						maxwait)
+
+					if slurp {
+						slurperr, _ := io.ReadAll(stderr)
+						slurpout, _ := io.ReadAll(stdout)
+						fmt.Printf("*** StartDaemon: Error from Daemon status update: %v\n", err)
+						fmt.Printf("*** Here is stderr from %s:\n----------\n%s",
+							daemonname, slurperr)
+						fmt.Printf("---------\n")
+						fmt.Printf("*** And here is stdout from %s:\n----------\n%s",
+							daemonname, slurpout)
+						fmt.Printf("---------\n*** Perhaps this provides some clue to why it isn't starting properly?\n")
+					} else {
+						fmt.Printf(
+							`*** StartDaemon: daemon failed to start.
 *** Note that starting the daemon takes a long time. Just wait a little and then ping it.
 *** Otherwise, try slurping stderr and stdout with the '--slurp' flag.
 `)
+					}
+					os.Exit(1)
+
+				case <-check_ticker.C:
+					// check status
+
+					_, r, err := api.UpdateDaemon(CommandPost{Command: "status"},
+						false)
+					if err == nil {
+						// All ok, daemon started, no error
+						fmt.Printf("Daemon started. Status: %s. Message: %s\n",
+							r.Status, r.Msg)
+						os.Exit(0)
+					} else {
+						if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+							if Globals.Verbose {
+								fmt.Printf("Status: connection refused, but not yet giving up\n")
 							}
-							os.Exit(1)
+							continue // with the for loop
+						} else {
+							fmt.Printf("*** StartDaemon: Error: %v\n", err)
+						}
 
-						case <-check_ticker.C:
-							// check status
-
-							_, r, err := api.UpdateDaemon(CommandPost{Command: "status"},
-								false)
-							if err == nil {
-								// All ok, daemon started, no error
-								fmt.Printf("Daemon started. Status: %s. Message: %s\n",
-									r.Status, r.Msg)
-								os.Exit(0)
-							} else {
-								if err.Error() == "Connection refused" {
-									if Globals.Verbose {
-										fmt.Printf("Status: connection refused, but not yet giving up\n")
-									}
-									continue // with the for loop
-								} else {
-									fmt.Printf("*** StartDaemon: Error: %v\n", err)
-								}
-
-								if slurp {
-									slurperr, _ := io.ReadAll(stderr)
-									slurpout, _ := io.ReadAll(stdout)
-									fmt.Printf("*** StartDaemon: Error from Daemon status update: %v\n", err)
-									fmt.Printf("*** Here is stderr from %s:\n----------\n%s",
-										daemonname, slurperr)
-									fmt.Printf("---------\n")
-									fmt.Printf("*** And here is stdout from %s:\n----------\n%s",
-										daemonname, slurpout)
-									fmt.Printf("---------\n*** Perhaps this provides some clue to why it isn't starting properly?\n")
-								} else {
-									fmt.Printf(
-										`*** StartDaemon: Error from status command: %v.
+						if slurp {
+							slurperr, _ := io.ReadAll(stderr)
+							slurpout, _ := io.ReadAll(stdout)
+							fmt.Printf("*** StartDaemon: Error from Daemon status update: %v\n", err)
+							fmt.Printf("*** Here is stderr from %s:\n----------\n%s",
+								daemonname, slurperr)
+							fmt.Printf("---------\n")
+							fmt.Printf("*** And here is stdout from %s:\n----------\n%s",
+								daemonname, slurpout)
+							fmt.Printf("---------\n*** Perhaps this provides some clue to why it isn't starting properly?\n")
+						} else {
+							fmt.Printf(
+								`*** StartDaemon: Error from status command: %v.
 *** Perhaps the daemon failed to start.
 *** Try slurping stderr and stdout with the '--slurp' flag.
 `, err)
-								}
-								os.Exit(1)
-							}
 						}
+						os.Exit(1)
 					}
-
-					// XXX: unreachable
-					// fmt.Printf("Daemon started. Status: %s. Message: %s\n", "foo", "bar") // r.Status, r.Msg)
-
 				}
-			} else {
-				fmt.Printf("Daemon binary \"%s\" does not exist. Exit.\n",
-					daemonbinary)
-				os.Exit(1)
 			}
 
 		} else {
@@ -202,7 +206,7 @@ func (api *ApiClient) UpdateDaemon(data CommandPost, dieOnError bool) (int, Comm
 	var cr CommandResponse
 	status, buf, err := api.RequestNG(http.MethodPost, "/command", data, dieOnError)
 	if err != nil {
-		if strings.Contains(err.Error(), "connection refused") {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			return 501, cr, errors.New("connection refused")
 		} else {
 			return 501, cr, err
@@ -290,7 +294,7 @@ func (api *ApiClient) ShowApi() {
 	var cr CommandResponse
 	status, buf, err := api.RequestNG(http.MethodPost, "/command", CommandPost{Command: "api"}, true)
 	if err != nil {
-		if strings.Contains(err.Error(), "connection refused") {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			fmt.Printf("Connection refused\n")
 		} else {
 			fmt.Printf("Error: %v\n", err)

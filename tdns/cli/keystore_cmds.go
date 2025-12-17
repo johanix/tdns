@@ -23,8 +23,8 @@ var NewState, filename, keytype string
 
 var KeystoreCmd = &cobra.Command{
 	Use:   "keystore",
-	Short: "Prefix command to access different features of tdns-server truststore",
-	Long: `The TDNS-SERVER keystore is where SIG(0) key pairs for zones are kept.
+	Short: "Prefix command to access different features of tdns-auth truststore",
+	Long: `The TDNS-AUTH keystore is where SIG(0) key pairs for zones are kept.
 The CLI contains functions for listing SIG(0) key pairs, adding and
 deleting keys.`,
 	Run: func(cmd *cobra.Command, args []string) {
