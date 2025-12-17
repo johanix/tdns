@@ -20,7 +20,7 @@ import (
 func getClientKeyFromParent(parent string) string {
 	switch parent {
 	case "auth", "server":
-		return "tdns-server"
+		return "tdns-auth"
 	case "combiner":
 		return "tdns-combiner"
 	case "msa":

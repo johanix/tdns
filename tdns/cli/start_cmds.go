@@ -75,7 +75,7 @@ var DaemonStartCmd = &cobra.Command{
 		// Get command from CLI config if available
 		clientKey := getClientKeyFromParent(prefixcmd)
 		if clientKey == "" {
-			clientKey = "tdns-server" // fallback for unknown commands
+			clientKey = "tdns-auth" // fallback for unknown commands
 		}
 		daemonCommand := ""
 		if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
@@ -117,7 +117,7 @@ var DaemonRestartCmd = &cobra.Command{
 		// Get command from CLI config if available
 		clientKey := getClientKeyFromParent(prefixcmd)
 		if clientKey == "" {
-			clientKey = "tdns-server" // fallback for unknown commands
+			clientKey = "tdns-auth" // fallback for unknown commands
 		}
 		daemonCommand := ""
 		if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {

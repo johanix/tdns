@@ -10,7 +10,7 @@ import (
 // AuthCmd is the parent command for all auth-related commands
 var AuthCmd = &cobra.Command{
 	Use:   "auth",
-	Short: "Interact with tdns-server (authoritative) via API",
+	Short: "Interact with tdns-auth (authoritative) via API",
 }
 
 func init() {

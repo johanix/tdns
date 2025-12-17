@@ -110,7 +110,7 @@ var delSyncCmd = &cobra.Command{
 
 var childpri, parpri string
 
-// Send a SIG(0) key rollover request to parent directly from CLI (not via tdns-server). This is mostly a debug command.
+// Send a SIG(0) key rollover request to parent directly from CLI (not via tdns-auth). This is mostly a debug command.
 var ddnsRollCmd = &cobra.Command{
 	Use:   "roll",
 	Short: "Send a DDNS update to roll the SIG(0) key used to sign updates",
@@ -132,7 +132,7 @@ var ddnsRollCmd = &cobra.Command{
 	},
 }
 
-// Send a SIG(0) key upload request to parent directly from CLI (not via tdns-server). This is mostly a debug command.
+// Send a SIG(0) key upload request to parent directly from CLI (not via tdns-auth). This is mostly a debug command.
 var ddnsUploadCmd = &cobra.Command{
 	Use:   "upload",
 	Short: "Send a DDNS update to upload the initial SIG(0) public key to parent",

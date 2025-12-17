@@ -22,8 +22,8 @@ var childSig0Src string
 
 var TruststoreCmd = &cobra.Command{
 	Use:   "truststore",
-	Short: "Prefix command to access different features of tdns-server truststore",
-	Long: `The TDNS-SERVER truststore is where SIG(0) public keys for child zones are kept.
+	Short: "Prefix command to access different features of tdns-auth truststore",
+	Long: `The TDNS-AUTH truststore is where SIG(0) public keys for child zones are kept.
 The CLI contains functions for listing trusted SIG(0) keys, adding and
 deleting child keys and alsowell as changing the trust state of individual keys.`,
 	//		Run: func(cmd *cobra.Command, args []string) {

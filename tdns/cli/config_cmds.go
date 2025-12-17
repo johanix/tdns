@@ -21,7 +21,7 @@ var ConfigCmd = &cobra.Command{
 
 var configReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Send config reload command to tdns-server",
+	Short: "Send config reload command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		prefixcmd, _ := getCommandContext("config")
 		api, _ := getApiClient(prefixcmd, true)
@@ -47,7 +47,7 @@ var configReloadCmd = &cobra.Command{
 
 var configReloadZonesCmd = &cobra.Command{
 	Use:   "reload-zones",
-	Short: "Send reload-zones command to tdns-server",
+	Short: "Send reload-zones command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		prefixcmd, _ := getCommandContext("config")
 		api, _ := getApiClient(prefixcmd, true)
@@ -73,7 +73,7 @@ var configReloadZonesCmd = &cobra.Command{
 
 var configStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Send config status command to tdns-server",
+	Short: "Send config status command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
 		prefixcmd, _ := getCommandContext("config")
 		api, _ := getApiClient(prefixcmd, true)
@@ -168,7 +168,7 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from tdns-server: %s", cr.ErrorMsg)
+		return cr, fmt.Errorf("error from tdns-auth: %s", cr.ErrorMsg)
 	}
 
 	return cr, nil

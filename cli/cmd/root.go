@@ -115,7 +115,7 @@ type ApiDetails struct {
 	BaseURL    string `validate:"required" yaml:"baseurl"`
 	ApiKey     string `validate:"required" yaml:"apikey"`
 	AuthMethod string `validate:"required" yaml:"authmethod"`
-	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon (e.g., "/usr/local/libexec/tdns-server")
+	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon (e.g., "/usr/local/libexec/tdns-auth")
 }
 
 func initApi() {
@@ -139,7 +139,7 @@ func initApi() {
 	}
 
 	// for convenience we store the API client for "server" in the old place also
-	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-server"]
+	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-auth"]
 
 //	numtsigs := len(cconf.Keys.Tsig)
 //	if numtsigs > 0 {
