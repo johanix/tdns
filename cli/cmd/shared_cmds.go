@@ -77,5 +77,11 @@ func init() {
 	// From ../tdns/cli/auth_cmds.go:
 	rootCmd.AddCommand(cli.AuthCmd)
 
+	// From ../tdns/cli/kdc_cmds.go:
+	rootCmd.AddCommand(cli.KdcCmd)
+
+	// From ../tdns/cli/krs_cmds.go:
+	rootCmd.AddCommand(cli.KrsCmd)
+
 	rootCmd.AddCommand(cli.VersionCmd)
 }

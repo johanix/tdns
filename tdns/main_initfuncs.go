@@ -75,7 +75,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	Globals.App.ServerConfigTime = time.Now()
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs:
 		pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 		pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -94,7 +94,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs:
 		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:

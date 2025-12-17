@@ -91,6 +91,16 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 	}
 
+	if Globals.App.Type == AppTypeKdc {
+		// KDC API routes are set up in kdc.StartKdc() to avoid circular imports
+		// They're registered directly on the router there
+	}
+
+	if Globals.App.Type == AppTypeKrs {
+		// KRS API routes are set up in krs.StartKrs() to avoid circular imports
+		// They're registered directly on the router there
+	}
+
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
 	return rtr, nil
