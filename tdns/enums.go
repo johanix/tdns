@@ -113,6 +113,8 @@ const (
 	AppTypeCli
 	AppTypeReporter
 	AppTypeScanner
+	AppTypeKdc // Key Distribution Center
+	AppTypeKrs // Key Receiving Service (edge receiver)
 )
 
 var AppTypeToString = map[AppType]string{
@@ -123,6 +125,8 @@ var AppTypeToString = map[AppType]string{
 	AppTypeCli:      "cli",
 	AppTypeReporter: "reporter",
 	AppTypeScanner:  "scanner",
+	AppTypeKdc:      "kdc",
+	AppTypeKrs:      "krs",
 }
 
 var StringToAppType = map[string]AppType{
@@ -133,6 +137,8 @@ var StringToAppType = map[string]AppType{
 	"cli":      AppTypeCli,
 	"reporter": AppTypeReporter,
 	"scanner":  AppTypeScanner,
+	"kdc":      AppTypeKdc,
+	"krs":      AppTypeKrs,
 }
 
 type ErrorType uint8

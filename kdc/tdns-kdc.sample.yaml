@@ -1,0 +1,54 @@
+# TDNS Key Distribution Center (KDC) Configuration
+# This is a sample configuration file for tdns-kdc
+
+service:
+   name:                TDNS-KDC
+   verbose:             true
+   debug:               false   # Set to true for detailed debugging output
+
+apiserver:
+   usetls:              true
+   addresses:           [ 127.0.0.1:8991 ]
+   apikey:              change-this-to-a-secure-random-key
+   certfile:            /etc/tdns/certs/localhost.crt
+   keyfile:             /etc/tdns/certs/localhost.key
+
+# KDC-specific configuration
+kdc:
+   # Database configuration
+   # Type: "sqlite" or "mariadb"
+   # For SQLite: dsn is the file path (e.g., "/var/lib/tdns/kdc.db")
+   #   Example: type: sqlite
+   #            dsn: "/var/lib/tdns/kdc.db"
+   # For MariaDB: dsn is "user:password@tcp(host:port)/dbname"
+   #   Example: type: mariadb
+   #            dsn: "kdcuser:password@tcp(localhost:3306)/tdns_kdc"
+   database:
+      type:               sqlite   # or "mariadb"
+      dsn:                "/var/lib/tdns/kdc.db"   # SQLite file path, or MariaDB DSN
+   
+   # Control zone where KMCTRL records are published
+   # This zone must be served by the KDC and will contain control records
+   # for edge nodes to discover the KDC and request keys
+   control_zone:        "kdc.example.com."
+   
+   # Default DNSSEC algorithm for generated keys
+   # Common values: 15 (ED25519), 13 (ECDSAP256SHA256), 8 (RSASHA256)
+   default_algorithm:    15   # ED25519
+   
+   # How often to rotate ZSKs (Zone Signing Keys)
+   # Format: Go duration (e.g., "720h" = 30 days, "168h" = 7 days)
+   key_rotation_interval: 720h   # 30 days
+   
+   # Number of standby ZSKs to maintain for rapid rollover
+   # When a key is compromised, a standby key can be activated immediately
+   standby_key_count:    2
+
+log:
+   file:                /var/log/tdns/tdns-kdc.log
+
+common:
+   command:             /usr/local/libexec/tdns-kdc
+   debug:               false
+   verbose:             true
+

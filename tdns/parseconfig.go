@@ -65,6 +65,7 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		if Globals.Debug {
 			log.Printf("processConfigFile: error unmarshalling YAML from %q to struct", file)
+			fmt.Printf("Config that we failed to unmarshal:\n%s\n", string(data))
 		}
 		return nil, fmt.Errorf("error parsing YAML: %v", err)
 	}
@@ -264,6 +265,20 @@ func (conf *Config) ParseConfig(reload bool) error {
 		conf.parseAuthOptions()
 	}
 
+	// Parse KDC configuration for AppTypeKdc
+	if Globals.App.Type == AppTypeKdc {
+		if err := conf.parseKdcConfig(configMap); err != nil {
+			return fmt.Errorf("error parsing KDC config: %v", err)
+		}
+	}
+
+	// Parse KRS configuration for AppTypeKrs
+	if Globals.App.Type == AppTypeKrs {
+		if err := conf.parseKrsConfig(configMap); err != nil {
+			return fmt.Errorf("error parsing KRS config: %v", err)
+		}
+	}
+
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
@@ -313,6 +328,58 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// dump.P(conf.Agent)
 		// log.Printf("** ParseConfig: exit")
 	}
+	return nil
+}
+
+// parseKdcConfig parses the KDC configuration section from the config map
+// and stores it as YAML bytes in conf.Internal.KdcConf
+// The bytes will be unmarshaled into kdc.KdcConf in StartKdc() to avoid circular import
+func (conf *Config) parseKdcConfig(configMap map[string]interface{}) error {
+	kdcSection, ok := configMap["kdc"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("KDC configuration section 'kdc' not found or invalid")
+	}
+
+	// Marshal the kdc section to YAML bytes
+	// We'll unmarshal it into kdc.KdcConf in StartKdc() to avoid circular import
+	kdcYAML, err := yaml.Marshal(kdcSection)
+	if err != nil {
+		return fmt.Errorf("failed to marshal KDC config: %v", err)
+	}
+
+	// Store YAML bytes - will be unmarshaled in StartKdc()
+	conf.Internal.KdcConf = kdcYAML
+
+	if Globals.Debug {
+		log.Printf("KDC config section found and stored (will be unmarshaled in StartKdc)")
+	}
+
+	return nil
+}
+
+// parseKrsConfig parses the KRS configuration section from the config map
+// and stores it as YAML bytes in conf.Internal.KrsConf
+// The bytes will be unmarshaled into krs.KrsConf in StartKrs() to avoid circular import
+func (conf *Config) parseKrsConfig(configMap map[string]interface{}) error {
+	krsSection, ok := configMap["krs"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("KRS configuration section 'krs' not found or invalid")
+	}
+
+	// Marshal the krs section to YAML bytes
+	// We'll unmarshal it into krs.KrsConf in StartKrs() to avoid circular import
+	krsYAML, err := yaml.Marshal(krsSection)
+	if err != nil {
+		return fmt.Errorf("failed to marshal KRS config: %v", err)
+	}
+
+	// Store YAML bytes - will be unmarshaled in StartKrs()
+	conf.Internal.KrsConf = krsYAML
+
+	if Globals.Debug {
+		log.Printf("KRS config section found and stored (will be unmarshaled in StartKrs)")
+	}
+
 	return nil
 }
 

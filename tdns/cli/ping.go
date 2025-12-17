@@ -31,6 +31,10 @@ func getClientKeyFromParent(parent string) string {
 		return "tdns-scanner"
 	case "imr":
 		return "tdns-imr"
+	case "kdc":
+		return "tdns-kdc"
+	case "krs":
+		return "tdns-krs"
 	default:
 		return ""
 	}

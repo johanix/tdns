@@ -197,6 +197,10 @@ type InternalConf struct {
 	ZoneDataRepo    *ZoneDataRepo
 	RRsetCache      *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine       *Imr
+	KdcDB           interface{} // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf         interface{} // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB           interface{} // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf         interface{} // *krs.KrsConf - using interface{} to avoid circular import
 	Scanner         *Scanner // Scanner instance for async job tracking
 }
 
