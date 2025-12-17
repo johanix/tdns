@@ -118,7 +118,7 @@ func dbSetupTables(db *sql.DB) bool {
 // It validates that dbfile is provided, ensures the file is writable, opens the sqlite3 database, and sets up required tables.
 // If force is true, existing default tables are dropped before setup.
 // On success it returns a KeyDB with caches, an update channel, and Options set to the provided map; on failure it returns an error describing the problem.
-func NewKeyDB(dbfile string, force bool, options *map[AuthOption]string) (*KeyDB, error) {
+func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB, error) {
 	// dbfile := viper.GetString("db.file")
 	if dbfile == "" {
 		return nil, fmt.Errorf("error: DB filename unspecified")
