@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/johanix/tdns/tdns/core"
 	"github.com/miekg/dns"
@@ -43,10 +44,21 @@ func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string) error
 		{Name: notifyQname, Qtype: notifyType, Qclass: dns.ClassINET},
 	}
 
-	res, err := dns.Exchange(m, kdcAddress)
+	// Create a DNS client with a reasonable timeout for NOTIFY
+	client := &dns.Client{
+		Timeout: 5 * time.Second, // 5 second timeout for NOTIFY
+		Net:     "udp",
+	}
+
+	res, _, err := client.Exchange(m, kdcAddress)
 	if err != nil {
 		log.Printf("KRS: Error sending confirmation NOTIFY to %s: %v", kdcAddress, err)
 		return fmt.Errorf("failed to send confirmation NOTIFY to %s: %v", kdcAddress, err)
+	}
+
+	if res == nil {
+		log.Printf("KRS: Confirmation NOTIFY to %s returned nil response", kdcAddress)
+		return fmt.Errorf("confirmation NOTIFY returned nil response")
 	}
 
 	if res.Rcode != dns.RcodeSuccess {

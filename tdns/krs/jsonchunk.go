@@ -576,6 +576,7 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
 
 	// Step 4: Decrypt each key and store
+	// Note: AddEdgesignerKeyWithRetirement handles retiring existing edgesigner keys atomically
 	successCount := 0
 	for i, entry := range entries {
 		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneID, entry.KeyID)
@@ -632,8 +633,9 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 			Comment:        fmt.Sprintf("Received via encrypted_keys distribution"),
 		}
 
-		// Store in database
-		if err := krsDB.AddReceivedKey(receivedKey); err != nil {
+		// Store in database atomically (retires existing edgesigner keys and adds new one)
+		// This ensures only one key per zone is in "edgesigner" state
+		if err := krsDB.AddEdgesignerKeyWithRetirement(receivedKey); err != nil {
 			log.Printf("KRS: Error: Failed to store key for entry %d: %v", i+1, err)
 			continue
 		}

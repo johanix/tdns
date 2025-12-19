@@ -13,6 +13,43 @@ import (
 	"github.com/miekg/dns"
 )
 
+// NotifyHandlerWithCallback consumes DnsNotifyRequest messages from the DnsNotifyQ channel
+// and calls the provided handler function. This allows custom NOTIFY handlers
+// (like KDC for confirmation NOTIFYs) to process NOTIFYs via channels.
+// handlerFunc: Function that processes a DnsNotifyRequest
+func NotifyHandlerWithCallback(ctx context.Context, conf *Config, handlerFunc func(context.Context, *DnsNotifyRequest) error) error {
+	dnsnotifyq := conf.Internal.DnsNotifyQ
+
+	log.Printf("*** DnsNotifyHandler: starting (with callback)")
+	if Globals.Debug {
+		log.Printf("DnsNotifyHandler: Channel capacity: %d", cap(dnsnotifyq))
+		log.Printf("DnsNotifyHandler: Waiting for NOTIFYs on dnsnotifyq channel")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("DnsNotifyHandler: context cancelled")
+			return nil
+		case dnr, ok := <-dnsnotifyq:
+			if !ok {
+				log.Println("DnsNotifyHandler: dnsnotifyq closed")
+				return nil
+			}
+			if Globals.Debug {
+				log.Printf("DnsNotifyHandler: Received NOTIFY from channel (qname=%s, from=%s)", dnr.Qname, dnr.ResponseWriter.RemoteAddr())
+			}
+			if err := handlerFunc(ctx, &dnr); err != nil {
+				log.Printf("Error in NOTIFY handler: %v", err)
+			} else {
+				if Globals.Debug {
+					log.Printf("DnsNotifyHandler: NOTIFY handler completed successfully")
+				}
+			}
+		}
+	}
+}
+
 func NotifyHandler(ctx context.Context, conf *Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
