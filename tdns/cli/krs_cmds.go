@@ -38,6 +38,17 @@ var KrsQueryCmd = &cobra.Command{
 	Short: "Query KDC for keys",
 }
 
+var KrsDebugCmd = &cobra.Command{
+	Use:   "debug",
+	Short: "Debug utilities for KRS",
+}
+
+var KrsDebugDistribCmd = &cobra.Command{
+	Use:   "distrib",
+	Short: "Manage test distributions",
+	Long:  `Commands for fetching and processing distributions.`,
+}
+
 // Key commands
 var krsKeysListCmd = &cobra.Command{
 	Use:   "list",
@@ -342,6 +353,46 @@ var krsQueryKmreqCmd = &cobra.Command{
 	},
 }
 
+// Debug commands
+var krsDebugDistribFetchCmd = &cobra.Command{
+	Use:   "fetch --id <id>",
+	Short: "Fetch and process a distribution from KDC",
+	Long:  `Fetches a distribution by querying JSONMANIFEST and JSONCHUNK records from the KDC, reassembles the chunks, and processes the content. For test_text distributions, displays the text to the terminal.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		distributionID := cmd.Flag("id").Value.String()
+
+		if distributionID == "" {
+			log.Fatalf("Error: --id is required")
+		}
+
+		api, err := getApiClient("krs", true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":        "fetch-distribution",
+			"distribution_id": distributionID,
+		}
+
+		resp, err := sendKrsRequest(api, "/krs/debug", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		fmt.Printf("%s\n", getString(resp, "msg"))
+		
+		// If content is present (test_text), display it
+		if content := getString(resp, "content"); content != "" {
+			fmt.Printf("\n%s\n", content)
+		}
+	},
+}
+
 // sendKrsRequest sends a JSON POST request to the KRS API
 func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map[string]interface{}, error) {
 	var result map[string]interface{}
@@ -371,12 +422,17 @@ func init() {
 	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd)
 	KrsConfigCmd.AddCommand(krsConfigGetCmd)
 	KrsQueryCmd.AddCommand(krsQueryKmreqCmd)
-	KrsCmd.AddCommand(KrsKeysCmd, KrsConfigCmd, KrsQueryCmd, PingCmd)
+	KrsDebugDistribCmd.AddCommand(krsDebugDistribFetchCmd)
+	KrsDebugCmd.AddCommand(KrsDebugDistribCmd)
+	KrsCmd.AddCommand(KrsKeysCmd, KrsConfigCmd, KrsQueryCmd, KrsDebugCmd, PingCmd)
 
 	krsKeysGetCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	krsKeysGetCmd.MarkFlagRequired("keyid")
 
 	krsQueryKmreqCmd.Flags().String("distribution-id", "", "Distribution ID")
 	krsQueryKmreqCmd.MarkFlagRequired("distribution-id")
+
+	krsDebugDistribFetchCmd.Flags().String("id", "", "Distribution ID")
+	krsDebugDistribFetchCmd.MarkFlagRequired("id")
 }
 

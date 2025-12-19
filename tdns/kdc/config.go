@@ -19,11 +19,20 @@ type KdcConf struct {
 	StandbyKeyCount int `yaml:"standby_key_count" mapstructure:"standby_key_count"` // Number of standby ZSKs to maintain
 	PublishTime time.Duration `yaml:"publish_time" mapstructure:"publish_time"` // Time to wait before published -> standby
 	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
+	JsonchunkMaxSize int `yaml:"jsonchunk_max_size" mapstructure:"jsonchunk_max_size"` // Maximum RDATA size per JSONCHUNK (bytes, default: 60000)
 }
 
 // DatabaseConf represents database configuration
 type DatabaseConf struct {
 	Type string `yaml:"type" mapstructure:"type" validate:"required,oneof=sqlite mariadb"` // Database type: "sqlite" or "mariadb"
 	DSN  string `yaml:"dsn" mapstructure:"dsn" validate:"required"`                        // DSN: SQLite file path or MariaDB "user:password@tcp(host:port)/dbname"
+}
+
+// GetJsonchunkMaxSize returns the configured chunk size, or default (60000) if not set
+func (conf *KdcConf) GetJsonchunkMaxSize() int {
+	if conf.JsonchunkMaxSize <= 0 {
+		return 60000 // Default: 60KB
+	}
+	return conf.JsonchunkMaxSize
 }
 
