@@ -36,6 +36,12 @@ var KdcZoneCmd = &cobra.Command{
 	Short: "Manage zones in KDC",
 }
 
+var KdcDistribCmd = &cobra.Command{
+	Use:   "distrib",
+	Short: "Manage key distributions",
+	Long:  `Commands for managing key distributions, including listing distributions, checking their state, marking them as completed, and distributing keys to edge nodes.`,
+}
+
 var KdcNodeCmd = &cobra.Command{
 	Use:   "node",
 	Short: "Manage edge nodes in KDC",
@@ -518,6 +524,9 @@ var kdcNodeUpdateCmd = &cobra.Command{
 			log.Fatalf("Error: --nodeid is required")
 		}
 
+		// Ensure node ID is FQDN
+		updateNodeIDFQDN := dns.Fqdn(updateNodeID)
+
 		prefixcmd, _ := getCommandContext("node")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
@@ -527,7 +536,7 @@ var kdcNodeUpdateCmd = &cobra.Command{
 		// Get current node to preserve fields not being updated
 		getReq := map[string]interface{}{
 			"command": "get",
-			"node_id": updateNodeID,
+			"node_id": updateNodeIDFQDN,
 		}
 		getResp, err := sendKdcRequest(api, "/kdc/node", getReq)
 		if err != nil {
@@ -544,7 +553,7 @@ var kdcNodeUpdateCmd = &cobra.Command{
 
 		// Update fields if provided
 		updateNode := map[string]interface{}{
-			"id": updateNodeID,
+			"id": updateNodeIDFQDN,
 		}
 
 		// Preserve or update name
@@ -687,8 +696,8 @@ var KdcDebugDistribCmd = &cobra.Command{
 
 var kdcDebugDistribGenerateCmd = &cobra.Command{
 	Use:   "generate",
-	Short: "Create a test distribution with test_text content",
-	Long:  `Creates a persistent test distribution that can be queried by KRS. The distribution will contain test text read from a file (or default lorem ipsum if no file specified) that will be chunked and distributed.`,
+	Short: "Create a test distribution with clear_text or encrypted_text content",
+	Long:  `Creates a persistent test distribution that can be queried by KRS. The distribution will contain text read from a file (or default lorem ipsum if no file specified) that will be chunked and distributed. Use --content-type to choose 'clear_text' (default) or 'encrypted_text' (HPKE encrypted).`,
 	Run: func(cmd *cobra.Command, args []string) {
 		api, err := getApiClient("kdc", true)
 		if err != nil {
@@ -719,10 +728,19 @@ var kdcDebugDistribGenerateCmd = &cobra.Command{
 			testText = string(data)
 		}
 
+		contentType := cmd.Flag("content-type").Value.String()
+		if contentType == "" {
+			contentType = "clear_text" // Default
+		}
+		if contentType != "clear_text" && contentType != "encrypted_text" {
+			log.Fatalf("Error: --content-type must be 'clear_text' or 'encrypted_text' (got: %s)", contentType)
+		}
+
 		req := map[string]interface{}{
 			"command":        "test-distribution",
 			"distribution_id": distributionID,
 			"node_id":        nodeIDFQDN,
+			"content_type":   contentType,
 		}
 		if testText != "" {
 			req["test_text"] = testText
@@ -1026,12 +1044,12 @@ var kdcDebugHpkeEncryptCmd = &cobra.Command{
 var kdcDebugHpkeGenerateCmd = &cobra.Command{
 	Use:   "hpke-generate [prefix]",
 	Short: "Generate an HPKE keypair for testing",
-	Long:  `Generates an HPKE keypair and writes the public key to {prefix}.publicKey and private key to {prefix}.PrivateKey (both hex encoded).`,
+	Long:  `Generates an HPKE keypair and writes the public key to {prefix}.publickey and private key to {prefix}.privatekey (both hex encoded).`,
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		prefix := args[0]
-		pubKeyFile := prefix + ".publicKey"
-		privKeyFile := prefix + ".PrivateKey"
+		pubKeyFile := prefix + ".publickey"
+		privKeyFile := prefix + ".privatekey"
 		
 		// Generate HPKE keypair
 		pubKey, privKey, err := hpke.GenerateKeyPair()
@@ -1288,9 +1306,9 @@ var kdcConfigGetCmd = &cobra.Command{
 	},
 }
 
-var kdcZoneDistributeZskCmd = &cobra.Command{
-	Use:   "distribute-zsk --zone <zone-id> --keyid <key-id>",
-	Short: "Trigger distribution of a standby ZSK to all nodes",
+var kdcDistribSingleCmd = &cobra.Command{
+	Use:   "single --zone <zone-id> --keyid <key-id>",
+	Short: "Trigger distribution of a specific standby ZSK to all nodes",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 		keyid := cmd.Flag("keyid").Value.String()
@@ -1298,7 +1316,7 @@ var kdcZoneDistributeZskCmd = &cobra.Command{
 			log.Fatalf("Error: --keyid is required")
 		}
 
-		prefixcmd, _ := getCommandContext("zone")
+		prefixcmd, _ := getCommandContext("distrib")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -1320,6 +1338,61 @@ var kdcZoneDistributeZskCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcDistribMultiCmd = &cobra.Command{
+	Use:   "multi [zone1] [zone2] ...",
+	Short: "Distribute standby ZSK keys for one or more zones (auto-selects standby keys)",
+	Long:  `Distributes standby ZSK keys for the specified zones. For each zone, automatically selects a standby ZSK and distributes it to all active nodes.`,
+	Args:  cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		// Normalize zone names to FQDNs
+		zones := make([]string, len(args))
+		for i, zone := range args {
+			zones[i] = dns.Fqdn(zone)
+		}
+
+		prefixcmd, _ := getCommandContext("distrib")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "distrib-multi",
+			"zones":   zones,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+		
+		// If there are results, display them
+		if resultsRaw, ok := resp["results"]; ok {
+			if results, ok := resultsRaw.([]interface{}); ok {
+				for _, result := range results {
+					if resultMap, ok := result.(map[string]interface{}); ok {
+						zoneID := getString(resultMap, "zone_id", "ZoneID")
+						keyID := getString(resultMap, "key_id", "KeyID")
+						status := getString(resultMap, "status", "Status")
+						msg := getString(resultMap, "msg", "Msg")
+						if status == "success" {
+							fmt.Printf("  %s: Key %s distributed successfully\n", zoneID, keyID)
+						} else {
+							fmt.Printf("  %s: %s\n", zoneID, msg)
+						}
+					}
+				}
+			}
+		}
 	},
 }
 
@@ -1358,6 +1431,46 @@ var kdcZoneTransitionCmd = &cobra.Command{
 	},
 }
 
+var kdcZoneDnssecHashCmd = &cobra.Command{
+	Use:   "hash --zone <zone-id> --keyid <key-id>",
+	Short: "Compute SHA-256 hash of a key's private key material",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		keyid := cmd.Flag("keyid").Value.String()
+		if keyid == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "hash",
+			"zone_id": tdns.Globals.Zonename,
+			"key_id":  keyid,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		hash := getString(resp, "msg", "Msg")
+		if hash == "" {
+			log.Fatalf("Error: hash not found in response")
+		}
+
+		fmt.Printf("Key Hash (SHA-256): %s\n", hash)
+	},
+}
+
 var kdcZoneDnssecDeleteCmd = &cobra.Command{
 	Use:   "delete --zone <zone-id> --keyid <key-id>",
 	Short: "Delete a DNSSEC key",
@@ -1381,6 +1494,139 @@ var kdcZoneDnssecDeleteCmd = &cobra.Command{
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcDistribListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all ongoing distributions",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("distrib")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "list",
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/distrib", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+		
+		if dists, ok := resp["distributions"].([]interface{}); ok {
+			if len(dists) == 0 {
+				fmt.Println("No distributions found")
+			} else {
+				fmt.Println("\nDistribution IDs:")
+				for _, dist := range dists {
+					fmt.Printf("  %s\n", dist)
+				}
+			}
+		}
+	},
+}
+
+var kdcDistribStateCmd = &cobra.Command{
+	Use:   "state --id <distribution-id>",
+	Short: "Show detailed state of a distribution",
+	Run: func(cmd *cobra.Command, args []string) {
+		distID := cmd.Flag("id").Value.String()
+		if distID == "" {
+			log.Fatalf("Error: --id is required")
+		}
+
+		prefixcmd, _ := getCommandContext("distrib")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":        "state",
+			"distribution_id": distID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/distrib", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n\n", resp["msg"])
+		
+		if stateRaw, ok := resp["state"]; ok {
+			if state, ok := stateRaw.(map[string]interface{}); ok {
+				fmt.Printf("Distribution ID: %s\n", getString(state, "distribution_id", "DistributionID"))
+				fmt.Printf("Zone: %s\n", getString(state, "zone_id", "ZoneID"))
+				fmt.Printf("Key ID: %s\n", getString(state, "key_id", "KeyID"))
+				fmt.Printf("Key State: %s\n", getString(state, "key_state", "KeyState"))
+				fmt.Printf("Created At: %s\n", getString(state, "created_at", "CreatedAt"))
+				fmt.Printf("All Confirmed: %v\n\n", getBool(state, "all_confirmed", "AllConfirmed"))
+				
+				if confirmedNodes, ok := state["confirmed_nodes"].([]interface{}); ok {
+					fmt.Printf("Confirmed Nodes (%d):\n", len(confirmedNodes))
+					for _, node := range confirmedNodes {
+						fmt.Printf("  - %s\n", node)
+					}
+				}
+				
+				if pendingNodes, ok := state["pending_nodes"].([]interface{}); ok {
+					fmt.Printf("\nPending Nodes (%d):\n", len(pendingNodes))
+					if len(pendingNodes) == 0 {
+						fmt.Println("  (none - all confirmed)")
+					} else {
+						for _, node := range pendingNodes {
+							fmt.Printf("  - %s\n", node)
+						}
+					}
+				}
+			}
+		}
+	},
+}
+
+var kdcDistribCompletedCmd = &cobra.Command{
+	Use:   "completed --id <distribution-id>",
+	Short: "Force mark a distribution as completed (even if nodes haven't confirmed)",
+	Run: func(cmd *cobra.Command, args []string) {
+		distID := cmd.Flag("id").Value.String()
+		if distID == "" {
+			log.Fatalf("Error: --id is required")
+		}
+
+		prefixcmd, _ := getCommandContext("distrib")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":        "completed",
+			"distribution_id": distID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/distrib", req)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -1434,24 +1680,34 @@ var kdcZoneSetStateCmd = &cobra.Command{
 }
 
 func init() {
-	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd)
+	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd, kdcZoneDnssecHashCmd)
 	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
-		kdcZoneDistributeZskCmd, kdcZoneTransitionCmd, kdcZoneSetStateCmd)
+		kdcZoneTransitionCmd, kdcZoneSetStateCmd)
+	KdcDistribCmd.AddCommand(kdcDistribListCmd, kdcDistribStateCmd, kdcDistribCompletedCmd, kdcDistribSingleCmd, kdcDistribMultiCmd)
 	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd)
 	KdcDebugDistribCmd.AddCommand(kdcDebugDistribGenerateCmd, kdcDebugDistribListCmd, kdcDebugDistribDeleteCmd)
 	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd, 
 		KdcDebugDistribCmd, kdcDebugSetChunkSizeCmd, kdcDebugGetChunkSizeCmd)
 	KdcConfigCmd.AddCommand(kdcConfigGetCmd)
-	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcConfigCmd, KdcDebugCmd, PingCmd)
+	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcConfigCmd, KdcDebugCmd, KdcDistribCmd, PingCmd)
 
-	kdcZoneDistributeZskCmd.Flags().StringP("keyid", "k", "", "Key ID (must be a ZSK in standby state)")
-	kdcZoneDistributeZskCmd.MarkFlagRequired("keyid")
+	kdcDistribSingleCmd.Flags().StringP("keyid", "k", "", "Key ID (must be a ZSK in standby state)")
+	kdcDistribSingleCmd.MarkFlagRequired("keyid")
+	
+	kdcDistribStateCmd.Flags().String("id", "", "Distribution ID")
+	kdcDistribStateCmd.MarkFlagRequired("id")
+	
+	kdcDistribCompletedCmd.Flags().String("id", "", "Distribution ID")
+	kdcDistribCompletedCmd.MarkFlagRequired("id")
 	
 	kdcZoneTransitionCmd.Flags().StringP("keyid", "k", "", "Key ID (transition auto-detected: created->published or standby->active)")
 	kdcZoneTransitionCmd.MarkFlagRequired("keyid")
 	
 	kdcZoneDnssecDeleteCmd.Flags().StringP("keyid", "k", "", "Key ID to delete")
 	kdcZoneDnssecDeleteCmd.MarkFlagRequired("keyid")
+
+	kdcZoneDnssecHashCmd.Flags().StringP("keyid", "k", "", "Key ID")
+	kdcZoneDnssecHashCmd.MarkFlagRequired("keyid")
 	
 	kdcZoneSetStateCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	kdcZoneSetStateCmd.Flags().StringP("state", "s", "", "New state")
@@ -1485,7 +1741,8 @@ func init() {
 
 	kdcDebugDistribGenerateCmd.Flags().String("id", "", "Distribution ID (hex, e.g., a1b2)")
 	kdcDebugDistribGenerateCmd.Flags().StringP("node-id", "n", "", "Node ID")
-	kdcDebugDistribGenerateCmd.Flags().StringP("file", "f", "", "File containing test text (if not provided, uses default lorem ipsum)")
+	kdcDebugDistribGenerateCmd.Flags().StringP("file", "f", "", "File containing text (if not provided, uses default lorem ipsum)")
+	kdcDebugDistribGenerateCmd.Flags().StringP("content-type", "t", "clear_text", "Content type: 'clear_text' or 'encrypted_text' (default: clear_text)")
 	kdcDebugDistribGenerateCmd.MarkFlagRequired("id")
 	kdcDebugDistribGenerateCmd.MarkFlagRequired("node-id")
 

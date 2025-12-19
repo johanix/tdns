@@ -68,6 +68,13 @@ kdc:
    # The KeyStateWorker background process checks every minute and transitions keys
    # that have been retired for at least this duration.
    retire_time:          30d   # 30 days
+   
+   # jsonchunk_max_size: Maximum RDATA size per JSONCHUNK record in bytes
+   # This controls how large each chunk can be when distributing encrypted keys
+   # via the JSONCHUNK RRtype. Larger values mean fewer chunks but larger DNS messages.
+   # Default: 60000 (60KB). Maximum practical size is ~64KB due to DNS message limits.
+   # For testing with small chunk sizes, set this to a smaller value (e.g., 1000).
+   jsonchunk_max_size:   60000   # 60KB (default)
 
 log:
    file:                /var/log/tdns/tdns-kdc.log

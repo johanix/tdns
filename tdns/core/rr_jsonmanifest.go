@@ -23,7 +23,8 @@ func init() {
 // The Metadata map should contain a "content" field indicating the type:
 //   - "zonelist": List of zone names (JSON array of strings)
 //   - "encrypted_keys": HPKE-encrypted key material
-//   - "test_text": Test/debug text payload
+//   - "clear_text": Clear text payload (base64 encoded)
+//   - "encrypted_text": HPKE-encrypted text payload (base64 encoded)
 type JSONMANIFEST struct {
 	ChunkCount uint16                 `json:"chunk_count"`        // Number of JSONCHUNK records
 	ChunkSize  uint16                 `json:"chunk_size,omitempty"` // Maximum size of each chunk in bytes (optional)

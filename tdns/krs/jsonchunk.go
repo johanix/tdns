@@ -9,13 +9,16 @@ package krs
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/johanix/tdns/tdns/core"
+	"github.com/johanix/tdns/tdns/hpke"
 	"github.com/miekg/dns"
 )
 
@@ -292,8 +295,18 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 
 	// Process based on content type
 	switch contentType {
-	case "test_text":
-		text, err := ProcessTestText(reassembled)
+	case "clear_text":
+		text, err := ProcessClearText(reassembled)
+		if err != nil {
+			return err
+		}
+		// Store text for API response (will be nil if not called from API)
+		if processTextResult != nil {
+			*processTextResult = text
+		}
+		return nil
+	case "encrypted_text":
+		text, err := ProcessEncryptedText(krsDB, conf, reassembled)
 		if err != nil {
 			return err
 		}
@@ -305,25 +318,167 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	case "zonelist":
 		return ProcessZoneList(krsDB, reassembled)
 	case "encrypted_keys":
-		return ProcessEncryptedKeys(krsDB, reassembled)
+		return ProcessEncryptedKeys(krsDB, conf, reassembled, distributionID)
 	default:
 		return fmt.Errorf("unknown content type: %s", contentType)
 	}
 }
 
-// ProcessTestText processes test_text content
+// ProcessClearText processes clear_text content
 // Returns the decoded text. If called directly (not from API), prints to stdout
-func ProcessTestText(data []byte) (string, error) {
+func ProcessClearText(data []byte) (string, error) {
 	// Data is base64-encoded, decode it
 	decoded, err := base64.StdEncoding.DecodeString(string(data))
 	if err != nil {
-		return "", fmt.Errorf("failed to decode base64 test text: %v", err)
+		return "", fmt.Errorf("failed to decode base64 clear text: %v", err)
 	}
 
 	text := string(decoded)
-	log.Printf("KRS: ===== TEST TEXT CONTENT =====")
+	log.Printf("KRS: ===== CLEAR TEXT CONTENT =====")
 	fmt.Println(text)
-	log.Printf("KRS: ===== END TEST TEXT =====")
+	log.Printf("KRS: ===== END CLEAR TEXT =====")
+
+	return text, nil
+}
+
+// ProcessEncryptedText processes encrypted_text content
+// Displays base64 transport, ciphertext, and decrypted cleartext
+func ProcessEncryptedText(krsDB *KrsDB, conf *KrsConf, data []byte) (string, error) {
+	// Step 1: Display base64 transport encoded message
+	log.Printf("KRS: ===== ENCRYPTED TEXT CONTENT =====")
+	log.Printf("KRS: --- Base64 Transport Encoded (as received, %d bytes) ---", len(data))
+	fmt.Println(string(data))
+	fmt.Println()
+
+	// Step 2: Decode base64 to get ciphertext
+	log.Printf("KRS: Decoding base64...")
+	ciphertextBase64, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		return "", fmt.Errorf("failed to decode base64 encrypted text: %v", err)
+	}
+	log.Printf("KRS: Base64 decoded to %d bytes", len(ciphertextBase64))
+
+	log.Printf("KRS: --- Ciphertext (base64 removed, %d bytes) ---", len(ciphertextBase64))
+	// Display first 64 bytes as hex for readability (full ciphertext might be very long)
+	if len(ciphertextBase64) > 64 {
+		fmt.Printf("%x... (truncated, showing first 64 bytes)\n", ciphertextBase64[:64])
+	} else {
+		fmt.Printf("%x\n", ciphertextBase64)
+	}
+	fmt.Println()
+
+	// Step 3: Decrypt using HPKE
+	// The ciphertext from hpke.Encrypt() already contains: <encapsulated_key (32 bytes)><encrypted_data>
+	// But KDC prepends ephemeralPub again, so we have: <ephemeralPub (32 bytes)><encapsulated_key (32 bytes)><encrypted_data>
+	// We need to skip the first 32 bytes (duplicate ephemeralPub) and use the rest
+	log.Printf("KRS: Analyzing ciphertext structure...")
+	if len(ciphertextBase64) < 64 {
+		return "", fmt.Errorf("ciphertext too short: %d bytes (expected at least 64: 32 for duplicate ephemeral + 32 for encapsulated key)", len(ciphertextBase64))
+	}
+
+	// Extract the actual ciphertext (skip first 32 bytes which is duplicate ephemeralPub)
+	// Verify that first 32 bytes match bytes 32-64 (they should both be the encapsulated key)
+	duplicateEphemeral := ciphertextBase64[:32]
+	encapsulatedKey := ciphertextBase64[32:64]
+	if len(encapsulatedKey) < 32 {
+		return "", fmt.Errorf("ciphertext too short to extract encapsulated key: %d bytes", len(ciphertextBase64))
+	}
+	
+	// Check if they match (they should, as KDC prepends ephemeralPub which is a copy of encapsulated key)
+	match := true
+	for i := 0; i < 32; i++ {
+		if duplicateEphemeral[i] != encapsulatedKey[i] {
+			match = false
+			break
+		}
+	}
+	if !match {
+		log.Printf("KRS: WARNING: First 32 bytes (duplicate ephemeral) don't match bytes 32-64 (encapsulated key)")
+		log.Printf("KRS: Duplicate ephemeral (first 32): %x", duplicateEphemeral)
+		log.Printf("KRS: Encapsulated key (bytes 32-64): %x", encapsulatedKey)
+	} else {
+		log.Printf("KRS: Verified: duplicate ephemeral matches encapsulated key (first 32 bytes)")
+	}
+	
+	actualCiphertext := ciphertextBase64[32:]
+	log.Printf("KRS: Extracted actual ciphertext: %d bytes (skipped first 32 bytes which is duplicate ephemeralPub)", len(actualCiphertext))
+	log.Printf("KRS: First 32 bytes of actual ciphertext (encapsulated key): %x", actualCiphertext[:32])
+
+	// Load node's private key from config
+	log.Printf("KRS: Loading private key from %s...", conf.Node.LongTermPrivKey)
+	if conf.Node.LongTermPrivKey == "" {
+		return "", fmt.Errorf("node long-term private key not configured")
+	}
+
+	// Read private key file
+	privKeyData, err := os.ReadFile(conf.Node.LongTermPrivKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to read private key file %s: %v", conf.Node.LongTermPrivKey, err)
+	}
+	log.Printf("KRS: Read private key file: %d bytes", len(privKeyData))
+
+	// Parse private key (skip comments, decode hex)
+	privKeyLines := strings.Split(string(privKeyData), "\n")
+	var privKeyHex string
+	for _, line := range privKeyLines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			privKeyHex += line
+		}
+	}
+
+	if privKeyHex == "" {
+		return "", fmt.Errorf("could not find private key in file %s", conf.Node.LongTermPrivKey)
+	}
+	log.Printf("KRS: Extracted private key hex: %d characters", len(privKeyHex))
+
+	// Decode hex private key
+	privateKey, err := hex.DecodeString(privKeyHex)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode hex private key: %v", err)
+	}
+
+	if len(privateKey) != 32 {
+		return "", fmt.Errorf("private key must be 32 bytes (got %d)", len(privateKey))
+	}
+	log.Printf("KRS: Private key decoded: %d bytes", len(privateKey))
+	log.Printf("KRS: Private key (first 8 bytes): %x", privateKey[:8])
+	
+	// Verify we can derive public key from private key (sanity check)
+	derivedPubKey, err := hpke.DerivePublicKey(privateKey)
+	if err != nil {
+		log.Printf("KRS: WARNING: Failed to derive public key from private key: %v", err)
+	} else {
+		log.Printf("KRS: Derived public key from private key (first 8 bytes): %x", derivedPubKey[:8])
+		log.Printf("KRS: This public key should match the node's public key stored in KDC")
+	}
+
+	// Decrypt using HPKE
+	log.Printf("KRS: Attempting HPKE decryption...")
+	log.Printf("KRS:   - Private key length: %d bytes", len(privateKey))
+	log.Printf("KRS:   - Ciphertext length: %d bytes", len(actualCiphertext))
+	log.Printf("KRS:   - Encapsulated key (first 32 bytes of actual ciphertext): %x", actualCiphertext[:32])
+	plaintext, err := hpke.Decrypt(privateKey, nil, actualCiphertext)
+	if err != nil {
+		log.Printf("KRS: HPKE decryption failed: %v", err)
+		log.Printf("KRS: Ciphertext structure:")
+		log.Printf("KRS:   - Total bytes after base64 decode: %d", len(ciphertextBase64))
+		log.Printf("KRS:   - Actual ciphertext (after skipping duplicate ephemeral): %d", len(actualCiphertext))
+		log.Printf("KRS:   - First 32 bytes (duplicate ephemeral): %x", ciphertextBase64[:32])
+		log.Printf("KRS:   - Bytes 32-64 (encapsulated key): %x", ciphertextBase64[32:64])
+		log.Printf("KRS:   - Encapsulated key from actual ciphertext: %x", actualCiphertext[:32])
+		if len(derivedPubKey) == 32 {
+			log.Printf("KRS:   - Derived public key from private key: %x", derivedPubKey)
+		}
+		return "", fmt.Errorf("failed to decrypt encrypted text: %v", err)
+	}
+	log.Printf("KRS: HPKE decryption successful: %d bytes decrypted", len(plaintext))
+
+	// Step 4: Display decrypted cleartext
+	log.Printf("KRS: --- Cleartext (after HPKE decryption, %d bytes) ---", len(plaintext))
+	text := string(plaintext)
+	fmt.Println(text)
+	log.Printf("KRS: ===== END ENCRYPTED TEXT =====")
 
 	return text, nil
 }
@@ -351,16 +506,177 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 }
 
 // ProcessEncryptedKeys processes encrypted_keys content
-func ProcessEncryptedKeys(krsDB *KrsDB, data []byte) error {
-	// Data is base64-encoded encrypted blob, decode it
-	decoded, err := base64.StdEncoding.DecodeString(string(data))
+// Data is base64-encoded JSON containing an array of encrypted key entries
+// distributionID is optional and can be passed from the manifest metadata
+func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID ...string) error {
+	distID := ""
+	if len(distributionID) > 0 {
+		distID = distributionID[0]
+	}
+	// Step 1: Decode base64 to get JSON
+	log.Printf("KRS: Processing encrypted_keys content (%d bytes base64)", len(data))
+	jsonData, err := base64.StdEncoding.DecodeString(string(data))
 	if err != nil {
 		return fmt.Errorf("failed to decode base64 encrypted keys: %v", err)
 	}
+	log.Printf("KRS: Decoded JSON data: %d bytes", len(jsonData))
 
-	log.Printf("KRS: Received encrypted keys blob (%d bytes)", len(decoded))
+	// Step 2: Parse JSON structure
+	type EncryptedKeyEntry struct {
+		ZoneID         string `json:"zone_id"`
+		KeyID          string `json:"key_id"`
+		KeyType        string `json:"key_type,omitempty"`
+		Algorithm      uint8  `json:"algorithm,omitempty"`
+		Flags          uint16 `json:"flags,omitempty"`
+		PublicKey      string `json:"public_key,omitempty"`
+		EncryptedKey   string `json:"encrypted_key"`   // base64-encoded
+		EphemeralPubKey string `json:"ephemeral_pub_key"` // base64-encoded (duplicate, for verification)
+	}
 
-	// TODO: Decrypt using HPKE and store keys
-	return fmt.Errorf("encrypted_keys processing not yet implemented")
+	var entries []EncryptedKeyEntry
+	if err := json.Unmarshal(jsonData, &entries); err != nil {
+		return fmt.Errorf("failed to unmarshal encrypted keys JSON: %v", err)
+	}
+
+	log.Printf("KRS: Parsed %d encrypted key entries", len(entries))
+
+	// Step 3: Load node's private key
+	if conf.Node.LongTermPrivKey == "" {
+		return fmt.Errorf("node long-term private key not configured")
+	}
+
+	privKeyData, err := os.ReadFile(conf.Node.LongTermPrivKey)
+	if err != nil {
+		return fmt.Errorf("failed to read private key file %s: %v", conf.Node.LongTermPrivKey, err)
+	}
+
+	// Parse private key (skip comments, decode hex)
+	privKeyLines := strings.Split(string(privKeyData), "\n")
+	var privKeyHex string
+	for _, line := range privKeyLines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			privKeyHex += line
+		}
+	}
+
+	if privKeyHex == "" {
+		return fmt.Errorf("could not find private key in file %s", conf.Node.LongTermPrivKey)
+	}
+
+	privateKey, err := hex.DecodeString(privKeyHex)
+	if err != nil {
+		return fmt.Errorf("failed to decode hex private key: %v", err)
+	}
+
+	if len(privateKey) != 32 {
+		return fmt.Errorf("private key must be 32 bytes (got %d)", len(privateKey))
+	}
+
+	log.Printf("KRS: Loaded node private key (%d bytes)", len(privateKey))
+
+	// Step 4: Decrypt each key and store
+	successCount := 0
+	for i, entry := range entries {
+		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneID, entry.KeyID)
+
+		// Decode encrypted key from base64
+		encryptedKeyBytes, err := base64.StdEncoding.DecodeString(entry.EncryptedKey)
+		if err != nil {
+			log.Printf("KRS: Error: Failed to decode encrypted_key for entry %d: %v", i+1, err)
+			continue
+		}
+
+		// The encrypted_key from EncryptKeyForNode is the full ciphertext from hpke.Encrypt()
+		// which already contains: <encapsulated_key (32 bytes)><encrypted_data>
+		// No duplicate ephemeralPub prepended (unlike ProcessEncryptedText which handles test text)
+		if len(encryptedKeyBytes) < 32 {
+			log.Printf("KRS: Error: Encrypted key too short for entry %d: %d bytes (expected at least 32 for encapsulated key)", i+1, len(encryptedKeyBytes))
+			continue
+		}
+
+		log.Printf("KRS: Encrypted key size: %d bytes (encapsulated key: first 32 bytes)", len(encryptedKeyBytes))
+
+		// Decrypt using HPKE (ciphertext already has the correct format)
+		plaintext, err := hpke.Decrypt(privateKey, nil, encryptedKeyBytes)
+		if err != nil {
+			log.Printf("KRS: Error: Failed to decrypt key for entry %d (zone=%s, key_id=%s): %v", i+1, entry.ZoneID, entry.KeyID, err)
+			continue
+		}
+
+		log.Printf("KRS: Successfully decrypted key for zone %s, key_id %s (%d bytes)", entry.ZoneID, entry.KeyID, len(plaintext))
+
+		// Create ReceivedKey structure
+		// Parse key_id as uint16 (it's stored as string in JSON but should be a keytag)
+		var keyID uint16
+		if _, err := fmt.Sscanf(entry.KeyID, "%d", &keyID); err != nil {
+			// Try parsing as hex
+			if _, err2 := fmt.Sscanf(entry.KeyID, "%x", &keyID); err2 != nil {
+				log.Printf("KRS: Warning: Could not parse key_id '%s' as number, using 0", entry.KeyID)
+				keyID = 0
+			}
+		}
+
+		receivedKey := &ReceivedKey{
+			ID:             fmt.Sprintf("%s-%s", entry.ZoneID, entry.KeyID),
+			ZoneID:         entry.ZoneID,
+			KeyID:          keyID,
+			KeyType:        entry.KeyType,
+			Algorithm:      entry.Algorithm,
+			Flags:          entry.Flags,
+			PublicKey:      entry.PublicKey,
+			PrivateKey:     plaintext,
+			State:          "edgesigner", // Standby keys are already published, ready to use
+			ReceivedAt:     time.Now(),
+			DistributionID: distID,
+			Comment:        fmt.Sprintf("Received via encrypted_keys distribution"),
+		}
+
+		// Store in database
+		if err := krsDB.AddReceivedKey(receivedKey); err != nil {
+			log.Printf("KRS: Error: Failed to store key for entry %d: %v", i+1, err)
+			continue
+		}
+
+		successCount++
+		log.Printf("KRS: Stored key for zone %s, key_id %s (keytag %d)", entry.ZoneID, entry.KeyID, keyID)
+	}
+
+	log.Printf("KRS: Successfully processed %d/%d encrypted keys", successCount, len(entries))
+	if successCount == 0 {
+		return fmt.Errorf("failed to process any encrypted keys")
+	}
+
+	// Send confirmation NOTIFY back to KDC
+	// Get KDC address from config
+	kdcAddress := conf.Node.KdcAddress
+	if kdcAddress == "" {
+		// Fallback to database
+		nodeConfig, err := krsDB.GetNodeConfig()
+		if err == nil && nodeConfig.KdcAddress != "" {
+			kdcAddress = nodeConfig.KdcAddress
+		}
+	}
+
+	if kdcAddress != "" && distID != "" {
+		// Send confirmation asynchronously (don't block on network I/O)
+		// Capture distID in closure
+		distIDCopy := distID
+		go func() {
+			if err := SendConfirmationToKDC(distIDCopy, conf.ControlZone, kdcAddress); err != nil {
+				log.Printf("KRS: Warning: Failed to send confirmation NOTIFY: %v", err)
+			} else {
+				log.Printf("KRS: Successfully sent confirmation NOTIFY for distribution %s", distIDCopy)
+			}
+		}()
+	} else {
+		if distID == "" {
+			log.Printf("KRS: Warning: Distribution ID not available, cannot send confirmation NOTIFY")
+		} else {
+			log.Printf("KRS: Warning: KDC address not configured, cannot send confirmation NOTIFY")
+		}
+	}
+
+	return nil
 }
 

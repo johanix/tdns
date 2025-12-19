@@ -22,6 +22,7 @@ type KdcDebugPost struct {
 	DistributionID string `json:"distribution_id"` // Distribution ID (hex, e.g., "a1b2")
 	NodeID         string `json:"node_id"`         // Node ID
 	TestText       string `json:"test_text"`       // Test text payload (for test-distribution)
+	ContentType    string `json:"content_type"`    // "clear_text" or "encrypted_text" (default: "clear_text")
 	ChunkSize      int    `json:"chunk_size"`      // Chunk size in bytes (for set-chunk-size)
 }
 
@@ -70,16 +71,26 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			if !resp.Error {
 				// Ensure node ID is FQDN
 				nodeIDFQDN := dns.Fqdn(req.NodeID)
-				// Prepare test_text chunks
-				prepared, err := kdcDB.PrepareTestTextChunks(nodeIDFQDN, req.DistributionID, req.TestText, kdcConf)
-				if err != nil {
+				// Determine content type (default to clear_text)
+				contentType := req.ContentType
+				if contentType == "" {
+					contentType = "clear_text"
+				}
+				if contentType != "clear_text" && contentType != "encrypted_text" {
 					resp.Error = true
-					resp.ErrorMsg = err.Error()
+					resp.ErrorMsg = fmt.Sprintf("invalid content_type: %s (must be 'clear_text' or 'encrypted_text')", contentType)
 				} else {
-					resp.Msg = fmt.Sprintf("Test distribution %s created successfully for node %s", req.DistributionID, nodeIDFQDN)
-					resp.DistributionID = req.DistributionID
-					resp.ChunkCount = prepared.manifest.ChunkCount
-					log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, prepared.manifest.ChunkCount)
+					// Prepare text chunks
+					prepared, err := kdcDB.PrepareTextChunks(nodeIDFQDN, req.DistributionID, req.TestText, contentType, kdcConf)
+					if err != nil {
+						resp.Error = true
+						resp.ErrorMsg = err.Error()
+					} else {
+						resp.Msg = fmt.Sprintf("Test distribution %s created successfully for node %s", req.DistributionID, nodeIDFQDN)
+						resp.DistributionID = req.DistributionID
+						resp.ChunkCount = prepared.manifest.ChunkCount
+						log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, prepared.manifest.ChunkCount)
+					}
 				}
 			}
 

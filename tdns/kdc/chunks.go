@@ -76,26 +76,94 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		return nil, fmt.Errorf("no distribution records found for node %s, distribution %s", nodeID, distributionID)
 	}
 
-	// For now, use "zones" mode (simpler)
-	// Collect zone names from distribution records
-	zoneSet := make(map[string]bool)
-	for _, record := range nodeRecords {
-		zoneSet[record.ZoneID] = true
-	}
+	// Determine content type: use "encrypted_keys" if we have keys, otherwise "zonelist"
+	// For now, we'll use "encrypted_keys" mode which sends the encrypted keys directly
+	contentType := "encrypted_keys"
+	
+	var base64Data []byte
+	var zoneCount int
+	var keyCount int
 
-	zones := make([]string, 0, len(zoneSet))
-	for zone := range zoneSet {
-		zones = append(zones, zone)
-	}
+	if contentType == "encrypted_keys" {
+		// Prepare JSON structure with encrypted keys
+		// Format: array of objects, each containing zone_id, key_id, encrypted_key, ephemeral_pub_key
+		type EncryptedKeyEntry struct {
+			ZoneID         string `json:"zone_id"`
+			KeyID          string `json:"key_id"`
+			KeyType        string `json:"key_type,omitempty"`
+			Algorithm      uint8  `json:"algorithm,omitempty"`
+			Flags          uint16 `json:"flags,omitempty"`
+			PublicKey      string `json:"public_key,omitempty"`
+			EncryptedKey   string `json:"encrypted_key"`   // base64-encoded
+			EphemeralPubKey string `json:"ephemeral_pub_key"` // base64-encoded (duplicate, for verification)
+		}
 
-	// Prepare JSON data: zone list
-	zoneListJSON, err := json.Marshal(zones)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal zone list: %v", err)
-	}
+		entries := make([]EncryptedKeyEntry, 0, len(nodeRecords))
+		zoneSet := make(map[string]bool)
+		
+		for _, record := range nodeRecords {
+			// Get the key details to include key_id
+			key, err := kdc.GetDNSSECKeyByID(record.ZoneID, record.KeyID)
+			if err != nil {
+				log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneID, err)
+				continue
+			}
 
-	// Base64 encode
-	base64Data := base64.StdEncoding.EncodeToString(zoneListJSON)
+			entry := EncryptedKeyEntry{
+				ZoneID:         record.ZoneID,
+				KeyID:          record.KeyID,
+				KeyType:        string(key.KeyType),
+				Algorithm:      key.Algorithm,
+				Flags:          key.Flags,
+				PublicKey:      key.PublicKey,
+				EncryptedKey:   base64.StdEncoding.EncodeToString(record.EncryptedKey),
+				EphemeralPubKey: base64.StdEncoding.EncodeToString(record.EphemeralPubKey),
+			}
+			entries = append(entries, entry)
+			zoneSet[record.ZoneID] = true
+		}
+
+		keyCount = len(entries)
+		zoneCount = len(zoneSet)
+
+		if keyCount == 0 {
+			return nil, fmt.Errorf("no valid keys found for node %s, distribution %s", nodeID, distributionID)
+		}
+
+		// Marshal to JSON
+		keysJSON, err := json.Marshal(entries)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal encrypted keys JSON: %v", err)
+		}
+
+		// Base64 encode the JSON
+		base64Data = []byte(base64.StdEncoding.EncodeToString(keysJSON))
+		log.Printf("KDC: Prepared encrypted_keys: %d keys for %d zones, JSON size: %d bytes, base64 size: %d bytes", 
+			keyCount, zoneCount, len(keysJSON), len(base64Data))
+	} else {
+		// "zonelist" mode (fallback)
+		// Collect zone names from distribution records
+		zoneSet := make(map[string]bool)
+		for _, record := range nodeRecords {
+			zoneSet[record.ZoneID] = true
+		}
+
+		zones := make([]string, 0, len(zoneSet))
+		for zone := range zoneSet {
+			zones = append(zones, zone)
+		}
+
+		zoneCount = len(zones)
+
+		// Prepare JSON data: zone list
+		zoneListJSON, err := json.Marshal(zones)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal zone list: %v", err)
+		}
+
+		// Base64 encode
+		base64Data = []byte(base64.StdEncoding.EncodeToString(zoneListJSON))
+	}
 
 	// Calculate checksum
 	hash := sha256.Sum256([]byte(base64Data))
@@ -106,16 +174,21 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	chunks := splitIntoChunks([]byte(base64Data), chunkSize)
 
 	// Create manifest
+	metadata := map[string]interface{}{
+		"content":         contentType,
+		"distribution_id": distributionID,
+		"node_id":         nodeID,
+		"zone_count":      zoneCount,
+	}
+	if contentType == "encrypted_keys" {
+		metadata["key_count"] = keyCount
+	}
+
 	manifest := &core.JSONMANIFEST{
 		ChunkCount: uint16(len(chunks)),
 		ChunkSize:  uint16(chunkSize),
 		Checksum:   checksum,
-		Metadata: map[string]interface{}{
-			"content":         "zonelist",
-			"distribution_id": distributionID,
-			"node_id":         nodeID,
-			"zone_count":      len(zones),
-		},
+		Metadata:  metadata,
 	}
 
 	prepared := &preparedChunks{
@@ -352,33 +425,62 @@ func ClearDistributionCache(distributionID string) {
 	}
 }
 
-// PrepareTestTextChunks prepares chunks for a test_text distribution
+// PrepareTextChunks prepares chunks for a text distribution (clear_text or encrypted_text)
 // This creates a persistent distribution record that can be queried by KRS
-func (kdc *KdcDB) PrepareTestTextChunks(nodeID, distributionID, testText string, conf *KdcConf) (*preparedChunks, error) {
+// contentType should be "clear_text" or "encrypted_text"
+func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, contentType string, conf *KdcConf) (*preparedChunks, error) {
 	cacheKey := fmt.Sprintf("%s:%s", nodeID, distributionID)
 
 	// Check cache first
 	globalChunkCache.mu.RLock()
 	if cached, ok := globalChunkCache.cache[cacheKey]; ok {
 		globalChunkCache.mu.RUnlock()
-		log.Printf("KDC: Using cached test_text chunks for node %s, distribution %s", nodeID, distributionID)
+		log.Printf("KDC: Using cached %s chunks for node %s, distribution %s", contentType, nodeID, distributionID)
 		return cached, nil
 	}
 	globalChunkCache.mu.RUnlock()
 
 	// Not in cache, prepare chunks
-	log.Printf("KDC: Preparing test_text chunks for node %s, distribution %s", nodeID, distributionID)
+	log.Printf("KDC: Preparing %s chunks for node %s, distribution %s", contentType, nodeID, distributionID)
 
-	// Base64 encode the test text
-	base64Data := base64.StdEncoding.EncodeToString([]byte(testText))
+	var dataToChunk []byte
+	// var err error
+
+	if contentType == "encrypted_text" {
+		// Get node's public key
+		node, err := kdc.GetNode(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
+		}
+		if len(node.LongTermPubKey) != 32 {
+			return nil, fmt.Errorf("node %s has invalid public key length: %d (expected 32)", nodeID, len(node.LongTermPubKey))
+		}
+
+		// Encrypt the text using HPKE
+		ciphertext, ephemeralPub, err := hpke.Encrypt(node.LongTermPubKey, nil, []byte(text))
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt text: %v", err)
+		}
+
+		// Combine ephemeral public key and ciphertext for transport
+		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
+		encryptedData := append(ephemeralPub, ciphertext...)
+
+		// Base64 encode the encrypted data
+		dataToChunk = []byte(base64.StdEncoding.EncodeToString(encryptedData))
+		log.Printf("KDC: Encrypted text (%d bytes) -> encrypted data (%d bytes) -> base64 (%d bytes)", len(text), len(encryptedData), len(dataToChunk))
+	} else {
+		// clear_text: just base64 encode the text
+		dataToChunk = []byte(base64.StdEncoding.EncodeToString([]byte(text)))
+	}
 
 	// Calculate checksum
-	hash := sha256.Sum256([]byte(base64Data))
+	hash := sha256.Sum256(dataToChunk)
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
 	// Split into chunks
 	chunkSize := conf.GetJsonchunkMaxSize()
-	chunks := splitIntoChunks([]byte(base64Data), chunkSize)
+	chunks := splitIntoChunks(dataToChunk, chunkSize)
 
 	// Create manifest
 	manifest := &core.JSONMANIFEST{
@@ -386,10 +488,10 @@ func (kdc *KdcDB) PrepareTestTextChunks(nodeID, distributionID, testText string,
 		ChunkSize:  uint16(chunkSize),
 		Checksum:   checksum,
 		Metadata: map[string]interface{}{
-			"content":         "test_text",
+			"content":         contentType,
 			"distribution_id": distributionID,
 			"node_id":         nodeID,
-			"text_length":     len(testText),
+			"text_length":     len(text),
 		},
 	}
 
@@ -435,7 +537,13 @@ func (kdc *KdcDB) PrepareTestTextChunks(nodeID, distributionID, testText string,
 		}
 	}
 
-	log.Printf("KDC: Prepared %d test_text chunks for node %s, distribution %s", len(chunks), nodeID, distributionID)
+	log.Printf("KDC: Prepared %d %s chunks for node %s, distribution %s", len(chunks), contentType, nodeID, distributionID)
 	return prepared, nil
+}
+
+// PrepareTestTextChunks is a convenience wrapper for backward compatibility
+// It calls PrepareTextChunks with contentType="clear_text"
+func (kdc *KdcDB) PrepareTestTextChunks(nodeID, distributionID, testText string, conf *KdcConf) (*preparedChunks, error) {
+	return kdc.PrepareTextChunks(nodeID, distributionID, testText, "clear_text", conf)
 }
 
