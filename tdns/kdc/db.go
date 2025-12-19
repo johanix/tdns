@@ -17,6 +17,7 @@ import (
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
 	"github.com/johanix/tdns/tdns/hpke"
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
+	"github.com/miekg/dns"
 )
 
 // KdcDB represents the KDC database connection
@@ -164,6 +165,22 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
 			INDEX idx_node_id (node_id),
 			INDEX idx_active (active)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+		// Distribution confirmations table - tracks which nodes have confirmed receipt of distributed keys
+		`CREATE TABLE IF NOT EXISTS distribution_confirmations (
+			id VARCHAR(255) PRIMARY KEY,
+			distribution_id VARCHAR(255) NOT NULL,
+			zone_id VARCHAR(255) NOT NULL,
+			key_id VARCHAR(255) NOT NULL,
+			node_id VARCHAR(255) NOT NULL,
+			confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (zone_id) REFERENCES zones(id) ON DELETE CASCADE,
+			FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
+			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
+			UNIQUE KEY uk_distribution_node (distribution_id, node_id),
+			INDEX idx_distribution_id (distribution_id),
+			INDEX idx_zone_key (zone_id, key_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		// Distribution confirmations table - tracks which nodes have confirmed receipt of distributed keys
@@ -634,18 +651,39 @@ func (kdc *KdcDB) DeleteZone(zoneID string) error {
 }
 
 // GetNode retrieves a node by ID
+// nodeID should be normalized to FQDN format, but we'll try both FQDN and non-FQDN versions
+// to handle legacy data
 func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
+	// Normalize to FQDN
+	nodeIDFQDN := dns.Fqdn(nodeID)
+	
 	var n Node
 	var notifyAddr sql.NullString
 	err := kdc.DB.QueryRow(
 		"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
-		nodeID,
+		nodeIDFQDN,
 	).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("node not found: %s", nodeID)
+			// Try without trailing dot (for legacy data)
+			if strings.HasSuffix(nodeIDFQDN, ".") {
+				nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
+				err2 := kdc.DB.QueryRow(
+					"SELECT id, name, long_term_pub_key, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+					nodeIDNoDot,
+				).Scan(&n.ID, &n.Name, &n.LongTermPubKey, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				if err2 != nil {
+					if err2 == sql.ErrNoRows {
+						return nil, fmt.Errorf("node not found: %s (tried both FQDN and non-FQDN formats)", nodeID)
+					}
+					return nil, fmt.Errorf("failed to get node: %v", err2)
+				}
+			} else {
+				return nil, fmt.Errorf("node not found: %s", nodeID)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get node: %v", err)
 		}
-		return nil, fmt.Errorf("failed to get node: %v", err)
 	}
 	if notifyAddr.Valid {
 		n.NotifyAddress = notifyAddr.String
@@ -777,11 +815,43 @@ func (kdc *KdcDB) UpdateNodeLastSeen(nodeID string) error {
 }
 
 // DeleteNode deletes a node
+// nodeID should be normalized to FQDN format, but we'll try both FQDN and non-FQDN versions
+// to handle legacy data
 func (kdc *KdcDB) DeleteNode(nodeID string) error {
-	_, err := kdc.DB.Exec("DELETE FROM nodes WHERE id = ?", nodeID)
+	// Normalize to FQDN
+	nodeIDFQDN := nodeID
+	if !strings.HasSuffix(nodeIDFQDN, ".") {
+		nodeIDFQDN = nodeIDFQDN + "."
+	}
+	
+	// Try deleting with FQDN first
+	result, err := kdc.DB.Exec("DELETE FROM nodes WHERE id = ?", nodeIDFQDN)
 	if err != nil {
 		return fmt.Errorf("failed to delete node: %v", err)
 	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %v", err)
+	}
+	
+	// If no rows affected with FQDN, try without trailing dot (for legacy data)
+	if rowsAffected == 0 && strings.HasSuffix(nodeIDFQDN, ".") {
+		nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
+		result, err = kdc.DB.Exec("DELETE FROM nodes WHERE id = ?", nodeIDNoDot)
+		if err != nil {
+			return fmt.Errorf("failed to delete node (non-FQDN): %v", err)
+		}
+		rowsAffected, err = result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %v", err)
+		}
+	}
+	
+	if rowsAffected == 0 {
+		return fmt.Errorf("node not found: %s (tried both FQDN and non-FQDN formats)", nodeID)
+	}
+	
 	return nil
 }
 

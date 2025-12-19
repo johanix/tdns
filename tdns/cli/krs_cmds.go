@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/johanix/tdns/tdns"
 	"github.com/miekg/dns"
@@ -91,19 +92,21 @@ var krsKeysListCmd = &cobra.Command{
 		}
 
 		var lines []string
-		lines = append(lines, "ID | Zone | Key ID | Type | Alg | State | Received At")
+		lines = append(lines, "Zone | Key ID | Type | Alg | State | Received At")
 		for _, k := range keys {
 			key, ok := k.(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			keyID := getString(key, "id", "ID")
 			zoneID := getString(key, "zone_id", "ZoneID")
 			dnskeyID := getString(key, "key_id", "KeyID")
 			keyType := getString(key, "key_type", "KeyType")
 			state := getString(key, "state", "State")
-			receivedAt := getString(key, "received_at", "ReceivedAt")
+			receivedAtStr := getString(key, "received_at", "ReceivedAt")
+
+			// Format date: "2025-12-19 16:55:03" (year-mo-dy hr:min:sec)
+			receivedAt := formatDateTime(receivedAtStr)
 
 			// Get algorithm
 			var algStr string
@@ -125,10 +128,58 @@ var krsKeysListCmd = &cobra.Command{
 				algStr = "?"
 			}
 
-			lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s",
-				keyID, zoneID, dnskeyID, keyType, algStr, state, receivedAt))
+			lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s | %s",
+				zoneID, dnskeyID, keyType, algStr, state, receivedAt))
 		}
 		fmt.Println(columnize.SimpleFormat(lines))
+	},
+}
+
+var krsKeysHashCmd = &cobra.Command{
+	Use:   "hash --keyid <key-id> [--zone <zone-id>]",
+	Short: "Compute SHA-256 hash of a key's private key material",
+	Run: func(cmd *cobra.Command, args []string) {
+		keyID := cmd.Flag("keyid").Value.String()
+		zoneID := cmd.Flag("zone").Value.String()
+		
+		if keyID == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		// Construct the full key ID: if zone is provided, use <zone>-<keyid>, otherwise use keyid as-is
+		fullKeyID := keyID
+		if zoneID != "" {
+			// Normalize zone to FQDN
+			zoneID = dns.Fqdn(zoneID)
+			fullKeyID = fmt.Sprintf("%s-%s", zoneID, keyID)
+		}
+
+		prefixcmd, _ := getCommandContext("keys")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "hash",
+			"key_id":  fullKeyID,
+		}
+
+		resp, err := sendKrsRequest(api, "/krs/keys", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		hash := getString(resp, "msg", "Msg")
+		if hash == "" {
+			log.Fatalf("Error: hash not found in response")
+		}
+
+		fmt.Printf("Key Hash (SHA-256): %s\n", hash)
 	},
 }
 
@@ -357,7 +408,7 @@ var krsQueryKmreqCmd = &cobra.Command{
 var krsDebugDistribFetchCmd = &cobra.Command{
 	Use:   "fetch --id <id>",
 	Short: "Fetch and process a distribution from KDC",
-	Long:  `Fetches a distribution by querying JSONMANIFEST and JSONCHUNK records from the KDC, reassembles the chunks, and processes the content. For test_text distributions, displays the text to the terminal.`,
+	Long:  `Fetches a distribution by querying JSONMANIFEST and JSONCHUNK records from the KDC, reassembles the chunks, and processes the content. For clear_text distributions, displays the text. For encrypted_text distributions, displays base64 transport, ciphertext, and decrypted cleartext.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		distributionID := cmd.Flag("id").Value.String()
 
@@ -386,7 +437,7 @@ var krsDebugDistribFetchCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", getString(resp, "msg"))
 		
-		// If content is present (test_text), display it
+		// If content is present (clear_text or encrypted_text), display it
 		if content := getString(resp, "content"); content != "" {
 			fmt.Printf("\n%s\n", content)
 		}
@@ -419,7 +470,7 @@ func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 }
 
 func init() {
-	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd)
+	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd, krsKeysHashCmd)
 	KrsConfigCmd.AddCommand(krsConfigGetCmd)
 	KrsQueryCmd.AddCommand(krsQueryKmreqCmd)
 	KrsDebugDistribCmd.AddCommand(krsDebugDistribFetchCmd)
@@ -429,10 +480,41 @@ func init() {
 	krsKeysGetCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	krsKeysGetCmd.MarkFlagRequired("keyid")
 
+	krsKeysHashCmd.Flags().StringP("keyid", "k", "", "Key ID (DNSSEC keytag)")
+	krsKeysHashCmd.Flags().StringP("zone", "z", "", "Zone ID (optional, if provided constructs full ID as <zone>-<keyid>)")
+	krsKeysHashCmd.MarkFlagRequired("keyid")
+
 	krsQueryKmreqCmd.Flags().String("distribution-id", "", "Distribution ID")
 	krsQueryKmreqCmd.MarkFlagRequired("distribution-id")
 
 	krsDebugDistribFetchCmd.Flags().String("id", "", "Distribution ID")
 	krsDebugDistribFetchCmd.MarkFlagRequired("id")
+}
+
+// formatDateTime formats an ISO 8601 datetime string to "year-mo-dy hr:min:sec"
+// Input format: "2025-12-19T16:55:03.508771+01:00" or similar
+// Output format: "2025-12-19 16:55:03"
+func formatDateTime(isoStr string) string {
+	if isoStr == "" {
+		return ""
+	}
+	
+	// Try parsing as RFC3339 (ISO 8601)
+	t, err := time.Parse(time.RFC3339, isoStr)
+	if err != nil {
+		// Try parsing without timezone
+		t, err = time.Parse("2006-01-02T15:04:05", isoStr)
+		if err != nil {
+			// Try parsing with microseconds but no timezone
+			t, err = time.Parse("2006-01-02T15:04:05.999999", isoStr)
+			if err != nil {
+				// Fallback: return as-is if we can't parse
+				return isoStr
+			}
+		}
+	}
+	
+	// Format as "year-mo-dy hr:min:sec"
+	return t.Format("2006-01-02 15:04:05")
 }
 

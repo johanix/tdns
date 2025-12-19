@@ -7,6 +7,8 @@
 package krs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,6 +31,7 @@ type KrsKeysResponse struct {
 	ErrorMsg string         `json:"error_msg,omitempty"`
 	Key      *ReceivedKey   `json:"key,omitempty"`
 	Keys     []*ReceivedKey `json:"keys,omitempty"`
+	Msg      string         `json:"msg,omitempty"` // For hash command
 }
 
 // KrsConfigPost represents a request to the KRS config API
@@ -71,7 +74,7 @@ type KrsDebugResponse struct {
 	Error    bool      `json:"error,omitempty"`
 	ErrorMsg string    `json:"error_msg,omitempty"`
 	Msg      string    `json:"msg,omitempty"`
-	Content  string    `json:"content,omitempty"` // For test_text content
+	Content  string    `json:"content,omitempty"` // For clear_text or encrypted_text content
 }
 
 // sendJSONError sends a JSON-formatted error response
@@ -167,6 +170,25 @@ func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Keys = keys
+			}
+
+		case "hash":
+			if req.KeyID == "" {
+				sendJSONError(w, http.StatusBadRequest, "key_id is required for hash command")
+				return
+			}
+			key, err := krsDB.GetReceivedKey(req.KeyID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				hash, err := computeKeyHash(key.PrivateKey)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					resp.Msg = hash
+				}
 			}
 
 		default:
@@ -274,6 +296,16 @@ func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 	}
 }
 
+// computeKeyHash computes a SHA-256 hash of the private key material
+// Returns hex-encoded hash string
+func computeKeyHash(privateKey []byte) (string, error) {
+	if len(privateKey) == 0 {
+		return "", fmt.Errorf("private key is empty")
+	}
+	hash := sha256.Sum256(privateKey)
+	return hex.EncodeToString(hash[:]), nil
+}
+
 // APIKrsDebug handles debug endpoints
 func APIKrsDebug(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -296,16 +328,16 @@ func APIKrsDebug(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 			}
 
 			// Process the distribution (this will fetch manifest, chunks, reassemble, and process)
-			// Pass a pointer to store test_text content if present
-			var testTextContent string
-			err := ProcessDistribution(krsDB, conf, req.DistributionID, &testTextContent)
+			// Pass a pointer to store clear_text or encrypted_text content if present
+			var textContent string
+			err := ProcessDistribution(krsDB, conf, req.DistributionID, &textContent)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Msg = fmt.Sprintf("Successfully fetched and processed distribution %s", req.DistributionID)
-				if testTextContent != "" {
-					resp.Content = testTextContent
+				if textContent != "" {
+					resp.Content = textContent
 				}
 			}
 
@@ -318,4 +350,3 @@ func APIKrsDebug(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 		json.NewEncoder(w).Encode(resp)
 	}
 }
-

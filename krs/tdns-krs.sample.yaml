@@ -28,8 +28,11 @@ krs:
       dsn:		/var/lib/tdns/krs.db  # SQLite database file path
    
    node:
-      id:			node1  # Must match node ID in KDC
-      long_term_priv_key:	/etc/tdns/krs/node1.PrivateKey  # Path to HPKE long-term private key file
+      # Node ID must be a Fully Qualified Domain Name (FQDN) with trailing dot
+      # This ID must match exactly the node ID registered in the KDC
+      # Example: "cpt.axfr.net." or "node1.example.com."
+      id:			cpt.axfr.net.  # Must match node ID in KDC (FQDN with trailing dot)
+      long_term_priv_key:	/etc/tdns/krs/cpt.axfr.net.privatekey  # Path to HPKE long-term private key file
       kdc_address:		127.0.0.1:5354  # KDC server address (IP:port)
    
    control_zone:		kdc.example.com.  # Control zone for KMCTRL records

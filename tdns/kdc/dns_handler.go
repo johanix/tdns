@@ -68,6 +68,26 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		}
 	}
 
+	// Check if this is a NOTIFY message (confirmation from KRS)
+	if msg.Opcode == dns.OpcodeNotify {
+		log.Printf("KDC: Received NOTIFY message (opcode: NOTIFY)")
+		// Handle NOTIFY as confirmation
+		err := handleConfirmationNotify(ctx, msg, qname, qtype, w, kdcDB, conf)
+		if err != nil {
+			log.Printf("KDC: Error handling confirmation NOTIFY: %v", err)
+		} else {
+			log.Printf("KDC: Confirmation NOTIFY handled successfully")
+		}
+		// Send minimal ACK response
+		m := new(dns.Msg)
+		m.SetReply(msg)
+		m.Authoritative = true
+		if err := w.WriteMsg(m); err != nil {
+			log.Printf("KDC: Error writing NOTIFY response: %v", err)
+		}
+		return err
+	}
+
 	// Create response message
 	m := new(dns.Msg)
 	m.SetReply(msg)
@@ -693,5 +713,142 @@ func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname s
 
 	log.Printf("KDC: Sending JSONCHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
 	return w.WriteMsg(m)
+}
+
+// handleConfirmationNotify handles NOTIFY(JSONMANIFEST) messages from KRS confirming receipt of keys
+// The NOTIFY QNAME format is: <distributionID>.<controlzone>
+func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, qtype uint16, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	// Only handle JSONMANIFEST NOTIFYs as confirmations
+	if qtype != core.TypeJSONMANIFEST {
+		log.Printf("KDC: Ignoring NOTIFY for non-JSONMANIFEST type %s", dns.TypeToString[qtype])
+		return nil
+	}
+
+	// Extract distributionID from QNAME: <distributionID>.<controlzone>
+	controlZoneFQDN := conf.ControlZone
+	if !strings.HasSuffix(controlZoneFQDN, ".") {
+		controlZoneFQDN += "."
+	}
+
+	if !strings.HasSuffix(qname, controlZoneFQDN) {
+		log.Printf("KDC: NOTIFY QNAME %s does not match control zone %s", qname, controlZoneFQDN)
+		return fmt.Errorf("invalid NOTIFY QNAME format")
+	}
+
+	// Extract distributionID (everything before the control zone)
+	prefix := strings.TrimSuffix(qname, controlZoneFQDN)
+	if strings.HasSuffix(prefix, ".") {
+		prefix = strings.TrimSuffix(prefix, ".")
+	}
+	
+	// Get the last label (distributionID)
+	labels := strings.Split(prefix, ".")
+	distributionID := labels[len(labels)-1]
+
+	log.Printf("KDC: Processing confirmation NOTIFY for distribution %s from %s", distributionID, w.RemoteAddr())
+
+	// Extract node ID from remote address or from NOTIFY message
+	// For now, we'll need to identify the node by matching the remote address
+	// or by extracting from SIG(0) if present (future)
+	// TODO: Extract node ID from SIG(0) signature or from message metadata
+	
+	// Get distribution records to find which zone/key this is for
+	records, err := kdcDB.GetDistributionRecordsForDistributionID(distributionID)
+	if err != nil {
+		return fmt.Errorf("failed to get distribution records: %v", err)
+	}
+
+	if len(records) == 0 {
+		log.Printf("KDC: No distribution records found for distribution %s", distributionID)
+		return fmt.Errorf("no distribution records found for distribution %s", distributionID)
+	}
+
+	// Use the first record to get zone and key info (all records for same distribution have same zone/key)
+	record := records[0]
+	zoneID := record.ZoneID
+	keyID := record.KeyID
+
+	// For now, we'll identify the node by matching remote address to node notify addresses
+	// This is a temporary solution - in the future, we'll use SIG(0) to identify the node
+	remoteAddr := w.RemoteAddr().String()
+	// Extract IP:port (remove protocol prefix if present)
+	parts := strings.Split(remoteAddr, ":")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid remote address format: %s", remoteAddr)
+	}
+	remoteIP := strings.TrimPrefix(parts[0], "[") // Handle IPv6
+	remoteIP = strings.TrimSuffix(remoteIP, "]")
+
+	// Find node by matching remote IP to notify address
+	allNodes, err := kdcDB.GetAllNodes()
+	if err != nil {
+		return fmt.Errorf("failed to get nodes: %v", err)
+	}
+
+	var confirmedNodeID string
+	for _, node := range allNodes {
+		if node.NotifyAddress != "" {
+			// Extract IP from notify address (format: "IP:port")
+			nodeParts := strings.Split(node.NotifyAddress, ":")
+			if len(nodeParts) >= 1 {
+				nodeIP := nodeParts[0]
+				if nodeIP == remoteIP {
+					confirmedNodeID = node.ID
+					break
+				}
+			}
+		}
+	}
+
+	if confirmedNodeID == "" {
+		log.Printf("KDC: Warning: Could not identify node from remote address %s, using first node from distribution records", remoteAddr)
+		// Fallback: use the node ID from the first distribution record if available
+		if record.NodeID != "" {
+			confirmedNodeID = record.NodeID
+		} else {
+			// If no node ID in record, we can't confirm - this shouldn't happen
+			return fmt.Errorf("could not identify confirming node")
+		}
+	}
+
+	log.Printf("KDC: Recording confirmation for distribution %s, zone %s, key %s, node %s", 
+		distributionID, zoneID, keyID, confirmedNodeID)
+
+	// Record the confirmation
+	if err := kdcDB.AddDistributionConfirmation(distributionID, zoneID, keyID, confirmedNodeID); err != nil {
+		return fmt.Errorf("failed to record confirmation: %v", err)
+	}
+
+	// Check if all nodes have confirmed
+	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, zoneID)
+	if err != nil {
+		log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
+		// Don't fail - we've recorded the confirmation
+	} else if allConfirmed {
+		log.Printf("KDC: All nodes have confirmed distribution %s, transitioning key %s state from 'distributed' to 'edgesigner'", 
+			distributionID, keyID)
+		
+		// Transition key state from 'distributed' to 'edgesigner'
+		if err := kdcDB.UpdateKeyState(zoneID, keyID, KeyStateEdgeSigner); err != nil {
+			log.Printf("KDC: Error transitioning key state: %v", err)
+			// Don't fail - the confirmation was recorded
+		} else {
+			log.Printf("KDC: Successfully transitioned key %s to 'edgesigner' state", keyID)
+		}
+	} else {
+		// Get list of confirmed nodes for logging
+		confirmedNodes, _ := kdcDB.GetDistributionConfirmations(distributionID)
+		activeNodes, _ := kdcDB.GetActiveNodes()
+		var targetCount int
+		for _, node := range activeNodes {
+			if node.NotifyAddress != "" {
+				targetCount++
+			}
+		}
+		log.Printf("KDC: Distribution %s: %d/%d nodes confirmed (need all %d)", 
+			distributionID, len(confirmedNodes), targetCount, targetCount)
+	}
+
+	return nil
 }
 
