@@ -16,6 +16,13 @@ apiserver:
    certfile:		/etc/tdns/certs/localhost.crt
    keyfile:		/etc/tdns/certs/localhost.key
 
+# DNS engine configuration for handling NOTIFY messages
+dnsengine:
+   addresses:		[ 127.0.0.1:5355, '[::1]:5355' ]  # Addresses to listen on for DNS NOTIFY
+   transports:		[ do53 ]  # Transport protocols: do53, dot, doh, doq
+   certfile:		/etc/tdns/certs/localhost.crt  # Required for dot, doh, doq
+   keyfile:		/etc/tdns/certs/localhost.key  # Required for dot, doh, doq
+
 krs:
    database:
       dsn:		/var/lib/tdns/krs.db  # SQLite database file path
@@ -26,8 +33,4 @@ krs:
       kdc_address:		127.0.0.1:5354  # KDC server address (IP:port)
    
    control_zone:		kdc.example.com.  # Control zone for KMCTRL records
-   
-   dnsengine:
-      addresses:		[ 127.0.0.1:5355 ]  # Address for NOTIFY receiver
-      transports:		[ do53 ]
 

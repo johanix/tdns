@@ -31,6 +31,12 @@ func CaseFoldContains(slice []string, str string) bool {
 
 func DnsEngine(ctx context.Context, conf *Config) error {
 	log.Printf("DnsEngine: starting with addresses: %v", conf.DnsEngine.Addresses)
+	if Globals.Debug {
+		log.Printf("DnsEngine: Debug mode enabled")
+		log.Printf("DnsEngine: DnsQueryQ channel: %v (nil=%v)", conf.Internal.DnsQueryQ, conf.Internal.DnsQueryQ == nil)
+		log.Printf("DnsEngine: DnsNotifyQ channel: %v (nil=%v)", conf.Internal.DnsNotifyQ, conf.Internal.DnsNotifyQ == nil)
+		log.Printf("DnsEngine: DnsUpdateQ channel: %v (nil=%v)", conf.Internal.DnsUpdateQ, conf.Internal.DnsUpdateQ == nil)
+	}
 
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
@@ -60,10 +66,16 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			servers = append(servers, srv)
 
 			go func(s *dns.Server, addr, transport string) {
+				if Globals.Debug {
+					log.Printf("DnsEngine: Attempting to bind to %s (%s)", addr, transport)
+				}
 				log.Printf("DnsEngine: serving on %s (%s)\n", addr, transport)
 				if err := s.ListenAndServe(); err != nil {
 					log.Printf("Failed to setup the %s server: %s", transport, err.Error())
 				} else {
+					if Globals.Debug {
+						log.Printf("DnsEngine: Successfully listening on %s/%s", addr, transport)
+					}
 					log.Printf("DnsEngine: listening on %s/%s", addr, transport)
 				}
 			}(srv, addr, transport)
@@ -171,14 +183,27 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
+	dnsqueryq := conf.Internal.DnsQueryQ    // This should be non-nil only for customer handlers like KDC queries
 	kdb := conf.Internal.KeyDB
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
+		if Globals.Debug {
+			log.Printf("DnsHandler: Received DNS message from %s", w.RemoteAddr())
+			log.Printf("DnsHandler: Message ID: %d, Opcode: %s (%d)", r.MsgHdr.Id, dns.OpcodeToString[r.Opcode], r.Opcode)
+			log.Printf("DnsHandler: Question count: %d", len(r.Question))
+			if len(r.Question) > 0 {
+				log.Printf("DnsHandler: Question: %s %s", r.Question[0].Name, dns.TypeToString[r.Question[0].Qtype])
+			}
+			log.Printf("DnsHandler: Additional count: %d", len(r.Extra))
+		}
 		qname := r.Question[0].Name
 		// var dnssec_ok, ots_opt_in, ots_opt_out bool
 		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
 		if err != nil {
 			log.Printf("Error extracting EDNS0 options: %v", err)
+		}
+		if Globals.Debug {
+			log.Printf("DnsHandler: EDNS0 DO bit: %v", msgoptions.DO)
 		}
 
 		switch r.Opcode {
@@ -203,6 +228,36 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			return
 
 		case dns.OpcodeQuery:
+			// If DnsQueryQ channel is provided, route queries there (for custom handlers like KDC)
+			// Otherwise, use the existing direct call to QueryResponder (backward compatible)
+			if dnsqueryq != nil {
+				qtype := r.Question[0].Qtype
+				if Globals.Debug {
+					log.Printf("DnsHandler: Routing QUERY to dnsqueryq channel (qname=%s, qtype=%s, channel_len=%d)", qname, dns.TypeToString[qtype], len(dnsqueryq))
+				}
+				log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. Routing to dnsqueryq channel", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO)
+				// A DNS Query may trigger time consuming processing
+				select {
+				case dnsqueryq <- DnsQueryRequest{
+					ResponseWriter: w,
+					Msg:            r,
+					Qname:          qname,
+					Qtype:          qtype,
+					Options:        msgoptions,
+				}:
+					if Globals.Debug {
+						log.Printf("DnsHandler: Successfully sent query to dnsqueryq channel")
+					}
+				default:
+					log.Printf("DnsHandler: ERROR: dnsqueryq channel is full! Dropping query")
+				}
+				// Not waiting for a result
+				return
+			}
+			if Globals.Debug {
+				log.Printf("DnsHandler: dnsqueryq is nil, using direct QueryResponder call")
+			}
+			// Fall through to existing direct QueryResponder call
 			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO)
 			qtype := r.Question[0].Qtype
 			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())

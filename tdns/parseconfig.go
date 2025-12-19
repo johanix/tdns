@@ -360,13 +360,19 @@ func (conf *Config) parseKdcConfig(configMap map[string]interface{}) error {
 // parseKrsConfig parses the KRS configuration section from the config map
 // and stores it as YAML bytes in conf.Internal.KrsConf
 // The bytes will be unmarshaled into krs.KrsConf in StartKrs() to avoid circular import
+// Note: dnsengine config is at top level (like KDC), but we merge it into krs section
 func (conf *Config) parseKrsConfig(configMap map[string]interface{}) error {
 	krsSection, ok := configMap["krs"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("KRS configuration section 'krs' not found or invalid")
 	}
 
-	// Marshal the krs section to YAML bytes
+	// Extract dnsengine from top level and merge into krs section
+	if dnsEngineSection, ok := configMap["dnsengine"].(map[string]interface{}); ok {
+		krsSection["dnsengine"] = dnsEngineSection
+	}
+
+	// Marshal the krs section (now including dnsengine) to YAML bytes
 	// We'll unmarshal it into krs.KrsConf in StartKrs() to avoid circular import
 	krsYAML, err := yaml.Marshal(krsSection)
 	if err != nil {

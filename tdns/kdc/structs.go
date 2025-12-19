@@ -37,6 +37,7 @@ type Node struct {
 	ID              string    `json:"id"`              // Unique identifier for the node
 	Name            string    `json:"name"`            // Human-readable name
 	LongTermPubKey  []byte    `json:"long_term_pub_key"` // HPKE long-term public key (32 bytes, X25519)
+	NotifyAddress   string    `json:"notify_address"`  // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
 	RegisteredAt    time.Time `json:"registered_at"`
 	LastSeen        time.Time `json:"last_seen"`
 	State           NodeState `json:"state"`
@@ -57,12 +58,15 @@ const (
 type KeyState string
 
 const (
-	KeyStateCreated   KeyState = "created"
-	KeyStatePublished KeyState = "published"
-	KeyStateActive    KeyState = "active"
-	KeyStateStandby   KeyState = "standby"
-	KeyStateRetired   KeyState = "retired"
-	KeyStateRevoked   KeyState = "revoked"
+	KeyStateCreated     KeyState = "created"
+	KeyStatePublished   KeyState = "published"
+	KeyStateStandby     KeyState = "standby"
+	KeyStateActive      KeyState = "active"      // Central signer (stays in KDC)
+	KeyStateDistributed KeyState = "distributed"  // Currently being distributed to nodes
+	KeyStateEdgeSigner  KeyState = "edgesigner"  // Active on edge nodes
+	KeyStateRetired     KeyState = "retired"
+	KeyStateRemoved     KeyState = "removed"
+	KeyStateRevoked     KeyState = "revoked"
 )
 
 // DNSSECKey represents a DNSSEC key (KSK, ZSK, or CSK) for a zone

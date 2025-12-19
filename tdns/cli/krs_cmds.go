@@ -43,7 +43,7 @@ var krsKeysListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all received keys",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("krs")
+		prefixcmd, _ := getCommandContext("keys")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -130,7 +130,7 @@ var krsKeysGetCmd = &cobra.Command{
 			log.Fatalf("Error: --keyid is required")
 		}
 
-		prefixcmd, _ := getCommandContext("krs")
+		prefixcmd, _ := getCommandContext("keys")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -178,7 +178,7 @@ var krsKeysGetByZoneCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := getCommandContext("krs")
+		prefixcmd, _ := getCommandContext("keys")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -261,7 +261,7 @@ var krsConfigGetCmd = &cobra.Command{
 	Use:   "get",
 	Short: "Get node configuration",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("krs")
+		prefixcmd, _ := getCommandContext("config")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -317,7 +317,7 @@ var krsQueryKmreqCmd = &cobra.Command{
 			log.Fatalf("Error: --zone is required")
 		}
 
-		prefixcmd, _ := getCommandContext("krs")
+		prefixcmd, _ := getCommandContext("query")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -371,12 +371,12 @@ func init() {
 	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd)
 	KrsConfigCmd.AddCommand(krsConfigGetCmd)
 	KrsQueryCmd.AddCommand(krsQueryKmreqCmd)
-	KrsCmd.AddCommand(KrsKeysCmd, KrsConfigCmd, KrsQueryCmd)
+	KrsCmd.AddCommand(KrsKeysCmd, KrsConfigCmd, KrsQueryCmd, PingCmd)
 
 	krsKeysGetCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	krsKeysGetCmd.MarkFlagRequired("keyid")
 
-	krsQueryKmreqCmd.Flags().StringP("distribution-id", "d", "", "Distribution ID")
+	krsQueryKmreqCmd.Flags().String("distribution-id", "", "Distribution ID")
 	krsQueryKmreqCmd.MarkFlagRequired("distribution-id")
 }
 

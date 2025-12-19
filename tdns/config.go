@@ -185,6 +185,7 @@ type InternalConf struct {
 	DeferredUpdateQ chan DeferredUpdate
 	DnsUpdateQ      chan DnsUpdateRequest
 	DnsNotifyQ      chan DnsNotifyRequest
+	DnsQueryQ       chan DnsQueryRequest // Optional: if nil, queries use direct call to QueryResponder
 	DelegationSyncQ chan DelegationSyncRequest
 	MusicSyncQ      chan MusicSyncRequest
 	NotifyQ         chan NotifyRequest

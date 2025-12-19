@@ -17,6 +17,8 @@ type KdcConf struct {
 	DefaultAlgorithm uint8 `yaml:"default_algorithm" mapstructure:"default_algorithm"` // Default DNSSEC algorithm (e.g., 15 for ED25519)
 	KeyRotationInterval time.Duration `yaml:"key_rotation_interval" mapstructure:"key_rotation_interval"` // How often to rotate ZSKs
 	StandbyKeyCount int `yaml:"standby_key_count" mapstructure:"standby_key_count"` // Number of standby ZSKs to maintain
+	PublishTime time.Duration `yaml:"publish_time" mapstructure:"publish_time"` // Time to wait before published -> standby
+	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
 }
 
 // DatabaseConf represents database configuration

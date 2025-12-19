@@ -13,6 +13,13 @@ apiserver:
    certfile:            /etc/tdns/certs/localhost.crt
    keyfile:             /etc/tdns/certs/localhost.key
 
+# DNS engine configuration for handling KMREQ and KMCTRL queries
+dnsengine:
+   addresses:           [ 127.0.0.1:5354, '[::1]:5354' ]  # Addresses to listen on for DNS queries
+   transports:          [ do53 ]  # Transport protocols: do53, dot, doh, doq
+   certfile:            /etc/tdns/certs/localhost.crt  # Required for dot, doh, doq
+   keyfile:             /etc/tdns/certs/localhost.key  # Required for dot, doh, doq
+
 # KDC-specific configuration
 kdc:
    # Database configuration
@@ -43,6 +50,24 @@ kdc:
    # Number of standby ZSKs to maintain for rapid rollover
    # When a key is compromised, a standby key can be activated immediately
    standby_key_count:    2
+   
+   # Key state transition timing configuration:
+   
+   # publish_time: Time a key must remain in 'published' state before automatically
+   # transitioning to 'standby'. This allows old cached DNSKEY RRsets to expire
+   # and ensures the key is widely available before it becomes available for distribution.
+   # Format: Go duration string (e.g., "24h" = 24 hours, "168h" = 7 days, "48h" = 2 days)
+   # The KeyStateWorker background process checks every minute and transitions keys
+   # that have been published for at least this duration.
+   publish_time:         24h   # 24 hours
+   
+   # retire_time: Time a key must remain in 'retired' state before automatically
+   # transitioning to 'removed'. This allows all RRSIGs signed by the retired key
+   # to expire, ensuring the key is no longer needed in the DNSKEY RRset.
+   # Format: Go duration string (e.g., "30d" = 30 days, "720h" = 30 days, "14d" = 14 days)
+   # The KeyStateWorker background process checks every minute and transitions keys
+   # that have been retired for at least this duration.
+   retire_time:          30d   # 30 days
 
 log:
    file:                /var/log/tdns/tdns-kdc.log

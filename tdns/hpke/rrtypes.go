@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -33,29 +34,31 @@ func init() {
 }
 
 // KMCTRL - Key Management Control record
-// Format: <distribution-id> <keyid> <state> <timestamp>
-// Example: example.com.kdc.example.com. IN KMCTRL a1b2c3d4e5f6 12345 published 1704067200
+// Format: <distribution-id> <keyid> <state> <timestamp> <zone>
+// Example: kdc.example.com. IN KMCTRL a1b2c3d4e5f6 12345 standby 1704067200 example.com.
 type KMCTRL struct {
 	DistributionID string    // Hex string (e.g., "a1b2c3d4e5f6")
 	KeyID          uint16    // DNSSEC key ID
-	State          KeyState  // "published" | "active" | "standby"
+	State          KeyState  // "published" | "active" | "standby" | "distributed"
 	Timestamp      uint64    // Unix timestamp
+	Zone           string    // Zone name this key is for (e.g., "example.com.")
 }
 
 func NewKMCTRL() dns.PrivateRdata { return new(KMCTRL) }
 
 func (rd KMCTRL) String() string {
-	return fmt.Sprintf("%s %d %s %d",
+	return fmt.Sprintf("%s %d %s %d %s",
 		rd.DistributionID,
 		rd.KeyID,
 		string(rd.State),
 		rd.Timestamp,
+		rd.Zone,
 	)
 }
 
 func (rd *KMCTRL) Parse(txt []string) error {
-	if len(txt) != 4 {
-		return errors.New("KMCTRL requires distribution-id, keyid, state, and timestamp")
+	if len(txt) != 5 {
+		return errors.New("KMCTRL requires distribution-id, keyid, state, timestamp, and zone")
 	}
 
 	// Validate distribution ID (hex string)
@@ -73,10 +76,10 @@ func (rd *KMCTRL) Parse(txt []string) error {
 	// Parse state
 	state := KeyState(txt[2])
 	switch state {
-	case KeyStatePublished, KeyStateActive, KeyStateStandby:
+	case KeyStatePublished, KeyStateActive, KeyStateStandby, KeyStateDistributed:
 		// Valid states
 	default:
-		return fmt.Errorf("invalid KMCTRL state: %s (must be published, active, or standby)", txt[2])
+		return fmt.Errorf("invalid KMCTRL state: %s (must be published, active, standby, or distributed)", txt[2])
 	}
 
 	// Parse timestamp
@@ -85,10 +88,17 @@ func (rd *KMCTRL) Parse(txt []string) error {
 		return fmt.Errorf("invalid KMCTRL timestamp: %s", txt[3])
 	}
 
+	// Parse zone name
+	zone := txt[4]
+	if zone == "" {
+		return errors.New("KMCTRL zone name cannot be empty")
+	}
+
 	rd.DistributionID = distributionID
 	rd.KeyID = uint16(keyID)
 	rd.State = state
 	rd.Timestamp = timestamp
+	rd.Zone = zone
 
 	return nil
 }
@@ -126,6 +136,16 @@ func (rd *KMCTRL) Pack(buf []byte) (int, error) {
 		buf[off+i] = byte(rd.Timestamp >> (56 - i*8))
 	}
 	off += 8
+
+	// Pack zone name (string, length-prefixed)
+	zoneBytes := []byte(rd.Zone)
+	if len(zoneBytes) > 255 {
+		return off, errors.New("zone name too long")
+	}
+	buf[off] = byte(len(zoneBytes))
+	off++
+	copy(buf[off:], zoneBytes)
+	off += len(zoneBytes)
 
 	return off, nil
 }
@@ -174,6 +194,18 @@ func (rd *KMCTRL) Unpack(buf []byte) (int, error) {
 		uint64(buf[off+6])<<8 | uint64(buf[off+7])
 	off += 8
 
+	// Unpack zone name
+	if len(buf) < off+1 {
+		return off, errors.New("buffer too short for zone name length")
+	}
+	zoneLen := int(buf[off])
+	off++
+	if len(buf) < off+zoneLen {
+		return off, errors.New("buffer too short for zone name")
+	}
+	rd.Zone = string(buf[off : off+zoneLen])
+	off += zoneLen
+
 	return off, nil
 }
 
@@ -183,6 +215,7 @@ func (rd *KMCTRL) Copy(dest dns.PrivateRdata) error {
 	d.KeyID = rd.KeyID
 	d.State = rd.State
 	d.Timestamp = rd.Timestamp
+	d.Zone = rd.Zone
 	return nil
 }
 
@@ -190,7 +223,8 @@ func (rd *KMCTRL) Len() int {
 	return 1 + len(rd.DistributionID) + // distribution ID length + data
 		2 + // key ID
 		1 + len(string(rd.State)) + // state length + data
-		8 // timestamp
+		8 + // timestamp
+		1 + len(rd.Zone) // zone name length + data
 }
 
 func RegisterKMCTRLRR() error {
@@ -399,8 +433,9 @@ func RegisterKMPKGRR() error {
 }
 
 // ParseQnameForKMREQ extracts distribution ID and zone from KMREQ QNAME
-// Format: <distribution-id>.<zone>.kdc.example.com
-func ParseQnameForKMREQ(qname string) (distributionID, zone string, err error) {
+// Format: <distribution-id>.<zone>.<control-zone>
+// The control zone is needed to correctly extract multi-label zones
+func ParseQnameForKMREQ(qname string, controlZone string) (distributionID, zone string, err error) {
 	// Remove trailing dot if present
 	if len(qname) > 0 && qname[len(qname)-1] == '.' {
 		qname = qname[:len(qname)-1]
@@ -408,27 +443,75 @@ func ParseQnameForKMREQ(qname string) (distributionID, zone string, err error) {
 
 	labels := dns.SplitDomainName(qname)
 	if len(labels) < 3 {
-		return "", "", fmt.Errorf("invalid KMREQ QNAME format: %s (need at least distribution-id.zone.kdc.domain)", qname)
+		return "", "", fmt.Errorf("invalid KMREQ QNAME format: %s (need at least distribution-id.zone.control-zone)", qname)
 	}
 
 	// Distribution ID is the first label
 	distributionID = labels[0]
-
-	// Zone is the second label (may need to handle multi-label zones)
-	// For now, assume single-label zones
-	zone = labels[1]
 
 	// Validate distribution ID is hex
 	if _, err := hex.DecodeString(distributionID); err != nil {
 		return "", "", fmt.Errorf("invalid distribution ID in QNAME: %s (must be hex)", distributionID)
 	}
 
+	// Extract control zone labels (remove trailing dot if present)
+	controlZoneClean := controlZone
+	if len(controlZoneClean) > 0 && controlZoneClean[len(controlZoneClean)-1] == '.' {
+		controlZoneClean = controlZoneClean[:len(controlZoneClean)-1]
+	}
+	controlLabels := dns.SplitDomainName(controlZoneClean)
+	
+	if len(controlLabels) == 0 {
+		return "", "", fmt.Errorf("invalid control zone: %s", controlZone)
+	}
+
+	// The zone is everything between the distribution ID and the control zone
+	// QNAME format: <distribution-id>.<zone-labels>.<control-zone-labels>
+	// We need at least: distribution-id (1) + zone (1+) + control-zone (1+) = 3+ labels
+	if len(labels) < len(controlLabels) + 2 {
+		return "", "", fmt.Errorf("invalid KMREQ QNAME format: %s (too few labels)", qname)
+	}
+
+	// Check that the last N labels match the control zone
+	controlStartIdx := len(labels) - len(controlLabels)
+	for i := 0; i < len(controlLabels); i++ {
+		if labels[controlStartIdx+i] != controlLabels[i] {
+			return "", "", fmt.Errorf("QNAME %s does not end with control zone %s", qname, controlZone)
+		}
+	}
+
+	// Zone is everything between distribution ID (index 0) and control zone
+	// Zone labels are from index 1 to controlStartIdx-1
+	if controlStartIdx <= 1 {
+		return "", "", fmt.Errorf("invalid KMREQ QNAME format: %s (no zone labels found)", qname)
+	}
+
+	zoneLabels := labels[1:controlStartIdx]
+	zone = strings.Join(zoneLabels, ".")
+	
+	// Ensure zone is FQDN
+	zone = dns.Fqdn(zone)
+
 	return distributionID, zone, nil
 }
 
 // BuildKMREQQname constructs a QNAME for a KMREQ query
+// All inputs are expected to be FQDN (dot-terminated), but we handle both cases
+// Format: <distribution-id>.<zone>.<control-zone>
 func BuildKMREQQname(distributionID, zone, controlZone string) string {
-	// Format: <distribution-id>.<zone>.<control-zone>
-	return fmt.Sprintf("%s.%s.%s", distributionID, zone, controlZone)
+	// Strip trailing dots to avoid ".." in the QNAME
+	zoneClean := zone
+	if len(zoneClean) > 0 && zoneClean[len(zoneClean)-1] == '.' {
+		zoneClean = zoneClean[:len(zoneClean)-1]
+	}
+	
+	controlZoneClean := controlZone
+	if len(controlZoneClean) > 0 && controlZoneClean[len(controlZoneClean)-1] == '.' {
+		controlZoneClean = controlZoneClean[:len(controlZoneClean)-1]
+	}
+	
+	// Build QNAME: <distribution-id>.<zone>.<control-zone>.
+	// Always ensure the result is FQDN (ends with ".")
+	return fmt.Sprintf("%s.%s.%s.", distributionID, zoneClean, controlZoneClean)
 }
 

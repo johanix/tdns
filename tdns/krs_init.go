@@ -95,7 +95,14 @@ func (conf *Config) StartKrs(ctx context.Context, apirouter *mux.Router) error {
 	}
 
 	// Setup KRS API routes
-	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf)
+	// Pass conf as map to avoid circular import, and pass ping handler
+	confMap := map[string]interface{}{
+		"ApiServer": map[string]interface{}{
+			"ApiKey":    conf.ApiServer.ApiKey,
+			"Addresses": conf.ApiServer.Addresses,
+		},
+	}
+	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf, confMap, APIping(conf))
 
 	// Start API dispatcher
 	startEngine(&Globals.App, "APIdispatcher", func() error {
@@ -104,9 +111,13 @@ func (conf *Config) StartKrs(ctx context.Context, apirouter *mux.Router) error {
 
 	// Start NOTIFY receiver
 	if len(krsConf.DnsEngine.Addresses) > 0 {
+		log.Printf("KRS: Starting NOTIFY receiver with %d addresses", len(krsConf.DnsEngine.Addresses))
 		startEngine(&Globals.App, "NotifyReceiver", func() error {
+			log.Printf("KRS: NotifyReceiver engine starting")
 			return krs.StartNotifyReceiver(ctx, krsDB, &krsConf)
 		})
+	} else {
+		log.Printf("KRS: WARNING: No DNS engine addresses configured, NOTIFY receiver not started")
 	}
 
 	log.Printf("TDNS %s (%s): KRS started successfully", Globals.App.Name, AppTypeToString[Globals.App.Type])
