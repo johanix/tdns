@@ -85,6 +85,22 @@ func (conf *Config) StartKdc(ctx context.Context, apirouter *mux.Router) error {
 		})
 	})
 
+	// Initialize DNS NOTIFY channel for NOTIFY handling
+	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
+	log.Printf("KDC: Initialized DnsNotifyQ channel (capacity: %d)", cap(conf.Internal.DnsNotifyQ))
+
+	// Start DNS NOTIFY handler for KDC (handles confirmation NOTIFYs from KRS)
+	startEngine(&Globals.App, "KdcNotifyHandler", func() error {
+		log.Printf("KDC: Starting NotifyHandler engine")
+		return NotifyHandlerWithCallback(ctx, conf, func(ctx context.Context, dnr *DnsNotifyRequest) error {
+			if Globals.Debug {
+				log.Printf("KDC: NotifyHandler callback invoked (qname=%s)", dnr.Qname)
+			}
+			// Call KDC NOTIFY handler (pass individual fields to avoid import cycle)
+			return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, &kdcConf)
+		})
+	})
+
 	// Start DNS engine (listens on configured addresses and routes queries to DnsQueryQ channel)
 	startEngine(&Globals.App, "DnsEngine", func() error {
 		log.Printf("KDC: Starting DnsEngine")

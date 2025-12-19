@@ -241,6 +241,66 @@ func (krs *KrsDB) UpdateReceivedKeyState(id string, state string, activatedAt, r
 	return nil
 }
 
+// RetireEdgesignerKeysForZone retires all keys in "edgesigner" state for a given zone
+// This ensures only one key per zone is in "edgesigner" state at a time
+func (krs *KrsDB) RetireEdgesignerKeysForZone(zoneID string) error {
+	now := time.Now()
+	_, err := krs.DB.Exec(
+		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_id = ? AND state = ?`,
+		"retired", now, zoneID, "edgesigner",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to retire edgesigner keys for zone %s: %v", zoneID, err)
+	}
+	return nil
+}
+
+// AddEdgesignerKeyWithRetirement atomically retires existing edgesigner keys for a zone
+// and adds a new edgesigner key. This ensures only one key per zone is in "edgesigner" state.
+// If either operation fails, the transaction is rolled back.
+func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
+	// Ensure the key state is "edgesigner"
+	if key.State != "edgesigner" {
+		return fmt.Errorf("key state must be 'edgesigner', got '%s'", key.State)
+	}
+
+	// Start a transaction
+	tx, err := krs.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback() // Will be a no-op if Commit succeeds
+
+	// Step 1: Retire existing edgesigner keys for this zone
+	now := time.Now()
+	_, err = tx.Exec(
+		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_id = ? AND state = ?`,
+		"retired", now, key.ZoneID, "edgesigner",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to retire existing edgesigner keys for zone %s: %v", key.ZoneID, err)
+	}
+
+	// Step 2: Insert the new edgesigner key
+	_, err = tx.Exec(
+		`INSERT INTO received_keys 
+			(id, zone_id, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		key.ID, key.ZoneID, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
+		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to add new edgesigner key: %v", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	return nil
+}
+
 // SetNodeConfig stores the node configuration
 func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 	query := `INSERT OR REPLACE INTO node_config 

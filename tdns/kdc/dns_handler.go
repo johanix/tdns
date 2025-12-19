@@ -68,26 +68,6 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		}
 	}
 
-	// Check if this is a NOTIFY message (confirmation from KRS)
-	if msg.Opcode == dns.OpcodeNotify {
-		log.Printf("KDC: Received NOTIFY message (opcode: NOTIFY)")
-		// Handle NOTIFY as confirmation
-		err := handleConfirmationNotify(ctx, msg, qname, qtype, w, kdcDB, conf)
-		if err != nil {
-			log.Printf("KDC: Error handling confirmation NOTIFY: %v", err)
-		} else {
-			log.Printf("KDC: Confirmation NOTIFY handled successfully")
-		}
-		// Send minimal ACK response
-		m := new(dns.Msg)
-		m.SetReply(msg)
-		m.Authoritative = true
-		if err := w.WriteMsg(m); err != nil {
-			log.Printf("KDC: Error writing NOTIFY response: %v", err)
-		}
-		return err
-	}
-
 	// Create response message
 	m := new(dns.Msg)
 	m.SetReply(msg)
