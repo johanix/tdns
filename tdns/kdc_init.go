@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/johanix/tdns/tdns/kdc"
+	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,15 +43,59 @@ func (conf *Config) StartKdc(ctx context.Context, apirouter *mux.Router) error {
 	conf.Internal.KdcDB = kdcDB
 
 	// Setup KDC API routes
-	kdc.SetupKdcAPIRoutes(apirouter, kdcDB)
+	// Pass conf as map to avoid circular import, and pass ping handler
+	confMap := map[string]interface{}{
+		"ApiServer": map[string]interface{}{
+			"ApiKey":    conf.ApiServer.ApiKey,
+			"Addresses": conf.ApiServer.Addresses,
+		},
+		"DnsEngine": map[string]interface{}{
+			"Addresses": conf.DnsEngine.Addresses,
+		},
+		"KdcConf": &kdcConf,
+	}
+	kdc.SetupKdcAPIRoutes(apirouter, kdcDB, confMap, APIping(conf))
 
 	// Start API dispatcher
 	startEngine(&Globals.App, "APIdispatcher", func() error {
 		return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh)
 	})
 
-	// Start key distribution engine (future: handles NOTIFY and KMREQ queries)
-	// For now, we'll just have the API endpoints
+	// Initialize DNS query channel for custom query handling
+	conf.Internal.DnsQueryQ = make(chan DnsQueryRequest, 100)
+	log.Printf("KDC: Initialized DnsQueryQ channel (capacity: %d)", cap(conf.Internal.DnsQueryQ))
+
+	// Start DNS query handler for KDC (handles KMREQ, KMCTRL, etc.)
+	startEngine(&Globals.App, "KdcQueryHandler", func() error {
+		log.Printf("KDC: Starting QueryHandler engine")
+		return QueryHandler(ctx, conf, func(ctx context.Context, dqr *DnsQueryRequest) error {
+			if Globals.Debug {
+				log.Printf("KDC: QueryHandler callback invoked (qname=%s, qtype=%s)", dqr.Qname, dns.TypeToString[dqr.Qtype])
+			}
+			// Convert DnsQueryRequest to kdc.KdcQueryRequest
+			kdcReq := &kdc.KdcQueryRequest{
+				ResponseWriter: dqr.ResponseWriter,
+				Msg:            dqr.Msg,
+				Qname:          dqr.Qname,
+				Qtype:          dqr.Qtype,
+				Options:        dqr.Options,
+			}
+			// Call KDC handler
+			return kdc.HandleKdcQuery(ctx, kdcReq, kdcDB, &kdcConf)
+		})
+	})
+
+	// Start DNS engine (listens on configured addresses and routes queries to DnsQueryQ channel)
+	startEngine(&Globals.App, "DnsEngine", func() error {
+		log.Printf("KDC: Starting DnsEngine")
+		return DnsEngine(ctx, conf)
+	})
+
+	// Start key state worker for automatic transitions
+	startEngine(&Globals.App, "KeyStateWorker", func() error {
+		log.Printf("KDC: Starting KeyStateWorker")
+		return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
+	})
 
 	log.Printf("TDNS %s (%s): KDC started successfully", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil

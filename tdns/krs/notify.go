@@ -13,7 +13,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -24,16 +23,57 @@ func StartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *KrsConf) error
 	if addr == "" {
 		addr = ":53"
 	}
+	log.Printf("KRS: Starting NOTIFY receiver on %s", addr)
+	log.Printf("KRS: DNS engine addresses: %v", conf.DnsEngine.Addresses)
+	log.Printf("KRS: DNS engine transports: %v", conf.DnsEngine.Transports)
 
 	// Set up a dedicated ServeMux to avoid global handlers
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		if r == nil || r.Opcode != dns.OpcodeNotify {
+		log.Printf("KRS: Received DNS message from %s", w.RemoteAddr())
+		if r == nil {
+			log.Printf("KRS: ERROR: Received nil message")
+			return
+		}
+		log.Printf("KRS: Message ID: %d, Opcode: %s (%d), Question count: %d", 
+			r.MsgHdr.Id, dns.OpcodeToString[r.Opcode], r.Opcode, len(r.Question))
+		if r.Opcode != dns.OpcodeNotify {
+			log.Printf("KRS: Rejecting non-NOTIFY message (opcode=%s)", dns.OpcodeToString[r.Opcode])
 			// Optionally reply REFUSED, or silently drop. Here we refuse.
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeRefused)
-			_ = w.WriteMsg(resp)
+			if err := w.WriteMsg(resp); err != nil {
+				log.Printf("KRS: Error writing REFUSED response: %v", err)
+			}
 			return
+		}
+
+		// At this point we have a NOTIFY. Extract zone name from question section
+		var notifyZone string
+		if len(r.Question) > 0 {
+			notifyZone = r.Question[0].Name
+			log.Printf("KRS: Received NOTIFY for zone: %s (Qtype: %s)", notifyZone, dns.TypeToString[r.Question[0].Qtype])
+		} else {
+			log.Printf("KRS: Received NOTIFY with no question section")
+			notifyZone = "<unknown>"
+		}
+
+		// TODO: Later we will verify SIG(0) signatures, but for now we accept unsigned NOTIFYs
+		// Check for SIG(0) signature (for future use)
+		if sig0 := r.IsEdns0(); sig0 != nil {
+			log.Printf("KRS: NOTIFY has EDNS(0) options")
+		}
+		// Check for SIG RR in additional section (SIG(0))
+		sigCount := 0
+		for _, rr := range r.Extra {
+			if rr.Header().Rrtype == dns.TypeSIG {
+				sigCount++
+			}
+		}
+		if sigCount > 0 {
+			log.Printf("KRS: NOTIFY contains %d SIG(0) signature(s) (not yet validated)", sigCount)
+		} else {
+			log.Printf("KRS: NOTIFY has no SIG(0) signature (accepting unsigned NOTIFY for now)")
 		}
 
 		// At this point we have a NOTIFY. Minimal ACK:
@@ -41,58 +81,70 @@ func StartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *KrsConf) error
 		resp.SetReply(r)
 		resp.MsgHdr.Authoritative = true
 
-		var tsig *dns.TSIG
-
-		if tsig = r.IsTsig(); tsig == nil {
-			resp.SetRcode(r, dns.RcodeRefused)
-			edns0.AttachEDEToResponse(resp, edns0.EDETsigRequired)
-			_ = w.WriteMsg(resp)
-			return
-		}
-
-		if err := w.TsigStatus(); err != nil {
-			// TSIG validation failure
-			resp.SetRcode(r, dns.RcodeNotAuth)
-			edns0.AttachEDEToResponse(resp, edns0.EDETsigValidationFailure)
-			_ = w.WriteMsg(resp)
-			return
-		}
-
-		// Handle NOTIFY for control zone
-		qname := r.Question[0].Name
-		log.Printf("KRS: Received NOTIFY for %s", qname)
-
-		// TODO: Check if this is a NOTIFY for the control zone
+		// Check if this is a NOTIFY for the control zone
 		// If so, trigger a KMCTRL query to check for new keys
-		// For now, just log it
-		log.Printf("KRS: NOTIFY received for zone %s (control zone: %s)", qname, conf.ControlZone)
+		if notifyZone == conf.ControlZone {
+			log.Printf("KRS: NOTIFY received for control zone %s, triggering KMCTRL query", notifyZone)
+			
+			// Query KMCTRL records asynchronously (don't block the NOTIFY response)
+			go func() {
+				kmctrlRecords, err := QueryKMCTRL(krsDB, conf)
+				if err != nil {
+					log.Printf("KRS: Error querying KMCTRL: %v", err)
+					return
+				}
+				
+				// Process KMCTRL records and trigger KMREQ queries for new keys
+				if err := ProcessKMCTRL(krsDB, conf, kmctrlRecords); err != nil {
+					log.Printf("KRS: Error processing KMCTRL records: %v", err)
+				}
+			}()
+		} else {
+			log.Printf("KRS: NOTIFY received for zone %s (not control zone %s), ignoring", notifyZone, conf.ControlZone)
+		}
 
-		_ = w.WriteMsg(resp)
+		if err := w.WriteMsg(resp); err != nil {
+			log.Printf("KRS: Error writing NOTIFY response: %v", err)
+		} else {
+			log.Printf("KRS: NOTIFY response sent successfully")
+		}
 	})
 
+	log.Printf("KRS: Attempting to bind UDP listener on %s", addr)
 	udpConn, err := net.ListenPacket("udp", addr)
 	if err != nil {
+		log.Printf("KRS: ERROR: Failed to bind UDP listener: %v", err)
 		return fmt.Errorf("failed to bind UDP notify listener on %s: %w", addr, err)
 	}
+	log.Printf("KRS: Successfully bound UDP listener on %s", addr)
+
+	log.Printf("KRS: Attempting to bind TCP listener on %s", addr)
 	tcpListener, err := net.Listen("tcp", addr)
 	if err != nil {
+		log.Printf("KRS: ERROR: Failed to bind TCP listener: %v", err)
 		_ = udpConn.Close()
 		return fmt.Errorf("failed to bind TCP notify listener on %s: %w", addr, err)
 	}
+	log.Printf("KRS: Successfully bound TCP listener on %s", addr)
 
 	udpSrv := &dns.Server{PacketConn: udpConn, Net: "udp", Handler: mux, Addr: addr}
 	tcpSrv := &dns.Server{Listener: tcpListener, Net: "tcp", Handler: mux, Addr: addr}
 
+	log.Printf("KRS: Starting UDP server goroutine")
 	go func() {
+		log.Printf("KRS: UDP server starting to serve on %s", addr)
 		if serveErr := udpSrv.ActivateAndServe(); serveErr != nil {
 			log.Printf("KRS notify-only UDP server stopped: %v", serveErr)
 		}
 	}()
+	log.Printf("KRS: Starting TCP server goroutine")
 	go func() {
+		log.Printf("KRS: TCP server starting to serve on %s", addr)
 		if serveErr := tcpSrv.ActivateAndServe(); serveErr != nil {
 			log.Printf("KRS notify-only TCP server stopped: %v", serveErr)
 		}
 	}()
+	log.Printf("KRS: NOTIFY receiver started successfully on %s", addr)
 
 	// Wait for context cancellation
 	<-ctx.Done()

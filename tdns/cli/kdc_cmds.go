@@ -41,6 +41,11 @@ var KdcNodeCmd = &cobra.Command{
 	Short: "Manage edge nodes in KDC",
 }
 
+var KdcConfigCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Manage KDC configuration",
+}
+
 // Zone commands
 var kdcZoneAddCmd = &cobra.Command{
 	Use:   "add --zone <zone-name>",
@@ -195,10 +200,13 @@ var KdcZoneDnssecCmd = &cobra.Command{
 }
 
 var kdcZoneDnssecListCmd = &cobra.Command{
-	Use:   "list --zone <zone-id>",
-	Short: "List all DNSSEC keys for a zone",
+	Use:   "list [--zone <zone-id>]",
+	Short: "List all DNSSEC keys for a zone (or all zones if zone not specified)",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+		// Zone is optional - if provided, normalize it
+		if tdns.Globals.Zonename != "" {
+			tdns.Globals.Zonename = dns.Fqdn(tdns.Globals.Zonename)
+		}
 
 		prefixcmd, _ := getCommandContext("zone")
 		api, err := getApiClient(prefixcmd, true)
@@ -208,7 +216,10 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "get-keys",
-			"zone_id": tdns.Globals.Zonename,
+		}
+		// Only include zone_id if zone was specified
+		if tdns.Globals.Zonename != "" {
+			req["zone_id"] = tdns.Globals.Zonename
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -237,12 +248,16 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 		}
 
 		if len(keys) == 0 {
-			fmt.Println("No keys configured for this zone")
+			if tdns.Globals.Zonename != "" {
+				fmt.Println("No keys configured for this zone")
+			} else {
+				fmt.Println("No keys configured for any zone")
+			}
 			return
 		}
 
 		var lines []string
-		lines = append(lines, "Key ID | Type | Algorithm | State | Flags | Comment")
+		lines = append(lines, "Zone | Key ID | Type | Algorithm | State | Flags | Comment")
 
 		for i, k := range keys {
 			if tdns.Globals.Verbose {
@@ -255,6 +270,8 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 				continue
 			}
 
+			// Get zone name (zone_id is the zone identifier, which is typically the zone name)
+			zoneID := getString(key, "zone_id", "ZoneID")
 			keyID := getString(key, "id", "ID")
 			keyType := getString(key, "key_type", "KeyType")
 			state := getString(key, "state", "State")
@@ -282,7 +299,7 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 				algStr = "?"
 			}
 
-			line := fmt.Sprintf("%s | %s | %s | %s | %s | %s", keyID, keyType, algStr, state, flags, comment)
+			line := fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s", zoneID, keyID, keyType, algStr, state, flags, comment)
 			lines = append(lines, line)
 		}
 
@@ -433,15 +450,19 @@ var kdcNodeListCmd = &cobra.Command{
 				fmt.Println("No nodes configured")
 				return
 			}
-			fmt.Printf("%-30s %-30s %-15s %s\n", "ID", "Name", "State", "Comment")
-			fmt.Println(strings.Repeat("-", 100))
+			fmt.Printf("%-30s %-30s %-25s %-15s %s\n", "ID", "Name", "Notify Address", "State", "Comment")
+			fmt.Println(strings.Repeat("-", 120))
 			for _, n := range nodes {
 				if node, ok := n.(map[string]interface{}); ok {
 					id := fmt.Sprintf("%v", node["id"])
 					name := fmt.Sprintf("%v", node["name"])
+					notifyAddr := ""
+					if addr, ok := node["notify_address"]; ok && addr != nil {
+						notifyAddr = fmt.Sprintf("%v", addr)
+					}
 					state := fmt.Sprintf("%v", node["state"])
 					comment := fmt.Sprintf("%v", node["comment"])
-					fmt.Printf("%-30s %-30s %-15s %s\n", id, name, state, comment)
+					fmt.Printf("%-30s %-30s %-25s %-15s %s\n", id, name, notifyAddr, state, comment)
 				}
 			}
 		} else {
@@ -482,6 +503,110 @@ var kdcNodeGetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Response: %+v\n", resp)
 		}
+	},
+}
+
+var kdcNodeUpdateCmd = &cobra.Command{
+	Use:   "update --nodeid <node-id> [--name <name>] [--notify-address <address:port>] [--comment <comment>]",
+	Short: "Update node details (name, notify address, comment)",
+	Run: func(cmd *cobra.Command, args []string) {
+		updateNodeID := cmd.Flag("nodeid").Value.String()
+		if updateNodeID == "" {
+			log.Fatalf("Error: --nodeid is required")
+		}
+
+		prefixcmd, _ := getCommandContext("node")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		// Get current node to preserve fields not being updated
+		getReq := map[string]interface{}{
+			"command": "get",
+			"node_id": updateNodeID,
+		}
+		getResp, err := sendKdcRequest(api, "/kdc/node", getReq)
+		if err != nil {
+			log.Fatalf("Error getting current node: %v", err)
+		}
+		if getResp["error"] == true {
+			log.Fatalf("Error getting current node: %v", getResp["error_msg"])
+		}
+
+		nodeMap, ok := getResp["node"].(map[string]interface{})
+		if !ok {
+			log.Fatalf("Error: invalid node data in response")
+		}
+
+		// Update fields if provided
+		updateNode := map[string]interface{}{
+			"id": updateNodeID,
+		}
+
+		// Preserve or update name
+		if nameFlag := cmd.Flag("name").Value.String(); nameFlag != "" {
+			updateNode["name"] = nameFlag
+		} else if name, ok := nodeMap["name"]; ok {
+			updateNode["name"] = name
+		}
+
+		// Preserve or update notify_address
+		if notifyAddrFlag := cmd.Flag("notify-address").Value.String(); notifyAddrFlag != "" {
+			updateNode["notify_address"] = notifyAddrFlag
+		} else if addr, ok := nodeMap["notify_address"]; ok {
+			updateNode["notify_address"] = addr
+		}
+
+		// Preserve long_term_pub_key (required field)
+		// JSON encodes []byte as base64 string, so we need to decode it back to []byte
+		if pubkeyVal, ok := nodeMap["long_term_pub_key"]; ok {
+			var pubkeyBytes []byte
+			if pubkeyStr, ok := pubkeyVal.(string); ok {
+				// Decode base64 string back to []byte
+				pubkeyBytes, err = base64.StdEncoding.DecodeString(pubkeyStr)
+				if err != nil {
+					log.Fatalf("Error decoding public key from response: %v", err)
+				}
+			} else {
+				log.Fatalf("Error: public key has unexpected type: %T", pubkeyVal)
+			}
+			updateNode["long_term_pub_key"] = pubkeyBytes
+		} else {
+			log.Fatalf("Error: public key not found in node data")
+		}
+
+		// Preserve state
+		if state, ok := nodeMap["state"]; ok {
+			updateNode["state"] = state
+		} else {
+			updateNode["state"] = "online"
+		}
+
+		// Preserve or update comment
+		if commentFlag := cmd.Flag("comment").Value.String(); commentFlag != "" {
+			updateNode["comment"] = commentFlag
+		} else if comment, ok := nodeMap["comment"]; ok {
+			updateNode["comment"] = comment
+		} else {
+			updateNode["comment"] = ""
+		}
+
+		req := map[string]interface{}{
+			"command": "update",
+			"node":    updateNode,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/node", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
 	},
 }
 
@@ -872,16 +997,229 @@ var kdcZoneDnssecGenerateCmd = &cobra.Command{
 	},
 }
 
+// Config commands
+var kdcConfigGetCmd = &cobra.Command{
+	Use:   "get",
+	Short: "Get KDC configuration",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("config")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "get",
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/config", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		configRaw, ok := resp["config"]
+		if !ok {
+			fmt.Printf("Error: 'config' key not found in response\n")
+			return
+		}
+
+		config, ok := configRaw.(map[string]interface{})
+		if !ok {
+			fmt.Printf("Error: 'config' is not an object (got %T)\n", configRaw)
+			return
+		}
+
+		// Pretty print the config
+		configJSON, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Printf("Error marshaling config: %v\n", err)
+			return
+		}
+		fmt.Printf("%s\n", string(configJSON))
+	},
+}
+
+var kdcZoneDistributeZskCmd = &cobra.Command{
+	Use:   "distribute-zsk --zone <zone-id> --keyid <key-id>",
+	Short: "Trigger distribution of a standby ZSK to all nodes",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		keyid := cmd.Flag("keyid").Value.String()
+		if keyid == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "distribute-zsk",
+			"zone_id": tdns.Globals.Zonename,
+			"key_id":  keyid,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcZoneTransitionCmd = &cobra.Command{
+	Use:   "transition --zone <zone-id> --keyid <key-id>",
+	Short: "Transition a key state (created->published or standby->active, auto-detected)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		keyid := cmd.Flag("keyid").Value.String()
+		if keyid == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "transition",
+			"zone_id": tdns.Globals.Zonename,
+			"key_id":  keyid,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcZoneDnssecDeleteCmd = &cobra.Command{
+	Use:   "delete --zone <zone-id> --keyid <key-id>",
+	Short: "Delete a DNSSEC key",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		keyid := cmd.Flag("keyid").Value.String()
+		if keyid == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "delete-key",
+			"zone_id": tdns.Globals.Zonename,
+			"key_id":  keyid,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcZoneSetStateCmd = &cobra.Command{
+	Use:   "setstate --zone <zone-id> --keyid <key-id> --state <state>",
+	Short: "Set a key to any state (debug command)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		keyid := cmd.Flag("keyid").Value.String()
+		newState := cmd.Flag("state").Value.String()
+		if keyid == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+		if newState == "" {
+			log.Fatalf("Error: --state is required")
+		}
+
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":  "setstate",
+			"zone_id":  tdns.Globals.Zonename,
+			"key_id":   keyid,
+			"new_state": newState,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
 func init() {
-	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd)
-	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd)
-	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd)
+	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd)
+	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
+		kdcZoneDistributeZskCmd, kdcZoneTransitionCmd, kdcZoneSetStateCmd)
+	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd)
 	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd)
-	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcDebugCmd)
+	KdcConfigCmd.AddCommand(kdcConfigGetCmd)
+	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcConfigCmd, KdcDebugCmd, PingCmd)
+
+	kdcZoneDistributeZskCmd.Flags().StringP("keyid", "k", "", "Key ID (must be a ZSK in standby state)")
+	kdcZoneDistributeZskCmd.MarkFlagRequired("keyid")
+	
+	kdcZoneTransitionCmd.Flags().StringP("keyid", "k", "", "Key ID (transition auto-detected: created->published or standby->active)")
+	kdcZoneTransitionCmd.MarkFlagRequired("keyid")
+	
+	kdcZoneDnssecDeleteCmd.Flags().StringP("keyid", "k", "", "Key ID to delete")
+	kdcZoneDnssecDeleteCmd.MarkFlagRequired("keyid")
+	
+	kdcZoneSetStateCmd.Flags().StringP("keyid", "k", "", "Key ID")
+	kdcZoneSetStateCmd.Flags().StringP("state", "s", "", "New state")
+	kdcZoneSetStateCmd.MarkFlagRequired("keyid")
+	kdcZoneSetStateCmd.MarkFlagRequired("state")
 
 	KdcNodeCmd.PersistentFlags().StringVarP(&nodeid, "nodeid", "n", "", "node id")
 	KdcNodeCmd.PersistentFlags().StringVarP(&nodename, "nodename", "N", "", "node name")
 	KdcNodeCmd.PersistentFlags().StringVarP(&pubkeyfile, "pubkeyfile", "p", "", "public key file")
+	
+	kdcNodeUpdateCmd.Flags().StringP("nodeid", "n", "", "Node ID (required)")
+	kdcNodeUpdateCmd.MarkFlagRequired("nodeid")
+	kdcNodeUpdateCmd.Flags().StringP("name", "", "", "Node name")
+	kdcNodeUpdateCmd.Flags().StringP("notify-address", "a", "", "Notify address:port (e.g., 192.0.2.1:53)")
+	kdcNodeUpdateCmd.Flags().StringP("comment", "c", "", "Comment")
 
 	kdcZoneDnssecGenerateCmd.Flags().StringP("type", "t", "ZSK", "Key type: KSK, ZSK, or CSK")
 	kdcZoneDnssecGenerateCmd.Flags().StringP("algorithm", "a", "", "DNSSEC algorithm (number or name, e.g., 15 or ED25519)")

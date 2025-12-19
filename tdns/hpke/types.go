@@ -10,12 +10,15 @@ package hpke
 type KeyState string
 
 const (
-	KeyStateCreated   KeyState = "created"
-	KeyStatePublished KeyState = "published"
-	KeyStateActive    KeyState = "active"
-	KeyStateStandby   KeyState = "standby"
-	KeyStateRetired   KeyState = "retired"
-	KeyStateRevoked   KeyState = "revoked"
+	KeyStateCreated     KeyState = "created"
+	KeyStatePublished   KeyState = "published"
+	KeyStateStandby     KeyState = "standby"
+	KeyStateActive      KeyState = "active"      // Central signer (stays in KDC)
+	KeyStateDistributed KeyState = "distributed"  // Currently being distributed to nodes
+	KeyStateEdgeSigner  KeyState = "edgesigner"  // Active on edge nodes
+	KeyStateRetired     KeyState = "retired"
+	KeyStateRemoved     KeyState = "removed"
+	KeyStateRevoked     KeyState = "revoked"
 )
 
 // EdgeStatus defines the status of an edge node in the KDC

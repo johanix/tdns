@@ -15,6 +15,50 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// KrsKeysPost represents a request to the KRS keys API
+type KrsKeysPost struct {
+	Command string `json:"command"` // "list", "get", "get-by-zone"
+	KeyID   string `json:"key_id,omitempty"`
+	ZoneID  string `json:"zone_id,omitempty"`
+}
+
+// KrsKeysResponse represents a response from the KRS keys API
+type KrsKeysResponse struct {
+	Time     time.Time      `json:"time"`
+	Error    bool           `json:"error,omitempty"`
+	ErrorMsg string         `json:"error_msg,omitempty"`
+	Key      *ReceivedKey   `json:"key,omitempty"`
+	Keys     []*ReceivedKey `json:"keys,omitempty"`
+}
+
+// KrsConfigPost represents a request to the KRS config API
+type KrsConfigPost struct {
+	Command string `json:"command"` // "get"
+}
+
+// KrsConfigResponse represents a response from the KRS config API
+type KrsConfigResponse struct {
+	Time     time.Time              `json:"time"`
+	Error    bool                   `json:"error,omitempty"`
+	ErrorMsg string                 `json:"error_msg,omitempty"`
+	Config   map[string]interface{} `json:"config,omitempty"`
+}
+
+// KrsQueryPost represents a request to the KRS query API
+type KrsQueryPost struct {
+	Command       string `json:"command"`        // "query-kmreq"
+	DistributionID string `json:"distribution_id,omitempty"`
+	ZoneID        string `json:"zone_id,omitempty"`
+}
+
+// KrsQueryResponse represents a response from the KRS query API
+type KrsQueryResponse struct {
+	Time     time.Time `json:"time"`
+	Error    bool      `json:"error,omitempty"`
+	ErrorMsg string    `json:"error_msg,omitempty"`
+	Msg      string    `json:"msg,omitempty"`
+}
+
 // sendJSONError sends a JSON-formatted error response
 func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 	resp := map[string]interface{}{
@@ -28,38 +72,59 @@ func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 }
 
 // SetupKrsAPIRoutes sets up API routes for KRS management
-func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf) {
-	router.HandleFunc("/krs/keys", APIKrsKeys(krsDB)).Methods("POST")
-	router.HandleFunc("/krs/config", APIKrsConfig(krsDB, conf)).Methods("POST")
-	router.HandleFunc("/krs/query", APIKrsQuery(krsDB, conf)).Methods("POST")
+// tdnsConf is *tdns.Config passed as interface{} to avoid circular import
+// pingHandler is the ping endpoint handler function
+func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf, tdnsConf interface{}, pingHandler http.HandlerFunc) {
+	// Extract API key from config
+	apikey := ""
+	if configMap, ok := tdnsConf.(map[string]interface{}); ok {
+		if apiServer, ok := configMap["ApiServer"].(map[string]interface{}); ok {
+			if key, ok := apiServer["ApiKey"].(string); ok {
+				apikey = key
+			}
+		}
+	}
+	
+	// Create subrouter with API key requirement
+	var sr *mux.Router
+	if apikey != "" {
+		sr = router.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	} else {
+		sr = router.PathPrefix("/api/v1").Subrouter()
+	}
+	
+	// Add ping endpoint
+	if pingHandler != nil {
+		sr.HandleFunc("/ping", pingHandler).Methods("POST")
+	}
+	
+	sr.HandleFunc("/krs/keys", APIKrsKeys(krsDB)).Methods("POST")
+	sr.HandleFunc("/krs/config", APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
+	sr.HandleFunc("/krs/query", APIKrsQuery(krsDB, conf)).Methods("POST")
 }
 
 // APIKrsKeys handles key management endpoints
 func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Command string `json:"command"` // "list", "get", "get-by-zone"
-			KeyID   string `json:"key_id,omitempty"`
-			ZoneID  string `json:"zone_id,omitempty"`
-		}
+		var req KrsKeysPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 			return
 		}
 
-		resp := map[string]interface{}{
-			"time": time.Now(),
+		resp := KrsKeysResponse{
+			Time: time.Now(),
 		}
 
 		switch req.Command {
 		case "list":
 			keys, err := krsDB.GetAllReceivedKeys()
 			if err != nil {
-				resp["error"] = true
-				resp["error_msg"] = err.Error()
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			} else {
-				resp["keys"] = keys
+				resp.Keys = keys
 			}
 
 		case "get":
@@ -69,10 +134,10 @@ func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 			}
 			key, err := krsDB.GetReceivedKey(req.KeyID)
 			if err != nil {
-				resp["error"] = true
-				resp["error_msg"] = err.Error()
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			} else {
-				resp["key"] = key
+				resp.Key = key
 			}
 
 		case "get-by-zone":
@@ -82,10 +147,10 @@ func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 			}
 			keys, err := krsDB.GetReceivedKeysForZone(req.ZoneID)
 			if err != nil {
-				resp["error"] = true
-				resp["error_msg"] = err.Error()
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			} else {
-				resp["keys"] = keys
+				resp.Keys = keys
 			}
 
 		default:
@@ -99,37 +164,48 @@ func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 }
 
 // APIKrsConfig handles node configuration endpoints
-func APIKrsConfig(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
+// tdnsConf is *tdns.Config passed as interface{} to avoid circular import
+func APIKrsConfig(krsDB *KrsDB, conf *KrsConf, tdnsConf interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Command string `json:"command"` // "get"
-		}
+		var req KrsConfigPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 			return
 		}
 
-		resp := map[string]interface{}{
-			"time": time.Now(),
+		resp := KrsConfigResponse{
+			Time: time.Now(),
 		}
 
 		switch req.Command {
 		case "get":
 			config, err := krsDB.GetNodeConfig()
 			if err != nil {
-				resp["error"] = true
-				resp["error_msg"] = err.Error()
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			} else {
+				// Extract API addresses from tdns config
+				apiAddresses := []string{}
+				if configMap, ok := tdnsConf.(map[string]interface{}); ok {
+					if apiServer, ok := configMap["ApiServer"].(map[string]interface{}); ok {
+						if addrs, ok := apiServer["Addresses"].([]string); ok {
+							apiAddresses = addrs
+						}
+					}
+				}
+
 				// Don't expose private keys in API response
 				configResp := map[string]interface{}{
-					"id":           config.ID,
-					"kdc_address":  config.KdcAddress,
-					"control_zone": config.ControlZone,
-					"registered_at": config.RegisteredAt,
-					"last_seen":    config.LastSeen,
+					"id":            config.ID,
+					"kdc_address":   config.KdcAddress,
+					"control_zone":   config.ControlZone,
+					"registered_at":  config.RegisteredAt,
+					"last_seen":      config.LastSeen,
+					"dns_addresses":  conf.DnsEngine.Addresses,
+					"api_addresses":  apiAddresses,
 				}
-				resp["config"] = configResp
+				resp.Config = configResp
 			}
 
 		default:
@@ -145,19 +221,15 @@ func APIKrsConfig(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 // APIKrsQuery handles KMREQ query endpoints (forces a query to KDC)
 func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Command       string `json:"command"`        // "query-kmreq"
-			DistributionID string `json:"distribution_id,omitempty"`
-			ZoneID        string `json:"zone_id,omitempty"`
-		}
+		var req KrsQueryPost
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
 			return
 		}
 
-		resp := map[string]interface{}{
-			"time": time.Now(),
+		resp := KrsQueryResponse{
+			Time: time.Now(),
 		}
 
 		switch req.Command {
@@ -170,10 +242,10 @@ func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 			// Trigger KMREQ query
 			err := QueryKMREQ(krsDB, conf, req.DistributionID, req.ZoneID)
 			if err != nil {
-				resp["error"] = true
-				resp["error_msg"] = err.Error()
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
 			} else {
-				resp["msg"] = fmt.Sprintf("KMREQ query initiated for distribution %s, zone %s", req.DistributionID, req.ZoneID)
+				resp.Msg = fmt.Sprintf("KMREQ query initiated for distribution %s, zone %s", req.DistributionID, req.ZoneID)
 			}
 
 		default:

@@ -17,6 +17,43 @@ import (
 	"github.com/miekg/dns"
 )
 
+// QueryHandler consumes DnsQueryRequest messages from the DnsQueryQ channel
+// and calls the provided handler function. This allows custom query handlers
+// (like KDC for KMREQ queries) to process queries via channels.
+// handlerFunc: Function that processes a DnsQueryRequest
+func QueryHandler(ctx context.Context, conf *Config, handlerFunc func(context.Context, *DnsQueryRequest) error) error {
+	dnsqueryq := conf.Internal.DnsQueryQ
+
+	log.Printf("*** DnsQueryHandler: starting")
+	if Globals.Debug {
+		log.Printf("DnsQueryHandler: Channel capacity: %d", cap(dnsqueryq))
+		log.Printf("DnsQueryHandler: Waiting for queries on dnsqueryq channel")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("DnsQueryHandler: context cancelled")
+			return nil
+		case dqr, ok := <-dnsqueryq:
+			if !ok {
+				log.Println("DnsQueryHandler: dnsqueryq closed")
+				return nil
+			}
+			if Globals.Debug {
+				log.Printf("DnsQueryHandler: Received query from channel (qname=%s, qtype=%s, from=%s)", dqr.Qname, dns.TypeToString[dqr.Qtype], dqr.ResponseWriter.RemoteAddr())
+			}
+			if err := handlerFunc(ctx, &dqr); err != nil {
+				log.Printf("Error in query handler: %v", err)
+			} else {
+				if Globals.Debug {
+					log.Printf("DnsQueryHandler: Query handler completed successfully")
+				}
+			}
+		}
+	}
+}
+
 // Define sets of known types
 var tdnsSpecialTypes = map[uint16]bool{
 	core.TypeDSYNC:   true,
