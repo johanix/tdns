@@ -566,6 +566,7 @@ func APIKdcConfig(kdcConf *KdcConf, tdnsConf interface{}) http.HandlerFunc {
 				"default_algorithm":   kdcConf.DefaultAlgorithm,
 				"key_rotation_interval": kdcConf.KeyRotationInterval.String(),
 				"standby_key_count":   kdcConf.StandbyKeyCount,
+				"jsonchunk_max_size":  kdcConf.GetJsonchunkMaxSize(),
 				"dns_addresses":       dnsAddresses,
 				"api_addresses":        apiAddresses,
 			}
@@ -623,8 +624,9 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 	sr.HandleFunc("/kdc/node", APIKdcNode(kdcDB)).Methods("POST")
 	if kdcConf != nil {
 		sr.HandleFunc("/kdc/config", APIKdcConfig(kdcConf, conf)).Methods("POST")
+		sr.HandleFunc("/kdc/debug", APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
 	}
 	
-	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/config")
+	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/config, /api/v1/kdc/debug")
 }
 

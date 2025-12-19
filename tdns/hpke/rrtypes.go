@@ -22,9 +22,9 @@ import (
 
 // Experimental RRtype codes (to be replaced with IANA assignments)
 const (
-	TypeKMCTRL = 65010 // Key Management Control
-	TypeKMREQ  = 65011 // Key Management Request
-	TypeKMPKG  = 65012 // Key Management Package
+	TypeKMCTRL = 65010 // 0xFDF2 - Key Management Control (legacy)
+	TypeKMREQ  = 65011 // 0xFDF3 - Key Management Request (legacy)
+	TypeKMPKG  = 65012 // 0xFDF4 - Key Management Package (legacy)
 )
 
 func init() {
@@ -514,4 +514,5 @@ func BuildKMREQQname(distributionID, zone, controlZone string) string {
 	// Always ensure the result is FQDN (ends with ".")
 	return fmt.Sprintf("%s.%s.%s.", distributionID, zoneClean, controlZoneClean)
 }
+
 

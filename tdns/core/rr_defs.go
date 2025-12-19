@@ -18,6 +18,8 @@ const (
 	TypeHSYNC   = 0x0F9D
 	TypeHSYNC2  = 0x0F9E
 	TypeTSYNC   = 0x0F9F
+	TypeJSONMANIFEST = 65013 // 0xFDF5 - JSON Distribution Manifest
+	TypeJSONCHUNK   = 65014 // 0xFDF6 - Chunked JSON Data Transport
 )
 
 func unpackUint8(msg []byte, off int) (i uint8, off1 int, err error) {

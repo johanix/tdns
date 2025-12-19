@@ -59,6 +59,21 @@ type KrsQueryResponse struct {
 	Msg      string    `json:"msg,omitempty"`
 }
 
+// KrsDebugPost represents a request to the KRS debug API
+type KrsDebugPost struct {
+	Command       string `json:"command"`        // "fetch-distribution"
+	DistributionID string `json:"distribution_id,omitempty"`
+}
+
+// KrsDebugResponse represents a response from the KRS debug API
+type KrsDebugResponse struct {
+	Time     time.Time `json:"time"`
+	Error    bool      `json:"error,omitempty"`
+	ErrorMsg string    `json:"error_msg,omitempty"`
+	Msg      string    `json:"msg,omitempty"`
+	Content  string    `json:"content,omitempty"` // For test_text content
+}
+
 // sendJSONError sends a JSON-formatted error response
 func sendJSONError(w http.ResponseWriter, statusCode int, errorMsg string) {
 	resp := map[string]interface{}{
@@ -101,6 +116,7 @@ func SetupKrsAPIRoutes(router *mux.Router, krsDB *KrsDB, conf *KrsConf, tdnsConf
 	sr.HandleFunc("/krs/keys", APIKrsKeys(krsDB)).Methods("POST")
 	sr.HandleFunc("/krs/config", APIKrsConfig(krsDB, conf, tdnsConf)).Methods("POST")
 	sr.HandleFunc("/krs/query", APIKrsQuery(krsDB, conf)).Methods("POST")
+	sr.HandleFunc("/krs/debug", APIKrsDebug(krsDB, conf)).Methods("POST")
 }
 
 // APIKrsKeys handles key management endpoints
@@ -246,6 +262,51 @@ func APIKrsQuery(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Msg = fmt.Sprintf("KMREQ query initiated for distribution %s, zone %s", req.DistributionID, req.ZoneID)
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// APIKrsDebug handles debug endpoints
+func APIKrsDebug(krsDB *KrsDB, conf *KrsConf) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req KrsDebugPost
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := KrsDebugResponse{
+			Time: time.Now(),
+		}
+
+		switch req.Command {
+		case "fetch-distribution":
+			if req.DistributionID == "" {
+				sendJSONError(w, http.StatusBadRequest, "distribution_id is required for fetch-distribution command")
+				return
+			}
+
+			// Process the distribution (this will fetch manifest, chunks, reassemble, and process)
+			// Pass a pointer to store test_text content if present
+			var testTextContent string
+			err := ProcessDistribution(krsDB, conf, req.DistributionID, &testTextContent)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Successfully fetched and processed distribution %s", req.DistributionID)
+				if testTextContent != "" {
+					resp.Content = testTextContent
+				}
 			}
 
 		default:

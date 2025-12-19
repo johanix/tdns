@@ -4,6 +4,11 @@
 
 This document describes the design and implementation of an HPKE (Hybrid Public Key Encryption) based distribution infrastructure for DNSSEC private keys, specifically ZSK keys, from a central Key Management System (KMS) to multiple edge authoritative servers.
 
+## Version History
+
+- **v2.0** (Current): Chunked distribution with MANIFEST/JSONCHUNK for scalable key distribution
+- **v1.0**: Initial per-zone distribution design (deprecated for large-scale deployments)
+
 ## Architecture
 
 ### Components
@@ -64,53 +69,134 @@ This approach:
    - Private keys encrypted with HPKE before distribution
    - State: created → published → active → retired
 
+## Key Distribution Events
+
+A **distribution event** is triggered when keys need to be distributed to edge nodes, typically due to:
+- Rapid ZSK rollover (compromised node scenario)
+- Scheduled key rotation
+- New zones added to nodes
+
+Each distribution event has:
+- **Unique distributionID**: Hex-encoded identifier (e.g., "1e62", "f876")
+- **Set of zones**: Zones requiring new ZSK keys
+- **Set of nodes**: Edge nodes that need to receive keys
+- **Node-specific data**: Each node may serve different subsets of zones
+
+### Node Groupings via Services/Components
+
+To optimize distribution, nodes are grouped by their service subscriptions:
+
+- **Zones** belong to **Services**
+- **Services** consist of **Components**
+- **Nodes** subscribe to **Components**
+
+Example:
+- 6 components, 5 services
+- Maximum groupings: 2^6 - 1 = 63 (but typically much fewer in practice)
+- Nodes with identical component subscriptions receive the same encrypted blob
+
+This model allows KDC to:
+- Pre-compute encrypted blobs per node group (not per node)
+- Reduce encryption overhead
+- Handle heterogeneous zone assignments efficiently
+
 ## Data Flow
 
 ### Initial Setup
 
 1. Edge node generates long-term HPKE keypair
 2. Edge node public key manually registered at KDC
-3. Edge node private key stored securely (eventually in-memory only)
-4. KDC publishes control zone (e.g., `kdc.example.com`)
+3. Edge node subscribes to components (determines which zones it serves)
+4. Edge node private key stored securely (eventually in-memory only)
+5. KDC publishes control zone (e.g., `kdc.example.com`)
 
-### Key Distribution Flow (DNS-Based)
+### Key Distribution Flow (Chunked Distribution)
 
-1. **KDC → Edge**: NOTIFY
-   - KDC sends DNS NOTIFY to edge nodes when new keys are available
-   - NOTIFY includes control zone name
+#### Step 0: Pre-computation (KDC)
 
-2. **Edge → KDC**: Query KMCTRL records
-   - Edge queries control zone for KMCTRL records
-   - KMCTRL contains: zone names, distribution IDs, key IDs, timestamps
+1. KDC identifies distribution event (e.g., compromised node detected)
+2. KDC determines affected zones and nodes
+3. KDC groups nodes by component subscriptions
+4. For each node group:
+   - Collect zones that group serves
+   - Prepare encrypted blob (HPKE-encrypted JSON containing keys)
+   - Split blob into chunks based on `jsonchunk_max_size` configuration
+   - Store chunks for distribution
 
-3. **Edge → KDC**: KMREQ query (direct, no caching)
-   - Edge generates ephemeral HPKE keypair
-   - Edge constructs KMREQ query:
-     - QNAME: encodes zone name, distribution ID, and ephemeral public key
-     - EDNS(0) option: ephemeral public key (alternative/additional)
-     - SIG(0): authenticates edge to KDC using long-term keypair
-   - Query sent directly to KDC (CD=1, RD=0, no recursion)
+#### Step 1: NOTIFY (KDC → Edge)
 
-4. **KDC → Edge**: KMPKG response
-   - KDC validates SIG(0) signature
-   - KDC extracts ephemeral public key from KMREQ
-   - KDC encrypts ZSK private keys using HPKE:
-     - Recipient: Edge's long-term public key (for authentication)
-     - Ephemeral: Edge's ephemeral public key (for forward secrecy)
-   - KDC returns KMPKG RR(s) containing encrypted key material
+- **QNAME**: `<distributionID>.<controlzone>` (e.g., `1e62.kdc.example.com.`)
+- **QTYPE**: `SOA` (standard NOTIFY)
+- **Purpose**: Inform edge node about distribution event
+- **Result**: Edge node receives `distributionID` immediately
 
-5. **Edge**: Decrypt and inject
-   - Edge decrypts KMPKG using long-term + ephemeral private keys
-   - Validates key material
-   - Injects into KeyDB with appropriate state
+#### Step 2: MANIFEST Query (Edge → KDC)
+
+- **QNAME**: `<nodeid>.<distributionID>.<controlzone>` (e.g., `node1.1e62.kdc.example.com.`)
+- **QTYPE**: `JSONMANIFEST` (65013)
+- **Response**: Small metadata (<500 bytes, never chunked)
+  ```json
+  {
+    "distribution_mode": "zones" | "chunked",
+    "chunk_count": 3,
+    "checksum": "sha256:...",
+    "metadata": {
+      "timestamp": "...",
+      "distribution_id": "..."
+    }
+  }
+  ```
+
+#### Step 3: JSONCHUNK Queries (Edge → KDC)
+
+- **QNAME**: `<chunkid>.<nodeid>.<distributionID>.<controlzone>` (e.g., `0.node1.1e62.kdc.example.com.`)
+- **QTYPE**: `JSONCHUNK` (65014)
+- **Response**: Base64-encoded JSON data chunk
+- **Process**: Query for `chunkid = 0..(chunk_count-1)`
+- **Reassembly**: Collect all chunks → concatenate → base64 decode → single JSON structure
+
+**Distribution Mode: "zones"**
+- JSONCHUNK contains: Base64-encoded JSON array of zone names
+- Example: `["foffa.se.", "provider.com.", ...]`
+- After reassembly: Parse JSON → get zone list → proceed with per-zone KMREQ queries (legacy mode)
+
+**Distribution Mode: "chunked"**
+- JSONCHUNK contains: Base64-encoded HPKE-encrypted blob
+- After reassembly: Base64 decode → HPKE decrypt → JSON structure with keys/metadata
+- Install keys directly (no per-zone queries needed)
+
+#### Step 4: Key Installation (Edge)
+
+- Validate checksum from MANIFEST
+- Decrypt (if chunked mode) or query per-zone (if zones mode)
+- Install keys into KeyDB
+- Delete old keys
+- Update key states
+
+#### Step 5: Confirmation (Edge → KDC)
+
+- **NOTIFY**: `<distributionID>.<controlzone>` (e.g., `1e62.kdc.example.com.`)
+- **QTYPE**: `SOA` (standard NOTIFY)
+- **Purpose**: Inform KDC that node has completed key installation
+- **KDC Processing**: Mark node as completed, track remaining nodes
+- **Completion**: When all nodes confirm → mark distribution event as DONE
 
 ### Rapid ZSK Rollover (Compromise Scenario)
 
-1. KDC detects compromised edge node (manual trigger or automated)
-2. KDC immediately distributes standby ZSK private key to all other edge nodes
-3. Compromised edge node excluded from distribution
-4. All non-compromised edges activate standby ZSK
-5. Compromised edge loses access to signing keys
+**Scenario**: 500 nodes serving 1000 zones, one node compromised
+
+1. KDC detects compromised edge node (manual trigger)
+2. KDC creates distribution event with unique `distributionID`
+3. KDC identifies all ZSKs that compromised node had access to
+4. KDC groups remaining nodes by component subscriptions
+5. KDC pre-computes encrypted blobs per node group
+6. KDC sends NOTIFY to all affected nodes: `<distributionID>.<controlzone>`
+7. Each node queries MANIFEST → gets node-specific metadata
+8. Each node queries JSONCHUNK records → receives encrypted keys
+9. Each node decrypts and installs new keys
+10. Each node sends confirmation NOTIFY back to KDC
+11. KDC tracks completion, marks event DONE when all nodes confirm
+12. Compromised node loses access to signing keys
 
 ## Database Schema
 
@@ -180,95 +266,213 @@ CREATE TABLE IF NOT EXISTS 'HpkeKeys' (
 
 ## DNS RRtypes
 
-### KMCTRL (Key Management Control)
+### JSONMANIFEST (Key Distribution Manifest)
 
-**RRtype**: TBD (experimental, e.g., 65XXX)
+**RRtype**: 65013 (experimental)
+
+**Purpose**: Small metadata about a key distribution event for a specific node
 
 **Format**:
 ```
-<zone>.kdc.example.com. IN KMCTRL <distribution-id> <keyid> <state> <timestamp>
+<nodeid>.<distributionID>.<controlzone> IN JSONMANIFEST <json-metadata>
+```
+
+**RDATA Structure** (packed):
+- `distribution_mode` (string): "zones" | "chunked"
+- `chunk_count` (uint16): Number of JSONCHUNK records to fetch
+- `checksum` (string, optional): SHA-256 checksum of reassembled data
+- `metadata` (JSON object): Additional information (timestamp, distribution_id, etc.)
+
+**Size Limit**: <500 bytes (never chunked)
+
+**Example JSON**:
+```json
+{
+  "distribution_mode": "chunked",
+  "chunk_count": 4,
+  "checksum": "sha256:a1b2c3d4...",
+  "metadata": {
+    "timestamp": "2025-01-15T10:30:00Z",
+    "distribution_id": "1e62"
+  }
+}
+```
+
+### JSONCHUNK (Chunked JSON Data Transport)
+
+**RRtype**: 65014 (experimental)
+
+**Purpose**: Transport large JSON-structured data (zone lists or encrypted blobs) in chunks
+
+**Format**:
+```
+<chunkid>.<nodeid>.<distributionID>.<controlzone> IN JSONCHUNK <base64-data>
+```
+
+**RDATA Structure** (packed):
+- `sequence` (uint16): Chunk sequence number (0-based)
+- `total` (uint16): Total number of chunks
+- `data_length` (uint16): Length of base64 data in this chunk
+- `data` (variable): Base64-encoded JSON data
+
+**Chunk Size**: Configurable via `jsonchunk_max_size` (default: 60000 bytes)
+- Maximum DNS message size: 64KB (TCP/DoT)
+- Usable payload: ~60KB per chunk
+- Testing: Can be set to small values (e.g., 1KB) to force fragmentation
+
+**Content Types**:
+
+1. **Zone List** (distribution_mode="zones"):
+   - Base64-encoded JSON array: `["zone1.", "zone2.", ...]`
+   - After reassembly: Parse as `[]string`
+
+2. **Encrypted Blob** (distribution_mode="chunked"):
+   - Base64-encoded HPKE-encrypted data
+   - After reassembly: Decrypt → JSON structure with keys/metadata
+
+**Reassembly**:
+- Collect chunks by querying `<chunkid>` from 0 to (chunk_count-1)
+- Chunks can arrive in any order (each has unique QNAME)
+- Concatenate base64 strings → decode → process based on mode
+
+### KMCTRL (Key Management Control) - Legacy/Deprecated
+
+**RRtype**: 65010 (experimental)
+
+**Status**: Deprecated for large-scale deployments, kept for backward compatibility
+
+**Format**:
+```
+<controlzone> IN KMCTRL <distribution-id> <keyid> <state> <timestamp> <zone>
 ```
 
 **Fields**:
 - `distribution-id`: Unique identifier for this key distribution (hex string)
 - `keyid`: DNSSEC key ID (16-bit)
-- `state`: "published" | "active" | "standby"
-- `timestamp`: Unix timestamp of distribution
+- `state`: "distributed" (only keys currently being distributed)
+- `timestamp`: Unix timestamp
+- `zone`: Zone name this key is for
 
-**Example**:
-```
-example.com.kdc.example.com. IN KMCTRL a1b2c3d4e5f6 12345 published 1704067200
-```
+**Note**: Only shows keys in "distributed" state, not "standby" keys
 
-### KMREQ (Key Management Request)
+### KMREQ (Key Management Request) - Legacy Mode
 
-**RRtype**: TBD (experimental, e.g., 65XXX)
+**RRtype**: 65011 (experimental)
+
+**Status**: Used only in "zones" distribution mode
 
 **Format** (in query):
 ```
-<distribution-id>.<zone>.kdc.example.com. IN KMREQ <ephemeral-pubkey>
+<distribution-id>.<zone>.<controlzone> IN KMREQ
 ```
 
 **QNAME encoding**:
-- Format: `<distribution-id>.<zone>.kdc.example.com`
-- Distribution ID: hex string (e.g., "a1b2c3d4e5f6")
-- Zone: base64url-encoded zone name
-- Ephemeral public key: in EDNS(0) option or encoded in QNAME
+- Format: `<distribution-id>.<zone>.<controlzone>`
+- Distribution ID: hex string (e.g., "1e62")
+- Zone: Multi-label zone name (e.g., "foffa.se")
+- Control zone: KDC control zone (e.g., "kdc.example.com")
 
-**EDNS(0) Option**: `EDNS0_HPKE_EPHEMERAL` (code TBD)
+**EDNS(0) Option**: `EDNS0_HPKE_EPHEMERAL` (future)
 - Contains ephemeral HPKE public key (X25519 = 32 bytes)
 
-**SIG(0)**: Query must be signed with edge's long-term SIG(0) key
+**SIG(0)**: Query should be signed with edge's long-term SIG(0) key (future)
 
-### KMPKG (Key Management Package)
+### KMPKG (Key Management Package) - Legacy Mode
 
-**RRtype**: TBD (experimental, e.g., 65XXX)
+**RRtype**: 65012 (experimental)
+
+**Status**: Used only in "zones" distribution mode
 
 **Format** (in response):
 ```
-<distribution-id>.<zone>.kdc.example.com. IN KMPKG <encrypted-key-data>
+<distribution-id>.<zone>.<controlzone> IN KMPKG <encrypted-key-data>
 ```
 
 **Fields**:
 - `encrypted-key-data`: HPKE-encrypted ZSK private key (base64-encoded)
 - May be split across multiple KMPKG records if large
 
-**Response Structure**:
-- Answer section: One or more KMPKG RRs
-- Authority section: SOA of control zone
-- Additional section: RRSIG(KMPKG) for validation (future)
-
 ## DNS Protocol Flow
 
-### 1. NOTIFY Phase
+### Chunked Distribution Flow (Recommended)
+
+#### 1. NOTIFY Phase
 ```
-KDC → Edge: NOTIFY <control-zone>
+KDC → Edge: NOTIFY <distributionID>.<controlzone>
+  - QNAME: 1e62.kdc.example.com.
+  - QTYPE: SOA
+  - Purpose: Inform edge about distribution event
 ```
 
-### 2. Control Query Phase
+#### 2. MANIFEST Query Phase
 ```
-Edge → KDC: Query KMCTRL records for control zone
-KDC → Edge: KMCTRL RRs in Answer section
+Edge → KDC: Query JSONMANIFEST
+  - QNAME: <nodeid>.<distributionID>.<controlzone>
+  - QTYPE: JSONMANIFEST
+  - Example: node1.1e62.kdc.example.com. JSONMANIFEST
+  
+KDC → Edge: JSONMANIFEST response
+  - Answer: JSONMANIFEST RR with metadata
+  - Contains: distribution_mode, chunk_count, checksum
 ```
 
-### 3. Key Request Phase
+#### 3. JSONCHUNK Query Phase
 ```
-Edge → KDC: KMREQ query
-  - QNAME: <distribution-id>.<zone>.kdc.example.com
+Edge → KDC: Query JSONCHUNK records
+  - QNAME: <chunkid>.<nodeid>.<distributionID>.<controlzone>
+  - QTYPE: JSONCHUNK
+  - Example: 0.node1.1e62.kdc.example.com. JSONCHUNK
+  - Repeat for chunkid = 0..(chunk_count-1)
+  
+KDC → Edge: JSONCHUNK responses
+  - Answer: JSONCHUNK RR(s) with base64-encoded data
+  - Edge reassembles: concatenate → base64 decode → process
+```
+
+#### 4. Processing Phase
+```
+Edge: Process reassembled data
+  - If distribution_mode="zones":
+    - Parse JSON → zone list
+    - Query KMREQ per zone (legacy mode)
+  - If distribution_mode="chunked":
+    - Decrypt HPKE → parse JSON
+    - Install keys directly
+```
+
+#### 5. Confirmation Phase
+```
+Edge → KDC: NOTIFY <distributionID>.<controlzone>
+  - QNAME: 1e62.kdc.example.com.
+  - QTYPE: SOA
+  - Purpose: Confirm key installation complete
+  
+KDC: Track completion, mark event DONE when all nodes confirm
+```
+
+### Legacy Per-Zone Flow (Small Deployments)
+
+For backward compatibility or small deployments using "zones" mode:
+
+#### 1. NOTIFY Phase
+```
+KDC → Edge: NOTIFY <controlzone>
+```
+
+#### 2. KMCTRL Query Phase
+```
+Edge → KDC: Query KMCTRL records
+KDC → Edge: KMCTRL RRs (only "distributed" keys)
+```
+
+#### 3. KMREQ Query Phase (per zone)
+```
+Edge → KDC: KMREQ query per zone
+  - QNAME: <distribution-id>.<zone>.<controlzone>
   - QTYPE: KMREQ
-  - EDNS(0): Ephemeral public key
-  - SIG(0): Edge authentication
-  - CD=1, RD=0 (no caching, no recursion)
   
 KDC → Edge: KMPKG response
   - Answer: KMPKG RR(s) with encrypted keys
-  - Authority: SOA
-  - Rcode: NOERROR
-```
-
-### 4. Key Injection Phase
-```
-Edge: Decrypt KMPKG → Inject into KeyDB
 ```
 
 ## Security Considerations
@@ -301,6 +505,39 @@ Edge: Decrypt KMPKG → Inject into KeyDB
 - Heartbeat/license-to-sign
 - In-memory keystore
 
+## Configuration Parameters
+
+### KDC Configuration
+
+```yaml
+kdc:
+  database:
+    type: mariadb  # or sqlite
+    dsn: "..."
+  control_zone: "kdc.example.com."
+  default_algorithm: 15  # ED25519
+  key_rotation_interval: "720h"
+  standby_key_count: 2
+  publish_time: "24h"
+  retire_time: "30d"
+  jsonchunk_max_size: 60000  # Maximum RDATA size per JSONCHUNK (bytes)
+                              # Default: 60000 (60KB)
+                              # Testing: Can be set to small values (e.g., 1024) to force fragmentation
+```
+
+### KRS Configuration
+
+```yaml
+krs:
+  database:
+    dsn: "/path/to/krs.db"
+  node:
+    id: "node1"
+    long_term_priv_key: "/path/to/private.key"
+    kdc_address: "192.0.2.1:5356"
+  control_zone: "kdc.example.com."
+```
+
 ## Implementation Details
 
 ### HPKE Library
@@ -312,19 +549,40 @@ Edge: Decrypt KMPKG → Inject into KeyDB
   - AEAD: AES-256-GCM
 
 ### Database Choice
-- **KDC**: MariaDB (production-grade, better for multi-user scenarios)
-- **Edge**: SQLite (existing KeyDB, single-user scenario)
+- **KDC**: MariaDB or SQLite (configurable)
+- **Edge/KRS**: SQLite (existing KeyDB, single-user scenario)
 
-### SIG(0) Integration
-- Edge authenticates to KDC using SIG(0) on KMREQ queries
+### Chunking Algorithm
+
+1. **Preparation** (KDC):
+   - Prepare JSON structure (zone list or encrypted blob)
+   - Base64 encode entire structure
+   - Split base64 string into chunks of `jsonchunk_max_size` bytes
+   - Create JSONCHUNK records with sequence numbers
+
+2. **Reassembly** (KRS):
+   - Query all chunks: `<chunkid>.<nodeid>.<distID>.<control> JSONCHUNK`
+   - Collect chunks (order doesn't matter due to unique QNAMEs)
+   - Detect and ignore duplicate chunks
+   - Concatenate base64 strings in sequence order
+   - Base64 decode → process based on distribution_mode
+
+3. **Validation**:
+   - Checksum in MANIFEST validates reassembled data
+   - Sequence numbers in JSONCHUNK validate chunk integrity
+   - Total count validates completeness
+
+### SIG(0) Integration (Future)
+- Edge authenticates to KDC using SIG(0) on queries
 - KDC validates SIG(0) signature before processing request
 - Uses existing SIG(0) infrastructure in tdns
 
 ### Direct Query Requirement
-- KMREQ queries must go directly to KDC (no caching)
+- All queries go directly to KDC (no caching)
 - Use CD=1 (Checking Disabled) to prevent resolver caching
 - Use RD=0 (Recursion Desired = false)
 - Edge must know KDC's IP address(es) for direct queries
+- Transport: TCP or DoT (not UDP) to support large messages
 
 ## Open Questions
 

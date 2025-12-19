@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -81,9 +82,15 @@ func StartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *KrsConf) error
 		resp.SetReply(r)
 		resp.MsgHdr.Authoritative = true
 
-		// Check if this is a NOTIFY for the control zone
-		// If so, trigger a KMCTRL query to check for new keys
-		if notifyZone == conf.ControlZone {
+		// Check if this is a NOTIFY for the control zone or a distribution event
+		// Format: <distributionID>.<controlzone> or just <controlzone>
+		controlZoneFQDN := conf.ControlZone
+		if !strings.HasSuffix(controlZoneFQDN, ".") {
+			controlZoneFQDN += "."
+		}
+
+		if notifyZone == controlZoneFQDN {
+			// NOTIFY for control zone - query KMCTRL (legacy flow)
 			log.Printf("KRS: NOTIFY received for control zone %s, triggering KMCTRL query", notifyZone)
 			
 			// Query KMCTRL records asynchronously (don't block the NOTIFY response)
@@ -99,8 +106,29 @@ func StartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *KrsConf) error
 					log.Printf("KRS: Error processing KMCTRL records: %v", err)
 				}
 			}()
+		} else if strings.HasSuffix(notifyZone, controlZoneFQDN) {
+			// NOTIFY for distribution event: <distributionID>.<controlzone>
+			// Extract distributionID
+			suffixLen := len(controlZoneFQDN)
+			prefix := notifyZone[:len(notifyZone)-suffixLen]
+			if strings.HasSuffix(prefix, ".") {
+				prefix = prefix[:len(prefix)-1]
+			}
+			
+			// Get the last label (distributionID)
+			labels := strings.Split(prefix, ".")
+			distributionID := labels[len(labels)-1]
+			
+			log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
+			
+			// Process distribution asynchronously
+			go func() {
+				if err := ProcessDistribution(krsDB, conf, distributionID, nil); err != nil {
+					log.Printf("KRS: Error processing distribution %s: %v", distributionID, err)
+				}
+			}()
 		} else {
-			log.Printf("KRS: NOTIFY received for zone %s (not control zone %s), ignoring", notifyZone, conf.ControlZone)
+			log.Printf("KRS: NOTIFY received for zone %s (not control zone %s), ignoring", notifyZone, controlZoneFQDN)
 		}
 
 		if err := w.WriteMsg(resp); err != nil {

@@ -9,10 +9,14 @@ package kdc
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/johanix/tdns/tdns/core"
 	"github.com/johanix/tdns/tdns/hpke"
 	"github.com/miekg/dns"
 )
@@ -88,6 +92,27 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 			log.Printf("KDC: Error handling KMCTRL: %v", err)
 		} else {
 			log.Printf("KDC: KMCTRL query handled successfully")
+		}
+		return err
+
+	case core.TypeJSONMANIFEST:
+		log.Printf("KDC: Handling JSONMANIFEST query")
+		err := handleJSONMANIFESTQuery(ctx, m, msg, qname, w, kdcDB, conf)
+		if err != nil {
+			log.Printf("KDC: Error handling JSONMANIFEST: %v", err)
+		} else {
+			log.Printf("KDC: JSONMANIFEST query handled successfully")
+		}
+		// Don't return error - we've already sent the response (success or error)
+		return nil
+
+	case core.TypeJSONCHUNK:
+		log.Printf("KDC: Handling JSONCHUNK query")
+		err := handleJSONCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
+		if err != nil {
+			log.Printf("KDC: Error handling JSONCHUNK: %v", err)
+		} else {
+			log.Printf("KDC: JSONCHUNK query handled successfully")
 		}
 		return err
 
@@ -416,5 +441,257 @@ func extractEphemeralPubKey(msg *dns.Msg) ([]byte, error) {
 	}
 
 	return nil, fmt.Errorf("no ephemeral public key found in query")
+}
+
+// ParseQnameForJSONMANIFEST extracts nodeid and distributionID from JSONMANIFEST QNAME
+// Format: <nodeid><distributionID>.<controlzone>
+// Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
+func ParseQnameForJSONMANIFEST(qname string, controlZone string) (nodeID, distributionID string, err error) {
+	// Remove trailing dot if present
+	if len(qname) > 0 && qname[len(qname)-1] == '.' {
+		qname = qname[:len(qname)-1]
+	}
+
+	// Extract control zone labels
+	controlZoneClean := controlZone
+	if len(controlZoneClean) > 0 && controlZoneClean[len(controlZoneClean)-1] == '.' {
+		controlZoneClean = controlZoneClean[:len(controlZoneClean)-1]
+	}
+	controlLabels := dns.SplitDomainName(controlZoneClean)
+
+	if len(controlLabels) == 0 {
+		return "", "", fmt.Errorf("invalid control zone: %s", controlZone)
+	}
+
+	// Check that QNAME ends with control zone
+	if !strings.HasSuffix(qname, "."+controlZoneClean) && !strings.HasSuffix(qname, controlZoneClean) {
+		return "", "", fmt.Errorf("QNAME %s does not end with control zone %s", qname, controlZone)
+	}
+
+	// Remove control zone suffix to get <nodeid><distributionID>
+	prefix := qname[:len(qname)-len(controlZoneClean)-1] // -1 for the dot before control zone
+
+	// Find where distribution ID starts (it's hex, so we need to find the boundary)
+	// Distribution ID is typically 4 hex characters, but could be longer
+	// We'll try to find a valid hex string at the end of the prefix
+	// Start from the end and work backwards to find the longest valid hex string
+	maxDistIDLen := len(prefix)
+	if maxDistIDLen > 8 {
+		maxDistIDLen = 8 // Reasonable max for distribution ID
+	}
+
+	found := false
+	for distIDLen := 4; distIDLen <= maxDistIDLen && distIDLen <= len(prefix); distIDLen++ {
+		candidateDistID := prefix[len(prefix)-distIDLen:]
+		if _, err := hex.DecodeString(candidateDistID); err == nil {
+			// Valid hex string found
+			distributionID = candidateDistID
+			nodeID = prefix[:len(prefix)-distIDLen]
+			// Ensure node ID is FQDN
+			if !strings.HasSuffix(nodeID, ".") {
+				nodeID = nodeID + "."
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return "", "", fmt.Errorf("invalid JSONMANIFEST QNAME format: %s (could not find valid distribution ID)", qname)
+	}
+
+	return nodeID, distributionID, nil
+}
+
+// ParseQnameForJSONCHUNK extracts chunkid, nodeid, and distributionID from JSONCHUNK QNAME
+// Format: <chunkid>.<nodeid><distributionID>.<controlzone>
+// Node ID is an FQDN (with trailing dot), so distributionID is concatenated directly after it
+func ParseQnameForJSONCHUNK(qname string, controlZone string) (chunkID uint16, nodeID, distributionID string, err error) {
+	// Remove trailing dot if present
+	if len(qname) > 0 && qname[len(qname)-1] == '.' {
+		qname = qname[:len(qname)-1]
+	}
+
+	labels := dns.SplitDomainName(qname)
+	if len(labels) < 3 {
+		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (need at least chunkid.nodeid+distID.controlzone)", qname)
+	}
+
+	// Parse chunk ID (first label)
+	chunkIDUint, err := strconv.ParseUint(labels[0], 10, 16)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("invalid chunk ID in QNAME: %s (must be uint16)", labels[0])
+	}
+	chunkID = uint16(chunkIDUint)
+
+	// Extract control zone labels
+	controlZoneClean := controlZone
+	if len(controlZoneClean) > 0 && controlZoneClean[len(controlZoneClean)-1] == '.' {
+		controlZoneClean = controlZoneClean[:len(controlZoneClean)-1]
+	}
+	controlLabels := dns.SplitDomainName(controlZoneClean)
+
+	if len(controlLabels) == 0 {
+		return 0, "", "", fmt.Errorf("invalid control zone: %s", controlZone)
+	}
+
+	// Check that the last N labels match the control zone
+	controlStartIdx := len(labels) - len(controlLabels)
+	if controlStartIdx < 2 {
+		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (too few labels)", qname)
+	}
+
+	for i := 0; i < len(controlLabels); i++ {
+		if labels[controlStartIdx+i] != controlLabels[i] {
+			return 0, "", "", fmt.Errorf("QNAME %s does not end with control zone %s", qname, controlZone)
+		}
+	}
+
+	// After removing control zone, we have: <chunkid>.<nodeid><distributionID>
+	// Labels from index 1 to controlStartIdx-1 contain <nodeid><distributionID>
+	// We need to combine them and find where distribution ID starts
+	if controlStartIdx-1 < 1 {
+		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (missing node ID and distribution ID)", qname)
+	}
+	prefixLabels := labels[1:controlStartIdx]
+	prefix := strings.Join(prefixLabels, ".")
+
+	// Find where distribution ID starts (it's hex, so we need to find the boundary)
+	// Distribution ID is typically 4 hex characters, but could be longer
+	maxDistIDLen := len(prefix)
+	if maxDistIDLen > 8 {
+		maxDistIDLen = 8 // Reasonable max for distribution ID
+	}
+
+	found := false
+	for distIDLen := 4; distIDLen <= maxDistIDLen && distIDLen <= len(prefix); distIDLen++ {
+		candidateDistID := prefix[len(prefix)-distIDLen:]
+		if _, err := hex.DecodeString(candidateDistID); err == nil {
+			// Valid hex string found
+			distributionID = candidateDistID
+			nodeID = prefix[:len(prefix)-distIDLen]
+			// Ensure node ID is FQDN
+			if !strings.HasSuffix(nodeID, ".") {
+				nodeID = nodeID + "."
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return 0, "", "", fmt.Errorf("invalid JSONCHUNK QNAME format: %s (could not find valid distribution ID in %s)", qname, prefix)
+	}
+
+	return chunkID, nodeID, distributionID, nil
+}
+
+// handleJSONMANIFESTQuery processes JSONMANIFEST queries
+// QNAME format: <nodeid>.<distributionID>.<controlzone>
+func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing JSONMANIFEST query for %s", qname)
+
+	// Parse QNAME to extract node ID and distribution ID
+	nodeID, distributionID, err := ParseQnameForJSONMANIFEST(qname, conf.ControlZone)
+	if err != nil {
+		log.Printf("KDC: Error parsing JSONMANIFEST QNAME %s: %v", qname, err)
+		m.SetRcode(msg, dns.RcodeFormatError)
+		if writeErr := w.WriteMsg(m); writeErr != nil {
+			return writeErr
+		}
+		return fmt.Errorf("failed to parse QNAME: %v", err)
+	}
+
+	log.Printf("KDC: JSONMANIFEST node-id=%s, distribution-id=%s", nodeID, distributionID)
+
+	// Get manifest data for this node and distribution
+	manifest, err := kdcDB.GetManifestForNode(nodeID, distributionID, conf)
+	if err != nil {
+		log.Printf("KDC: Error getting manifest for node %s, distribution %s: %v", nodeID, distributionID, err)
+		m.SetRcode(msg, dns.RcodeServerFailure)
+		if writeErr := w.WriteMsg(m); writeErr != nil {
+			return writeErr
+		}
+		return fmt.Errorf("failed to get manifest: %v", err)
+	}
+
+	if manifest == nil {
+		log.Printf("KDC: No manifest found for node %s, distribution %s", nodeID, distributionID)
+		m.SetRcode(msg, dns.RcodeNameError)
+		if writeErr := w.WriteMsg(m); writeErr != nil {
+			return writeErr
+		}
+		return fmt.Errorf("no manifest found for node %s, distribution %s", nodeID, distributionID)
+	}
+
+	// Create JSONMANIFEST RR
+	manifestRR := &dns.PrivateRR{
+		Hdr: dns.RR_Header{
+			Name:   qname,
+			Rrtype: core.TypeJSONMANIFEST,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Data: manifest,
+	}
+
+	m.Answer = append(m.Answer, manifestRR)
+	m.SetRcode(msg, dns.RcodeSuccess)
+
+	content := "unknown"
+	if manifest.Metadata != nil {
+		if c, ok := manifest.Metadata["content"].(string); ok {
+			content = c
+		}
+	}
+	log.Printf("KDC: Sending JSONMANIFEST response with content=%s, chunk_count=%d", content, manifest.ChunkCount)
+	return w.WriteMsg(m)
+}
+
+// handleJSONCHUNKQuery processes JSONCHUNK queries
+// QNAME format: <chunkid>.<nodeid>.<distributionID>.<controlzone>
+func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname string, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
+	log.Printf("KDC: Processing JSONCHUNK query for %s", qname)
+
+	// Parse QNAME to extract chunk ID, node ID, and distribution ID
+	chunkID, nodeID, distributionID, err := ParseQnameForJSONCHUNK(qname, conf.ControlZone)
+	if err != nil {
+		log.Printf("KDC: Error parsing JSONCHUNK QNAME %s: %v", qname, err)
+		m.SetRcode(msg, dns.RcodeFormatError)
+		return w.WriteMsg(m)
+	}
+
+	log.Printf("KDC: JSONCHUNK chunk-id=%d, node-id=%s, distribution-id=%s", chunkID, nodeID, distributionID)
+
+	// Get chunk data for this node, distribution, and chunk ID
+	chunk, err := kdcDB.GetChunkForNode(nodeID, distributionID, chunkID, conf)
+	if err != nil {
+		log.Printf("KDC: Error getting chunk %d for node %s, distribution %s: %v", chunkID, nodeID, distributionID, err)
+		m.SetRcode(msg, dns.RcodeServerFailure)
+		return w.WriteMsg(m)
+	}
+
+	if chunk == nil {
+		log.Printf("KDC: No chunk %d found for node %s, distribution %s", chunkID, nodeID, distributionID)
+		m.SetRcode(msg, dns.RcodeNameError)
+		return w.WriteMsg(m)
+	}
+
+	// Create JSONCHUNK RR
+	chunkRR := &dns.PrivateRR{
+		Hdr: dns.RR_Header{
+			Name:   qname,
+			Rrtype: core.TypeJSONCHUNK,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Data: chunk,
+	}
+
+	m.Answer = append(m.Answer, chunkRR)
+	m.SetRcode(msg, dns.RcodeSuccess)
+
+	log.Printf("KDC: Sending JSONCHUNK response with sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
+	return w.WriteMsg(m)
 }
 
