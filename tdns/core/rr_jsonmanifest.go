@@ -25,11 +25,16 @@ func init() {
 //   - "encrypted_keys": HPKE-encrypted key material
 //   - "clear_text": Clear text payload (base64 encoded)
 //   - "encrypted_text": HPKE-encrypted text payload (base64 encoded)
+//
+// When payload fits inline (typically < 1000 bytes), it can be included directly
+// in the Payload field, eliminating the need for separate JSONCHUNK queries.
+// In this case, ChunkCount should be 0 (or Payload is used instead of chunks).
 type JSONMANIFEST struct {
-	ChunkCount uint16                 `json:"chunk_count"`        // Number of JSONCHUNK records
+	ChunkCount uint16                 `json:"chunk_count"`        // Number of JSONCHUNK records (0 if payload is inline)
 	ChunkSize  uint16                 `json:"chunk_size,omitempty"` // Maximum size of each chunk in bytes (optional)
 	Checksum   string                 `json:"checksum,omitempty"`  // SHA-256 checksum (optional)
 	Metadata   map[string]interface{} `json:"metadata,omitempty"` // Additional metadata (must include "content")
+	Payload    []byte                 `json:"payload,omitempty"`  // Inline payload (base64-encoded in JSON, optional)
 }
 
 func NewJSONMANIFEST() dns.PrivateRdata { return new(JSONMANIFEST) }
@@ -103,12 +108,17 @@ func (rd *JSONMANIFEST) Unpack(buf []byte) (int, error) {
 func (rd *JSONMANIFEST) Copy(dest dns.PrivateRdata) error {
 	d := dest.(*JSONMANIFEST)
 	d.ChunkCount = rd.ChunkCount
+	d.ChunkSize = rd.ChunkSize
 	d.Checksum = rd.Checksum
 	if rd.Metadata != nil {
 		d.Metadata = make(map[string]interface{})
 		for k, v := range rd.Metadata {
 			d.Metadata[k] = v
 		}
+	}
+	if rd.Payload != nil {
+		d.Payload = make([]byte, len(rd.Payload))
+		copy(d.Payload, rd.Payload)
 	}
 	return nil
 }

@@ -169,10 +169,6 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	hash := sha256.Sum256([]byte(base64Data))
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
-	// Split into chunks
-	chunkSize := conf.GetJsonchunkMaxSize()
-	chunks := splitIntoChunks([]byte(base64Data), chunkSize)
-
 	// Create manifest
 	metadata := map[string]interface{}{
 		"content":         contentType,
@@ -184,11 +180,42 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		metadata["key_count"] = keyCount
 	}
 
+	// Determine if payload should be included inline
+	// Use ~1000 bytes as threshold to leave room for other JSONMANIFEST fields
+	// This fits comfortably in UDP DNS messages (~1180 bytes payload limit)
+	const inlinePayloadThreshold = 1000
+	payloadSize := len(base64Data)
+	includeInline := payloadSize <= inlinePayloadThreshold
+
+	var chunks []*core.JSONCHUNK
+	var chunkSize uint16
+	var chunkCount uint16
+
+	if includeInline {
+		// Payload fits inline, include it directly in manifest
+		chunkCount = 0
+		chunkSize = 0
+		log.Printf("KDC: Payload size %d bytes fits inline, including in JSONMANIFEST", payloadSize)
+	} else {
+		// Payload is too large, split into chunks
+		chunkSizeInt := conf.GetJsonchunkMaxSize()
+		chunks = splitIntoChunks([]byte(base64Data), chunkSizeInt)
+		chunkCount = uint16(len(chunks))
+		chunkSize = uint16(chunkSizeInt)
+		log.Printf("KDC: Payload size %d bytes exceeds inline threshold, splitting into %d chunks", payloadSize, chunkCount)
+	}
+
 	manifest := &core.JSONMANIFEST{
-		ChunkCount: uint16(len(chunks)),
-		ChunkSize:  uint16(chunkSize),
+		ChunkCount: chunkCount,
+		ChunkSize:  chunkSize,
 		Checksum:   checksum,
-		Metadata:  metadata,
+		Metadata:   metadata,
+	}
+
+	// Include payload inline if it fits
+	if includeInline {
+		manifest.Payload = make([]byte, len(base64Data))
+		copy(manifest.Payload, base64Data)
 	}
 
 	prepared := &preparedChunks{
@@ -478,14 +505,33 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	hash := sha256.Sum256(dataToChunk)
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
-	// Split into chunks
-	chunkSize := conf.GetJsonchunkMaxSize()
-	chunks := splitIntoChunks(dataToChunk, chunkSize)
+	// Determine if payload should be included inline
+	const inlinePayloadThreshold = 1000
+	payloadSize := len(dataToChunk)
+	includeInline := payloadSize <= inlinePayloadThreshold
+
+	var chunks []*core.JSONCHUNK
+	var chunkSize uint16
+	var chunkCount uint16
+
+	if includeInline {
+		// Payload fits inline, include it directly in manifest
+		chunkCount = 0
+		chunkSize = 0
+		log.Printf("KDC: Test text payload size %d bytes fits inline, including in JSONMANIFEST", payloadSize)
+	} else {
+		// Payload is too large, split into chunks
+		chunkSizeInt := conf.GetJsonchunkMaxSize()
+		chunks = splitIntoChunks(dataToChunk, chunkSizeInt)
+		chunkCount = uint16(len(chunks))
+		chunkSize = uint16(chunkSizeInt)
+		log.Printf("KDC: Test text payload size %d bytes exceeds inline threshold, splitting into %d chunks", payloadSize, chunkCount)
+	}
 
 	// Create manifest
 	manifest := &core.JSONMANIFEST{
-		ChunkCount: uint16(len(chunks)),
-		ChunkSize:  uint16(chunkSize),
+		ChunkCount: chunkCount,
+		ChunkSize:  chunkSize,
 		Checksum:   checksum,
 		Metadata: map[string]interface{}{
 			"content":         contentType,
@@ -493,6 +539,12 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 			"node_id":         nodeID,
 			"text_length":     len(text),
 		},
+	}
+
+	// Include payload inline if it fits
+	if includeInline {
+		manifest.Payload = make([]byte, len(dataToChunk))
+		copy(manifest.Payload, dataToChunk)
 	}
 
 	prepared := &preparedChunks{

@@ -217,8 +217,18 @@ func handleKMREQQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 
 	// Get nodes that serve this zone (via components)
 	// Only distribute keys for edgesign_* zones
-	if zoneObj.SigningMode != ZoneSigningModeEdgesignDyn && zoneObj.SigningMode != ZoneSigningModeEdgesignZsk && zoneObj.SigningMode != ZoneSigningModeEdgesignAll {
-		log.Printf("KDC: Zone %s has signing_mode=%s, not distributing keys via KMREQ (only edgesign_* modes support key distribution)", zone, zoneObj.SigningMode)
+	signingMode, err := kdcDB.GetZoneSigningMode(zone)
+	if err != nil {
+		log.Printf("KDC: Failed to get signing mode for zone %s: %v", zone, err)
+		m.SetRcode(msg, dns.RcodeRefused)
+		err := w.WriteMsg(m)
+		if err != nil {
+			log.Printf("KDC: Error writing REFUSED response: %v", err)
+		}
+		return err
+	}
+	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+		log.Printf("KDC: Zone %s has signing_mode=%s, not distributing keys via KMREQ (only edgesign_* modes support key distribution)", zone, signingMode)
 		m.SetRcode(msg, dns.RcodeRefused)
 		err := w.WriteMsg(m)
 		if err != nil {
