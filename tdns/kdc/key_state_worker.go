@@ -48,7 +48,7 @@ func checkAndTransitionKeys(kdcDB *KdcDB, conf *KdcConf) error {
 					elapsed := now.Sub(*key.PublishedAt)
 					if elapsed >= conf.PublishTime {
 						log.Printf("KDC: Auto-transitioning key %s from published to standby (elapsed: %v)", key.ID, elapsed)
-						if err := kdcDB.UpdateKeyState(key.ZoneID, key.ID, KeyStateStandby); err != nil {
+						if err := kdcDB.UpdateKeyState(key.ZoneName, key.ID, KeyStateStandby); err != nil {
 							log.Printf("KDC: Error transitioning key %s: %v", key.ID, err)
 						} else {
 							log.Printf("KDC: Successfully transitioned key %s to standby", key.ID)
@@ -70,7 +70,7 @@ func checkAndTransitionKeys(kdcDB *KdcDB, conf *KdcConf) error {
 					elapsed := now.Sub(*key.RetiredAt)
 					if elapsed >= conf.RetireTime {
 						log.Printf("KDC: Auto-transitioning key %s from retired to removed (elapsed: %v)", key.ID, elapsed)
-						if err := kdcDB.UpdateKeyState(key.ZoneID, key.ID, KeyStateRemoved); err != nil {
+						if err := kdcDB.UpdateKeyState(key.ZoneName, key.ID, KeyStateRemoved); err != nil {
 							log.Printf("KDC: Error transitioning key %s: %v", key.ID, err)
 						} else {
 							log.Printf("KDC: Successfully transitioned key %s to removed", key.ID)
@@ -112,9 +112,9 @@ func maintainStandbyKeyCount(kdcDB *KdcDB, conf *KdcConf) error {
 		}
 
 		// Get all keys for this zone
-		keys, err := kdcDB.GetDNSSECKeysForZone(zone.ID)
+		keys, err := kdcDB.GetDNSSECKeysForZone(zone.Name)
 		if err != nil {
-			log.Printf("KDC: Error getting keys for zone %s: %v", zone.ID, err)
+			log.Printf("KDC: Error getting keys for zone %s: %v", zone.Name, err)
 			continue
 		}
 
@@ -145,7 +145,7 @@ func maintainStandbyKeyCount(kdcDB *KdcDB, conf *KdcConf) error {
 					algorithm = 15 // Default to ED25519 if not configured
 				}
 
-				key, err := kdcDB.GenerateDNSSECKey(zone.ID, zone.Name, KeyTypeZSK, algorithm,
+				key, err := kdcDB.GenerateDNSSECKey(zone.Name, KeyTypeZSK, algorithm,
 					fmt.Sprintf("Auto-generated to maintain standby key count"))
 				if err != nil {
 					log.Printf("KDC: Error generating ZSK for zone %s: %v", zone.Name, err)
@@ -159,7 +159,7 @@ func maintainStandbyKeyCount(kdcDB *KdcDB, conf *KdcConf) error {
 				}
 
 				// Immediately transition to published state (will auto-transition to standby after publish_time)
-				if err := kdcDB.UpdateKeyState(zone.ID, key.ID, KeyStatePublished); err != nil {
+				if err := kdcDB.UpdateKeyState(zone.Name, key.ID, KeyStatePublished); err != nil {
 					log.Printf("KDC: Error setting generated ZSK %s to published state: %v", key.ID, err)
 				} else {
 					log.Printf("KDC: Successfully generated and published new ZSK %s for zone %s", key.ID, zone.Name)
@@ -186,9 +186,9 @@ func ensureActiveKSK(kdcDB *KdcDB, conf *KdcConf) error {
 		}
 
 		// Get all keys for this zone
-		keys, err := kdcDB.GetDNSSECKeysForZone(zone.ID)
+		keys, err := kdcDB.GetDNSSECKeysForZone(zone.Name)
 		if err != nil {
-			log.Printf("KDC: Error getting keys for zone %s: %v", zone.ID, err)
+			log.Printf("KDC: Error getting keys for zone %s: %v", zone.Name, err)
 			continue
 		}
 
@@ -210,7 +210,7 @@ func ensureActiveKSK(kdcDB *KdcDB, conf *KdcConf) error {
 				algorithm = 15 // Default to ED25519 if not configured
 			}
 
-			key, err := kdcDB.GenerateDNSSECKey(zone.ID, zone.Name, KeyTypeKSK, algorithm,
+			key, err := kdcDB.GenerateDNSSECKey(zone.Name, KeyTypeKSK, algorithm,
 				fmt.Sprintf("Auto-generated to ensure active KSK"))
 			if err != nil {
 				log.Printf("KDC: Error generating KSK for zone %s: %v", zone.Name, err)
@@ -224,13 +224,13 @@ func ensureActiveKSK(kdcDB *KdcDB, conf *KdcConf) error {
 			}
 
 			// First transition to published (sets published_at timestamp)
-			if err := kdcDB.UpdateKeyState(zone.ID, key.ID, KeyStatePublished); err != nil {
+			if err := kdcDB.UpdateKeyState(zone.Name, key.ID, KeyStatePublished); err != nil {
 				log.Printf("KDC: Error setting generated KSK %s to published state: %v", key.ID, err)
 				continue
 			}
 
 			// Immediately transition to active (KSKs don't need to go through standby)
-			if err := kdcDB.UpdateKeyState(zone.ID, key.ID, KeyStateActive); err != nil {
+			if err := kdcDB.UpdateKeyState(zone.Name, key.ID, KeyStateActive); err != nil {
 				log.Printf("KDC: Error setting generated KSK %s to active state: %v", key.ID, err)
 			} else {
 				log.Printf("KDC: Successfully generated and activated new KSK %s for zone %s", key.ID, zone.Name)

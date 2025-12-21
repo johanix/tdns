@@ -86,9 +86,9 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 
 	if contentType == "encrypted_keys" {
 		// Prepare JSON structure with encrypted keys
-		// Format: array of objects, each containing zone_id, key_id, encrypted_key, ephemeral_pub_key
+		// Format: array of objects, each containing zone_name, key_id, encrypted_key, ephemeral_pub_key
 		type EncryptedKeyEntry struct {
-			ZoneID         string `json:"zone_id"`
+			ZoneName       string `json:"zone_name"`
 			KeyID          string `json:"key_id"`
 			KeyType        string `json:"key_type,omitempty"`
 			Algorithm      uint8  `json:"algorithm,omitempty"`
@@ -103,14 +103,14 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		
 		for _, record := range nodeRecords {
 			// Get the key details to include key_id
-			key, err := kdc.GetDNSSECKeyByID(record.ZoneID, record.KeyID)
+			key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
 			if err != nil {
-				log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneID, err)
+				log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
 				continue
 			}
 
 			entry := EncryptedKeyEntry{
-				ZoneID:         record.ZoneID,
+				ZoneName:       record.ZoneName,
 				KeyID:          record.KeyID,
 				KeyType:        string(key.KeyType),
 				Algorithm:      key.Algorithm,
@@ -120,7 +120,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 				EphemeralPubKey: base64.StdEncoding.EncodeToString(record.EphemeralPubKey),
 			}
 			entries = append(entries, entry)
-			zoneSet[record.ZoneID] = true
+			zoneSet[record.ZoneName] = true
 		}
 
 		keyCount = len(entries)
@@ -145,7 +145,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 		// Collect zone names from distribution records
 		zoneSet := make(map[string]bool)
 		for _, record := range nodeRecords {
-			zoneSet[record.ZoneID] = true
+			zoneSet[record.ZoneName] = true
 		}
 
 		zones := make([]string, 0, len(zoneSet))
@@ -264,7 +264,7 @@ func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16,
 // GetDistributionRecordsForDistributionID gets all distribution records for a distribution ID
 func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string) ([]*DistributionRecord, error) {
 	rows, err := kdc.DB.Query(
-		`SELECT id, zone_id, key_id, node_id, encrypted_key, ephemeral_pub_key, 
+		`SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
 			created_at, expires_at, status, distribution_id
 			FROM distribution_records 
 			WHERE distribution_id = ? 
@@ -283,7 +283,7 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 		var expiresAt sql.NullTime
 		var statusStr string
 		if err := rows.Scan(
-			&record.ID, &record.ZoneID, &record.KeyID, &nodeID,
+			&record.ID, &record.ZoneName, &record.KeyID, &nodeID,
 			&record.EncryptedKey, &record.EphemeralPubKey, &record.CreatedAt,
 			&expiresAt, &statusStr, &record.DistributionID,
 		); err != nil {
@@ -519,7 +519,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		// the way we query (we also check cache)
 		distRecord := &DistributionRecord{
 			ID:             distRecordIDHex,
-			ZoneID:         "test", // Placeholder zone for test distributions
+			ZoneName:       "test", // Placeholder zone for test distributions
 			KeyID:          "test", // Placeholder key for test distributions
 			NodeID:         nodeID,
 			EncryptedKey:   []byte("test"), // Dummy data

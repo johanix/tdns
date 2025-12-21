@@ -523,7 +523,7 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 
 	// Step 2: Parse JSON structure
 	type EncryptedKeyEntry struct {
-		ZoneID         string `json:"zone_id"`
+		ZoneName       string `json:"zone_name"`
 		KeyID          string `json:"key_id"`
 		KeyType        string `json:"key_type,omitempty"`
 		Algorithm      uint8  `json:"algorithm,omitempty"`
@@ -579,7 +579,7 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 	// Note: AddEdgesignerKeyWithRetirement handles retiring existing edgesigner keys atomically
 	successCount := 0
 	for i, entry := range entries {
-		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneID, entry.KeyID)
+		log.Printf("KRS: Processing key entry %d/%d: zone=%s, key_id=%s", i+1, len(entries), entry.ZoneName, entry.KeyID)
 
 		// Decode encrypted key from base64
 		encryptedKeyBytes, err := base64.StdEncoding.DecodeString(entry.EncryptedKey)
@@ -601,11 +601,11 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		// Decrypt using HPKE (ciphertext already has the correct format)
 		plaintext, err := hpke.Decrypt(privateKey, nil, encryptedKeyBytes)
 		if err != nil {
-			log.Printf("KRS: Error: Failed to decrypt key for entry %d (zone=%s, key_id=%s): %v", i+1, entry.ZoneID, entry.KeyID, err)
+			log.Printf("KRS: Error: Failed to decrypt key for entry %d (zone=%s, key_id=%s): %v", i+1, entry.ZoneName, entry.KeyID, err)
 			continue
 		}
 
-		log.Printf("KRS: Successfully decrypted key for zone %s, key_id %s (%d bytes)", entry.ZoneID, entry.KeyID, len(plaintext))
+		log.Printf("KRS: Successfully decrypted key for zone %s, key_id %s (%d bytes)", entry.ZoneName, entry.KeyID, len(plaintext))
 
 		// Create ReceivedKey structure
 		// Parse key_id as uint16 (it's stored as string in JSON but should be a keytag)
@@ -619,8 +619,8 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		}
 
 		receivedKey := &ReceivedKey{
-			ID:             fmt.Sprintf("%s-%s", entry.ZoneID, entry.KeyID),
-			ZoneID:         entry.ZoneID,
+			ID:             fmt.Sprintf("%s-%s", entry.ZoneName, entry.KeyID),
+			ZoneName:       entry.ZoneName,
 			KeyID:          keyID,
 			KeyType:        entry.KeyType,
 			Algorithm:      entry.Algorithm,
@@ -641,7 +641,7 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		}
 
 		successCount++
-		log.Printf("KRS: Stored key for zone %s, key_id %s (keytag %d)", entry.ZoneID, entry.KeyID, keyID)
+		log.Printf("KRS: Stored key for zone %s, key_id %s (keytag %d)", entry.ZoneName, entry.KeyID, keyID)
 	}
 
 	log.Printf("KRS: Successfully processed %d/%d encrypted keys", successCount, len(entries))

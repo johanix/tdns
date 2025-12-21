@@ -22,7 +22,7 @@ import (
 
 // GenerateDNSSECKey generates a DNSSEC key (KSK, ZSK, or CSK) for a zone
 // Returns the generated DNSSECKey struct ready for database storage
-func (kdc *KdcDB) GenerateDNSSECKey(zoneID, zoneName string, keyType KeyType, algorithm uint8, comment string) (*DNSSECKey, error) {
+func (kdc *KdcDB) GenerateDNSSECKey(zoneName string, keyType KeyType, algorithm uint8, comment string) (*DNSSECKey, error) {
 	// Validate algorithm
 	if _, exist := dns.AlgorithmToString[algorithm]; !exist {
 		return nil, fmt.Errorf("unknown algorithm: %d", algorithm)
@@ -94,7 +94,7 @@ func (kdc *KdcDB) GenerateDNSSECKey(zoneID, zoneName string, keyType KeyType, al
 	// Create DNSSECKey struct
 	key := &DNSSECKey{
 		ID:        keyIDStr,
-		ZoneID:    zoneID,
+		ZoneName:  zoneName,
 		KeyType:   keyType,
 		KeyID:     keyID,
 		Algorithm: algorithm,

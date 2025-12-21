@@ -31,7 +31,7 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node) (encryptedKey []
 	}
 
 	// Get or create a stable distribution ID for this key
-	distributionID, err = kdc.GetOrCreateDistributionID(key.ZoneID, key)
+	distributionID, err = kdc.GetOrCreateDistributionID(key.ZoneName, key)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to get/create distribution ID: %v", err)
 	}
@@ -53,7 +53,7 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node) (encryptedKey []
 	// Store the distribution record in the database
 	distRecord := &DistributionRecord{
 		ID:             distRecordIDHex,
-		ZoneID:         key.ZoneID,
+		ZoneName:       key.ZoneName,
 		KeyID:          key.ID,
 		NodeID:         node.ID,
 		EncryptedKey:   ciphertext,

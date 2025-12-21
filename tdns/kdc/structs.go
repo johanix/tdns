@@ -12,14 +12,72 @@ import (
 	"github.com/johanix/tdns/tdns/hpke"
 )
 
+// ZoneSigningMode represents how a zone is signed
+type ZoneSigningMode string
+
+const (
+	ZoneSigningModeUpstream      ZoneSigningMode = "upstream"      // Upstream signed, no keys distributed
+	ZoneSigningModeCentral       ZoneSigningMode = "central"        // Centrally signed, no keys distributed (default)
+	ZoneSigningModeEdgesignDyn   ZoneSigningMode = "edgesign_dyn"  // ZSK distributed, signs dynamic responses only
+	ZoneSigningModeEdgesignZsk   ZoneSigningMode = "edgesign_zsk"  // ZSK distributed, signs all responses
+	ZoneSigningModeEdgesignAll   ZoneSigningMode = "edgesign_all"  // KSK+ZSK distributed, all signing at edge
+	ZoneSigningModeUnsigned      ZoneSigningMode = "unsigned"      // No DNSSEC signing
+)
+
 // Zone represents a DNS zone managed by the KDC
 type Zone struct {
-	ID          string    `json:"id"`          // Unique identifier (typically the zone name)
-	Name        string    `json:"name"`        // Zone name (e.g., "example.com.")
+	Name        string          `json:"name"`        // Zone name (e.g., "example.com.") - used as primary key
+	ServiceID   string          `json:"service_id"` // Service this zone belongs to
+	SigningMode ZoneSigningMode `json:"signing_mode"` // How this zone is signed
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	Active      bool            `json:"active"`      // Whether the zone is actively managed
+	Comment     string          `json:"comment"`     // Optional comment/description
+}
+
+// Service represents a logical service that groups zones
+type Service struct {
+	ID          string    `json:"id"`          // Unique identifier (e.g., "customer-service")
+	Name        string    `json:"name"`        // Human-readable name
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	Active      bool      `json:"active"`      // Whether the zone is actively managed
+	Active      bool      `json:"active"`      // Whether the service is active
 	Comment     string    `json:"comment"`     // Optional comment/description
+}
+
+// Component represents a component within a service
+// Components can serve both signed and unsigned zones
+type Component struct {
+	ID          string    `json:"id"`          // Unique identifier (e.g., "web-component")
+	Name        string    `json:"name"`        // Human-readable name
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Active      bool      `json:"active"`      // Whether the component is active
+	Comment     string    `json:"comment"`     // Optional comment/description
+}
+
+// ServiceComponentAssignment represents which components belong to which services
+type ServiceComponentAssignment struct {
+	ServiceID   string    `json:"service_id"`
+	ComponentID string    `json:"component_id"`
+	Active      bool      `json:"active"`      // Whether this assignment is active
+	Since       time.Time `json:"since"`
+}
+
+// ComponentZoneAssignment represents which zones are served by which components
+type ComponentZoneAssignment struct {
+	ComponentID string    `json:"component_id"`
+	ZoneName    string    `json:"zone_name"`
+	Active      bool      `json:"active"`      // Whether this assignment is active
+	Since       time.Time `json:"since"`
+}
+
+// NodeComponentAssignment represents which components are served by which nodes
+type NodeComponentAssignment struct {
+	NodeID      string    `json:"node_id"`
+	ComponentID string    `json:"component_id"`
+	Active      bool      `json:"active"`      // Whether this assignment is active
+	Since       time.Time `json:"since"`
 }
 
 // NodeState represents the state of an edge node
@@ -42,7 +100,7 @@ type Node struct {
 	LastSeen        time.Time `json:"last_seen"`
 	State           NodeState `json:"state"`
 	Comment         string    `json:"comment"`         // Optional comment/description
-	Zones           []string  `json:"zones"`           // List of zone IDs this node serves (for future use)
+	Zones           []string  `json:"zones"`           // List of zone names this node serves (for future use)
 }
 
 // KeyType represents the type of DNSSEC key
@@ -72,7 +130,7 @@ const (
 // DNSSECKey represents a DNSSEC key (KSK, ZSK, or CSK) for a zone
 type DNSSECKey struct {
 	ID          string    `json:"id"`          // Unique identifier
-	ZoneID      string    `json:"zone_id"`    // Zone this key belongs to
+	ZoneName    string    `json:"zone_name"`  // Zone name this key belongs to
 	KeyType     KeyType   `json:"key_type"`   // KSK, ZSK, or CSK
 	KeyID       uint16    `json:"key_id"`     // DNSSEC KeyTag
 	Algorithm   uint8     `json:"algorithm"`  // DNSSEC algorithm (e.g., 13 for ECDSA256, 15 for ED25519)
@@ -90,7 +148,7 @@ type DNSSECKey struct {
 // DistributionRecord represents a record of a key distribution to a node
 type DistributionRecord struct {
 	ID               string             // Unique ID for this distribution
-	ZoneID           string             // Zone name
+	ZoneName         string             // Zone name
 	KeyID            string             // DNSSEC key ID
 	NodeID           string             // Target node ID (empty if to all nodes)
 	EncryptedKey     []byte             // HPKE-encrypted private key
@@ -101,13 +159,12 @@ type DistributionRecord struct {
 	DistributionID   string             // HPKE distribution ID (for tracking)
 }
 
-// ZoneNodeAssignment represents which zones are assigned to which nodes
-// For now, we assume all zones are served by all nodes, but this structure
-// allows for future per-node zone assignments
+// ZoneNodeAssignment is deprecated - use Component-based model instead
+// Kept for backward compatibility during migration
 type ZoneNodeAssignment struct {
-	ZoneID string
-	NodeID string
-	Active bool      // Whether this assignment is active
-	Since  time.Time
+	ZoneName string
+	NodeID   string
+	Active   bool      // Whether this assignment is active
+	Since    time.Time
 }
 

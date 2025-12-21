@@ -215,10 +215,21 @@ func handleKMREQQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 		log.Printf("KDC: SIG(0) signer: %s (not yet used for node identification)", sig0SignerName)
 	}
 
-	// Get all online nodes
-	nodes, err = kdcDB.GetActiveNodes()
+	// Get nodes that serve this zone (via components)
+	// Only distribute keys for edgesign_* zones
+	if zoneObj.SigningMode != ZoneSigningModeEdgesignDyn && zoneObj.SigningMode != ZoneSigningModeEdgesignZsk && zoneObj.SigningMode != ZoneSigningModeEdgesignAll {
+		log.Printf("KDC: Zone %s has signing_mode=%s, not distributing keys via KMREQ (only edgesign_* modes support key distribution)", zone, zoneObj.SigningMode)
+		m.SetRcode(msg, dns.RcodeRefused)
+		err := w.WriteMsg(m)
+		if err != nil {
+			log.Printf("KDC: Error writing REFUSED response: %v", err)
+		}
+		return err
+	}
+
+	nodes, err = kdcDB.GetActiveNodesForZone(zone)
 	if err != nil {
-		log.Printf("KDC: Error getting active nodes: %v", err)
+		log.Printf("KDC: Error getting nodes for zone: %v", err)
 		m.SetRcode(msg, dns.RcodeServerFailure)
 		err := w.WriteMsg(m)
 		if err != nil {
@@ -228,7 +239,7 @@ func handleKMREQQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 	}
 
 	if len(nodes) == 0 {
-		log.Printf("KDC: No online nodes found")
+		log.Printf("KDC: No active nodes serve zone %s", zone)
 		m.SetRcode(msg, dns.RcodeServerFailure)
 		err := w.WriteMsg(m)
 		if err != nil {
@@ -745,7 +756,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 
 	// Use the first record to get zone and key info (all records for same distribution have same zone/key)
 	record := records[0]
-	zoneID := record.ZoneID
+	zoneName := record.ZoneName
 	keyID := record.KeyID
 
 	// For now, we'll identify the node by matching remote address to node notify addresses
@@ -792,15 +803,15 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 	}
 
 	log.Printf("KDC: Recording confirmation for distribution %s, zone %s, key %s, node %s", 
-		distributionID, zoneID, keyID, confirmedNodeID)
+		distributionID, zoneName, keyID, confirmedNodeID)
 
 	// Record the confirmation
-	if err := kdcDB.AddDistributionConfirmation(distributionID, zoneID, keyID, confirmedNodeID); err != nil {
+	if err := kdcDB.AddDistributionConfirmation(distributionID, zoneName, keyID, confirmedNodeID); err != nil {
 		return fmt.Errorf("failed to record confirmation: %v", err)
 	}
 
 	// Check if all nodes have confirmed
-	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, zoneID)
+	allConfirmed, err := kdcDB.CheckAllNodesConfirmed(distributionID, zoneName)
 	if err != nil {
 		log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
 		// Don't fail - we've recorded the confirmation
@@ -809,7 +820,7 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 			distributionID, keyID)
 		
 		// Transition key state from 'distributed' to 'edgesigner'
-		if err := kdcDB.UpdateKeyState(zoneID, keyID, KeyStateEdgeSigner); err != nil {
+		if err := kdcDB.UpdateKeyState(zoneName, keyID, KeyStateEdgeSigner); err != nil {
 			log.Printf("KDC: Error transitioning key state: %v", err)
 			// Don't fail - the confirmation was recorded
 		} else {
