@@ -420,6 +420,8 @@ var kdcZoneDeleteCmd = &cobra.Command{
 	Short: "Delete a zone from KDC",
 	// Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename") // Normalize zone name to FQDN format
+		
 		prefixcmd, _ := getCommandContext("zone")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {

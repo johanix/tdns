@@ -720,11 +720,38 @@ func (kdc *KdcDB) UpdateZone(zone *Zone) error {
 }
 
 // DeleteZone deletes a zone (cascade deletes keys and distributions)
+// Note: Foreign key constraints with ON DELETE CASCADE should automatically clean up
+// related records in component_zone_assignments, dnssec_keys, distribution_records, etc.
+// However, we explicitly delete component assignments first as a safety measure.
 func (kdc *KdcDB) DeleteZone(zoneName string) error {
-	_, err := kdc.DB.Exec("DELETE FROM zones WHERE name = ?", zoneName)
+	// First, verify the zone exists
+	_, err := kdc.GetZone(zoneName)
+	if err != nil {
+		return fmt.Errorf("zone not found: %s", zoneName)
+	}
+	
+	// Explicitly remove component assignments (in case CASCADE doesn't work as expected)
+	// This is a safety measure - CASCADE should handle it, but we do it explicitly to be sure
+	_, err = kdc.DB.Exec("DELETE FROM component_zone_assignments WHERE zone_name = ?", zoneName)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to delete component assignments for zone %s: %v", zoneName, err)
+		// Continue anyway - CASCADE might handle it
+	}
+	
+	// Now delete the zone itself
+	result, err := kdc.DB.Exec("DELETE FROM zones WHERE name = ?", zoneName)
 	if err != nil {
 		return fmt.Errorf("failed to delete zone: %v", err)
 	}
+	
+	// Verify that a row was actually deleted
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("KDC: Warning: Could not determine rows affected for zone deletion: %v", err)
+	} else if rowsAffected == 0 {
+		return fmt.Errorf("zone not found or could not be deleted: %s", zoneName)
+	}
+	
 	return nil
 }
 
