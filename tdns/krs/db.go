@@ -51,7 +51,7 @@ func (krs *KrsDB) initSchema() error {
 		// Received keys table
 		`CREATE TABLE IF NOT EXISTS received_keys (
 			id TEXT PRIMARY KEY,
-			zone_id TEXT NOT NULL,
+			zone_name TEXT NOT NULL,
 			key_id INTEGER NOT NULL,
 			key_type TEXT NOT NULL,
 			algorithm INTEGER NOT NULL,
@@ -64,7 +64,7 @@ func (krs *KrsDB) initSchema() error {
 			retired_at TIMESTAMP NULL,
 			distribution_id TEXT NOT NULL,
 			comment TEXT,
-			UNIQUE(zone_id, key_id)
+			UNIQUE(zone_name, key_id)
 		)`,
 
 		// Node config table (stores node identity)
@@ -79,7 +79,7 @@ func (krs *KrsDB) initSchema() error {
 		)`,
 
 		// Create indexes
-		`CREATE INDEX IF NOT EXISTS idx_received_keys_zone_id ON received_keys(zone_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_received_keys_zone_name ON received_keys(zone_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_received_keys_key_id ON received_keys(key_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_received_keys_state ON received_keys(state)`,
 		`CREATE INDEX IF NOT EXISTS idx_received_keys_distribution_id ON received_keys(distribution_id)`,
@@ -97,11 +97,11 @@ func (krs *KrsDB) initSchema() error {
 // AddReceivedKey adds a new received key to the database
 func (krs *KrsDB) AddReceivedKey(key *ReceivedKey) error {
 	query := `INSERT INTO received_keys 
-		(id, zone_id, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
+		(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := krs.DB.Exec(query,
-		key.ID, key.ZoneID, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
+		key.ID, key.ZoneName, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
 		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment,
 	)
 	if err != nil {
@@ -116,12 +116,12 @@ func (krs *KrsDB) GetReceivedKey(id string) (*ReceivedKey, error) {
 	var activatedAt, retiredAt sql.NullTime
 
 	err := krs.DB.QueryRow(
-		`SELECT id, zone_id, key_id, key_type, algorithm, flags, public_key, private_key, 
+		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
 			state, received_at, activated_at, retired_at, distribution_id, comment
 			FROM received_keys WHERE id = ?`,
 		id,
 	).Scan(
-		&key.ID, &key.ZoneID, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
+		&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
 		&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
 		&activatedAt, &retiredAt, &key.DistributionID, &key.Comment,
 	)
@@ -143,12 +143,12 @@ func (krs *KrsDB) GetReceivedKey(id string) (*ReceivedKey, error) {
 }
 
 // GetReceivedKeysForZone retrieves all received keys for a zone
-func (krs *KrsDB) GetReceivedKeysForZone(zoneID string) ([]*ReceivedKey, error) {
+func (krs *KrsDB) GetReceivedKeysForZone(zoneName string) ([]*ReceivedKey, error) {
 	rows, err := krs.DB.Query(
-		`SELECT id, zone_id, key_id, key_type, algorithm, flags, public_key, private_key, 
+		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
 			state, received_at, activated_at, retired_at, distribution_id, comment
-			FROM received_keys WHERE zone_id = ? ORDER BY received_at DESC`,
-		zoneID,
+			FROM received_keys WHERE zone_name = ? ORDER BY received_at DESC`,
+		zoneName,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query received keys: %v", err)
@@ -161,7 +161,7 @@ func (krs *KrsDB) GetReceivedKeysForZone(zoneID string) ([]*ReceivedKey, error) 
 		var activatedAt, retiredAt sql.NullTime
 
 		err := rows.Scan(
-			&key.ID, &key.ZoneID, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
+			&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
 			&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
 			&activatedAt, &retiredAt, &key.DistributionID, &key.Comment,
 		)
@@ -185,7 +185,7 @@ func (krs *KrsDB) GetReceivedKeysForZone(zoneID string) ([]*ReceivedKey, error) 
 // GetAllReceivedKeys retrieves all received keys
 func (krs *KrsDB) GetAllReceivedKeys() ([]*ReceivedKey, error) {
 	rows, err := krs.DB.Query(
-		`SELECT id, zone_id, key_id, key_type, algorithm, flags, public_key, private_key, 
+		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
 			state, received_at, activated_at, retired_at, distribution_id, comment
 			FROM received_keys ORDER BY received_at DESC`,
 	)
@@ -200,7 +200,7 @@ func (krs *KrsDB) GetAllReceivedKeys() ([]*ReceivedKey, error) {
 		var activatedAt, retiredAt sql.NullTime
 
 		err := rows.Scan(
-			&key.ID, &key.ZoneID, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
+			&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
 			&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
 			&activatedAt, &retiredAt, &key.DistributionID, &key.Comment,
 		)
@@ -243,14 +243,14 @@ func (krs *KrsDB) UpdateReceivedKeyState(id string, state string, activatedAt, r
 
 // RetireEdgesignerKeysForZone retires all keys in "edgesigner" state for a given zone
 // This ensures only one key per zone is in "edgesigner" state at a time
-func (krs *KrsDB) RetireEdgesignerKeysForZone(zoneID string) error {
+func (krs *KrsDB) RetireEdgesignerKeysForZone(zoneName string) error {
 	now := time.Now()
 	_, err := krs.DB.Exec(
-		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_id = ? AND state = ?`,
-		"retired", now, zoneID, "edgesigner",
+		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_name = ? AND state = ?`,
+		"retired", now, zoneName, "edgesigner",
 	)
 	if err != nil {
-		return fmt.Errorf("failed to retire edgesigner keys for zone %s: %v", zoneID, err)
+		return fmt.Errorf("failed to retire edgesigner keys for zone %s: %v", zoneName, err)
 	}
 	return nil
 }
@@ -274,19 +274,19 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 	// Step 1: Retire existing edgesigner keys for this zone
 	now := time.Now()
 	_, err = tx.Exec(
-		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_id = ? AND state = ?`,
-		"retired", now, key.ZoneID, "edgesigner",
+		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_name = ? AND state = ?`,
+		"retired", now, key.ZoneName, "edgesigner",
 	)
 	if err != nil {
-		return fmt.Errorf("failed to retire existing edgesigner keys for zone %s: %v", key.ZoneID, err)
+		return fmt.Errorf("failed to retire existing edgesigner keys for zone %s: %v", key.ZoneName, err)
 	}
 
 	// Step 2: Insert the new edgesigner key
 	_, err = tx.Exec(
 		`INSERT INTO received_keys 
-			(id, zone_id, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
+			(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		key.ID, key.ZoneID, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
+		key.ID, key.ZoneName, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
 		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment,
 	)
 	if err != nil {

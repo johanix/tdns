@@ -69,7 +69,6 @@ var kdcZoneAddCmd = &cobra.Command{
 		req := map[string]interface{}{
 			"command": "add",
 			"zone": map[string]interface{}{
-				"id":      tdns.Globals.Zonename,
 				"name":    tdns.Globals.Zonename,
 				"active":  true,
 				"comment": "",
@@ -178,7 +177,7 @@ var kdcZoneGetCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "get",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -223,9 +222,9 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 		req := map[string]interface{}{
 			"command": "get-keys",
 		}
-		// Only include zone_id if zone was specified
+		// Only include zone_name if zone was specified
 		if tdns.Globals.Zonename != "" {
-			req["zone_id"] = tdns.Globals.Zonename
+			req["zone_name"] = tdns.Globals.Zonename
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -276,8 +275,8 @@ var kdcZoneDnssecListCmd = &cobra.Command{
 				continue
 			}
 
-			// Get zone name (zone_id is the zone identifier, which is typically the zone name)
-			zoneID := getString(key, "zone_id", "ZoneID")
+			// Get zone name
+			zoneID := getString(key, "zone_name", "ZoneName")
 			keyID := getString(key, "id", "ID")
 			keyType := getString(key, "key_type", "KeyType")
 			state := getString(key, "state", "State")
@@ -326,7 +325,7 @@ var kdcZoneDeleteCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "delete",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/zone", req)
@@ -963,7 +962,7 @@ var kdcDebugHpkeEncryptCmd = &cobra.Command{
 		// Request encryption via API
 		req := map[string]interface{}{
 			"command": "encrypt-key",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 			"key_id":  keyID,
 			"node_id": nodeID,
 		}
@@ -1237,7 +1236,7 @@ var kdcZoneDnssecGenerateCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "generate-key",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 			"key_type": keyType,
 		}
 		if algorithm != 0 {
@@ -1324,7 +1323,7 @@ var kdcDistribSingleCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "distribute-zsk",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 			"key_id":  keyid,
 		}
 
@@ -1380,7 +1379,7 @@ var kdcDistribMultiCmd = &cobra.Command{
 			if results, ok := resultsRaw.([]interface{}); ok {
 				for _, result := range results {
 					if resultMap, ok := result.(map[string]interface{}); ok {
-						zoneID := getString(resultMap, "zone_id", "ZoneID")
+						zoneID := getString(resultMap, "zone_name", "ZoneName")
 						keyID := getString(resultMap, "key_id", "KeyID")
 						status := getString(resultMap, "status", "Status")
 						msg := getString(resultMap, "msg", "Msg")
@@ -1414,7 +1413,7 @@ var kdcZoneTransitionCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "transition",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 			"key_id":  keyid,
 		}
 
@@ -1449,7 +1448,7 @@ var kdcZoneDnssecHashCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "hash",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 			"key_id":  keyid,
 		}
 
@@ -1489,7 +1488,7 @@ var kdcZoneDnssecDeleteCmd = &cobra.Command{
 
 		req := map[string]interface{}{
 			"command": "delete-key",
-			"zone_id": tdns.Globals.Zonename,
+			"zone_name": tdns.Globals.Zonename,
 			"key_id":  keyid,
 		}
 
@@ -1578,7 +1577,7 @@ var kdcDistribStateCmd = &cobra.Command{
 		if stateRaw, ok := resp["state"]; ok {
 			if state, ok := stateRaw.(map[string]interface{}); ok {
 				fmt.Printf("Distribution ID: %s\n", getString(state, "distribution_id", "DistributionID"))
-				fmt.Printf("Zone: %s\n", getString(state, "zone_id", "ZoneID"))
+				fmt.Printf("Zone: %s\n", getString(state, "zone_name", "ZoneName"))
 				fmt.Printf("Key ID: %s\n", getString(state, "key_id", "KeyID"))
 				fmt.Printf("Key State: %s\n", getString(state, "key_state", "KeyState"))
 				fmt.Printf("Created At: %s\n", getString(state, "created_at", "CreatedAt"))

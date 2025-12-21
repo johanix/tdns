@@ -24,22 +24,22 @@ import (
 type KdcZonePost struct {
 	Command   string   `json:"command"`   // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distribute-zsk", "distrib-multi", "transition", "setstate", "delete-key"
 	Zone      *Zone    `json:"zone,omitempty"`
-	ZoneID    string   `json:"zone_id,omitempty"`
+	ZoneName  string   `json:"zone_name,omitempty"`  // Zone name (replaces zone_id)
 	KeyID     string   `json:"key_id,omitempty"`     // For encrypt-key/distribute-zsk/transition/setstate/delete-key: DNSSEC key ID
 	NodeID    string   `json:"node_id,omitempty"`    // For encrypt-key: node ID
 	KeyType   string   `json:"key_type,omitempty"`   // For generate-key: "KSK", "ZSK", or "CSK"
 	Algorithm uint8    `json:"algorithm,omitempty"`  // For generate-key: DNSSEC algorithm
 	Comment   string   `json:"comment,omitempty"`    // For generate-key: optional comment
 	NewState  string   `json:"new_state,omitempty"`  // For setstate: target state
-	Zones     []string `json:"zones,omitempty"`     // For distrib-multi: list of zone IDs
+	Zones     []string `json:"zones,omitempty"`     // For distrib-multi: list of zone names
 }
 
 // DistributionResult represents the result of distributing a key for a zone
 type DistributionResult struct {
-	ZoneID string `json:"zone_id"`
-	KeyID  string `json:"key_id,omitempty"`
-	Status string `json:"status"` // "success" or "error"
-	Msg    string `json:"msg,omitempty"`
+	ZoneName string `json:"zone_name"`
+	KeyID    string `json:"key_id,omitempty"`
+	Status   string `json:"status"` // "success" or "error"
+	Msg      string `json:"msg,omitempty"`
 }
 
 // KdcZoneResponse represents a response from the KDC zone API
@@ -108,14 +108,15 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "zone is required for add command")
 				return
 			}
-			if req.Zone.ID == "" {
-				req.Zone.ID = req.Zone.Name // Use zone name as ID if not specified
+			if req.Zone.Name == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone name is required")
+				return
 			}
 			if err := kdcDB.AddZone(req.Zone); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
-				resp.Msg = fmt.Sprintf("Zone %s added successfully", req.Zone.ID)
+				resp.Msg = fmt.Sprintf("Zone %s added successfully", req.Zone.Name)
 			}
 
 		case "list":
@@ -128,11 +129,11 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 		case "get":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for get command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for get command")
 				return
 			}
-			zone, err := kdcDB.GetZone(req.ZoneID)
+			zone, err := kdcDB.GetZone(req.ZoneName)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -143,12 +144,12 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 		case "get-keys":
 			var keys []*DNSSECKey
 			var err error
-			if req.ZoneID == "" {
+			if req.ZoneName == "" {
 				// List all keys for all zones
 				keys, err = kdcDB.GetAllDNSSECKeys()
 			} else {
 				// List keys for a specific zone
-				keys, err = kdcDB.GetDNSSECKeysForZone(req.ZoneID)
+				keys, err = kdcDB.GetDNSSECKeysForZone(req.ZoneName)
 			}
 			if err != nil {
 				resp.Error = true
@@ -158,8 +159,8 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 		case "encrypt-key":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for encrypt-key command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for encrypt-key command")
 				return
 			}
 			keyID := req.KeyID
@@ -174,7 +175,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 			// Get the DNSSEC key by ID
-			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneID, keyID)
+			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneName, keyID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -201,12 +202,12 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 		case "generate-key":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for generate-key command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for generate-key command")
 				return
 			}
-			// Get zone to get zone name
-			zone, err := kdcDB.GetZone(req.ZoneID)
+			// Verify zone exists
+			_, err := kdcDB.GetZone(req.ZoneName)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("zone not found: %v", err)
@@ -221,7 +222,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				if keyType == "" {
 					keyType = KeyTypeZSK // Default to ZSK
 				}
-				key, err := kdcDB.GenerateDNSSECKey(req.ZoneID, zone.Name, keyType, algorithm, req.Comment)
+				key, err := kdcDB.GenerateDNSSECKey(req.ZoneName, keyType, algorithm, req.Comment)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
@@ -238,32 +239,32 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 		case "update":
-			if req.Zone == nil || req.Zone.ID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone with ID is required for update command")
+			if req.Zone == nil || req.Zone.Name == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone with name is required for update command")
 				return
 			}
 			if err := kdcDB.UpdateZone(req.Zone); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
-				resp.Msg = fmt.Sprintf("Zone %s updated successfully", req.Zone.ID)
+				resp.Msg = fmt.Sprintf("Zone %s updated successfully", req.Zone.Name)
 			}
 
 		case "delete":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for delete command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for delete command")
 				return
 			}
-			if err := kdcDB.DeleteZone(req.ZoneID); err != nil {
+			if err := kdcDB.DeleteZone(req.ZoneName); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
-				resp.Msg = fmt.Sprintf("Zone %s deleted successfully", req.ZoneID)
+				resp.Msg = fmt.Sprintf("Zone %s deleted successfully", req.ZoneName)
 			}
 
 		case "distribute-zsk":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for distribute-zsk command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for distribute-zsk command")
 				return
 			}
 			if req.KeyID == "" {
@@ -271,7 +272,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				return
 			}
 			// Get the key and verify it's a ZSK in standby state
-			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneID, req.KeyID)
+			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Key not found: %v", err)
@@ -283,37 +284,49 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.ErrorMsg = fmt.Sprintf("Key %s is not in standby state (current state: %s)", req.KeyID, key.State)
 			} else {
 				// Get distributionID for this key (before transitioning state)
-				distributionID, err := kdcDB.GetOrCreateDistributionID(req.ZoneID, key)
+				distributionID, err := kdcDB.GetOrCreateDistributionID(req.ZoneName, key)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Failed to get/create distribution ID: %v", err)
 				} else {
 					// Transition to distributed state
-					if err := kdcDB.UpdateKeyState(req.ZoneID, req.KeyID, KeyStateDistributed); err != nil {
+					if err := kdcDB.UpdateKeyState(req.ZoneName, req.KeyID, KeyStateDistributed); err != nil {
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 					} else {
-						// Encrypt key for all active nodes and create distribution records
-						nodes, err := kdcDB.GetActiveNodes()
+						// Check zone signing mode - only distribute keys for edgesigned zones
+						zone, err := kdcDB.GetZone(req.ZoneName)
 						if err != nil {
-							log.Printf("KDC: Warning: Failed to get active nodes: %v", err)
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("Failed to get zone: %v", err)
+						} else if zone.SigningMode != ZoneSigningModeEdgesignDyn && zone.SigningMode != ZoneSigningModeEdgesignZsk && zone.SigningMode != ZoneSigningModeEdgesignAll {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("Zone %s has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", req.ZoneName, zone.SigningMode)
 						} else {
-							encryptedCount := 0
-							for _, node := range nodes {
-								if node.NotifyAddress == "" {
-									log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
-									continue
+							// Get nodes that serve this zone (via components)
+							nodes, err := kdcDB.GetActiveNodesForZone(req.ZoneName)
+							if err != nil {
+								log.Printf("KDC: Warning: Failed to get nodes for zone: %v", err)
+							} else if len(nodes) == 0 {
+								log.Printf("KDC: Warning: No active nodes serve zone %s", req.ZoneName)
+							} else {
+								encryptedCount := 0
+								for _, node := range nodes {
+									if node.NotifyAddress == "" {
+										log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
+										continue
+									}
+									// Encrypt key for this node (creates distribution record)
+									_, _, _, err := kdcDB.EncryptKeyForNode(key, node)
+									if err != nil {
+										log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
+										continue
+									}
+									encryptedCount++
+									log.Printf("KDC: Encrypted key %s for node %s (distribution ID: %s)", req.KeyID, node.ID, distributionID)
 								}
-								// Encrypt key for this node (creates distribution record)
-								_, _, _, err := kdcDB.EncryptKeyForNode(key, node)
-								if err != nil {
-									log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
-									continue
-								}
-								encryptedCount++
-								log.Printf("KDC: Encrypted key %s for node %s (distribution ID: %s)", req.KeyID, node.ID, distributionID)
+								log.Printf("KDC: Encrypted key for %d/%d nodes serving zone %s", encryptedCount, len(nodes), req.ZoneName)
 							}
-							log.Printf("KDC: Encrypted key for %d/%d active nodes", encryptedCount, len(nodes))
 						}
 
 						// Send NOTIFY to all active nodes with distributionID
@@ -328,15 +341,15 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 						
 						resp.Msg = fmt.Sprintf("Key %s transitioned to distributed state. Distribution ID: %s. NOTIFYs sent to nodes.", req.KeyID, distributionID)
 						// Reload key to get updated state
-						key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneID, req.KeyID)
+						key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 						resp.Key = key
 					}
 				}
 			}
 
 		case "transition":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for transition command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for transition command")
 				return
 			}
 			if req.KeyID == "" {
@@ -345,7 +358,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 			
 			// Get key and determine next state based on current state
-			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneID, req.KeyID)
+			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Key not found: %v", err)
@@ -364,26 +377,26 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					return
 				}
 				
-				if err := kdcDB.UpdateKeyState(req.ZoneID, req.KeyID, toState); err != nil {
+				if err := kdcDB.UpdateKeyState(req.ZoneName, req.KeyID, toState); err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
 					resp.Msg = fmt.Sprintf("Key %s transitioned from %s to %s", req.KeyID, key.State, toState)
-					key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneID, req.KeyID)
+					key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 					resp.Key = key
 				}
 			}
 
 		case "delete-key":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for delete-key command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for delete-key command")
 				return
 			}
 			if req.KeyID == "" {
 				sendJSONError(w, http.StatusBadRequest, "key_id is required for delete-key command")
 				return
 			}
-			if err := kdcDB.DeleteDNSSECKey(req.ZoneID, req.KeyID); err != nil {
+			if err := kdcDB.DeleteDNSSECKey(req.ZoneName, req.KeyID); err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
@@ -391,8 +404,8 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			}
 
 		case "setstate":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for setstate command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for setstate command")
 				return
 			}
 			if req.KeyID == "" {
@@ -421,26 +434,26 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Invalid state: %s", req.NewState)
 			} else {
-				if err := kdcDB.UpdateKeyState(req.ZoneID, req.KeyID, newState); err != nil {
+				if err := kdcDB.UpdateKeyState(req.ZoneName, req.KeyID, newState); err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
 					resp.Msg = fmt.Sprintf("Key %s state set to %s", req.KeyID, newState)
-					key, _ := kdcDB.GetDNSSECKeyByID(req.ZoneID, req.KeyID)
+					key, _ := kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 					resp.Key = key
 				}
 			}
 
 		case "hash":
-			if req.ZoneID == "" {
-				sendJSONError(w, http.StatusBadRequest, "zone_id is required for hash command")
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for hash command")
 				return
 			}
 			if req.KeyID == "" {
 				sendJSONError(w, http.StatusBadRequest, "key_id is required for hash command")
 				return
 			}
-			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneID, req.KeyID)
+			key, err := kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -464,14 +477,14 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			successCount := 0
 			errorCount := 0
 			
-			for _, zoneID := range req.Zones {
+			for _, zoneName := range req.Zones {
 				result := DistributionResult{
-					ZoneID: zoneID,
-					Status: "error",
+					ZoneName: zoneName,
+					Status:   "error",
 				}
 				
 				// Find a standby ZSK for this zone
-				keys, err := kdcDB.GetDNSSECKeysForZone(zoneID)
+				keys, err := kdcDB.GetDNSSECKeysForZone(zoneName)
 				if err != nil {
 					result.Msg = fmt.Sprintf("Failed to get keys: %v", err)
 					results = append(results, result)
@@ -496,7 +509,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				}
 				
 				// Distribute this key (same logic as distribute-zsk)
-				distributionID, err := kdcDB.GetOrCreateDistributionID(zoneID, standbyZSK)
+				distributionID, err := kdcDB.GetOrCreateDistributionID(zoneName, standbyZSK)
 				if err != nil {
 					result.Msg = fmt.Sprintf("Failed to get/create distribution ID: %v", err)
 					results = append(results, result)
@@ -505,17 +518,34 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				}
 				
 				// Transition to distributed state
-				if err := kdcDB.UpdateKeyState(zoneID, standbyZSK.ID, KeyStateDistributed); err != nil {
+				if err := kdcDB.UpdateKeyState(zoneName, standbyZSK.ID, KeyStateDistributed); err != nil {
 					result.Msg = fmt.Sprintf("Failed to update key state: %v", err)
 					results = append(results, result)
 					errorCount++
 					continue
 				}
 				
-				// Encrypt key for all active nodes
-				nodes, err := kdcDB.GetActiveNodes()
+				// Check zone signing mode - only distribute keys for edgesigned zones
+				zone, err := kdcDB.GetZone(zoneName)
 				if err != nil {
-					log.Printf("KDC: Warning: Failed to get active nodes: %v", err)
+					result.Msg = fmt.Sprintf("Failed to get zone: %v", err)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+				if zone.SigningMode != ZoneSigningModeEdgesignDyn && zone.SigningMode != ZoneSigningModeEdgesignZsk && zone.SigningMode != ZoneSigningModeEdgesignAll {
+					result.Msg = fmt.Sprintf("Zone has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", zone.SigningMode)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+
+				// Get nodes that serve this zone (via components)
+				nodes, err := kdcDB.GetActiveNodesForZone(zoneName)
+				if err != nil {
+					log.Printf("KDC: Warning: Failed to get nodes for zone %s: %v", zoneName, err)
+				} else if len(nodes) == 0 {
+					log.Printf("KDC: Warning: No active nodes serve zone %s", zoneName)
 				} else {
 					encryptedCount := 0
 					for _, node := range nodes {
@@ -530,7 +560,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 						}
 						encryptedCount++
 					}
-					log.Printf("KDC: Encrypted key %s for %d/%d active nodes", standbyZSK.ID, encryptedCount, len(nodes))
+					log.Printf("KDC: Encrypted key %s for %d/%d nodes serving zone %s", standbyZSK.ID, encryptedCount, len(nodes), zoneName)
 				}
 				
 				// Send NOTIFY to all active nodes
@@ -759,7 +789,7 @@ type KdcDistribPost struct {
 // DistributionStateInfo represents detailed information about a distribution
 type DistributionStateInfo struct {
 	DistributionID string   `json:"distribution_id"`
-	ZoneID         string   `json:"zone_id"`
+	ZoneName       string   `json:"zone_name"`
 	KeyID          string   `json:"key_id"`
 	KeyState       string   `json:"key_state"`
 	CreatedAt      string   `json:"created_at"`
@@ -824,16 +854,16 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				record := records[0]
 				
 				// Get key state
-				key, err := kdcDB.GetDNSSECKeyByID(record.ZoneID, record.KeyID)
+				key, err := kdcDB.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
 				keyState := "unknown"
 				if err == nil {
 					keyState = string(key.State)
 				}
 				
-				// Get target nodes (active nodes with notify addresses)
-				activeNodes, _ := kdcDB.GetActiveNodes()
+				// Get target nodes (nodes that serve this zone via components)
+				zoneNodes, _ := kdcDB.GetActiveNodesForZone(record.ZoneName)
 				var targetNodes []string
-				for _, node := range activeNodes {
+				for _, node := range zoneNodes {
 					if node.NotifyAddress != "" {
 						targetNodes = append(targetNodes, node.ID)
 					}
@@ -858,7 +888,7 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				
 				resp.State = &DistributionStateInfo{
 					DistributionID: req.DistributionID,
-					ZoneID:         record.ZoneID,
+					ZoneName:       record.ZoneName,
 					KeyID:          record.KeyID,
 					KeyState:       keyState,
 					CreatedAt:      record.CreatedAt.Format(time.RFC3339),
@@ -888,7 +918,7 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				record := records[0]
 				
 				// Force transition key state from 'distributed' to 'edgesigner'
-				if err := kdcDB.UpdateKeyState(record.ZoneID, record.KeyID, KeyStateEdgeSigner); err != nil {
+				if err := kdcDB.UpdateKeyState(record.ZoneName, record.KeyID, KeyStateEdgeSigner); err != nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Failed to update key state: %v", err)
 				} else {

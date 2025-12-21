@@ -13,7 +13,7 @@ import (
 // ReceivedKey represents a DNSSEC key received from the KDC
 type ReceivedKey struct {
 	ID              string    `json:"id"`              // Unique identifier (distribution ID)
-	ZoneID          string    `json:"zone_id"`        // Zone name this key is for
+	ZoneName        string    `json:"zone_name"`      // Zone name this key is for
 	KeyID           uint16    `json:"key_id"`         // DNSSEC KeyTag
 	KeyType         string    `json:"key_type"`       // "KSK", "ZSK", or "CSK"
 	Algorithm       uint8     `json:"algorithm"`      // DNSSEC algorithm

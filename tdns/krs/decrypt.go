@@ -33,7 +33,7 @@ func DecryptAndStoreKey(krsDB *KrsDB, encryptedKey []byte, ephemeralPrivKey []by
 	// For now, create a basic ReceivedKey structure
 	key := &ReceivedKey{
 		ID:             distributionID,
-		ZoneID:         zoneID,
+		ZoneName:       zoneID, // zoneID parameter is actually zone name
 		KeyID:          0, // TODO: Extract from metadata
 		KeyType:        "ZSK", // TODO: Extract from metadata
 		Algorithm:      15,    // TODO: Extract from metadata (ED25519)

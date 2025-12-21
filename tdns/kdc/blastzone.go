@@ -1,0 +1,235 @@
+/*
+ * Copyright (c) 2025 Johan Stenstam, johani@johani.org
+ *
+ * Blast zone calculation for node compromise scenarios
+ */
+
+package kdc
+
+import (
+	"fmt"
+	"log"
+)
+
+// BlastZoneResult represents the result of calculating the blast zone for a compromised node
+type BlastZoneResult struct {
+	NodeID           string   `json:"node_id"`
+	AffectedZones    []string `json:"affected_zones"`    // All zones in components served by this node
+	EdgesignedZones []string `json:"edgesigned_zones"`  // Zones that need immediate ZSK rollover
+	Components       []string `json:"components"`        // Components served by this node
+}
+
+// CalculateBlastZone calculates which zones are affected when a node is compromised
+// Returns zones that need immediate ZSK rollover (only edgesigned zones)
+func (kdc *KdcDB) CalculateBlastZone(nodeID string) (*BlastZoneResult, error) {
+	result := &BlastZoneResult{
+		NodeID:           nodeID,
+		AffectedZones:    []string{},
+		EdgesignedZones: []string{},
+		Components:       []string{},
+	}
+
+	// Step 1: Find all components served by this node
+	components, err := kdc.GetComponentsForNode(nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get components for node %s: %v", nodeID, err)
+	}
+	result.Components = components
+
+	if len(components) == 0 {
+		log.Printf("KDC: Node %s serves no components, no blast zone", nodeID)
+		return result, nil
+	}
+
+	// Step 2: For each component, find all zones it serves
+	zoneSet := make(map[string]bool)
+	for _, componentID := range components {
+		zones, err := kdc.GetZonesForComponent(componentID)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get zones for component %s: %v", componentID, err)
+			continue
+		}
+		for _, zoneName := range zones {
+			zoneSet[zoneName] = true
+		}
+	}
+
+	// Convert set to slice
+	for zoneName := range zoneSet {
+		result.AffectedZones = append(result.AffectedZones, zoneName)
+	}
+
+	// Step 3: Filter to only edgesign_* zones (these need immediate rollover)
+	// Note: edgesign_all also requires KSK rollover, but we track all edgesign_* zones here
+	for _, zoneName := range result.AffectedZones {
+		zone, err := kdc.GetZone(zoneName)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get zone %s: %v", zoneName, err)
+			continue
+		}
+		if zone.SigningMode == ZoneSigningModeEdgesignDyn || zone.SigningMode == ZoneSigningModeEdgesignZsk || zone.SigningMode == ZoneSigningModeEdgesignAll {
+			result.EdgesignedZones = append(result.EdgesignedZones, zoneName)
+		}
+	}
+
+	log.Printf("KDC: Blast zone for node %s: %d total zones, %d edgesign_* zones requiring rollover",
+		nodeID, len(result.AffectedZones), len(result.EdgesignedZones))
+
+	return result, nil
+}
+
+// GetComponentsForNode returns all component IDs served by a node
+func (kdc *KdcDB) GetComponentsForNode(nodeID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT component_id FROM node_component_assignments 
+		 WHERE node_id = ? AND active = 1`,
+		nodeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node components: %v", err)
+	}
+	defer rows.Close()
+
+	var components []string
+	for rows.Next() {
+		var componentID string
+		if err := rows.Scan(&componentID); err != nil {
+			return nil, fmt.Errorf("failed to scan component ID: %v", err)
+		}
+		components = append(components, componentID)
+	}
+
+	return components, rows.Err()
+}
+
+// GetZonesForComponent returns all zone names served by a component
+func (kdc *KdcDB) GetZonesForComponent(componentID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT zone_name FROM component_zone_assignments 
+		 WHERE component_id = ? AND active = 1`,
+		componentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query component zones: %v", err)
+	}
+	defer rows.Close()
+
+	var zones []string
+	for rows.Next() {
+		var zoneName string
+		if err := rows.Scan(&zoneName); err != nil {
+			return nil, fmt.Errorf("failed to scan zone name: %v", err)
+		}
+		zones = append(zones, zoneName)
+	}
+
+	return zones, rows.Err()
+}
+
+// GetNodesForComponent returns all node IDs that serve a component
+func (kdc *KdcDB) GetNodesForComponent(componentID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT node_id FROM node_component_assignments 
+		 WHERE component_id = ? AND active = 1`,
+		componentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query component nodes: %v", err)
+	}
+	defer rows.Close()
+
+	var nodes []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, fmt.Errorf("failed to scan node ID: %v", err)
+		}
+		nodes = append(nodes, nodeID)
+	}
+
+	return nodes, rows.Err()
+}
+
+// GetNodesForZone returns all node IDs that serve a zone (via components)
+// This replaces the old "all nodes serve all zones" model
+func (kdc *KdcDB) GetNodesForZone(zoneName string) ([]string, error) {
+	// Step 1: Find all components that serve this zone
+	rows, err := kdc.DB.Query(
+		`SELECT component_id FROM component_zone_assignments 
+		 WHERE zone_name = ? AND active = 1`,
+		zoneName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query zone components: %v", err)
+	}
+	defer rows.Close()
+
+	var componentIDs []string
+	for rows.Next() {
+		var componentID string
+		if err := rows.Scan(&componentID); err != nil {
+			return nil, fmt.Errorf("failed to scan component ID: %v", err)
+		}
+		componentIDs = append(componentIDs, componentID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(componentIDs) == 0 {
+		// No components serve this zone, return empty list
+		return []string{}, nil
+	}
+
+	// Step 2: For each component, find all nodes that serve it
+	nodeSet := make(map[string]bool)
+	for _, componentID := range componentIDs {
+		nodes, err := kdc.GetNodesForComponent(componentID)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get nodes for component %s: %v", componentID, err)
+			continue
+		}
+		for _, nodeID := range nodes {
+			nodeSet[nodeID] = true
+		}
+	}
+
+	// Convert set to slice
+	var nodes []string
+	for nodeID := range nodeSet {
+		nodes = append(nodes, nodeID)
+	}
+
+	return nodes, nil
+}
+
+// GetActiveNodesForZone returns all active node objects that serve a zone (via components)
+// This replaces the old "all nodes serve all zones" model
+func (kdc *KdcDB) GetActiveNodesForZone(zoneName string) ([]*Node, error) {
+	// Get node IDs for this zone
+	nodeIDs, err := kdc.GetNodesForZone(zoneName)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(nodeIDs) == 0 {
+		return []*Node{}, nil
+	}
+
+	// Get full node objects and filter to only active ones
+	var nodes []*Node
+	for _, nodeID := range nodeIDs {
+		node, err := kdc.GetNode(nodeID)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get node %s: %v", nodeID, err)
+			continue
+		}
+		// Only include online nodes
+		if node.State == NodeStateOnline {
+			nodes = append(nodes, node)
+		}
+	}
+
+	return nodes, nil
+}
+
