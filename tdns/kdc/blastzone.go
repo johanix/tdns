@@ -62,12 +62,12 @@ func (kdc *KdcDB) CalculateBlastZone(nodeID string) (*BlastZoneResult, error) {
 	// Step 3: Filter to only edgesign_* zones (these need immediate rollover)
 	// Note: edgesign_all also requires KSK rollover, but we track all edgesign_* zones here
 	for _, zoneName := range result.AffectedZones {
-		zone, err := kdc.GetZone(zoneName)
+		signingMode, err := kdc.GetZoneSigningMode(zoneName)
 		if err != nil {
-			log.Printf("KDC: Warning: Failed to get zone %s: %v", zoneName, err)
+			log.Printf("KDC: Warning: Failed to get signing mode for zone %s: %v", zoneName, err)
 			continue
 		}
-		if zone.SigningMode == ZoneSigningModeEdgesignDyn || zone.SigningMode == ZoneSigningModeEdgesignZsk || zone.SigningMode == ZoneSigningModeEdgesignAll {
+		if signingMode == ZoneSigningModeEdgesignDyn || signingMode == ZoneSigningModeEdgesignZsk || signingMode == ZoneSigningModeEdgesignAll {
 			result.EdgesignedZones = append(result.EdgesignedZones, zoneName)
 		}
 	}

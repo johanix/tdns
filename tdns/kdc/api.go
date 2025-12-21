@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -22,16 +23,20 @@ import (
 
 // KdcZonePost represents a request to the KDC zone API
 type KdcZonePost struct {
-	Command   string   `json:"command"`   // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distribute-zsk", "distrib-multi", "transition", "setstate", "delete-key"
-	Zone      *Zone    `json:"zone,omitempty"`
-	ZoneName  string   `json:"zone_name,omitempty"`  // Zone name (replaces zone_id)
-	KeyID     string   `json:"key_id,omitempty"`     // For encrypt-key/distribute-zsk/transition/setstate/delete-key: DNSSEC key ID
-	NodeID    string   `json:"node_id,omitempty"`    // For encrypt-key: node ID
-	KeyType   string   `json:"key_type,omitempty"`   // For generate-key: "KSK", "ZSK", or "CSK"
-	Algorithm uint8    `json:"algorithm,omitempty"`  // For generate-key: DNSSEC algorithm
-	Comment   string   `json:"comment,omitempty"`    // For generate-key: optional comment
-	NewState  string   `json:"new_state,omitempty"`  // For setstate: target state
-	Zones     []string `json:"zones,omitempty"`     // For distrib-multi: list of zone names
+	Command       string   `json:"command"`        // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distribute-zsk", "distrib-multi", "transition", "setstate", "delete-key", "set-service", "set-component"
+	Zone          *Zone    `json:"zone,omitempty"`
+	ZoneName      string   `json:"zone_name,omitempty"`      // Zone name (replaces zone_id)
+	ServiceID     string   `json:"service_id,omitempty"`     // For set-service command
+	ServiceName   string   `json:"service_name,omitempty"`   // For set-service command (CLI convenience)
+	ComponentID   string   `json:"component_id,omitempty"`   // For set-component command
+	ComponentName string   `json:"component_name,omitempty"` // For set-component command (CLI convenience)
+	KeyID         string   `json:"key_id,omitempty"`         // For encrypt-key/distribute-zsk/transition/setstate/delete-key: DNSSEC key ID
+	NodeID        string   `json:"node_id,omitempty"`        // For encrypt-key: node ID
+	KeyType       string   `json:"key_type,omitempty"`       // For generate-key: "KSK", "ZSK", or "CSK"
+	Algorithm     uint8    `json:"algorithm,omitempty"`      // For generate-key: DNSSEC algorithm
+	Comment       string   `json:"comment,omitempty"`        // For generate-key: optional comment
+	NewState      string   `json:"new_state,omitempty"`      // For setstate: target state
+	Zones         []string `json:"zones,omitempty"`           // For distrib-multi: list of zone names
 }
 
 // DistributionResult represents the result of distributing a key for a zone
@@ -42,6 +47,14 @@ type DistributionResult struct {
 	Msg      string `json:"msg,omitempty"`
 }
 
+// ZoneEnrichment contains additional information about a zone for display
+type ZoneEnrichment struct {
+	ServiceName  string   `json:"service_name,omitempty"`
+	ComponentIDs []string `json:"component_ids,omitempty"`
+	ComponentNames []string `json:"component_names,omitempty"`
+	NodeIDs      []string `json:"node_ids,omitempty"` // For verbose mode
+}
+
 // KdcZoneResponse represents a response from the KDC zone API
 type KdcZoneResponse struct {
 	Time      time.Time              `json:"time"`
@@ -50,6 +63,7 @@ type KdcZoneResponse struct {
 	Msg       string                 `json:"msg,omitempty"`
 	Zone      *Zone                  `json:"zone,omitempty"`
 	Zones     []*Zone                `json:"zones,omitempty"`
+	ZoneEnrichments map[string]*ZoneEnrichment `json:"zone_enrichments,omitempty"` // Keyed by zone name
 	Key       *DNSSECKey             `json:"key,omitempty"`
 	Keys      []*DNSSECKey           `json:"keys,omitempty"`
 	EncryptedKey     string          `json:"encrypted_key,omitempty"`     // Base64-encoded
@@ -74,6 +88,60 @@ type KdcNodeResponse struct {
 	Msg      string      `json:"msg,omitempty"`
 	Node     *Node       `json:"node,omitempty"`
 	Nodes    []*Node     `json:"nodes,omitempty"`
+}
+
+// KdcServicePost represents a request to the KDC service API
+type KdcServicePost struct {
+	Command string   `json:"command"` // "add", "list", "get", "update", "delete"
+	Service *Service `json:"service,omitempty"`
+	ServiceID string `json:"service_id,omitempty"`
+	ServiceName string `json:"service_name,omitempty"` // For CLI convenience
+}
+
+// KdcServiceResponse represents a response from the KDC service API
+type KdcServiceResponse struct {
+	Time     time.Time   `json:"time"`
+	Error    bool        `json:"error,omitempty"`
+	ErrorMsg string      `json:"error_msg,omitempty"`
+	Msg      string      `json:"msg,omitempty"`
+	Service  *Service    `json:"service,omitempty"`
+	Services []*Service   `json:"services,omitempty"`
+}
+
+// KdcComponentPost represents a request to the KDC component API
+type KdcComponentPost struct {
+	Command string     `json:"command"` // "add", "list", "get", "update", "delete"
+	Component *Component `json:"component,omitempty"`
+	ComponentID string   `json:"component_id,omitempty"`
+	ComponentName string `json:"component_name,omitempty"` // For CLI convenience
+}
+
+// KdcComponentResponse represents a response from the KDC component API
+type KdcComponentResponse struct {
+	Time      time.Time    `json:"time"`
+	Error     bool         `json:"error,omitempty"`
+	ErrorMsg  string       `json:"error_msg,omitempty"`
+	Msg       string       `json:"msg,omitempty"`
+	Component *Component   `json:"component,omitempty"`
+	Components []*Component `json:"components,omitempty"`
+}
+
+// KdcServiceComponentPost represents a request for service-component assignment
+type KdcServiceComponentPost struct {
+	Command     string `json:"command"` // "add", "delete", "list"
+	ServiceID   string `json:"service_id,omitempty"`
+	ServiceName string `json:"service_name,omitempty"` // For CLI convenience
+	ComponentID string `json:"component_id,omitempty"`
+	ComponentName string `json:"component_name,omitempty"` // For CLI convenience
+}
+
+// KdcServiceComponentResponse represents a response for service-component assignment
+type KdcServiceComponentResponse struct {
+	Time      time.Time   `json:"time"`
+	Error     bool        `json:"error,omitempty"`
+	ErrorMsg  string      `json:"error_msg,omitempty"`
+	Msg       string      `json:"msg,omitempty"`
+	Assignments []*ServiceComponentAssignment `json:"assignments,omitempty"`
 }
 
 // sendJSONError sends a JSON-formatted error response
@@ -126,6 +194,52 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Zones = zones
+				// Enrich zones with service name and components
+				resp.ZoneEnrichments = make(map[string]*ZoneEnrichment)
+				for _, zone := range zones {
+					enrichment := &ZoneEnrichment{}
+					
+					// Get service name
+					if zone.ServiceID != "" {
+						service, err := kdcDB.GetService(zone.ServiceID)
+						if err == nil {
+							enrichment.ServiceName = service.Name
+						} else {
+							enrichment.ServiceName = zone.ServiceID // Fallback to ID
+						}
+					}
+					
+					// Get components for this zone
+					componentIDs, err := kdcDB.GetComponentsForZone(zone.Name)
+					if err == nil {
+						enrichment.ComponentIDs = componentIDs
+						// Get component names
+						for _, compID := range componentIDs {
+							comp, err := kdcDB.GetComponent(compID)
+							if err == nil {
+								enrichment.ComponentNames = append(enrichment.ComponentNames, comp.Name)
+							} else {
+								enrichment.ComponentNames = append(enrichment.ComponentNames, compID)
+							}
+						}
+						
+						// Get nodes for components (for verbose mode - we'll include them always)
+						nodeSet := make(map[string]bool)
+						for _, compID := range componentIDs {
+							nodes, err := kdcDB.GetNodesForComponent(compID)
+							if err == nil {
+								for _, nodeID := range nodes {
+									nodeSet[nodeID] = true
+								}
+							}
+						}
+						for nodeID := range nodeSet {
+							enrichment.NodeIDs = append(enrichment.NodeIDs, nodeID)
+						}
+					}
+					
+					resp.ZoneEnrichments[zone.Name] = enrichment
+				}
 			}
 
 		case "get":
@@ -250,6 +364,113 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.Msg = fmt.Sprintf("Zone %s updated successfully", req.Zone.Name)
 			}
 
+		case "set-service":
+			if req.ZoneName == "" {
+				sendJSONError(w, http.StatusBadRequest, "zone_name is required for set-service command")
+				return
+			}
+			// Get service ID from name if provided
+			serviceID := req.ServiceID
+			if serviceID == "" && req.ServiceName != "" {
+				// Look up service by name
+				services, err := kdcDB.GetAllServices()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Failed to get services: %v", err)
+				} else {
+					found := false
+					for _, s := range services {
+						if s.Name == req.ServiceName {
+							serviceID = s.ID
+							found = true
+							break
+						}
+					}
+					if !found {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Service not found: %s", req.ServiceName)
+					}
+				}
+			}
+			if serviceID == "" {
+				sendJSONError(w, http.StatusBadRequest, "service_id or service_name is required for set-service command")
+				return
+			}
+			// Get zone
+			zone, err := kdcDB.GetZone(req.ZoneName)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone not found: %v", err)
+			} else {
+				// Update zone service
+				zone.ServiceID = serviceID
+				if err := kdcDB.UpdateZone(zone); err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					// Get current signing mode from component assignment
+					currentSigningMode, err := kdcDB.GetZoneSigningMode(req.ZoneName)
+					if err != nil {
+						log.Printf("KDC: Warning: Failed to get signing mode for zone %s: %v", req.ZoneName, err)
+						currentSigningMode = ZoneSigningModeCentral // Default
+					}
+					
+					// Get components available in the new service
+					serviceComponents, err := kdcDB.GetComponentsForService(serviceID)
+					if err != nil {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Failed to get components for service: %v", err)
+					} else if len(serviceComponents) == 0 {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Service %s has no components assigned", serviceID)
+					} else {
+						// Try to find a component in the new service that matches current signing mode
+						targetComponentID := ""
+						desiredComponentID := fmt.Sprintf("comp_%s", string(currentSigningMode))
+						
+						// Check if desired component exists in new service
+						for _, compID := range serviceComponents {
+							if compID == desiredComponentID {
+								targetComponentID = compID
+								break
+							}
+						}
+						
+						// If not found, default to comp_central if available, otherwise use first component
+						if targetComponentID == "" {
+							for _, compID := range serviceComponents {
+								if compID == "comp_central" {
+									targetComponentID = compID
+									break
+								}
+							}
+							if targetComponentID == "" {
+								targetComponentID = serviceComponents[0] // Use first available
+							}
+						}
+						
+						// Remove old component assignments
+						currentComponents, err := kdcDB.GetComponentsForZone(req.ZoneName)
+						if err == nil {
+							for _, compID := range currentComponents {
+								if err := kdcDB.RemoveComponentZoneAssignment(compID, req.ZoneName); err != nil {
+									log.Printf("KDC: Warning: Failed to remove zone %s from component %s: %v", req.ZoneName, compID, err)
+								}
+							}
+						}
+						
+						// Add new component assignment
+						if err := kdcDB.AddComponentZoneAssignment(targetComponentID, req.ZoneName); err != nil {
+							log.Printf("KDC: Warning: Failed to assign zone %s to component %s: %v", req.ZoneName, targetComponentID, err)
+						}
+						
+						newSigningMode := DeriveSigningModeFromComponent(targetComponentID)
+						resp.Msg = fmt.Sprintf("Zone %s assigned to service %s, component %s (signing mode: %s)", req.ZoneName, serviceID, targetComponentID, newSigningMode)
+						resp.Zone = zone
+					}
+				}
+			}
+
 		case "delete":
 			if req.ZoneName == "" {
 				sendJSONError(w, http.StatusBadRequest, "zone_name is required for delete command")
@@ -295,54 +516,60 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 						resp.ErrorMsg = err.Error()
 					} else {
 						// Check zone signing mode - only distribute keys for edgesigned zones
-						zone, err := kdcDB.GetZone(req.ZoneName)
+						_, err := kdcDB.GetZone(req.ZoneName)
 						if err != nil {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("Failed to get zone: %v", err)
-						} else if zone.SigningMode != ZoneSigningModeEdgesignDyn && zone.SigningMode != ZoneSigningModeEdgesignZsk && zone.SigningMode != ZoneSigningModeEdgesignAll {
-							resp.Error = true
-							resp.ErrorMsg = fmt.Sprintf("Zone %s has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", req.ZoneName, zone.SigningMode)
 						} else {
-							// Get nodes that serve this zone (via components)
-							nodes, err := kdcDB.GetActiveNodesForZone(req.ZoneName)
+							signingMode, err := kdcDB.GetZoneSigningMode(req.ZoneName)
 							if err != nil {
-								log.Printf("KDC: Warning: Failed to get nodes for zone: %v", err)
-							} else if len(nodes) == 0 {
-								log.Printf("KDC: Warning: No active nodes serve zone %s", req.ZoneName)
+								resp.Error = true
+								resp.ErrorMsg = fmt.Sprintf("Failed to get signing mode: %v", err)
+							} else if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+								resp.Error = true
+								resp.ErrorMsg = fmt.Sprintf("Zone %s has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", req.ZoneName, signingMode)
 							} else {
-								encryptedCount := 0
-								for _, node := range nodes {
-									if node.NotifyAddress == "" {
-										log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
-										continue
+								// Get nodes that serve this zone (via components)
+								nodes, err := kdcDB.GetActiveNodesForZone(req.ZoneName)
+								if err != nil {
+									log.Printf("KDC: Warning: Failed to get nodes for zone: %v", err)
+								} else if len(nodes) == 0 {
+									log.Printf("KDC: Warning: No active nodes serve zone %s", req.ZoneName)
+								} else {
+									encryptedCount := 0
+									for _, node := range nodes {
+										if node.NotifyAddress == "" {
+											log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
+											continue
+										}
+										// Encrypt key for this node (creates distribution record)
+										_, _, _, err := kdcDB.EncryptKeyForNode(key, node)
+										if err != nil {
+											log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
+											continue
+										}
+										encryptedCount++
+										log.Printf("KDC: Encrypted key %s for node %s (distribution ID: %s)", req.KeyID, node.ID, distributionID)
 									}
-									// Encrypt key for this node (creates distribution record)
-									_, _, _, err := kdcDB.EncryptKeyForNode(key, node)
-									if err != nil {
-										log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
-										continue
-									}
-									encryptedCount++
-									log.Printf("KDC: Encrypted key %s for node %s (distribution ID: %s)", req.KeyID, node.ID, distributionID)
+									log.Printf("KDC: Encrypted key for %d/%d nodes serving zone %s", encryptedCount, len(nodes), req.ZoneName)
 								}
-								log.Printf("KDC: Encrypted key for %d/%d nodes serving zone %s", encryptedCount, len(nodes), req.ZoneName)
 							}
-						}
 
-						// Send NOTIFY to all active nodes with distributionID
-						if kdcConf != nil && kdcConf.ControlZone != "" {
-							if err := kdcDB.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
-								log.Printf("KDC: Warning: Failed to send NOTIFYs: %v", err)
-								// Don't fail the request, just log the warning
+							// Send NOTIFY to all active nodes with distributionID
+							if kdcConf != nil && kdcConf.ControlZone != "" {
+								if err := kdcDB.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
+									log.Printf("KDC: Warning: Failed to send NOTIFYs: %v", err)
+									// Don't fail the request, just log the warning
+								}
+							} else {
+								log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY")
 							}
-						} else {
-							log.Printf("KDC: Warning: Control zone not configured, skipping NOTIFY")
+							
+							resp.Msg = fmt.Sprintf("Key %s transitioned to distributed state. Distribution ID: %s. NOTIFYs sent to nodes.", req.KeyID, distributionID)
+							// Reload key to get updated state
+							key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
+							resp.Key = key
 						}
-						
-						resp.Msg = fmt.Sprintf("Key %s transitioned to distributed state. Distribution ID: %s. NOTIFYs sent to nodes.", req.KeyID, distributionID)
-						// Reload key to get updated state
-						key, _ = kdcDB.GetDNSSECKeyByID(req.ZoneName, req.KeyID)
-						resp.Key = key
 					}
 				}
 			}
@@ -494,20 +721,79 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				
 				// Find first standby ZSK
 				var standbyZSK *DNSSECKey
+				var zskStates []string
 				for _, key := range keys {
-					if key.KeyType == KeyTypeZSK && key.State == KeyStateStandby {
-						standbyZSK = key
-						break
+					if key.KeyType == KeyTypeZSK {
+						zskStates = append(zskStates, string(key.State))
+						if key.State == KeyStateStandby {
+							standbyZSK = key
+							break
+						}
 					}
 				}
 				
 				if standbyZSK == nil {
-					result.Msg = "No standby ZSK found for zone"
+					if len(zskStates) == 0 {
+						result.Msg = "No ZSK keys found for zone"
+					} else {
+						result.Msg = fmt.Sprintf("No standby ZSK found for zone (available ZSK states: %s)", strings.Join(zskStates, ", "))
+					}
 					results = append(results, result)
 					errorCount++
 					continue
 				}
 				
+				// Check zone signing mode FIRST - only distribute keys for edgesigned zones
+				_, err = kdcDB.GetZone(zoneName)
+				if err != nil {
+					result.Msg = fmt.Sprintf("Failed to get zone: %v", err)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+				signingMode, err := kdcDB.GetZoneSigningMode(zoneName)
+				if err != nil {
+					result.Msg = fmt.Sprintf("Failed to get signing mode: %v", err)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+				if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+					result.Msg = fmt.Sprintf("Zone has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", signingMode)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+
+				// Get nodes that serve this zone (via components)
+				nodes, err := kdcDB.GetActiveNodesForZone(zoneName)
+				if err != nil {
+					result.Msg = fmt.Sprintf("Failed to get nodes for zone: %v", err)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+				if len(nodes) == 0 {
+					result.Msg = fmt.Sprintf("No active nodes serve zone %s (zone may not be assigned to any components, or no nodes are assigned to those components)", zoneName)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+
+				// Check if any nodes have notify_address configured
+				nodesWithNotify := 0
+				for _, node := range nodes {
+					if node.NotifyAddress != "" {
+						nodesWithNotify++
+					}
+				}
+				if nodesWithNotify == 0 {
+					result.Msg = fmt.Sprintf("No nodes with notify_address configured for zone %s (%d nodes found but none have notify_address)", zoneName, len(nodes))
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+
 				// Distribute this key (same logic as distribute-zsk)
 				distributionID, err := kdcDB.GetOrCreateDistributionID(zoneName, standbyZSK)
 				if err != nil {
@@ -524,44 +810,30 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					errorCount++
 					continue
 				}
-				
-				// Check zone signing mode - only distribute keys for edgesigned zones
-				zone, err := kdcDB.GetZone(zoneName)
-				if err != nil {
-					result.Msg = fmt.Sprintf("Failed to get zone: %v", err)
-					results = append(results, result)
-					errorCount++
-					continue
-				}
-				if zone.SigningMode != ZoneSigningModeEdgesignDyn && zone.SigningMode != ZoneSigningModeEdgesignZsk && zone.SigningMode != ZoneSigningModeEdgesignAll {
-					result.Msg = fmt.Sprintf("Zone has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", zone.SigningMode)
-					results = append(results, result)
-					errorCount++
-					continue
-				}
 
-				// Get nodes that serve this zone (via components)
-				nodes, err := kdcDB.GetActiveNodesForZone(zoneName)
-				if err != nil {
-					log.Printf("KDC: Warning: Failed to get nodes for zone %s: %v", zoneName, err)
-				} else if len(nodes) == 0 {
-					log.Printf("KDC: Warning: No active nodes serve zone %s", zoneName)
-				} else {
-					encryptedCount := 0
-					for _, node := range nodes {
-						if node.NotifyAddress == "" {
-							log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
-							continue
-						}
-						_, _, _, err := kdcDB.EncryptKeyForNode(standbyZSK, node)
-						if err != nil {
-							log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
-							continue
-						}
-						encryptedCount++
+				// Encrypt keys for all nodes
+				encryptedCount := 0
+				for _, node := range nodes {
+					if node.NotifyAddress == "" {
+						log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
+						continue
 					}
-					log.Printf("KDC: Encrypted key %s for %d/%d nodes serving zone %s", standbyZSK.ID, encryptedCount, len(nodes), zoneName)
+					_, _, _, err := kdcDB.EncryptKeyForNode(standbyZSK, node)
+					if err != nil {
+						log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
+						continue
+					}
+					encryptedCount++
 				}
+				
+				if encryptedCount == 0 {
+					result.Msg = fmt.Sprintf("Failed to encrypt key for any node (tried %d nodes)", len(nodes))
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+				
+				log.Printf("KDC: Encrypted key %s for %d/%d nodes serving zone %s", standbyZSK.ID, encryptedCount, len(nodes), zoneName)
 				
 				// Send NOTIFY to all active nodes
 				if kdcConf != nil && kdcConf.ControlZone != "" {
@@ -572,7 +844,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				
 				result.Status = "success"
 				result.KeyID = standbyZSK.ID
-				result.Msg = fmt.Sprintf("Key %s distributed (distribution ID: %s)", standbyZSK.ID, distributionID)
+				result.Msg = fmt.Sprintf("Key %s distributed (distribution ID: %s) to %d node(s)", standbyZSK.ID, distributionID, encryptedCount)
 				results = append(results, result)
 				successCount++
 			}
@@ -581,8 +853,21 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 			if errorCount == 0 {
 				resp.Msg = fmt.Sprintf("Successfully distributed keys for %d zone(s)", successCount)
 			} else if successCount == 0 {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Failed to distribute keys for all %d zone(s)", errorCount)
+				// Check if all failures are due to signing mode
+				allSigningModeErrors := true
+				for _, result := range results {
+					if result.Status == "error" && !strings.Contains(result.Msg, "signing_mode") {
+						allSigningModeErrors = false
+						break
+					}
+				}
+				if allSigningModeErrors {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Request denied: all %d zone(s) have signing_mode=central (keys are not distributed for central mode; use edgesign_* modes for key distribution)", errorCount)
+				} else {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Failed to distribute keys for all %d zone(s)", errorCount)
+				}
 			} else {
 				resp.Msg = fmt.Sprintf("Distributed keys for %d/%d zone(s) (%d failed)", successCount, len(req.Zones), errorCount)
 			}
@@ -948,6 +1233,419 @@ func computeKeyHash(privateKey []byte) (string, error) {
 
 // SetupKdcAPIRoutes sets up KDC-specific API routes
 // conf is *tdns.Config passed as interface{} to avoid circular import
+// APIKdcService handles service management endpoints
+func APIKdcService(kdcDB *KdcDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req KdcServicePost
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := KdcServiceResponse{
+			Time: time.Now(),
+		}
+
+		switch req.Command {
+		case "add":
+			if req.Service == nil {
+				sendJSONError(w, http.StatusBadRequest, "service is required for add command")
+				return
+			}
+			if req.Service.ID == "" {
+				sendJSONError(w, http.StatusBadRequest, "service.id is required")
+				return
+			}
+			if err := kdcDB.AddService(req.Service); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Service %s added successfully", req.Service.ID)
+			}
+
+		case "list":
+			services, err := kdcDB.GetAllServices()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Services = services
+			}
+
+		case "get":
+			serviceID := req.ServiceID
+			if serviceID == "" && req.ServiceName != "" {
+				// Look up by name
+				services, err := kdcDB.GetAllServices()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					found := false
+					for _, s := range services {
+						if s.Name == req.ServiceName {
+							serviceID = s.ID
+							found = true
+							break
+						}
+					}
+					if !found {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Service not found: %s", req.ServiceName)
+					}
+				}
+			}
+			if serviceID == "" {
+				sendJSONError(w, http.StatusBadRequest, "service_id or service_name is required for get command")
+				return
+			}
+			service, err := kdcDB.GetService(serviceID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Service = service
+			}
+
+		case "update":
+			if req.Service == nil || req.Service.ID == "" {
+				sendJSONError(w, http.StatusBadRequest, "service with ID is required for update command")
+				return
+			}
+			if err := kdcDB.UpdateService(req.Service); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Service %s updated successfully", req.Service.ID)
+			}
+
+		case "delete":
+			serviceID := req.ServiceID
+			if serviceID == "" && req.ServiceName != "" {
+				// Look up by name
+				services, err := kdcDB.GetAllServices()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					found := false
+					for _, s := range services {
+						if s.Name == req.ServiceName {
+							serviceID = s.ID
+							found = true
+							break
+						}
+					}
+					if !found {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Service not found: %s", req.ServiceName)
+					}
+				}
+			}
+			if serviceID == "" {
+				sendJSONError(w, http.StatusBadRequest, "service_id or service_name is required for delete command")
+				return
+			}
+			if err := kdcDB.DeleteService(serviceID); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Service %s deleted successfully", serviceID)
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// APIKdcComponent handles component management endpoints
+func APIKdcComponent(kdcDB *KdcDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req KdcComponentPost
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := KdcComponentResponse{
+			Time: time.Now(),
+		}
+
+		switch req.Command {
+		case "add":
+			if req.Component == nil {
+				sendJSONError(w, http.StatusBadRequest, "component is required for add command")
+				return
+			}
+			if req.Component.ID == "" {
+				sendJSONError(w, http.StatusBadRequest, "component.id is required")
+				return
+			}
+			if err := kdcDB.AddComponent(req.Component); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Component %s added successfully", req.Component.ID)
+			}
+
+		case "list":
+			components, err := kdcDB.GetAllComponents()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Components = components
+			}
+
+		case "get":
+			componentID := req.ComponentID
+			if componentID == "" && req.ComponentName != "" {
+				// Look up by name
+				components, err := kdcDB.GetAllComponents()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					found := false
+					for _, c := range components {
+						if c.Name == req.ComponentName {
+							componentID = c.ID
+							found = true
+							break
+						}
+					}
+					if !found {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Component not found: %s", req.ComponentName)
+					}
+				}
+			}
+			if componentID == "" {
+				sendJSONError(w, http.StatusBadRequest, "component_id or component_name is required for get command")
+				return
+			}
+			component, err := kdcDB.GetComponent(componentID)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Component = component
+			}
+
+		case "update":
+			if req.Component == nil || req.Component.ID == "" {
+				sendJSONError(w, http.StatusBadRequest, "component with ID is required for update command")
+				return
+			}
+			if err := kdcDB.UpdateComponent(req.Component); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Component %s updated successfully", req.Component.ID)
+			}
+
+		case "delete":
+			componentID := req.ComponentID
+			if componentID == "" && req.ComponentName != "" {
+				// Look up by name
+				components, err := kdcDB.GetAllComponents()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					found := false
+					for _, c := range components {
+						if c.Name == req.ComponentName {
+							componentID = c.ID
+							found = true
+							break
+						}
+					}
+					if !found {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("Component not found: %s", req.ComponentName)
+					}
+				}
+			}
+			if componentID == "" {
+				sendJSONError(w, http.StatusBadRequest, "component_id or component_name is required for delete command")
+				return
+			}
+			if err := kdcDB.DeleteComponent(componentID); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Component %s deleted successfully", componentID)
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// APIKdcServiceComponent handles service-component assignment endpoints
+func APIKdcServiceComponent(kdcDB *KdcDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req KdcServiceComponentPost
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+
+		resp := KdcServiceComponentResponse{
+			Time: time.Now(),
+		}
+
+		// Helper to resolve service ID from name or ID
+		resolveServiceID := func() (string, error) {
+			if req.ServiceID != "" {
+				// Check if it's a valid service ID
+				_, err := kdcDB.GetService(req.ServiceID)
+				if err != nil {
+					return "", fmt.Errorf("service not found: %s", req.ServiceID)
+				}
+				return req.ServiceID, nil
+			}
+			if req.ServiceName != "" {
+				// First, try to find by ID (in case user passed ID as name)
+				_, err := kdcDB.GetService(req.ServiceName)
+				if err == nil {
+					return req.ServiceName, nil
+				}
+				// If not found by ID, try to find by name
+				services, err := kdcDB.GetAllServices()
+				if err != nil {
+					return "", err
+				}
+				for _, s := range services {
+					if s.Name == req.ServiceName {
+						return s.ID, nil
+					}
+				}
+				return "", fmt.Errorf("service not found: %s", req.ServiceName)
+			}
+			return "", fmt.Errorf("service_id or service_name is required")
+		}
+
+		// Helper to resolve component ID from name or ID
+		resolveComponentID := func() (string, error) {
+			if req.ComponentID != "" {
+				// Check if it's a valid component ID
+				_, err := kdcDB.GetComponent(req.ComponentID)
+				if err != nil {
+					return "", fmt.Errorf("component not found: %s", req.ComponentID)
+				}
+				return req.ComponentID, nil
+			}
+			if req.ComponentName != "" {
+				// First, try to find by ID (in case user passed ID as name)
+				_, err := kdcDB.GetComponent(req.ComponentName)
+				if err == nil {
+					return req.ComponentName, nil
+				}
+				// If not found by ID, try to find by name
+				components, err := kdcDB.GetAllComponents()
+				if err != nil {
+					return "", err
+				}
+				for _, c := range components {
+					if c.Name == req.ComponentName {
+						return c.ID, nil
+					}
+				}
+				return "", fmt.Errorf("component not found: %s", req.ComponentName)
+			}
+			return "", fmt.Errorf("component_id or component_name is required")
+		}
+
+		switch req.Command {
+		case "add":
+			serviceID, err := resolveServiceID()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				componentID, err := resolveComponentID()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					if err := kdcDB.AddServiceComponentAssignment(serviceID, componentID); err != nil {
+						resp.Error = true
+						resp.ErrorMsg = err.Error()
+					} else {
+						resp.Msg = fmt.Sprintf("Component %s assigned to service %s", componentID, serviceID)
+					}
+				}
+			}
+
+		case "delete":
+			serviceID, err := resolveServiceID()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				componentID, err := resolveComponentID()
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					if err := kdcDB.RemoveServiceComponentAssignment(serviceID, componentID); err != nil {
+						resp.Error = true
+						resp.ErrorMsg = err.Error()
+					} else {
+						resp.Msg = fmt.Sprintf("Component %s removed from service %s", componentID, serviceID)
+					}
+				}
+			}
+
+		case "list":
+			serviceID, err := resolveServiceID()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				componentIDs, err := kdcDB.GetComponentsForService(serviceID)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					// Convert to ServiceComponentAssignment structs
+					assignments := make([]*ServiceComponentAssignment, 0, len(componentIDs))
+					for _, compID := range componentIDs {
+						assignments = append(assignments, &ServiceComponentAssignment{
+							ServiceID:   serviceID,
+							ComponentID: compID,
+							Active:      true,
+						})
+					}
+					resp.Assignments = assignments
+				}
+			}
+
+		default:
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unknown command: %s", req.Command))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
 // pingHandler is the ping endpoint handler function
 func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingHandler http.HandlerFunc) {
 	if kdcDB == nil {
@@ -987,11 +1685,14 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 	sr.HandleFunc("/kdc/zone", APIKdcZone(kdcDB, kdcConf)).Methods("POST")
 	sr.HandleFunc("/kdc/node", APIKdcNode(kdcDB)).Methods("POST")
 	sr.HandleFunc("/kdc/distrib", APIKdcDistrib(kdcDB, kdcConf)).Methods("POST")
+	sr.HandleFunc("/kdc/service", APIKdcService(kdcDB)).Methods("POST")
+	sr.HandleFunc("/kdc/component", APIKdcComponent(kdcDB)).Methods("POST")
+	sr.HandleFunc("/kdc/service-component", APIKdcServiceComponent(kdcDB)).Methods("POST")
 	if kdcConf != nil {
 		sr.HandleFunc("/kdc/config", APIKdcConfig(kdcConf, conf)).Methods("POST")
 		sr.HandleFunc("/kdc/debug", APIKdcDebug(kdcDB, kdcConf)).Methods("POST")
 	}
 	
-	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/config, /api/v1/kdc/debug")
+	log.Printf("KDC API routes registered: /api/v1/ping, /api/v1/kdc/zone, /api/v1/kdc/node, /api/v1/kdc/distrib, /api/v1/kdc/service, /api/v1/kdc/component, /api/v1/kdc/service-component, /api/v1/kdc/config, /api/v1/kdc/debug")
 }
 

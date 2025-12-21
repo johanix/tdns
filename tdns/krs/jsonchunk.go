@@ -263,25 +263,38 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 
 	log.Printf("KRS: Distribution content type: %s, chunk_count: %d", contentType, manifest.ChunkCount)
 
-	// Fetch all chunks
-	// Pass chunk size from manifest to QueryJSONCHUNK so it can decide UDP vs TCP
-	var chunks []*core.JSONCHUNK
-	for i := uint16(0); i < manifest.ChunkCount; i++ {
-		chunk, err := QueryJSONCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
-		if err != nil {
-			return fmt.Errorf("failed to query JSONCHUNK %d: %v", i, err)
+	var reassembled []byte
+
+	// Check if payload is included inline in manifest
+	if len(manifest.Payload) > 0 {
+		// Payload is inline, use it directly
+		reassembled = make([]byte, len(manifest.Payload))
+		copy(reassembled, manifest.Payload)
+		log.Printf("KRS: Using inline payload from JSONMANIFEST (%d bytes)", len(reassembled))
+	} else if manifest.ChunkCount > 0 {
+		// Payload is chunked, fetch all chunks
+		// Pass chunk size from manifest to QueryJSONCHUNK so it can decide UDP vs TCP
+		var chunks []*core.JSONCHUNK
+		for i := uint16(0); i < manifest.ChunkCount; i++ {
+			chunk, err := QueryJSONCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
+			if err != nil {
+				return fmt.Errorf("failed to query JSONCHUNK %d: %v", i, err)
+			}
+			chunks = append(chunks, chunk)
+			log.Printf("KRS: Fetched chunk %d/%d", i+1, manifest.ChunkCount)
 		}
-		chunks = append(chunks, chunk)
-		log.Printf("KRS: Fetched chunk %d/%d", i+1, manifest.ChunkCount)
-	}
 
-	// Reassemble chunks
-	reassembled, err := ReassembleChunks(chunks)
-	if err != nil {
-		return fmt.Errorf("failed to reassemble chunks: %v", err)
-	}
+		// Reassemble chunks
+		var err error
+		reassembled, err = ReassembleChunks(chunks)
+		if err != nil {
+			return fmt.Errorf("failed to reassemble chunks: %v", err)
+		}
 
-	log.Printf("KRS: Reassembled %d bytes from %d chunks", len(reassembled), len(chunks))
+		log.Printf("KRS: Reassembled %d bytes from %d chunks", len(reassembled), len(chunks))
+	} else {
+		return fmt.Errorf("manifest has no payload and chunk_count is 0")
+	}
 
 	// Verify checksum if present
 	if manifest.Checksum != "" {

@@ -25,14 +25,14 @@ const (
 )
 
 // Zone represents a DNS zone managed by the KDC
+// Note: Signing mode is derived from component assignment, not stored directly
 type Zone struct {
-	Name        string          `json:"name"`        // Zone name (e.g., "example.com.") - used as primary key
-	ServiceID   string          `json:"service_id"` // Service this zone belongs to
-	SigningMode ZoneSigningMode `json:"signing_mode"` // How this zone is signed
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
-	Active      bool            `json:"active"`      // Whether the zone is actively managed
-	Comment     string          `json:"comment"`     // Optional comment/description
+	Name        string    `json:"name"`        // Zone name (e.g., "example.com.") - used as primary key
+	ServiceID   string    `json:"service_id"`  // Service this zone belongs to
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Active      bool      `json:"active"`       // Whether the zone is actively managed
+	Comment     string    `json:"comment"`      // Optional comment/description
 }
 
 // Service represents a logical service that groups zones

@@ -98,18 +98,17 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		// Zones table
+		// Note: signing_mode is derived from component assignment, not stored here
 		`CREATE TABLE IF NOT EXISTS zones (
 			name VARCHAR(255) PRIMARY KEY,
 			service_id VARCHAR(255),
-			signing_mode ENUM('upstream', 'central', 'edgesign_dyn', 'edgesign_zsk', 'edgesign_all', 'unsigned') NOT NULL DEFAULT 'central',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			active BOOLEAN NOT NULL DEFAULT TRUE,
 			comment TEXT,
 			FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE SET NULL,
 			INDEX idx_active (active),
-			INDEX idx_service_id (service_id),
-			INDEX idx_signing_mode (signing_mode)
+			INDEX idx_service_id (service_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		// Nodes table
@@ -250,6 +249,12 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 	}
 
 	log.Printf("KDC database schema initialized successfully (MySQL/MariaDB)")
+	
+	// Ensure default service/component exist
+	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
+		return fmt.Errorf("failed to ensure default service/component: %v", err)
+	}
+	
 	return nil
 }
 
@@ -284,17 +289,16 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		)`,
 
 		// Zones table
+		// Note: signing_mode is derived from component assignment, not stored here
 		`CREATE TABLE IF NOT EXISTS zones (
 			name TEXT PRIMARY KEY,
 			service_id TEXT,
-			signing_mode TEXT NOT NULL DEFAULT 'central',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			active INTEGER NOT NULL DEFAULT 1,
 			comment TEXT,
 			FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE SET NULL,
-			CHECK (active IN (0, 1)),
-			CHECK (signing_mode IN ('upstream', 'central', 'edgesign_dyn', 'edgesign_zsk', 'edgesign_all', 'unsigned'))
+			CHECK (active IN (0, 1))
 		)`,
 
 		// Trigger to update updated_at on services
@@ -470,15 +474,51 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 	}
 
 	log.Printf("KDC database schema initialized successfully (SQLite)")
+	
+	// Ensure default service/component exist
+	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
+		return fmt.Errorf("failed to ensure default service/component: %v", err)
+	}
+	
 	return nil
 }
 
-// Close closes the database connection
-func (kdc *KdcDB) Close() error {
-	if kdc.DB != nil {
-		return kdc.DB.Close()
+// DeriveSigningModeFromComponent derives the signing mode from a component ID
+// Component IDs are in the format "comp_<signing_mode>" (e.g., "comp_edgesign_all")
+func DeriveSigningModeFromComponent(componentID string) ZoneSigningMode {
+	if strings.HasPrefix(componentID, "comp_") {
+		mode := strings.TrimPrefix(componentID, "comp_")
+		switch mode {
+		case "upstream":
+			return ZoneSigningModeUpstream
+		case "central":
+			return ZoneSigningModeCentral
+		case "edgesign_dyn":
+			return ZoneSigningModeEdgesignDyn
+		case "edgesign_zsk":
+			return ZoneSigningModeEdgesignZsk
+		case "edgesign_all":
+			return ZoneSigningModeEdgesignAll
+		case "unsigned":
+			return ZoneSigningModeUnsigned
+		}
 	}
-	return nil
+	// Default to central if component ID doesn't match expected pattern
+	return ZoneSigningModeCentral
+}
+
+// GetZoneSigningMode retrieves the signing mode for a zone by looking at its component assignments
+func (kdc *KdcDB) GetZoneSigningMode(zoneName string) (ZoneSigningMode, error) {
+	components, err := kdc.GetComponentsForZone(zoneName)
+	if err != nil {
+		return ZoneSigningModeCentral, fmt.Errorf("failed to get components for zone: %v", err)
+	}
+	if len(components) == 0 {
+		// No component assignment, default to central
+		return ZoneSigningModeCentral, nil
+	}
+	// Use the first component's signing mode (zones should typically have one component)
+	return DeriveSigningModeFromComponent(components[0]), nil
 }
 
 // GetZone retrieves a zone by name
@@ -486,11 +526,10 @@ func (kdc *KdcDB) GetZone(zoneName string) (*Zone, error) {
 	var z Zone
 	var updatedAt sql.NullTime
 	var serviceID sql.NullString
-	var signingModeStr string
 	err := kdc.DB.QueryRow(
-		"SELECT name, service_id, signing_mode, created_at, updated_at, active, comment FROM zones WHERE name = ?",
+		"SELECT name, service_id, created_at, updated_at, active, comment FROM zones WHERE name = ?",
 		zoneName,
-	).Scan(&z.Name, &serviceID, &signingModeStr, &z.CreatedAt, &updatedAt, &z.Active, &z.Comment)
+	).Scan(&z.Name, &serviceID, &z.CreatedAt, &updatedAt, &z.Active, &z.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("zone not found: %s", zoneName)
@@ -503,17 +542,12 @@ func (kdc *KdcDB) GetZone(zoneName string) (*Zone, error) {
 	if serviceID.Valid {
 		z.ServiceID = serviceID.String
 	}
-	if signingModeStr == "" {
-		z.SigningMode = ZoneSigningModeUnsigned
-	} else {
-		z.SigningMode = ZoneSigningMode(signingModeStr)
-	}
 	return &z, nil
 }
 
 // GetAllZones retrieves all zones
 func (kdc *KdcDB) GetAllZones() ([]*Zone, error) {
-	rows, err := kdc.DB.Query("SELECT name, service_id, signing_mode, created_at, updated_at, active, comment FROM zones ORDER BY name")
+	rows, err := kdc.DB.Query("SELECT name, service_id, created_at, updated_at, active, comment FROM zones ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query zones: %v", err)
 	}
@@ -524,8 +558,7 @@ func (kdc *KdcDB) GetAllZones() ([]*Zone, error) {
 		var z Zone
 		var updatedAt sql.NullTime
 		var serviceID sql.NullString
-		var signingModeStr string
-		if err := rows.Scan(&z.Name, &serviceID, &signingModeStr, &z.CreatedAt, &updatedAt, &z.Active, &z.Comment); err != nil {
+		if err := rows.Scan(&z.Name, &serviceID, &z.CreatedAt, &updatedAt, &z.Active, &z.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan zone: %v", err)
 		}
 		if updatedAt.Valid {
@@ -534,39 +567,151 @@ func (kdc *KdcDB) GetAllZones() ([]*Zone, error) {
 		if serviceID.Valid {
 			z.ServiceID = serviceID.String
 		}
-		if signingModeStr == "" {
-			z.SigningMode = ZoneSigningModeCentral // Default to central
-		} else {
-			z.SigningMode = ZoneSigningMode(signingModeStr)
-		}
 		zones = append(zones, &z)
 	}
 	return zones, rows.Err()
 }
 
-// AddZone adds a new zone
-func (kdc *KdcDB) AddZone(zone *Zone) error {
-	// Default signing_mode if not set
-	signingMode := zone.SigningMode
-	if signingMode == "" {
-		signingMode = ZoneSigningModeCentral // Default to central (safest, no key distribution)
+// ensureDefaultServiceAndComponent ensures that default_service and signing-mode components exist
+// Creates components for each signing mode: upstream, central, unsigned, edgesign_dyn, edgesign_zsk, edgesign_all
+func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
+	const defaultServiceID = "default_service"
+	const defaultComponentID = "default_comp"
+	
+	// Check if default service exists
+	var serviceExists bool
+	err := kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM services WHERE id = ?)", defaultServiceID).Scan(&serviceExists)
+	if err != nil {
+		return fmt.Errorf("failed to check default service: %v", err)
 	}
+	
+	if !serviceExists {
+		// Create default service
+		defaultService := &Service{
+			ID:      defaultServiceID,
+			Name:    "Default Service",
+			Active:  true,
+			Comment: "Default service for zones without explicit service assignment",
+		}
+		if err := kdc.AddService(defaultService); err != nil {
+			return fmt.Errorf("failed to create default service: %v", err)
+		}
+		log.Printf("KDC: Created default service: %s", defaultServiceID)
+	}
+	
+	// Create components for each signing mode
+	signingModeComponents := map[string]string{
+		"upstream":      "Component for upstream-signed zones",
+		"central":       "Component for centrally-signed zones",
+		"unsigned":      "Component for unsigned zones",
+		"edgesign_dyn":  "Component for edgesigned zones (dynamic responses only)",
+		"edgesign_zsk":  "Component for edgesigned zones (all responses)",
+		"edgesign_all":  "Component for fully edgesigned zones (KSK+ZSK)",
+	}
+	
+	for mode, description := range signingModeComponents {
+		componentID := fmt.Sprintf("comp_%s", mode)
+		var componentExists bool
+		err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM components WHERE id = ?)", componentID).Scan(&componentExists)
+		if err != nil {
+			return fmt.Errorf("failed to check component %s: %v", componentID, err)
+		}
+		
+		if !componentExists {
+			component := &Component{
+				ID:      componentID,
+				Name:    fmt.Sprintf("Component for %s zones", mode),
+				Active:  true,
+				Comment: description,
+			}
+			if err := kdc.AddComponent(component); err != nil {
+				return fmt.Errorf("failed to create component %s: %v", componentID, err)
+			}
+			log.Printf("KDC: Created component: %s", componentID)
+			
+			// Assign component to default service
+			if err := kdc.AddServiceComponentAssignment(defaultServiceID, componentID); err != nil {
+				return fmt.Errorf("failed to assign component %s to default service: %v", componentID, err)
+			}
+			log.Printf("KDC: Assigned component %s to default service %s", componentID, defaultServiceID)
+		}
+	}
+	
+	// Check if default component exists (for backward compatibility)
+	var defaultComponentExists bool
+	err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM components WHERE id = ?)", defaultComponentID).Scan(&defaultComponentExists)
+	if err != nil {
+		return fmt.Errorf("failed to check default component: %v", err)
+	}
+	
+	if !defaultComponentExists {
+		// Create default component (maps to central mode)
+		defaultComponent := &Component{
+			ID:      defaultComponentID,
+			Name:    "Default Component",
+			Active:  true,
+			Comment: "Default component for default service (maps to comp_central)",
+		}
+		if err := kdc.AddComponent(defaultComponent); err != nil {
+			return fmt.Errorf("failed to create default component: %v", err)
+		}
+		log.Printf("KDC: Created default component: %s", defaultComponentID)
+		
+		// Assign default component to default service
+		if err := kdc.AddServiceComponentAssignment(defaultServiceID, defaultComponentID); err != nil {
+			return fmt.Errorf("failed to assign default component to default service: %v", err)
+		}
+		log.Printf("KDC: Assigned default component %s to default service %s", defaultComponentID, defaultServiceID)
+	}
+	
+	return nil
+}
+
+// AddZone adds a new zone
+// Note: Zone signing mode is determined by component assignment, not stored directly
+// If no service_id is provided, zone is assigned to default_service and comp_central
+func (kdc *KdcDB) AddZone(zone *Zone) error {
+	// If no service_id provided, use default_service
+	serviceID := zone.ServiceID
+	if serviceID == "" {
+		serviceID = "default_service"
+		log.Printf("KDC: Zone %s assigned to default_service (no service_id provided)", zone.Name)
+	}
+	
 	_, err := kdc.DB.Exec(
-		"INSERT INTO zones (name, service_id, signing_mode, active, comment) VALUES (?, ?, ?, ?, ?)",
-		zone.Name, zone.ServiceID, string(signingMode), zone.Active, zone.Comment,
+		"INSERT INTO zones (name, service_id, active, comment) VALUES (?, ?, ?, ?)",
+		zone.Name, serviceID, zone.Active, zone.Comment,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to add zone: %v", err)
 	}
+	
+	// Assign zone to default component (comp_central) if no component specified
+	// This ensures the zone has a signing mode derived from component assignment
+	componentID := "comp_central" // Default to central signing
+	if err := kdc.AddComponentZoneAssignment(componentID, zone.Name); err != nil {
+		// Log warning but don't fail - the zone was created successfully
+		log.Printf("KDC: Warning: Failed to assign zone %s to component %s: %v", zone.Name, componentID, err)
+	} else {
+		log.Printf("KDC: Assigned zone %s to component %s (default: central signing)", zone.Name, componentID)
+	}
+	
 	return nil
 }
 
 // UpdateZone updates an existing zone
 // Note: zone name cannot be changed (it's the primary key)
 func (kdc *KdcDB) UpdateZone(zone *Zone) error {
+	// Convert empty ServiceID to nil (NULL) for foreign key constraint
+	var serviceID interface{}
+	if zone.ServiceID == "" {
+		serviceID = nil
+	} else {
+		serviceID = zone.ServiceID
+	}
 	_, err := kdc.DB.Exec(
-		"UPDATE zones SET service_id = ?, signing_mode = ?, active = ?, comment = ? WHERE name = ?",
-		zone.ServiceID, string(zone.SigningMode), zone.Active, zone.Comment, zone.Name,
+		"UPDATE zones SET service_id = ?, active = ?, comment = ? WHERE name = ?",
+		serviceID, zone.Active, zone.Comment, zone.Name,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update zone: %v", err)
@@ -1313,7 +1458,12 @@ func (kdc *KdcDB) UpdateService(service *Service) error {
 }
 
 // DeleteService deletes a service
+// System-defined services (default_service) cannot be deleted
 func (kdc *KdcDB) DeleteService(serviceID string) error {
+	// Prevent deletion of default_service
+	if serviceID == "default_service" {
+		return fmt.Errorf("cannot delete default_service (system-defined)")
+	}
 	_, err := kdc.DB.Exec("DELETE FROM services WHERE id = ?", serviceID)
 	if err != nil {
 		return fmt.Errorf("failed to delete service: %v", err)
@@ -1393,7 +1543,12 @@ func (kdc *KdcDB) UpdateComponent(component *Component) error {
 }
 
 // DeleteComponent deletes a component
+// System-defined components (comp_*) cannot be deleted
 func (kdc *KdcDB) DeleteComponent(componentID string) error {
+	// Prevent deletion of system-defined components
+	if strings.HasPrefix(componentID, "comp_") {
+		return fmt.Errorf("cannot delete system-defined component: %s", componentID)
+	}
 	_, err := kdc.DB.Exec("DELETE FROM components WHERE id = ?", componentID)
 	if err != nil {
 		return fmt.Errorf("failed to delete component: %v", err)
@@ -1427,6 +1582,54 @@ func (kdc *KdcDB) RemoveServiceComponentAssignment(serviceID, componentID string
 		return fmt.Errorf("failed to remove service-component assignment: %v", err)
 	}
 	return nil
+}
+
+// GetComponentsForZone returns all component IDs that serve a zone
+func (kdc *KdcDB) GetComponentsForZone(zoneName string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT component_id FROM component_zone_assignments 
+		 WHERE zone_name = ? AND active = 1`,
+		zoneName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query zone components: %v", err)
+	}
+	defer rows.Close()
+
+	var components []string
+	for rows.Next() {
+		var componentID string
+		if err := rows.Scan(&componentID); err != nil {
+			return nil, fmt.Errorf("failed to scan component ID: %v", err)
+		}
+		components = append(components, componentID)
+	}
+
+	return components, rows.Err()
+}
+
+// GetComponentsForService returns all component IDs assigned to a service
+func (kdc *KdcDB) GetComponentsForService(serviceID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT component_id FROM service_component_assignments 
+		 WHERE service_id = ? AND active = 1`,
+		serviceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query service components: %v", err)
+	}
+	defer rows.Close()
+
+	var components []string
+	for rows.Next() {
+		var componentID string
+		if err := rows.Scan(&componentID); err != nil {
+			return nil, fmt.Errorf("failed to scan component ID: %v", err)
+		}
+		components = append(components, componentID)
+	}
+
+	return components, rows.Err()
 }
 
 // AddComponentZoneAssignment assigns a zone to a component
