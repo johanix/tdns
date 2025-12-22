@@ -458,7 +458,8 @@ func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 		return nil, fmt.Errorf("error from API POST: %v", err)
 	}
 
-	if tdns.Globals.Verbose {
+	// Only print status if it's not 200 (success) - useful for debugging errors
+	if status != 200 && tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

@@ -484,20 +484,20 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 }
 
 // DeriveSigningModeFromComponent derives the signing mode from a component ID
-// Component IDs are in the format "comp_<signing_mode>" (e.g., "comp_edgesign_all")
+// Component IDs are in the format "sign_<signing_mode>" (e.g., "sign_edge_all", "sign_kdc", "sign_upstream")
 func DeriveSigningModeFromComponent(componentID string) ZoneSigningMode {
-	if strings.HasPrefix(componentID, "comp_") {
-		mode := strings.TrimPrefix(componentID, "comp_")
+	if strings.HasPrefix(componentID, "sign_") {
+		mode := strings.TrimPrefix(componentID, "sign_")
 		switch mode {
 		case "upstream":
 			return ZoneSigningModeUpstream
-		case "central":
+		case "kdc":
 			return ZoneSigningModeCentral
-		case "edgesign_dyn":
+		case "edge_dyn":
 			return ZoneSigningModeEdgesignDyn
-		case "edgesign_zsk":
+		case "edge_zsk":
 			return ZoneSigningModeEdgesignZsk
-		case "edgesign_all":
+		case "edge_all":
 			return ZoneSigningModeEdgesignAll
 		case "unsigned":
 			return ZoneSigningModeUnsigned
@@ -507,18 +507,44 @@ func DeriveSigningModeFromComponent(componentID string) ZoneSigningMode {
 	return ZoneSigningModeCentral
 }
 
-// GetZoneSigningMode retrieves the signing mode for a zone by looking at its component assignments
+// GetZoneSigningMode retrieves the signing mode for a zone by looking at its service's components
+// Zones derive components from their service, not from direct component assignments
 func (kdc *KdcDB) GetZoneSigningMode(zoneName string) (ZoneSigningMode, error) {
-	components, err := kdc.GetComponentsForZone(zoneName)
+	zone, err := kdc.GetZone(zoneName)
 	if err != nil {
-		return ZoneSigningModeCentral, fmt.Errorf("failed to get components for zone: %v", err)
+		return ZoneSigningModeCentral, fmt.Errorf("failed to get zone: %v", err)
 	}
-	if len(components) == 0 {
-		// No component assignment, default to central
+	
+	if zone.ServiceID == "" {
+		// No service assignment, default to central
 		return ZoneSigningModeCentral, nil
 	}
-	// Use the first component's signing mode (zones should typically have one component)
-	return DeriveSigningModeFromComponent(components[0]), nil
+	
+	// Get components from the service
+	components, err := kdc.GetComponentsForService(zone.ServiceID)
+	if err != nil {
+		return ZoneSigningModeCentral, fmt.Errorf("failed to get components for service: %v", err)
+	}
+	if len(components) == 0 {
+		// No components in service, default to central
+		return ZoneSigningModeCentral, nil
+	}
+	
+	// Use the first signing component's signing mode
+	// Prefer sign_kdc if available, otherwise use first sign_* component
+	for _, compID := range components {
+		if compID == "sign_kdc" {
+			return DeriveSigningModeFromComponent(compID), nil
+		}
+	}
+	for _, compID := range components {
+		if strings.HasPrefix(compID, "sign_") {
+			return DeriveSigningModeFromComponent(compID), nil
+		}
+	}
+	
+	// No signing component found, default to central
+	return ZoneSigningModeCentral, nil
 }
 
 // GetZone retrieves a zone by name
@@ -601,16 +627,20 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 	
 	// Create components for each signing mode
 	signingModeComponents := map[string]string{
-		"upstream":      "Component for upstream-signed zones",
-		"central":       "Component for centrally-signed zones",
-		"unsigned":      "Component for unsigned zones",
-		"edgesign_dyn":  "Component for edgesigned zones (dynamic responses only)",
-		"edgesign_zsk":  "Component for edgesigned zones (all responses)",
-		"edgesign_all":  "Component for fully edgesigned zones (KSK+ZSK)",
+		"upstream":   "Component for upstream-signed zones",
+		"kdc":        "Component for centrally-signed zones",
+		"unsigned":   "Component for unsigned zones",
+		"edge_dyn":   "Component for edgesigned zones (dynamic responses only)",
+		"edge_zsk":   "Component for edgesigned zones (all responses)",
+		"edge_all":   "Component for fully edgesigned zones (KSK+ZSK)",
 	}
 	
+	// Only assign sign_kdc to default_service (default signing mode)
+	// Other sign_* components are created but not assigned (users must create services for them)
+	defaultSigningComponentID := "sign_kdc"
+	
 	for mode, description := range signingModeComponents {
-		componentID := fmt.Sprintf("comp_%s", mode)
+		componentID := fmt.Sprintf("sign_%s", mode)
 		var componentExists bool
 		err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM components WHERE id = ?)", componentID).Scan(&componentExists)
 		if err != nil {
@@ -628,12 +658,191 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 				return fmt.Errorf("failed to create component %s: %v", componentID, err)
 			}
 			log.Printf("KDC: Created component: %s", componentID)
-			
-			// Assign component to default service
-			if err := kdc.AddServiceComponentAssignment(defaultServiceID, componentID); err != nil {
-				return fmt.Errorf("failed to assign component %s to default service: %v", componentID, err)
+		}
+	}
+	
+	// Clean up any invalid sign_* component assignments on default_service
+	// This handles cases where the database has multiple sign_* components assigned (from old code or manual edits)
+	existingComponents, err := kdc.GetComponentsForService(defaultServiceID)
+	if err != nil {
+		return fmt.Errorf("failed to get existing components for default service: %v", err)
+	}
+	
+	var signingComponents []string
+	for _, compID := range existingComponents {
+		if strings.HasPrefix(compID, "sign_") {
+			signingComponents = append(signingComponents, compID)
+		}
+	}
+	
+	// Remove all sign_* components except sign_kdc (if it exists)
+	// If sign_kdc doesn't exist in the list, we'll add it below
+	hasSignKdc := false
+	for _, compID := range signingComponents {
+		if compID == defaultSigningComponentID {
+			hasSignKdc = true
+		} else {
+			// Remove this signing component from default_service
+			if err := kdc.RemoveServiceComponentAssignment(defaultServiceID, compID); err != nil {
+				log.Printf("KDC: Warning: Failed to remove invalid signing component %s from default service: %v", compID, err)
+			} else {
+				log.Printf("KDC: Removed invalid signing component %s from default service (only sign_kdc allowed)", compID)
 			}
-			log.Printf("KDC: Assigned component %s to default service %s", componentID, defaultServiceID)
+		}
+	}
+	
+	// Ensure sign_kdc is assigned to default_service
+	if !hasSignKdc {
+		// Check if sign_kdc component exists (it should after the loop above)
+		var signKdcExists bool
+		err = kdc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM components WHERE id = ?)", defaultSigningComponentID).Scan(&signKdcExists)
+		if err != nil {
+			return fmt.Errorf("failed to check if sign_kdc component exists: %v", err)
+		}
+		if signKdcExists {
+			if err := kdc.AddServiceComponentAssignment(defaultServiceID, defaultSigningComponentID); err != nil {
+				return fmt.Errorf("failed to assign component %s to default service: %v", defaultSigningComponentID, err)
+			}
+			log.Printf("KDC: Assigned component %s to default service %s", defaultSigningComponentID, defaultServiceID)
+		}
+	}
+	
+	// Clean up old comp_* system components (migrated to sign_* naming)
+	// Map old comp_* names to new sign_* names
+	oldToNewComponentMap := map[string]string{
+		"comp_central":        "sign_kdc",
+		"comp_upstream":       "sign_upstream",
+		"comp_unsigned":       "sign_unsigned",
+		"comp_edgesign_dyn":   "sign_edge_dyn",
+		"comp_edgesign_zsk":   "sign_edge_zsk",
+		"comp_edgesign_all":   "sign_edge_all",
+	}
+	
+	// Find all old comp_* components
+	rows, err := kdc.DB.Query("SELECT id FROM components WHERE id LIKE 'comp_%'")
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to query old comp_* components: %v", err)
+	} else {
+		defer rows.Close()
+		var oldComponentIDs []string
+		for rows.Next() {
+			var compID string
+			if err := rows.Scan(&compID); err != nil {
+				log.Printf("KDC: Warning: Failed to scan old component ID: %v", err)
+				continue
+			}
+			oldComponentIDs = append(oldComponentIDs, compID)
+		}
+		
+		// Process each old component
+		for _, oldCompID := range oldComponentIDs {
+			newCompID, isSystemComponent := oldToNewComponentMap[oldCompID]
+			
+			if isSystemComponent {
+				// This is a system component that should be migrated
+				log.Printf("KDC: Migrating old system component %s to %s", oldCompID, newCompID)
+				
+				// Check if zones are assigned to old component
+				zones, err := kdc.GetZonesForComponent(oldCompID)
+				if err == nil && len(zones) > 0 {
+					log.Printf("KDC: Warning: Component %s has %d zones assigned. Migrating to %s", oldCompID, len(zones), newCompID)
+					for _, zoneName := range zones {
+						// Remove from old component
+						if err := kdc.RemoveComponentZoneAssignment(oldCompID, zoneName); err != nil {
+							log.Printf("KDC: Warning: Failed to remove zone %s from old component %s: %v", zoneName, oldCompID, err)
+						} else {
+							// Add to new component
+							if err := kdc.AddComponentZoneAssignment(newCompID, zoneName); err != nil {
+								log.Printf("KDC: Warning: Failed to assign zone %s to new component %s: %v", zoneName, newCompID, err)
+							}
+						}
+					}
+				}
+				
+				// Check if nodes are assigned to old component
+				nodes, err := kdc.GetNodesForComponent(oldCompID)
+				if err == nil && len(nodes) > 0 {
+					log.Printf("KDC: Warning: Component %s has %d nodes assigned. Migrating to %s", oldCompID, len(nodes), newCompID)
+					for _, nodeID := range nodes {
+						// Remove from old component (deactivate assignment)
+						_, err := kdc.DB.Exec(
+							"UPDATE node_component_assignments SET active = 0 WHERE node_id = ? AND component_id = ?",
+							nodeID, oldCompID,
+						)
+						if err != nil {
+							log.Printf("KDC: Warning: Failed to remove node %s from old component %s: %v", nodeID, oldCompID, err)
+						} else {
+							// Add to new component (check if already exists first)
+							var exists bool
+							err = kdc.DB.QueryRow(
+								"SELECT EXISTS(SELECT 1 FROM node_component_assignments WHERE node_id = ? AND component_id = ?)",
+								nodeID, newCompID,
+							).Scan(&exists)
+							if err == nil && !exists {
+								_, err = kdc.DB.Exec(
+									"INSERT INTO node_component_assignments (node_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
+									nodeID, newCompID,
+								)
+								if err != nil {
+									log.Printf("KDC: Warning: Failed to assign node %s to new component %s: %v", nodeID, newCompID, err)
+								}
+							}
+						}
+					}
+				}
+				
+				// Remove service-component assignments for old component
+				serviceRows, err := kdc.DB.Query(
+					"SELECT service_id FROM service_component_assignments WHERE component_id = ? AND active = 1",
+					oldCompID,
+				)
+				if err == nil {
+					var serviceIDs []string
+					for serviceRows.Next() {
+						var serviceID string
+						if err := serviceRows.Scan(&serviceID); err == nil {
+							serviceIDs = append(serviceIDs, serviceID)
+						}
+					}
+					serviceRows.Close()
+					
+					for _, serviceID := range serviceIDs {
+						// Remove old assignment
+						if err := kdc.RemoveServiceComponentAssignment(serviceID, oldCompID); err != nil {
+							log.Printf("KDC: Warning: Failed to remove old component %s from service %s: %v", oldCompID, serviceID, err)
+						} else {
+							// Add new assignment (if not already present)
+							existingComps, err := kdc.GetComponentsForService(serviceID)
+							hasNewComp := false
+							if err == nil {
+								for _, compID := range existingComps {
+									if compID == newCompID {
+										hasNewComp = true
+										break
+									}
+								}
+							}
+							if !hasNewComp {
+								if err := kdc.AddServiceComponentAssignment(serviceID, newCompID); err != nil {
+									log.Printf("KDC: Warning: Failed to assign new component %s to service %s: %v", newCompID, serviceID, err)
+								} else {
+									log.Printf("KDC: Migrated component assignment: service %s: %s -> %s", serviceID, oldCompID, newCompID)
+								}
+							}
+						}
+					}
+				}
+				
+				// Delete the old component
+				if err := kdc.DeleteComponent(oldCompID); err != nil {
+					log.Printf("KDC: Warning: Failed to delete old component %s: %v", oldCompID, err)
+				} else {
+					log.Printf("KDC: Deleted old system component %s (replaced by %s)", oldCompID, newCompID)
+				}
+			} else {
+				// Unknown comp_* component - might be user-created, leave it alone
+				log.Printf("KDC: Found comp_* component %s (not a known system component, leaving as-is)", oldCompID)
+			}
 		}
 	}
 	
@@ -650,26 +859,42 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 			ID:      defaultComponentID,
 			Name:    "Default Component",
 			Active:  true,
-			Comment: "Default component for default service (maps to comp_central)",
+			Comment: "Default component for default service (maps to sign_kdc)",
 		}
 		if err := kdc.AddComponent(defaultComponent); err != nil {
 			return fmt.Errorf("failed to create default component: %v", err)
 		}
 		log.Printf("KDC: Created default component: %s", defaultComponentID)
 		
-		// Assign default component to default service
-		if err := kdc.AddServiceComponentAssignment(defaultServiceID, defaultComponentID); err != nil {
-			return fmt.Errorf("failed to assign default component to default service: %v", err)
+		// Only assign default_comp to default service if sign_kdc is not already assigned
+		// (to avoid conflicts - default_comp is deprecated)
+		existingComponents, err := kdc.GetComponentsForService(defaultServiceID)
+		if err == nil {
+			hasSignKdc := false
+			for _, compID := range existingComponents {
+				if compID == "sign_kdc" {
+					hasSignKdc = true
+					break
+				}
+			}
+			if !hasSignKdc {
+				// Only assign if sign_kdc is not present (shouldn't happen, but be safe)
+				if err := kdc.AddServiceComponentAssignment(defaultServiceID, defaultComponentID); err != nil {
+					log.Printf("KDC: Warning: Failed to assign default component to default service: %v", err)
+				} else {
+					log.Printf("KDC: Assigned default component %s to default service %s", defaultComponentID, defaultServiceID)
+				}
+			}
 		}
-		log.Printf("KDC: Assigned default component %s to default service %s", defaultComponentID, defaultServiceID)
 	}
 	
 	return nil
 }
 
 // AddZone adds a new zone
-// Note: Zone signing mode is determined by component assignment, not stored directly
-// If no service_id is provided, zone is assigned to default_service and comp_central
+// Note: Zone signing mode is derived from service components, not stored directly
+// Zones are only assigned to services; components are derived from the service
+// If no service_id is provided, zone is assigned to default_service
 func (kdc *KdcDB) AddZone(zone *Zone) error {
 	// If no service_id provided, use default_service
 	serviceID := zone.ServiceID
@@ -686,21 +911,12 @@ func (kdc *KdcDB) AddZone(zone *Zone) error {
 		return fmt.Errorf("failed to add zone: %v", err)
 	}
 	
-	// Assign zone to default component (comp_central) if no component specified
-	// This ensures the zone has a signing mode derived from component assignment
-	componentID := "comp_central" // Default to central signing
-	if err := kdc.AddComponentZoneAssignment(componentID, zone.Name); err != nil {
-		// Log warning but don't fail - the zone was created successfully
-		log.Printf("KDC: Warning: Failed to assign zone %s to component %s: %v", zone.Name, componentID, err)
-	} else {
-		log.Printf("KDC: Assigned zone %s to component %s (default: central signing)", zone.Name, componentID)
-	}
-	
 	return nil
 }
 
 // UpdateZone updates an existing zone
 // Note: zone name cannot be changed (it's the primary key)
+// Zones are related to services only; components are derived from the service, not directly assigned
 func (kdc *KdcDB) UpdateZone(zone *Zone) error {
 	// Convert empty ServiceID to nil (NULL) for foreign key constraint
 	var serviceID interface{}
@@ -1570,10 +1786,10 @@ func (kdc *KdcDB) UpdateComponent(component *Component) error {
 }
 
 // DeleteComponent deletes a component
-// System-defined components (comp_*) cannot be deleted
+// System-defined components (sign_*) cannot be deleted
 func (kdc *KdcDB) DeleteComponent(componentID string) error {
 	// Prevent deletion of system-defined components
-	if strings.HasPrefix(componentID, "comp_") {
+	if strings.HasPrefix(componentID, "sign_") {
 		return fmt.Errorf("cannot delete system-defined component: %s", componentID)
 	}
 	_, err := kdc.DB.Exec("DELETE FROM components WHERE id = ?", componentID)
@@ -1588,7 +1804,24 @@ func (kdc *KdcDB) DeleteComponent(componentID string) error {
 // ============================================================================
 
 // AddServiceComponentAssignment assigns a component to a service
+// Validates that only one sign_* component can be assigned to a service at a time
 func (kdc *KdcDB) AddServiceComponentAssignment(serviceID, componentID string) error {
+	// Check if this is a signing component (sign_*)
+	if strings.HasPrefix(componentID, "sign_") {
+		// Get all existing components for this service
+		existingComponents, err := kdc.GetComponentsForService(serviceID)
+		if err != nil {
+			return fmt.Errorf("failed to get existing components: %v", err)
+		}
+		
+		// Check if there's already a sign_* component assigned
+		for _, existingCompID := range existingComponents {
+			if strings.HasPrefix(existingCompID, "sign_") {
+				return fmt.Errorf("service %s already has signing component %s assigned (cannot have multiple sign_* components)", serviceID, existingCompID)
+			}
+		}
+	}
+	
 	_, err := kdc.DB.Exec(
 		"INSERT INTO service_component_assignments (service_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
 		serviceID, componentID,
@@ -1608,6 +1841,108 @@ func (kdc *KdcDB) RemoveServiceComponentAssignment(serviceID, componentID string
 	if err != nil {
 		return fmt.Errorf("failed to remove service-component assignment: %v", err)
 	}
+	return nil
+}
+
+// ReplaceServiceComponentAssignment atomically replaces one component with another in a service
+// This ensures there's never a state with no signing component when replacing sign_* components
+// The operation is atomic: if adding the new component fails, the old one remains
+func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, newComponentID string) error {
+	// Validate that old component exists and is assigned to the service
+	existingComponents, err := kdc.GetComponentsForService(serviceID)
+	if err != nil {
+		return fmt.Errorf("failed to get existing components: %v", err)
+	}
+	
+	oldComponentFound := false
+	for _, compID := range existingComponents {
+		if compID == oldComponentID {
+			oldComponentFound = true
+			break
+		}
+	}
+	if !oldComponentFound {
+		return fmt.Errorf("component %s is not assigned to service %s", oldComponentID, serviceID)
+	}
+	
+	// Validate that new component is not already assigned
+	for _, compID := range existingComponents {
+		if compID == newComponentID {
+			return fmt.Errorf("component %s is already assigned to service %s", newComponentID, serviceID)
+		}
+	}
+	
+	// If replacing sign_* components, ensure we're replacing one sign_* with another
+	oldIsSigning := strings.HasPrefix(oldComponentID, "sign_")
+	newIsSigning := strings.HasPrefix(newComponentID, "sign_")
+	
+	if oldIsSigning && !newIsSigning {
+		// Check if there are other sign_* components (shouldn't happen, but be safe)
+		for _, compID := range existingComponents {
+			if compID != oldComponentID && strings.HasPrefix(compID, "sign_") {
+				return fmt.Errorf("cannot remove signing component %s: service %s has other signing components", oldComponentID, serviceID)
+			}
+		}
+		// Allow removing sign_* and replacing with non-signing component
+	}
+	
+	if !oldIsSigning && newIsSigning {
+		// Check if there's already a sign_* component
+		for _, compID := range existingComponents {
+			if strings.HasPrefix(compID, "sign_") {
+				return fmt.Errorf("service %s already has signing component %s assigned (cannot have multiple sign_* components)", serviceID, compID)
+			}
+		}
+	}
+	
+	if oldIsSigning && newIsSigning {
+		// Replacing one sign_* with another - this is the main use case
+		// Ensure atomic operation: remove old and add new in a transaction
+		tx, err := kdc.DB.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %v", err)
+		}
+		defer tx.Rollback()
+		
+		// Remove old component
+		_, err = tx.Exec(
+			"UPDATE service_component_assignments SET active = 0 WHERE service_id = ? AND component_id = ?",
+			serviceID, oldComponentID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to remove old component: %v", err)
+		}
+		
+		// Add new component
+		_, err = tx.Exec(
+			"INSERT INTO service_component_assignments (service_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
+			serviceID, newComponentID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to add new component: %v", err)
+		}
+		
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %v", err)
+		}
+		
+		return nil
+	}
+	
+	// Non-signing component replacement - can be done without transaction
+	// Remove old
+	if err := kdc.RemoveServiceComponentAssignment(serviceID, oldComponentID); err != nil {
+		return fmt.Errorf("failed to remove old component: %v", err)
+	}
+	
+	// Add new
+	if err := kdc.AddServiceComponentAssignment(serviceID, newComponentID); err != nil {
+		// Try to restore old component if adding new fails
+		kdc.AddServiceComponentAssignment(serviceID, oldComponentID)
+		return fmt.Errorf("failed to add new component: %v", err)
+	}
+	
 	return nil
 }
 
@@ -1705,5 +2040,30 @@ func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string) erro
 		return fmt.Errorf("failed to remove node-component assignment: %v", err)
 	}
 	return nil
+}
+
+// GetAllNodeComponentAssignments returns all active node-component assignments
+func (kdc *KdcDB) GetAllNodeComponentAssignments() ([]*NodeComponentAssignment, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT node_id, component_id, active, since FROM node_component_assignments 
+		 WHERE active = 1 ORDER BY node_id, component_id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node-component assignments: %v", err)
+	}
+	defer rows.Close()
+
+	var assignments []*NodeComponentAssignment
+	for rows.Next() {
+		var assignment NodeComponentAssignment
+		var activeInt int
+		if err := rows.Scan(&assignment.NodeID, &assignment.ComponentID, &activeInt, &assignment.Since); err != nil {
+			return nil, fmt.Errorf("failed to scan assignment: %v", err)
+		}
+		assignment.Active = activeInt != 0
+		assignments = append(assignments, &assignment)
+	}
+
+	return assignments, rows.Err()
 }
 

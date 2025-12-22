@@ -41,17 +41,49 @@ func (kdc *KdcDB) CalculateBlastZone(nodeID string) (*BlastZoneResult, error) {
 		return result, nil
 	}
 
-	// Step 2: For each component, find all zones it serves
+	// Step 2: For each component, find all zones served via services
+	// Zones are assigned to services, and components belong to services
+	// So we need to find all services that have these components, then all zones in those services
 	zoneSet := make(map[string]bool)
+	
+	// Get all services that have any of these components
+	serviceSet := make(map[string]bool)
 	for _, componentID := range components {
-		zones, err := kdc.GetZonesForComponent(componentID)
+		// Query for services that have this component
+		rows, err := kdc.DB.Query(
+			"SELECT DISTINCT service_id FROM service_component_assignments WHERE component_id = ? AND active = 1",
+			componentID,
+		)
 		if err != nil {
-			log.Printf("KDC: Warning: Failed to get zones for component %s: %v", componentID, err)
+			log.Printf("KDC: Warning: Failed to get services for component %s: %v", componentID, err)
 			continue
 		}
-		for _, zoneName := range zones {
-			zoneSet[zoneName] = true
+		for rows.Next() {
+			var serviceID string
+			if err := rows.Scan(&serviceID); err == nil {
+				serviceSet[serviceID] = true
+			}
 		}
+		rows.Close()
+	}
+	
+	// Get all zones from these services
+	for serviceID := range serviceSet {
+		rows, err := kdc.DB.Query(
+			"SELECT name FROM zones WHERE service_id = ? AND active = 1",
+			serviceID,
+		)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get zones for service %s: %v", serviceID, err)
+			continue
+		}
+		for rows.Next() {
+			var zoneName string
+			if err := rows.Scan(&zoneName); err == nil {
+				zoneSet[zoneName] = true
+			}
+		}
+		rows.Close()
 	}
 
 	// Convert set to slice
@@ -150,38 +182,33 @@ func (kdc *KdcDB) GetNodesForComponent(componentID string) ([]string, error) {
 	return nodes, rows.Err()
 }
 
-// GetNodesForZone returns all node IDs that serve a zone (via components)
+// GetNodesForZone returns all node IDs that serve a zone (via service → components → nodes)
+// Zones are related to services, and components are derived from the service
 // This replaces the old "all nodes serve all zones" model
 func (kdc *KdcDB) GetNodesForZone(zoneName string) ([]string, error) {
-	// Step 1: Find all components that serve this zone
-	rows, err := kdc.DB.Query(
-		`SELECT component_id FROM component_zone_assignments 
-		 WHERE zone_name = ? AND active = 1`,
-		zoneName,
-	)
+	// Step 1: Get the zone's service
+	zone, err := kdc.GetZone(zoneName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query zone components: %v", err)
+		return nil, fmt.Errorf("failed to get zone: %v", err)
 	}
-	defer rows.Close()
-
-	var componentIDs []string
-	for rows.Next() {
-		var componentID string
-		if err := rows.Scan(&componentID); err != nil {
-			return nil, fmt.Errorf("failed to scan component ID: %v", err)
-		}
-		componentIDs = append(componentIDs, componentID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(componentIDs) == 0 {
-		// No components serve this zone, return empty list
+	
+	if zone.ServiceID == "" {
+		// Zone has no service assignment, return empty list
 		return []string{}, nil
 	}
-
-	// Step 2: For each component, find all nodes that serve it
+	
+	// Step 2: Get all components for the service
+	componentIDs, err := kdc.GetComponentsForService(zone.ServiceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get components for service: %v", err)
+	}
+	
+	if len(componentIDs) == 0 {
+		// Service has no components, return empty list
+		return []string{}, nil
+	}
+	
+	// Step 3: For each component, find all nodes that serve it
 	nodeSet := make(map[string]bool)
 	for _, componentID := range componentIDs {
 		nodes, err := kdc.GetNodesForComponent(componentID)
@@ -193,13 +220,13 @@ func (kdc *KdcDB) GetNodesForZone(zoneName string) ([]string, error) {
 			nodeSet[nodeID] = true
 		}
 	}
-
+	
 	// Convert set to slice
 	var nodes []string
 	for nodeID := range nodeSet {
 		nodes = append(nodes, nodeID)
 	}
-
+	
 	return nodes, nil
 }
 
