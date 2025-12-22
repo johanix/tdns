@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -63,9 +64,15 @@ var KdcComponentCmd = &cobra.Command{
 }
 
 var KdcServiceComponentCmd = &cobra.Command{
-	Use:   "service-component",
+	Use:   "component",
 	Short: "Manage service-component assignments",
 	Long:  `Manage which components belong to which services`,
+}
+
+var KdcNodeComponentCmd = &cobra.Command{
+	Use:   "component",
+	Short: "Manage node-component assignments",
+	Long:  `Manage which components are served by which nodes`,
 }
 
 // Zone commands
@@ -214,19 +221,24 @@ var kdcZoneListCmd = &cobra.Command{
 			}
 
 			name := getString(zone, "name", "Name")
-			signingMode := getString(zone, "signing_mode", "signing_mode")
 			active := getBool(zone, "active", "Active")
 			comment := getString(zone, "comment", "Comment")
 
 			// Get enrichment data
 			serviceName := "(none)"
 			componentsStr := "(none)"
+			signingModeStr := "(none)"
 			var nodeIDs []string
 
 			if enrichment, ok := enrichments[name]; ok {
 				if sn := getString(enrichment, "service_name", "service_name"); sn != "" {
 					serviceName = sn
 				}
+				// Get signing component ID for Signing Mode column
+				if signingCompID := getString(enrichment, "signing_component_id", "signing_component_id"); signingCompID != "" {
+					signingModeStr = signingCompID
+				}
+				// Get non-signing components for Components column
 				if compNames, ok := enrichment["component_names"].([]interface{}); ok {
 					compStrs := make([]string, 0, len(compNames))
 					for _, cn := range compNames {
@@ -255,7 +267,7 @@ var kdcZoneListCmd = &cobra.Command{
 			}
 
 			fmt.Printf("%-30s %-20s %-30s %-15s %-8s %s\n", 
-				name, serviceName, componentsStr, signingMode, activeStr, comment)
+				name, serviceName, componentsStr, signingModeStr, activeStr, comment)
 			
 			// Print nodes in verbose mode
 			if tdns.Globals.Verbose && len(nodeIDs) > 0 {
@@ -453,7 +465,8 @@ var kdcNodeAddCmd = &cobra.Command{
 	Long:  `Add a new edge node. pubkey-file should contain the HPKE public key (32 bytes, hex or base64 encoded)`,
 	// Args:  cobra.ExactArgs(3),
 	Run: func(cmd *cobra.Command, args []string) {
-		// Validate required flags
+		// Note: nodeid, nodename, pubkeyfile are persistent flags (global variables)
+		// We validate them here since PrepArgs doesn't handle persistent flags yet
 		if nodeid == "" {
 			log.Fatalf("Error: --nodeid is required")
 		}
@@ -508,7 +521,7 @@ var kdcNodeAddCmd = &cobra.Command{
 			log.Fatalf("Public key must be 32 bytes (X25519), got %d bytes", len(pubkey))
 		}
 
-		// Ensure node ID is FQDN
+		// Normalize node ID to FQDN
 		nodeIDFQDN := dns.Fqdn(nodeid)
 
 		req := map[string]interface{}{
@@ -623,13 +636,8 @@ var kdcNodeUpdateCmd = &cobra.Command{
 	Use:   "update --nodeid <node-id> [--name <name>] [--notify-address <address:port>] [--comment <comment>]",
 	Short: "Update node details (name, notify address, comment)",
 	Run: func(cmd *cobra.Command, args []string) {
-		updateNodeID := cmd.Flag("nodeid").Value.String()
-		if updateNodeID == "" {
-			log.Fatalf("Error: --nodeid is required")
-		}
-
-		// Ensure node ID is FQDN
-		updateNodeIDFQDN := dns.Fqdn(updateNodeID)
+		PrepArgs(cmd, "nodeid")
+		updateNodeIDFQDN := cmd.Flag("nodeid").Value.String()
 
 		prefixcmd, _ := getCommandContext("node")
 		api, err := getApiClient(prefixcmd, true)
@@ -760,18 +768,18 @@ var kdcNodeDeleteCmd = &cobra.Command{
 	Short: "Delete a node from KDC",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "nodeid")
+		nodeid := cmd.Flag("nodeid").Value.String()
+
 		prefixcmd, _ := getCommandContext("node")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		// Ensure node ID is FQDN
-		nodeIDFQDN := dns.Fqdn(args[0])
-
 		req := map[string]interface{}{
 			"command": "delete",
-			"node_id": nodeIDFQDN,
+			"node_id": nodeid,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/node", req)
@@ -793,6 +801,8 @@ var kdcZoneServiceCmd = &cobra.Command{
 	Short: "Change the service for a zone",
 	Long:  `Change which service a zone belongs to. The zone will be reassigned to an appropriate component in the new service based on its current signing mode.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "zonename", "service")
+
 		prefixcmd, _ := getCommandContext("zone")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
@@ -801,10 +811,6 @@ var kdcZoneServiceCmd = &cobra.Command{
 
 		zoneName := cmd.Flag("zone").Value.String()
 		serviceName := cmd.Flag("service").Value.String()
-
-		if zoneName == "" || serviceName == "" {
-			log.Fatalf("Error: --zone and --service are required")
-		}
 
 		req := map[string]interface{}{
 			"command":     "set-service",
@@ -832,13 +838,15 @@ var kdcZoneComponentCmd = &cobra.Command{
 	Long:  `Change which component a zone is assigned to. This directly changes the zone's signing mode, as signing mode is derived from component assignment.
 
 Available components:
-  - comp_upstream: Upstream signed zones (no key distribution)
-  - comp_central: Centrally signed zones (no key distribution, default)
-  - comp_unsigned: Unsigned zones
-  - comp_edgesign_dyn: Edgesigned zones (dynamic responses only)
-  - comp_edgesign_zsk: Edgesigned zones (all responses)
-  - comp_edgesign_all: Fully edgesigned zones (KSK+ZSK)`,
+  - sign_upstream: Upstream signed zones (no key distribution)
+  - sign_kdc: Centrally signed zones (no key distribution, default)
+  - sign_unsigned: Unsigned zones
+  - sign_edge_dyn: Edgesigned zones (dynamic responses only)
+  - sign_edge_zsk: Edgesigned zones (all responses)
+  - sign_edge_all: Fully edgesigned zones (KSK+ZSK)`,
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "zonename", "component")
+
 		prefixcmd, _ := getCommandContext("zone")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
@@ -847,10 +855,6 @@ Available components:
 
 		zoneName := cmd.Flag("zone").Value.String()
 		componentName := cmd.Flag("component").Value.String()
-
-		if zoneName == "" || componentName == "" {
-			log.Fatalf("Error: --zone and --component are required")
-		}
 
 		req := map[string]interface{}{
 			"command":        "set-component",
@@ -956,15 +960,9 @@ var kdcServiceListCmd = &cobra.Command{
 			return
 		}
 
-		verbose := tdns.Globals.Verbose
-		
-		if verbose {
-			fmt.Printf("%-30s %-30s %-8s %-50s %s\n", "ID", "Name", "Active", "Components", "Comment")
-			fmt.Println(strings.Repeat("-", 150))
-		} else {
-			fmt.Printf("%-30s %-30s %-8s %s\n", "ID", "Name", "Active", "Comment")
-			fmt.Println(strings.Repeat("-", 100))
-		}
+		// Always show components column
+		fmt.Printf("%-30s %-30s %-8s %-50s %s\n", "ID", "Name", "Active", "Components", "Comment")
+		fmt.Println(strings.Repeat("-", 150))
 
 		for _, s := range services {
 			service, ok := s.(map[string]interface{})
@@ -980,41 +978,37 @@ var kdcServiceListCmd = &cobra.Command{
 				activeStr = "no"
 			}
 			
-			if verbose {
-				// Fetch components for this service
-				componentsReq := map[string]interface{}{
-					"command":      "list",
-					"service_name": id, // Use ID to look up components
-				}
-				componentsResp, err := sendKdcRequest(api, "/kdc/service-component", componentsReq)
-				componentsList := ""
-				if err == nil && componentsResp["error"] != true {
-					if assignmentsRaw, ok := componentsResp["assignments"]; ok {
-						if assignments, ok := assignmentsRaw.([]interface{}); ok {
-							componentIDs := make([]string, 0, len(assignments))
-							for _, a := range assignments {
-								if assignment, ok := a.(map[string]interface{}); ok {
-									compID := getString(assignment, "component_id")
-									if compID != "" {
-										componentIDs = append(componentIDs, compID)
-									}
+			// Always fetch and show components for this service
+			componentsReq := map[string]interface{}{
+				"command":      "list",
+				"service_name": id, // Use ID to look up components
+			}
+			componentsResp, err := sendKdcRequest(api, "/kdc/service-component", componentsReq)
+			componentsList := ""
+			if err == nil && componentsResp["error"] != true {
+				if assignmentsRaw, ok := componentsResp["assignments"]; ok {
+					if assignments, ok := assignmentsRaw.([]interface{}); ok {
+						componentIDs := make([]string, 0, len(assignments))
+						for _, a := range assignments {
+							if assignment, ok := a.(map[string]interface{}); ok {
+								compID := getString(assignment, "component_id")
+								if compID != "" {
+									componentIDs = append(componentIDs, compID)
 								}
 							}
-							if len(componentIDs) > 0 {
-								componentsList = strings.Join(componentIDs, ", ")
-							} else {
-								componentsList = "(none)"
-							}
+						}
+						if len(componentIDs) > 0 {
+							componentsList = strings.Join(componentIDs, ", ")
+						} else {
+							componentsList = "(none)"
 						}
 					}
 				}
-				if componentsList == "" {
-					componentsList = "(error fetching)"
-				}
-				fmt.Printf("%-30s %-30s %-8s %-50s %s\n", id, name, activeStr, componentsList, comment)
-			} else {
-				fmt.Printf("%-30s %-30s %-8s %s\n", id, name, activeStr, comment)
 			}
+			if componentsList == "" {
+				componentsList = "(error fetching)"
+			}
+			fmt.Printf("%-30s %-30s %-8s %-50s %s\n", id, name, activeStr, componentsList, comment)
 		}
 	},
 }
@@ -1228,7 +1222,7 @@ var kdcComponentDeleteCmd = &cobra.Command{
 	Use:   "delete",
 	Short: "Delete a component",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefix, _ := getCommandContext("service-component")
+		prefix, _ := getCommandContext("component")
 		api, err := getApiClient(prefix, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -1262,7 +1256,9 @@ var kdcServiceComponentAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Assign a component to a service",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefix, _ := getCommandContext("service-component")
+		PrepArgs(cmd, "sname", "cname")
+		
+		prefix, _ := getCommandContext("service")
 		api, err := getApiClient(prefix, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -1270,10 +1266,6 @@ var kdcServiceComponentAddCmd = &cobra.Command{
 
 		serviceName := cmd.Flag("sname").Value.String()
 		componentName := cmd.Flag("cname").Value.String()
-
-		if serviceName == "" || componentName == "" {
-			log.Fatalf("Error: --sname and --cname are required")
-		}
 
 		req := map[string]interface{}{
 			"command":        "add",
@@ -1298,7 +1290,9 @@ var kdcServiceComponentDeleteCmd = &cobra.Command{
 	Use:   "delete",
 	Short: "Remove a component from a service",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefix, _ := getCommandContext("service-component")
+		PrepArgs(cmd, "sname", "cname")
+		
+		prefix, _ := getCommandContext("service")
 		api, err := getApiClient(prefix, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -1306,10 +1300,6 @@ var kdcServiceComponentDeleteCmd = &cobra.Command{
 
 		serviceName := cmd.Flag("sname").Value.String()
 		componentName := cmd.Flag("cname").Value.String()
-
-		if serviceName == "" || componentName == "" {
-			log.Fatalf("Error: --sname and --cname are required")
-		}
 
 		req := map[string]interface{}{
 			"command":        "delete",
@@ -1330,6 +1320,231 @@ var kdcServiceComponentDeleteCmd = &cobra.Command{
 	},
 }
 
+var kdcServiceComponentReplaceCmd = &cobra.Command{
+	Use:   "replace",
+	Short: "Atomically replace one component with another in a service",
+	Long:  `Atomically replaces one component with another in a service. This ensures there's never a state with no signing component when replacing sign_* components. The operation is atomic: if adding the new component fails, the old one remains.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "sname")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		serviceName := cmd.Flag("sname").Value.String()
+		oldComponentName := cmd.Flag("old").Value.String()
+		newComponentName := cmd.Flag("new").Value.String()
+
+		if oldComponentName == "" || newComponentName == "" {
+			log.Fatalf("Error: --old and --new are required")
+		}
+
+		req := map[string]interface{}{
+			"command":           "replace",
+			"service_name":      serviceName,
+			"old_component_name": oldComponentName,
+			"new_component_name": newComponentName,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-component", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+// Node-component commands
+var kdcNodeComponentAddCmd = &cobra.Command{
+	Use:   "add",
+	Short: "Assign a component to a node",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "nodeid", "cname")
+		
+		prefix, _ := getCommandContext("node")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		// Get nodeid from persistent flag (normalized by PrepArgs)
+		nodeID := cmd.Flag("nodeid").Value.String()
+		componentName := cmd.Flag("cname").Value.String()
+
+		req := map[string]interface{}{
+			"command":        "add",
+			"node_id":        nodeID,
+			"component_name": componentName,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/node-component", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcNodeComponentDeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Remove a component from a node",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "nodeid", "cname")
+		
+		prefix, _ := getCommandContext("node")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		// Get nodeid from persistent flag (normalized by PrepArgs)
+		nodeID := cmd.Flag("nodeid").Value.String()
+		componentName := cmd.Flag("cname").Value.String()
+
+		req := map[string]interface{}{
+			"command":        "delete",
+			"node_id":        nodeID,
+			"component_name": componentName,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/node-component", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcNodeComponentListCmd = &cobra.Command{
+	Use:   "list [--nodeid <node-id>]",
+	Short: "List node-component assignments",
+	Long:  `List all node-component assignments. If --nodeid is provided, shows components for that node only. Otherwise, shows all nodes and their assigned components.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		prefix, _ := getCommandContext("node")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "list",
+		}
+
+		// Check if nodeid is provided (optional)
+		nodeIDFlag := cmd.Flag("nodeid")
+		if nodeIDFlag != nil && nodeIDFlag.Value.String() != "" {
+			PrepArgs(cmd, "nodeid")
+			nodeID := cmd.Flag("nodeid").Value.String()
+			req["node_id"] = nodeID
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/node-component", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		assignmentsRaw, ok := resp["assignments"]
+		if !ok {
+			if nodeIDFlag != nil && nodeIDFlag.Value.String() != "" {
+				fmt.Printf("Node %s has no components assigned\n", nodeIDFlag.Value.String())
+			} else {
+				fmt.Printf("No node-component assignments found\n")
+			}
+			return
+		}
+
+		assignments, ok := assignmentsRaw.([]interface{})
+		if !ok {
+			log.Fatalf("Error: 'assignments' is not an array")
+		}
+
+		if len(assignments) == 0 {
+			if nodeIDFlag != nil && nodeIDFlag.Value.String() != "" {
+				fmt.Printf("Node %s has no components assigned\n", nodeIDFlag.Value.String())
+			} else {
+				fmt.Printf("No node-component assignments found\n")
+			}
+			return
+		}
+
+		// Group assignments by node
+		nodeAssignments := make(map[string][]string)
+		for _, a := range assignments {
+			assignment, ok := a.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			nodeID := getString(assignment, "node_id")
+			componentID := getString(assignment, "component_id")
+			if nodeID != "" && componentID != "" {
+				nodeAssignments[nodeID] = append(nodeAssignments[nodeID], componentID)
+			}
+		}
+
+		if nodeIDFlag != nil && nodeIDFlag.Value.String() != "" {
+			// Single node: show detailed component list
+			nodeID := nodeIDFlag.Value.String()
+			fmt.Printf("Components for node %s:\n", nodeID)
+			fmt.Printf("%-30s %-8s\n", "Component ID", "Active")
+			fmt.Println(strings.Repeat("-", 50))
+			for _, a := range assignments {
+				assignment, ok := a.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				componentID := getString(assignment, "component_id")
+				active := getBool(assignment, "active")
+				activeStr := "yes"
+				if !active {
+					activeStr = "no"
+				}
+				fmt.Printf("%-30s %-8s\n", componentID, activeStr)
+			}
+		} else {
+			// All nodes: show one line per node with components
+			fmt.Printf("%-30s %s\n", "Node ID", "Components")
+			fmt.Println(strings.Repeat("-", 80))
+			
+			// Sort nodes for consistent output
+			var nodeIDs []string
+			for nodeID := range nodeAssignments {
+				nodeIDs = append(nodeIDs, nodeID)
+			}
+			sort.Strings(nodeIDs)
+			
+			for _, nodeID := range nodeIDs {
+				components := nodeAssignments[nodeID]
+				componentsStr := strings.Join(components, ", ")
+				if componentsStr == "" {
+					componentsStr = "(none)"
+				}
+				fmt.Printf("%-30s %s\n", nodeID, componentsStr)
+			}
+		}
+	},
+}
+
 var KdcDebugCmd = &cobra.Command{
 	Use:   "debug",
 	Short: "Debug utilities for KDC",
@@ -1346,25 +1561,17 @@ var kdcDebugDistribGenerateCmd = &cobra.Command{
 	Short: "Create a test distribution with clear_text or encrypted_text content",
 	Long:  `Creates a persistent test distribution that can be queried by KRS. The distribution will contain text read from a file (or default lorem ipsum if no file specified) that will be chunked and distributed. Use --content-type to choose 'clear_text' (default) or 'encrypted_text' (HPKE encrypted).`,
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "nodeid", "distid")
+		
 		prefix, _ := getCommandContext("debug")
 		api, err := getApiClient(prefix, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		distributionID := cmd.Flag("id").Value.String()
-		nodeID := cmd.Flag("node-id").Value.String()
+		distributionID := cmd.Flag("distid").Value.String()
+		nodeIDFQDN := cmd.Flag("nodeid").Value.String()
 		testTextFile := cmd.Flag("file").Value.String()
-
-		if distributionID == "" {
-			log.Fatalf("Error: --id is required")
-		}
-		if nodeID == "" {
-			log.Fatalf("Error: --node-id is required")
-		}
-
-		// Ensure node ID is FQDN
-		nodeIDFQDN := dns.Fqdn(nodeID)
 
 		var testText string
 		if testTextFile != "" {
@@ -1479,15 +1686,14 @@ var kdcDebugDistribDeleteCmd = &cobra.Command{
 	Short: "Delete a distribution by ID",
 	Long:  `Deletes a distribution (both from database and cache) by its distribution ID.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "distid")
+		
 		api, err := getApiClient("kdc", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		distributionID := cmd.Flag("id").Value.String()
-		if distributionID == "" {
-			log.Fatalf("Error: --id is required")
-		}
+		distributionID := cmd.Flag("distid").Value.String()
 
 		req := map[string]interface{}{
 			"command":        "delete-distribution",
@@ -1958,7 +2164,8 @@ var kdcDistribSingleCmd = &cobra.Command{
 	Use:   "single --zone <zone-id> --keyid <key-id>",
 	Short: "Trigger distribution of a specific standby ZSK to all nodes",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+		PrepArgs(cmd, "zonename")
+		zoneName := cmd.Flag("zone").Value.String()
 		keyid := cmd.Flag("keyid").Value.String()
 		if keyid == "" {
 			log.Fatalf("Error: --keyid is required")
@@ -1971,8 +2178,8 @@ var kdcDistribSingleCmd = &cobra.Command{
 		}
 
 		req := map[string]interface{}{
-			"command": "distribute-zsk",
-			"zone_name": tdns.Globals.Zonename,
+			"command": "distrib-single",
+			"zone_name": zoneName,
 			"key_id":  keyid,
 		}
 
@@ -2224,13 +2431,11 @@ var kdcDistribListCmd = &cobra.Command{
 }
 
 var kdcDistribStateCmd = &cobra.Command{
-	Use:   "state --id <distribution-id>",
+	Use:   "state --distid <distribution-id>",
 	Short: "Show detailed state of a distribution",
 	Run: func(cmd *cobra.Command, args []string) {
-		distID := cmd.Flag("id").Value.String()
-		if distID == "" {
-			log.Fatalf("Error: --id is required")
-		}
+		PrepArgs(cmd, "distid")
+		distID := cmd.Flag("distid").Value.String()
 
 		prefixcmd, _ := getCommandContext("distrib")
 		api, err := getApiClient(prefixcmd, true)
@@ -2286,13 +2491,11 @@ var kdcDistribStateCmd = &cobra.Command{
 }
 
 var kdcDistribCompletedCmd = &cobra.Command{
-	Use:   "completed --id <distribution-id>",
+	Use:   "completed --distid <distribution-id>",
 	Short: "Force mark a distribution as completed (even if nodes haven't confirmed)",
 	Run: func(cmd *cobra.Command, args []string) {
-		distID := cmd.Flag("id").Value.String()
-		if distID == "" {
-			log.Fatalf("Error: --id is required")
-		}
+		PrepArgs(cmd, "distid")
+		distID := cmd.Flag("distid").Value.String()
 
 		prefixcmd, _ := getCommandContext("distrib")
 		api, err := getApiClient(prefixcmd, true)
@@ -2363,24 +2566,25 @@ func init() {
 	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
 		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd)
 	KdcDistribCmd.AddCommand(kdcDistribListCmd, kdcDistribStateCmd, kdcDistribCompletedCmd, kdcDistribSingleCmd, kdcDistribMultiCmd)
-	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd)
+	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, KdcNodeComponentCmd)
+	KdcNodeComponentCmd.AddCommand(kdcNodeComponentAddCmd, kdcNodeComponentDeleteCmd, kdcNodeComponentListCmd)
 	KdcDebugDistribCmd.AddCommand(kdcDebugDistribGenerateCmd, kdcDebugDistribListCmd, kdcDebugDistribDeleteCmd)
 	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd, 
 		KdcDebugDistribCmd, kdcDebugSetChunkSizeCmd, kdcDebugGetChunkSizeCmd)
 	KdcConfigCmd.AddCommand(kdcConfigGetCmd)
-	KdcServiceCmd.AddCommand(kdcServiceAddCmd, kdcServiceListCmd, kdcServiceDeleteCmd, kdcServiceComponentsCmd)
+	KdcServiceCmd.AddCommand(kdcServiceAddCmd, kdcServiceListCmd, kdcServiceDeleteCmd, kdcServiceComponentsCmd, KdcServiceComponentCmd)
+	KdcServiceComponentCmd.AddCommand(kdcServiceComponentAddCmd, kdcServiceComponentDeleteCmd, kdcServiceComponentReplaceCmd)
 	KdcComponentCmd.AddCommand(kdcComponentAddCmd, kdcComponentListCmd, kdcComponentDeleteCmd)
-	KdcServiceComponentCmd.AddCommand(kdcServiceComponentAddCmd, kdcServiceComponentDeleteCmd)
-	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcConfigCmd, KdcDebugCmd, KdcDistribCmd, KdcServiceCmd, KdcComponentCmd, KdcServiceComponentCmd, PingCmd)
+	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcConfigCmd, KdcDebugCmd, KdcDistribCmd, KdcServiceCmd, KdcComponentCmd, PingCmd)
 
 	kdcDistribSingleCmd.Flags().StringP("keyid", "k", "", "Key ID (must be a ZSK in standby state)")
 	kdcDistribSingleCmd.MarkFlagRequired("keyid")
 	
-	kdcDistribStateCmd.Flags().String("id", "", "Distribution ID")
-	kdcDistribStateCmd.MarkFlagRequired("id")
+	kdcDistribStateCmd.Flags().String("distid", "", "Distribution ID")
+	kdcDistribStateCmd.MarkFlagRequired("distid")
 	
-	kdcDistribCompletedCmd.Flags().String("id", "", "Distribution ID")
-	kdcDistribCompletedCmd.MarkFlagRequired("id")
+	kdcDistribCompletedCmd.Flags().String("distid", "", "Distribution ID")
+	kdcDistribCompletedCmd.MarkFlagRequired("distid")
 	
 	kdcZoneTransitionCmd.Flags().StringP("keyid", "k", "", "Key ID (transition auto-detected: created->published or standby->active)")
 	kdcZoneTransitionCmd.MarkFlagRequired("keyid")
@@ -2439,6 +2643,21 @@ func init() {
 	kdcServiceComponentDeleteCmd.Flags().StringP("cname", "c", "", "Component name")
 	kdcServiceComponentDeleteCmd.MarkFlagRequired("sname")
 	kdcServiceComponentDeleteCmd.MarkFlagRequired("cname")
+	
+	kdcServiceComponentReplaceCmd.Flags().StringP("sname", "s", "", "Service name")
+	kdcServiceComponentReplaceCmd.Flags().String("old", "", "Old component ID or name")
+	kdcServiceComponentReplaceCmd.Flags().String("new", "", "New component ID or name")
+	kdcServiceComponentReplaceCmd.MarkFlagRequired("sname")
+	kdcServiceComponentReplaceCmd.MarkFlagRequired("old")
+	kdcServiceComponentReplaceCmd.MarkFlagRequired("new")
+	
+	// Node-component command flags
+	// Note: nodeid is a persistent flag on KdcNodeCmd, so we don't need to define it here
+	kdcNodeComponentAddCmd.Flags().StringP("cname", "c", "", "Component name")
+	kdcNodeComponentAddCmd.MarkFlagRequired("cname")
+	kdcNodeComponentDeleteCmd.Flags().StringP("cname", "c", "", "Component name")
+	kdcNodeComponentDeleteCmd.MarkFlagRequired("cname")
+	// kdcNodeComponentListCmd uses persistent nodeid flag, no additional flags needed
 
 	KdcNodeCmd.PersistentFlags().StringVarP(&nodeid, "nodeid", "n", "", "node id")
 	KdcNodeCmd.PersistentFlags().StringVarP(&nodename, "nodename", "N", "", "node name")
@@ -2465,15 +2684,15 @@ func init() {
 	kdcDebugHpkeDecryptCmd.MarkFlagRequired("encrypted-file")
 	kdcDebugHpkeDecryptCmd.MarkFlagRequired("private-key-file")
 
-	kdcDebugDistribGenerateCmd.Flags().String("id", "", "Distribution ID (hex, e.g., a1b2)")
-	kdcDebugDistribGenerateCmd.Flags().StringP("node-id", "n", "", "Node ID")
+	kdcDebugDistribGenerateCmd.Flags().String("distid", "", "Distribution ID (hex, e.g., a1b2)")
+	kdcDebugDistribGenerateCmd.Flags().StringP("nodeid", "n", "", "Node ID")
 	kdcDebugDistribGenerateCmd.Flags().StringP("file", "f", "", "File containing text (if not provided, uses default lorem ipsum)")
 	kdcDebugDistribGenerateCmd.Flags().StringP("content-type", "t", "clear_text", "Content type: 'clear_text' or 'encrypted_text' (default: clear_text)")
-	kdcDebugDistribGenerateCmd.MarkFlagRequired("id")
-	kdcDebugDistribGenerateCmd.MarkFlagRequired("node-id")
+	kdcDebugDistribGenerateCmd.MarkFlagRequired("distid")
+	kdcDebugDistribGenerateCmd.MarkFlagRequired("nodeid")
 
-	kdcDebugDistribDeleteCmd.Flags().String("id", "", "Distribution ID to delete")
-	kdcDebugDistribDeleteCmd.MarkFlagRequired("id")
+	kdcDebugDistribDeleteCmd.Flags().String("distid", "", "Distribution ID to delete")
+	kdcDebugDistribDeleteCmd.MarkFlagRequired("distid")
 
 	kdcDebugSetChunkSizeCmd.Flags().StringP("size", "s", "", "Chunk size in bytes")
 	kdcDebugSetChunkSizeCmd.MarkFlagRequired("size")
@@ -2493,8 +2712,11 @@ func sendKdcRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 		return nil, fmt.Errorf("error from API POST: %v", err)
 	}
 
-	if tdns.Globals.Verbose {
-		fmt.Printf("Status: %d\n", status)
+	// Only print status if it's not 200 (success) - useful for debugging errors
+	if status != 200 {
+		if tdns.Globals.Verbose {
+			fmt.Printf("Status: %d\n", status)
+		}
 	}
 
 	if err := json.Unmarshal(buf, &result); err != nil {

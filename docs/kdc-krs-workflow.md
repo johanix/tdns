@@ -212,7 +212,7 @@ To distribute a ZSK to all active edge nodes:
 
 ```bash
 # Distribute a standby ZSK
-tdns-cli kdc zone distribute-zsk \
+tdns-cli kdc distrib single \
    --zone foffa.se. \
    --keyid 4664
 ```
@@ -229,7 +229,7 @@ tdns-cli kdc zone distribute-zsk \
 ### Distribution Flow
 
 ```
-KDC: distribute-zsk command
+KDC: distrib-single command
   ↓
 KDC: Encrypt key for each active node
   ↓
