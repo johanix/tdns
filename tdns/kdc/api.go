@@ -1752,7 +1752,7 @@ func APIKdcServiceComponent(kdcDB *KdcDB) http.HandlerFunc {
 }
 
 // APIKdcNodeComponent handles node-component assignment endpoints
-func APIKdcNodeComponent(kdcDB *KdcDB) http.HandlerFunc {
+func APIKdcNodeComponent(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req KdcNodeComponentPost
 
@@ -1839,7 +1839,7 @@ func APIKdcNodeComponent(kdcDB *KdcDB) http.HandlerFunc {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
-					if err := kdcDB.AddNodeComponentAssignment(nodeID, componentID); err != nil {
+					if err := kdcDB.AddNodeComponentAssignment(nodeID, componentID, kdcConf); err != nil {
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 					} else {
@@ -1859,7 +1859,7 @@ func APIKdcNodeComponent(kdcDB *KdcDB) http.HandlerFunc {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
 				} else {
-					if err := kdcDB.RemoveNodeComponentAssignment(nodeID, componentID); err != nil {
+					if err := kdcDB.RemoveNodeComponentAssignment(nodeID, componentID, kdcConf); err != nil {
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 					} else {
@@ -1957,7 +1957,7 @@ func SetupKdcAPIRoutes(router *mux.Router, kdcDB *KdcDB, conf interface{}, pingH
 	sr.HandleFunc("/kdc/service", APIKdcService(kdcDB)).Methods("POST")
 	sr.HandleFunc("/kdc/component", APIKdcComponent(kdcDB)).Methods("POST")
 	sr.HandleFunc("/kdc/service-component", APIKdcServiceComponent(kdcDB)).Methods("POST")
-	sr.HandleFunc("/kdc/node-component", APIKdcNodeComponent(kdcDB)).Methods("POST")
+	sr.HandleFunc("/kdc/node-component", APIKdcNodeComponent(kdcDB, kdcConf)).Methods("POST")
 	if kdcConf != nil {
 		sr.HandleFunc("/kdc/config", APIKdcConfig(kdcConf, conf)).Methods("POST")
 		sr.HandleFunc("/kdc/debug", APIKdcDebug(kdcDB, kdcConf)).Methods("POST")

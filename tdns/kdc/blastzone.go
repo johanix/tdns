@@ -135,10 +135,16 @@ func (kdc *KdcDB) GetComponentsForNode(nodeID string) ([]string, error) {
 }
 
 // GetZonesForComponent returns all zone names served by a component
+// Zones are related to services, and components are derived from services
 func (kdc *KdcDB) GetZonesForComponent(componentID string) ([]string, error) {
 	rows, err := kdc.DB.Query(
-		`SELECT zone_name FROM component_zone_assignments 
-		 WHERE component_id = ? AND active = 1`,
+		`SELECT DISTINCT z.name
+		 FROM zones z
+		 JOIN service_component_assignments sc ON sc.service_id = z.service_id
+		 WHERE sc.component_id = ?
+		   AND sc.active = 1
+		   AND z.active = 1
+		   AND z.service_id IS NOT NULL`,
 		componentID,
 	)
 	if err != nil {
