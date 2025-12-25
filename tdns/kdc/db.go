@@ -185,19 +185,6 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			INDEX idx_active (active)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-		// Component-zone assignments table (many-to-many)
-		`CREATE TABLE IF NOT EXISTS component_zone_assignments (
-			component_id VARCHAR(255) NOT NULL,
-			zone_name VARCHAR(255) NOT NULL,
-			active BOOLEAN NOT NULL DEFAULT TRUE,
-			since TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (component_id, zone_name),
-			FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE,
-			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
-			INDEX idx_zone_name (zone_name),
-			INDEX idx_active (active)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-
 		// Node-component assignments table (many-to-many)
 		`CREATE TABLE IF NOT EXISTS node_component_assignments (
 			node_id VARCHAR(255) NOT NULL,
@@ -208,19 +195,6 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
 			FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE,
 			INDEX idx_component_id (component_id),
-			INDEX idx_active (active)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-
-		// Zone-node assignments table (deprecated, kept for backward compatibility)
-		`CREATE TABLE IF NOT EXISTS zone_node_assignments (
-			zone_name VARCHAR(255) NOT NULL,
-			node_id VARCHAR(255) NOT NULL,
-			active BOOLEAN NOT NULL DEFAULT TRUE,
-			since TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (zone_name, node_id),
-			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
-			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
-			INDEX idx_node_id (node_id),
 			INDEX idx_active (active)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
@@ -393,18 +367,6 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			CHECK (active IN (0, 1))
 		)`,
 
-		// Component-zone assignments table (many-to-many)
-		`CREATE TABLE IF NOT EXISTS component_zone_assignments (
-			component_id TEXT NOT NULL,
-			zone_name TEXT NOT NULL,
-			active INTEGER NOT NULL DEFAULT 1,
-			since DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (component_id, zone_name),
-			FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE,
-			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
-			CHECK (active IN (0, 1))
-		)`,
-
 		// Node-component assignments table (many-to-many)
 		`CREATE TABLE IF NOT EXISTS node_component_assignments (
 			node_id TEXT NOT NULL,
@@ -414,18 +376,6 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			PRIMARY KEY (node_id, component_id),
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
 			FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE,
-			CHECK (active IN (0, 1))
-		)`,
-
-		// Zone-node assignments table (deprecated, kept for backward compatibility)
-		`CREATE TABLE IF NOT EXISTS zone_node_assignments (
-			zone_name TEXT NOT NULL,
-			node_id TEXT NOT NULL,
-			active INTEGER NOT NULL DEFAULT 1,
-			since DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (zone_name, node_id),
-			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
-			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
 			CHECK (active IN (0, 1))
 		)`,
 
@@ -460,8 +410,6 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		`CREATE INDEX IF NOT EXISTS idx_distribution_records_node_id ON distribution_records(node_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_records_status ON distribution_records(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_records_distribution_id ON distribution_records(distribution_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_zone_node_assignments_node_id ON zone_node_assignments(node_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_zone_node_assignments_active ON zone_node_assignments(active)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_distribution_id ON distribution_confirmations(distribution_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_zone_key ON distribution_confirmations(zone_name, key_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_node_id ON distribution_confirmations(node_id)`,
@@ -744,19 +692,11 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 				
 				// Check if zones are assigned to old component
 				zones, err := kdc.GetZonesForComponent(oldCompID)
+				// Note: Zones are now related to services, not directly to components
+				// Component-zone assignments no longer exist, so no migration needed for zones
+				// Zones will automatically use the new component via their service assignment
 				if err == nil && len(zones) > 0 {
-					log.Printf("KDC: Warning: Component %s has %d zones assigned. Migrating to %s", oldCompID, len(zones), newCompID)
-					for _, zoneName := range zones {
-						// Remove from old component
-						if err := kdc.RemoveComponentZoneAssignment(oldCompID, zoneName); err != nil {
-							log.Printf("KDC: Warning: Failed to remove zone %s from old component %s: %v", zoneName, oldCompID, err)
-						} else {
-							// Add to new component
-							if err := kdc.AddComponentZoneAssignment(newCompID, zoneName); err != nil {
-								log.Printf("KDC: Warning: Failed to assign zone %s to new component %s: %v", zoneName, newCompID, err)
-							}
-						}
-					}
+					log.Printf("KDC: Component %s had %d zones assigned (via old component_zone_assignments table). Zones will now use component %s via their service assignments.", oldCompID, len(zones), newCompID)
 				}
 				
 				// Check if nodes are assigned to old component
@@ -946,13 +886,9 @@ func (kdc *KdcDB) DeleteZone(zoneName string) error {
 		return fmt.Errorf("zone not found: %s", zoneName)
 	}
 	
-	// Explicitly remove component assignments (in case CASCADE doesn't work as expected)
-	// This is a safety measure - CASCADE should handle it, but we do it explicitly to be sure
-	_, err = kdc.DB.Exec("DELETE FROM component_zone_assignments WHERE zone_name = ?", zoneName)
-	if err != nil {
-		log.Printf("KDC: Warning: Failed to delete component assignments for zone %s: %v", zoneName, err)
-		// Continue anyway - CASCADE might handle it
-	}
+	// Note: Zones are now related to services, not directly to components
+	// Foreign key constraints with ON DELETE CASCADE will automatically clean up
+	// related records in dnssec_keys, distribution_records, etc.
 	
 	// Now delete the zone itself
 	result, err := kdc.DB.Exec("DELETE FROM zones WHERE name = ?", zoneName)
@@ -1493,10 +1429,30 @@ func (kdc *KdcDB) CheckAllNodesConfirmed(distributionID, zoneName string) (bool,
 	return true, nil
 }
 
+// updateKeyComment replaces the key's comment field with the latest timestamped event
+func (kdc *KdcDB) updateKeyComment(zoneName, keyID, event string) error {
+	// Format timestamp
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	
+	// Build new comment (replace, don't append)
+	newComment := fmt.Sprintf("%s at %s", event, timestamp)
+
+	// Update comment
+	_, err := kdc.DB.Exec(
+		`UPDATE dnssec_keys SET comment = ? WHERE zone_name = ? AND id = ?`,
+		newComment, zoneName, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update comment: %v", err)
+	}
+	return nil
+}
+
 // UpdateKeyState updates the state of a DNSSEC key
 func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) error {
 	now := time.Now()
 	var err error
+	var commentEvent string
 	
 	switch newState {
 	case KeyStatePublished:
@@ -1504,36 +1460,73 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 			`UPDATE dnssec_keys SET state = ?, published_at = ? WHERE zone_name = ? AND id = ?`,
 			newState, now, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = "published"
+		}
 	case KeyStateStandby:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
 			newState, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = "transitioned to standby"
+		}
 	case KeyStateActive:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ?, activated_at = ? WHERE zone_name = ? AND id = ?`,
 			newState, now, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = "activated"
+		}
 	case KeyStateDistributed:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
 			newState, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = "distributed"
+		}
 	case KeyStateEdgeSigner:
+		// Get zone to find signing component
+		zone, zoneErr := kdc.GetZone(zoneName)
+		var componentInfo string
+		if zoneErr == nil && zone.ServiceID != "" {
+			// Get signing component from service
+			components, compErr := kdc.GetComponentsForService(zone.ServiceID)
+			if compErr == nil {
+				for _, compID := range components {
+					if strings.HasPrefix(compID, "sign_") {
+						componentInfo = fmt.Sprintf(" (%s)", compID)
+						break
+					}
+				}
+			}
+		}
+		
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
 			newState, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = fmt.Sprintf("activated as edgesigner%s", componentInfo)
+		}
 	case KeyStateRetired:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ?, retired_at = ? WHERE zone_name = ? AND id = ?`,
 			newState, now, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = "retired"
+		}
 	case KeyStateRemoved:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
 			newState, zoneName, keyID,
 		)
+		if err == nil {
+			commentEvent = "removed"
+		}
 	default:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
@@ -1544,6 +1537,15 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 	if err != nil {
 		return fmt.Errorf("failed to update key state: %v", err)
 	}
+	
+	// Update comment if we have an event
+	if commentEvent != "" {
+		if err := kdc.updateKeyComment(zoneName, keyID, commentEvent); err != nil {
+			// Log but don't fail the state update
+			log.Printf("KDC: Warning: Failed to update comment for key %s: %v", keyID, err)
+		}
+	}
+	
 	return nil
 }
 
@@ -1946,30 +1948,6 @@ func (kdc *KdcDB) ReplaceServiceComponentAssignment(serviceID, oldComponentID, n
 	return nil
 }
 
-// GetComponentsForZone returns all component IDs that serve a zone
-func (kdc *KdcDB) GetComponentsForZone(zoneName string) ([]string, error) {
-	rows, err := kdc.DB.Query(
-		`SELECT component_id FROM component_zone_assignments 
-		 WHERE zone_name = ? AND active = 1`,
-		zoneName,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query zone components: %v", err)
-	}
-	defer rows.Close()
-
-	var components []string
-	for rows.Next() {
-		var componentID string
-		if err := rows.Scan(&componentID); err != nil {
-			return nil, fmt.Errorf("failed to scan component ID: %v", err)
-		}
-		components = append(components, componentID)
-	}
-
-	return components, rows.Err()
-}
-
 // GetComponentsForService returns all component IDs assigned to a service
 func (kdc *KdcDB) GetComponentsForService(serviceID string) ([]string, error) {
 	rows, err := kdc.DB.Query(
@@ -1994,32 +1972,10 @@ func (kdc *KdcDB) GetComponentsForService(serviceID string) ([]string, error) {
 	return components, rows.Err()
 }
 
-// AddComponentZoneAssignment assigns a zone to a component
-func (kdc *KdcDB) AddComponentZoneAssignment(componentID, zoneName string) error {
-	_, err := kdc.DB.Exec(
-		"INSERT INTO component_zone_assignments (component_id, zone_name, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
-		componentID, zoneName,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to add component-zone assignment: %v", err)
-	}
-	return nil
-}
-
-// RemoveComponentZoneAssignment removes a zone from a component
-func (kdc *KdcDB) RemoveComponentZoneAssignment(componentID, zoneName string) error {
-	_, err := kdc.DB.Exec(
-		"UPDATE component_zone_assignments SET active = 0 WHERE component_id = ? AND zone_name = ?",
-		componentID, zoneName,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to remove component-zone assignment: %v", err)
-	}
-	return nil
-}
-
 // AddNodeComponentAssignment assigns a component to a node
-func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string) error {
+// If kdcConf is provided, it will automatically trigger key distribution for newly served zones
+func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string, kdcConf *KdcConf) error {
+	// Add the assignment
 	_, err := kdc.DB.Exec(
 		"INSERT INTO node_component_assignments (node_id, component_id, active, since) VALUES (?, ?, 1, CURRENT_TIMESTAMP)",
 		nodeID, componentID,
@@ -2027,18 +1983,54 @@ func (kdc *KdcDB) AddNodeComponentAssignment(nodeID, componentID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to add node-component assignment: %v", err)
 	}
+
+	// Compute which zones are newly served by this node
+	newlyServedZones, err := kdc.GetZonesNewlyServedByNode(nodeID, componentID)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to compute newly served zones for node %s, component %s: %v", nodeID, componentID, err)
+		// Don't fail the assignment if delta computation fails
+	} else if len(newlyServedZones) > 0 {
+		log.Printf("KDC: Node %s now serves %d new zone(s) after adding component %s: %v", nodeID, len(newlyServedZones), componentID, newlyServedZones)
+		
+		// Trigger key distribution for newly served zones
+		if kdcConf != nil {
+			for _, zoneName := range newlyServedZones {
+				if err := kdc.distributeKeysForZone(zoneName, nodeID, kdcConf); err != nil {
+					log.Printf("KDC: Warning: Failed to distribute keys for zone %s to node %s: %v", zoneName, nodeID, err)
+					// Continue with other zones
+				}
+			}
+		} else {
+			log.Printf("KDC: KdcConf not provided, skipping automatic key distribution for %d zone(s)", len(newlyServedZones))
+		}
+	}
+
 	return nil
 }
 
 // RemoveNodeComponentAssignment removes a component from a node
-func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string) error {
-	_, err := kdc.DB.Exec(
+// If kdcConf is provided, it will log zones that are no longer served (key deletion can be handled separately)
+func (kdc *KdcDB) RemoveNodeComponentAssignment(nodeID, componentID string, kdcConf *KdcConf) error {
+	// Compute which zones will no longer be served BEFORE removing the assignment
+	noLongerServedZones, err := kdc.GetZonesNoLongerServedByNode(nodeID, componentID)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to compute no-longer-served zones for node %s, component %s: %v", nodeID, componentID, err)
+		// Continue with removal even if delta computation fails
+	} else if len(noLongerServedZones) > 0 {
+		log.Printf("KDC: Node %s will no longer serve %d zone(s) after removing component %s: %v", nodeID, len(noLongerServedZones), componentID, noLongerServedZones)
+		// TODO: Trigger key deletion/revocation for these zones
+		// For now, just log - key deletion can be implemented separately
+	}
+
+	// Remove the assignment
+	_, err = kdc.DB.Exec(
 		"UPDATE node_component_assignments SET active = 0 WHERE node_id = ? AND component_id = ?",
 		nodeID, componentID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to remove node-component assignment: %v", err)
 	}
+
 	return nil
 }
 
@@ -2065,5 +2057,212 @@ func (kdc *KdcDB) GetAllNodeComponentAssignments() ([]*NodeComponentAssignment, 
 	}
 
 	return assignments, rows.Err()
+}
+
+// GetZonesForNode returns all zone names served by a node (via components)
+// A node serves a zone if the node serves at least one component that belongs to the zone's service
+func (kdc *KdcDB) GetZonesForNode(nodeID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT DISTINCT z.name
+		 FROM zones z
+		 JOIN service_component_assignments sc ON sc.service_id = z.service_id
+		 JOIN node_component_assignments nc ON nc.component_id = sc.component_id
+		 WHERE nc.node_id = ? 
+		   AND nc.active = 1 
+		   AND sc.active = 1
+		   AND z.active = 1
+		   AND z.service_id IS NOT NULL`,
+		nodeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query zones for node: %v", err)
+	}
+	defer rows.Close()
+
+	var zones []string
+	for rows.Next() {
+		var zoneName string
+		if err := rows.Scan(&zoneName); err != nil {
+			return nil, fmt.Errorf("failed to scan zone name: %v", err)
+		}
+		zones = append(zones, zoneName)
+	}
+
+	return zones, rows.Err()
+}
+
+// GetZonesNewlyServedByNode returns zones that become newly served by a node after adding a component
+// A zone becomes newly served if:
+// - The component is part of the zone's service, AND
+// - The node did not previously serve any other component of that service
+func (kdc *KdcDB) GetZonesNewlyServedByNode(nodeID, componentID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT DISTINCT z.name
+		 FROM zones z
+		 JOIN service_component_assignments sc ON sc.service_id = z.service_id
+		 WHERE sc.component_id = ?
+		   AND sc.active = 1
+		   AND z.active = 1
+		   AND z.service_id IS NOT NULL
+		   AND NOT EXISTS (
+		       SELECT 1
+		       FROM service_component_assignments sc2
+		       JOIN node_component_assignments nc ON nc.component_id = sc2.component_id
+		       WHERE sc2.service_id = z.service_id
+		         AND nc.node_id = ?
+		         AND nc.active = 1
+		         AND sc2.active = 1
+		         AND sc2.component_id != ?
+		   )`,
+		componentID, nodeID, componentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query newly served zones: %v", err)
+	}
+	defer rows.Close()
+
+	var zones []string
+	for rows.Next() {
+		var zoneName string
+		if err := rows.Scan(&zoneName); err != nil {
+			return nil, fmt.Errorf("failed to scan zone name: %v", err)
+		}
+		zones = append(zones, zoneName)
+	}
+
+	return zones, rows.Err()
+}
+
+// GetZonesNoLongerServedByNode returns zones that are no longer served by a node after removing a component
+// A zone becomes unserved if:
+// - The component was part of the zone's service, AND
+// - The component was the only component of that service that the node had
+func (kdc *KdcDB) GetZonesNoLongerServedByNode(nodeID, componentID string) ([]string, error) {
+	rows, err := kdc.DB.Query(
+		`SELECT DISTINCT z.name
+		 FROM zones z
+		 JOIN service_component_assignments sc ON sc.service_id = z.service_id
+		 WHERE sc.component_id = ?
+		   AND sc.active = 1
+		   AND z.active = 1
+		   AND z.service_id IS NOT NULL
+		   AND NOT EXISTS (
+		       SELECT 1
+		       FROM service_component_assignments sc2
+		       JOIN node_component_assignments nc ON nc.component_id = sc2.component_id
+		       WHERE sc2.service_id = z.service_id
+		         AND nc.node_id = ?
+		         AND nc.active = 1
+		         AND sc2.active = 1
+		         AND sc2.component_id != ?
+		   )`,
+		componentID, nodeID, componentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query no-longer-served zones: %v", err)
+	}
+	defer rows.Close()
+
+	var zones []string
+	for rows.Next() {
+		var zoneName string
+		if err := rows.Scan(&zoneName); err != nil {
+			return nil, fmt.Errorf("failed to scan zone name: %v", err)
+		}
+		zones = append(zones, zoneName)
+	}
+
+	return zones, rows.Err()
+}
+
+// distributeKeysForZone distributes standby ZSK keys for a zone to a specific node
+// This is a helper function called when a node starts serving a zone
+func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcConf) error {
+	// Check zone signing mode - only distribute keys for edgesigned zones
+	signingMode, err := kdc.GetZoneSigningMode(zoneName)
+	if err != nil {
+		return fmt.Errorf("failed to get signing mode: %v", err)
+	}
+	
+	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+		log.Printf("KDC: Zone %s has signing_mode=%s, skipping key distribution (only edgesign_* modes support key distribution)", zoneName, signingMode)
+		return nil // Not an error, just skip
+	}
+
+	// Get the node
+	node, err := kdc.GetNode(nodeID)
+	if err != nil {
+		return fmt.Errorf("failed to get node: %v", err)
+	}
+	
+	if node.State != NodeStateOnline {
+		log.Printf("KDC: Node %s is not online (state: %s), skipping key distribution", nodeID, node.State)
+		return nil // Not an error, just skip
+	}
+	
+	if node.NotifyAddress == "" {
+		log.Printf("KDC: Node %s has no notify_address configured, skipping key distribution", nodeID)
+		return nil // Not an error, just skip
+	}
+
+	// Get all keys for the zone
+	keys, err := kdc.GetDNSSECKeysForZone(zoneName)
+	if err != nil {
+		return fmt.Errorf("failed to get keys for zone: %v", err)
+	}
+
+	// Find standby ZSK keys
+	var standbyZSKs []*DNSSECKey
+	for _, key := range keys {
+		if key.KeyType == KeyTypeZSK && key.State == KeyStateStandby {
+			standbyZSKs = append(standbyZSKs, key)
+		}
+	}
+
+	if len(standbyZSKs) == 0 {
+		log.Printf("KDC: No standby ZSK keys found for zone %s, nothing to distribute", zoneName)
+		return nil // Not an error, just no keys to distribute
+	}
+
+	// Distribute each standby ZSK
+	encryptedCount := 0
+	var lastDistributionID string
+	for _, key := range standbyZSKs {
+		// Get or create distribution ID
+		distributionID, err := kdc.GetOrCreateDistributionID(zoneName, key)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get/create distribution ID for key %s: %v", key.ID, err)
+			continue
+		}
+		lastDistributionID = distributionID
+
+		// Transition to distributed state
+		if err := kdc.UpdateKeyState(zoneName, key.ID, KeyStateDistributed); err != nil {
+			log.Printf("KDC: Warning: Failed to update key state for key %s: %v", key.ID, err)
+			continue
+		}
+
+		// Encrypt key for the node
+		_, _, _, err = kdc.EncryptKeyForNode(key, node)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to encrypt key %s for node %s: %v", key.ID, nodeID, err)
+			continue
+		}
+
+		encryptedCount++
+		log.Printf("KDC: Distributed key %s for zone %s to node %s (distribution ID: %s)", key.ID, zoneName, nodeID, distributionID)
+	}
+
+	if encryptedCount > 0 && lastDistributionID != "" {
+		// Send NOTIFY to the node
+		if kdcConf != nil && kdcConf.ControlZone != "" {
+			if err := kdc.SendNotifyWithDistributionID(lastDistributionID, kdcConf.ControlZone); err != nil {
+				log.Printf("KDC: Warning: Failed to send NOTIFY for distribution %s: %v", lastDistributionID, err)
+			}
+		}
+		log.Printf("KDC: Distributed %d key(s) for zone %s to node %s", encryptedCount, zoneName, nodeID)
+	}
+
+	return nil
 }
 

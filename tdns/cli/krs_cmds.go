@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/johanix/tdns/tdns"
@@ -91,6 +92,28 @@ var krsKeysListCmd = &cobra.Command{
 			return
 		}
 
+		// Sort keys by zone name, then by key ID
+		sort.Slice(keys, func(i, j int) bool {
+			keyI, okI := keys[i].(map[string]interface{})
+			keyJ, okJ := keys[j].(map[string]interface{})
+			if !okI || !okJ {
+				return false
+			}
+			
+			zoneI := getString(keyI, "zone_name", "ZoneName")
+			zoneJ := getString(keyJ, "zone_name", "ZoneName")
+			
+			// First sort by zone name
+			if zoneI != zoneJ {
+				return zoneI < zoneJ
+			}
+			
+			// If same zone, sort by key ID
+			keyIDI := getString(keyI, "key_id", "KeyID")
+			keyIDJ := getString(keyJ, "key_id", "KeyID")
+			return keyIDI < keyIDJ
+		})
+
 		var lines []string
 		lines = append(lines, "Zone | Key ID | Type | Alg | State | Received At")
 		for _, k := range keys {
@@ -99,7 +122,7 @@ var krsKeysListCmd = &cobra.Command{
 				continue
 			}
 
-			zoneID := getString(key, "zone_id", "ZoneID")
+			zoneID := getString(key, "zone_name", "ZoneName")
 			dnskeyID := getString(key, "key_id", "KeyID")
 			keyType := getString(key, "key_type", "KeyType")
 			state := getString(key, "state", "State")
