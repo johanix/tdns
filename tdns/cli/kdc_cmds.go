@@ -99,7 +99,7 @@ Signing Modes:
   - central: Zone is signed centrally, no keys distributed (default)
   - edgesign_dyn: ZSK distributed, signs dynamic responses only
   - edgesign_zsk: ZSK distributed, signs all responses
-  - edgesign_all: KSK+ZSK distributed, all signing at edge
+  - edgesign_full: KSK+ZSK distributed, all signing at edge
   - unsigned: No DNSSEC signing
 
 If --service-id is not provided, the zone will be created without a service assignment.
@@ -843,7 +843,7 @@ Available components:
   - sign_unsigned: Unsigned zones
   - sign_edge_dyn: Edgesigned zones (dynamic responses only)
   - sign_edge_zsk: Edgesigned zones (all responses)
-  - sign_edge_all: Fully edgesigned zones (KSK+ZSK)`,
+  - sign_edge_full: Fully edgesigned zones (KSK+ZSK)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs(cmd, "zonename", "component")
 
@@ -2392,6 +2392,43 @@ var kdcZoneDnssecDeleteCmd = &cobra.Command{
 	},
 }
 
+var kdcZoneDnssecPurgeCmd = &cobra.Command{
+	Use:   "purge [--zone <zone-id>]",
+	Short: "Delete all DNSSEC keys in 'removed' state",
+	Long:  `Delete all DNSSEC keys that are in the 'removed' state. If --zone is specified, only keys for that zone are purged. Otherwise, keys for all zones are purged.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Zone is optional - if provided, normalize it
+		zoneName := ""
+		if tdns.Globals.Zonename != "" {
+			zoneName = dns.Fqdn(tdns.Globals.Zonename)
+		}
+
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "purge-keys",
+		}
+		if zoneName != "" {
+			req["zone_name"] = zoneName
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/zone", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
 var kdcDistribListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all ongoing distributions",
@@ -2417,7 +2454,195 @@ var kdcDistribListCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", resp["msg"])
 		
-		if dists, ok := resp["distributions"].([]interface{}); ok {
+		// Check for verbose flag
+		verbose := false
+		if v, err := cmd.Flags().GetBool("verbose"); err == nil {
+			verbose = v
+		}
+		
+		// Try to get summaries (new format)
+		if summariesRaw, ok := resp["summaries"].([]interface{}); ok && len(summariesRaw) > 0 {
+			if verbose {
+				// Verbose mode: show full multiline information
+				fmt.Println("\nDistributions:")
+				for _, sRaw := range summariesRaw {
+					if s, ok := sRaw.(map[string]interface{}); ok {
+						distID := getString(s, "distribution_id")
+						fmt.Printf("\n  Distribution ID: %s\n", distID)
+						
+						if nodes, ok := s["nodes"].([]interface{}); ok {
+							nodeStrs := make([]string, len(nodes))
+							for i, n := range nodes {
+								nodeStrs[i] = fmt.Sprintf("%v", n)
+							}
+							fmt.Printf("    Nodes: %s\n", strings.Join(nodeStrs, ", "))
+						}
+						
+						if zones, ok := s["zones"].([]interface{}); ok {
+							zoneStrs := make([]string, len(zones))
+							for i, z := range zones {
+								zoneStrs[i] = fmt.Sprintf("%v", z)
+							}
+							fmt.Printf("    Zones: %s\n", strings.Join(zoneStrs, ", "))
+						}
+						
+						zskCount := 0
+						if z, ok := s["zsk_count"].(float64); ok {
+							zskCount = int(z)
+						}
+						kskCount := 0
+						if k, ok := s["ksk_count"].(float64); ok {
+							kskCount = int(k)
+						}
+						fmt.Printf("    Keys: %d ZSK, %d KSK\n", zskCount, kskCount)
+						
+						if keys, ok := s["keys"].(map[string]interface{}); ok {
+							fmt.Printf("    Key Details:\n")
+							for zone, keyID := range keys {
+								fmt.Printf("      %s: key %v\n", zone, keyID)
+							}
+						}
+						
+						if completedAt, ok := s["completed_at"].(string); ok && completedAt != "" {
+							// Parse and format the datetime nicely
+							if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
+								fmt.Printf("    Completed: %s\n", t.Format("2006-01-02 15:04:05"))
+							} else {
+								fmt.Printf("    Completed: %s\n", completedAt)
+							}
+						} else {
+							allConfirmed := false
+							if a, ok := s["all_confirmed"].(bool); ok {
+								allConfirmed = a
+							}
+							if allConfirmed {
+								fmt.Printf("    Status: All nodes confirmed\n")
+							} else {
+								// Show confirmed and pending nodes
+								confirmedNodes := []string{}
+								if c, ok := s["confirmed_nodes"].([]interface{}); ok {
+									for _, n := range c {
+										confirmedNodes = append(confirmedNodes, fmt.Sprintf("%v", n))
+									}
+								}
+								pendingNodes := []string{}
+								if p, ok := s["pending_nodes"].([]interface{}); ok {
+									for _, n := range p {
+										pendingNodes = append(pendingNodes, fmt.Sprintf("%v", n))
+									}
+								}
+								
+								if len(confirmedNodes) > 0 {
+									fmt.Printf("    Confirmed nodes: %s\n", strings.Join(confirmedNodes, ", "))
+								}
+								if len(pendingNodes) > 0 {
+									fmt.Printf("    Pending nodes: %s\n", strings.Join(pendingNodes, ", "))
+								} else {
+									fmt.Printf("    Status: Pending confirmations\n")
+								}
+							}
+						}
+					}
+				}
+			} else {
+				// Default mode: show tabular format
+				var rows []string
+				rows = append(rows, "Id | State | Time | Node | Contents")
+				
+				for _, sRaw := range summariesRaw {
+					if s, ok := sRaw.(map[string]interface{}); ok {
+						distID := getString(s, "distribution_id")
+						if distID == "" {
+							continue
+						}
+						
+						// Get node
+						nodeStr := ""
+						if nodes, ok := s["nodes"].([]interface{}); ok && len(nodes) > 0 {
+							nodeList := make([]string, len(nodes))
+							for i, n := range nodes {
+								nodeList[i] = fmt.Sprintf("%v", n)
+							}
+							nodeStr = nodeList[0]
+							if len(nodeList) > 1 {
+								nodeStr = fmt.Sprintf("%s (+%d)", nodeStr, len(nodeList)-1)
+							}
+						}
+						
+						// Get state and time
+						state := "ongoing"
+						timeStr := ""
+						if completedAt, ok := s["completed_at"].(string); ok && completedAt != "" {
+							state = "completed"
+							if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
+								timeStr = t.Format("2006-01-02 15:04:05")
+							} else {
+								timeStr = completedAt
+							}
+						} else {
+							// Use creation time for ongoing distributions
+							if createdAt, ok := s["created_at"].(string); ok && createdAt != "" {
+								if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+									timeStr = t.Format("2006-01-02 15:04:05")
+								} else {
+									timeStr = createdAt
+								}
+							}
+						}
+						
+						// Build contents string
+						zskCount := 0
+						if z, ok := s["zsk_count"].(float64); ok {
+							zskCount = int(z)
+						}
+						kskCount := 0
+						if k, ok := s["ksk_count"].(float64); ok {
+							kskCount = int(k)
+						}
+						
+						keyTypeStr := ""
+						if zskCount > 0 && kskCount > 0 {
+							keyTypeStr = fmt.Sprintf("%d ZSK and %d KSK", zskCount, kskCount)
+						} else if zskCount > 0 {
+							keyTypeStr = fmt.Sprintf("%d ZSK", zskCount)
+						} else if kskCount > 0 {
+							keyTypeStr = fmt.Sprintf("%d KSK", kskCount)
+						}
+						
+						zoneStr := ""
+						zoneCount := 0
+						if zones, ok := s["zones"].([]interface{}); ok {
+							zoneList := make([]string, len(zones))
+							for i, z := range zones {
+								zoneList[i] = fmt.Sprintf("%v", z)
+							}
+							zoneCount = len(zoneList)
+							if zoneCount > 0 {
+								zoneStr = strings.Join(zoneList, ", ")
+								if zoneCount > 3 {
+									zoneStr = strings.Join(zoneList[:3], ", ") + fmt.Sprintf(" (+%d more)", zoneCount-3)
+								}
+							}
+						}
+						
+						contents := ""
+						if zoneCount > 0 {
+							contents = fmt.Sprintf("%s keys for %d zone(s), including %s", keyTypeStr, zoneCount, zoneStr)
+						} else {
+							contents = keyTypeStr + " keys"
+						}
+						
+						rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s", distID, state, timeStr, nodeStr, contents))
+					}
+				}
+				
+				if len(rows) > 1 {
+					output := columnize.SimpleFormat(rows)
+					fmt.Println(output)
+				}
+			}
+		} else if dists, ok := resp["distributions"].([]interface{}); ok {
+			// Fallback to old format
 			if len(dists) == 0 {
 				fmt.Println("No distributions found")
 			} else {
@@ -2426,6 +2651,35 @@ var kdcDistribListCmd = &cobra.Command{
 					fmt.Printf("  %s\n", dist)
 				}
 			}
+		}
+	},
+}
+
+var kdcDistribPurgeCmd = &cobra.Command{
+	Use:   "purge",
+	Short: "Delete all completed distributions",
+	Long:  "Delete all completed distributions from the database. This permanently removes distribution records and their confirmations.",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("distrib")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		reqBody := map[string]interface{}{
+			"command": "purge",
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/distrib", reqBody)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if msg, ok := resp["msg"].(string); ok {
+			fmt.Println(msg)
+		} else if errorMsg, ok := resp["error_msg"].(string); ok {
+			fmt.Printf("Error: %s\n", errorMsg)
+			os.Exit(1)
 		}
 	},
 }
@@ -2562,10 +2816,10 @@ var kdcZoneSetStateCmd = &cobra.Command{
 }
 
 func init() {
-	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd, kdcZoneDnssecHashCmd)
+	KdcZoneDnssecCmd.AddCommand(kdcZoneDnssecListCmd, kdcZoneDnssecGenerateCmd, kdcZoneDnssecDeleteCmd, kdcZoneDnssecHashCmd, kdcZoneDnssecPurgeCmd)
 	KdcZoneCmd.AddCommand(kdcZoneAddCmd, kdcZoneListCmd, kdcZoneGetCmd, KdcZoneDnssecCmd, kdcZoneDeleteCmd,
 		kdcZoneTransitionCmd, kdcZoneSetStateCmd, kdcZoneServiceCmd, kdcZoneComponentCmd)
-	KdcDistribCmd.AddCommand(kdcDistribListCmd, kdcDistribStateCmd, kdcDistribCompletedCmd, kdcDistribSingleCmd, kdcDistribMultiCmd)
+	KdcDistribCmd.AddCommand(kdcDistribListCmd, kdcDistribStateCmd, kdcDistribCompletedCmd, kdcDistribSingleCmd, kdcDistribMultiCmd, kdcDistribPurgeCmd)
 	KdcNodeCmd.AddCommand(kdcNodeAddCmd, kdcNodeListCmd, kdcNodeGetCmd, kdcNodeUpdateCmd, kdcNodeSetStateCmd, kdcNodeDeleteCmd, KdcNodeComponentCmd)
 	KdcNodeComponentCmd.AddCommand(kdcNodeComponentAddCmd, kdcNodeComponentDeleteCmd, kdcNodeComponentListCmd)
 	KdcDebugDistribCmd.AddCommand(kdcDebugDistribGenerateCmd, kdcDebugDistribListCmd, kdcDebugDistribDeleteCmd)

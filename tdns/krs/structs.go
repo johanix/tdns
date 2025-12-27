@@ -20,10 +20,11 @@ type ReceivedKey struct {
 	Flags           uint16    `json:"flags"`          // DNSSEC flags
 	PublicKey       string    `json:"public_key"`     // Public key RR string (DNSKEY record)
 	PrivateKey      []byte    `json:"-"`              // Decrypted private key (never sent in API responses)
-	State           string    `json:"state"`          // "received", "active", "retired"
+	State           string    `json:"state"`          // "received", "active", "edgesigner", "retired", "removed"
 	ReceivedAt      time.Time `json:"received_at"`    // When the key was received
 	ActivatedAt     *time.Time `json:"activated_at,omitempty"` // When the key was activated
 	RetiredAt       *time.Time `json:"retired_at,omitempty"`   // When the key was retired
+	RetireTime      string    `json:"retire_time,omitempty"`   // Duration string from KDC (e.g., "168h0m0s")
 	DistributionID  string    `json:"distribution_id"` // KDC distribution ID
 	Comment         string    `json:"comment"`        // Optional comment
 }

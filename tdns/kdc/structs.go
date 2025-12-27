@@ -20,7 +20,7 @@ const (
 	ZoneSigningModeCentral       ZoneSigningMode = "central"        // Centrally signed, no keys distributed (default)
 	ZoneSigningModeEdgesignDyn   ZoneSigningMode = "edgesign_dyn"  // ZSK distributed, signs dynamic responses only
 	ZoneSigningModeEdgesignZsk   ZoneSigningMode = "edgesign_zsk"  // ZSK distributed, signs all responses
-	ZoneSigningModeEdgesignAll   ZoneSigningMode = "edgesign_all"  // KSK+ZSK distributed, all signing at edge
+	ZoneSigningModeEdgesignFull  ZoneSigningMode = "edgesign_full"  // KSK+ZSK distributed, all signing at edge
 	ZoneSigningModeUnsigned      ZoneSigningMode = "unsigned"      // No DNSSEC signing
 )
 
@@ -119,13 +119,20 @@ const (
 	KeyStateCreated     KeyState = "created"
 	KeyStatePublished   KeyState = "published"
 	KeyStateStandby     KeyState = "standby"
-	KeyStateActive      KeyState = "active"      // Central signer (stays in KDC)
-	KeyStateDistributed KeyState = "distributed"  // Currently being distributed to nodes
-	KeyStateEdgeSigner  KeyState = "edgesigner"  // Active on edge nodes
+	KeyStateActive      KeyState = "active"       // Active but not distributed (central signer)
+	KeyStateActiveDist  KeyState = "active_dist"   // Active AND distributed to edges (for KSKs in edgesign_full zones)
+	KeyStateDistributed KeyState = "distributed"    // Currently being distributed to nodes
+	KeyStateEdgeSigner  KeyState = "edgesigner"    // Active on edge nodes
 	KeyStateRetired     KeyState = "retired"
 	KeyStateRemoved     KeyState = "removed"
 	KeyStateRevoked     KeyState = "revoked"
 )
+
+// IsActiveKeyState returns true if the key state represents an active key
+// Both KeyStateActive and KeyStateActiveDist qualify as "active"
+func IsActiveKeyState(state KeyState) bool {
+	return state == KeyStateActive || state == KeyStateActiveDist
+}
 
 // DNSSECKey represents a DNSSEC key (KSK, ZSK, or CSK) for a zone
 type DNSSECKey struct {
@@ -157,6 +164,22 @@ type DistributionRecord struct {
 	ExpiresAt        *time.Time         // Optional expiration of the distributed key
 	Status           hpke.DistributionStatus
 	DistributionID   string             // HPKE distribution ID (for tracking)
+	CompletedAt      *time.Time         // When distribution was completed (nil if not completed)
+}
+
+// DistributionSummaryInfo represents summary information about a distribution for listing
+type DistributionSummaryInfo struct {
+	DistributionID string            `json:"distribution_id"`
+	Nodes          []string          `json:"nodes"`          // Nodes this distribution applies to
+	Zones          []string          `json:"zones"`          // Zones in this distribution
+	ZSKCount       int               `json:"zsk_count"`     // Number of ZSK keys
+	KSKCount       int               `json:"ksk_count"`     // Number of KSK keys
+	Keys           map[string]string `json:"keys"`          // Map of zone -> key_id (for verbose mode)
+	CreatedAt      string            `json:"created_at"`
+	CompletedAt    *string           `json:"completed_at,omitempty"`
+	AllConfirmed   bool              `json:"all_confirmed"`
+	ConfirmedNodes []string          `json:"confirmed_nodes,omitempty"` // Nodes that have confirmed
+	PendingNodes   []string          `json:"pending_nodes,omitempty"`   // Nodes that haven't confirmed yet
 }
 
 // ZoneNodeAssignment is deprecated - use Component-based model instead

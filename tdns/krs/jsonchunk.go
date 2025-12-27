@@ -253,11 +253,16 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		return fmt.Errorf("failed to query JSONMANIFEST: %v", err)
 	}
 
-	// Extract content type from metadata
+	// Extract content type and retire_time from metadata
 	contentType := "unknown"
+	retireTime := ""
 	if manifest.Metadata != nil {
 		if c, ok := manifest.Metadata["content"].(string); ok {
 			contentType = c
+		}
+		if rt, ok := manifest.Metadata["retire_time"].(string); ok {
+			retireTime = rt
+			log.Printf("KRS: Extracted retire_time from metadata: %s", retireTime)
 		}
 	}
 
@@ -331,7 +336,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	case "zonelist":
 		return ProcessZoneList(krsDB, reassembled)
 	case "encrypted_keys":
-		return ProcessEncryptedKeys(krsDB, conf, reassembled, distributionID)
+		return ProcessEncryptedKeys(krsDB, conf, reassembled, distributionID, retireTime)
 	default:
 		return fmt.Errorf("unknown content type: %s", contentType)
 	}
@@ -520,12 +525,9 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 
 // ProcessEncryptedKeys processes encrypted_keys content
 // Data is base64-encoded JSON containing an array of encrypted key entries
-// distributionID is optional and can be passed from the manifest metadata
-func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID ...string) error {
-	distID := ""
-	if len(distributionID) > 0 {
-		distID = distributionID[0]
-	}
+// distributionID and retireTime are optional and can be passed from the manifest metadata
+func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distributionID string, retireTime string) error {
+	distID := distributionID
 	// Step 1: Decode base64 to get JSON
 	log.Printf("KRS: Processing encrypted_keys content (%d bytes base64)", len(data))
 	jsonData, err := base64.StdEncoding.DecodeString(string(data))
@@ -619,6 +621,8 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 		}
 
 		log.Printf("KRS: Successfully decrypted key for zone %s, key_id %s (%d bytes)", entry.ZoneName, entry.KeyID, len(plaintext))
+		log.Printf("KRS: Key entry details - ZoneName: %s, KeyID: %s, KeyType: '%s', Algorithm: %d, Flags: %d", 
+			entry.ZoneName, entry.KeyID, entry.KeyType, entry.Algorithm, entry.Flags)
 
 		// Create ReceivedKey structure
 		// Parse key_id as uint16 (it's stored as string in JSON but should be a keytag)
@@ -631,6 +635,24 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 			}
 		}
 
+		// Determine state based on key type
+		// ZSKs go to "edgesigner" state, KSKs go to "active" state
+		// Also check Flags: 257 = KSK, 256 = ZSK
+		keyState := "edgesigner"
+		isKSK := false
+		if entry.KeyType == "KSK" {
+			keyState = "active"
+			isKSK = true
+			log.Printf("KRS: Detected KSK from KeyType field")
+		} else if entry.Flags == 257 {
+			// Fallback: check flags if KeyType is missing or incorrect
+			keyState = "active"
+			isKSK = true
+			log.Printf("KRS: Detected KSK from Flags field (257), KeyType was '%s'", entry.KeyType)
+		} else {
+			log.Printf("KRS: Detected ZSK (KeyType: '%s', Flags: %d)", entry.KeyType, entry.Flags)
+		}
+
 		receivedKey := &ReceivedKey{
 			ID:             fmt.Sprintf("%s-%s", entry.ZoneName, entry.KeyID),
 			ZoneName:       entry.ZoneName,
@@ -640,17 +662,32 @@ func ProcessEncryptedKeys(krsDB *KrsDB, conf *KrsConf, data []byte, distribution
 			Flags:          entry.Flags,
 			PublicKey:      entry.PublicKey,
 			PrivateKey:     plaintext,
-			State:          "edgesigner", // Standby keys are already published, ready to use
+			State:          keyState,
 			ReceivedAt:     time.Now(),
 			DistributionID: distID,
+			RetireTime:     retireTime, // From KDC metadata
 			Comment:        fmt.Sprintf("Received via encrypted_keys distribution"),
 		}
 
-		// Store in database atomically (retires existing edgesigner keys and adds new one)
-		// This ensures only one key per zone is in "edgesigner" state
-		if err := krsDB.AddEdgesignerKeyWithRetirement(receivedKey); err != nil {
-			log.Printf("KRS: Error: Failed to store key for entry %d: %v", i+1, err)
-			continue
+		// Store in database atomically
+		// For ZSKs: retires existing edgesigner keys and adds new one (ensures only one ZSK per zone in edgesigner state)
+		// For KSKs: retires existing active KSKs and adds new one (ensures only one KSK per zone in active state)
+		if isKSK {
+			// Ensure KeyType is set correctly for KSK
+			receivedKey.KeyType = "KSK"
+			if err := krsDB.AddActiveKeyWithRetirement(receivedKey); err != nil {
+				log.Printf("KRS: Error: Failed to store KSK for entry %d: %v", i+1, err)
+				continue
+			}
+			log.Printf("KRS: Successfully stored KSK (key_id %d) in 'active' state for zone %s", keyID, entry.ZoneName)
+		} else {
+			// Ensure KeyType is set correctly for ZSK
+			receivedKey.KeyType = "ZSK"
+			if err := krsDB.AddEdgesignerKeyWithRetirement(receivedKey); err != nil {
+				log.Printf("KRS: Error: Failed to store ZSK for entry %d: %v", i+1, err)
+				continue
+			}
+			log.Printf("KRS: Successfully stored ZSK (key_id %d) in 'edgesigner' state for zone %s", keyID, entry.ZoneName)
 		}
 
 		successCount++

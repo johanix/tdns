@@ -19,9 +19,10 @@ import (
 
 // KrsKeysPost represents a request to the KRS keys API
 type KrsKeysPost struct {
-	Command string `json:"command"` // "list", "get", "get-by-zone"
+	Command string `json:"command"` // "list", "get", "get-by-zone", "purge"
 	KeyID   string `json:"key_id,omitempty"`
 	ZoneID  string `json:"zone_id,omitempty"`
+	ZoneName string `json:"zone_name,omitempty"` // For purge command
 }
 
 // KrsKeysResponse represents a response from the KRS keys API
@@ -188,6 +189,21 @@ func APIKrsKeys(krsDB *KrsDB) http.HandlerFunc {
 					resp.ErrorMsg = err.Error()
 				} else {
 					resp.Msg = hash
+				}
+			}
+
+		case "purge":
+			// Purge keys in "removed" state
+			// zone_name is optional - if provided, only purge keys for that zone
+			deletedCount, err := krsDB.DeleteKeysByState("removed", req.ZoneName)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				if req.ZoneName != "" {
+					resp.Msg = fmt.Sprintf("Deleted %d key(s) in 'removed' state for zone %s", deletedCount, req.ZoneName)
+				} else {
+					resp.Msg = fmt.Sprintf("Deleted %d key(s) in 'removed' state (all zones)", deletedCount)
 				}
 			}
 

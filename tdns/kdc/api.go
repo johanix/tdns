@@ -23,7 +23,7 @@ import (
 
 // KdcZonePost represents a request to the KDC zone API
 type KdcZonePost struct {
-	Command       string   `json:"command"`        // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distrib-single", "distrib-multi", "transition", "setstate", "delete-key", "set-service", "set-component"
+	Command       string   `json:"command"`        // "add", "list", "get", "get-keys", "generate-key", "encrypt-key", "update", "delete", "distrib-single", "distrib-multi", "transition", "setstate", "delete-key", "purge-keys", "set-service", "set-component"
 	Zone          *Zone    `json:"zone,omitempty"`
 	ZoneName      string   `json:"zone_name,omitempty"`      // Zone name (replaces zone_id)
 	ServiceID     string   `json:"service_id,omitempty"`     // For set-service command
@@ -527,6 +527,18 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Key %s is not in standby state (current state: %s)", req.KeyID, key.State)
 			} else {
+				// Check if zone uses sign_edge_full and get active KSK
+				signingMode, _ := kdcDB.GetZoneSigningMode(req.ZoneName)
+				var activeKSK *DNSSECKey
+				if signingMode == ZoneSigningModeEdgesignFull {
+					keys, _ := kdcDB.GetDNSSECKeysForZone(req.ZoneName)
+					for _, k := range keys {
+						if k.KeyType == KeyTypeKSK && k.State == KeyStateActive {
+							activeKSK = k
+							break
+						}
+					}
+				}
 				// Get distributionID for this key (before transitioning state)
 				distributionID, err := kdcDB.GetOrCreateDistributionID(req.ZoneName, key)
 				if err != nil {
@@ -548,7 +560,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 							if err != nil {
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Failed to get signing mode: %v", err)
-							} else if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+							} else if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Zone %s has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", req.ZoneName, signingMode)
 							} else {
@@ -575,6 +587,34 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 										log.Printf("KDC: Encrypted key %s for node %s (distribution ID: %s)", req.KeyID, node.ID, distributionID)
 									}
 									log.Printf("KDC: Encrypted key for %d/%d nodes serving zone %s", encryptedCount, len(nodes), req.ZoneName)
+								}
+
+								// Distribute active KSK for edgesign_full zones
+								if activeKSK != nil {
+									kskDistributionID, err := kdcDB.GetOrCreateDistributionID(req.ZoneName, activeKSK)
+									if err != nil {
+										log.Printf("KDC: Warning: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
+									} else {
+										// Transition to active_dist state
+										if err := kdcDB.UpdateKeyState(req.ZoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
+											log.Printf("KDC: Warning: Failed to update KSK state: %v", err)
+										} else {
+											// Encrypt KSK for all nodes
+											kskEncryptedCount := 0
+											for _, node := range nodes {
+												if node.NotifyAddress == "" {
+													continue
+												}
+												_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node)
+												if err != nil {
+													log.Printf("KDC: Warning: Failed to encrypt KSK for node %s: %v", node.ID, err)
+													continue
+												}
+												kskEncryptedCount++
+											}
+											log.Printf("KDC: Encrypted KSK %s for %d/%d nodes serving zone %s (distribution ID: %s)", activeKSK.ID, kskEncryptedCount, len(nodes), req.ZoneName, kskDistributionID)
+										}
+									}
 								}
 							}
 
@@ -651,6 +691,21 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Msg = fmt.Sprintf("Key %s deleted successfully", req.KeyID)
+			}
+
+		case "purge-keys":
+			// Purge keys in "removed" state
+			// zone_name is optional - if provided, only purge keys for that zone
+			deletedCount, err := kdcDB.DeleteKeysByState(KeyStateRemoved, req.ZoneName)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				if req.ZoneName != "" {
+					resp.Msg = fmt.Sprintf("Deleted %d key(s) in 'removed' state for zone %s", deletedCount, req.ZoneName)
+				} else {
+					resp.Msg = fmt.Sprintf("Deleted %d key(s) in 'removed' state (all zones)", deletedCount)
+				}
 			}
 
 		case "setstate":
@@ -755,17 +810,6 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					}
 				}
 				
-				if standbyZSK == nil {
-					if len(zskStates) == 0 {
-						result.Msg = "No ZSK keys found for zone"
-					} else {
-						result.Msg = fmt.Sprintf("No standby ZSK found for zone (available ZSK states: %s)", strings.Join(zskStates, ", "))
-					}
-					results = append(results, result)
-					errorCount++
-					continue
-				}
-				
 				// Check zone signing mode FIRST - only distribute keys for edgesigned zones
 				_, err = kdcDB.GetZone(zoneName)
 				if err != nil {
@@ -781,8 +825,44 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					errorCount++
 					continue
 				}
-				if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+				if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
 					result.Msg = fmt.Sprintf("Zone has signing_mode=%s, keys are not distributed to nodes (only edgesign_* modes support key distribution)", signingMode)
+					results = append(results, result)
+					errorCount++
+					continue
+				}
+
+				// For edgesign_full zones, also find active KSK (must be in 'active' state, not 'active_dist')
+				var activeKSK *DNSSECKey
+				if signingMode == ZoneSigningModeEdgesignFull {
+					log.Printf("KDC: Zone %s uses sign_edge_full, searching for active KSK (checked %d keys)", zoneName, len(keys))
+					for _, key := range keys {
+						if key.KeyType == KeyTypeKSK {
+							log.Printf("KDC: Zone %s: Found KSK %s in state %s", zoneName, key.ID, key.State)
+							if key.State == KeyStateActive {
+								activeKSK = key
+								log.Printf("KDC: Zone %s: Selected KSK %s for distribution (state: %s)", zoneName, key.ID, key.State)
+								break
+							}
+						}
+					}
+					if activeKSK == nil {
+						log.Printf("KDC: Zone %s uses sign_edge_full but no active KSK found (checked %d keys)", zoneName, len(keys))
+						// Log all KSK states for debugging
+						for _, key := range keys {
+							if key.KeyType == KeyTypeKSK {
+								log.Printf("KDC: Zone %s has KSK %s in state %s", zoneName, key.ID, key.State)
+							}
+						}
+					}
+				}
+
+				if standbyZSK == nil && activeKSK == nil {
+					if len(zskStates) == 0 {
+						result.Msg = "No ZSK keys found for zone"
+					} else {
+						result.Msg = fmt.Sprintf("No standby ZSK found for zone (available ZSK states: %s)", strings.Join(zskStates, ", "))
+					}
 					results = append(results, result)
 					errorCount++
 					continue
@@ -817,36 +897,81 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					continue
 				}
 
-				// Distribute this key (same logic as distrib-single)
-				distributionID, err := kdcDB.GetOrCreateDistributionID(zoneName, standbyZSK)
-				if err != nil {
-					result.Msg = fmt.Sprintf("Failed to get/create distribution ID: %v", err)
-					results = append(results, result)
-					errorCount++
-					continue
-				}
-				
-				// Transition to distributed state
-				if err := kdcDB.UpdateKeyState(zoneName, standbyZSK.ID, KeyStateDistributed); err != nil {
-					result.Msg = fmt.Sprintf("Failed to update key state: %v", err)
-					results = append(results, result)
-					errorCount++
-					continue
+				// Distribute ZSK (if available)
+				var distributionID string
+				var encryptedCount int
+				if standbyZSK != nil {
+					distributionID, err = kdcDB.GetOrCreateDistributionID(zoneName, standbyZSK)
+					if err != nil {
+						result.Msg = fmt.Sprintf("Failed to get/create distribution ID: %v", err)
+						results = append(results, result)
+						errorCount++
+						continue
+					}
+					
+					// Transition to distributed state
+					if err := kdcDB.UpdateKeyState(zoneName, standbyZSK.ID, KeyStateDistributed); err != nil {
+						result.Msg = fmt.Sprintf("Failed to update key state: %v", err)
+						results = append(results, result)
+						errorCount++
+						continue
+					}
+
+					// Encrypt ZSK for all nodes
+					for _, node := range nodes {
+						if node.NotifyAddress == "" {
+							log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
+							continue
+						}
+						_, _, _, err := kdcDB.EncryptKeyForNode(standbyZSK, node)
+						if err != nil {
+							log.Printf("KDC: Warning: Failed to encrypt ZSK for node %s: %v", node.ID, err)
+							continue
+						}
+						encryptedCount++
+					}
+					log.Printf("KDC: Encrypted ZSK %s for %d/%d nodes serving zone %s", standbyZSK.ID, encryptedCount, len(nodes), zoneName)
 				}
 
-				// Encrypt keys for all nodes
-				encryptedCount := 0
-				for _, node := range nodes {
-					if node.NotifyAddress == "" {
-						log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
-						continue
-					}
-					_, _, _, err := kdcDB.EncryptKeyForNode(standbyZSK, node)
+				// Distribute active KSK for edgesign_full zones
+				if activeKSK != nil {
+					log.Printf("KDC: Distributing KSK %s for zone %s (sign_edge_full)", activeKSK.ID, zoneName)
+					kskDistributionID, err := kdcDB.GetOrCreateDistributionID(zoneName, activeKSK)
 					if err != nil {
-						log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
-						continue
+						log.Printf("KDC: Error: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
+					} else {
+						log.Printf("KDC: KSK %s distribution ID: %s", activeKSK.ID, kskDistributionID)
+						// Use KSK distribution ID if ZSK wasn't distributed
+						if distributionID == "" {
+							distributionID = kskDistributionID
+						}
+						// Transition to active_dist state
+						if err := kdcDB.UpdateKeyState(zoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
+							log.Printf("KDC: Error: Failed to update KSK state to active_dist: %v", err)
+						} else {
+							log.Printf("KDC: Successfully updated KSK %s state to active_dist", activeKSK.ID)
+							// Encrypt KSK for all nodes
+							kskEncryptedCount := 0
+							for _, node := range nodes {
+								if node.NotifyAddress == "" {
+									log.Printf("KDC: Skipping node %s (no notify_address) for KSK distribution", node.ID)
+									continue
+								}
+								log.Printf("KDC: Encrypting KSK %s for node %s", activeKSK.ID, node.ID)
+								_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node)
+								if err != nil {
+									log.Printf("KDC: Error: Failed to encrypt KSK for node %s: %v", node.ID, err)
+									continue
+								}
+								kskEncryptedCount++
+								log.Printf("KDC: Successfully encrypted KSK %s for node %s", activeKSK.ID, node.ID)
+							}
+							log.Printf("KDC: Encrypted KSK %s for %d/%d nodes serving zone %s", activeKSK.ID, kskEncryptedCount, len(nodes), zoneName)
+							encryptedCount += kskEncryptedCount
+						}
 					}
-					encryptedCount++
+				} else {
+					log.Printf("KDC: No active KSK to distribute for zone %s (sign_edge_full)", zoneName)
 				}
 				
 				if encryptedCount == 0 {
@@ -856,18 +981,20 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 					continue
 				}
 				
-				log.Printf("KDC: Encrypted key %s for %d/%d nodes serving zone %s", standbyZSK.ID, encryptedCount, len(nodes), zoneName)
-				
 				// Send NOTIFY to all active nodes
-				if kdcConf != nil && kdcConf.ControlZone != "" {
+				if kdcConf != nil && kdcConf.ControlZone != "" && distributionID != "" {
 					if err := kdcDB.SendNotifyWithDistributionID(distributionID, kdcConf.ControlZone); err != nil {
 						log.Printf("KDC: Warning: Failed to send NOTIFYs: %v", err)
 					}
 				}
 				
 				result.Status = "success"
-				result.KeyID = standbyZSK.ID
-				result.Msg = fmt.Sprintf("Key %s distributed (distribution ID: %s) to %d node(s)", standbyZSK.ID, distributionID, encryptedCount)
+				if standbyZSK != nil {
+					result.KeyID = standbyZSK.ID
+				} else if activeKSK != nil {
+					result.KeyID = activeKSK.ID
+				}
+				result.Msg = fmt.Sprintf("Key(s) distributed (distribution ID: %s) to %d node(s)", distributionID, encryptedCount)
 				results = append(results, result)
 				successCount++
 			}
@@ -1105,16 +1232,19 @@ type DistributionStateInfo struct {
 	ConfirmedNodes []string `json:"confirmed_nodes"` // Nodes that have confirmed
 	PendingNodes   []string `json:"pending_nodes"`   // Nodes that haven't confirmed yet
 	AllConfirmed   bool     `json:"all_confirmed"`
+	CompletedAt    *string  `json:"completed_at,omitempty"` // When distribution was completed
 }
+
 
 // KdcDistribResponse represents a response from the KDC distrib API
 type KdcDistribResponse struct {
-	Time      time.Time              `json:"time"`
-	Error     bool                   `json:"error,omitempty"`
-	ErrorMsg  string                 `json:"error_msg,omitempty"`
-	Msg       string                 `json:"msg,omitempty"`
-	Distributions []string           `json:"distributions,omitempty"` // For list command
-	State     *DistributionStateInfo `json:"state,omitempty"`         // For state command
+	Time          time.Time                `json:"time"`
+	Error         bool                     `json:"error,omitempty"`
+	ErrorMsg      string                   `json:"error_msg,omitempty"`
+	Msg           string                   `json:"msg,omitempty"`
+	Distributions []string                 `json:"distributions,omitempty"` // For list command (simple format)
+	Summaries     []DistributionSummaryInfo `json:"summaries,omitempty"`     // For list command (detailed format)
+	State         *DistributionStateInfo    `json:"state,omitempty"`          // For state command
 }
 
 // APIKdcDistrib handles distribution management endpoints
@@ -1133,14 +1263,30 @@ func APIKdcDistrib(kdcDB *KdcDB, kdcConf *KdcConf) http.HandlerFunc {
 
 		switch req.Command {
 		case "list":
-			// Get all distribution IDs
-			distIDs, err := kdcDB.GetAllDistributionIDs()
+			// Get detailed distribution summaries
+			summaries, err := kdcDB.GetDistributionSummaries()
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
+				resp.Summaries = summaries
+				// Also include simple list for backward compatibility
+				distIDs := make([]string, len(summaries))
+				for i, s := range summaries {
+					distIDs[i] = s.DistributionID
+				}
 				resp.Distributions = distIDs
-				resp.Msg = fmt.Sprintf("Found %d distribution(s)", len(distIDs))
+				resp.Msg = fmt.Sprintf("Found %d distribution(s)", len(summaries))
+			}
+
+		case "purge":
+			// Delete all completed distributions
+			deleted, err := kdcDB.PurgeCompletedDistributions()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Msg = fmt.Sprintf("Purged %d completed distribution(s)", deleted)
 			}
 
 		case "state":

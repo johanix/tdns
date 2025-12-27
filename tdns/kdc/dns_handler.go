@@ -227,7 +227,7 @@ func handleKMREQQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 		}
 		return err
 	}
-	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
 		log.Printf("KDC: Zone %s has signing_mode=%s, not distributing keys via KMREQ (only edgesign_* modes support key distribution)", zone, signingMode)
 		m.SetRcode(msg, dns.RcodeRefused)
 		err := w.WriteMsg(m)
@@ -826,15 +826,46 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		log.Printf("KDC: Error checking if all nodes confirmed: %v", err)
 		// Don't fail - we've recorded the confirmation
 	} else if allConfirmed {
-		log.Printf("KDC: All nodes have confirmed distribution %s, transitioning key %s state from 'distributed' to 'edgesigner'", 
-			distributionID, keyID)
-		
-		// Transition key state from 'distributed' to 'edgesigner'
-		if err := kdcDB.UpdateKeyState(zoneName, keyID, KeyStateEdgeSigner); err != nil {
-			log.Printf("KDC: Error transitioning key state: %v", err)
-			// Don't fail - the confirmation was recorded
+		// Get the key to check its type
+		key, err := kdcDB.GetDNSSECKeyByID(zoneName, keyID)
+		if err != nil {
+			log.Printf("KDC: Error getting key %s: %v", keyID, err)
 		} else {
-			log.Printf("KDC: Successfully transitioned key %s to 'edgesigner' state", keyID)
+			var newState KeyState
+			if key.KeyType == KeyTypeKSK {
+				// KSK transitions to active_dist (already active, now confirmed distributed)
+				newState = KeyStateActiveDist
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s state to 'active_dist'", 
+					distributionID, keyID)
+			} else {
+				// ZSK transitions to edgesigner
+				newState = KeyStateEdgeSigner
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning ZSK %s state from 'distributed' to 'edgesigner'", 
+					distributionID, keyID)
+			}
+			
+			// Transition key state
+			if err := kdcDB.UpdateKeyState(zoneName, keyID, newState); err != nil {
+				log.Printf("KDC: Error transitioning key state: %v", err)
+				// Don't fail - the confirmation was recorded
+			} else {
+				log.Printf("KDC: Successfully transitioned key %s to '%s' state", keyID, newState)
+				
+				// Retire old keys in the same state for the same zone and key type
+				// This ensures only one key per zone/key-type is in edgesigner/active_dist state
+				if err := kdcDB.RetireOldKeysForZone(zoneName, key.KeyType, keyID, newState); err != nil {
+					log.Printf("KDC: Warning: Failed to retire old keys for zone %s: %v", zoneName, err)
+					// Don't fail - the new key was successfully transitioned
+				}
+				
+				// Mark distribution as complete
+				if err := kdcDB.MarkDistributionComplete(distributionID); err != nil {
+					log.Printf("KDC: Warning: Failed to mark distribution %s as complete: %v", distributionID, err)
+					// Don't fail - the key was successfully transitioned
+				} else {
+					log.Printf("KDC: Marked distribution %s as complete", distributionID)
+				}
+			}
 		}
 	} else {
 		// Get list of confirmed nodes for logging

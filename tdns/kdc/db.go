@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,7 +42,21 @@ func NewKdcDB(dbType, dsn string) (*KdcDB, error) {
 		return nil, fmt.Errorf("unsupported database type: %s (must be 'sqlite' or 'mariadb')", dbType)
 	}
 
-	db, err := sql.Open(driverName, dsn)
+	var dsnWithParams string
+	if strings.ToLower(dbType) == "sqlite" || strings.ToLower(dbType) == "sqlite3" {
+		// SQLite: Add busy_timeout and other pragmas via query parameters
+		// busy_timeout=5000 means wait up to 5 seconds for locks to clear
+		// WAL mode provides better concurrency
+		if strings.Contains(dsn, "?") {
+			dsnWithParams = dsn + "&_busy_timeout=5000&_journal_mode=WAL"
+		} else {
+			dsnWithParams = dsn + "?_busy_timeout=5000&_journal_mode=WAL"
+		}
+	} else {
+		dsnWithParams = dsn
+	}
+
+	db, err := sql.Open(driverName, dsnWithParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
 	}
@@ -49,6 +64,18 @@ func NewKdcDB(dbType, dsn string) (*KdcDB, error) {
 	// Test the connection
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %v", err)
+	}
+	
+	// For SQLite, set additional pragmas after connection
+	if strings.ToLower(dbType) == "sqlite" || strings.ToLower(dbType) == "sqlite3" {
+		// Set busy timeout (in milliseconds) - wait up to 5 seconds for locks
+		if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+			return nil, fmt.Errorf("failed to set busy_timeout: %v", err)
+		}
+		// Enable WAL mode for better concurrency (if not already set via DSN)
+		if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+			log.Printf("KDC: Warning: Failed to set journal_mode to WAL: %v", err)
+		}
 	}
 
 	kdc := &KdcDB{
@@ -137,7 +164,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			flags SMALLINT UNSIGNED NOT NULL,
 			public_key TEXT NOT NULL,
 			private_key BLOB NOT NULL,
-			state ENUM('created', 'published', 'standby', 'active', 'distributed', 'edgesigner', 'retired', 'removed', 'revoked') NOT NULL DEFAULT 'created',
+			state ENUM('created', 'published', 'standby', 'active', 'active_dist', 'distributed', 'edgesigner', 'retired', 'removed', 'revoked') NOT NULL DEFAULT 'created',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			published_at TIMESTAMP NULL,
 			activated_at TIMESTAMP NULL,
@@ -160,7 +187,7 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 			ephemeral_pub_key BLOB NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at TIMESTAMP NULL,
-			status ENUM('pending', 'delivered', 'active', 'revoked') NOT NULL DEFAULT 'pending',
+			status ENUM('pending', 'delivered', 'active', 'revoked', 'completed') NOT NULL DEFAULT 'pending',
 			distribution_id VARCHAR(255) NOT NULL,
 			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
 			FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
@@ -223,6 +250,26 @@ func (kdc *KdcDB) initSchemaMySQL() error {
 	}
 
 	log.Printf("KDC database schema initialized successfully (MySQL/MariaDB)")
+	
+	// Migrate: Add completed_at column if it doesn't exist
+	if err := kdc.migrateAddCompletedAtColumn(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate completed_at column: %v", err)
+	} else {
+		// Create index on completed_at after the column has been added
+		if _, err := kdc.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_distribution_records_completed_at ON distribution_records(completed_at)`); err != nil {
+			log.Printf("KDC: Warning: Failed to create index on completed_at: %v", err)
+		}
+	}
+	
+	// Migrate: Update status ENUM to include 'completed'
+	if err := kdc.migrateAddCompletedStatus(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate status ENUM: %v", err)
+	}
+	
+	// Migrate: Update state ENUM to include 'active_dist'
+	if err := kdc.migrateAddActiveDistState(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate state ENUM: %v", err)
+	}
 	
 	// Ensure default service/component exist
 	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
@@ -334,7 +381,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			comment TEXT,
 			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
 			CHECK (key_type IN ('KSK', 'ZSK', 'CSK')),
-			CHECK (state IN ('created', 'published', 'standby', 'active', 'distributed', 'edgesigner', 'retired', 'removed', 'revoked'))
+			CHECK (state IN ('created', 'published', 'standby', 'active', 'active_dist', 'distributed', 'edgesigner', 'retired', 'removed', 'revoked'))
 		)`,
 
 		// Distribution records table
@@ -349,10 +396,11 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 			expires_at DATETIME,
 			status TEXT NOT NULL DEFAULT 'pending',
 			distribution_id TEXT NOT NULL,
+			completed_at DATETIME,
 			FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
 			FOREIGN KEY (key_id) REFERENCES dnssec_keys(id) ON DELETE CASCADE,
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
-			CHECK (status IN ('pending', 'delivered', 'active', 'revoked'))
+			CHECK (status IN ('pending', 'delivered', 'active', 'revoked', 'completed'))
 		)`,
 
 		// Service-component assignments table (many-to-many)
@@ -409,7 +457,7 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		`CREATE INDEX IF NOT EXISTS idx_distribution_records_key_id ON distribution_records(key_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_records_node_id ON distribution_records(node_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_records_status ON distribution_records(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_distribution_records_distribution_id ON distribution_records(distribution_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_distribution_records_distribution_id ON distribution_records(distribution_id		)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_distribution_id ON distribution_confirmations(distribution_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_zone_key ON distribution_confirmations(zone_name, key_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_distribution_confirmations_node_id ON distribution_confirmations(node_id)`,
@@ -423,6 +471,26 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 
 	log.Printf("KDC database schema initialized successfully (SQLite)")
 	
+	// Migrate: Add completed_at column if it doesn't exist
+	if err := kdc.migrateAddCompletedAtColumn(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate completed_at column: %v", err)
+	} else {
+		// Create index on completed_at after the column has been added
+		if _, err := kdc.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_distribution_records_completed_at ON distribution_records(completed_at)`); err != nil {
+			log.Printf("KDC: Warning: Failed to create index on completed_at: %v", err)
+		}
+	}
+	
+	// Migrate: Update status CHECK constraint to include 'completed'
+	if err := kdc.migrateAddCompletedStatus(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate status CHECK constraint: %v", err)
+	}
+	
+	// Migrate: Update state CHECK constraint to include 'active_dist'
+	if err := kdc.migrateAddActiveDistState(); err != nil {
+		log.Printf("KDC: Warning: Failed to migrate state CHECK constraint: %v", err)
+	}
+	
 	// Ensure default service/component exist
 	if err := kdc.ensureDefaultServiceAndComponent(); err != nil {
 		return fmt.Errorf("failed to ensure default service/component: %v", err)
@@ -432,7 +500,8 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 }
 
 // DeriveSigningModeFromComponent derives the signing mode from a component ID
-// Component IDs are in the format "sign_<signing_mode>" (e.g., "sign_edge_all", "sign_kdc", "sign_upstream")
+// Component IDs are in the format "sign_<signing_mode>" (e.g., "sign_edge_full", "sign_kdc", "sign_upstream")
+// Also handles legacy "sign_edge_all" for backward compatibility
 func DeriveSigningModeFromComponent(componentID string) ZoneSigningMode {
 	if strings.HasPrefix(componentID, "sign_") {
 		mode := strings.TrimPrefix(componentID, "sign_")
@@ -445,8 +514,10 @@ func DeriveSigningModeFromComponent(componentID string) ZoneSigningMode {
 			return ZoneSigningModeEdgesignDyn
 		case "edge_zsk":
 			return ZoneSigningModeEdgesignZsk
-		case "edge_all":
-			return ZoneSigningModeEdgesignAll
+		case "edge_full":
+			return ZoneSigningModeEdgesignFull
+		case "edge_all": // Legacy name, map to edgesign_full
+			return ZoneSigningModeEdgesignFull
 		case "unsigned":
 			return ZoneSigningModeUnsigned
 		}
@@ -547,7 +618,7 @@ func (kdc *KdcDB) GetAllZones() ([]*Zone, error) {
 }
 
 // ensureDefaultServiceAndComponent ensures that default_service and signing-mode components exist
-// Creates components for each signing mode: upstream, central, unsigned, edgesign_dyn, edgesign_zsk, edgesign_all
+// Creates components for each signing mode: upstream, central, unsigned, edgesign_dyn, edgesign_zsk, edgesign_full
 func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 	const defaultServiceID = "default_service"
 	const defaultComponentID = "default_comp"
@@ -580,7 +651,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		"unsigned":   "Component for unsigned zones",
 		"edge_dyn":   "Component for edgesigned zones (dynamic responses only)",
 		"edge_zsk":   "Component for edgesigned zones (all responses)",
-		"edge_all":   "Component for fully edgesigned zones (KSK+ZSK)",
+		"edge_full":  "Component for fully edgesigned zones (KSK+ZSK)",
 	}
 	
 	// Only assign sign_kdc to default_service (default signing mode)
@@ -663,7 +734,7 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 		"comp_unsigned":       "sign_unsigned",
 		"comp_edgesign_dyn":   "sign_edge_dyn",
 		"comp_edgesign_zsk":   "sign_edge_zsk",
-		"comp_edgesign_all":   "sign_edge_all",
+		"comp_edgesign_all":   "sign_edge_full",
 	}
 	
 	// Find all old comp_* components
@@ -784,6 +855,108 @@ func (kdc *KdcDB) ensureDefaultServiceAndComponent() error {
 				log.Printf("KDC: Found comp_* component %s (not a known system component, leaving as-is)", oldCompID)
 			}
 		}
+	}
+	
+	// Migrate sign_edge_all components to sign_edge_full (naming consistency fix)
+	rows, err = kdc.DB.Query("SELECT id FROM components WHERE id = 'sign_edge_all'")
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to query sign_edge_all components: %v", err)
+	} else {
+		defer rows.Close()
+		if rows.Next() {
+			// sign_edge_all component exists, migrate it
+			log.Printf("KDC: Migrating sign_edge_all component to sign_edge_full")
+			
+			// Get all services using sign_edge_all
+			serviceRows, err := kdc.DB.Query(
+				"SELECT service_id FROM service_component_assignments WHERE component_id = 'sign_edge_all' AND active = 1",
+			)
+			if err == nil {
+				var serviceIDs []string
+				for serviceRows.Next() {
+					var serviceID string
+					if err := serviceRows.Scan(&serviceID); err == nil {
+						serviceIDs = append(serviceIDs, serviceID)
+					}
+				}
+				serviceRows.Close()
+				
+				// Migrate service-component assignments
+				for _, serviceID := range serviceIDs {
+					// Remove old assignment
+					if err := kdc.RemoveServiceComponentAssignment(serviceID, "sign_edge_all"); err != nil {
+						log.Printf("KDC: Warning: Failed to remove sign_edge_all from service %s: %v", serviceID, err)
+					} else {
+						// Add new assignment (if not already present)
+						existingComps, err := kdc.GetComponentsForService(serviceID)
+						hasNewComp := false
+						if err == nil {
+							for _, compID := range existingComps {
+								if compID == "sign_edge_full" {
+									hasNewComp = true
+									break
+								}
+							}
+						}
+						if !hasNewComp {
+							if err := kdc.AddServiceComponentAssignment(serviceID, "sign_edge_full"); err != nil {
+								log.Printf("KDC: Warning: Failed to assign sign_edge_full to service %s: %v", serviceID, err)
+							} else {
+								log.Printf("KDC: Migrated component assignment: service %s: sign_edge_all -> sign_edge_full", serviceID)
+							}
+						}
+					}
+				}
+			}
+			
+			// Migrate node-component assignments
+			nodeRows, err := kdc.DB.Query(
+				"SELECT node_id FROM node_component_assignments WHERE component_id = 'sign_edge_all' AND active = 1",
+			)
+			if err == nil {
+				var nodeIDs []string
+				for nodeRows.Next() {
+					var nodeID string
+					if err := nodeRows.Scan(&nodeID); err == nil {
+						nodeIDs = append(nodeIDs, nodeID)
+					}
+				}
+				nodeRows.Close()
+				
+				for _, nodeID := range nodeIDs {
+					// Remove from old component
+					_, err := kdc.DB.Exec(
+						"UPDATE node_component_assignments SET active = 0 WHERE node_id = ? AND component_id = 'sign_edge_all'",
+						nodeID,
+					)
+					if err == nil {
+						// Add to new component (if not already present)
+						var exists bool
+						err = kdc.DB.QueryRow(
+							"SELECT EXISTS(SELECT 1 FROM node_component_assignments WHERE node_id = ? AND component_id = 'sign_edge_full')",
+							nodeID,
+						).Scan(&exists)
+						if err == nil && !exists {
+							_, err = kdc.DB.Exec(
+								"INSERT INTO node_component_assignments (node_id, component_id, active, since) VALUES (?, 'sign_edge_full', 1, CURRENT_TIMESTAMP)",
+								nodeID,
+							)
+							if err != nil {
+								log.Printf("KDC: Warning: Failed to assign node %s to sign_edge_full: %v", nodeID, err)
+							}
+						}
+					}
+				}
+			}
+			
+			// Delete the old component
+			if err := kdc.DeleteComponent("sign_edge_all"); err != nil {
+				log.Printf("KDC: Warning: Failed to delete sign_edge_all component: %v", err)
+			} else {
+				log.Printf("KDC: Deleted sign_edge_all component (replaced by sign_edge_full)")
+			}
+		}
+		rows.Close()
 	}
 	
 	// Check if default component exists (for backward compatibility)
@@ -1254,6 +1427,36 @@ func (kdc *KdcDB) DeleteDNSSECKey(zoneName, keyID string) error {
 	return nil
 }
 
+// DeleteKeysByState deletes all DNSSEC keys in the specified state
+// If zoneName is provided, only deletes keys for that zone; otherwise deletes for all zones
+// Returns the number of keys deleted
+func (kdc *KdcDB) DeleteKeysByState(state KeyState, zoneName string) (int64, error) {
+	var result sql.Result
+	var err error
+	
+	if zoneName != "" {
+		result, err = kdc.DB.Exec(
+			`DELETE FROM dnssec_keys WHERE state = ? AND zone_name = ?`,
+			state, zoneName,
+		)
+	} else {
+		result, err = kdc.DB.Exec(
+			`DELETE FROM dnssec_keys WHERE state = ?`,
+			state,
+		)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete keys by state: %v", err)
+	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %v", err)
+	}
+	
+	return rowsAffected, nil
+}
+
 // AddDistributionRecord adds a distribution record
 func (kdc *KdcDB) AddDistributionRecord(record *DistributionRecord) error {
 	_, err := kdc.DB.Exec(
@@ -1279,6 +1482,253 @@ func (kdc *KdcDB) UpdateDistributionStatus(distributionID string, status hpke.Di
 		return fmt.Errorf("failed to update distribution status: %v", err)
 	}
 	return nil
+}
+
+// MarkDistributionComplete marks a distribution as complete by setting completed_at timestamp
+func (kdc *KdcDB) MarkDistributionComplete(distributionID string) error {
+	now := time.Now()
+	_, err := kdc.DB.Exec(
+		"UPDATE distribution_records SET status = 'completed', completed_at = ? WHERE distribution_id = ?",
+		now, distributionID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mark distribution as complete: %v", err)
+	}
+	return nil
+}
+
+// PurgeCompletedDistributions deletes all completed distributions immediately
+// Returns the number of distributions deleted
+func (kdc *KdcDB) PurgeCompletedDistributions() (int, error) {
+	// Delete distribution records
+	result, err := kdc.DB.Exec(
+		"DELETE FROM distribution_records WHERE status = 'completed'",
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete completed distributions: %v", err)
+	}
+	
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %v", err)
+	}
+	
+	// Also delete orphaned confirmations (confirmations without distribution records)
+	_, err = kdc.DB.Exec(
+		`DELETE FROM distribution_confirmations 
+		 WHERE distribution_id NOT IN (SELECT DISTINCT distribution_id FROM distribution_records)`,
+	)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations: %v", err)
+	}
+	
+	return int(deleted), nil
+}
+
+// GarbageCollectCompletedDistributions deletes completed distributions older than the specified duration
+func (kdc *KdcDB) GarbageCollectCompletedDistributions(olderThan time.Duration) error {
+	cutoffTime := time.Now().Add(-olderThan)
+	
+	// Delete distribution records
+	result, err := kdc.DB.Exec(
+		"DELETE FROM distribution_records WHERE status = 'completed' AND completed_at < ?",
+		cutoffTime,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete old distribution records: %v", err)
+	}
+	
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected > 0 {
+		log.Printf("KDC: Garbage collected %d completed distribution record(s) older than %v", rowsAffected, olderThan)
+	}
+	
+	// Also delete related confirmations (they're no longer needed)
+	_, err = kdc.DB.Exec(
+		`DELETE FROM distribution_confirmations 
+		 WHERE distribution_id NOT IN (SELECT DISTINCT distribution_id FROM distribution_records)`,
+	)
+	if err != nil {
+		log.Printf("KDC: Warning: Failed to clean up orphaned confirmations: %v", err)
+	}
+	
+	return nil
+}
+
+// GetDistributionSummaries returns detailed summary information for all distributions
+func (kdc *KdcDB) GetDistributionSummaries() ([]DistributionSummaryInfo, error) {
+	// First, mark old distributions as complete if they have all confirmations but weren't marked
+	// This handles distributions that were completed before we added the completion tracking
+	kdc.markOldCompletedDistributions()
+	
+	// Get all distribution records grouped by distribution_id
+	// Show:
+	// - All non-completed distributions (regardless of age - they're still pending)
+	// - Completed distributions less than 5 minutes old (before GC)
+	rows, err := kdc.DB.Query(
+		`SELECT distribution_id, zone_name, key_id, node_id, created_at, completed_at, status
+		 FROM distribution_records 
+		 WHERE status != 'completed' OR (status = 'completed' AND completed_at > datetime('now', '-5 minutes'))
+		 ORDER BY distribution_id, zone_name, key_id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query distribution records: %v", err)
+	}
+	defer rows.Close()
+
+	// Group by distribution_id
+	distMap := make(map[string]*DistributionSummaryInfo)
+	zoneKeyMap := make(map[string]map[string]bool) // distID -> zone:key -> bool
+
+	for rows.Next() {
+		var distID, zoneName, keyID string
+		var nodeID sql.NullString
+		var createdAt time.Time
+		var completedAt sql.NullTime
+		var status string
+
+		if err := rows.Scan(&distID, &zoneName, &keyID, &nodeID, &createdAt, &completedAt, &status); err != nil {
+			return nil, fmt.Errorf("failed to scan distribution record: %v", err)
+		}
+
+		// Initialize summary if needed
+		if distMap[distID] == nil {
+			distMap[distID] = &DistributionSummaryInfo{
+				DistributionID: distID,
+				Nodes:          []string{},
+				Zones:          []string{},
+				Keys:           make(map[string]string),
+				CreatedAt:      createdAt.Format(time.RFC3339),
+				AllConfirmed:   status == "completed",
+			}
+			if completedAt.Valid {
+				completedAtStr := completedAt.Time.Format(time.RFC3339)
+				distMap[distID].CompletedAt = &completedAtStr
+			}
+			zoneKeyMap[distID] = make(map[string]bool)
+		}
+
+		// Add node if not already present
+		if nodeID.Valid && nodeID.String != "" {
+			found := false
+			for _, n := range distMap[distID].Nodes {
+				if n == nodeID.String {
+					found = true
+					break
+				}
+			}
+			if !found {
+				distMap[distID].Nodes = append(distMap[distID].Nodes, nodeID.String)
+			}
+		}
+
+		// Track zone-key pairs
+		zoneKey := zoneName + ":" + keyID
+		if !zoneKeyMap[distID][zoneKey] {
+			zoneKeyMap[distID][zoneKey] = true
+			// Add zone if not already present
+			found := false
+			for _, z := range distMap[distID].Zones {
+				if z == zoneName {
+					found = true
+					break
+				}
+			}
+			if !found {
+				distMap[distID].Zones = append(distMap[distID].Zones, zoneName)
+			}
+			// Store key for zone (for verbose mode - show first key, or comma-separated if multiple)
+			if distMap[distID].Keys[zoneName] == "" {
+				distMap[distID].Keys[zoneName] = keyID
+			} else {
+				// Multiple keys for same zone - append
+				distMap[distID].Keys[zoneName] = distMap[distID].Keys[zoneName] + ", " + keyID
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Get key types to count ZSK/KSK - count all unique zone:key pairs from zoneKeyMap
+	for distID, zoneKeys := range zoneKeyMap {
+		for zoneKey := range zoneKeys {
+			parts := strings.Split(zoneKey, ":")
+			if len(parts) == 2 {
+				zoneName := parts[0]
+				keyID := parts[1]
+				key, err := kdc.GetDNSSECKeyByID(zoneName, keyID)
+				if err == nil {
+					if key.KeyType == KeyTypeZSK {
+						distMap[distID].ZSKCount++
+					} else if key.KeyType == KeyTypeKSK {
+						distMap[distID].KSKCount++
+					}
+				}
+			}
+		}
+	}
+
+	// For each distribution, get confirmed and pending nodes
+	for distID, summary := range distMap {
+		if len(summary.Zones) > 0 {
+			// Use first zone to get target nodes (all zones in same distribution should have same target nodes)
+			zoneName := summary.Zones[0]
+			zoneNodes, _ := kdc.GetActiveNodesForZone(zoneName)
+			var targetNodes []string
+			for _, node := range zoneNodes {
+				if node.NotifyAddress != "" {
+					targetNodes = append(targetNodes, node.ID)
+				}
+			}
+			
+			// Get confirmed nodes
+			confirmedNodes, _ := kdc.GetDistributionConfirmations(distID)
+			summary.ConfirmedNodes = confirmedNodes
+			
+			// Calculate pending nodes
+			confirmedMap := make(map[string]bool)
+			for _, nodeID := range confirmedNodes {
+				confirmedMap[nodeID] = true
+			}
+			var pendingNodes []string
+			for _, nodeID := range targetNodes {
+				if !confirmedMap[nodeID] {
+					pendingNodes = append(pendingNodes, nodeID)
+				}
+			}
+			summary.PendingNodes = pendingNodes
+			
+			// Update AllConfirmed based on actual confirmations
+			summary.AllConfirmed = len(pendingNodes) == 0 && len(targetNodes) > 0
+		}
+	}
+
+	// Convert map to slice
+	summaries := make([]DistributionSummaryInfo, 0, len(distMap))
+	for _, summary := range distMap {
+		summaries = append(summaries, *summary)
+	}
+
+	// Sort by completion timestamp (most recent first), then by creation time
+	sort.Slice(summaries, func(i, j int) bool {
+		// If both have completion times, sort by completion time (newest first)
+		if summaries[i].CompletedAt != nil && summaries[j].CompletedAt != nil {
+			return *summaries[i].CompletedAt > *summaries[j].CompletedAt
+		}
+		// If only one has completion time, completed ones come first
+		if summaries[i].CompletedAt != nil {
+			return true
+		}
+		if summaries[j].CompletedAt != nil {
+			return false
+		}
+		// Neither completed, sort by creation time (newest first)
+		return summaries[i].CreatedAt > summaries[j].CreatedAt
+	})
+
+	return summaries, nil
 }
 
 // GetDistributionRecordsForZoneKey retrieves distribution records for a specific zone and key
@@ -1479,6 +1929,14 @@ func (kdc *KdcDB) UpdateKeyState(zoneName, keyID string, newState KeyState) erro
 		if err == nil {
 			commentEvent = "activated"
 		}
+	case KeyStateActiveDist:
+		_, err = kdc.DB.Exec(
+			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
+			newState, zoneName, keyID,
+		)
+		if err == nil {
+			commentEvent = "activated and distributed"
+		}
 	case KeyStateDistributed:
 		_, err = kdc.DB.Exec(
 			`UPDATE dnssec_keys SET state = ? WHERE zone_name = ? AND id = ?`,
@@ -1597,6 +2055,46 @@ func (kdc *KdcDB) GetKeysByState(zoneName string, state KeyState) ([]*DNSSECKey,
 		keys = append(keys, key)
 	}
 	return keys, rows.Err()
+}
+
+// RetireOldKeysForZone retires all keys in the specified state for a zone and key type,
+// excluding the newly activated key. This ensures only one key per zone/key-type is in
+// edgesigner/active_dist state at a time.
+func (kdc *KdcDB) RetireOldKeysForZone(zoneName string, keyType KeyType, excludeKeyID string, state KeyState) error {
+	// Only retire keys that are in edgesigner or active_dist state
+	if state != KeyStateEdgeSigner && state != KeyStateActiveDist {
+		return nil // Nothing to retire
+	}
+	
+	// Get all keys for the zone in the same state and key type
+	keys, err := kdc.GetDNSSECKeysForZone(zoneName)
+	if err != nil {
+		return fmt.Errorf("failed to get keys for zone: %v", err)
+	}
+	
+	retiredCount := 0
+	for _, key := range keys {
+		// Skip the newly activated key
+		if key.ID == excludeKeyID {
+			continue
+		}
+		
+		// Only retire keys of the same type and state
+		if key.KeyType == keyType && key.State == state {
+			if err := kdc.UpdateKeyState(zoneName, key.ID, KeyStateRetired); err != nil {
+				log.Printf("KDC: Warning: Failed to retire old key %s: %v", key.ID, err)
+			} else {
+				retiredCount++
+				log.Printf("KDC: Retired old key %s (zone: %s, type: %s, previous state: %s)", key.ID, zoneName, keyType, state)
+			}
+		}
+	}
+	
+	if retiredCount > 0 {
+		log.Printf("KDC: Retired %d old key(s) for zone %s (type: %s)", retiredCount, zoneName, keyType)
+	}
+	
+	return nil
 }
 
 // GetDNSSECKeyByID retrieves a DNSSEC key by its ID (keytag) for a zone
@@ -2184,7 +2682,7 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcCon
 		return fmt.Errorf("failed to get signing mode: %v", err)
 	}
 	
-	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignAll {
+	if signingMode != ZoneSigningModeEdgesignDyn && signingMode != ZoneSigningModeEdgesignZsk && signingMode != ZoneSigningModeEdgesignFull {
 		log.Printf("KDC: Zone %s has signing_mode=%s, skipping key distribution (only edgesign_* modes support key distribution)", zoneName, signingMode)
 		return nil // Not an error, just skip
 	}
@@ -2219,8 +2717,22 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcCon
 		}
 	}
 
-	if len(standbyZSKs) == 0 {
-		log.Printf("KDC: No standby ZSK keys found for zone %s, nothing to distribute", zoneName)
+	// For edgesign_full zones, also find active KSK
+	var activeKSK *DNSSECKey
+	if signingMode == ZoneSigningModeEdgesignFull {
+		for _, key := range keys {
+			if key.KeyType == KeyTypeKSK && key.State == KeyStateActive {
+				activeKSK = key
+				break
+			}
+		}
+		if activeKSK == nil {
+			log.Printf("KDC: Zone %s uses sign_edge_full but no active KSK found, skipping KSK distribution", zoneName)
+		}
+	}
+
+	if len(standbyZSKs) == 0 && activeKSK == nil {
+		log.Printf("KDC: No standby ZSK keys or active KSK found for zone %s, nothing to distribute", zoneName)
 		return nil // Not an error, just no keys to distribute
 	}
 
@@ -2251,6 +2763,30 @@ func (kdc *KdcDB) distributeKeysForZone(zoneName, nodeID string, kdcConf *KdcCon
 
 		encryptedCount++
 		log.Printf("KDC: Distributed key %s for zone %s to node %s (distribution ID: %s)", key.ID, zoneName, nodeID, distributionID)
+	}
+
+	// Distribute active KSK for edgesign_full zones
+	if activeKSK != nil {
+		// Get or create distribution ID for KSK
+		distributionID, err := kdc.GetOrCreateDistributionID(zoneName, activeKSK)
+		if err != nil {
+			log.Printf("KDC: Warning: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
+		} else {
+			lastDistributionID = distributionID
+			// Transition to active_dist state (not distributed, since it's already active)
+			if err := kdc.UpdateKeyState(zoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
+				log.Printf("KDC: Warning: Failed to update KSK state for key %s: %v", activeKSK.ID, err)
+			} else {
+				// Encrypt key for the node
+				_, _, _, err = kdc.EncryptKeyForNode(activeKSK, node)
+				if err != nil {
+					log.Printf("KDC: Warning: Failed to encrypt KSK %s for node %s: %v", activeKSK.ID, nodeID, err)
+				} else {
+					encryptedCount++
+					log.Printf("KDC: Distributed KSK %s for zone %s to node %s (distribution ID: %s)", activeKSK.ID, zoneName, nodeID, distributionID)
+				}
+			}
+		}
 	}
 
 	if encryptedCount > 0 && lastDistributionID != "" {

@@ -93,6 +93,11 @@ func checkAndTransitionKeys(kdcDB *KdcDB, conf *KdcConf) error {
 		log.Printf("KDC: Error ensuring active KSK: %v", err)
 	}
 
+	// Garbage collect completed distributions older than 5 minutes
+	if err := kdcDB.GarbageCollectCompletedDistributions(5 * time.Minute); err != nil {
+		log.Printf("KDC: Error garbage collecting completed distributions: %v", err)
+	}
+
 	return nil
 }
 
@@ -195,7 +200,7 @@ func ensureActiveKSK(kdcDB *KdcDB, conf *KdcConf) error {
 		// Check if there's an active KSK
 		hasActiveKSK := false
 		for _, key := range keys {
-			if key.KeyType == KeyTypeKSK && key.State == KeyStateActive {
+			if key.KeyType == KeyTypeKSK && IsActiveKeyState(key.State) {
 				hasActiveKSK = true
 				break
 			}
