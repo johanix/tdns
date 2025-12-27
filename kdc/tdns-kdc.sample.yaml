@@ -69,6 +69,15 @@ kdc:
    # that have been retired for at least this duration.
    retire_time:          30d   # 30 days
    
+   # distribution_ttl: Time-to-live for key distributions (replay protection)
+   # Distributions include a timestamp in the JSONMANIFEST metadata, and KRS validates
+   # that distributions are not older than this TTL. This prevents replay attacks where
+   # an old distribution is reused. The timestamp is protected by DNSSEC (RRSIG on
+   # JSONMANIFEST), providing integrity protection.
+   # Format: Go duration string (e.g., "5m" = 5 minutes, "10m" = 10 minutes)
+   # Default: 5 minutes (same as TSIG signatures). Set to 0 to disable TTL validation.
+   distribution_ttl:     5m    # 5 minutes (default, like TSIG)
+   
    # jsonchunk_max_size: Maximum RDATA size per JSONCHUNK record in bytes
    # This controls how large each chunk can be when distributing encrypted keys
    # via the JSONCHUNK RRtype. Larger values mean fewer chunks but larger DNS messages.

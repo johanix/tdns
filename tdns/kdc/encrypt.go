@@ -19,7 +19,8 @@ import (
 // using HPKE with the node's long-term public key
 // Returns: encrypted key data, ephemeral public key used, distribution ID, error
 // This function also stores the distribution record in the database
-func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node) (encryptedKey []byte, ephemeralPubKey []byte, distributionID string, err error) {
+// kdcConf is optional - if provided, expires_at will be set based on DistributionTTL
+func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node, kdcConf *KdcConf) (encryptedKey []byte, ephemeralPubKey []byte, distributionID string, err error) {
 	if key == nil {
 		return nil, nil, "", fmt.Errorf("key is nil")
 	}
@@ -50,6 +51,16 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node) (encryptedKey []
 	}
 	distRecordIDHex := hex.EncodeToString(distRecordID)
 
+	// Calculate expires_at based on DistributionTTL if config is provided
+	var expiresAt *time.Time
+	if kdcConf != nil {
+		ttl := kdcConf.GetDistributionTTL()
+		if ttl > 0 {
+			expires := time.Now().Add(ttl)
+			expiresAt = &expires
+		}
+	}
+
 	// Store the distribution record in the database
 	distRecord := &DistributionRecord{
 		ID:             distRecordIDHex,
@@ -59,7 +70,7 @@ func (kdc *KdcDB) EncryptKeyForNode(key *DNSSECKey, node *Node) (encryptedKey []
 		EncryptedKey:   ciphertext,
 		EphemeralPubKey: ephemeralPub,
 		CreatedAt:      time.Now(),
-		ExpiresAt:      nil, // No expiration for now
+		ExpiresAt:      expiresAt,
 		Status:         hpke.DistributionStatusPending,
 		DistributionID: distributionID,
 	}

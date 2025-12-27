@@ -119,19 +119,20 @@ const (
 	KeyStateCreated     KeyState = "created"
 	KeyStatePublished   KeyState = "published"
 	KeyStateStandby     KeyState = "standby"
-	KeyStateActive      KeyState = "active"       // Active but not distributed (central signer)
-	KeyStateActiveDist  KeyState = "active_dist"   // Active AND distributed to edges (for KSKs in edgesign_full zones)
-	KeyStateDistributed KeyState = "distributed"    // Currently being distributed to nodes
-	KeyStateEdgeSigner  KeyState = "edgesigner"    // Active on edge nodes
+	KeyStateActive      KeyState = "active"        // Active but not distributed (central signer) - for KSKs: "active:C"
+	KeyStateActiveDist  KeyState = "active_dist"   // Active and being distributed (for KSKs: "active:C+dist", for ZSKs: same as "distributed")
+	KeyStateActiveCE    KeyState = "active_ce"      // Active both central and at edges (for KSKs: "active:CE", final state after all confirmations)
+	KeyStateDistributed KeyState = "distributed"    // Currently being distributed to nodes (for ZSKs)
+	KeyStateEdgeSigner  KeyState = "edgesigner"    // Active on edge nodes (for ZSKs, final state after all confirmations)
 	KeyStateRetired     KeyState = "retired"
 	KeyStateRemoved     KeyState = "removed"
 	KeyStateRevoked     KeyState = "revoked"
 )
 
 // IsActiveKeyState returns true if the key state represents an active key
-// Both KeyStateActive and KeyStateActiveDist qualify as "active"
+// KeyStateActive, KeyStateActiveDist, and KeyStateActiveCE all qualify as "active"
 func IsActiveKeyState(state KeyState) bool {
-	return state == KeyStateActive || state == KeyStateActiveDist
+	return state == KeyStateActive || state == KeyStateActiveDist || state == KeyStateActiveCE
 }
 
 // DNSSECKey represents a DNSSEC key (KSK, ZSK, or CSK) for a zone
@@ -189,5 +190,68 @@ type ZoneNodeAssignment struct {
 	NodeID   string
 	Active   bool      // Whether this assignment is active
 	Since    time.Time
+}
+
+// ServiceTransactionState represents the state of a service modification transaction
+type ServiceTransactionState string
+
+const (
+	ServiceTransactionStateOpen        ServiceTransactionState = "open"
+	ServiceTransactionStateCommitted   ServiceTransactionState = "committed"
+	ServiceTransactionStateRolledBack  ServiceTransactionState = "rolled_back"
+)
+
+// ServiceTransactionChanges represents pending changes in a transaction
+type ServiceTransactionChanges struct {
+	AddComponents    []string `json:"add_components"`
+	RemoveComponents []string `json:"remove_components"`
+}
+
+// ServiceTransaction represents a transaction for modifying a service
+type ServiceTransaction struct {
+	ID              string                    `json:"id"`               // Transaction token (e.g., "tx1234")
+	ServiceID       string                    `json:"service_id"`       // Service being modified
+	CreatedAt       time.Time                 `json:"created_at"`
+	ExpiresAt       time.Time                 `json:"expires_at"`
+	State           ServiceTransactionState   `json:"state"`           // open, committed, rolled_back
+	Changes         ServiceTransactionChanges  `json:"changes"`         // Pending changes
+	CreatedBy       string                    `json:"created_by,omitempty"` // Optional: user/process that created it
+	Comment         string                    `json:"comment,omitempty"`   // Optional: description
+	ServiceSnapshot map[string]interface{}    `json:"service_snapshot,omitempty"` // Snapshot of service state at start (for conflict detection)
+}
+
+// DistributionPlan represents a planned key distribution
+type DistributionPlan struct {
+	ZoneName string   `json:"zone_name"`
+	NodeID   string   `json:"node_id"`
+	KeyIDs   []string `json:"key_ids"` // Which keys would be distributed
+}
+
+// DeltaSummary provides summary statistics about a delta
+type DeltaSummary struct {
+	TotalZonesAffected      int `json:"total_zones_affected"`
+	TotalDistributions      int `json:"total_distributions"`
+	TotalNodesAffected      int `json:"total_nodes_affected"`
+	ZonesNewlyServed        int `json:"zones_newly_served"`
+	ZonesNoLongerServed     int `json:"zones_no_longer_served"`
+	DistributionsToCreate   int `json:"distributions_to_create"`
+	DistributionsToRevoke   int `json:"distributions_to_revoke"`
+}
+
+// DeltaReport represents the impact analysis of service changes
+type DeltaReport struct {
+	ServiceID              string                        `json:"service_id"`
+	TransactionID          string                        `json:"transaction_id,omitempty"`
+	OriginalComponents     []string                      `json:"original_components"`       // Components before transaction
+	UpdatedComponents      []string                      `json:"updated_components"`        // Components after transaction
+	AddedComponents        []string                      `json:"added_components"`           // Components being added
+	RemovedComponents      []string                      `json:"removed_components"`        // Components being removed
+	IsValid                bool                          `json:"is_valid"`                  // Whether service is valid (has exactly one signing component)
+	ValidationErrors       []string                      `json:"validation_errors,omitempty"` // Validation error messages
+	ZonesNewlyServed       map[string][]string            `json:"zones_newly_served"`         // zone -> nodes that will serve it
+	ZonesNoLongerServed    map[string][]string            `json:"zones_no_longer_served"`    // zone -> nodes that will stop serving it
+	DistributionsToCreate  []DistributionPlan            `json:"distributions_to_create"`
+	DistributionsToRevoke  []DistributionPlan            `json:"distributions_to_revoke"`
+	Summary                DeltaSummary                   `json:"summary"`
 }
 

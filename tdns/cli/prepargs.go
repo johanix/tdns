@@ -353,6 +353,28 @@ func PrepArgs(args ...interface{}) {
 				cmd.Flag("cname").Value.Set(componentName)
 			}
 
+		case "tx":
+			var txID string
+			if cmd != nil {
+				txFlag := cmd.Flag("tx")
+				if txFlag == nil {
+					fmt.Printf("Error: --tx flag not defined for this command\n")
+					os.Exit(1)
+				}
+				txID = txFlag.Value.String()
+			} else {
+				fmt.Printf("Error: transaction ID not specified using --tx flag\n")
+				os.Exit(1)
+			}
+			if txID == "" {
+				fmt.Printf("Error: transaction ID not specified using --tx flag\n")
+				os.Exit(1)
+			}
+			txID = strings.TrimSpace(txID)
+			if cmd != nil {
+				cmd.Flag("tx").Value.Set(txID)
+			}
+
 		default:
 			fmt.Printf("Unknown required argument: \"%s\"\n", arg)
 			os.Exit(1)

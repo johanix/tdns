@@ -253,9 +253,11 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		return fmt.Errorf("failed to query JSONMANIFEST: %v", err)
 	}
 
-	// Extract content type and retire_time from metadata
+	// Extract content type, retire_time, timestamp, and distribution_ttl from metadata
 	contentType := "unknown"
 	retireTime := ""
+	var distributionTimestamp int64
+	var distributionTTL time.Duration
 	if manifest.Metadata != nil {
 		if c, ok := manifest.Metadata["content"].(string); ok {
 			contentType = c
@@ -264,7 +266,45 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 			retireTime = rt
 			log.Printf("KRS: Extracted retire_time from metadata: %s", retireTime)
 		}
+		// Extract timestamp for replay protection
+		if ts, ok := manifest.Metadata["timestamp"].(float64); ok {
+			distributionTimestamp = int64(ts)
+			log.Printf("KRS: Extracted timestamp from metadata: %d", distributionTimestamp)
+		} else {
+			// Timestamp is required for replay protection
+			return fmt.Errorf("missing timestamp in distribution metadata (replay protection)")
+		}
+		// Extract distribution_ttl (default to 5 minutes if not present)
+		if ttlStr, ok := manifest.Metadata["distribution_ttl"].(string); ok {
+			parsedTTL, err := time.ParseDuration(ttlStr)
+			if err != nil {
+				log.Printf("KRS: Warning: Failed to parse distribution_ttl '%s', using default 5 minutes: %v", ttlStr, err)
+				distributionTTL = 5 * time.Minute
+			} else {
+				distributionTTL = parsedTTL
+				log.Printf("KRS: Extracted distribution_ttl from metadata: %s", distributionTTL)
+			}
+		} else {
+			// Default to 5 minutes if not specified (same as TSIG)
+			distributionTTL = 5 * time.Minute
+			log.Printf("KRS: No distribution_ttl in metadata, using default: %s", distributionTTL)
+		}
+	} else {
+		return fmt.Errorf("missing metadata in distribution manifest (replay protection)")
 	}
+
+	// Validate timestamp freshness (replay protection)
+	// Note: Real protection comes from DNSSEC (RRSIG on JSONMANIFEST), but we check freshness here
+	now := time.Now()
+	distributionTime := time.Unix(distributionTimestamp, 0)
+	age := now.Sub(distributionTime)
+	if age < 0 {
+		return fmt.Errorf("distribution timestamp is in the future (clock skew?): %v", distributionTime)
+	}
+	if age > distributionTTL {
+		return fmt.Errorf("distribution is too old (age: %v, TTL: %v, timestamp: %v) - possible replay attack", age, distributionTTL, distributionTime)
+	}
+	log.Printf("KRS: Distribution timestamp validated: age %v (within TTL %v)", age, distributionTTL)
 
 	log.Printf("KRS: Distribution content type: %s, chunk_count: %d", contentType, manifest.ChunkCount)
 

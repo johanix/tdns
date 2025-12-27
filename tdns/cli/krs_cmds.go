@@ -25,9 +25,9 @@ var KrsCmd = &cobra.Command{
 	Long:  `Manage received keys and node configuration in the Key Receiving Service (KRS)`,
 }
 
-var KrsKeysCmd = &cobra.Command{
-	Use:   "keys",
-	Short: "Manage received keys",
+var KrsDnssecCmd = &cobra.Command{
+	Use:   "dnssec",
+	Short: "Manage received DNSSEC keys",
 }
 
 var KrsConfigCmd = &cobra.Command{
@@ -56,7 +56,7 @@ var krsKeysListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all received keys",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("keys")
+		prefixcmd, _ := getCommandContext("dnssec")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -177,7 +177,7 @@ var krsKeysHashCmd = &cobra.Command{
 			fullKeyID = fmt.Sprintf("%s-%s", zoneID, keyID)
 		}
 
-		prefixcmd, _ := getCommandContext("keys")
+		prefixcmd, _ := getCommandContext("dnssec")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -217,7 +217,7 @@ var krsKeysPurgeCmd = &cobra.Command{
 			zoneName = dns.Fqdn(tdns.Globals.Zonename)
 		}
 
-		prefixcmd, _ := getCommandContext("keys")
+		prefixcmd, _ := getCommandContext("dnssec")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -243,6 +243,47 @@ var krsKeysPurgeCmd = &cobra.Command{
 	},
 }
 
+var krsDnssecDeleteCmd = &cobra.Command{
+	Use:   "delete --zone <zone-name> --keyid <key-id>",
+	Short: "Delete a specific received key",
+	Long:  `Delete a specific DNSSEC key by zone name and key ID.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "zone", "keyid")
+		zoneName := dns.Fqdn(tdns.Globals.Zonename)
+		keyID := cmd.Flag("keyid").Value.String()
+
+		if zoneName == "" {
+			log.Fatalf("Error: --zone is required")
+		}
+		if keyID == "" {
+			log.Fatalf("Error: --keyid is required")
+		}
+
+		prefixcmd, _ := getCommandContext("dnssec")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command":   "delete",
+			"zone_name": zoneName,
+			"key_id":    keyID,
+		}
+
+		resp, err := sendKrsRequest(api, "/krs/keys", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		fmt.Printf("%s\n", getString(resp, "msg", "Msg"))
+	},
+}
+
 var krsKeysGetCmd = &cobra.Command{
 	Use:   "get --keyid <key-id>",
 	Short: "Get a specific received key",
@@ -252,7 +293,7 @@ var krsKeysGetCmd = &cobra.Command{
 			log.Fatalf("Error: --keyid is required")
 		}
 
-		prefixcmd, _ := getCommandContext("keys")
+		prefixcmd, _ := getCommandContext("dnssec")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -300,7 +341,7 @@ var krsKeysGetByZoneCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := getCommandContext("keys")
+		prefixcmd, _ := getCommandContext("dnssec")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
@@ -531,12 +572,12 @@ func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 }
 
 func init() {
-	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd, krsKeysHashCmd, krsKeysPurgeCmd)
+	KrsDnssecCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd, krsKeysHashCmd, krsKeysPurgeCmd, krsDnssecDeleteCmd)
 	KrsConfigCmd.AddCommand(krsConfigGetCmd)
 	KrsQueryCmd.AddCommand(krsQueryKmreqCmd)
 	KrsDebugDistribCmd.AddCommand(krsDebugDistribFetchCmd)
 	KrsDebugCmd.AddCommand(KrsDebugDistribCmd)
-	KrsCmd.AddCommand(KrsKeysCmd, KrsConfigCmd, KrsQueryCmd, KrsDebugCmd, PingCmd)
+	KrsCmd.AddCommand(KrsDnssecCmd, KrsConfigCmd, KrsQueryCmd, KrsDebugCmd, PingCmd)
 
 	krsKeysGetCmd.Flags().StringP("keyid", "k", "", "Key ID")
 	krsKeysGetCmd.MarkFlagRequired("keyid")
@@ -544,6 +585,11 @@ func init() {
 	krsKeysHashCmd.Flags().StringP("keyid", "k", "", "Key ID (DNSSEC keytag)")
 	krsKeysHashCmd.Flags().StringP("zone", "z", "", "Zone ID (optional, if provided constructs full ID as <zone>-<keyid>)")
 	krsKeysHashCmd.MarkFlagRequired("keyid")
+
+	krsDnssecDeleteCmd.Flags().StringP("zone", "z", "", "Zone name")
+	krsDnssecDeleteCmd.Flags().StringP("keyid", "k", "", "Key ID (DNSSEC keytag)")
+	krsDnssecDeleteCmd.MarkFlagRequired("zone")
+	krsDnssecDeleteCmd.MarkFlagRequired("keyid")
 
 	krsQueryKmreqCmd.Flags().String("distribution-id", "", "Distribution ID")
 	krsQueryKmreqCmd.MarkFlagRequired("distribution-id")

@@ -276,13 +276,94 @@ func (krs *KrsDB) RetireEdgesignerKeysForZone(zoneName string) error {
 	return nil
 }
 
+// GetReceivedKeyByZoneAndKeyID retrieves a received key by zone name and key ID
+func (krs *KrsDB) GetReceivedKeyByZoneAndKeyID(zoneName string, keyID uint16) (*ReceivedKey, error) {
+	var key ReceivedKey
+	var activatedAt, retiredAt sql.NullTime
+	var retireTime sql.NullString
+
+	err := krs.DB.QueryRow(
+		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
+			state, received_at, activated_at, retired_at, distribution_id, comment, retire_time
+			FROM received_keys WHERE zone_name = ? AND key_id = ?`,
+		zoneName, keyID,
+	).Scan(
+		&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
+		&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
+		&activatedAt, &retiredAt, &key.DistributionID, &key.Comment, &retireTime,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // Key doesn't exist, that's fine
+		}
+		return nil, fmt.Errorf("failed to get received key: %v", err)
+	}
+
+	if activatedAt.Valid {
+		key.ActivatedAt = &activatedAt.Time
+	}
+	if retiredAt.Valid {
+		key.RetiredAt = &retiredAt.Time
+	}
+	if retireTime.Valid {
+		key.RetireTime = retireTime.String
+	}
+
+	return &key, nil
+}
+
+// compareKeys compares two keys to see if they have identical key material
+// Returns true if keys are identical, false otherwise
+func compareKeys(key1, key2 *ReceivedKey) bool {
+	if key1.Algorithm != key2.Algorithm {
+		return false
+	}
+	if key1.Flags != key2.Flags {
+		return false
+	}
+	if key1.PublicKey != key2.PublicKey {
+		return false
+	}
+	// Compare private keys byte-by-byte
+	if len(key1.PrivateKey) != len(key2.PrivateKey) {
+		return false
+	}
+	for i := range key1.PrivateKey {
+		if key1.PrivateKey[i] != key2.PrivateKey[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // AddEdgesignerKeyWithRetirement atomically retires existing edgesigner keys for a zone
 // and adds a new edgesigner key. This ensures only one key per zone is in "edgesigner" state.
 // If either operation fails, the transaction is rolled back.
+// If a key with the same zone_name and key_id already exists, compares the keys.
+// If identical, accepts (idempotent). If different, returns an error.
 func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 	// Ensure the key state is "edgesigner"
 	if key.State != "edgesigner" {
 		return fmt.Errorf("key state must be 'edgesigner', got '%s'", key.State)
+	}
+
+	// Check if a key with the same zone_name and key_id already exists
+	existingKey, err := krs.GetReceivedKeyByZoneAndKeyID(key.ZoneName, key.KeyID)
+	if err != nil {
+		return fmt.Errorf("failed to check for existing key: %v", err)
+	}
+	
+	if existingKey != nil {
+		// Key with same ID exists - compare them
+		if compareKeys(existingKey, key) {
+			// Keys are identical - this is an idempotent retry, log and accept
+			log.Printf("KRS: Key %d for zone %s already exists with identical key material (idempotent retry), accepting", key.KeyID, key.ZoneName)
+			return nil
+		} else {
+			// Keys are different - this is an error (key ID collision or compromise)
+			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise", 
+				key.KeyID, key.ZoneName, existingKey.Algorithm, key.Algorithm, existingKey.Flags, key.Flags)
+		}
 	}
 
 	// Start a transaction
@@ -325,6 +406,8 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 // AddActiveKeyWithRetirement atomically retires existing active KSKs for a zone
 // and adds a new active KSK. This ensures only one KSK per zone is in "active" state.
 // If either operation fails, the transaction is rolled back.
+// If a key with the same zone_name and key_id already exists, compares the keys.
+// If identical, accepts (idempotent). If different, returns an error.
 func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 	// Ensure the key state is "active" and key type is KSK
 	if key.State != "active" {
@@ -332,6 +415,25 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 	}
 	if key.KeyType != "KSK" {
 		return fmt.Errorf("key type must be 'KSK', got '%s'", key.KeyType)
+	}
+
+	// Check if a key with the same zone_name and key_id already exists
+	existingKey, err := krs.GetReceivedKeyByZoneAndKeyID(key.ZoneName, key.KeyID)
+	if err != nil {
+		return fmt.Errorf("failed to check for existing key: %v", err)
+	}
+	
+	if existingKey != nil {
+		// Key with same ID exists - compare them
+		if compareKeys(existingKey, key) {
+			// Keys are identical - this is an idempotent retry, log and accept
+			log.Printf("KRS: Key %d for zone %s already exists with identical key material (idempotent retry), accepting", key.KeyID, key.ZoneName)
+			return nil
+		} else {
+			// Keys are different - this is an error (key ID collision or compromise)
+			return fmt.Errorf("key %d for zone %s already exists but with different key material (algorithm: %d vs %d, flags: %d vs %d, public_key differs). This may indicate a key ID collision or compromise", 
+				key.KeyID, key.ZoneName, existingKey.Algorithm, key.Algorithm, existingKey.Flags, key.Flags)
+		}
 	}
 
 	// Start a transaction
@@ -416,6 +518,28 @@ func (krs *KrsDB) UpdateNodeLastSeen() error {
 	if err != nil {
 		return fmt.Errorf("failed to update last_seen: %v", err)
 	}
+	return nil
+}
+
+// DeleteReceivedKeyByZoneAndKeyID deletes a specific key by zone name and key ID
+func (krs *KrsDB) DeleteReceivedKeyByZoneAndKeyID(zoneName, keyID string) error {
+	result, err := krs.DB.Exec(
+		`DELETE FROM received_keys WHERE zone_name = ? AND key_id = ?`,
+		zoneName, keyID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete key: %v", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %v", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("key %s not found for zone %s", keyID, zoneName)
+	}
+
 	return nil
 }
 

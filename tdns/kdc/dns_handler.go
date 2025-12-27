@@ -297,7 +297,7 @@ func handleKMREQQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname strin
 		// Note: HPKE Base mode uses ephemeral key internally, but we need to use the provided one
 		// For now, we'll use the standard EncryptKeyForNode which generates its own ephemeral
 		// TODO: Modify encryption to use provided ephemeral key
-		encryptedKey, _, distributionID, err := kdcDB.EncryptKeyForNode(key, node)
+		encryptedKey, _, distributionID, err := kdcDB.EncryptKeyForNode(key, node, conf)
 		if err != nil {
 			log.Printf("KDC: Error encrypting key %s for node %s: %v", key.ID, node.ID, err)
 			continue
@@ -833,12 +833,17 @@ func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, q
 		} else {
 			var newState KeyState
 			if key.KeyType == KeyTypeKSK {
-				// KSK transitions to active_dist (already active, now confirmed distributed)
-				newState = KeyStateActiveDist
-				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s state to 'active_dist'", 
+				// KSK transitions from active_dist to active_ce (all confirmations received)
+				// State flow: active -> active_dist -> active_ce
+				if key.State != KeyStateActiveDist {
+					log.Printf("KDC: Warning: KSK %s is in state '%s', expected 'active_dist' for confirmation", keyID, key.State)
+				}
+				newState = KeyStateActiveCE
+				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning KSK %s state from 'active_dist' to 'active_ce'", 
 					distributionID, keyID)
 			} else {
-				// ZSK transitions to edgesigner
+				// ZSK transitions from distributed to edgesigner
+				// State flow: standby -> distributed -> edgesigner
 				newState = KeyStateEdgeSigner
 				log.Printf("KDC: All nodes have confirmed distribution %s, transitioning ZSK %s state from 'distributed' to 'edgesigner'", 
 					distributionID, keyID)

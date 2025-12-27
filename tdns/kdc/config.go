@@ -19,6 +19,7 @@ type KdcConf struct {
 	StandbyKeyCount int `yaml:"standby_key_count" mapstructure:"standby_key_count"` // Number of standby ZSKs to maintain
 	PublishTime time.Duration `yaml:"publish_time" mapstructure:"publish_time"` // Time to wait before published -> standby
 	RetireTime time.Duration `yaml:"retire_time" mapstructure:"retire_time"` // Time to wait before retired -> removed
+	DistributionTTL time.Duration `yaml:"distribution_ttl" mapstructure:"distribution_ttl"` // TTL for distributions (default: 5 minutes, like TSIG)
 	JsonchunkMaxSize int `yaml:"jsonchunk_max_size" mapstructure:"jsonchunk_max_size"` // Maximum RDATA size per JSONCHUNK (bytes, default: 60000)
 }
 
@@ -34,5 +35,13 @@ func (conf *KdcConf) GetJsonchunkMaxSize() int {
 		return 60000 // Default: 60KB
 	}
 	return conf.JsonchunkMaxSize
+}
+
+// GetDistributionTTL returns the configured distribution TTL, or default (5 minutes) if not set
+func (conf *KdcConf) GetDistributionTTL() time.Duration {
+	if conf.DistributionTTL <= 0 {
+		return 5 * time.Minute // Default: 5 minutes (like TSIG signatures)
+	}
+	return conf.DistributionTTL
 }
 

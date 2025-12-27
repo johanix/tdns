@@ -75,9 +75,15 @@ var KdcNodeComponentCmd = &cobra.Command{
 	Long:  `Manage which components are served by which nodes`,
 }
 
+var KdcServiceTransactionCmd = &cobra.Command{
+	Use:   "tx",
+	Short: "Manage service modification transactions",
+	Long:  `Transaction-based service modification allows batching multiple component changes and previewing their impact before applying them.`,
+}
+
 // Zone commands
 var kdcZoneAddCmd = &cobra.Command{
-	Use:   "add --zone <zone-name> [--service-id <service-id>] [--signing-mode <mode>]",
+	Use:   "add --zone <zone-name> [--sid <service-id>] [--signing-mode <mode>]",
 	Short: "Add a new zone to KDC",
 	Long: `Add a new zone to the Key Distribution Center.
 
@@ -102,7 +108,7 @@ Signing Modes:
   - edgesign_full: KSK+ZSK distributed, all signing at edge
   - unsigned: No DNSSEC signing
 
-If --service-id is not provided, the zone will be created without a service assignment.
+If --sid is not provided, the zone will be created without a service assignment.
 This is valid but means the zone won't be part of the service-component model.`,
 	// Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -115,7 +121,7 @@ This is valid but means the zone won't be part of the service-component model.`,
 		}
 
 		// Get optional flags
-		serviceID, _ := cmd.Flags().GetString("service-id")
+		serviceID, _ := cmd.Flags().GetString("sid")
 		signingMode, _ := cmd.Flags().GetString("signing-mode")
 		comment, _ := cmd.Flags().GetString("comment")
 
@@ -210,7 +216,7 @@ var kdcZoneListCmd = &cobra.Command{
 		}
 
 		// Print header - remove ID column, add Service and Components
-		fmt.Printf("%-30s %-20s %-30s %-15s %-8s %s\n", "Name", "Service", "Components", "Signing Mode", "Active", "Comment")
+		fmt.Printf("%-30s %-20s %-30s %-15s %-8s %s\n", "Zone", "Service", "Components", "Signing comp", "Active", "Comment")
 		fmt.Println(strings.Repeat("-", 120))
 
 		for i, z := range zones {
@@ -225,17 +231,23 @@ var kdcZoneListCmd = &cobra.Command{
 			comment := getString(zone, "comment", "Comment")
 
 			// Get enrichment data
-			serviceName := "(none)"
+			serviceID := "(none)"
 			componentsStr := "(none)"
 			signingModeStr := "(none)"
 			var nodeIDs []string
 
+			// Get service_id from zone object itself
+			if sid := getString(zone, "service_id"); sid != "" {
+				serviceID = sid
+			}
+
 			if enrichment, ok := enrichments[name]; ok {
-				if sn := getString(enrichment, "service_name", "service_name"); sn != "" {
-					serviceName = sn
+				// Prefer service_id from enrichment if available, otherwise keep zone's service_id
+				if sid := getString(enrichment, "service_id"); sid != "" {
+					serviceID = sid
 				}
-				// Get signing component ID for Signing Mode column
-				if signingCompID := getString(enrichment, "signing_component_id", "signing_component_id"); signingCompID != "" {
+				// Get signing component ID for Signing comp column
+				if signingCompID := getString(enrichment, "signing_component_id"); signingCompID != "" {
 					signingModeStr = signingCompID
 				}
 				// Get non-signing components for Components column
@@ -267,7 +279,7 @@ var kdcZoneListCmd = &cobra.Command{
 			}
 
 			fmt.Printf("%-30s %-20s %-30s %-15s %-8s %s\n", 
-				name, serviceName, componentsStr, signingModeStr, activeStr, comment)
+				name, serviceID, componentsStr, signingModeStr, activeStr, comment)
 			
 			// Print nodes in verbose mode
 			if tdns.Globals.Verbose && len(nodeIDs) > 0 {
@@ -891,9 +903,9 @@ var kdcServiceAddCmd = &cobra.Command{
 			log.Fatalf("Error: --name is required")
 		}
 
-		serviceID := cmd.Flag("id").Value.String()
+		serviceID := cmd.Flag("sid").Value.String()
 		if serviceID == "" {
-			serviceID = serviceName // Use name as ID if not provided
+			log.Fatalf("Error: --sid is required")
 		}
 
 		comment := cmd.Flag("comment").Value.String()
@@ -1023,14 +1035,14 @@ var kdcServiceDeleteCmd = &cobra.Command{
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		serviceName := cmd.Flag("name").Value.String()
-		if serviceName == "" {
-			log.Fatalf("Error: --name is required")
+		serviceID := cmd.Flag("sid").Value.String()
+		if serviceID == "" {
+			log.Fatalf("Error: --sid is required")
 		}
 
 		req := map[string]interface{}{
-			"command":      "delete",
-			"service_name": serviceName,
+			"command":    "delete",
+			"service_id": serviceID,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/service", req)
@@ -1128,9 +1140,9 @@ var kdcComponentAddCmd = &cobra.Command{
 			log.Fatalf("Error: --name is required")
 		}
 
-		componentID := cmd.Flag("id").Value.String()
+		componentID := cmd.Flag("cid").Value.String()
 		if componentID == "" {
-			componentID = componentName // Use name as ID if not provided
+			log.Fatalf("Error: --cid is required")
 		}
 
 		comment := cmd.Flag("comment").Value.String()
@@ -1228,14 +1240,14 @@ var kdcComponentDeleteCmd = &cobra.Command{
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		componentName := cmd.Flag("name").Value.String()
-		if componentName == "" {
-			log.Fatalf("Error: --name is required")
+		componentID := cmd.Flag("cid").Value.String()
+		if componentID == "" {
+			log.Fatalf("Error: --cid is required")
 		}
 
 		req := map[string]interface{}{
-			"command":        "delete",
-			"component_name": componentName,
+			"command":      "delete",
+			"component_id": componentID,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/component", req)
@@ -1359,6 +1371,535 @@ var kdcServiceComponentReplaceCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", resp["msg"])
 	},
+}
+
+// Service transaction commands
+var kdcServiceTxStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start a new service modification transaction",
+	Long:  `Creates a new transaction for modifying a service. Returns a transaction token that can be used for subsequent operations.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		serviceID := cmd.Flag("sid").Value.String()
+		if serviceID == "" {
+			log.Fatalf("Error: --sid is required")
+		}
+		createdBy := cmd.Flag("created-by").Value.String()
+		comment := cmd.Flag("comment").Value.String()
+
+		req := map[string]interface{}{
+			"command":    "start",
+			"service_id": serviceID,
+		}
+		if createdBy != "" {
+			req["created_by"] = createdBy
+		}
+		if comment != "" {
+			req["comment"] = comment
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		txID := getString(resp, "tx_id")
+		if txID != "" {
+			fmt.Printf("Transaction started: %s\n", txID)
+			fmt.Printf("%s\n", resp["msg"])
+		} else {
+			fmt.Printf("%s\n", resp["msg"])
+		}
+	},
+}
+
+var kdcServiceTxComponentAddCmd = &cobra.Command{
+	Use:   "add",
+	Short: "Add a component to a transaction",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "tx")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		txID := cmd.Flag("tx").Value.String()
+		componentID := cmd.Flag("cid").Value.String()
+		if componentID == "" {
+			log.Fatalf("Error: --cid is required")
+		}
+
+		req := map[string]interface{}{
+			"command":      "add-component",
+			"tx_id":        txID,
+			"component_id": componentID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcServiceTxComponentDeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Remove a component from a transaction",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "tx")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		txID := cmd.Flag("tx").Value.String()
+		componentID := cmd.Flag("cid").Value.String()
+		if componentID == "" {
+			log.Fatalf("Error: --cid is required")
+		}
+
+		req := map[string]interface{}{
+			"command":      "remove-component",
+			"tx_id":        txID,
+			"component_id": componentID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcServiceTxViewCmd = &cobra.Command{
+	Use:   "view",
+	Short: "View the impact of a transaction (dry-run)",
+	Long:  `Computes and displays what changes would result from committing the transaction, without actually applying them.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "tx")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		txID := cmd.Flag("tx").Value.String()
+
+		req := map[string]interface{}{
+			"command": "view",
+			"tx_id":   txID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		// Display delta report
+		if deltaReportRaw, ok := resp["delta_report"]; ok {
+			if deltaReport, ok := deltaReportRaw.(map[string]interface{}); ok {
+				fmt.Printf("Transaction: %s\n", txID)
+				fmt.Printf("Service: %s\n\n", getString(deltaReport, "service_id"))
+				
+				// Show component changes
+				fmt.Printf("Component Changes:\n")
+				
+				// Original components
+				if originalComps, ok := deltaReport["original_components"].([]interface{}); ok {
+					compStrs := make([]string, len(originalComps))
+					for i, c := range originalComps {
+						compStrs[i] = fmt.Sprintf("%v", c)
+					}
+					if len(compStrs) == 0 {
+						fmt.Printf("  Original: (none)\n")
+					} else {
+						fmt.Printf("  Original: %s\n", strings.Join(compStrs, ", "))
+					}
+				}
+				
+				// Updated components
+				if updatedComps, ok := deltaReport["updated_components"].([]interface{}); ok {
+					compStrs := make([]string, len(updatedComps))
+					for i, c := range updatedComps {
+						compStrs[i] = fmt.Sprintf("%v", c)
+					}
+					if len(compStrs) == 0 {
+						fmt.Printf("  Updated:  (none)\n")
+					} else {
+						fmt.Printf("  Updated:  %s\n", strings.Join(compStrs, ", "))
+					}
+				}
+				
+				// Delta
+				addedComps := []string{}
+				if added, ok := deltaReport["added_components"].([]interface{}); ok {
+					for _, c := range added {
+						addedComps = append(addedComps, fmt.Sprintf("%v", c))
+					}
+				}
+				removedComps := []string{}
+				if removed, ok := deltaReport["removed_components"].([]interface{}); ok {
+					for _, c := range removed {
+						removedComps = append(removedComps, fmt.Sprintf("%v", c))
+					}
+				}
+				
+				if len(addedComps) > 0 || len(removedComps) > 0 {
+					fmt.Printf("  Delta:\n")
+					if len(addedComps) > 0 {
+						fmt.Printf("    + Add:    %s\n", strings.Join(addedComps, ", "))
+					}
+					if len(removedComps) > 0 {
+						fmt.Printf("    - Remove: %s\n", strings.Join(removedComps, ", "))
+					}
+				} else {
+					fmt.Printf("  Delta: (no changes)\n")
+				}
+				
+				// Service validation
+				fmt.Printf("\nService Validation:\n")
+				isValid := getBool(deltaReport, "is_valid")
+				if isValid {
+					fmt.Printf("  Status: ✓ Valid (has exactly one signing component)\n")
+				} else {
+					fmt.Printf("  Status: ✗ Invalid\n")
+					if validationErrors, ok := deltaReport["validation_errors"].([]interface{}); ok {
+						for _, errMsg := range validationErrors {
+							fmt.Printf("    Error: %v\n", errMsg)
+						}
+					}
+				}
+				
+				fmt.Printf("\nImpact Analysis:\n")
+				
+				// Summary
+				if summary, ok := deltaReport["summary"].(map[string]interface{}); ok {
+					totalAffected := getInt(summary, "total_zones_affected")
+					newlyServed := getInt(summary, "zones_newly_served")
+					noLongerServed := getInt(summary, "zones_no_longer_served")
+					
+					fmt.Printf("  Zones affected: %d\n", totalAffected)
+					fmt.Printf("    - Zones newly served: %d\n", newlyServed)
+					fmt.Printf("    - Zones no longer served: %d\n", noLongerServed)
+					fmt.Printf("  Distributions to create: %v\n", getString(summary, "distributions_to_create"))
+					fmt.Printf("  Distributions to revoke: %v\n", getString(summary, "distributions_to_revoke"))
+					fmt.Printf("  Total nodes affected: %v\n", getString(summary, "total_nodes_affected"))
+					
+					// Show warning if no zones affected but service has zones
+					if totalAffected == 0 {
+						fmt.Printf("\n  Note: No zones are affected by this transaction.\n")
+						fmt.Printf("        This may mean:\n")
+						fmt.Printf("        - No zones are assigned to this service, OR\n")
+						fmt.Printf("        - All nodes already serve other components of this service, OR\n")
+						fmt.Printf("        - No nodes serve the components being added/removed\n")
+					}
+				}
+				
+				// Zones newly served
+				if newlyServed, ok := deltaReport["zones_newly_served"].(map[string]interface{}); ok && len(newlyServed) > 0 {
+					fmt.Printf("\nZones newly served:\n")
+					for zoneName, nodesRaw := range newlyServed {
+						if nodes, ok := nodesRaw.([]interface{}); ok {
+							nodeStrs := make([]string, len(nodes))
+							for i, n := range nodes {
+								nodeStrs[i] = fmt.Sprintf("%v", n)
+							}
+							fmt.Printf("  - %s → nodes: %s\n", zoneName, strings.Join(nodeStrs, ", "))
+						}
+					}
+				}
+				
+				// Zones no longer served
+				if noLongerServed, ok := deltaReport["zones_no_longer_served"].(map[string]interface{}); ok && len(noLongerServed) > 0 {
+					fmt.Printf("\nZones no longer served:\n")
+					for zoneName, nodesRaw := range noLongerServed {
+						if nodes, ok := nodesRaw.([]interface{}); ok {
+							nodeStrs := make([]string, len(nodes))
+							for i, n := range nodes {
+								nodeStrs[i] = fmt.Sprintf("%v", n)
+							}
+							fmt.Printf("  - %s → nodes: %s\n", zoneName, strings.Join(nodeStrs, ", "))
+						}
+					}
+				}
+			}
+		} else {
+			fmt.Printf("%s\n", resp["msg"])
+		}
+	},
+}
+
+var kdcServiceTxCommitCmd = &cobra.Command{
+	Use:   "commit",
+	Short: "Commit a transaction (apply changes)",
+	Long:  `Applies all pending changes in the transaction and creates key distributions. Use --dry-run to preview without applying.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "tx")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		txID := cmd.Flag("tx").Value.String()
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		req := map[string]interface{}{
+			"command": "commit",
+			"tx_id":   txID,
+			"dry_run": dryRun,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+		
+		// If dry-run, show delta report
+		if dryRun {
+			if deltaReportRaw, ok := resp["delta_report"]; ok {
+				if deltaReport, ok := deltaReportRaw.(map[string]interface{}); ok {
+					if summary, ok := deltaReport["summary"].(map[string]interface{}); ok {
+						fmt.Printf("\nSummary:\n")
+						fmt.Printf("  Zones affected: %v\n", getString(summary, "total_zones_affected"))
+						fmt.Printf("  Distributions to create: %v\n", getString(summary, "distributions_to_create"))
+					}
+				}
+			}
+		}
+	},
+}
+
+var kdcServiceTxRollbackCmd = &cobra.Command{
+	Use:   "rollback",
+	Short: "Rollback a transaction (cancel changes)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "tx")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		txID := cmd.Flag("tx").Value.String()
+
+		req := map[string]interface{}{
+			"command": "rollback",
+			"tx_id":   txID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcServiceTxStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show transaction status and details",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "tx")
+		
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		txID := cmd.Flag("tx").Value.String()
+
+		req := map[string]interface{}{
+			"command": "get",
+			"tx_id":   txID,
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		if tx, ok := resp["transaction"].(map[string]interface{}); ok {
+			fmt.Printf("Transaction: %s\n", getString(tx, "id"))
+			fmt.Printf("Service: %s\n", getString(tx, "service_id"))
+			fmt.Printf("State: %s\n", getString(tx, "state"))
+			fmt.Printf("Created: %s\n", getString(tx, "created_at"))
+			fmt.Printf("Expires: %s\n", getString(tx, "expires_at"))
+			if comment := getString(tx, "comment"); comment != "" {
+				fmt.Printf("Comment: %s\n", comment)
+			}
+			
+			if changes, ok := tx["changes"].(map[string]interface{}); ok {
+				fmt.Printf("\nPending Changes:\n")
+				if addComps, ok := changes["add_components"].([]interface{}); ok && len(addComps) > 0 {
+					compStrs := make([]string, len(addComps))
+					for i, c := range addComps {
+						compStrs[i] = fmt.Sprintf("%v", c)
+					}
+					fmt.Printf("  + Add: %s\n", strings.Join(compStrs, ", "))
+				}
+				if removeComps, ok := changes["remove_components"].([]interface{}); ok && len(removeComps) > 0 {
+					compStrs := make([]string, len(removeComps))
+					for i, c := range removeComps {
+						compStrs[i] = fmt.Sprintf("%v", c)
+					}
+					fmt.Printf("  - Remove: %s\n", strings.Join(compStrs, ", "))
+				}
+				if addComps, ok := changes["add_components"].([]interface{}); ok && len(addComps) == 0 {
+					if removeComps, ok := changes["remove_components"].([]interface{}); ok && len(removeComps) == 0 {
+						fmt.Printf("  (no changes)\n")
+					}
+				}
+			}
+		} else {
+			fmt.Printf("%s\n", resp["msg"])
+		}
+	},
+}
+
+var kdcServiceTxListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all transactions",
+	Long:  `Lists all service modification transactions. Use --state to filter by state (open, committed, rolled_back).`,
+	Run: func(cmd *cobra.Command, args []string) {
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		stateFilter, _ := cmd.Flags().GetString("state")
+
+		req := map[string]interface{}{
+			"command": "list",
+		}
+		if stateFilter != "" {
+			req["state_filter"] = stateFilter
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		if transactionsRaw, ok := resp["transactions"]; ok {
+			if transactions, ok := transactionsRaw.([]interface{}); ok {
+				if len(transactions) == 0 {
+					fmt.Printf("No transactions found\n")
+					return
+				}
+				
+				fmt.Printf("%-20s %-30s %-12s %-20s %s\n", "Transaction ID", "Service", "State", "Created", "Expires")
+				fmt.Println(strings.Repeat("-", 120))
+				
+				for _, txRaw := range transactions {
+					if tx, ok := txRaw.(map[string]interface{}); ok {
+						txID := getString(tx, "id")
+						serviceID := getString(tx, "service_id")
+						state := getString(tx, "state")
+						createdAt := getString(tx, "created_at")
+						expiresAt := getString(tx, "expires_at")
+						
+						// Parse and format dates
+						if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+							createdAt = t.Format("2006-01-02 15:04:05")
+						}
+						if t, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+							expiresAt = t.Format("2006-01-02 15:04:05")
+						}
+						
+						fmt.Printf("%-20s %-30s %-12s %-20s %s\n", txID, serviceID, state, createdAt, expiresAt)
+					}
+				}
+			}
+		} else {
+			fmt.Printf("%s\n", resp["msg"])
+		}
+	},
+}
+
+var kdcServiceTxCleanupCmd = &cobra.Command{
+	Use:   "cleanup",
+	Short: "Cleanup expired transactions",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefix, _ := getCommandContext("service")
+		api, err := getApiClient(prefix, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "cleanup",
+		}
+
+		resp, err := sendKdcRequest(api, "/kdc/service-transaction", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if resp["error"] == true {
+			log.Fatalf("Error: %v", resp["error_msg"])
+		}
+
+		fmt.Printf("%s\n", resp["msg"])
+	},
+}
+
+var kdcServiceTxComponentCmd = &cobra.Command{
+	Use:   "component",
+	Short: "Manage components in a transaction",
 }
 
 // Node-component commands
@@ -2656,10 +3197,12 @@ var kdcDistribListCmd = &cobra.Command{
 }
 
 var kdcDistribPurgeCmd = &cobra.Command{
-	Use:   "purge",
-	Short: "Delete all completed distributions",
-	Long:  "Delete all completed distributions from the database. This permanently removes distribution records and their confirmations.",
+	Use:   "purge [--force]",
+	Short: "Delete distributions",
+	Long:  "Delete distributions from the database. By default, only completed distributions are deleted. Use --force to delete ALL distributions regardless of status.",
 	Run: func(cmd *cobra.Command, args []string) {
+		force, _ := cmd.Flags().GetBool("force")
+		
 		prefixcmd, _ := getCommandContext("distrib")
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
@@ -2668,6 +3211,7 @@ var kdcDistribPurgeCmd = &cobra.Command{
 
 		reqBody := map[string]interface{}{
 			"command": "purge",
+			"force":   force,
 		}
 
 		resp, err := sendKdcRequest(api, "/kdc/distrib", reqBody)
@@ -2826,8 +3370,10 @@ func init() {
 	KdcDebugCmd.AddCommand(kdcDebugHpkeGenerateCmd, kdcDebugHpkeEncryptCmd, kdcDebugHpkeDecryptCmd, 
 		KdcDebugDistribCmd, kdcDebugSetChunkSizeCmd, kdcDebugGetChunkSizeCmd)
 	KdcConfigCmd.AddCommand(kdcConfigGetCmd)
-	KdcServiceCmd.AddCommand(kdcServiceAddCmd, kdcServiceListCmd, kdcServiceDeleteCmd, kdcServiceComponentsCmd, KdcServiceComponentCmd)
+	KdcServiceCmd.AddCommand(kdcServiceAddCmd, kdcServiceListCmd, kdcServiceDeleteCmd, kdcServiceComponentsCmd, KdcServiceComponentCmd, KdcServiceTransactionCmd)
 	KdcServiceComponentCmd.AddCommand(kdcServiceComponentAddCmd, kdcServiceComponentDeleteCmd, kdcServiceComponentReplaceCmd)
+	KdcServiceTransactionCmd.AddCommand(kdcServiceTxStartCmd, kdcServiceTxViewCmd, kdcServiceTxCommitCmd, kdcServiceTxRollbackCmd, kdcServiceTxStatusCmd, kdcServiceTxListCmd, kdcServiceTxCleanupCmd, kdcServiceTxComponentCmd)
+	kdcServiceTxComponentCmd.AddCommand(kdcServiceTxComponentAddCmd, kdcServiceTxComponentDeleteCmd)
 	KdcComponentCmd.AddCommand(kdcComponentAddCmd, kdcComponentListCmd, kdcComponentDeleteCmd)
 	KdcCmd.AddCommand(KdcZoneCmd, KdcNodeCmd, KdcConfigCmd, KdcDebugCmd, KdcDistribCmd, KdcServiceCmd, KdcComponentCmd, PingCmd)
 
@@ -2839,6 +3385,8 @@ func init() {
 	
 	kdcDistribCompletedCmd.Flags().String("distid", "", "Distribution ID")
 	kdcDistribCompletedCmd.MarkFlagRequired("distid")
+	
+	kdcDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
 	
 	kdcZoneTransitionCmd.Flags().StringP("keyid", "k", "", "Key ID (transition auto-detected: created->published or standby->active)")
 	kdcZoneTransitionCmd.MarkFlagRequired("keyid")
@@ -2855,7 +3403,7 @@ func init() {
 	kdcZoneSetStateCmd.MarkFlagRequired("state")
 
 	// Zone add command flags
-	kdcZoneAddCmd.Flags().String("service-id", "", "Service ID this zone belongs to (optional)")
+	kdcZoneAddCmd.Flags().String("sid", "", "Service ID this zone belongs to (optional)")
 	kdcZoneAddCmd.Flags().String("comment", "", "Comment for this zone")
 	
 	// Zone service command flags
@@ -2871,22 +3419,24 @@ func init() {
 	kdcZoneComponentCmd.MarkFlagRequired("component")
 	
 	// Service command flags
-	kdcServiceAddCmd.Flags().String("id", "", "Service ID (defaults to name if not provided)")
+	kdcServiceAddCmd.Flags().String("sid", "", "Service ID")
 	kdcServiceAddCmd.Flags().StringP("name", "n", "", "Service name")
 	kdcServiceAddCmd.Flags().String("comment", "", "Comment")
 	kdcServiceAddCmd.MarkFlagRequired("name")
-	kdcServiceDeleteCmd.Flags().StringP("name", "n", "", "Service name")
-	kdcServiceDeleteCmd.MarkFlagRequired("name")
+	kdcServiceAddCmd.MarkFlagRequired("sid")
+	kdcServiceDeleteCmd.Flags().String("sid", "", "Service ID")
+	kdcServiceDeleteCmd.MarkFlagRequired("sid")
 	kdcServiceComponentsCmd.Flags().StringP("name", "n", "", "Service name")
 	kdcServiceComponentsCmd.MarkFlagRequired("name")
 	
 	// Component command flags
-	kdcComponentAddCmd.Flags().String("id", "", "Component ID (defaults to name if not provided)")
+	kdcComponentAddCmd.Flags().String("cid", "", "Component ID")
 	kdcComponentAddCmd.Flags().StringP("name", "n", "", "Component name")
 	kdcComponentAddCmd.Flags().String("comment", "", "Comment")
 	kdcComponentAddCmd.MarkFlagRequired("name")
-	kdcComponentDeleteCmd.Flags().StringP("name", "n", "", "Component name")
-	kdcComponentDeleteCmd.MarkFlagRequired("name")
+	kdcComponentAddCmd.MarkFlagRequired("cid")
+	kdcComponentDeleteCmd.Flags().String("cid", "", "Component ID")
+	kdcComponentDeleteCmd.MarkFlagRequired("cid")
 	
 	// Service-component command flags
 	kdcServiceComponentAddCmd.Flags().StringP("sname", "s", "", "Service name")
@@ -2950,6 +3500,37 @@ func init() {
 
 	kdcDebugSetChunkSizeCmd.Flags().StringP("size", "s", "", "Chunk size in bytes")
 	kdcDebugSetChunkSizeCmd.MarkFlagRequired("size")
+	
+	// Service transaction command flags
+	kdcServiceTxStartCmd.Flags().String("sid", "", "Service ID")
+	kdcServiceTxStartCmd.Flags().String("created-by", "", "User/process that created the transaction")
+	kdcServiceTxStartCmd.Flags().String("comment", "", "Optional comment/description")
+	kdcServiceTxStartCmd.MarkFlagRequired("sid")
+	
+	kdcServiceTxComponentAddCmd.Flags().String("tx", "", "Transaction ID")
+	kdcServiceTxComponentAddCmd.Flags().String("cid", "", "Component ID")
+	kdcServiceTxComponentAddCmd.MarkFlagRequired("tx")
+	kdcServiceTxComponentAddCmd.MarkFlagRequired("cid")
+	
+	kdcServiceTxComponentDeleteCmd.Flags().String("tx", "", "Transaction ID")
+	kdcServiceTxComponentDeleteCmd.Flags().String("cid", "", "Component ID")
+	kdcServiceTxComponentDeleteCmd.MarkFlagRequired("tx")
+	kdcServiceTxComponentDeleteCmd.MarkFlagRequired("cid")
+	
+	kdcServiceTxViewCmd.Flags().String("tx", "", "Transaction ID")
+	kdcServiceTxViewCmd.MarkFlagRequired("tx")
+	
+	kdcServiceTxCommitCmd.Flags().String("tx", "", "Transaction ID")
+	kdcServiceTxCommitCmd.Flags().Bool("dry-run", false, "Preview changes without applying them")
+	kdcServiceTxCommitCmd.MarkFlagRequired("tx")
+	
+	kdcServiceTxRollbackCmd.Flags().String("tx", "", "Transaction ID")
+	kdcServiceTxRollbackCmd.MarkFlagRequired("tx")
+	
+	kdcServiceTxStatusCmd.Flags().String("tx", "", "Transaction ID")
+	kdcServiceTxStatusCmd.MarkFlagRequired("tx")
+	
+	kdcServiceTxListCmd.Flags().String("state", "", "Filter by state (open, committed, rolled_back)")
 }
 
 // sendKdcRequest sends a JSON POST request to the KDC API
@@ -3014,5 +3595,19 @@ func getMapKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func getInt(m map[string]interface{}, key string) int {
+	if val, ok := m[key]; ok {
+		switch v := val.(type) {
+		case int:
+			return v
+		case int64:
+			return int(v)
+		case float64:
+			return int(v)
+		}
+	}
+	return 0
 }
 

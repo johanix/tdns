@@ -276,6 +276,113 @@ func (kdc *KdcDB) migrateAddActiveDistState() error {
 	}
 }
 
+// migrateAddActiveCEState updates the state ENUM/CHECK constraint to include 'active_ce'
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (kdc *KdcDB) migrateAddActiveCEState() error {
+	if kdc.DBType == "sqlite" {
+		// SQLite: Check if constraint already allows 'active_ce' by trying to update a test record
+		var testID, originalState string
+		err := kdc.DB.QueryRow("SELECT id, state FROM dnssec_keys LIMIT 1").Scan(&testID, &originalState)
+		if err == nil && testID != "" {
+			// Try to update a record to 'active_ce' to test the constraint
+			_, err = kdc.DB.Exec("UPDATE dnssec_keys SET state = 'active_ce' WHERE id = ?", testID)
+			if err != nil && strings.Contains(err.Error(), "CHECK constraint failed") {
+				// Constraint doesn't allow 'active_ce', need to recreate table
+				log.Printf("KDC: Recreating dnssec_keys table to update CHECK constraint for 'active_ce' state")
+				
+				// Create new table with correct constraint
+				_, err = kdc.DB.Exec(`
+					CREATE TABLE IF NOT EXISTS dnssec_keys_new (
+						id TEXT PRIMARY KEY,
+						zone_name TEXT NOT NULL,
+						key_type TEXT NOT NULL,
+						key_id INTEGER NOT NULL,
+						algorithm INTEGER NOT NULL,
+						flags INTEGER NOT NULL,
+						public_key TEXT NOT NULL,
+						private_key BLOB NOT NULL,
+						state TEXT NOT NULL DEFAULT 'created',
+						created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+						published_at DATETIME,
+						activated_at DATETIME,
+						retired_at DATETIME,
+						comment TEXT,
+						FOREIGN KEY (zone_name) REFERENCES zones(name) ON DELETE CASCADE,
+						CHECK (key_type IN ('KSK', 'ZSK', 'CSK')),
+						CHECK (state IN ('created', 'published', 'standby', 'active', 'active_dist', 'active_ce', 'distributed', 'edgesigner', 'retired', 'removed', 'revoked'))
+					)`)
+				if err != nil {
+					return fmt.Errorf("failed to create new dnssec_keys table: %v", err)
+				}
+				
+				// Copy data
+				_, err = kdc.DB.Exec(`
+					INSERT INTO dnssec_keys_new 
+					SELECT id, zone_name, key_type, key_id, algorithm, flags, public_key, private_key, 
+					       state, created_at, published_at, activated_at, retired_at, comment
+					FROM dnssec_keys`)
+				if err != nil {
+					return fmt.Errorf("failed to copy data to new table: %v", err)
+				}
+				
+				// Drop old table
+				_, err = kdc.DB.Exec("DROP TABLE dnssec_keys")
+				if err != nil {
+					return fmt.Errorf("failed to drop old table: %v", err)
+				}
+				
+				// Rename new table
+				_, err = kdc.DB.Exec("ALTER TABLE dnssec_keys_new RENAME TO dnssec_keys")
+				if err != nil {
+					return fmt.Errorf("failed to rename new table: %v", err)
+				}
+				
+				// Recreate indexes
+				indexes := []string{
+					"CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone_name ON dnssec_keys(zone_name)",
+					"CREATE INDEX IF NOT EXISTS idx_dnssec_keys_key_type ON dnssec_keys(key_type)",
+					"CREATE INDEX IF NOT EXISTS idx_dnssec_keys_state ON dnssec_keys(state)",
+					"CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone_key_type_state ON dnssec_keys(zone_name, key_type, state)",
+				}
+				for _, idxStmt := range indexes {
+					if _, err := kdc.DB.Exec(idxStmt); err != nil {
+						log.Printf("KDC: Warning: Failed to recreate index: %v", err)
+					}
+				}
+				
+				log.Printf("KDC: Successfully updated dnssec_keys table CHECK constraint for 'active_ce'")
+			} else if err == nil {
+				// Update succeeded, revert it to original state
+				_, _ = kdc.DB.Exec("UPDATE dnssec_keys SET state = ? WHERE id = ?", originalState, testID)
+			}
+		}
+		// If no records exist or constraint already allows 'active_ce', nothing to do
+		return nil
+	} else {
+		// MySQL/MariaDB: Alter ENUM to include 'active_ce'
+		// Check if 'active_ce' is already in the ENUM
+		var enumValues string
+		err := kdc.DB.QueryRow(
+			"SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dnssec_keys' AND COLUMN_NAME = 'state'",
+		).Scan(&enumValues)
+		if err != nil {
+			return fmt.Errorf("failed to check state ENUM: %v", err)
+		}
+		
+		if !strings.Contains(enumValues, "active_ce") {
+			// Update ENUM to include 'active_ce'
+			_, err = kdc.DB.Exec(
+				"ALTER TABLE dnssec_keys MODIFY COLUMN state ENUM('created', 'published', 'standby', 'active', 'active_dist', 'active_ce', 'distributed', 'edgesigner', 'retired', 'removed', 'revoked') NOT NULL DEFAULT 'created'",
+			)
+			if err != nil {
+				return fmt.Errorf("failed to update state ENUM: %v", err)
+			}
+			log.Printf("KDC: Updated state ENUM to include 'active_ce'")
+		}
+		return nil
+	}
+}
+
 // markOldCompletedDistributions marks old distributions as complete if they have all confirmations
 // This handles distributions that were completed before we added completion tracking
 // TEMPORARY: Remove this migration once all databases have been upgraded

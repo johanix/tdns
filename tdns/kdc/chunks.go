@@ -170,11 +170,13 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	checksum := fmt.Sprintf("sha256:%x", hash)
 
 	// Create manifest
+	now := time.Now()
 	metadata := map[string]interface{}{
 		"content":         contentType,
 		"distribution_id": distributionID,
 		"node_id":         nodeID,
 		"zone_count":      zoneCount,
+		"timestamp":       now.Unix(), // Unix timestamp for replay protection (validated by KRS)
 	}
 	if contentType == "encrypted_keys" {
 		metadata["key_count"] = keyCount
@@ -182,6 +184,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	// Add retire_time from config if available
 	if conf != nil && conf.RetireTime > 0 {
 		metadata["retire_time"] = conf.RetireTime.String() // Convert duration to string (e.g., "168h0m0s")
+	}
+	// Add distribution_ttl from config if available (for KRS validation)
+	if conf != nil && conf.GetDistributionTTL() > 0 {
+		metadata["distribution_ttl"] = conf.GetDistributionTTL().String() // Convert duration to string (e.g., "5m0s")
 	}
 
 	// Determine if payload should be included inline
