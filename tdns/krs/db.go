@@ -10,6 +10,8 @@ package krs
 import (
 	"database/sql"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
@@ -42,6 +44,11 @@ func NewKrsDB(dsn string) (*KrsDB, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %v", err)
 	}
 
+	// Migrate: Add retire_time column and 'removed' state if needed
+	if err := krs.migrateAddRetireTimeAndRemovedState(); err != nil {
+		log.Printf("KRS: Warning: Failed to migrate retire_time column and removed state: %v", err)
+	}
+
 	return krs, nil
 }
 
@@ -62,9 +69,11 @@ func (krs *KrsDB) initSchema() error {
 			received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			activated_at TIMESTAMP NULL,
 			retired_at TIMESTAMP NULL,
+			retire_time TEXT NULL,
 			distribution_id TEXT NOT NULL,
 			comment TEXT,
-			UNIQUE(zone_name, key_id)
+			UNIQUE(zone_name, key_id),
+			CHECK (state IN ('received', 'active', 'edgesigner', 'retired', 'removed'))
 		)`,
 
 		// Node config table (stores node identity)
@@ -97,12 +106,12 @@ func (krs *KrsDB) initSchema() error {
 // AddReceivedKey adds a new received key to the database
 func (krs *KrsDB) AddReceivedKey(key *ReceivedKey) error {
 	query := `INSERT INTO received_keys 
-		(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment, retire_time)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := krs.DB.Exec(query,
 		key.ID, key.ZoneName, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
-		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment,
+		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment, key.RetireTime,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to add received key: %v", err)
@@ -114,16 +123,17 @@ func (krs *KrsDB) AddReceivedKey(key *ReceivedKey) error {
 func (krs *KrsDB) GetReceivedKey(id string) (*ReceivedKey, error) {
 	var key ReceivedKey
 	var activatedAt, retiredAt sql.NullTime
+	var retireTime sql.NullString
 
 	err := krs.DB.QueryRow(
 		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
-			state, received_at, activated_at, retired_at, distribution_id, comment
+			state, received_at, activated_at, retired_at, distribution_id, comment, retire_time
 			FROM received_keys WHERE id = ?`,
 		id,
 	).Scan(
 		&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
 		&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
-		&activatedAt, &retiredAt, &key.DistributionID, &key.Comment,
+		&activatedAt, &retiredAt, &key.DistributionID, &key.Comment, &retireTime,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -138,6 +148,9 @@ func (krs *KrsDB) GetReceivedKey(id string) (*ReceivedKey, error) {
 	if retiredAt.Valid {
 		key.RetiredAt = &retiredAt.Time
 	}
+	if retireTime.Valid {
+		key.RetireTime = retireTime.String
+	}
 
 	return &key, nil
 }
@@ -146,7 +159,7 @@ func (krs *KrsDB) GetReceivedKey(id string) (*ReceivedKey, error) {
 func (krs *KrsDB) GetReceivedKeysForZone(zoneName string) ([]*ReceivedKey, error) {
 	rows, err := krs.DB.Query(
 		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
-			state, received_at, activated_at, retired_at, distribution_id, comment
+			state, received_at, activated_at, retired_at, distribution_id, comment, retire_time
 			FROM received_keys WHERE zone_name = ? ORDER BY received_at DESC`,
 		zoneName,
 	)
@@ -159,11 +172,12 @@ func (krs *KrsDB) GetReceivedKeysForZone(zoneName string) ([]*ReceivedKey, error
 	for rows.Next() {
 		var key ReceivedKey
 		var activatedAt, retiredAt sql.NullTime
+		var retireTime sql.NullString
 
 		err := rows.Scan(
 			&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
 			&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
-			&activatedAt, &retiredAt, &key.DistributionID, &key.Comment,
+			&activatedAt, &retiredAt, &key.DistributionID, &key.Comment, &retireTime,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan received key: %v", err)
@@ -174,6 +188,9 @@ func (krs *KrsDB) GetReceivedKeysForZone(zoneName string) ([]*ReceivedKey, error
 		}
 		if retiredAt.Valid {
 			key.RetiredAt = &retiredAt.Time
+		}
+		if retireTime.Valid {
+			key.RetireTime = retireTime.String
 		}
 
 		keys = append(keys, &key)
@@ -186,7 +203,7 @@ func (krs *KrsDB) GetReceivedKeysForZone(zoneName string) ([]*ReceivedKey, error
 func (krs *KrsDB) GetAllReceivedKeys() ([]*ReceivedKey, error) {
 	rows, err := krs.DB.Query(
 		`SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
-			state, received_at, activated_at, retired_at, distribution_id, comment
+			state, received_at, activated_at, retired_at, distribution_id, comment, retire_time
 			FROM received_keys ORDER BY received_at DESC`,
 	)
 	if err != nil {
@@ -198,11 +215,12 @@ func (krs *KrsDB) GetAllReceivedKeys() ([]*ReceivedKey, error) {
 	for rows.Next() {
 		var key ReceivedKey
 		var activatedAt, retiredAt sql.NullTime
+		var retireTime sql.NullString
 
 		err := rows.Scan(
 			&key.ID, &key.ZoneName, &key.KeyID, &key.KeyType, &key.Algorithm, &key.Flags,
 			&key.PublicKey, &key.PrivateKey, &key.State, &key.ReceivedAt,
-			&activatedAt, &retiredAt, &key.DistributionID, &key.Comment,
+			&activatedAt, &retiredAt, &key.DistributionID, &key.Comment, &retireTime,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan received key: %v", err)
@@ -213,6 +231,9 @@ func (krs *KrsDB) GetAllReceivedKeys() ([]*ReceivedKey, error) {
 		}
 		if retiredAt.Valid {
 			key.RetiredAt = &retiredAt.Time
+		}
+		if retireTime.Valid {
+			key.RetireTime = retireTime.String
 		}
 
 		keys = append(keys, &key)
@@ -284,13 +305,62 @@ func (krs *KrsDB) AddEdgesignerKeyWithRetirement(key *ReceivedKey) error {
 	// Step 2: Insert the new edgesigner key
 	_, err = tx.Exec(
 		`INSERT INTO received_keys 
-			(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, distribution_id, comment, retire_time)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		key.ID, key.ZoneName, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
-		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment,
+		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, key.DistributionID, key.Comment, key.RetireTime,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to add new edgesigner key: %v", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	return nil
+}
+
+// AddActiveKeyWithRetirement atomically retires existing active KSKs for a zone
+// and adds a new active KSK. This ensures only one KSK per zone is in "active" state.
+// If either operation fails, the transaction is rolled back.
+func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
+	// Ensure the key state is "active" and key type is KSK
+	if key.State != "active" {
+		return fmt.Errorf("key state must be 'active', got '%s'", key.State)
+	}
+	if key.KeyType != "KSK" {
+		return fmt.Errorf("key type must be 'KSK', got '%s'", key.KeyType)
+	}
+
+	// Start a transaction
+	tx, err := krs.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback() // Will be a no-op if Commit succeeds
+
+	// Step 1: Retire existing active KSKs for this zone
+	now := time.Now()
+	_, err = tx.Exec(
+		`UPDATE received_keys SET state = ?, retired_at = ? WHERE zone_name = ? AND state = ? AND key_type = ?`,
+		"retired", now, key.ZoneName, "active", "KSK",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to retire existing active KSKs for zone %s: %v", key.ZoneName, err)
+	}
+
+	// Step 2: Insert the new active KSK (set activated_at to now since it's immediately active)
+	_, err = tx.Exec(
+		`INSERT INTO received_keys 
+			(id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, state, received_at, activated_at, distribution_id, comment, retire_time)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		key.ID, key.ZoneName, key.KeyID, key.KeyType, key.Algorithm, key.Flags,
+		key.PublicKey, key.PrivateKey, key.State, key.ReceivedAt, now, key.DistributionID, key.Comment, key.RetireTime,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to add new active KSK: %v", err)
 	}
 
 	// Commit the transaction
@@ -346,6 +416,112 @@ func (krs *KrsDB) UpdateNodeLastSeen() error {
 	if err != nil {
 		return fmt.Errorf("failed to update last_seen: %v", err)
 	}
+	return nil
+}
+
+// migrateAddRetireTimeAndRemovedState adds retire_time column and updates CHECK constraint to include 'removed'
+// TEMPORARY: Remove this migration once all databases have been upgraded
+func (krs *KrsDB) migrateAddRetireTimeAndRemovedState() error {
+	// Check if retire_time column exists
+	var columnExists bool
+	var count int
+	err := krs.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('received_keys') WHERE name='retire_time'").Scan(&count)
+	columnExists = (err == nil && count > 0)
+
+	if !columnExists {
+		// Add retire_time column
+		_, err = krs.DB.Exec("ALTER TABLE received_keys ADD COLUMN retire_time TEXT NULL")
+		if err != nil {
+			// Check if error is "duplicate column" (column already exists - race condition)
+			if !strings.Contains(err.Error(), "duplicate column") &&
+			   !strings.Contains(err.Error(), "already exists") &&
+			   !strings.Contains(err.Error(), "Duplicate column name") {
+				return fmt.Errorf("failed to add retire_time column: %v", err)
+			}
+		} else {
+			log.Printf("KRS: Added retire_time column to received_keys table")
+		}
+	}
+
+	// Check if constraint already allows 'removed' by trying to update a test record
+	var testID, originalState string
+	err = krs.DB.QueryRow("SELECT id, state FROM received_keys LIMIT 1").Scan(&testID, &originalState)
+	if err == nil && testID != "" {
+		// Try to update a record to 'removed' to test the constraint
+		_, err = krs.DB.Exec("UPDATE received_keys SET state = 'removed' WHERE id = ?", testID)
+		if err != nil && strings.Contains(err.Error(), "CHECK constraint failed") {
+			// Constraint doesn't allow 'removed', need to recreate table
+			log.Printf("KRS: Recreating received_keys table to update CHECK constraint for 'removed' state")
+
+			// Create new table with correct constraint
+			_, err = krs.DB.Exec(`
+				CREATE TABLE IF NOT EXISTS received_keys_new (
+					id TEXT PRIMARY KEY,
+					zone_name TEXT NOT NULL,
+					key_id INTEGER NOT NULL,
+					key_type TEXT NOT NULL,
+					algorithm INTEGER NOT NULL,
+					flags INTEGER NOT NULL,
+					public_key TEXT NOT NULL,
+					private_key BLOB NOT NULL,
+					state TEXT NOT NULL DEFAULT 'received',
+					received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					activated_at TIMESTAMP NULL,
+					retired_at TIMESTAMP NULL,
+					retire_time TEXT NULL,
+					distribution_id TEXT NOT NULL,
+					comment TEXT,
+					UNIQUE(zone_name, key_id),
+					CHECK (state IN ('received', 'active', 'edgesigner', 'retired', 'removed'))
+				)`)
+			if err != nil {
+				return fmt.Errorf("failed to create new received_keys table: %v", err)
+			}
+
+			// Copy data
+			_, err = krs.DB.Exec(`
+				INSERT INTO received_keys_new 
+				SELECT id, zone_name, key_id, key_type, algorithm, flags, public_key, private_key, 
+				       state, received_at, activated_at, retired_at, 
+				       COALESCE(retire_time, '') as retire_time,
+				       distribution_id, comment
+				FROM received_keys`)
+			if err != nil {
+				return fmt.Errorf("failed to copy data to new table: %v", err)
+			}
+
+			// Drop old table
+			_, err = krs.DB.Exec("DROP TABLE received_keys")
+			if err != nil {
+				return fmt.Errorf("failed to drop old table: %v", err)
+			}
+
+			// Rename new table
+			_, err = krs.DB.Exec("ALTER TABLE received_keys_new RENAME TO received_keys")
+			if err != nil {
+				return fmt.Errorf("failed to rename new table: %v", err)
+			}
+
+			// Recreate indexes
+			indexes := []string{
+				"CREATE INDEX IF NOT EXISTS idx_received_keys_zone_name ON received_keys(zone_name)",
+				"CREATE INDEX IF NOT EXISTS idx_received_keys_key_id ON received_keys(key_id)",
+				"CREATE INDEX IF NOT EXISTS idx_received_keys_state ON received_keys(state)",
+				"CREATE INDEX IF NOT EXISTS idx_received_keys_distribution_id ON received_keys(distribution_id)",
+			}
+			for _, idxStmt := range indexes {
+				if _, err := krs.DB.Exec(idxStmt); err != nil {
+					log.Printf("KRS: Warning: Failed to recreate index: %v", err)
+				}
+			}
+
+			log.Printf("KRS: Successfully updated received_keys table CHECK constraint")
+		} else if err == nil {
+			// Update succeeded, revert it to original state
+			_, _ = krs.DB.Exec("UPDATE received_keys SET state = ? WHERE id = ?", originalState, testID)
+		}
+	}
+	// If no records exist or constraint already allows 'removed', nothing to do
 	return nil
 }
 

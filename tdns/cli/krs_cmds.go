@@ -206,6 +206,43 @@ var krsKeysHashCmd = &cobra.Command{
 	},
 }
 
+var krsKeysPurgeCmd = &cobra.Command{
+	Use:   "purge [--zone <zone-name>]",
+	Short: "Delete all keys in 'removed' state",
+	Long:  `Delete all keys that are in the 'removed' state. If --zone is specified, only keys for that zone are purged. Otherwise, keys for all zones are purged.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Zone is optional - if provided, normalize it
+		zoneName := ""
+		if tdns.Globals.Zonename != "" {
+			zoneName = dns.Fqdn(tdns.Globals.Zonename)
+		}
+
+		prefixcmd, _ := getCommandContext("keys")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		req := map[string]interface{}{
+			"command": "purge",
+		}
+		if zoneName != "" {
+			req["zone_name"] = zoneName
+		}
+
+		resp, err := sendKrsRequest(api, "/krs/keys", req)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if getBool(resp, "error") {
+			log.Fatalf("Error: %v", getString(resp, "error_msg"))
+		}
+
+		fmt.Printf("%s\n", getString(resp, "msg", "Msg"))
+	},
+}
+
 var krsKeysGetCmd = &cobra.Command{
 	Use:   "get --keyid <key-id>",
 	Short: "Get a specific received key",
@@ -494,7 +531,7 @@ func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map
 }
 
 func init() {
-	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd, krsKeysHashCmd)
+	KrsKeysCmd.AddCommand(krsKeysListCmd, krsKeysGetCmd, krsKeysGetByZoneCmd, krsKeysHashCmd, krsKeysPurgeCmd)
 	KrsConfigCmd.AddCommand(krsConfigGetCmd)
 	KrsQueryCmd.AddCommand(krsQueryKmreqCmd)
 	KrsDebugDistribCmd.AddCommand(krsDebugDistribFetchCmd)

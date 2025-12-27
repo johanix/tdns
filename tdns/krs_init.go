@@ -120,6 +120,12 @@ func (conf *Config) StartKrs(ctx context.Context, apirouter *mux.Router) error {
 		log.Printf("KRS: WARNING: No DNS engine addresses configured, NOTIFY receiver not started")
 	}
 
+	// Start key state worker for automatic transitions
+	startEngine(&Globals.App, "KeyStateWorker", func() error {
+		log.Printf("KRS: Starting KeyStateWorker")
+		return krs.KeyStateWorker(ctx, krsDB)
+	})
+
 	log.Printf("TDNS %s (%s): KRS started successfully", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	return nil
 }

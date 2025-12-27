@@ -179,6 +179,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	if contentType == "encrypted_keys" {
 		metadata["key_count"] = keyCount
 	}
+	// Add retire_time from config if available
+	if conf != nil && conf.RetireTime > 0 {
+		metadata["retire_time"] = conf.RetireTime.String() // Convert duration to string (e.g., "168h0m0s")
+	}
 
 	// Determine if payload should be included inline
 	// DNS UDP message limit is ~1232 bytes with EDNS0, but we need to account for:
@@ -313,7 +317,7 @@ func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16,
 func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string) ([]*DistributionRecord, error) {
 	rows, err := kdc.DB.Query(
 		`SELECT id, zone_name, key_id, node_id, encrypted_key, ephemeral_pub_key, 
-			created_at, expires_at, status, distribution_id
+			created_at, expires_at, status, distribution_id, completed_at
 			FROM distribution_records 
 			WHERE distribution_id = ? 
 			ORDER BY created_at DESC`,
@@ -329,11 +333,12 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 		record := &DistributionRecord{}
 		var nodeID sql.NullString
 		var expiresAt sql.NullTime
+		var completedAt sql.NullTime
 		var statusStr string
 		if err := rows.Scan(
 			&record.ID, &record.ZoneName, &record.KeyID, &nodeID,
 			&record.EncryptedKey, &record.EphemeralPubKey, &record.CreatedAt,
-			&expiresAt, &statusStr, &record.DistributionID,
+			&expiresAt, &statusStr, &record.DistributionID, &completedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan distribution record: %v", err)
 		}
@@ -342,6 +347,9 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 		}
 		if expiresAt.Valid {
 			record.ExpiresAt = &expiresAt.Time
+		}
+		if completedAt.Valid {
+			record.CompletedAt = &completedAt.Time
 		}
 		record.Status = hpke.DistributionStatus(statusStr)
 		records = append(records, record)
