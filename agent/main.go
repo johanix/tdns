@@ -14,7 +14,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/johanix/tdns/tdns"
+	"github.com/johanix/tdns/v1.0/tdns"
 )
 
 func main() {
