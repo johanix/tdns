@@ -16,11 +16,10 @@ import (
 
 	"crypto/tls"
 
-	"github.com/johanix/tdns/tdns"
-	core "github.com/johanix/tdns/tdns/core"
-	edns0 "github.com/johanix/tdns/tdns/edns0"
+	"github.com/johanix/tdns/v1.0/tdns"
+	core "github.com/johanix/tdns/v1.0/tdns/core"
+	edns0 "github.com/johanix/tdns/v1.0/tdns/edns0"
 
-	// cli "github.com/johanix/tdns/tdns/cli"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
