@@ -14,9 +14,6 @@
 #   - add-transport-signal:	automatically syntetisize SVCB RRs to put in Additional section
 #
 
-templates:
-   - name:            foobar
-     options:         [ delegation-sync-child, allow-updates, online-signing, add-transport-signal ]
 zones:
    - name:            test.net
      zonefile:        /etc/tdns/zones/test.net
@@ -25,8 +22,3 @@ zones:
    - name:            .
      zonefile:        /etc/tdns/zones/root
      template:        parent-primary
-
-# Commented zones kept for reference
-#  - name:         child.test.net
-#    zonefile:     /etc/tdns/zones/child.test.net
-#    template:     child-primary
