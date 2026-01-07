@@ -18,9 +18,28 @@ const (
 	TypeHSYNC   = 0x0F9D
 	TypeHSYNC2  = 0x0F9E
 	TypeTSYNC   = 0x0F9F
-	TypeJSONMANIFEST = 65013 // 0xFDF5 - JSON Distribution Manifest
-	TypeJSONCHUNK   = 65014 // 0xFDF6 - Chunked JSON Data Transport
+	TypeMANIFEST = 65013 // 0xFDF5 - Distribution Manifest
+	TypeCHUNK    = 65014 // 0xFDF6 - Chunked Data Transport
+	TypeCHUNK2   = 65015 // 0xFDF7 - Unified Chunk/Manifest (experimental)
 )
+
+// Format constants for MANIFEST and CHUNK RR types
+const (
+	FormatJSON = 1 // JSON format (original format)
+	// Future formats can be added as needed:
+	// FormatJSONv2 = 9  // Example: if JSON v2 is needed in the future
+	// FormatBinary = 2  // Example: binary format
+	// FormatProtobuf = 3 // Example: protobuf format
+)
+
+// FormatToString maps format constants to their string representations
+var FormatToString = map[uint8]string{
+	FormatJSON: "JSON",
+	// Future formats:
+	// FormatJSONv2: "JSONv2",
+	// FormatBinary: "BINARY",
+	// FormatProtobuf: "PROTOBUF",
+}
 
 func unpackUint8(msg []byte, off int) (i uint8, off1 int, err error) {
 	if off+1 > len(msg) {

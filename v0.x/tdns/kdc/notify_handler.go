@@ -36,7 +36,7 @@ func HandleKdcNotify(ctx context.Context, msg *dns.Msg, qname string, w dns.Resp
 	}
 
 	// Only handle JSONMANIFEST NOTIFYs as confirmations
-	if qtype != core.TypeJSONMANIFEST {
+	if qtype != core.TypeMANIFEST {
 		log.Printf("KDC: Ignoring NOTIFY for non-JSONMANIFEST type %s", dns.TypeToString[qtype])
 		// Send minimal ACK response
 		m := new(dns.Msg)

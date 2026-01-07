@@ -3,36 +3,33 @@ module dog
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/v1.0/tdns => ../v1.0/tdns
-	github.com/johanix/tdns/v1.0/tdns/cache => ../v1.0/tdns/cache
-	github.com/johanix/tdns/v1.0/tdns/cli => ../v1.0/tdns/cli
-	github.com/johanix/tdns/v1.0/tdns/core => ../v1.0/tdns/core
-	github.com/johanix/tdns/v1.0/tdns/edns0 => ../v1.0/tdns/edns0
+	github.com/johanix/tdns/v0.x/tdns => ../v0.x/tdns
+	github.com/johanix/tdns/v0.x/tdns/cache => ../v0.x/tdns/cache
+	github.com/johanix/tdns/v0.x/tdns/cli => ../v0.x/tdns/cli
+	github.com/johanix/tdns/v0.x/tdns/core => ../v0.x/tdns/core
+	github.com/johanix/tdns/v0.x/tdns/edns0 => ../v0.x/tdns/edns0
 )
 
 require (
-	github.com/johanix/tdns/v1.0/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v1.0/tdns/core v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v1.0/tdns/edns0 v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v0.x/tdns v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v0.x/tdns/core v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v0.x/tdns/edns0 v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.68
 	github.com/spf13/cobra v1.8.1
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/cloudflare/circl v1.6.1 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.22.1 // indirect
-	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns/v1.0/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v0.x/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect

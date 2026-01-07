@@ -309,6 +309,7 @@ func (rr *DELEG) Unpack(buf []byte) (int, error) {
 // johani
 func RegisterDelegRR() error {
 	dns.PrivateHandle("DELEG", TypeDELEG, NewDELEG)
+	dns.TypeToString[TypeDELEG] = "DELEG"
 	return nil
 }
 

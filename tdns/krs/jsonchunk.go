@@ -88,7 +88,7 @@ func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID strin
 	rr := resp.Answer[0]
 	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeJSONMANIFEST {
 		if manifest, ok := privRR.Data.(*core.JSONMANIFEST); ok {
-			log.Printf("KRS: Parsed JSONMANIFEST: chunk_count=%d, chunk_size=%d, checksum=%s", manifest.ChunkCount, manifest.ChunkSize, manifest.Checksum)
+			log.Printf("KRS: Parsed JSONMANIFEST: chunk_count=%d, chunk_size=%d, HMAC=%x", manifest.ChunkCount, manifest.ChunkSize, manifest.HMAC)
 			if manifest.Metadata != nil {
 				if content, ok := manifest.Metadata["content"].(string); ok {
 					log.Printf("KRS: JSONMANIFEST content type: %s", content)
@@ -342,13 +342,13 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	}
 
 	// Verify checksum if present
-	if manifest.Checksum != "" {
+	if manifest.HMAC != nil {
 		hash := sha256.Sum256(reassembled)
-		expectedChecksum := fmt.Sprintf("sha256:%x", hash)
-		if manifest.Checksum != expectedChecksum {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", manifest.Checksum, expectedChecksum)
+		expectedHMAC := fmt.Sprintf("sha256:%x", hash)
+		if manifest.HMAC != expectedHMAC {
+			return fmt.Errorf("HMAC mismatch: expected %x, got %x", manifest.HMAC, expectedHMAC)
 		}
-		log.Printf("KRS: Checksum verified successfully")
+		log.Printf("KRS: HMAC verified successfully")
 	}
 
 	// Process based on content type

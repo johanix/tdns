@@ -294,6 +294,8 @@ func (rd *HSYNC2) Len() int {
 
 func RegisterHsync2RR() error {
 	dns.PrivateHandle("HSYNC2", TypeHSYNC2, NewHSYNC2)
+	// Explicitly set TypeToString to use "HSYNC2" for printing
+	dns.TypeToString[TypeHSYNC2] = "HSYNC2"
 	// log.Printf("Registered HSYNC RR")
 	return nil
 }

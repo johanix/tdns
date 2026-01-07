@@ -259,8 +259,11 @@ type APIRouteRegistration struct {
 }
 
 // RegisterAPIRoute registers a function that will add API routes to the router.
-// The route registration function is called after SetupAPIRouter() completes,
-// allowing external code to add routes without TDNS knowing about them.
+// IMPORTANT: The route registration function is called DURING SetupAPIRouter(),
+// so routes must be registered BEFORE calling SetupAPIRouter().
+// For apps that call SetupAPIRouter() before initializing their subsystems,
+// routes should be registered directly on the router after SetupAPIRouter() returns,
+// rather than using RegisterAPIRoute().
 //
 // Example usage:
 //   tdns.RegisterAPIRoute(func(router *mux.Router) error {

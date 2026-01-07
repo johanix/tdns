@@ -8,8 +8,8 @@ all:
 	$(MAKE) -C ./imr/
 	$(MAKE) -C ./reporter/
 	$(MAKE) -C ./scanner/
-	$(MAKE) -C ./kdc/
-	$(MAKE) -C ./krs/
+#	$(MAKE) -C ./kdc/
+#	$(MAKE) -C ./krs/
 #	$(MAKE) -C ./msa/
 #	$(MAKE) -C ./sidecar-cli/
 
@@ -22,8 +22,8 @@ clean:
 	$(MAKE) -C ./imr/ clean
 	$(MAKE) -C ./reporter/ clean
 	$(MAKE) -C ./scanner/ clean
-	$(MAKE) -C ./kdc/ clean
-	$(MAKE) -C ./krs/ clean
+#	$(MAKE) -C ./kdc/ clean
+#	$(MAKE) -C ./krs/ clean
 #	$(MAKE) -C ./msa/ clean
 #	$(MAKE) -C ./sidecar-cli/ clean
 
@@ -36,8 +36,8 @@ install:
 	$(MAKE) -C ./imr/ install
 	$(MAKE) -C ./reporter/ install
 	$(MAKE) -C ./scanner/ install
-	$(MAKE) -C ./kdc/ install
-	$(MAKE) -C ./krs/ install
+#	$(MAKE) -C ./kdc/ install
+#	$(MAKE) -C ./krs/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install
 

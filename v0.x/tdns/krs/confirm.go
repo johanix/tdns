@@ -30,7 +30,7 @@ func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string) error
 	notifyQname := distributionID + "." + controlZoneFQDN
 
 	// Send NOTIFY for JSONMANIFEST query type
-	notifyType := uint16(core.TypeJSONMANIFEST) // Use JSONMANIFEST RRtype (65013)
+	notifyType := uint16(core.TypeMANIFEST) // Use MANIFEST RRtype (65013)
 
 	typeStr := dns.TypeToString[notifyType]
 	if typeStr == "" {

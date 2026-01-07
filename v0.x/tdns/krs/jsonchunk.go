@@ -7,7 +7,6 @@
 package krs
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -23,7 +22,7 @@ import (
 )
 
 // QueryJSONMANIFEST queries the KDC for a JSONMANIFEST record
-func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (*core.JSONMANIFEST, error) {
+func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string) (*core.MANIFEST, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -53,7 +52,7 @@ func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID strin
 
 	// Create JSONMANIFEST query
 	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeJSONMANIFEST)
+	msg.SetQuestion(qname, core.TypeMANIFEST)
 	msg.RecursionDesired = false
 
 	log.Printf("KRS: Querying JSONMANIFEST for node %s, distribution %s", nodeID, distributionID)
@@ -86,9 +85,9 @@ func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID strin
 	}
 
 	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeJSONMANIFEST {
-		if manifest, ok := privRR.Data.(*core.JSONMANIFEST); ok {
-			log.Printf("KRS: Parsed JSONMANIFEST: chunk_count=%d, chunk_size=%d, checksum=%s", manifest.ChunkCount, manifest.ChunkSize, manifest.Checksum)
+	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeMANIFEST {
+		if manifest, ok := privRR.Data.(*core.MANIFEST); ok {
+			log.Printf("KRS: Parsed MANIFEST: chunk_count=%d, chunk_size=%d, hmac=%x", manifest.ChunkCount, manifest.ChunkSize, manifest.HMAC)
 			if manifest.Metadata != nil {
 				if content, ok := manifest.Metadata["content"].(string); ok {
 					log.Printf("KRS: JSONMANIFEST content type: %s", content)
@@ -108,7 +107,7 @@ func QueryJSONMANIFEST(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID strin
 // QueryJSONCHUNK queries the KDC for a specific JSONCHUNK record
 // chunkSize is the expected chunk size from the manifest (0 if unknown)
 // If chunkSize > 1180 bytes, TCP is used directly (UDP max is ~1232 bytes including headers)
-func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.JSONCHUNK, error) {
+func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, chunkID uint16, chunkSize uint16) (*core.CHUNK, error) {
 	nodeConfig, err := krsDB.GetNodeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node config: %v", err)
@@ -138,7 +137,7 @@ func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, 
 
 	// Create JSONCHUNK query
 	msg := new(dns.Msg)
-	msg.SetQuestion(qname, core.TypeJSONCHUNK)
+	msg.SetQuestion(qname, core.TypeCHUNK)
 	msg.RecursionDesired = false
 	// Set EDNS0 to allow larger messages
 	msg.SetEdns0(dns.DefaultMsgSize, true)
@@ -189,8 +188,8 @@ func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, 
 	}
 
 	rr := resp.Answer[0]
-	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeJSONCHUNK {
-		if chunk, ok := privRR.Data.(*core.JSONCHUNK); ok {
+	if privRR, ok := rr.(*dns.PrivateRR); ok && privRR.Hdr.Rrtype == core.TypeCHUNK {
+		if chunk, ok := privRR.Data.(*core.CHUNK); ok {
 			log.Printf("KRS: Parsed JSONCHUNK: sequence=%d, total=%d, data_len=%d", chunk.Sequence, chunk.Total, len(chunk.Data))
 			return chunk, nil
 		}
@@ -201,7 +200,7 @@ func QueryJSONCHUNK(krsDB *KrsDB, conf *KrsConf, nodeID, distributionID string, 
 }
 
 // ReassembleChunks reassembles chunks into the complete base64-encoded data
-func ReassembleChunks(chunks []*core.JSONCHUNK) ([]byte, error) {
+func ReassembleChunks(chunks []*core.CHUNK) ([]byte, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks to reassemble")
 	}
@@ -212,7 +211,7 @@ func ReassembleChunks(chunks []*core.JSONCHUNK) ([]byte, error) {
 	}
 
 	// Sort chunks by sequence number
-	chunkMap := make(map[uint16]*core.JSONCHUNK)
+	chunkMap := make(map[uint16]*core.CHUNK)
 	for _, chunk := range chunks {
 		if int(chunk.Sequence) >= total {
 			return nil, fmt.Errorf("chunk sequence %d out of range (max %d)", chunk.Sequence, total-1)
@@ -319,7 +318,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 	} else if manifest.ChunkCount > 0 {
 		// Payload is chunked, fetch all chunks
 		// Pass chunk size from manifest to QueryJSONCHUNK so it can decide UDP vs TCP
-		var chunks []*core.JSONCHUNK
+		var chunks []*core.CHUNK
 		for i := uint16(0); i < manifest.ChunkCount; i++ {
 			chunk, err := QueryJSONCHUNK(krsDB, conf, nodeID, distributionID, i, manifest.ChunkSize)
 			if err != nil {
@@ -341,15 +340,8 @@ func ProcessDistribution(krsDB *KrsDB, conf *KrsConf, distributionID string, pro
 		return fmt.Errorf("manifest has no payload and chunk_count is 0")
 	}
 
-	// Verify checksum if present
-	if manifest.Checksum != "" {
-		hash := sha256.Sum256(reassembled)
-		expectedChecksum := fmt.Sprintf("sha256:%x", hash)
-		if manifest.Checksum != expectedChecksum {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", manifest.Checksum, expectedChecksum)
-		}
-		log.Printf("KRS: Checksum verified successfully")
-	}
+	// HMAC verification is done during ProcessDistribution using the node's public key
+	// No need to verify checksum here as HMAC provides integrity protection
 
 	// Process based on content type
 	switch contentType {

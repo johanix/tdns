@@ -31,8 +31,8 @@ type chunkCache struct {
 }
 
 type preparedChunks struct {
-	manifest  *core.JSONMANIFEST
-	chunks    []*core.JSONCHUNK
+	manifest  *core.MANIFEST
+	chunks    []*core.CHUNK
 	checksum  string
 	timestamp int64
 }
@@ -201,10 +201,11 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	payloadSize := len(base64Data)
 	
 	// Create a test manifest to check actual size
-	testManifest := &core.JSONMANIFEST{
+	// Note: HMAC will be calculated later, not set here
+	testManifest := &core.MANIFEST{
+		Format:     core.FormatJSON,
 		ChunkCount: 0,
 		ChunkSize:  0,
-		Checksum:   checksum,
 		Metadata:   metadata,
 		Payload:    base64Data, // Test with actual payload
 	}
@@ -216,7 +217,7 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
 
-	var chunks []*core.JSONCHUNK
+	var chunks []*core.CHUNK
 	var chunkSize uint16
 	var chunkCount uint16
 
@@ -236,10 +237,10 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 			payloadSize, testSize, estimatedTotalSize, chunkCount)
 	}
 
-	manifest := &core.JSONMANIFEST{
+	manifest := &core.MANIFEST{
+		Format:     core.FormatJSON,
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
-		Checksum:   checksum,
 		Metadata:   metadata,
 	}
 
@@ -266,12 +267,12 @@ func (kdc *KdcDB) prepareChunksForNode(nodeID, distributionID string, conf *KdcC
 }
 
 // splitIntoChunks splits data into chunks of specified size
-func splitIntoChunks(data []byte, chunkSize int) []*core.JSONCHUNK {
+func splitIntoChunks(data []byte, chunkSize int) []*core.CHUNK {
 	if chunkSize <= 0 {
 		chunkSize = 60000 // Default
 	}
 
-	var chunks []*core.JSONCHUNK
+	var chunks []*core.CHUNK
 	total := len(data)
 	numChunks := (total + chunkSize - 1) / chunkSize // Ceiling division
 
@@ -285,7 +286,7 @@ func splitIntoChunks(data []byte, chunkSize int) []*core.JSONCHUNK {
 		chunkData := make([]byte, end-start)
 		copy(chunkData, data[start:end])
 
-		chunk := &core.JSONCHUNK{
+		chunk := &core.CHUNK{
 			Sequence: uint16(i),
 			Total:    uint16(numChunks),
 			Data:     chunkData,
@@ -297,7 +298,7 @@ func splitIntoChunks(data []byte, chunkSize int) []*core.JSONCHUNK {
 }
 
 // GetManifestForNode retrieves or prepares manifest for a node's distribution event
-func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcConf) (*core.JSONMANIFEST, error) {
+func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcConf) (*core.MANIFEST, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
 		return nil, err
@@ -306,7 +307,7 @@ func (kdc *KdcDB) GetManifestForNode(nodeID, distributionID string, conf *KdcCon
 }
 
 // GetChunkForNode retrieves a specific chunk for a node's distribution event
-func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.JSONCHUNK, error) {
+func (kdc *KdcDB) GetChunkForNode(nodeID, distributionID string, chunkID uint16, conf *KdcConf) (*core.CHUNK, error) {
 	prepared, err := kdc.prepareChunksForNode(nodeID, distributionID, conf)
 	if err != nil {
 		return nil, err
@@ -545,10 +546,11 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	payloadSize := len(dataToChunk)
 	
 	// Create a test manifest to check actual size
-	testManifest := &core.JSONMANIFEST{
+	// Note: HMAC will be calculated later, not set here
+	testManifest := &core.MANIFEST{
+		Format:     core.FormatJSON,
 		ChunkCount: 0,
 		ChunkSize:  0,
-		Checksum:   checksum,
 		Metadata: map[string]interface{}{
 			"content":         contentType,
 			"distribution_id": distributionID,
@@ -564,7 +566,7 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	estimatedTotalSize := estimatedDNSOverhead + testSize
 	includeInline := payloadSize <= inlinePayloadThreshold && estimatedTotalSize < 1200
 
-	var chunks []*core.JSONCHUNK
+	var chunks []*core.CHUNK
 	var chunkSize uint16
 	var chunkCount uint16
 
@@ -585,10 +587,11 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	}
 
 	// Create manifest
-	manifest := &core.JSONMANIFEST{
+	// Note: HMAC will be calculated later, not set here
+	manifest := &core.MANIFEST{
+		Format:     core.FormatJSON,
 		ChunkCount: chunkCount,
 		ChunkSize:  chunkSize,
-		Checksum:   checksum,
 		Metadata: map[string]interface{}{
 			"content":         contentType,
 			"distribution_id": distributionID,

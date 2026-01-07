@@ -95,7 +95,7 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		}
 		return err
 
-	case core.TypeJSONMANIFEST:
+	case core.TypeMANIFEST:
 		log.Printf("KDC: Handling JSONMANIFEST query")
 		err := handleJSONMANIFESTQuery(ctx, m, msg, qname, w, kdcDB, conf)
 		if err != nil {
@@ -106,7 +106,7 @@ func HandleKdcQuery(ctx context.Context, dqr *KdcQueryRequest, kdcDB *KdcDB, con
 		// Don't return error - we've already sent the response (success or error)
 		return nil
 
-	case core.TypeJSONCHUNK:
+	case core.TypeCHUNK:
 		log.Printf("KDC: Handling JSONCHUNK query")
 		err := handleJSONCHUNKQuery(ctx, m, msg, qname, w, kdcDB, conf)
 		if err != nil {
@@ -649,7 +649,7 @@ func handleJSONMANIFESTQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qnam
 	manifestRR := &dns.PrivateRR{
 		Hdr: dns.RR_Header{
 			Name:   qname,
-			Rrtype: core.TypeJSONMANIFEST,
+			Rrtype: core.TypeMANIFEST,
 			Class:  dns.ClassINET,
 			Ttl:    300,
 		},
@@ -702,7 +702,7 @@ func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname s
 	chunkRR := &dns.PrivateRR{
 		Hdr: dns.RR_Header{
 			Name:   qname,
-			Rrtype: core.TypeJSONCHUNK,
+			Rrtype: core.TypeCHUNK,
 			Class:  dns.ClassINET,
 			Ttl:    300,
 		},
@@ -720,7 +720,7 @@ func handleJSONCHUNKQuery(ctx context.Context, m *dns.Msg, msg *dns.Msg, qname s
 // The NOTIFY QNAME format is: <distributionID>.<controlzone>
 func handleConfirmationNotify(ctx context.Context, msg *dns.Msg, qname string, qtype uint16, w dns.ResponseWriter, kdcDB *KdcDB, conf *KdcConf) error {
 	// Only handle JSONMANIFEST NOTIFYs as confirmations
-	if qtype != core.TypeJSONMANIFEST {
+	if qtype != core.TypeMANIFEST {
 		log.Printf("KDC: Ignoring NOTIFY for non-JSONMANIFEST type %s", dns.TypeToString[qtype])
 		return nil
 	}

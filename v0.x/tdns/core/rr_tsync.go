@@ -237,6 +237,8 @@ func (rd *TSYNC) Len() int {
 
 func RegisterTsyncRR() error {
 	dns.PrivateHandle("TSYNC", TypeTSYNC, NewTSYNC)
+	// Explicitly set TypeToString to use "TSYNC" for printing
+	dns.TypeToString[TypeTSYNC] = "TSYNC"
 	return nil
 }
 

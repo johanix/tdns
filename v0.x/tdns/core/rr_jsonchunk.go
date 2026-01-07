@@ -15,21 +15,35 @@ import (
 )
 
 func init() {
-	RegisterJSONCHUNKRR()
+	RegisterCHUNKRR()
 }
 
-// JSONCHUNK - Chunked JSON Data Transport
-// Transports large JSON-structured data (zone lists or encrypted blobs) in chunks
-// Format: Base64-encoded JSON data with sequence/total metadata
-type JSONCHUNK struct {
+// CHUNK - Chunked Data Transport (generalized from JSONCHUNK)
+// Transports large format-specific data (zone lists or encrypted blobs) in chunks
+// The format is determined by the associated MANIFEST, not by CHUNK itself.
+//
+// RDATA structure:
+//   - Sequence (uint16): Chunk sequence number (0-based)
+//   - Total (uint16): Total number of chunks
+//   - Data length (uint16): Length of format-specific data
+//   - Data ([]byte): Format-specific data
+//
+// For FormatJSON (as specified in MANIFEST), the data is base64-encoded JSON data (raw bytes, not base64 string)
+//
+// Presentation format (space-separated values):
+//   - Single chunk: <base64-data>
+//     Example: "<base64-encoded-chunk-data>"
+//   - Multiple chunks: <base64-data> <sequence> <total>
+//     Example: "<base64-encoded-chunk-data> 1 2"
+type CHUNK struct {
 	Sequence uint16 `json:"sequence"` // Chunk sequence number (0-based)
 	Total    uint16 `json:"total"`    // Total number of chunks
-	Data     []byte `json:"data"`     // Base64-encoded JSON data (raw bytes, not base64 string)
+	Data     []byte `json:"data"`     // Format-specific data (format determined by associated MANIFEST)
 }
 
-func NewJSONCHUNK() dns.PrivateRdata { return new(JSONCHUNK) }
+func NewCHUNK() dns.PrivateRdata { return new(CHUNK) }
 
-func (rd JSONCHUNK) String() string {
+func (rd CHUNK) String() string {
 	dataStr := base64.StdEncoding.EncodeToString(rd.Data)
 	if rd.Total > 1 {
 		return fmt.Sprintf("%s %d %d", dataStr, rd.Sequence, rd.Total)
@@ -37,15 +51,15 @@ func (rd JSONCHUNK) String() string {
 	return dataStr
 }
 
-func (rd *JSONCHUNK) Parse(txt []string) error {
+func (rd *CHUNK) Parse(txt []string) error {
 	if len(txt) < 1 || len(txt) > 3 {
-		return errors.New("JSONCHUNK requires base64 data and optionally sequence/total")
+		return errors.New("CHUNK requires base64 data and optionally sequence/total")
 	}
 
 	// Decode base64-encoded data
 	data, err := base64.StdEncoding.DecodeString(txt[0])
 	if err != nil {
-		return fmt.Errorf("invalid JSONCHUNK base64 data: %v", err)
+		return fmt.Errorf("invalid CHUNK base64 data: %v", err)
 	}
 
 	rd.Data = data
@@ -56,11 +70,11 @@ func (rd *JSONCHUNK) Parse(txt []string) error {
 	if len(txt) >= 3 {
 		seq, err := strconv.ParseUint(txt[1], 10, 16)
 		if err != nil {
-			return fmt.Errorf("invalid JSONCHUNK sequence: %s", txt[1])
+			return fmt.Errorf("invalid CHUNK sequence: %s", txt[1])
 		}
 		total, err := strconv.ParseUint(txt[2], 10, 16)
 		if err != nil {
-			return fmt.Errorf("invalid JSONCHUNK total: %s", txt[2])
+			return fmt.Errorf("invalid CHUNK total: %s", txt[2])
 		}
 		rd.Sequence = uint16(seq)
 		rd.Total = uint16(total)
@@ -69,10 +83,13 @@ func (rd *JSONCHUNK) Parse(txt []string) error {
 	return nil
 }
 
-func (rd *JSONCHUNK) Pack(buf []byte) (int, error) {
+func (rd *CHUNK) Pack(buf []byte) (int, error) {
 	off := 0
 
 	// Pack sequence and total (uint16 each)
+	if len(buf) < off+4 {
+		return off, errors.New("buffer too small for CHUNK sequence/total")
+	}
 	buf[off] = byte(rd.Sequence >> 8)
 	buf[off+1] = byte(rd.Sequence)
 	off += 2
@@ -83,7 +100,10 @@ func (rd *JSONCHUNK) Pack(buf []byte) (int, error) {
 	// Pack data length (uint16)
 	dataLen := len(rd.Data)
 	if dataLen > 65535 {
-		return off, errors.New("JSONCHUNK data too long")
+		return off, errors.New("CHUNK data too long")
+	}
+	if len(buf) < off+2 {
+		return off, errors.New("buffer too small for CHUNK data length")
 	}
 	buf[off] = byte(dataLen >> 8)
 	buf[off+1] = byte(dataLen)
@@ -91,7 +111,7 @@ func (rd *JSONCHUNK) Pack(buf []byte) (int, error) {
 
 	// Pack data
 	if len(buf) < off+dataLen {
-		return off, errors.New("buffer too small for JSONCHUNK data")
+		return off, errors.New("buffer too small for CHUNK data")
 	}
 	copy(buf[off:], rd.Data)
 	off += dataLen
@@ -99,33 +119,33 @@ func (rd *JSONCHUNK) Pack(buf []byte) (int, error) {
 	return off, nil
 }
 
-func (rd *JSONCHUNK) Unpack(buf []byte) (int, error) {
+func (rd *CHUNK) Unpack(buf []byte) (int, error) {
 	off := 0
 
 	// Unpack sequence
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for JSONCHUNK sequence")
+		return off, errors.New("buffer too short for CHUNK sequence")
 	}
 	rd.Sequence = binary.BigEndian.Uint16(buf[off:])
 	off += 2
 
 	// Unpack total
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for JSONCHUNK total")
+		return off, errors.New("buffer too short for CHUNK total")
 	}
 	rd.Total = binary.BigEndian.Uint16(buf[off:])
 	off += 2
 
 	// Unpack data length
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for JSONCHUNK data length")
+		return off, errors.New("buffer too short for CHUNK data length")
 	}
 	dataLen := int(binary.BigEndian.Uint16(buf[off:]))
 	off += 2
 
 	// Unpack data
 	if len(buf) < off+dataLen {
-		return off, errors.New("buffer too short for JSONCHUNK data")
+		return off, errors.New("buffer too short for CHUNK data")
 	}
 	rd.Data = make([]byte, dataLen)
 	copy(rd.Data, buf[off:off+dataLen])
@@ -134,24 +154,28 @@ func (rd *JSONCHUNK) Unpack(buf []byte) (int, error) {
 	return off, nil
 }
 
-func (rd *JSONCHUNK) Copy(dest dns.PrivateRdata) error {
-	d := dest.(*JSONCHUNK)
-	d.Data = make([]byte, len(rd.Data))
-	copy(d.Data, rd.Data)
+func (rd *CHUNK) Copy(dest dns.PrivateRdata) error {
+	d := dest.(*CHUNK)
 	d.Sequence = rd.Sequence
 	d.Total = rd.Total
+	if rd.Data != nil {
+		d.Data = make([]byte, len(rd.Data))
+		copy(d.Data, rd.Data)
+	}
 	return nil
 }
 
-func (rd *JSONCHUNK) Len() int {
+func (rd *CHUNK) Len() int {
 	return 2 + // sequence
 		2 + // total
 		2 + // data length
 		len(rd.Data) // data
 }
 
-func RegisterJSONCHUNKRR() error {
-	dns.PrivateHandle("JSONCHUNK", TypeJSONCHUNK, NewJSONCHUNK)
+func RegisterCHUNKRR() error {
+	dns.PrivateHandle("CHUNK", TypeCHUNK, NewCHUNK)
+	// Explicitly set TypeToString to use "CHUNK" for printing
+	dns.TypeToString[TypeCHUNK] = "CHUNK"
 	return nil
 }
 

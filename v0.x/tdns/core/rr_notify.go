@@ -144,5 +144,7 @@ func (rd *NOTIFY) Len() int {
 
 func RegisterNotifyRR() error {
 	dns.PrivateHandle("NOTIFY", TypeNOTIFY, NewNOTIFY)
+	// Explicitly set TypeToString to use "NOTIFY" for printing
+	dns.TypeToString[TypeNOTIFY] = "NOTIFY"
 	return nil
 }

@@ -185,5 +185,7 @@ func (rd *DSYNC) Len() int {
 
 func RegisterDsyncRR() error {
 	dns.PrivateHandle("DSYNC", TypeDSYNC, NewDSYNC)
+	// Explicitly set TypeToString to use "DSYNC" for printing
+	dns.TypeToString[TypeDSYNC] = "DSYNC"
 	return nil
 }

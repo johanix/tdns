@@ -158,5 +158,7 @@ func (rd *MSIGNER) Len() int {
 
 func RegisterMsignerRR() error {
 	dns.PrivateHandle("MSIGNER", TypeMSIGNER, NewMSIGNER)
+	// Explicitly set TypeToString to use "MSIGNER" for printing
+	dns.TypeToString[TypeMSIGNER] = "MSIGNER"
 	return nil
 }

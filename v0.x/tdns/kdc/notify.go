@@ -127,7 +127,7 @@ func (kdc *KdcDB) SendNotifyWithDistributionID(distributionID, controlZone strin
 	notifyQname := distributionID + "." + controlZoneFQDN
 
 	// Send NOTIFY for JSONMANIFEST query type
-	notifyType := uint16(core.TypeJSONMANIFEST) // Use JSONMANIFEST RRtype (65013)
+	notifyType := uint16(core.TypeMANIFEST) // Use MANIFEST RRtype (65013)
 
 	successCount := 0
 	for _, dst := range targets {
