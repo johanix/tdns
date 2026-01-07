@@ -14,7 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/johanix/tdns/tdns"
+	"github.com/johanix/tdns/v0.x/tdns"
 )
 
 func main() {

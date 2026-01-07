@@ -3,17 +3,17 @@ module tdns-krs
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/tdns => ../tdns
-	github.com/johanix/tdns/tdns/cache => ../tdns/cache
-	github.com/johanix/tdns/tdns/core => ../tdns/core
-	github.com/johanix/tdns/tdns/edns0 => ../tdns/edns0
+	github.com/johanix/tdns/v0.x/tdns => ../v0.x/tdns
+	github.com/johanix/tdns/v0.x/tdns/cache => ../v0.x/tdns/cache
+	github.com/johanix/tdns/v0.x/tdns/core => ../v0.x/tdns/core
+	github.com/johanix/tdns/v0.x/tdns/edns0 => ../v0.x/tdns/edns0
 )
 
-require github.com/johanix/tdns/tdns v0.0.0-20250422095619-c770a62254d9
+require github.com/johanix/tdns/v0.x/tdns v0.0.0-20250422095619-c770a62254d9
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/cloudflare/circl v1.6.1 // indirect
+	github.com/cloudflare/circl v1.6.2 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -24,9 +24,9 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/tdns/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
-	github.com/johanix/tdns/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v0.x/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/tdns/v0.x/tdns/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
+	github.com/johanix/tdns/v0.x/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.28 // indirect
@@ -34,7 +34,7 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
-	github.com/quic-go/quic-go v0.57.0 // indirect
+	github.com/quic-go/quic-go v0.58.0 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
