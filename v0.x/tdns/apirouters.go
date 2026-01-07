@@ -101,6 +101,15 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		// They're registered directly on the router there
 	}
 
+	// Call registered API route functions (allows external code to add routes)
+	routeFuncs := getRegisteredAPIRoutes()
+	for _, routeFunc := range routeFuncs {
+		if err := routeFunc(rtr); err != nil {
+			log.Printf("Error registering API route: %v", err)
+			// Continue with other routes even if one fails
+		}
+	}
+
 	// sr.HandleFunc("/show/api", tdns.APIshowAPI(r)).Methods("GET")
 
 	return rtr, nil

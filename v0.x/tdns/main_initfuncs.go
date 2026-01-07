@@ -156,6 +156,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	globalNotifyHandlersMutex.RUnlock()
 
+	// Register default query handlers (default zone-based handler)
+	// The default handler is registered with qtype=0, so it catches all queries that aren't handled by other handlers.
+	// It's only registered if zones are configured (TDNS-internal check).
+	// Note: .server. queries are automatically handled by createAuthDnsHandler() as a fallback before returning REFUSED.
+	if err := RegisterDefaultQueryHandlers(conf); err != nil {
+		return fmt.Errorf("failed to register default query handlers: %v", err)
+	}
+
 	// Create all channels unconditionally to simplify code and reduce conditional complexity.
 	// Channels containing pointers have minimal memory overhead, so unused channels are acceptable.
 	conf.Internal.APIStopCh = make(chan struct{}) // Used for shutdown coordination

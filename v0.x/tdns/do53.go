@@ -183,8 +183,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
-	dnsqueryq := conf.Internal.DnsQueryQ    // This should be non-nil only for customer handlers like KDC queries
-	kdb := conf.Internal.KeyDB
+	dnsqueryq := conf.Internal.DnsQueryQ    // NOTE: Only used by original tdns-kdc (before repo split). New dzm/tdns-kdc uses RegisterQueryHandler.
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		if Globals.Debug {
@@ -337,7 +336,9 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			}
 			
 			// Backward compatibility: If DnsQueryQ channel is provided, route queries there
-			// (This is the old way, kept for backward compatibility)
+			// NOTE: This is only used by the original tdns-kdc (before repo split to dzm).
+			// The new dzm/tdns-kdc uses RegisterQueryHandler instead.
+			// (This is the old way, kept for backward compatibility with tdns/tdns/kdc_init.go)
 			if dnsqueryq != nil {
 				if Globals.Debug {
 					log.Printf("DnsHandler: Routing QUERY to dnsqueryq channel (qname=%s, qtype=%s, channel_len=%d)", qname, dns.TypeToString[qtype], len(dnsqueryq))
@@ -362,122 +363,20 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 				return
 			}
 			
-			// Fall through to existing direct QueryResponder call (default zone-based handler)
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO)
-			// qtype already declared above
-			log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
-
-			// Check if this is a reporter app handling error channel queries (RFC9567)
-			if Globals.App.Type == AppTypeReporter {
-				if strings.HasPrefix(qname, "_er.") {
-					edns0.ErrorChannelReporter(qname, qtype, w, r)
-					return
-				}
-				log.Printf("DnsHandler: Qname is %q, which is not the correct format for error channel reports (expected to start with '_er.').", qname)
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeRefused)
-				w.WriteMsg(m)
+			// All registered handlers (including default handlers) returned ErrNotHandled
+			// Before returning REFUSED, check for .server. queries (standard DNS server identification)
+			qnameLower := strings.ToLower(qname)
+			if strings.HasSuffix(qnameLower, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
+				log.Printf("DnsHandler: Qname is '%s', which is not a known zone, but likely a query for the .server CH tld", qnameLower)
+				DotServerQnameResponse(qnameLower, w, r)
 				return
 			}
-
-			if zd, ok := Zones.Get(qname); ok {
-				if zd.Error {
-					if zd.ErrorType != RefreshError || zd.RefreshCount == 0 {
-						log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
-							qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
-						m := new(dns.Msg)
-						m.SetRcode(r, dns.RcodeServerFailure)
-						w.WriteMsg(m)
-						return
-					}
-				}
-
-				log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
-				err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
-				if err != nil {
-					log.Printf("Error in QueryResponder: %v", err)
-					m := new(dns.Msg)
-					m.SetRcode(r, dns.RcodeServerFailure)
-					w.WriteMsg(m)
-				}
-				return
-			}
-
-			// Let's try case folded
-			// lcqname := strings.ToLower(qname)
-			// if zd, ok := Zones.Get(lcqname); ok {
-			// The qname is equal to the name of a zone we are authoritative for
-			// err := zd.ApexResponder(w, r, lcqname, qtype, dnssec_ok, kdb)
-			// if err != nil {
-			// 	log.Printf("Error in ApexResponder: %v", err)
-			// }
-			// return
-			// }
-
-			log.Printf("DnsHandler: Qname is %q, which is not a known zone.", qname)
-			log.Printf("DnsHandler: known zones are: %v", Zones.Keys())
-
-			// Let's see if we can find the zone
-			zd, folded := FindZone(qname)
-			if zd == nil {
-				// No zone found, but perhaps this is a query for the .server CH tld?
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeRefused)
-				qname = strings.ToLower(qname)
-				if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
-					DotServerQnameResponse(qname, w, r)
-					return
-				}
-
-				// We don't have the zone, and it's not a .server CH tld query, so we return a REFUSED
-				w.WriteMsg(m)
-				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
-			}
-
-			log.Printf("DnsHandler: query %q refers to zone %q", qname, zd.ZoneName)
-
-			log.Printf("DnsHandler: AppMode: \"%s\"", AppTypeToString[Globals.App.Type])
-			if Globals.App.Type == AppTypeAgent {
-				log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %q", qname)
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeRefused)
-				w.WriteMsg(m)
-				return
-			}
-
-			if zd.ZoneStore == XfrZone {
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeRefused)
-				w.WriteMsg(m)
-				return // didn't find any zone for that qname or found zone, but it is an XFR zone only
-			}
-
-			if folded {
-				qname = strings.ToLower(qname)
-			}
-
-			if zd.Error && zd.ErrorType != RefreshError {
-				log.Printf("DnsHandler: Qname is %q, which is belongs to a known zone (%q), but it is in %s error state: %s",
-					qname, zd.ZoneName, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeServerFailure)
-				w.WriteMsg(m)
-				return
-			}
-
-			if zd.RefreshCount == 0 {
-				log.Printf("DnsHandler: Qname is %q, which belongs to a known zone (%q), but it has not been refreshed at least once yet", qname, zd.ZoneName)
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeServerFailure)
-				w.WriteMsg(m)
-				return
-			}
-
-			// log.Printf("Found matching %s (%d) zone for qname %s: %s", tdns.ZoneStoreToString[zd.ZoneStore], zd.ZoneStore, qname, zd.ZoneName)
-			err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
-			if err != nil {
-				log.Printf("Error in QueryResponder: %v", err)
-			}
+			
+			// No handler processed the query, return REFUSED
+			log.Printf("DnsHandler: No handler processed query for %s %s, returning REFUSED", qname, dns.TypeToString[qtype])
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeRefused)
+			w.WriteMsg(m)
 			return
 
 		default:

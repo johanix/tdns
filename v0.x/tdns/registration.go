@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log"
 	"sync"
+
+	"github.com/gorilla/mux"
 )
 
 // ErrNotHandled is returned by query/notify handlers to indicate they don't handle this request.
@@ -31,6 +33,12 @@ var (
 	
 	globalNotifyHandlers   = make(map[uint16][]NotifyHandlerFunc)
 	globalNotifyHandlersMutex sync.RWMutex
+	
+	globalEngines   = make([]EngineRegistration, 0)
+	globalEnginesMutex sync.RWMutex
+	
+	globalAPIRoutes   = make([]APIRouteRegistration, 0)
+	globalAPIRoutesMutex sync.RWMutex
 )
 
 // RegisterQueryHandler registers a handler for a specific query type.
@@ -72,27 +80,14 @@ func RegisterQueryHandler(qtype uint16, handler QueryHandlerFunc) error {
 }
 
 // getQueryHandlers returns the list of handlers for a given qtype, checking both
-// global storage and conf storage. Handlers registered with qtype=0 (all queries)
-// are included first, followed by handlers for the specific qtype.
+// global storage and conf storage. Handlers for the specific qtype are called first,
+// followed by handlers registered with qtype=0 (all queries). This ensures application
+// handlers (registered for specific qtypes) are called before default handlers.
 func getQueryHandlers(conf *Config, qtype uint16) []QueryHandlerFunc {
 	var handlers []QueryHandlerFunc
 
-	// First, get handlers for qtype=0 (all queries) - these are called first
-	globalQueryHandlersMutex.RLock()
-	if globalHandlers0, ok := globalQueryHandlers[0]; ok {
-		handlers = append(handlers, globalHandlers0...)
-	}
-	globalQueryHandlersMutex.RUnlock()
-
-	if conf != nil && conf.Internal.QueryHandlers != nil {
-		conf.Internal.QueryHandlersMutex.RLock()
-		if confHandlers0, ok := conf.Internal.QueryHandlers[0]; ok {
-			handlers = append(handlers, confHandlers0...)
-		}
-		conf.Internal.QueryHandlersMutex.RUnlock()
-	}
-
-	// Then, get handlers for the specific qtype (if qtype != 0)
+	// First, get handlers for the specific qtype (if qtype != 0)
+	// These are application-specific handlers (like KDC) that should be called first
 	if qtype != 0 {
 		globalQueryHandlersMutex.RLock()
 		if globalHandlers, ok := globalQueryHandlers[qtype]; ok {
@@ -108,6 +103,22 @@ func getQueryHandlers(conf *Config, qtype uint16) []QueryHandlerFunc {
 			}
 			conf.Internal.QueryHandlersMutex.RUnlock()
 		}
+	}
+
+	// Then, get handlers for qtype=0 (all queries) - these are called after specific handlers
+	// This includes debug handlers and default handlers (server, default zone-based)
+	globalQueryHandlersMutex.RLock()
+	if globalHandlers0, ok := globalQueryHandlers[0]; ok {
+		handlers = append(handlers, globalHandlers0...)
+	}
+	globalQueryHandlersMutex.RUnlock()
+
+	if conf != nil && conf.Internal.QueryHandlers != nil {
+		conf.Internal.QueryHandlersMutex.RLock()
+		if confHandlers0, ok := conf.Internal.QueryHandlers[0]; ok {
+			handlers = append(handlers, confHandlers0...)
+		}
+		conf.Internal.QueryHandlersMutex.RUnlock()
 	}
 
 	return handlers
@@ -199,3 +210,114 @@ func getNotifyHandlers(conf *Config, qtype uint16) []NotifyHandlerFunc {
 	return handlers
 }
 
+// EngineFunc is the function signature for registered engines.
+// Engines are long-running goroutines that run until the context is cancelled.
+// They should return nil when the context is cancelled, or an error if they fail.
+type EngineFunc func(ctx context.Context) error
+
+// EngineRegistration stores an engine registration
+type EngineRegistration struct {
+	Name    string
+	Engine  EngineFunc
+}
+
+// RegisterEngine registers a long-running engine that will be started by TDNS.
+// Engines are started as goroutines and run until the context is cancelled.
+// They are started after TDNS initialization is complete.
+//
+// Example usage:
+//   tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
+//       return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
+//   })
+func RegisterEngine(name string, engine EngineFunc) error {
+	if engine == nil {
+		return fmt.Errorf("engine function cannot be nil")
+	}
+	if name == "" {
+		return fmt.Errorf("engine name cannot be empty")
+	}
+
+	// Register in global storage
+	globalEnginesMutex.Lock()
+	globalEngines = append(globalEngines, EngineRegistration{Name: name, Engine: engine})
+	globalEnginesMutex.Unlock()
+
+	if Globals.Debug {
+		log.Printf("RegisterEngine: Registered engine '%s'", name)
+	}
+
+	return nil
+}
+
+// APIRouteFunc is the function signature for API route registration.
+// The function receives the API router and should register routes on it.
+type APIRouteFunc func(router *mux.Router) error
+
+// APIRouteRegistration stores an API route registration
+type APIRouteRegistration struct {
+	RouteFunc APIRouteFunc
+}
+
+// RegisterAPIRoute registers a function that will add API routes to the router.
+// The route registration function is called after SetupAPIRouter() completes,
+// allowing external code to add routes without TDNS knowing about them.
+//
+// Example usage:
+//   tdns.RegisterAPIRoute(func(router *mux.Router) error {
+//       router.PathPrefix("/api/v1/kdc").HandlerFunc(kdc.APIKdcZone)
+//       return nil
+//   })
+func RegisterAPIRoute(routeFunc APIRouteFunc) error {
+	if routeFunc == nil {
+		return fmt.Errorf("route function cannot be nil")
+	}
+
+	// Register in global storage
+	globalAPIRoutesMutex.Lock()
+	globalAPIRoutes = append(globalAPIRoutes, APIRouteRegistration{RouteFunc: routeFunc})
+	globalAPIRoutesMutex.Unlock()
+
+	if Globals.Debug {
+		log.Printf("RegisterAPIRoute: Registered API route function")
+	}
+
+	return nil
+}
+
+// getRegisteredEngines returns all registered engines
+func getRegisteredEngines() []EngineRegistration {
+	globalEnginesMutex.RLock()
+	defer globalEnginesMutex.RUnlock()
+	
+	// Return a copy to avoid race conditions
+	result := make([]EngineRegistration, len(globalEngines))
+	copy(result, globalEngines)
+	return result
+}
+
+// getRegisteredAPIRoutes returns all registered API route functions
+func getRegisteredAPIRoutes() []APIRouteFunc {
+	globalAPIRoutesMutex.RLock()
+	defer globalAPIRoutesMutex.RUnlock()
+	
+	// Return a copy of the functions
+	result := make([]APIRouteFunc, len(globalAPIRoutes))
+	for i, reg := range globalAPIRoutes {
+		result[i] = reg.RouteFunc
+	}
+	return result
+}
+
+// StartRegisteredEngines starts all registered engines as goroutines.
+// This should be called after TDNS initialization is complete.
+// Engines run until the context is cancelled.
+func StartRegisteredEngines(ctx context.Context) {
+	engines := getRegisteredEngines()
+	for _, reg := range engines {
+		name := reg.Name
+		engine := reg.Engine
+		startEngine(&Globals.App, name, func() error {
+			return engine(ctx)
+		})
+	}
+}
