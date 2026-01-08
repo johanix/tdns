@@ -8,6 +8,7 @@ const (
 	EDNS0_OTS_OPTION_CODE      = 65001 // TBD: Replace with actual IANA assigned code
 	EDNS0_KEYSTATE_OPTION_CODE = 65002
 	EDNS0_REPORT_OPTION_CODE   = 65003
+	EDNS0_CHUNK_OPTION_CODE    = 65004 // CHUNK EDNS(0) option for key status reports
 )
 
 // Standard EDNS(0) option codes (RFC9567)

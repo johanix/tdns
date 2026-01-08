@@ -19,11 +19,11 @@ const (
 	TypeHSYNC2  = 0x0F9E
 	TypeTSYNC   = 0x0F9F
 	TypeMANIFEST = 65013 // 0xFDF5 - Distribution Manifest
-	TypeCHUNK    = 65014 // 0xFDF6 - Chunked Data Transport
-	TypeCHUNK2   = 65015 // 0xFDF7 - Unified Chunk/Manifest (experimental)
+	TypeOLDCHUNK = 65014 // 0xFDF6 - Chunked Data Transport (deprecated, use CHUNK)
+	TypeCHUNK    = 65015 // 0xFDF7 - Unified Chunk/Manifest
 )
 
-// Format constants for MANIFEST and CHUNK RR types
+// Format constants for MANIFEST and OLDCHUNK RR types
 const (
 	FormatJSON = 1 // JSON format (original format)
 	// Future formats can be added as needed:

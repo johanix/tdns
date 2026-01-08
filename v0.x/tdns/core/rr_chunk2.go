@@ -18,10 +18,10 @@ import (
 )
 
 func init() {
-	RegisterCHUNK2RR()
+	RegisterCHUNKRR()
 }
 
-// CHUNK2 - Unified Chunk/Manifest RR type
+// CHUNK - Unified Chunk/Manifest RR type
 // Combines MANIFEST and CHUNK functionality into a single RR type
 // Fixed RDATA structure with all fields always present (some unused depending on context)
 //
@@ -54,13 +54,13 @@ func init() {
 // Presentation format (space-separated values):
 //   - Manifest chunk: <sequence> <total> <format> <hmac> <json-data>
 //     Example:
-//     node.distid.control. IN CHUNK2 0 0 JSON a889a20e0722d903fe0772226ddd21bce465056f94785ea3dbba74069c897092
+//     node.distid.control. IN CHUNK 0 0 JSON a889a20e0722d903fe0772226ddd21bce465056f94785ea3dbba74069c897092
 //                                    {"chunk_count":1,"chunk_size":60000,"metadata":{"content":"encrypted_keys","distribution_id":"3a29c33a"},"payload":"<base64-encoded-payload>"}"
 //   - Data chunk: <sequence> <total> <format> <hmac> <base64-data>
 //     Example:
-//     node.distid.control. IN CHUNK2 1 2 JSON "" bWhBdGRTlac0hX2p0eGZzSW9kcHJKZ2d...QY1c3b05uYTd3aWpORXlLUDMrWG10T3c9PQ==
+//     node.distid.control. IN CHUNK 1 2 JSON "" bWhBdGRTlac0hX2p0eGZzSW9kcHJKZ2d...QY1c3b05uYTd3aWpORXlLUDMrWG10T3c9PQ==
 
-type CHUNK2 struct {
+type CHUNK struct {
 	Format     uint8  // Format identifier (used for manifest, unused for data chunks)
 	HMACLen    uint16 // HMAC length (0 for data chunks, >0 for manifest)
 	HMAC       []byte // HMAC-SHA256 checksum (only present if HMACLen > 0)
@@ -70,9 +70,9 @@ type CHUNK2 struct {
 	Data       []byte // Format-specific data (JSON manifest or chunk payload)
 }
 
-func NewCHUNK2() dns.PrivateRdata { return new(CHUNK2) }
+func NewCHUNK() dns.PrivateRdata { return new(CHUNK) }
 
-func (rd CHUNK2) String() string {
+func (rd CHUNK) String() string {
 	// Format field (always present)
 	formatStr := FormatToString[rd.Format]
 	if formatStr == "" {
@@ -113,27 +113,27 @@ func (rd CHUNK2) String() string {
 	return fmt.Sprintf("%d %d %s %s %s", rd.Sequence, rd.Total, formatStr, hmacStr, dataStr)
 }
 
-func (rd *CHUNK2) Parse(txt []string) error {
-	// CHUNK2 String() format: "Sequence Total Format HMAC Data"
+func (rd *CHUNK) Parse(txt []string) error {
+	// CHUNK String() format: "Sequence Total Format HMAC Data"
 	// Format: "JSON" or "FORMAT<n>"
 	// HMAC: hex string or "" for data chunks
 	// Data: JSON (for manifest) or base64 (for data chunks)
 	
 	if len(txt) < 5 {
-		return errors.New("CHUNK2 requires 5 fields: Sequence Total Format HMAC Data")
+		return errors.New("CHUNK requires 5 fields: Sequence Total Format HMAC Data")
 	}
 
 	// Parse Sequence (uint16)
 	seq, err := strconv.ParseUint(txt[0], 10, 16)
 	if err != nil {
-		return fmt.Errorf("invalid CHUNK2 sequence: %s", txt[0])
+		return fmt.Errorf("invalid CHUNK sequence: %s", txt[0])
 	}
 	rd.Sequence = uint16(seq)
 
 	// Parse Total (uint16)
 	total, err := strconv.ParseUint(txt[1], 10, 16)
 	if err != nil {
-		return fmt.Errorf("invalid CHUNK2 total: %s", txt[1])
+		return fmt.Errorf("invalid CHUNK total: %s", txt[1])
 	}
 	rd.Total = uint16(total)
 
@@ -145,11 +145,11 @@ func (rd *CHUNK2) Parse(txt []string) error {
 		// Format like "FORMAT1" (fallback for unknown formats)
 		formatNum, err := strconv.ParseUint(strings.TrimPrefix(formatStr, "FORMAT"), 10, 8)
 		if err != nil {
-			return fmt.Errorf("invalid CHUNK2 format: %s", formatStr)
+			return fmt.Errorf("invalid CHUNK format: %s", formatStr)
 		}
 		rd.Format = uint8(formatNum)
 	} else {
-		return fmt.Errorf("invalid CHUNK2 format: %s", formatStr)
+		return fmt.Errorf("invalid CHUNK format: %s", formatStr)
 	}
 
 	// Parse HMAC (hex string or "")
@@ -160,7 +160,7 @@ func (rd *CHUNK2) Parse(txt []string) error {
 	} else {
 		hmac, err := hex.DecodeString(hmacStr)
 		if err != nil {
-			return fmt.Errorf("invalid CHUNK2 HMAC (hex): %s", hmacStr)
+			return fmt.Errorf("invalid CHUNK HMAC (hex): %s", hmacStr)
 		}
 		rd.HMACLen = uint16(len(hmac))
 		rd.HMAC = hmac
@@ -176,7 +176,7 @@ func (rd *CHUNK2) Parse(txt []string) error {
 		// Data chunk: data is base64
 		data, err := base64.StdEncoding.DecodeString(dataStr)
 		if err != nil {
-			return fmt.Errorf("invalid CHUNK2 base64 data: %v", err)
+			return fmt.Errorf("invalid CHUNK base64 data: %v", err)
 		}
 		rd.Data = data
 		rd.DataLength = uint16(len(data))
@@ -185,19 +185,19 @@ func (rd *CHUNK2) Parse(txt []string) error {
 	return nil
 }
 
-func (rd *CHUNK2) Pack(buf []byte) (int, error) {
+func (rd *CHUNK) Pack(buf []byte) (int, error) {
 	off := 0
 
 	// Pack Format (uint8)
 	if len(buf) < off+1 {
-		return off, errors.New("buffer too small for CHUNK2 format")
+		return off, errors.New("buffer too small for CHUNK format")
 	}
 	buf[off] = rd.Format
 	off += 1
 
 	// Pack HMAC length (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too small for CHUNK2 HMAC length")
+		return off, errors.New("buffer too small for CHUNK HMAC length")
 	}
 	buf[off] = byte(rd.HMACLen >> 8)
 	buf[off+1] = byte(rd.HMACLen)
@@ -206,10 +206,10 @@ func (rd *CHUNK2) Pack(buf []byte) (int, error) {
 	// Pack HMAC (only if HMACLen > 0)
 	if rd.HMACLen > 0 {
 		if len(buf) < off+int(rd.HMACLen) {
-			return off, errors.New("buffer too small for CHUNK2 HMAC")
+			return off, errors.New("buffer too small for CHUNK HMAC")
 		}
 		if len(rd.HMAC) != int(rd.HMACLen) {
-			return off, fmt.Errorf("CHUNK2 HMAC length mismatch: expected %d, got %d", rd.HMACLen, len(rd.HMAC))
+			return off, fmt.Errorf("CHUNK HMAC length mismatch: expected %d, got %d", rd.HMACLen, len(rd.HMAC))
 		}
 		copy(buf[off:], rd.HMAC)
 		off += int(rd.HMACLen)
@@ -217,7 +217,7 @@ func (rd *CHUNK2) Pack(buf []byte) (int, error) {
 
 	// Pack Sequence (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too small for CHUNK2 sequence")
+		return off, errors.New("buffer too small for CHUNK sequence")
 	}
 	buf[off] = byte(rd.Sequence >> 8)
 	buf[off+1] = byte(rd.Sequence)
@@ -225,7 +225,7 @@ func (rd *CHUNK2) Pack(buf []byte) (int, error) {
 
 	// Pack Total (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too small for CHUNK2 total")
+		return off, errors.New("buffer too small for CHUNK total")
 	}
 	buf[off] = byte(rd.Total >> 8)
 	buf[off+1] = byte(rd.Total)
@@ -233,11 +233,11 @@ func (rd *CHUNK2) Pack(buf []byte) (int, error) {
 
 	// Pack Data length (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too small for CHUNK2 data length")
+		return off, errors.New("buffer too small for CHUNK data length")
 	}
 	dataLen := len(rd.Data)
 	if dataLen > 65535 {
-		return off, errors.New("CHUNK2 data too long")
+		return off, errors.New("CHUNK data too long")
 	}
 	buf[off] = byte(dataLen >> 8)
 	buf[off+1] = byte(dataLen)
@@ -245,7 +245,7 @@ func (rd *CHUNK2) Pack(buf []byte) (int, error) {
 
 	// Pack Data
 	if len(buf) < off+dataLen {
-		return off, errors.New("buffer too small for CHUNK2 data")
+		return off, errors.New("buffer too small for CHUNK data")
 	}
 	copy(buf[off:], rd.Data)
 	off += dataLen
@@ -253,19 +253,19 @@ func (rd *CHUNK2) Pack(buf []byte) (int, error) {
 	return off, nil
 }
 
-func (rd *CHUNK2) Unpack(buf []byte) (int, error) {
+func (rd *CHUNK) Unpack(buf []byte) (int, error) {
 	off := 0
 
 	// Unpack Format (uint8)
 	if len(buf) < off+1 {
-		return off, errors.New("buffer too short for CHUNK2 format")
+		return off, errors.New("buffer too short for CHUNK format")
 	}
 	rd.Format = buf[off]
 	off += 1
 
 	// Unpack HMAC length (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for CHUNK2 HMAC length")
+		return off, errors.New("buffer too short for CHUNK HMAC length")
 	}
 	rd.HMACLen = binary.BigEndian.Uint16(buf[off:])
 	off += 2
@@ -273,7 +273,7 @@ func (rd *CHUNK2) Unpack(buf []byte) (int, error) {
 	// Unpack HMAC (only if HMACLen > 0)
 	if rd.HMACLen > 0 {
 		if len(buf) < off+int(rd.HMACLen) {
-			return off, errors.New("buffer too short for CHUNK2 HMAC")
+			return off, errors.New("buffer too short for CHUNK HMAC")
 		}
 		rd.HMAC = make([]byte, rd.HMACLen)
 		copy(rd.HMAC, buf[off:off+int(rd.HMACLen)])
@@ -284,28 +284,28 @@ func (rd *CHUNK2) Unpack(buf []byte) (int, error) {
 
 	// Unpack Sequence (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for CHUNK2 sequence")
+		return off, errors.New("buffer too short for CHUNK sequence")
 	}
 	rd.Sequence = binary.BigEndian.Uint16(buf[off:])
 	off += 2
 
 	// Unpack Total (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for CHUNK2 total")
+		return off, errors.New("buffer too short for CHUNK total")
 	}
 	rd.Total = binary.BigEndian.Uint16(buf[off:])
 	off += 2
 
 	// Unpack Data length (uint16)
 	if len(buf) < off+2 {
-		return off, errors.New("buffer too short for CHUNK2 data length")
+		return off, errors.New("buffer too short for CHUNK data length")
 	}
 	rd.DataLength = binary.BigEndian.Uint16(buf[off:])
 	off += 2
 
 	// Unpack Data
 	if len(buf) < off+int(rd.DataLength) {
-		return off, errors.New("buffer too short for CHUNK2 data")
+		return off, errors.New("buffer too short for CHUNK data")
 	}
 	rd.Data = make([]byte, rd.DataLength)
 	copy(rd.Data, buf[off:off+int(rd.DataLength)])
@@ -314,8 +314,8 @@ func (rd *CHUNK2) Unpack(buf []byte) (int, error) {
 	return off, nil
 }
 
-func (rd *CHUNK2) Copy(dest dns.PrivateRdata) error {
-	d := dest.(*CHUNK2)
+func (rd *CHUNK) Copy(dest dns.PrivateRdata) error {
+	d := dest.(*CHUNK)
 	d.Format = rd.Format
 	d.HMACLen = rd.HMACLen
 	if rd.HMAC != nil {
@@ -334,7 +334,7 @@ func (rd *CHUNK2) Copy(dest dns.PrivateRdata) error {
 	return nil
 }
 
-func (rd *CHUNK2) Len() int {
+func (rd *CHUNK) Len() int {
 	return 1 + // format
 		2 + // hmac length
 		int(rd.HMACLen) + // hmac (variable)
@@ -344,10 +344,10 @@ func (rd *CHUNK2) Len() int {
 		len(rd.Data) // data
 }
 
-func RegisterCHUNK2RR() error {
-	dns.PrivateHandle("CHUNK2", TypeCHUNK2, NewCHUNK2)
-	// Explicitly set TypeToString to use "CHUNK2" for printing
-	dns.TypeToString[TypeCHUNK2] = "CHUNK2"
+func RegisterCHUNKRR() error {
+	dns.PrivateHandle("CHUNK", TypeCHUNK, NewCHUNK)
+	// Explicitly set TypeToString to use "CHUNK" for printing
+	dns.TypeToString[TypeCHUNK] = "CHUNK"
 	return nil
 }
 
