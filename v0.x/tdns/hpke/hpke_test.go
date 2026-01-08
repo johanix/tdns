@@ -74,7 +74,7 @@ func TestEncryptDecryptWithEphemeralKey(t *testing.T) {
 	}
 
 	// Generate ephemeral keypair for forward secrecy
-	ephemeralPub, ephemeralPriv, err := GenerateKeyPair()
+	ephemeralPub, _, err := GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("Failed to generate ephemeral keypair: %v", err)
 	}
@@ -145,4 +145,3 @@ func TestEncryptDecryptLargeData(t *testing.T) {
 
 	t.Logf("Successfully encrypted and decrypted %d bytes", len(plaintext))
 }
-

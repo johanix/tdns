@@ -1,6 +1,6 @@
 PROG:=tdns-lib
 
-include ../utils/Makefile.common
+include ../../utils/Makefile.common
 
 .PHONY: clean install build version.go
 

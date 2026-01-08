@@ -324,7 +324,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 // PrivateKeyToPEM converts a crypto.PrivateKey to PKCS#8 PEM format.
 // PrivateKeyToPEM converts a crypto.PrivateKey to a PKCS#8 PEM-encoded string.
 // PrivateKeyToPEM converts a crypto.PrivateKey into a PKCS#8 PEM-encoded string.
-// 
+//
 // It returns the PEM-formatted private key. An error is returned if the provided
 // private key is nil or if marshaling the key to PKCS#8 DER fails.
 func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {

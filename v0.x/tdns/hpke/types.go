@@ -14,7 +14,7 @@ const (
 	KeyStatePublished   KeyState = "published"
 	KeyStateStandby     KeyState = "standby"
 	KeyStateActive      KeyState = "active"      // Central signer (stays in KDC)
-	KeyStateDistributed KeyState = "distributed"  // Currently being distributed to nodes
+	KeyStateDistributed KeyState = "distributed" // Currently being distributed to nodes
 	KeyStateEdgeSigner  KeyState = "edgesigner"  // Active on edge nodes
 	KeyStateRetired     KeyState = "retired"
 	KeyStateRemoved     KeyState = "removed"
@@ -39,4 +39,3 @@ const (
 	DistributionStatusActive    DistributionStatus = "active"
 	DistributionStatusRevoked   DistributionStatus = "revoked"
 )
-

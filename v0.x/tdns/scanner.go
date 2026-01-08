@@ -67,8 +67,8 @@ type Scanner struct {
 	JobsMutex sync.RWMutex
 }
 
-func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) Scanner {
-	s := Scanner{
+func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) *Scanner {
+	s := &Scanner{
 		AuthQueryQ: authqueryq,
 		//		Conf:        conf,
 		//		LabDB:       conf.Internal.LabDB,
@@ -121,7 +121,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	scanner.AddLogger("GENERIC")
 
 	// Store scanner instance in Config for API handler access
-	conf.Internal.Scanner = &scanner
+	conf.Internal.Scanner = scanner
 
 	log.Printf("*** ScannerEngine: starting ***")
 	defer ticker.Stop()

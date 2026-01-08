@@ -79,7 +79,7 @@ func Encrypt(recipientPubKey []byte, ephemeralPubKey []byte, plaintext []byte) (
 	if encLen != expectedEncLen {
 		return nil, nil, fmt.Errorf("encapsulated key length mismatch: got %d, expected %d", encLen, expectedEncLen)
 	}
-	
+
 	fullCiphertext := make([]byte, encLen+len(encryptedData))
 	copy(fullCiphertext[:encLen], encapsulatedKey)
 	copy(fullCiphertext[encLen:], encryptedData)
@@ -130,7 +130,7 @@ func Decrypt(recipientPrivKey []byte, ephemeralPubKey []byte, ciphertext []byte)
 	// Extract encapsulated key (first encLen bytes)
 	encapsulatedKey := make([]byte, encLen)
 	copy(encapsulatedKey, ciphertext[:encLen])
-	
+
 	// Extract encrypted data (remaining bytes after encapsulated key)
 	// Create a proper copy to avoid any potential slice sharing issues
 	encryptedDataLen := len(ciphertext) - encLen
@@ -196,11 +196,10 @@ func DerivePublicKey(privateKey []byte) (publicKey []byte, err error) {
 	// Use X25519 package directly to derive public key
 	var privKey, pubKey x25519.Key
 	copy(privKey[:], privateKey)
-	
+
 	// Derive public key by scalar multiplication with base point
 	x25519.KeyGen(&pubKey, &privKey)
 
 	// Return public key as bytes
 	return pubKey[:], nil
 }
-

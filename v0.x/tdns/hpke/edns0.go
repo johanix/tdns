@@ -92,4 +92,3 @@ func RemoveHPKEEphemeralOption(opt *dns.OPT) {
 
 	opt.Option = newOptions
 }
-

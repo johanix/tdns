@@ -138,7 +138,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	// Initialize QueryHandlers map for registration API
 	conf.Internal.QueryHandlers = make(map[uint16][]QueryHandlerFunc)
-	
+
 	// Copy any handlers registered before MainInit (from global storage)
 	globalQueryHandlersMutex.RLock()
 	for qtype, handlers := range globalQueryHandlers {
@@ -148,7 +148,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	// Initialize NOTIFY handlers map
 	conf.Internal.NotifyHandlers = make(map[uint16][]NotifyHandlerFunc)
-	
+
 	// Copy any handlers registered before MainInit (from global storage)
 	globalNotifyHandlersMutex.RLock()
 	for qtype, handlers := range globalNotifyHandlers {

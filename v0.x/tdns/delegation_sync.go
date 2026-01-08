@@ -310,7 +310,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 			if err != nil {
 				return fmt.Errorf("Sig0KeyPreparation(%s) failed to generate keypair: %v", name, err)
 			}
-			zd.Logger.Printf(resp.Msg)
+			zd.Logger.Printf("%s", resp.Msg)
 
 			sak, err = zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 			if err != nil {

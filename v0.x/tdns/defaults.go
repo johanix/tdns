@@ -10,9 +10,9 @@ const (
 	DefaultImrCfgFile = "/etc/tdns/tdns-imr.yaml"
 
 	DefaultAuthCfgFile = "/etc/tdns/tdns-auth.yaml"
-//	DefaultServerCfgFile = "/etc/tdns/tdns-server.yaml" // being killed off
+	//	DefaultServerCfgFile = "/etc/tdns/tdns-server.yaml" // being killed off
 
-	DefaultAgentCfgFile  = "/etc/tdns/tdns-agent.yaml"
+	DefaultAgentCfgFile    = "/etc/tdns/tdns-agent.yaml"
 	DefaultCombinerCfgFile = "/etc/tdns/tdns-combiner.yaml"
 	DefaultReporterCfgFile = "/etc/tdns/tdns-reporter.yaml"
 	DefaultScannerCfgFile  = "/etc/tdns/tdns-scanner.yaml"

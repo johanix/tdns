@@ -7,10 +7,12 @@ package core
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -112,44 +114,72 @@ func (rd CHUNK2) String() string {
 }
 
 func (rd *CHUNK2) Parse(txt []string) error {
-	// CHUNK2 parsing is complex due to unified structure
-	// For now, we'll support a simplified text format
-	// Full parsing would require knowing if it's manifest or data chunk
-	if len(txt) < 1 {
-		return errors.New("CHUNK2 requires at least data field")
+	// CHUNK2 String() format: "Sequence Total Format HMAC Data"
+	// Format: "JSON" or "FORMAT<n>"
+	// HMAC: hex string or "" for data chunks
+	// Data: JSON (for manifest) or base64 (for data chunks)
+	
+	if len(txt) < 5 {
+		return errors.New("CHUNK2 requires 5 fields: Sequence Total Format HMAC Data")
 	}
 
-	// Decode base64-encoded data
-	data, err := base64.StdEncoding.DecodeString(txt[0])
+	// Parse Sequence (uint16)
+	seq, err := strconv.ParseUint(txt[0], 10, 16)
 	if err != nil {
-		return fmt.Errorf("invalid CHUNK2 base64 data: %v", err)
+		return fmt.Errorf("invalid CHUNK2 sequence: %s", txt[0])
+	}
+	rd.Sequence = uint16(seq)
+
+	// Parse Total (uint16)
+	total, err := strconv.ParseUint(txt[1], 10, 16)
+	if err != nil {
+		return fmt.Errorf("invalid CHUNK2 total: %s", txt[1])
+	}
+	rd.Total = uint16(total)
+
+	// Parse Format (string -> enum)
+	formatStr := txt[2]
+	if format, ok := StringToFormat[formatStr]; ok {
+		rd.Format = format
+	} else if strings.HasPrefix(formatStr, "FORMAT") {
+		// Format like "FORMAT1" (fallback for unknown formats)
+		formatNum, err := strconv.ParseUint(strings.TrimPrefix(formatStr, "FORMAT"), 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid CHUNK2 format: %s", formatStr)
+		}
+		rd.Format = uint8(formatNum)
+	} else {
+		return fmt.Errorf("invalid CHUNK2 format: %s", formatStr)
 	}
 
-	rd.Data = data
-	rd.DataLength = uint16(len(data))
-
-	// Default values
-	rd.Format = FormatJSON
-	rd.HMACLen = 0
-	rd.HMAC = nil
-	rd.Sequence = 0
-	rd.Total = 1
-
-	// Parse optional fields if present
-	if len(txt) >= 2 {
-		// Try to parse as manifest (format, hmac)
-		// Or as data chunk (sequence, total)
-		// For simplicity, assume data chunk if sequence/total provided
-		if len(txt) >= 4 {
-			seq, err := strconv.ParseUint(txt[1], 10, 16)
-			if err == nil {
-				total, err := strconv.ParseUint(txt[2], 10, 16)
-				if err == nil {
-					rd.Sequence = uint16(seq)
-					rd.Total = uint16(total)
-				}
-			}
+	// Parse HMAC (hex string or "")
+	hmacStr := txt[3]
+	if hmacStr == `""` || hmacStr == "" {
+		rd.HMACLen = 0
+		rd.HMAC = nil
+	} else {
+		hmac, err := hex.DecodeString(hmacStr)
+		if err != nil {
+			return fmt.Errorf("invalid CHUNK2 HMAC (hex): %s", hmacStr)
 		}
+		rd.HMACLen = uint16(len(hmac))
+		rd.HMAC = hmac
+	}
+
+	// Parse Data (JSON for manifest, base64 for data chunk)
+	dataStr := txt[4]
+	if rd.Total == 0 {
+		// Manifest: data is JSON
+		rd.Data = []byte(dataStr)
+		rd.DataLength = uint16(len(rd.Data))
+	} else {
+		// Data chunk: data is base64
+		data, err := base64.StdEncoding.DecodeString(dataStr)
+		if err != nil {
+			return fmt.Errorf("invalid CHUNK2 base64 data: %v", err)
+		}
+		rd.Data = data
+		rd.DataLength = uint16(len(data))
 	}
 
 	return nil

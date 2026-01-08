@@ -76,4 +76,3 @@ func DebugEncryptDecrypt() {
 	fmt.Printf("Decrypted: %s\n", string(decrypted))
 	fmt.Println("Success!")
 }
-

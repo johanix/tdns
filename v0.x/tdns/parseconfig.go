@@ -173,11 +173,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if Globals.Debug {
-		tmp := fmt.Sprintf("Templates: %d templates defined: ", len(conf.Templates))
+		tmplNames := make([]string, 0, len(conf.Templates))
 		for _, tmpl := range conf.Templates {
-			tmp += fmt.Sprintf(" %s", tmpl.Name)
+			tmplNames = append(tmplNames, tmpl.Name)
 		}
-		log.Printf(tmp)
+		log.Printf("Templates: %d templates defined: %s", len(conf.Templates), strings.Join(tmplNames, " "))
 	}
 
 	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
@@ -204,11 +204,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 
 		if Globals.Debug {
-			tmp := fmt.Sprintf("Templates (again): %d templates defined: ", len(Templates))
+			tmplNames := make([]string, 0, len(Templates))
 			for _, tmpl := range Templates {
-				tmp += fmt.Sprintf(" %s", tmpl.Name)
+				tmplNames = append(tmplNames, tmpl.Name)
 			}
-			log.Printf(tmp)
+			log.Printf("Templates (again): %d templates defined: %s", len(Templates), strings.Join(tmplNames, " "))
 		}
 	}
 
@@ -637,7 +637,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
 			// try a non-blocking send; if it would block, send from a goroutine.
 			if conf.Internal.RefreshZoneCh == nil {
-				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.", zname)
+				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
 				return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
 			}
 			zr := ZoneRefresher{

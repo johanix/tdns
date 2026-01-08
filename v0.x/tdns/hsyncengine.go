@@ -673,7 +673,8 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	agents := map[AgentId]*Agent{}
 	for _, agent := range ar.S.Items() {
 		// Make a clean copy of the agent for the response
-		saneAgent := SanitizeForJSON(*agent) // Shallow copy
+		// Pass pointer to avoid copying the mutex
+		saneAgent := SanitizeForJSON(agent)
 		if foo, ok := saneAgent.(*Agent); ok {
 			agents[agent.Identity] = foo
 		} else {

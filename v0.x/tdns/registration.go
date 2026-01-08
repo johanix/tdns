@@ -28,16 +28,16 @@ type QueryHandlerFunc func(ctx context.Context, req *DnsQueryRequest) error
 
 var (
 	// Global registration storage (used when conf is not available during registration)
-	globalQueryHandlers   = make(map[uint16][]QueryHandlerFunc)
+	globalQueryHandlers      = make(map[uint16][]QueryHandlerFunc)
 	globalQueryHandlersMutex sync.RWMutex
-	
-	globalNotifyHandlers   = make(map[uint16][]NotifyHandlerFunc)
+
+	globalNotifyHandlers      = make(map[uint16][]NotifyHandlerFunc)
 	globalNotifyHandlersMutex sync.RWMutex
-	
-	globalEngines   = make([]EngineRegistration, 0)
+
+	globalEngines      = make([]EngineRegistration, 0)
 	globalEnginesMutex sync.RWMutex
-	
-	globalAPIRoutes   = make([]APIRouteRegistration, 0)
+
+	globalAPIRoutes      = make([]APIRouteRegistration, 0)
 	globalAPIRoutesMutex sync.RWMutex
 )
 
@@ -217,8 +217,8 @@ type EngineFunc func(ctx context.Context) error
 
 // EngineRegistration stores an engine registration
 type EngineRegistration struct {
-	Name    string
-	Engine  EngineFunc
+	Name   string
+	Engine EngineFunc
 }
 
 // RegisterEngine registers a long-running engine that will be started by TDNS.
@@ -226,9 +226,10 @@ type EngineRegistration struct {
 // They are started after TDNS initialization is complete.
 //
 // Example usage:
-//   tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
-//       return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
-//   })
+//
+//	tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
+//	    return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
+//	})
 func RegisterEngine(name string, engine EngineFunc) error {
 	if engine == nil {
 		return fmt.Errorf("engine function cannot be nil")
@@ -266,10 +267,11 @@ type APIRouteRegistration struct {
 // rather than using RegisterAPIRoute().
 //
 // Example usage:
-//   tdns.RegisterAPIRoute(func(router *mux.Router) error {
-//       router.PathPrefix("/api/v1/kdc").HandlerFunc(kdc.APIKdcZone)
-//       return nil
-//   })
+//
+//	tdns.RegisterAPIRoute(func(router *mux.Router) error {
+//	    router.PathPrefix("/api/v1/kdc").HandlerFunc(kdc.APIKdcZone)
+//	    return nil
+//	})
 func RegisterAPIRoute(routeFunc APIRouteFunc) error {
 	if routeFunc == nil {
 		return fmt.Errorf("route function cannot be nil")
@@ -291,7 +293,7 @@ func RegisterAPIRoute(routeFunc APIRouteFunc) error {
 func getRegisteredEngines() []EngineRegistration {
 	globalEnginesMutex.RLock()
 	defer globalEnginesMutex.RUnlock()
-	
+
 	// Return a copy to avoid race conditions
 	result := make([]EngineRegistration, len(globalEngines))
 	copy(result, globalEngines)
@@ -302,7 +304,7 @@ func getRegisteredEngines() []EngineRegistration {
 func getRegisteredAPIRoutes() []APIRouteFunc {
 	globalAPIRoutesMutex.RLock()
 	defer globalAPIRoutesMutex.RUnlock()
-	
+
 	// Return a copy of the functions
 	result := make([]APIRouteFunc, len(globalAPIRoutes))
 	for i, reg := range globalAPIRoutes {

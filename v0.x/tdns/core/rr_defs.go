@@ -41,6 +41,17 @@ var FormatToString = map[uint8]string{
 	// FormatProtobuf: "PROTOBUF",
 }
 
+// StringToFormat maps string representations to format constants (reverse of FormatToString)
+// NOTE: This map must be kept in sync with FormatToString - when adding a new format to FormatToString,
+// also add the corresponding entry here.
+var StringToFormat = map[string]uint8{
+	"JSON": FormatJSON,
+	// Future formats will be added here when FormatToString is updated:
+	// "JSONv2": FormatJSONv2,
+	// "BINARY": FormatBinary,
+	// "PROTOBUF": FormatProtobuf,
+}
+
 func unpackUint8(msg []byte, off int) (i uint8, off1 int, err error) {
 	if off+1 > len(msg) {
 		return 0, len(msg), errors.New("overflow unpacking uint8")

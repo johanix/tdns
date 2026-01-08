@@ -183,7 +183,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	dnsnotifyq := conf.Internal.DnsNotifyQ
-	dnsqueryq := conf.Internal.DnsQueryQ    // NOTE: Only used by original tdns-kdc (before repo split). New dzm/tdns-kdc uses RegisterQueryHandler.
+	dnsqueryq := conf.Internal.DnsQueryQ // NOTE: Only used by original tdns-kdc (before repo split). New dzm/tdns-kdc uses RegisterQueryHandler.
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		if Globals.Debug {
@@ -212,7 +212,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			if len(r.Question) > 0 {
 				qtype = r.Question[0].Qtype
 			}
-			
+
 			// Check for registered NOTIFY handlers (new registration API)
 			handlers := getNotifyHandlers(conf, qtype)
 			if len(handlers) > 0 {
@@ -225,7 +225,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 						Qname:          qname,
 						Options:        msgoptions,
 					}
-					
+
 					err := handler(ctx, &dnr)
 					if err == nil {
 						// Handler successfully handled the NOTIFY
@@ -247,7 +247,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 						continue
 					}
 				}
-				
+
 				if handled {
 					return // NOTIFY was handled by a registered handler
 				}
@@ -256,7 +256,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					log.Printf("DnsHandler: All registered NOTIFY handlers returned ErrNotHandled, falling back to channel-based handler")
 				}
 			}
-			
+
 			// Backward compatibility: If DnsNotifyQ channel is provided, route NOTIFYs there
 			// (This is the old way, kept for backward compatibility)
 			if dnsnotifyq != nil {
@@ -266,7 +266,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 				// Not waiting for a result
 				return
 			}
-			
+
 			// No handlers and no channel - send error response
 			m := new(dns.Msg)
 			m.SetReply(r)
@@ -289,7 +289,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 
 		case dns.OpcodeQuery:
 			qtype := r.Question[0].Qtype
-			
+
 			// Check for registered query handlers (new registration API)
 			handlers := getQueryHandlers(conf, qtype)
 			if len(handlers) > 0 {
@@ -303,7 +303,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 						Qtype:          qtype,
 						Options:        msgoptions,
 					}
-					
+
 					err := handler(ctx, &dqr)
 					if err == nil {
 						// Handler successfully handled the query
@@ -325,7 +325,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 						continue
 					}
 				}
-				
+
 				if handled {
 					return // Query was handled by a registered handler
 				}
@@ -334,7 +334,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					log.Printf("DnsHandler: All registered handlers returned ErrNotHandled, falling back to default handler")
 				}
 			}
-			
+
 			// Backward compatibility: If DnsQueryQ channel is provided, route queries there
 			// NOTE: This is only used by the original tdns-kdc (before repo split to dzm).
 			// The new dzm/tdns-kdc uses RegisterQueryHandler instead.
@@ -362,7 +362,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 				// Not waiting for a result
 				return
 			}
-			
+
 			// All registered handlers (including default handlers) returned ErrNotHandled
 			// Before returning REFUSED, check for .server. queries (standard DNS server identification)
 			qnameLower := strings.ToLower(qname)
@@ -371,7 +371,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 				DotServerQnameResponse(qnameLower, w, r)
 				return
 			}
-			
+
 			// No handler processed the query, return REFUSED
 			log.Printf("DnsHandler: No handler processed query for %s %s, returning REFUSED", qname, dns.TypeToString[qtype])
 			m := new(dns.Msg)

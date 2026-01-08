@@ -7,9 +7,12 @@ package core
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -92,28 +95,74 @@ func (rd MANIFEST) String() string {
 }
 
 func (rd *MANIFEST) Parse(txt []string) error {
-	if len(txt) != 1 {
-		return errors.New("MANIFEST requires single JSON string")
+	// MANIFEST String() format: "Format HMAC JSON-data"
+	// Format: "JSON" or "FORMAT<n>"
+	// HMAC: hex string
+	// JSON-data: the JSON structure
+	
+	if len(txt) < 3 {
+		// Fallback: try to parse as single JSON string (backward compatibility)
+		if len(txt) == 1 {
+			if err := json.Unmarshal([]byte(txt[0]), rd); err != nil {
+				return fmt.Errorf("invalid MANIFEST JSON: %v", err)
+			}
+			// Validate Format is present and valid
+			if rd.Format == 0 {
+				return errors.New("MANIFEST format field is required")
+			}
+			if rd.Format != FormatJSON {
+				return fmt.Errorf("MANIFEST format %d not supported (only FormatJSON=1 is currently supported)", rd.Format)
+			}
+			// HMAC validation
+			if rd.HMAC != nil && len(rd.HMAC) != 32 {
+				return fmt.Errorf("MANIFEST HMAC must be 32 bytes (SHA-256), got %d bytes", len(rd.HMAC))
+			}
+			return nil
+		}
+		return errors.New("MANIFEST requires 3 fields: Format HMAC JSON-data")
 	}
 
-	// Parse JSON (Format and HMAC may be in JSON for text representation)
-	if err := json.Unmarshal([]byte(txt[0]), rd); err != nil {
+	// Parse Format (string -> enum)
+	formatStr := txt[0]
+	if format, ok := StringToFormat[formatStr]; ok {
+		rd.Format = format
+	} else if strings.HasPrefix(formatStr, "FORMAT") {
+		// Format like "FORMAT1" (fallback for unknown formats)
+		formatNum, err := strconv.ParseUint(strings.TrimPrefix(formatStr, "FORMAT"), 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid MANIFEST format: %s", formatStr)
+		}
+		rd.Format = uint8(formatNum)
+	} else {
+		return fmt.Errorf("invalid MANIFEST format: %s", formatStr)
+	}
+
+	// Parse HMAC (hex string)
+	hmacStr := txt[1]
+	hmac, err := hex.DecodeString(hmacStr)
+	if err != nil {
+		return fmt.Errorf("invalid MANIFEST HMAC (hex): %s", hmacStr)
+	}
+	if len(hmac) != 32 {
+		return fmt.Errorf("MANIFEST HMAC must be 32 bytes (SHA-256), got %d bytes", len(hmac))
+	}
+	rd.HMAC = hmac
+
+	// Parse JSON data (may contain spaces, so join remaining tokens)
+	jsonStr := strings.Join(txt[2:], " ")
+	var jsonFields struct {
+		ChunkCount uint16                 `json:"chunk_count"`
+		ChunkSize  uint16                 `json:"chunk_size,omitempty"`
+		Metadata   map[string]interface{} `json:"metadata,omitempty"`
+		Payload    []byte                 `json:"payload,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &jsonFields); err != nil {
 		return fmt.Errorf("invalid MANIFEST JSON: %v", err)
 	}
-
-	// Validate Format is present and valid
-	if rd.Format == 0 {
-		return errors.New("MANIFEST format field is required")
-	}
-	if rd.Format != FormatJSON {
-		return fmt.Errorf("MANIFEST format %d not supported (only FormatJSON=1 is currently supported)", rd.Format)
-	}
-
-	// HMAC is optional in text representation (will be calculated during Pack)
-	// But if present, validate it's a reasonable length
-	if rd.HMAC != nil && len(rd.HMAC) != 32 {
-		return fmt.Errorf("MANIFEST HMAC must be 32 bytes (SHA-256), got %d bytes", len(rd.HMAC))
-	}
+	rd.ChunkCount = jsonFields.ChunkCount
+	rd.ChunkSize = jsonFields.ChunkSize
+	rd.Metadata = jsonFields.Metadata
+	rd.Payload = jsonFields.Payload
 
 	return nil
 }

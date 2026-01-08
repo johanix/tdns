@@ -21,8 +21,9 @@ import (
 // before any specific qtype handlers. It should be registered first (before other handlers).
 //
 // Example usage:
-//   tdns.RegisterDebugQueryHandler()
-//   tdns.RegisterQueryHandler(hpke.TypeKMREQ, myHandler)
+//
+//	tdns.RegisterDebugQueryHandler()
+//	tdns.RegisterQueryHandler(hpke.TypeKMREQ, myHandler)
 func RegisterDebugQueryHandler() error {
 	debugQueryHandler := func(ctx context.Context, dqr *DnsQueryRequest) error {
 		log.Printf("DEBUG QUERY: qname=%s, qtype=%s, from=%s, msgid=%d, do=%v",
@@ -45,8 +46,9 @@ func RegisterDebugQueryHandler() error {
 // before any specific qtype handlers. It should be registered first (before other handlers).
 //
 // Example usage:
-//   tdns.RegisterDebugNotifyHandler()
-//   tdns.RegisterNotifyHandler(core.TypeMANIFEST, myHandler)
+//
+//	tdns.RegisterDebugNotifyHandler()
+//	tdns.RegisterNotifyHandler(core.TypeMANIFEST, myHandler)
 func RegisterDebugNotifyHandler() error {
 	debugNotifyHandler := func(ctx context.Context, dnr *DnsNotifyRequest) error {
 		qtype := uint16(0)
@@ -63,4 +65,3 @@ func RegisterDebugNotifyHandler() error {
 	}
 	return RegisterNotifyHandler(0, debugNotifyHandler)
 }
-

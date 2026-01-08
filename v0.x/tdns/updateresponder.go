@@ -71,12 +71,6 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 			}
 		}
 	}
-
-	//	}()
-	//	wg.Wait()
-
-	log.Println("DnsUpdateResponderEngine: terminating")
-	return nil
 }
 
 func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {

@@ -57,4 +57,3 @@ func IsExpiredPtr(timestamp *uint64, now time.Time) bool {
 	}
 	return IsExpired(*timestamp, now)
 }
-

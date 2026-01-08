@@ -165,48 +165,48 @@ type DbConf struct {
 }
 
 type InternalConf struct {
-	CfgFile         string //
-	DebugMode       bool   // if true, may activate dangerous tests
-	ZonesCfgFile    string //
-	CertData        string // PEM encoded certificate
-	KeyData         string // PEM encoded key
-	KeyDB           *KeyDB
-	AllZones        []string
-	DnssecPolicies  map[string]DnssecPolicy
-	StopCh          chan struct{}
-	APIStopCh       chan struct{}
-	StopOnce        sync.Once
-	RefreshZoneCh   chan ZoneRefresher
-	BumpZoneCh      chan BumperData
-	ValidatorCh     chan ValidatorRequest
-	RecursorCh      chan ImrRequest
-	ScannerQ        chan ScanRequest
-	UpdateQ         chan UpdateRequest
-	DeferredUpdateQ chan DeferredUpdate
-	DnsUpdateQ      chan DnsUpdateRequest
-	DnsNotifyQ      chan DnsNotifyRequest
-	DnsQueryQ       chan DnsQueryRequest // Optional: if nil, queries use direct call to QueryResponder
-	QueryHandlers   map[uint16][]QueryHandlerFunc // qtype -> list of handlers (registered via RegisterQueryHandler)
-	QueryHandlersMutex sync.RWMutex                // protects QueryHandlers map
-	NotifyHandlers   map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
-	NotifyHandlersMutex sync.RWMutex                // protects NotifyHandlers map
-	DelegationSyncQ chan DelegationSyncRequest
-	MusicSyncQ      chan MusicSyncRequest
-	NotifyQ         chan NotifyRequest
-	AuthQueryQ      chan AuthQueryRequest
-	ResignQ         chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
-	SyncQ           chan SyncRequest
-	AgentQs         *AgentQs // aggregated channels for agent communication
-	SyncStatusQ     chan SyncStatus
-	AgentRegistry   *AgentRegistry
-	ZoneDataRepo    *ZoneDataRepo
-	RRsetCache      *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine       *Imr
-	KdcDB           interface{} // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf         interface{} // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB           interface{} // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf         interface{} // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner         *Scanner // Scanner instance for async job tracking
+	CfgFile             string //
+	DebugMode           bool   // if true, may activate dangerous tests
+	ZonesCfgFile        string //
+	CertData            string // PEM encoded certificate
+	KeyData             string // PEM encoded key
+	KeyDB               *KeyDB
+	AllZones            []string
+	DnssecPolicies      map[string]DnssecPolicy
+	StopCh              chan struct{}
+	APIStopCh           chan struct{}
+	StopOnce            sync.Once
+	RefreshZoneCh       chan ZoneRefresher
+	BumpZoneCh          chan BumperData
+	ValidatorCh         chan ValidatorRequest
+	RecursorCh          chan ImrRequest
+	ScannerQ            chan ScanRequest
+	UpdateQ             chan UpdateRequest
+	DeferredUpdateQ     chan DeferredUpdate
+	DnsUpdateQ          chan DnsUpdateRequest
+	DnsNotifyQ          chan DnsNotifyRequest
+	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
+	QueryHandlers       map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
+	QueryHandlersMutex  sync.RWMutex                   // protects QueryHandlers map
+	NotifyHandlers      map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
+	NotifyHandlersMutex sync.RWMutex                   // protects NotifyHandlers map
+	DelegationSyncQ     chan DelegationSyncRequest
+	MusicSyncQ          chan MusicSyncRequest
+	NotifyQ             chan NotifyRequest
+	AuthQueryQ          chan AuthQueryRequest
+	ResignQ             chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+	SyncQ               chan SyncRequest
+	AgentQs             *AgentQs // aggregated channels for agent communication
+	SyncStatusQ         chan SyncStatus
+	AgentRegistry       *AgentRegistry
+	ZoneDataRepo        *ZoneDataRepo
+	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine           *Imr
+	KdcDB               interface{} // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf             interface{} // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB               interface{} // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf             interface{} // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner             *Scanner    // Scanner instance for async job tracking
 }
 
 type AgentQs struct {

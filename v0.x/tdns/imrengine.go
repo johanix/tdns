@@ -108,7 +108,8 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		if len(conf.Imr.Stubs) > 0 {
 			for _, stub := range conf.Imr.Stubs {
 				stubservers := []string{}
-				for _, server := range stub.Servers {
+				for i := range stub.Servers {
+					server := &stub.Servers[i]
 					stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
 				}
 				if !quiet {

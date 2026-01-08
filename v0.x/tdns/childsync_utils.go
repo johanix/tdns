@@ -157,11 +157,11 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 // Parent is the zone to apply the update to.
 // XXX: This is to focused on creating updates for child delegation info. Need a more general
 // CreateChildUpdate constructs a DNS UPDATE message for the given parent zone that applies the provided additions and removals for a child delegation.
-// 
+//
 // If any removed RR is an NS whose target name is within the child zone, the function also removes A and AAAA glue RRsets for that NS name.
 // It validates that parent and child are non-empty and not ".", returning an error when validation fails.
 // When Globals.Debug is set, the resulting message is printed.
-// 
+//
 // It returns the constructed DNS UPDATE message, or an error if validation fails.
 func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {

@@ -2054,7 +2054,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		case cache.ValidationStateSecure, cache.ValidationStateIndeterminate:
 			z.SetState(vstate)
 		default:
-			log.Printf("handleReferral: ERROR (should not happen): invalid DS validation state: %s", vstate)
+			log.Printf("handleReferral: ERROR (should not happen): invalid DS validation state: %v", vstate)
 		}
 		imr.Cache.ZoneMap.Set(zonename, z)
 	}

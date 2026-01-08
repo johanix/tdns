@@ -22,7 +22,7 @@ import (
 // to handle .server. queries earlier in the handler chain.
 func ServerQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	qname := strings.ToLower(req.Qname)
-	
+
 	// Only handle .server. queries with ClassCHAOS
 	if !strings.HasSuffix(qname, ".server.") || req.Msg.Question[0].Qclass != dns.ClassCHAOS {
 		return ErrNotHandled
@@ -164,4 +164,3 @@ func RegisterDefaultQueryHandlers(conf *Config) error {
 
 	return nil
 }
-

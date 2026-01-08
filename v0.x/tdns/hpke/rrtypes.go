@@ -37,11 +37,11 @@ func init() {
 // Format: <distribution-id> <keyid> <state> <timestamp> <zone>
 // Example: kdc.example.com. IN KMCTRL a1b2c3d4e5f6 12345 standby 1704067200 example.com.
 type KMCTRL struct {
-	DistributionID string    // Hex string (e.g., "a1b2c3d4e5f6")
-	KeyID          uint16    // DNSSEC key ID
-	State          KeyState  // "published" | "active" | "standby" | "distributed"
-	Timestamp      uint64    // Unix timestamp
-	Zone           string    // Zone name this key is for (e.g., "example.com.")
+	DistributionID string   // Hex string (e.g., "a1b2c3d4e5f6")
+	KeyID          uint16   // DNSSEC key ID
+	State          KeyState // "published" | "active" | "standby" | "distributed"
+	Timestamp      uint64   // Unix timestamp
+	Zone           string   // Zone name this key is for (e.g., "example.com.")
 }
 
 func NewKMCTRL() dns.PrivateRdata { return new(KMCTRL) }
@@ -460,7 +460,7 @@ func ParseQnameForKMREQ(qname string, controlZone string) (distributionID, zone 
 		controlZoneClean = controlZoneClean[:len(controlZoneClean)-1]
 	}
 	controlLabels := dns.SplitDomainName(controlZoneClean)
-	
+
 	if len(controlLabels) == 0 {
 		return "", "", fmt.Errorf("invalid control zone: %s", controlZone)
 	}
@@ -468,7 +468,7 @@ func ParseQnameForKMREQ(qname string, controlZone string) (distributionID, zone 
 	// The zone is everything between the distribution ID and the control zone
 	// QNAME format: <distribution-id>.<zone-labels>.<control-zone-labels>
 	// We need at least: distribution-id (1) + zone (1+) + control-zone (1+) = 3+ labels
-	if len(labels) < len(controlLabels) + 2 {
+	if len(labels) < len(controlLabels)+2 {
 		return "", "", fmt.Errorf("invalid KMREQ QNAME format: %s (too few labels)", qname)
 	}
 
@@ -488,7 +488,7 @@ func ParseQnameForKMREQ(qname string, controlZone string) (distributionID, zone 
 
 	zoneLabels := labels[1:controlStartIdx]
 	zone = strings.Join(zoneLabels, ".")
-	
+
 	// Ensure zone is FQDN
 	zone = dns.Fqdn(zone)
 
@@ -504,15 +504,13 @@ func BuildKMREQQname(distributionID, zone, controlZone string) string {
 	if len(zoneClean) > 0 && zoneClean[len(zoneClean)-1] == '.' {
 		zoneClean = zoneClean[:len(zoneClean)-1]
 	}
-	
+
 	controlZoneClean := controlZone
 	if len(controlZoneClean) > 0 && controlZoneClean[len(controlZoneClean)-1] == '.' {
 		controlZoneClean = controlZoneClean[:len(controlZoneClean)-1]
 	}
-	
+
 	// Build QNAME: <distribution-id>.<zone>.<control-zone>.
 	// Always ensure the result is FQDN (ends with ".")
 	return fmt.Sprintf("%s.%s.%s.", distributionID, zoneClean, controlZoneClean)
 }
-
-

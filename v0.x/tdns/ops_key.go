@@ -137,7 +137,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 		if err != nil {
 			return fmt.Errorf("VerifyPublishedKeyRRs(%q) failed to generate keypair: %v", zd.ZoneName, err)
 		}
-		zd.Logger.Printf(resp.Msg)
+		zd.Logger.Printf("%s", resp.Msg)
 
 		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
@@ -195,7 +195,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 		if err != nil {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to generate keypair: %v", zd.ZoneName, err), UpdateResult{}, err
 		}
-		zd.Logger.Printf(resp.Msg)
+		zd.Logger.Printf("%s", resp.Msg)
 
 		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
@@ -269,9 +269,9 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 		}
 		if resp.Error {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
-				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf(resp.ErrorMsg)
+				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf("%s", resp.ErrorMsg)
 		}
-		zd.Logger.Printf(resp.Msg)
+		zd.Logger.Printf("%s", resp.Msg)
 	}
 
 	dump.P(ur)
@@ -337,7 +337,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to generate keypair: %v", zd.ZoneName, err)
 	}
-	zd.Logger.Printf(kpresp.Msg)
+	zd.Logger.Printf("%s", kpresp.Msg)
 
 	tx.Commit() //
 
@@ -461,7 +461,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
 			zd.ZoneName, pkc.KeyRR.KeyTag(), kpresp.ErrorMsg)
 	}
-	zd.Logger.Printf(kpresp.Msg)
+	zd.Logger.Printf("%s", kpresp.Msg)
 
 	kp = KeystorePost{
 		Command:    "sig0-mgmt",
@@ -480,7 +480,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to change state of key %d to retired: %v",
 			zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), kpresp.ErrorMsg)
 	}
-	zd.Logger.Printf(kpresp.Msg)
+	zd.Logger.Printf("%s", kpresp.Msg)
 
 	// 9. Publish the new key
 	err = zd.PublishKeyRRs(newSak)

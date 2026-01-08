@@ -47,7 +47,7 @@ func TestInlineEncryptDecrypt() {
 	// Encrypt
 	plaintext := []byte("Hello, HPKE! This is a test message.")
 	fmt.Printf("Plaintext size: %d\n", len(plaintext))
-	
+
 	encryptedData, err := sealer.Seal(plaintext, nil)
 	if err != nil {
 		log.Fatalf("Failed to encrypt: %v", err)
@@ -65,14 +65,14 @@ func TestInlineEncryptDecrypt() {
 	// Extract back
 	encLen := kemScheme.CiphertextSize()
 	fmt.Printf("Extracting with CiphertextSize(): %d\n", encLen)
-	
+
 	extractedEnc := make([]byte, encLen)
 	copy(extractedEnc, combined[:encLen])
 	extractedData := combined[encLen:]
-	
+
 	fmt.Printf("Extracted encapsulated key size: %d\n", len(extractedEnc))
 	fmt.Printf("Extracted encrypted data size: %d\n", len(extractedData))
-	
+
 	// Compare
 	if len(extractedEnc) != len(encapsulatedKey) {
 		log.Fatalf("Encapsulated key size mismatch: got %d, expected %d", len(extractedEnc), len(encapsulatedKey))
@@ -80,7 +80,7 @@ func TestInlineEncryptDecrypt() {
 	if len(extractedData) != len(encryptedData) {
 		log.Fatalf("Encrypted data size mismatch: got %d, expected %d", len(extractedData), len(encryptedData))
 	}
-	
+
 	// Check if bytes match
 	for i := 0; i < len(encapsulatedKey); i++ {
 		if extractedEnc[i] != encapsulatedKey[i] {
@@ -118,4 +118,3 @@ func TestInlineEncryptDecrypt() {
 
 	fmt.Printf("✓ Decryption successful!\n")
 }
-
