@@ -1,0 +1,43 @@
+apiservers:
+   - name:		tdns-server
+     baseurl:           https://127.0.0.1:8989/api/v1
+     apikey:            winter-is-coming-santa-stuck-in-chimney
+     authmethod:        X-API-Key
+
+   - name:		tdns-agent
+     baseurl:           https://127.0.0.1:8987/api/v1
+     apikey:            winter-is-coming-santa-stuck-in-chimney
+     authmethod:	X-API-Key
+
+   - name:		tdns-reporter
+     baseurl:           https://127.0.0.1:8991/api/v1
+     apikey:            winter-is-coming-santa-stuck-in-chimney
+     authmethod:        X-API-Key
+
+   - name:		tdns-scanner
+     baseurl:           https://127.0.0.1:8082/api/v1
+     apikey:            you-have-stolen-my-frotzblinger
+     authmethod:	X-API-Key
+
+   - name:		tdns-imr
+     baseurl:		https://127.0.0.1:8084/api/v1
+     apikey:            you-have-stolen-my-frotzblinger
+     authmethod:	X-API-Key
+
+   - name:		tdns-combiner
+     baseurl:		https://127.0.0.1:8085/api/v1
+     apikey:            you-have-stolen-my-frotzblinger
+     authmethod:	X-API-Key
+
+keys:
+   tsig:
+      - name:		johani.key.
+        algorithm:	hmac-sha256
+        secret:		fjvJ7KwoL7oX9n+L5sOwYJqyuxS8Jwt5k2M+JIwTQ7E=
+
+      - name:		jonathan.key.
+        algorithm:	hmac-sha256
+        secret:		jkYMg8gccGs1upIgE+tLGAyquXDZyuc06YuFUPoM6Ac=
+
+log:
+   file:		/var/log/tdns/tdns-cli.log

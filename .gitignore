@@ -17,6 +17,8 @@ scanner/tdns-scanner
 imr/tdns-imr
 cli/tdns-cli
 dog/dog
+kdc/tdns-kdc
+krs/tdns-krs
 # old stuff; going away:
 sidecar/music-sidecar
 sidecar-cli/sidecar-cli

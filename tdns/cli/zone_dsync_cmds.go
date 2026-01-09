@@ -188,7 +188,8 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
-	if tdns.Globals.Verbose {
+	// Only print status if it's not 200 (success) - useful for debugging errors
+	if status != 200 && tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
 	}
 

@@ -37,6 +37,14 @@ type DnsNotifyRequest struct {
 	Status         *NotifyStatus
 }
 
+type DnsQueryRequest struct {
+	ResponseWriter dns.ResponseWriter
+	Msg            *dns.Msg
+	Qname          string
+	Qtype          uint16
+	Options        *edns0.MsgOptions
+}
+
 func UpdateHandler(ctx context.Context, conf *Config) error {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	updateq := conf.Internal.UpdateQ

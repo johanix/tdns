@@ -1,6 +1,7 @@
 # Main TDNS configuration
 include:
-   - tdns-zones.yaml
+   - auth-templates.yaml
+   - auth-zones.yaml
 
 service:
    name:		TDNS-SERVER
