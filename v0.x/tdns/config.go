@@ -190,6 +190,8 @@ type InternalConf struct {
 	QueryHandlersMutex  sync.RWMutex                   // protects QueryHandlers map
 	NotifyHandlers      map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
 	NotifyHandlersMutex sync.RWMutex                   // protects NotifyHandlers map
+	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
+	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
 	DelegationSyncQ     chan DelegationSyncRequest
 	MusicSyncQ          chan MusicSyncRequest
 	NotifyQ             chan NotifyRequest

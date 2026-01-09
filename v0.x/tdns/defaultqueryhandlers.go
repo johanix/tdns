@@ -33,9 +33,10 @@ func ServerQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	return nil
 }
 
-// defaultQueryHandler handles all other queries using zone-based query handling.
+// DefaultQueryHandler handles all other queries using zone-based query handling.
 // This is registered with qtype=0 to catch all query types that aren't handled by other handlers.
-func defaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
+// Exported so apps (like KDC) can register it even when no zones are in config.
+func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	conf := &Conf
 	kdb := conf.Internal.KeyDB
 	qname := req.Qname
@@ -150,7 +151,7 @@ func RegisterDefaultQueryHandlers(conf *Config) error {
 	// Only register default query handler if zones are configured
 	// Check if any zones are configured in the config (TDNS-internal check, not app-type specific)
 	if conf != nil && len(conf.Zones) > 0 {
-		if err := RegisterQueryHandler(0, defaultQueryHandler); err != nil {
+		if err := RegisterQueryHandler(0, DefaultQueryHandler); err != nil {
 			return err
 		}
 		if Globals.Debug {

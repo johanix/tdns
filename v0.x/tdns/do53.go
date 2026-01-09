@@ -276,15 +276,67 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 
 		case dns.OpcodeUpdate:
 			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO, len(dnsupdateq))
-			// A DNS Update may trigger time consuming outbound queries
-			dnsupdateq <- DnsUpdateRequest{
+			
+			// Create DnsUpdateRequest for handler matching
+			dur := DnsUpdateRequest{
 				ResponseWriter: w,
 				Msg:            r,
 				Qname:          qname,
 				Options:        msgoptions,
 				Status:         &UpdateStatus{},
 			}
-			// Not waiting for a result
+
+			// Check for registered UPDATE handlers (new registration API)
+			handlers := getUpdateHandlers(conf, &dur)
+			if len(handlers) > 0 {
+				// Try registered handlers
+				handled := false
+				for _, handler := range handlers {
+					err := handler(ctx, &dur)
+					if err == nil {
+						// Handler successfully handled the UPDATE
+						handled = true
+						if Globals.Debug {
+							log.Printf("DnsHandler: UPDATE handled by registered handler (qname=%s)", qname)
+						}
+						return
+					} else if err == ErrNotHandled {
+						// Handler doesn't handle this UPDATE, try next handler
+						if Globals.Debug {
+							log.Printf("DnsHandler: UPDATE handler returned ErrNotHandled, trying next handler")
+						}
+						continue
+					} else {
+						// Handler attempted to handle but encountered an error
+						log.Printf("DnsHandler: UPDATE handler error: %v", err)
+						// Continue to next handler or fall through to default
+						continue
+					}
+				}
+
+				if handled {
+					return // UPDATE was handled by a registered handler
+				}
+				// All handlers returned ErrNotHandled, fall through to default handler
+				if Globals.Debug {
+					log.Printf("DnsHandler: All registered UPDATE handlers returned ErrNotHandled, falling back to channel-based handler")
+				}
+			}
+
+			// Backward compatibility: If DnsUpdateQ channel is provided, route UPDATEs there
+			// (This is the old way, kept for backward compatibility)
+			if dnsupdateq != nil {
+				// A DNS Update may trigger time consuming outbound queries
+				dnsupdateq <- dur
+				// Not waiting for a result
+				return
+			}
+
+			// No handlers and no channel - send error response
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.SetRcode(r, dns.RcodeNotImplemented)
+			w.WriteMsg(m)
 			return
 
 		case dns.OpcodeQuery:

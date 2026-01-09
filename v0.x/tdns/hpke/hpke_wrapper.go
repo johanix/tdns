@@ -203,3 +203,144 @@ func DerivePublicKey(privateKey []byte) (publicKey []byte, err error) {
 	// Return public key as bytes
 	return pubKey[:], nil
 }
+
+// EncryptAuth encrypts plaintext using HPKE Auth mode (sender authentication)
+// senderPrivKey: X25519 private key of the sender (32 bytes) - for authentication
+// recipientPubKey: X25519 public key of the recipient (32 bytes)
+// plaintext: Data to encrypt
+// Returns: encrypted ciphertext (with encapsulated key prepended), error
+func EncryptAuth(senderPrivKey []byte, recipientPubKey []byte, plaintext []byte) (ciphertext []byte, err error) {
+	if len(senderPrivKey) != 32 {
+		return nil, fmt.Errorf("sender private key must be 32 bytes (got %d)", len(senderPrivKey))
+	}
+	if len(recipientPubKey) != 32 {
+		return nil, fmt.Errorf("recipient public key must be 32 bytes (got %d)", len(recipientPubKey))
+	}
+
+	// Get HPKE suite
+	suite := getHPKESuite()
+
+	// Get KEM scheme
+	kemScheme := hpke.KEM_X25519_HKDF_SHA256.Scheme()
+
+	// Unmarshal sender's private key
+	senderKey, err := kemScheme.UnmarshalBinaryPrivateKey(senderPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal sender private key: %v", err)
+	}
+
+	// Unmarshal recipient's public key
+	recipientKey, err := kemScheme.UnmarshalBinaryPublicKey(recipientPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal recipient public key: %v", err)
+	}
+
+	// Create sender context (Auth mode requires sender's private key)
+	// Note: CIRCL HPKE Auth mode uses NewSender with sender's private key parameter
+	// The SetupAuth method is called on the sender object
+	sender, err := suite.NewSender(recipientKey, nil) // nil = no info
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sender: %v", err)
+	}
+
+	// Setup encryption with authentication (generates ephemeral keypair internally)
+	// SetupAuth takes the sender's private key for authentication
+	encapsulatedKey, sealer, err := sender.SetupAuth(rand.Reader, senderKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup authenticated encryption: %v", err)
+	}
+
+	// Verify encapsulated key size matches expected ciphertext size
+	expectedSize := kemScheme.CiphertextSize()
+	if len(encapsulatedKey) != expectedSize {
+		return nil, fmt.Errorf("encapsulated key size mismatch: got %d, expected %d", len(encapsulatedKey), expectedSize)
+	}
+
+	// Encrypt plaintext
+	encryptedData, err := sealer.Seal(plaintext, nil) // nil = no associated data
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt: %v", err)
+	}
+
+	// Prepend encapsulated key to ciphertext
+	encLen := len(encapsulatedKey)
+	fullCiphertext := make([]byte, encLen+len(encryptedData))
+	copy(fullCiphertext[:encLen], encapsulatedKey)
+	copy(fullCiphertext[encLen:], encryptedData)
+
+	return fullCiphertext, nil
+}
+
+// DecryptAuth decrypts ciphertext using HPKE Auth mode (sender authentication)
+// recipientPrivKey: X25519 private key of the recipient (32 bytes)
+// senderPubKey: X25519 public key of the sender (32 bytes) - for authentication verification
+// ciphertext: HPKE-encrypted data (encapsulated key + encrypted data)
+// Returns: decrypted plaintext, error
+func DecryptAuth(recipientPrivKey []byte, senderPubKey []byte, ciphertext []byte) (plaintext []byte, err error) {
+	if len(recipientPrivKey) != 32 {
+		return nil, fmt.Errorf("recipient private key must be 32 bytes (got %d)", len(recipientPrivKey))
+	}
+	if len(senderPubKey) != 32 {
+		return nil, fmt.Errorf("sender public key must be 32 bytes (got %d)", len(senderPubKey))
+	}
+
+	// Get HPKE suite
+	suite := getHPKESuite()
+
+	// Get KEM scheme
+	kemScheme := hpke.KEM_X25519_HKDF_SHA256.Scheme()
+
+	// Unmarshal recipient's private key
+	recipientKey, err := kemScheme.UnmarshalBinaryPrivateKey(recipientPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal recipient private key: %v", err)
+	}
+
+	// Unmarshal sender's public key
+	senderKey, err := kemScheme.UnmarshalBinaryPublicKey(senderPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal sender public key: %v", err)
+	}
+
+	// Extract encapsulated key from ciphertext
+	encLen := kemScheme.PublicKeySize()
+	ciphertextSize := kemScheme.CiphertextSize()
+	if encLen != ciphertextSize {
+		encLen = ciphertextSize
+	}
+	if len(ciphertext) < encLen {
+		return nil, fmt.Errorf("ciphertext too short (got %d, need at least %d)", len(ciphertext), encLen)
+	}
+
+	// Extract encapsulated key (first encLen bytes)
+	encapsulatedKey := make([]byte, encLen)
+	copy(encapsulatedKey, ciphertext[:encLen])
+
+	// Extract encrypted data (remaining bytes after encapsulated key)
+	encryptedDataLen := len(ciphertext) - encLen
+	encryptedData := make([]byte, encryptedDataLen)
+	copy(encryptedData, ciphertext[encLen:])
+
+	// Create receiver context (Auth mode requires sender's public key)
+	// Note: CIRCL HPKE Auth mode uses NewReceiver with sender's public key parameter
+	// The SetupAuth method is called on the receiver object
+	receiver, err := suite.NewReceiver(recipientKey, nil) // nil = no info
+	if err != nil {
+		return nil, fmt.Errorf("failed to create receiver: %v", err)
+	}
+
+	// Setup decryption with authentication (takes encapsulated key and sender's public key)
+	// SetupAuth takes the sender's public key for authentication verification
+	opener, err := receiver.SetupAuth(encapsulatedKey, senderKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup authenticated decryption: %v", err)
+	}
+
+	// Decrypt
+	plaintext, err = opener.Open(encryptedData, nil) // nil = no associated data
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt: %v", err)
+	}
+
+	return plaintext, nil
+}

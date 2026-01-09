@@ -142,6 +142,10 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		log.Printf("QueryResponder: DNSSEC not requested (DO=0), skipping signing for %s %s", name, dns.TypeToString[rrset.RRtype])
 		return rrset, nil
 	}
+	if kdb == nil {
+		log.Printf("QueryResponder: no KeyDB available for zone %s, cannot sign %s %s", zd.ZoneName, name, dns.TypeToString[rrset.RRtype])
+		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
+	}
 	if !zd.Options[OptOnlineSigning] {
 		log.Printf("QueryResponder: online signing not enabled for zone %s, skipping signing for %s %s", zd.ZoneName, name, dns.TypeToString[rrset.RRtype])
 		return rrset, fmt.Errorf("online signing not enabled for zone %s", zd.ZoneName)
@@ -510,9 +514,19 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// Track if the configured transport signal is already present in the Answer section
 	transportSignalInAnswer := false
 
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		log.Printf("QueryResponder: failed to get dnssec key for zone %s", zd.ZoneName)
+	// Get DNSSEC keys if KeyDB is available and zone has DNSSEC enabled
+	var dak *DnssecKeys
+	var err error
+	if kdb != nil {
+		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			log.Printf("QueryResponder: failed to get dnssec key for zone %s: %v", zd.ZoneName, err)
+		}
+	} else {
+		// No KeyDB available (e.g., KDC catalog zone) - DNSSEC not supported
+		if msgoptions.DO {
+			log.Printf("QueryResponder: DNSSEC requested (DO=1) but no KeyDB available for zone %s, responding without DNSSEC", zd.ZoneName)
+		}
 	}
 
 	// Wrapper function for addCDEResponse that uses the consolidated signRRsetForZone function
@@ -533,13 +547,16 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		return fmt.Errorf("failed to get apex data for zone %s: %v", zd.ZoneName, err)
 	}
 
-	if err := zd.signApexRRsets(apex, msgoptions, kdb, dak); err != nil {
-		log.Printf("QueryResponder: failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
-		if msgoptions.DO {
+	// Sign apex RRsets if DNSSEC is requested and KeyDB is available
+	if msgoptions.DO && kdb != nil {
+		if err := zd.signApexRRsets(apex, msgoptions, kdb, dak); err != nil {
+			log.Printf("QueryResponder: failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
 			m.MsgHdr.Rcode = dns.RcodeServerFailure
 			w.WriteMsg(m)
 			return fmt.Errorf("failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
 		}
+	} else if msgoptions.DO && kdb == nil {
+		log.Printf("QueryResponder: DNSSEC requested (DO=1) but no KeyDB available for zone %s, responding without DNSSEC", zd.ZoneName)
 	}
 
 	// Reject explicit queries for NXNAME type (RFC 9824)

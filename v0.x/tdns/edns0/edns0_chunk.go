@@ -20,8 +20,8 @@ import (
 
 // CHUNK option content types
 const (
-	CHUNKContentTypeKeyStatus = 1 // Key installation status report (failed/successful keys)
-	// Future content types can be added here
+	CHUNKContentTypeKeyStatus            = 1 // Key installation status report (failed/successful keys)
+	CHUNKContentTypeBootstrapConfirmation = 2 // Bootstrap confirmation (encrypted confirmation data)
 )
 
 // ChunkOption represents a CHUNK EDNS(0) option
@@ -46,6 +46,18 @@ type KeyStatusEntry struct {
 	ZoneName string `json:"zone_name"` // Zone name
 	KeyID    string `json:"key_id"`    // Key ID
 	Error    string `json:"error,omitempty"` // Error message if failed
+}
+
+// BootstrapConfirmation represents a bootstrap confirmation message
+// This is the payload for CHUNKContentTypeBootstrapConfirmation
+// Note: This struct represents the decrypted confirmation data.
+// The actual EDNS(0) option contains encrypted data.
+type BootstrapConfirmation struct {
+	NodeID         string `json:"node_id"`          // Assigned node ID
+	Status         string `json:"status"`           // Status: "success" or "error"
+	KdcHpkePubKey  string `json:"kdc_hpke_pubkey"` // KDC HPKE public key (hex encoded)
+	Timestamp      string `json:"timestamp"`        // RFC3339 timestamp
+	ErrorMessage   string `json:"error_message,omitempty"` // Error message if status is "error"
 }
 
 // CreateChunkOption creates a CHUNK EDNS(0) option
@@ -89,6 +101,24 @@ func CreateKeyStatusChunkOption(successfulKeys, failedKeys []KeyStatusEntry) (*d
 	copy(data[1:], jsonData)
 
 	// Create option with no HMAC (key status reports don't need HMAC)
+	return CreateChunkOption(core.FormatJSON, nil, data), nil
+}
+
+// CreateBootstrapConfirmationOption creates a CHUNK EDNS(0) option with bootstrap confirmation content
+// The confirmation data is encrypted using HPKE Auth mode before being placed in the option.
+// encryptedConfirmation: HPKE-encrypted confirmation data (ciphertext)
+// Returns: CHUNK EDNS(0) option, error
+func CreateBootstrapConfirmationOption(encryptedConfirmation []byte) (*dns.EDNS0_LOCAL, error) {
+	if len(encryptedConfirmation) == 0 {
+		return nil, fmt.Errorf("encrypted confirmation data cannot be empty")
+	}
+
+	// Prepend content type byte to the encrypted data
+	data := make([]byte, 1+len(encryptedConfirmation))
+	data[0] = CHUNKContentTypeBootstrapConfirmation
+	copy(data[1:], encryptedConfirmation)
+
+	// Create option with no HMAC (bootstrap confirmation is already encrypted)
 	return CreateChunkOption(core.FormatJSON, nil, data), nil
 }
 
@@ -201,6 +231,24 @@ func ParseKeyStatusReport(chunkOpt *ChunkOption) (uint8, *KeyStatusReport, error
 	}
 
 	return contentType, &report, nil
+}
+
+// ParseBootstrapConfirmation parses a bootstrap confirmation from CHUNK option data
+// Returns the content type and the encrypted confirmation data
+// Note: The returned data is still encrypted and must be decrypted using HPKE Auth mode
+func ParseBootstrapConfirmation(chunkOpt *ChunkOption) (uint8, []byte, error) {
+	if len(chunkOpt.Data) < 1 {
+		return 0, nil, fmt.Errorf("CHUNK option data too short for content type")
+	}
+
+	contentType := chunkOpt.Data[0]
+	encryptedData := chunkOpt.Data[1:]
+
+	if contentType != CHUNKContentTypeBootstrapConfirmation {
+		return contentType, nil, fmt.Errorf("unsupported content type: %d (expected %d)", contentType, CHUNKContentTypeBootstrapConfirmation)
+	}
+
+	return contentType, encryptedData, nil
 }
 
 // ExtractChunkOption extracts the CHUNK EDNS0 option from an OPT RR

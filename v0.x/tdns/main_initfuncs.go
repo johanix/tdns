@@ -156,6 +156,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	globalNotifyHandlersMutex.RUnlock()
 
+	// Initialize UPDATE handlers slice
+	conf.Internal.UpdateHandlers = make([]UpdateHandlerRegistration, 0)
+
+	// Copy any handlers registered before MainInit (from global storage)
+	globalUpdateHandlersMutex.RLock()
+	conf.Internal.UpdateHandlers = append(conf.Internal.UpdateHandlers, globalUpdateHandlers...)
+	globalUpdateHandlersMutex.RUnlock()
+
 	// Register default query handlers (default zone-based handler)
 	// The default handler is registered with qtype=0, so it catches all queries that aren't handled by other handlers.
 	// It's only registered if zones are configured (TDNS-internal check).

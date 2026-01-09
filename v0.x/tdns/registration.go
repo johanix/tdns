@@ -34,6 +34,9 @@ var (
 	globalNotifyHandlers      = make(map[uint16][]NotifyHandlerFunc)
 	globalNotifyHandlersMutex sync.RWMutex
 
+	globalUpdateHandlers      = make([]UpdateHandlerRegistration, 0)
+	globalUpdateHandlersMutex sync.RWMutex
+
 	globalEngines      = make([]EngineRegistration, 0)
 	globalEnginesMutex sync.RWMutex
 
@@ -205,6 +208,115 @@ func getNotifyHandlers(conf *Config, qtype uint16) []NotifyHandlerFunc {
 			}
 			conf.Internal.NotifyHandlersMutex.RUnlock()
 		}
+	}
+
+	return handlers
+}
+
+// UpdateHandlerFunc is the function signature for registered UPDATE handlers.
+// Returns ErrNotHandled if the handler doesn't handle this UPDATE (allows fallthrough).
+// Returns nil if the handler successfully handled the UPDATE.
+// Returns other error if handler attempted to handle but encountered an error.
+type UpdateHandlerFunc func(ctx context.Context, req *DnsUpdateRequest) error
+
+// UpdateMatcherFunc is the function signature for matching UPDATE messages.
+// Returns true if the UPDATE should be handled by the associated handler.
+// The matcher receives the DnsUpdateRequest and can inspect:
+// - req.Qname (zone name from question section)
+// - req.Msg.Ns (update section RRs)
+// - req.Msg.Extra (additional section, e.g., SIG(0))
+// - req.Options (EDNS0 options)
+type UpdateMatcherFunc func(req *DnsUpdateRequest) bool
+
+// UpdateHandlerRegistration stores an UPDATE handler registration
+type UpdateHandlerRegistration struct {
+	Matcher UpdateMatcherFunc
+	Handler UpdateHandlerFunc
+}
+
+// RegisterUpdateHandler registers a handler for DNS UPDATE messages.
+// The matcher function determines which UPDATEs should be handled by this handler.
+// Multiple handlers can be registered - they will be called in registration order.
+// If a handler returns ErrNotHandled, TDNS will try the next handler or fall back to default.
+//
+// This function can be called before TDNS is initialized (uses global storage),
+// or after initialization (uses conf.Internal.UpdateHandlers).
+// During UPDATE processing, TDNS checks both locations.
+//
+// Example usage:
+//
+//	// Match bootstrap UPDATEs (name pattern _bootstrap.*)
+//	tdns.RegisterUpdateHandler(
+//		func(req *tdns.DnsUpdateRequest) bool {
+//			for _, rr := range req.Msg.Ns {
+//				if strings.HasPrefix(rr.Header().Name, "_bootstrap.") {
+//					return true
+//				}
+//			}
+//			return false
+//		},
+//		func(ctx context.Context, req *tdns.DnsUpdateRequest) error {
+//			return kdc.HandleBootstrapUpdate(ctx, req, kdcDB, &kdcConf)
+//		},
+//	)
+func RegisterUpdateHandler(matcher UpdateMatcherFunc, handler UpdateHandlerFunc) error {
+	if matcher == nil {
+		return fmt.Errorf("matcher function cannot be nil")
+	}
+	if handler == nil {
+		return fmt.Errorf("handler cannot be nil")
+	}
+
+	// Register in global storage (for early registration before conf is available)
+	globalUpdateHandlersMutex.Lock()
+	globalUpdateHandlers = append(globalUpdateHandlers, UpdateHandlerRegistration{
+		Matcher: matcher,
+		Handler: handler,
+	})
+	globalUpdateHandlersMutex.Unlock()
+
+	// Also register in conf if available (and slice is initialized)
+	if Conf.Internal.UpdateHandlers != nil {
+		Conf.Internal.UpdateHandlersMutex.Lock()
+		Conf.Internal.UpdateHandlers = append(Conf.Internal.UpdateHandlers, UpdateHandlerRegistration{
+			Matcher: matcher,
+			Handler: handler,
+		})
+		Conf.Internal.UpdateHandlersMutex.Unlock()
+	} else {
+		// Conf not initialized yet, will be copied from global storage during MainInit
+	}
+
+	if Globals.Debug {
+		log.Printf("RegisterUpdateHandler: Registered UPDATE handler")
+	}
+
+	return nil
+}
+
+// getUpdateHandlers returns the list of handlers that match the given UPDATE request,
+// checking both global storage and conf storage.
+func getUpdateHandlers(conf *Config, dur *DnsUpdateRequest) []UpdateHandlerFunc {
+	var handlers []UpdateHandlerFunc
+
+	// First, check global storage
+	globalUpdateHandlersMutex.RLock()
+	for _, reg := range globalUpdateHandlers {
+		if reg.Matcher(dur) {
+			handlers = append(handlers, reg.Handler)
+		}
+	}
+	globalUpdateHandlersMutex.RUnlock()
+
+	// Then, check conf storage
+	if conf != nil && conf.Internal.UpdateHandlers != nil {
+		conf.Internal.UpdateHandlersMutex.RLock()
+		for _, reg := range conf.Internal.UpdateHandlers {
+			if reg.Matcher(dur) {
+				handlers = append(handlers, reg.Handler)
+			}
+		}
+		conf.Internal.UpdateHandlersMutex.RUnlock()
 	}
 
 	return handlers
