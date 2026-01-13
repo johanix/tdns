@@ -22,6 +22,7 @@ import (
 const (
 	CHUNKContentTypeKeyStatus            = 1 // Key installation status report (failed/successful keys)
 	CHUNKContentTypeBootstrapConfirmation = 2 // Bootstrap confirmation (encrypted confirmation data)
+	CHUNKContentTypeComponentStatus      = 3 // Component installation status report (failed/successful components)
 )
 
 // ChunkOption represents a CHUNK EDNS(0) option
@@ -46,6 +47,19 @@ type KeyStatusEntry struct {
 	ZoneName string `json:"zone_name"` // Zone name
 	KeyID    string `json:"key_id"`    // Key ID
 	Error    string `json:"error,omitempty"` // Error message if failed
+}
+
+// ComponentStatusReport represents a component installation status report
+// This is the payload for CHUNKContentTypeComponentStatus
+type ComponentStatusReport struct {
+	SuccessfulComponents []ComponentStatusEntry `json:"successful_components,omitempty"` // Components that were successfully installed
+	FailedComponents     []ComponentStatusEntry `json:"failed_components,omitempty"`     // Components that failed to install
+}
+
+// ComponentStatusEntry represents a single component's installation status
+type ComponentStatusEntry struct {
+	ComponentID string `json:"component_id"` // Component ID
+	Error       string `json:"error,omitempty"` // Error message if failed
 }
 
 // BootstrapConfirmation represents a bootstrap confirmation message
@@ -101,6 +115,28 @@ func CreateKeyStatusChunkOption(successfulKeys, failedKeys []KeyStatusEntry) (*d
 	copy(data[1:], jsonData)
 
 	// Create option with no HMAC (key status reports don't need HMAC)
+	return CreateChunkOption(core.FormatJSON, nil, data), nil
+}
+
+// CreateComponentStatusChunkOption creates a CHUNK EDNS(0) option with component status report content
+func CreateComponentStatusChunkOption(successfulComponents, failedComponents []ComponentStatusEntry) (*dns.EDNS0_LOCAL, error) {
+	report := ComponentStatusReport{
+		SuccessfulComponents: successfulComponents,
+		FailedComponents:     failedComponents,
+	}
+
+	// Encode the report as JSON
+	jsonData, err := json.Marshal(report)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal component status report: %v", err)
+	}
+
+	// Prepend content type byte to the data
+	data := make([]byte, 1+len(jsonData))
+	data[0] = CHUNKContentTypeComponentStatus
+	copy(data[1:], jsonData)
+
+	// Create option with no HMAC (component status reports don't need HMAC)
 	return CreateChunkOption(core.FormatJSON, nil, data), nil
 }
 
@@ -228,6 +264,28 @@ func ParseKeyStatusReport(chunkOpt *ChunkOption) (uint8, *KeyStatusReport, error
 	var report KeyStatusReport
 	if err := json.Unmarshal(jsonData, &report); err != nil {
 		return contentType, nil, fmt.Errorf("failed to parse key status report JSON: %v", err)
+	}
+
+	return contentType, &report, nil
+}
+
+// ParseComponentStatusReport parses a component status report from CHUNK option data
+// Returns the content type and the parsed report
+func ParseComponentStatusReport(chunkOpt *ChunkOption) (uint8, *ComponentStatusReport, error) {
+	if len(chunkOpt.Data) < 1 {
+		return 0, nil, fmt.Errorf("CHUNK option data too short for content type")
+	}
+
+	contentType := chunkOpt.Data[0]
+	jsonData := chunkOpt.Data[1:]
+
+	if contentType != CHUNKContentTypeComponentStatus {
+		return contentType, nil, fmt.Errorf("unsupported content type: %d", contentType)
+	}
+
+	var report ComponentStatusReport
+	if err := json.Unmarshal(jsonData, &report); err != nil {
+		return contentType, nil, fmt.Errorf("failed to parse component status report JSON: %v", err)
 	}
 
 	return contentType, &report, nil

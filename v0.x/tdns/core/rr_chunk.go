@@ -22,7 +22,6 @@ func init() {
 }
 
 // CHUNK - Unified Chunk/Manifest RR type
-// Combines MANIFEST and CHUNK functionality into a single RR type
 // Fixed RDATA structure with all fields always present (some unused depending on context)
 //
 // RDATA structure (fixed field order):
@@ -41,10 +40,10 @@ func init() {
 //     * HMAC: Present (length from HMAC length field)
 //     * Sequence: Unused (can be 0)
 //     * Total: 0 (indicates manifest)
-//     * Data: JSON manifest data (ChunkCount, ChunkSize, Metadata, Payload)
+//     * Data: JSON data (ChunkCount, ChunkSize, Metadata, Payload)
 //
 //   - When Total>0: This is a data chunk
-//     * Format: Stored from manifest (e.g., FormatJSON=1)
+//     * Format: Stored from CHUNK manifest (e.g., FormatJSON=1)
 //     * HMAC length: 0
 //     * HMAC: Not present (HMACLen=0)
 //     * Sequence: Chunk sequence number (0-based)

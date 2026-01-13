@@ -61,37 +61,6 @@ func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
 	})
 }
 
-func TestMANIFESTPackUnpackRoundTrip(t *testing.T) {
-	manifestHMAC := make([]byte, 32)
-	rand.Read(manifestHMAC)
-
-	original := &MANIFEST{
-		Format:     FormatJSON,
-		HMAC:       manifestHMAC,
-		ChunkCount: 1,
-		ChunkSize:  60000,
-		Metadata: map[string]interface{}{
-			"content":        "encrypted_keys",
-			"distribution_id": "test456",
-		},
-		Payload: []byte("test payload 2"),
-	}
-
-	testMANIFESTPackUnpackRoundTrip(t, original, "MANIFEST")
-}
-
-func TestCHUNKPackUnpackRoundTrip(t *testing.T) {
-	chunkData := make([]byte, 200)
-	rand.Read(chunkData)
-
-	original := &CHUNK{
-		Sequence: 0,
-		Total:    2,
-		Data:     chunkData,
-	}
-
-	testCHUNKPackUnpackRoundTrip(t, original, "CHUNK")
-}
 
 func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
 	// Pack to binary
@@ -118,53 +87,4 @@ func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
 	}
 }
 
-func testMANIFESTPackUnpackRoundTrip(t *testing.T, original *MANIFEST, name string) {
-	// Pack to binary
-	buf := make([]byte, 65535)
-	off, err := original.Pack(buf)
-	if err != nil {
-		t.Fatalf("%s Pack() failed: %v", name, err)
-	}
-
-	// Unpack from binary
-	parsed := &MANIFEST{}
-	off2, err := parsed.Unpack(buf[:off])
-	if err != nil {
-		t.Fatalf("%s Unpack() failed: %v", name, err)
-	}
-
-	if off != off2 {
-		t.Errorf("%s: Pack offset %d != Unpack offset %d", name, off, off2)
-	}
-
-	// Compare
-	if !compareMANIFEST(t, original, parsed, name) {
-		t.Errorf("%s: Pack/Unpack round-trip failed", name)
-	}
-}
-
-func testCHUNKPackUnpackRoundTrip(t *testing.T, original *CHUNK, name string) {
-	// Pack to binary
-	buf := make([]byte, 65535)
-	off, err := original.Pack(buf)
-	if err != nil {
-		t.Fatalf("%s Pack() failed: %v", name, err)
-	}
-
-	// Unpack from binary
-	parsed := &CHUNK{}
-	off2, err := parsed.Unpack(buf[:off])
-	if err != nil {
-		t.Fatalf("%s Unpack() failed: %v", name, err)
-	}
-
-	if off != off2 {
-		t.Errorf("%s: Pack offset %d != Unpack offset %d", name, off, off2)
-	}
-
-	// Compare
-	if !compareCHUNK(t, original, parsed, name) {
-		t.Errorf("%s: Pack/Unpack round-trip failed", name)
-	}
-}
 

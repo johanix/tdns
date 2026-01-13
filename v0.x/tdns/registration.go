@@ -430,9 +430,16 @@ func getRegisteredAPIRoutes() []APIRouteFunc {
 // Engines run until the context is cancelled.
 func StartRegisteredEngines(ctx context.Context) {
 	engines := getRegisteredEngines()
+	var names []string
+	for _, e := range engines {
+		names = append(names, e.Name)
+	}
+	log.Printf("Starting registered engines: %d engines to start: %v", len(engines), names)
+	// engines := getRegisteredEngines()
 	for _, reg := range engines {
 		name := reg.Name
 		engine := reg.Engine
+		log.Printf("StartRegisteredEngines: starting %s", name)
 		startEngine(&Globals.App, name, func() error {
 			return engine(ctx)
 		})

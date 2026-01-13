@@ -48,7 +48,7 @@ func RegisterDebugQueryHandler() error {
 // Example usage:
 //
 //	tdns.RegisterDebugNotifyHandler()
-//	tdns.RegisterNotifyHandler(core.TypeMANIFEST, myHandler)
+//	tdns.RegisterNotifyHandler(core.TypeCHUNK, myHandler)
 func RegisterDebugNotifyHandler() error {
 	debugNotifyHandler := func(ctx context.Context, dnr *DnsNotifyRequest) error {
 		qtype := uint16(0)

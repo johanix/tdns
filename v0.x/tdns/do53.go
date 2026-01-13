@@ -67,16 +67,18 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 
 			go func(s *dns.Server, addr, transport string) {
 				if Globals.Debug {
-					log.Printf("DnsEngine: Attempting to bind to %s (%s)", addr, transport)
+					log.Printf("DnsEngine: [startup] Attempting to bind to %s (%s)", addr, transport)
 				}
-				log.Printf("DnsEngine: serving on %s (%s)\n", addr, transport)
+				// Announce we're attempting to listen. This does not mean we're listening yet.
+				log.Printf("DnsEngine: [startup] Launching %s/%s server (will log an error if bind fails)...", addr, transport)
 				if err := s.ListenAndServe(); err != nil {
-					log.Printf("Failed to setup the %s server: %s", transport, err.Error())
+					// ListenAndServe only returns on error or shutdown.
+					log.Printf("DnsEngine: ERROR: %s/%s server failed to start or stopped unexpectedly: %v", addr, transport, err)
 				} else {
+					// This case is basically never reached unless shutdown is very clean.
 					if Globals.Debug {
-						log.Printf("DnsEngine: Successfully listening on %s/%s", addr, transport)
+						log.Printf("DnsEngine: [debug] %s/%s server exited normally", addr, transport)
 					}
-					log.Printf("DnsEngine: listening on %s/%s", addr, transport)
 				}
 			}(srv, addr, transport)
 		}
