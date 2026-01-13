@@ -1,27 +1,24 @@
-module github.com/johanix/tdns/v0.x/tdns
+module github.com/johanix/tdns/tdns
 
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/v0.x/tdns/cache => ./cache
-	github.com/johanix/tdns/v0.x/tdns/core => ./core
-	github.com/johanix/tdns/v0.x/tdns/edns0 => ./edns0
+	github.com/johanix/tdns/tdns/core => ./core
+	github.com/johanix/tdns/tdns/edns0 => ./edns0
 )
 
 require (
-	github.com/cloudflare/circl v1.6.2
 	github.com/go-playground/validator/v10 v10.22.1
-	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/tdns/v0.x/tdns/cache v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v0.x/tdns/core v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v0.x/tdns/edns0 v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns/cache v0.0.0-20251209183459-2d9962c12f9f
+	github.com/johanix/tdns/tdns/core v0.0.0-20251215204415-08e1f7d4ef39
+	github.com/johanix/tdns/tdns/edns0 v0.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/miekg/dns v1.1.68
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/orcaman/concurrent-map/v2 v2.0.1
-	github.com/quic-go/quic-go v0.58.0
+	github.com/quic-go/quic-go v0.57.0
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.16.0
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553
@@ -32,7 +29,6 @@ require (
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
