@@ -266,18 +266,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Parse KDC configuration for AppTypeKdc
-	if Globals.App.Type == AppTypeKdc {
-		if err := conf.parseKdcConfig(configMap); err != nil {
-			return fmt.Errorf("error parsing KDC config: %v", err)
-		}
-	}
+	// if Globals.App.Type == AppTypeKdc {
+//		if err := conf.parseKdcConfig(configMap); err != nil {
+//			return fmt.Errorf("error parsing KDC config: %v", err)
+//		}
+//	}
 
 	// Parse KRS configuration for AppTypeKrs
-	if Globals.App.Type == AppTypeKrs {
-		if err := conf.parseKrsConfig(configMap); err != nil {
-			return fmt.Errorf("error parsing KRS config: %v", err)
-		}
-	}
+//	if Globals.App.Type == AppTypeKrs {
+//		if err := conf.parseKrsConfig(configMap); err != nil {
+//			return fmt.Errorf("error parsing KRS config: %v", err)
+//		}
+//	}
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
@@ -334,7 +334,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 // parseKdcConfig parses the KDC configuration section from the config map
 // and stores it as YAML bytes in conf.Internal.KdcConf
 // The bytes will be unmarshaled into kdc.KdcConf in StartKdc() to avoid circular import
-func (conf *Config) parseKdcConfig(configMap map[string]interface{}) error {
+func (conf *Config) xxxparseKdcConfig(configMap map[string]interface{}) error {
 	kdcSection, ok := configMap["kdc"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("KDC configuration section 'kdc' not found or invalid")
@@ -361,7 +361,7 @@ func (conf *Config) parseKdcConfig(configMap map[string]interface{}) error {
 // and stores it as YAML bytes in conf.Internal.KrsConf
 // The bytes will be unmarshaled into krs.KrsConf in StartKrs() to avoid circular import
 // Note: dnsengine config is at top level (like KDC), but we merge it into krs section
-func (conf *Config) parseKrsConfig(configMap map[string]interface{}) error {
+func (conf *Config) xxxparseKrsConfig(configMap map[string]interface{}) error {
 	krsSection, ok := configMap["krs"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("KRS configuration section 'krs' not found or invalid")

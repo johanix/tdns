@@ -12,7 +12,7 @@ replace (
 
 require (
 	github.com/johanix/tdns/v0.x/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v0.x/tdns/core v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v0.x/tdns/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/johanix/tdns/v0.x/tdns/edns0 v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.68
 	github.com/spf13/cobra v1.8.1
@@ -29,7 +29,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns/v0.x/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v0.x/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
