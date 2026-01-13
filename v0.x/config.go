@@ -1,0 +1,264 @@
+/*
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
+package tdns
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"slices"
+	"sync"
+	"time"
+
+	cache "github.com/johanix/tdns/v0.x/cache"
+)
+
+var Conf Config
+
+type Config struct {
+	Service        ServiceConf
+	DnsEngine      DnsEngineConf
+	Imr            ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
+	ApiServer      ApiServerConf
+	DnssecPolicies map[string]DnssecPolicyConf
+	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
+	Zones          []ZoneConf                 `yaml:"zones"`
+	Templates      []ZoneConf                 `yaml:"templates"`
+	Keys           KeyConf
+	Db             DbConf
+	Registrars     map[string][]string
+	Log            struct {
+		File string `validate:"required"`
+	}
+	Agent    LocalAgentConf
+	Internal InternalConf
+}
+
+type AppDetails struct {
+	Name             string
+	Version          string
+	Type             AppType
+	Date             string
+	ServerBootTime   time.Time
+	ServerConfigTime time.Time
+}
+
+type ServiceConf struct {
+	Name       string `validate:"required"`
+	Debug      *bool
+	Verbose    *bool
+	Identities []string      // this is a strawman attempt at deciding on what name to publish the ALPN
+	Transport  TransportConf `yaml:"transport"`
+}
+
+type TransportConf struct {
+	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
+	Signal string `yaml:"signal"`
+}
+
+type DnsEngineConf struct {
+	Addresses   []string              `yaml:"addresses" validate:"required"`
+	CertFile    string                `yaml:"certfile,omitempty"`
+	KeyFile     string                `yaml:"keyfile,omitempty"`
+	Transports  []string              `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
+	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
+	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
+}
+
+type ImrEngineConf struct {
+	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
+	Addresses   []string             `yaml:"addresses" mapstructure:"addresses" validate:"required"`
+	CertFile    string               `yaml:"certfile" mapstructure:"certfile"`
+	KeyFile     string               `yaml:"keyfile" mapstructure:"keyfile"`
+	Transports  []string             `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
+	Stubs       []ImrStubConf        `yaml:"stubs"`
+	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
+	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
+	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
+	// full RR text (zonefile format). DS is preferred as it is more convenient.
+	TrustAnchorDS     string `yaml:"trust_anchor_ds"`
+	TrustAnchorDNSKEY string `yaml:"trust_anchor_dnskey"`
+	// Unbound-style file with one RR per line (DNSKEY and/or DS). Absolute path.
+	TrustAnchorFile string `yaml:"trust-anchor-file"`
+	Verbose         bool
+	Debug           bool
+}
+type ImrStubConf struct {
+	Zone string `validate:"required"`
+	// Servers []StubServerConf `validate:"required"`
+	Servers []cache.AuthServer `validate:"required"`
+}
+
+// type StubServerConf struct {
+// 	Name  string   `validate:"required"`
+// 	Addrs []string `validate:"required"`
+// 	Alpn  []string `validate:"required"`
+// }
+
+type ApiServerConf struct {
+	Addresses []string `validate:"required"` // Must be in addr:port format
+	ApiKey    string   `validate:"required"`
+	CertFile  string   `validate:"required,file,certkey"`
+	KeyFile   string   `validate:"required,file"`
+	UseTLS    bool
+	Server    ApiServerAppConf
+	Agent     ApiServerAppConf
+	// MSA       ApiServerAppConf
+	Combiner ApiServerAppConf
+}
+
+type ApiServerAppConf struct {
+	Addresses []string
+	ApiKey    string
+}
+
+type LocalAgentConf struct {
+	Identity string `validate:"required,hostname"`
+	Local    struct {
+		Notify []string // secondaries to notify for an agent autozone
+	}
+	Remote struct {
+		LocateInterval int    // time in seconds
+		BeatInterval   uint32 // time between outgoing heartbeats to same destination
+	}
+	Api LocalAgentApiConf
+	Dns LocalAgentDnsConf
+	Xfr struct {
+		Outgoing struct {
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
+		}
+		Incoming struct {
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
+		}
+	}
+}
+
+type LocalAgentApiConf struct {
+	Addresses struct {
+		Publish []string
+		Listen  []string
+	}
+	BaseUrl  string
+	Port     uint16
+	CertFile string
+	KeyFile  string
+	CertData string
+	KeyData  string
+}
+
+type LocalAgentDnsConf struct {
+	Addresses struct {
+		Publish []string
+		Listen  []string
+	}
+	BaseUrl string
+	Port    uint16
+}
+
+type DbConf struct {
+	File string // `validate:"required"`
+}
+
+type InternalConf struct {
+	CfgFile             string //
+	DebugMode           bool   // if true, may activate dangerous tests
+	ZonesCfgFile        string //
+	CertData            string // PEM encoded certificate
+	KeyData             string // PEM encoded key
+	KeyDB               *KeyDB
+	AllZones            []string
+	DnssecPolicies      map[string]DnssecPolicy
+	StopCh              chan struct{}
+	APIStopCh           chan struct{}
+	StopOnce            sync.Once
+	RefreshZoneCh       chan ZoneRefresher
+	BumpZoneCh          chan BumperData
+	ValidatorCh         chan ValidatorRequest
+	RecursorCh          chan ImrRequest
+	ScannerQ            chan ScanRequest
+	UpdateQ             chan UpdateRequest
+	DeferredUpdateQ     chan DeferredUpdate
+	DnsUpdateQ          chan DnsUpdateRequest
+	DnsNotifyQ          chan DnsNotifyRequest
+	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
+	QueryHandlers       map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
+	QueryHandlersMutex  sync.RWMutex                   // protects QueryHandlers map
+	NotifyHandlers      map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
+	NotifyHandlersMutex sync.RWMutex                   // protects NotifyHandlers map
+	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
+	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
+	DelegationSyncQ     chan DelegationSyncRequest
+	MusicSyncQ          chan MusicSyncRequest
+	NotifyQ             chan NotifyRequest
+	AuthQueryQ          chan AuthQueryRequest
+	ResignQ             chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+	SyncQ               chan SyncRequest
+	AgentQs             *AgentQs // aggregated channels for agent communication
+	SyncStatusQ         chan SyncStatus
+	AgentRegistry       *AgentRegistry
+	ZoneDataRepo        *ZoneDataRepo
+	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine           *Imr
+	KdcDB               interface{} // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf             interface{} // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB               interface{} // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf             interface{} // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner             *Scanner    // Scanner instance for async job tracking
+}
+
+type AgentQs struct {
+	Hello chan *AgentMsgReport // incoming /hello from other agents
+	Beat  chan *AgentMsgReport // incoming /beat from other agents
+	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
+	Msg               chan *AgentMsgPostPlus  // incoming /msg from other agents
+	Command           chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
+	DebugCommand      chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
+	SynchedDataUpdate chan *SynchedDataUpdate // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd    // local commands TO the combiner
+}
+
+func (conf *Config) ReloadConfig() (string, error) {
+	err := conf.ParseConfig(true) // true: reload, not initial parsing
+	if err != nil {
+		log.Printf("Error parsing config: %v", err)
+	}
+	Globals.App.ServerConfigTime = time.Now()
+	return "Config reloaded.", err
+}
+
+func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	prezones := Zones.Keys()
+	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
+	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
+	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
+	if err != nil {
+		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)
+	}
+
+	for _, zname := range prezones {
+		if !slices.Contains(zonelist, zname) {
+			zd, exists := Zones.Get(zname)
+			if !exists {
+				log.Printf("ReloadZoneConfig: Zone %s not in config and also not in zone list.", zname)
+			}
+			if zd.Options[OptAutomaticZone] {
+				log.Printf("ReloadZoneConfig: Zone %s is an automatic zone. Not removing from zone list.", zname)
+				continue
+			}
+			log.Printf("ReloadZoneConfig: Zone %s no longer in config. Removing from zone list.", zname)
+			Zones.Remove(zname)
+		}
+	}
+
+	log.Printf("ReloadZones: zones after reloading: %v", zonelist)
+	Globals.App.ServerConfigTime = time.Now()
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
+}
