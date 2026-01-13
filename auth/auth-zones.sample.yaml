@@ -1,0 +1,24 @@
+#
+# Defined zone options:
+#   - delegation-sync-child:	attempt delegation synchronization for zone towards parent
+#   - delegation-sync-parent:	provide delegation synchronization service towards child zones
+#   - allow-updates:		allow zone modifications via DNS UPDATE
+#   - allow-child-updates:	allow updates to child delegation data via DNS UPDATE
+#   - allow-combine:		allow zone apex RRsets NS, DNSKEY, CDS, CSYNC to be modified
+#   - fold-case:		fold domain name case before comparisons
+#   - black-lies:		implement "black lies" negative responses
+#   - dont-publish-key:		don't publish the public SIG(0) key in zone
+#   - online-signing:		sign zone on-the-fly as needed; will create DNSSEC keypair if needed
+#   - multisigner:		OBE
+#   - automatic-zone:		[not a zone option, but rather a zone property; not configurable]
+#   - add-transport-signal:	automatically syntetisize SVCB RRs to put in Additional section
+#
+
+zones:
+   - name:            test.net
+     zonefile:        /etc/tdns/zones/test.net
+     template:        parent-primary
+
+   - name:            .
+     zonefile:        /etc/tdns/zones/root
+     template:        parent-primary
