@@ -10,7 +10,6 @@ import (
 )
 
 const TypeDSYNC = 0x0042 // 66 is the official IANA code
-// const TypeDSYNC = 0x0F9B
 
 const (
 	TypeNOTIFY  = 0x0F9A
@@ -19,6 +18,9 @@ const (
 	TypeHSYNC2  = 0x0F9E
 	TypeTSYNC   = 0x0F9F
 	TypeCHUNK    = 65015 // 0xFDF7 - Unified Chunk/Manifest
+	// lots of space
+	TypeJSONMANIFEST = 65100 // Older version of CHUNK
+	TypeJSONCHUNK = 65100    // Older version of CHUNK
 )
 
 // Format constants for CHUNK RR type
