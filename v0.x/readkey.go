@@ -262,7 +262,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			pkc.KeyRR = *rr
 
 		default:
-			return nil, fmt.Errorf("rr is of type %v", "foo")
+			return nil, fmt.Errorf("rr is of type %T", rr)
 		}
 	} else {
 		// BIND format: use existing logic
@@ -289,7 +289,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			pkc.KeyRR = *rr
 
 		default:
-			return nil, fmt.Errorf("rr is of type %v", "foo")
+			return nil, fmt.Errorf("rr is of type %T", rr)
 		}
 
 		// Extract PrivateKey field from BIND format YAML
@@ -519,7 +519,7 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 			case *dns.KEY:
 				keymap[rr.Header().Name] = *rr
 			default:
-				return nil, fmt.Errorf("error: rr is of type %v", "foo")
+				return nil, fmt.Errorf("error: rr is of type %T", rr)
 			}
 
 		} else {
