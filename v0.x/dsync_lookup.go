@@ -343,9 +343,9 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 			childzone, dsync_res.Qname, dsync.String())
 	}
 
-	addrs, err = net.LookupHost(dsync.Target)
+	addrs, err = net.DefaultResolver.LookupHost(ctx, dsync.Target)
 	if err != nil {
-		return nil, fmt.Errorf("error: %v", err)
+		return nil, fmt.Errorf("lookup DSYNC target %q: %w", dsync.Target, err)
 	}
 
 	if Globals.Verbose {

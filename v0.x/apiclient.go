@@ -533,7 +533,11 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 
 	buf, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 500, nil, fmt.Errorf("error reading response body: %v", err)
+		fmt.Printf("api.RequestNGWithContext: Error from io.ReadAll: %v", err)
+		if dieOnError {
+			os.Exit(1)
+		}
+		return 501, nil, fmt.Errorf("error from io.ReadAll: %v", err)
 	}
 
 	if api.Debug {

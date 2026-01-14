@@ -372,7 +372,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 			if lg != nil {
 				lg.Printf("queryAllNSAndCompare: error querying %s %s from %s (%s): %v", qname, dns.TypeToString[qtype], nsName, nsAddrs[0], err)
 			}
-			_ = append(queryErrors, fmt.Errorf("NS %s: %v", nsName, err))
+			queryErrors = append(queryErrors, fmt.Errorf("NS %s: %v", nsName, err))
 			continue
 		}
 		if rrset == nil || len(rrset.RRs) == 0 {
@@ -386,6 +386,9 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 
 	// Check if we got any responses
 	if len(responseRRsets) == 0 {
+		if len(queryErrors) > 0 {
+			return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver (errors: %v)", dns.TypeToString[qtype], queryErrors)
+		}
 		return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver", dns.TypeToString[qtype])
 	}
 

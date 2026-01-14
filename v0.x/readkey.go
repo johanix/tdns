@@ -46,7 +46,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		return nil, fmt.Errorf("error: filename %s does not end in either .key or .private", filename)
 	}
 
-	_, err := os.Open(pubfile)
+	_, err := os.Stat(pubfile)
 	if err != nil {
 		return nil, fmt.Errorf("error opening public key file '%s': %v", pubfile, err)
 	}
@@ -60,7 +60,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		return nil, fmt.Errorf("error reading public key '%s': %v", pubkey, err)
 	}
 
-	_, err = os.Open(privfile)
+	_, err = os.Stat(privfile)
 	if err != nil {
 		return nil, fmt.Errorf("error opening private key file '%s': %v", privfile, err)
 	}
@@ -271,7 +271,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			pkc.K, err = rr.NewPrivateKey(privkey)
 			if err != nil {
 				log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
-				return nil, fmt.Errorf("error reading private key file '%s': %v", "foo", err)
+				return nil, fmt.Errorf("error reading private key %q: %v", "**REDACTED**", err)
 			}
 			pkc.KeyType = dns.TypeDNSKEY
 			pkc.Algorithm = rr.Algorithm
@@ -499,7 +499,7 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 		if strings.HasSuffix(fname, ".key") {
 			// basename = strings.TrimSuffix(filename, ".key")
 			pubfile := keydir + "/" + fname
-			_, err := os.Open(pubfile)
+			_, err = os.Stat(pubfile)
 			if err != nil {
 				return nil, fmt.Errorf("error opening public key file '%s': %v",
 					pubfile, err)
