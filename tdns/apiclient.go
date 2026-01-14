@@ -331,7 +331,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		req, err := http.NewRequest(method, fullURL, bytebuf)
 		//	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
 		if err != nil {
-			// return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+			// return 501, nil, fmt.Errorf("error from http.NewRequest: Error: %v", err)
 			lastErr = err
 			continue // Try next address
 		}
@@ -385,7 +385,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if dieOnError {
 			os.Exit(1)
 		}
-		return 501, nil, fmt.Errorf("Error from io.ReadAll: %v", err)
+		return 501, nil, fmt.Errorf("error from io.ReadAll: %v", err)
 	}
 
 	if api.Debug {
@@ -478,7 +478,7 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		// req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
 		req, err := http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(bytebuf.Bytes()))
 		if err != nil {
-			// return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
+			// return 501, nil, fmt.Errorf("error from http.NewRequest: Error: %v", err)
 			lastErr = err
 			continue // Try next address
 		}
@@ -532,6 +532,9 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	}
 
 	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 500, nil, fmt.Errorf("error reading response body: %v", err)
+	}
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer

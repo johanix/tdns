@@ -100,7 +100,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
 	hsyncrrset, exists := apex.RRtypes.Get(core.TypeHSYNC)
@@ -146,7 +146,7 @@ func (zd *ZoneData) PrintOwnerNames() error {
 func (zd *ZoneData) PrintApexRRs() error {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
 	for _, rrtype := range apex.RRtypes.Keys() {

@@ -385,7 +385,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if dieOnError {
 			os.Exit(1)
 		}
-		return 501, nil, fmt.Errorf("Error from io.ReadAll: %v", err)
+		return 501, nil, fmt.Errorf("error from io.ReadAll: %v", err)
 	}
 
 	if api.Debug {
@@ -532,6 +532,13 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	}
 
 	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("api.RequestNGWithContext: Error from io.ReadAll: %v", err)
+		if dieOnError {
+			os.Exit(1)
+		}
+		return 501, nil, fmt.Errorf("error from io.ReadAll: %v", err)
+	}
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer

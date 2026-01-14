@@ -46,9 +46,7 @@ var Globals = GlobalStuff{
 var Zones = cmap.New[*ZoneData]()
 
 func (gs *GlobalStuff) Validate() error {
-	if gs.Port > 65535 {
-		return fmt.Errorf("invalid port number: %d", gs.Port)
-	}
+	// Port is uint16, so it's always <= 65535, no need to check
 	if gs.Address != "" {
 		if net.ParseIP(gs.Address) == nil {
 			return fmt.Errorf("invalid address format: %s", gs.Address)

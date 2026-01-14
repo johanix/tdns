@@ -352,7 +352,8 @@ var imrShowConfigCmd = &cobra.Command{
 			fmt.Println("  Stub zones:")
 			for _, stub := range Conf.Imr.Stubs {
 				var servers []string
-				for _, server := range stub.Servers {
+				for i := range stub.Servers {
+					server := &stub.Servers[i]
 					servers = append(servers, fmt.Sprintf("%s (%s)", server.Name, strings.Join(server.Addrs, ", ")))
 				}
 				fmt.Printf("    %s -> %s\n", stub.Zone, strings.Join(servers, "; "))

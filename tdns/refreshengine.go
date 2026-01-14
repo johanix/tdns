@@ -114,7 +114,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 					if zd.ZoneType == Primary && zd.Options[OptDirty] {
 						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
-						log.Printf(resp.Msg)
+						log.Printf("%s", resp.Msg)
 						if zr.Response != nil {
 							zr.Response <- resp
 						}
@@ -288,19 +288,19 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
-						log.Printf(resp.ErrorMsg)
+						log.Printf("%s", resp.ErrorMsg)
 					}
 					resp, err = zd.BumpSerial()
 					if err != nil {
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Error bumping SOA serial for zone '%s': %v", zone, err)
-						log.Printf(resp.ErrorMsg)
+						log.Printf("%s", resp.ErrorMsg)
 					}
 					log.Printf("RefreshEngine: bumping SOA serial for known zone '%s'", zone)
 				} else {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Request to bump serial for unknown zone '%s'", zone)
-					log.Printf(resp.ErrorMsg)
+					log.Printf("%s", resp.ErrorMsg)
 				}
 			}
 			bd.Result <- resp

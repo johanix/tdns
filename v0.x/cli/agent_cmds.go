@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -142,7 +142,7 @@ func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtRe
 
 	var amr tdns.AgentMgmtResponse
 	if err := json.Unmarshal(buf, &amr); err != nil {
-		return nil, fmt.Errorf("Failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse response: %v", err)
 	}
 
 	return &amr, nil
@@ -153,11 +153,11 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	var err error
 
 	if dnsRecord == "" {
-		return fmt.Errorf("Error: DNS record is required")
+		return fmt.Errorf("error: DNS record is required")
 	}
 
 	if rr, err = dns.NewRR(dnsRecord); err != nil {
-		return fmt.Errorf("Error: Invalid DNS record (did not parse): %v", err)
+		return fmt.Errorf("error: invalid DNS record (did not parse): %v", err)
 	}
 
 	if !strings.HasSuffix(rr.Header().Name, zonename) {
@@ -170,7 +170,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	case *dns.NS, *dns.DNSKEY, *dns.KEY:
 		// all good
 	default:
-		return fmt.Errorf("Invalid RR type: %s (only NS, DNSKEY and KEY allowed)", dns.TypeToString[rr.Header().Rrtype])
+		return fmt.Errorf("invalid RR type: %s (only NS, DNSKEY and KEY allowed)", dns.TypeToString[rr.Header().Rrtype])
 	}
 
 	switch cmd {
@@ -184,7 +184,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 		// This is a delete RRset, signaled by the CLASS=ANY
 		rr.Header().Class = dns.ClassANY
 	default:
-		return fmt.Errorf("Invalid command: %s", cmd)
+		return fmt.Errorf("invalid command: %s", cmd)
 	}
 
 	rrs := []string{rr.String()}

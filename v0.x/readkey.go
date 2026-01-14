@@ -29,7 +29,7 @@ type BindPrivateKey struct {
 func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 
 	if filename == "" {
-		return nil, fmt.Errorf("Error: filename of SIG(0) or DNSSEC key not specified")
+		return nil, fmt.Errorf("error: filename of SIG(0) or DNSSEC key not specified")
 	}
 
 	var basename, pubfile, privfile string
@@ -43,36 +43,36 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 		privfile = filename
 		pubfile = basename + ".key"
 	} else {
-		return nil, fmt.Errorf("Error: filename %s does not end in either .key or .private", filename)
+		return nil, fmt.Errorf("error: filename %s does not end in either .key or .private", filename)
 	}
 
-	_, err := os.Open(pubfile)
+	_, err := os.Stat(pubfile)
 	if err != nil {
-		return nil, fmt.Errorf("Error opening public key file '%s': %v", pubfile, err)
+		return nil, fmt.Errorf("error opening public key file '%s': %v", pubfile, err)
 	}
 	pubkeybytes, err := os.ReadFile(pubfile)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading public key file '%s': %v", pubfile, err)
+		return nil, fmt.Errorf("error reading public key file '%s': %v", pubfile, err)
 	}
 	pubkey := string(pubkeybytes)
 	_, err = dns.NewRR(pubkey)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
+		return nil, fmt.Errorf("error reading public key '%s': %v", pubkey, err)
 	}
 
-	_, err = os.Open(privfile)
+	_, err = os.Stat(privfile)
 	if err != nil {
-		return nil, fmt.Errorf("Error opening private key file '%s': %v", privfile, err)
+		return nil, fmt.Errorf("error opening private key file '%s': %v", privfile, err)
 	}
 	privkeybytes, err := os.ReadFile(privfile)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading private key file '%s': %v", privfile, err)
+		return nil, fmt.Errorf("error reading private key file '%s': %v", privfile, err)
 	}
 	privkey := string(privkeybytes)
 
 	pkc, err := PrepareKeyCache(privkey, pubkey)
 	if err != nil {
-		return nil, fmt.Errorf("Error preparing key cache: %v", err)
+		return nil, fmt.Errorf("error preparing key cache: %v", err)
 	}
 	return pkc, nil
 
@@ -83,7 +83,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 	//		rrk := rr.(*dns.DNSKEY)
 	//		pkc.K, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
 	//		if err != nil {
-	//			return nil, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
+	//			return nil, fmt.Errorf("error reading private key file '%s': %v", filename, err)
 	//		}
 	//		pkc.KeyType = dns.TypeDNSKEY
 	//		pkc.Algorithm = rrk.Algorithm
@@ -95,7 +95,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 	//		rrk := rr.(*dns.KEY)
 	//		pkc.K, err = rrk.ReadPrivateKey(file, "/allan/tar/kakan")
 	//		if err != nil {
-	//			return nil, fmt.Errorf("Error reading private key file '%s': %v", filename, err)
+	//			return nil, fmt.Errorf("error reading private key file '%s': %v", filename, err)
 	//		}
 	//		pkc.KeyType = dns.TypeKEY
 	//		pkc.Algorithm = rrk.Algorithm
@@ -104,13 +104,13 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 	//		pkc.PrivateKey = rrk.PrivateKeyString(pkc.K)
 
 	//	default:
-	//		return nil, fmt.Errorf("Error: rr is of type %v", "foo")
+	//		return nil, fmt.Errorf("error: rr is of type %v", "foo")
 	//	}
 
 	//	var bpk BindPrivateKey
 	//	err = yaml.Unmarshal([]byte(pkc.PrivateKey), &bpk)
 	//	if err != nil {
-	//		return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
+	//		return nil, fmt.Errorf("error from yaml.Unmarshal(): %v", err)
 	//	}
 
 	//	log.Printf("ReadPrivateKey: pkc.PrivateKey: %s", pkc.PrivateKey)
@@ -125,7 +125,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 	//	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 	//		pkc.CS = pkc.K.(*ecdsa.PrivateKey)
 	//	default:
-	//		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
+	//		return nil, fmt.Errorf("error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
 	//	}
 
 	// return &pkc, err
@@ -134,7 +134,7 @@ func ReadPrivateKey(filename string) (*PrivateKeyCache, error) {
 func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 
 	if filename == "" {
-		return nil, 0, 0, fmt.Errorf("Error: filename of key not specified")
+		return nil, 0, 0, fmt.Errorf("error: filename of key not specified")
 	}
 
 	var pubfile string
@@ -142,18 +142,18 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 	if strings.HasSuffix(filename, ".key") {
 		pubfile = filename
 	} else {
-		return nil, 0, 0, fmt.Errorf("Error: filename %s for a public key must end in '.key'", filename)
+		return nil, 0, 0, fmt.Errorf("error: filename %s for a public key must end in '.key'", filename)
 	}
 
 	pubkeybytes, err := os.ReadFile(pubfile)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("Error reading public key file %s: %v", pubfile, err)
+		return nil, 0, 0, fmt.Errorf("error reading public key file %s: %v", pubfile, err)
 	}
 	pubkey := string(pubkeybytes)
 
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("Error parsing public key '%s': %v", pubkey, err)
+		return nil, 0, 0, fmt.Errorf("error parsing public key '%s': %v", pubkey, err)
 	}
 
 	var ktype uint16
@@ -171,7 +171,7 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 		// fmt.Printf("PubKey is a %s\n", dns.AlgorithmToString[rrk.Algorithm])
 
 	default:
-		return nil, 0, 0, fmt.Errorf("Error: rr is of type %v", "foo")
+		return nil, 0, 0, fmt.Errorf("error: rr is of type %v", "foo")
 	}
 
 	return rr, ktype, alg, err
@@ -180,7 +180,7 @@ func ReadPubKey(filename string) (dns.RR, uint16, uint8, error) {
 func PrivKeyToBindFormat(privkey, algorithm string) (string, error) {
 	alg, algexist := dns.StringToAlgorithm[strings.ToUpper(algorithm)]
 	if !algexist {
-		return "", fmt.Errorf("Error: algorithm %s is unknown", algorithm)
+		return "", fmt.Errorf("error: algorithm %s is unknown", algorithm)
 	}
 	foo := fmt.Sprintf(
 		`Private-key-format: v1.3
@@ -217,7 +217,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// log.Printf("PrepareKeyCache: privkey:\n%s\npubkey: %s", privkey, pubkey)
 	rr, err := dns.NewRR(pubkey)
 	if err != nil {
-		return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
+		return nil, fmt.Errorf("error reading public key '%s': %v", pubkey, err)
 	}
 
 	var pkc PrivateKeyCache
@@ -228,7 +228,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		// PEM format: parse directly to crypto.PrivateKey
 		pkc.K, err = PEMToPrivateKey(privkey)
 		if err != nil {
-			return nil, fmt.Errorf("Error parsing PEM private key: %v", err)
+			return nil, fmt.Errorf("error parsing PEM private key: %v", err)
 		}
 
 		// Convert to BIND format for the PrivateKey field (for backward compatibility)
@@ -239,7 +239,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			var bpk BindPrivateKey
 			err = yaml.Unmarshal([]byte(bindFormat), &bpk)
 			if err != nil {
-				return nil, fmt.Errorf("Error converting PEM to BIND format: %v", err)
+				return nil, fmt.Errorf("error converting PEM to BIND format: %v", err)
 			}
 			privKeyBase64 = bpk.PrivateKey
 			pkc.KeyType = dns.TypeDNSKEY
@@ -253,7 +253,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			var bpk BindPrivateKey
 			err = yaml.Unmarshal([]byte(bindFormat), &bpk)
 			if err != nil {
-				return nil, fmt.Errorf("Error converting PEM to BIND format: %v", err)
+				return nil, fmt.Errorf("error converting PEM to BIND format: %v", err)
 			}
 			privKeyBase64 = bpk.PrivateKey
 			pkc.KeyType = dns.TypeKEY
@@ -262,7 +262,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			pkc.KeyRR = *rr
 
 		default:
-			return nil, fmt.Errorf("rr is of type %v", "foo")
+			return nil, fmt.Errorf("rr is of type %T", rr)
 		}
 	} else {
 		// BIND format: use existing logic
@@ -271,7 +271,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			pkc.K, err = rr.NewPrivateKey(privkey)
 			if err != nil {
 				log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
-				return nil, fmt.Errorf("Error reading private key file '%s': %v", "foo", err)
+				return nil, fmt.Errorf("error reading private key %q: %v", "**REDACTED**", err)
 			}
 			pkc.KeyType = dns.TypeDNSKEY
 			pkc.Algorithm = rr.Algorithm
@@ -289,7 +289,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 			pkc.KeyRR = *rr
 
 		default:
-			return nil, fmt.Errorf("rr is of type %v", "foo")
+			return nil, fmt.Errorf("rr is of type %T", rr)
 		}
 
 		// Extract PrivateKey field from BIND format YAML
@@ -297,7 +297,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		err = yaml.Unmarshal([]byte(privkey), &bpk)
 		if err != nil {
 			// log.Printf("PrepareKeyCache: Error from yaml.Unmarshal(): %v", err)
-			return nil, fmt.Errorf("Error from yaml.Unmarshal(): %v", err)
+			return nil, fmt.Errorf("error from yaml.Unmarshal(): %v", err)
 		}
 		privKeyBase64 = bpk.PrivateKey
 	}
@@ -312,7 +312,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 		pkc.CS = pkc.K.(*ecdsa.PrivateKey)
 	default:
-		return nil, fmt.Errorf("Error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
+		return nil, fmt.Errorf("error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
 	}
 
 	//	log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d,\nprivkey: %s,\npubkey: %s\npkc.K: %v",
@@ -484,12 +484,12 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 	var keymap = make(map[string]dns.KEY, 5)
 
 	if keydir == "" {
-		return nil, fmt.Errorf("Error: key directory not specified in YAML config")
+		return nil, fmt.Errorf("error: key directory not specified in YAML config")
 	}
 
 	entries, err := os.ReadDir(keydir)
 	if err != nil {
-		return nil, fmt.Errorf("Error from os.ReadDir(%s): %v", keydir, err)
+		return nil, fmt.Errorf("error from os.ReadDir(%s): %v", keydir, err)
 	}
 
 	for _, f := range entries {
@@ -499,27 +499,27 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 		if strings.HasSuffix(fname, ".key") {
 			// basename = strings.TrimSuffix(filename, ".key")
 			pubfile := keydir + "/" + fname
-			_, err := os.Open(pubfile)
+			_, err = os.Stat(pubfile)
 			if err != nil {
-				return nil, fmt.Errorf("Error opening public key file '%s': %v",
+				return nil, fmt.Errorf("error opening public key file '%s': %v",
 					pubfile, err)
 			}
 			pubkeybytes, err := os.ReadFile(pubfile)
 			if err != nil {
-				return nil, fmt.Errorf("Error reading public key file '%s': %v",
+				return nil, fmt.Errorf("error reading public key file '%s': %v",
 					pubfile, err)
 			}
 			pubkey := string(pubkeybytes)
 			rr, err := dns.NewRR(pubkey)
 			if err != nil {
-				return nil, fmt.Errorf("Error reading public key '%s': %v", pubkey, err)
+				return nil, fmt.Errorf("error reading public key '%s': %v", pubkey, err)
 			}
 
 			switch rr := rr.(type) {
 			case *dns.KEY:
 				keymap[rr.Header().Name] = *rr
 			default:
-				return nil, fmt.Errorf("Error: rr is of type %v", "foo")
+				return nil, fmt.Errorf("error: rr is of type %T", rr)
 			}
 
 		} else {

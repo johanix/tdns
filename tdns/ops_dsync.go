@@ -176,7 +176,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		new_addr := false
 		owner, err := zd.GetOwner(addr_rr.Header().Name)
 		if err != nil {
-			return fmt.Errorf("Error fetching owner for address %s: %v", addr_rr.Header().Name, err)
+			return fmt.Errorf("error fetching owner for address %s: %v", addr_rr.Header().Name, err)
 		}
 
 		if owner == nil {

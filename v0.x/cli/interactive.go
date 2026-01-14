@@ -262,14 +262,14 @@ func getTopLevelCommands(word string) []prompt.Suggest {
 	if word == "" {
 		// When word is empty, show all commands except completion
 		for _, cmd := range cmdRoot.Commands() {
-			if cmd.Name() != "completion" && cmd.Hidden == false {
+			if cmd.Name() != "completion" && !cmd.Hidden {
 				matches = append(matches, cmd.Name())
 			}
 		}
 	} else {
 		// When word has a value, filter commands that start with it
 		for _, cmd := range cmdRoot.Commands() {
-			if cmd.Name() != "completion" && cmd.Hidden == false && strings.HasPrefix(cmd.Name(), word) {
+			if cmd.Name() != "completion" && !cmd.Hidden && strings.HasPrefix(cmd.Name(), word) {
 				matches = append(matches, cmd.Name())
 			}
 		}

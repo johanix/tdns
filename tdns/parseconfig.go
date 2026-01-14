@@ -176,7 +176,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		for _, tmpl := range conf.Templates {
 			tmp += fmt.Sprintf(" %s", tmpl.Name)
 		}
-		log.Printf(tmp)
+		log.Printf("%s", tmp)
 	}
 
 	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
@@ -207,7 +207,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			for _, tmpl := range Templates {
 				tmp += fmt.Sprintf(" %s", tmpl.Name)
 			}
-			log.Printf(tmp)
+			log.Printf("%s", tmp)
 		}
 	}
 
@@ -339,7 +339,7 @@ func (conf *Config) InitializeKeyDB() error {
 		}
 		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
 		if err != nil {
-			return fmt.Errorf("Error from NewKeyDB: %v", err)
+			return fmt.Errorf("error from NewKeyDB: %v", err)
 		}
 		conf.Internal.KeyDB = kdb
 
@@ -421,7 +421,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
 			zonetype = Primary
-			primary_zones = append(primary_zones, zname)
+			_ = append(primary_zones, zname)
 		case "secondary":
 			zonetype = Secondary
 			if zconf.Primary == "" {
@@ -564,8 +564,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
 			// try a non-blocking send; if it would block, send from a goroutine.
 			if conf.Internal.RefreshZoneCh == nil {
-				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.", zname)
-				return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating. Zone: %s", zname)
+				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
 				Name:         zname,

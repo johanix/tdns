@@ -67,7 +67,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 		zd.Logger.Printf("Refresher: %s: upstream serial is unchanged: %d", zd.ZoneName, zd.IncomingSerial)
 
 	default:
-		return false, fmt.Errorf("Error: cannot refresh zone %s of unknown type %d", zd.ZoneName, zd.ZoneType)
+		return false, fmt.Errorf("error: cannot refresh zone %s of unknown type %d", zd.ZoneName, zd.ZoneType)
 	}
 
 	return false, nil
@@ -445,7 +445,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 func (zd *ZoneData) ZoneFileName() (string, error) {
 	filedir := viper.GetString("dnsengine.zones.filedir")
 	if filedir == "" {
-		return "", fmt.Errorf("ZoneFileName: dnsengine.zones.filedir is not set")
+		return "", fmt.Errorf("zoneFileName: dnsengine.zones.filedir is not set")
 	}
 	filetmpl := viper.GetString("dnsengine.zones.filetmpl")
 	if filetmpl == "" {
@@ -456,7 +456,7 @@ func (zd *ZoneData) ZoneFileName() (string, error) {
 	dirname := path.Dir(fname)
 	if _, err := os.Stat(dirname); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirname, 0755); err != nil {
-			return "", fmt.Errorf("ZoneFileName: failed to create missing directory %s: %v", dirname, err)
+			return "", fmt.Errorf("zoneFileName: failed to create missing directory %s: %v", dirname, err)
 		}
 	}
 	return fname, nil
@@ -516,7 +516,7 @@ func (zd *ZoneData) NameExists(qname string) bool {
 
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	if !zd.Ready {
-		return nil, fmt.Errorf("GetOwner: Zone %s: zone data is not yet ready", zd.ZoneName)
+		return nil, fmt.Errorf("getOwner: zone %s: zone data is not yet ready", zd.ZoneName)
 	}
 	var owner OwnerData
 	var ok bool
@@ -546,7 +546,7 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 
 	default:
 		zd.Logger.Printf("GetOwner: zone storage not supported: %v", zd.ZoneStore)
-		return &owner, fmt.Errorf("GetOwner: only supported for SliceZone and MapZone, not %s",
+		return &owner, fmt.Errorf("getOwner: only supported for SliceZone and MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
 	// dump.P(owner)
@@ -569,7 +569,7 @@ func (zd *ZoneData) AddOwner(owner *OwnerData) {
 
 func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
 	if zd == nil {
-		return nil, fmt.Errorf("GetRRset: zone data is nil. This should not happen")
+		return nil, fmt.Errorf("getRRset: zone data is nil, this should not happen")
 	}
 	owner, err := zd.GetOwner(qname)
 	if err != nil {
@@ -607,7 +607,7 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 
 	default:
 		zd.Logger.Printf("GetOwnerNames: zone storage not supported: %v", zd.ZoneStore)
-		return names, fmt.Errorf("GetOwnerNames: only supported for SliceZone and MapZone, not %s",
+		return names, fmt.Errorf("getOwnerNames: only supported for SliceZone and MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
 	return names, nil
@@ -829,7 +829,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 
 	owner, err := zd.GetOwner(childname)
 	if err != nil {
-		return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", childname, err)
+		return nil, fmt.Errorf("fetchChildDelegationData: error getting owner for %s: %v", childname, err)
 	}
 
 	cdd.RRsets[childname] = map[uint16]core.RRset{
@@ -847,7 +847,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 	for _, ns := range bns {
 		nsowner, err := zd.GetOwner(ns)
 		if err != nil {
-			return nil, fmt.Errorf("FetchChildDelegationData: error getting owner for %s: %v", ns, err)
+			return nil, fmt.Errorf("fetchChildDelegationData: error getting owner for %s: %v", ns, err)
 		}
 		cdd.RRsets[ns] = map[uint16]core.RRset{
 			dns.TypeA:    nsowner.RRtypes.GetOnlyRRSet(dns.TypeA),
@@ -973,8 +973,10 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			const fetchZoneDnskeysSql = `
 SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
 			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
-			defer rows.Close()
-			if err == nil {
+			if err != nil {
+				zd.Logger.Printf("CollectDynamicRRs: failed to query DNSKEYs for zone %s: %v", zd.ZoneName, err)
+			} else {
+				defer rows.Close()
 				for rows.Next() {
 					var keyid, flags, algorithm string
 					var keyrr string

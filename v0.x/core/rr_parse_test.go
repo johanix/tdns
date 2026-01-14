@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestCHUNK2ParseRoundTrip(t *testing.T) {
+func TestCHUNKParseRoundTrip(t *testing.T) {
 	t.Run("Manifest", func(t *testing.T) {
-		// Create manifest CHUNK2
+		// Create manifest CHUNK
 		manifestHMAC := make([]byte, 32)
-		rand.Read(manifestHMAC)
+		if _, err := rand.Read(manifestHMAC); err != nil {
+			t.Fatalf("failed to read manifest HMAC: %v", err)
+		}
 
 		manifestJSON := struct {
 			ChunkCount uint16                 `json:"chunk_count"`
@@ -32,9 +35,12 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 			},
 			Payload: []byte("test payload"),
 		}
-		manifestJSONBytes, _ := json.Marshal(manifestJSON)
+		manifestJSONBytes, err := json.Marshal(manifestJSON)
+		if err != nil {
+			t.Fatalf("failed to marshal manifest JSON: %v", err)
+		}
 
-		original := &CHUNK2{
+		original := &CHUNK{
 			Format:     FormatJSON,
 			HMACLen:    32,
 			HMAC:       manifestHMAC,
@@ -44,15 +50,17 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 			Data:       manifestJSONBytes,
 		}
 
-		testCHUNK2RoundTrip(t, original, "CHUNK2 manifest")
+		testCHUNKRoundTrip(t, original, "CHUNK manifest")
 	})
 
 	t.Run("DataChunk", func(t *testing.T) {
-		// Create data chunk CHUNK2
+		// Create data chunk CHUNK
 		dataChunk := make([]byte, 100)
-		rand.Read(dataChunk)
+		if _, err := rand.Read(dataChunk); err != nil {
+			t.Fatalf("failed to read data chunk: %v", err)
+		}
 
-		original := &CHUNK2{
+		original := &CHUNK{
 			Format:     FormatJSON,
 			HMACLen:    0, // No HMAC for data chunks
 			HMAC:       nil,
@@ -62,11 +70,11 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 			Data:       dataChunk,
 		}
 
-		testCHUNK2RoundTrip(t, original, "CHUNK2 data chunk")
+		testCHUNKRoundTrip(t, original, "CHUNK data chunk")
 	})
 }
 
-func testCHUNK2RoundTrip(t *testing.T, original *CHUNK2, name string) {
+func testCHUNKRoundTrip(t *testing.T, original *CHUNK, name string) {
 	// Get String() output
 	str := original.String()
 	t.Logf("%s String() output: %s", name, str)
@@ -77,21 +85,22 @@ func testCHUNK2RoundTrip(t *testing.T, original *CHUNK2, name string) {
 		t.Logf("Warning: Failed to write file: %v", err)
 	}
 
-	// Parse the string back
-	tokens := parseCHUNK2String(str)
 
-	parsed := &CHUNK2{}
+	// Parse the string back
+	tokens := parseCHUNKString(str)
+
+	parsed := &CHUNK{}
 	if err := parsed.Parse(tokens); err != nil {
 		t.Fatalf("%s Parse() failed: %v (tokens: %v)", name, err, tokens)
 	}
 
 	// Compare
-	if !compareCHUNK2(t, original, parsed, name) {
+	if !compareCHUNK(t, original, parsed, name) {
 		t.Errorf("%s: Parsed RR does not match original", name)
 	}
 }
 
-func parseCHUNK2String(s string) []string {
+func parseCHUNKString(s string) []string {
 	// String format: "Sequence Total Format HMAC Data"
 	parts := strings.Fields(s)
 	if len(parts) < 5 {
@@ -109,7 +118,7 @@ func parseCHUNK2String(s string) []string {
 	return tokens
 }
 
-func compareCHUNK2(t *testing.T, a, b *CHUNK2, name string) bool {
+func compareCHUNK(t *testing.T, a, b *CHUNK, name string) bool {
 	if a.Format != b.Format {
 		t.Errorf("%s: Format mismatch: %d != %d", name, a.Format, b.Format)
 		return false
@@ -118,7 +127,7 @@ func compareCHUNK2(t *testing.T, a, b *CHUNK2, name string) bool {
 		t.Errorf("%s: HMACLen mismatch: %d != %d", name, a.HMACLen, b.HMACLen)
 		return false
 	}
-	if !bytesEqual(a.HMAC, b.HMAC) {
+	if !bytes.Equal(a.HMAC, b.HMAC) {
 		t.Errorf("%s: HMAC mismatch", name)
 		return false
 	}
@@ -134,7 +143,7 @@ func compareCHUNK2(t *testing.T, a, b *CHUNK2, name string) bool {
 		t.Errorf("%s: DataLength mismatch: %d != %d", name, a.DataLength, b.DataLength)
 		return false
 	}
-	if !bytesEqual(a.Data, b.Data) {
+	if !bytes.Equal(a.Data, b.Data) {
 		t.Errorf("%s: Data mismatch (lengths: %d != %d)", name, len(a.Data), len(b.Data))
 		return false
 	}
@@ -582,18 +591,6 @@ func compareDELEG(t *testing.T, a, b *DELEG, name string) bool {
 	if len(a.Value) != len(b.Value) {
 		t.Errorf("%s: Value length mismatch: %d != %d", name, len(a.Value), len(b.Value))
 		return false
-	}
-	return true
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
 	}
 	return true
 }

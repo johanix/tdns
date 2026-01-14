@@ -38,5 +38,5 @@ func (imr *Imr) SendRfc9567ErrorReport(ctx context.Context, qname string, qtype 
 		return nil
 	}
 	log.Printf("SendRfc9567ErrorReport: ImrEngine not active. Cannot send error report.")
-	return fmt.Errorf("ImrEngine not active. Cannot send error report.")
+	return fmt.Errorf("imrEngine not active, cannot send error report")
 }

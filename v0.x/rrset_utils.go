@@ -55,8 +55,9 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 
 			} else if _, ok := rr.(*dns.RRSIG); ok {
 				// ignore RRSIGs for the moment
+				_ = ok // suppress unused variable warning
 			} else {
-				return []dns.RR{}, fmt.Errorf("Error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
+				return []dns.RR{}, fmt.Errorf("error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
 			}
 		}
 		return rrs, nil
@@ -76,6 +77,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 
 			} else if _, ok := rr.(*dns.RRSIG); ok {
 				// ignore RRSIGs for the moment
+				_ = ok // suppress unused variable warning
 			} else {
 				// Should not be fatal. Happens when querying parent for glue
 				// log.Fatalf("Error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
@@ -100,6 +102,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 
 			} else if _, ok := rr.(*dns.RRSIG); ok {
 				// ignore RRSIGs for the moment
+				_ = ok // suppress unused variable warning
 			} else {
 				// Should not be fatal.
 				// log.Fatalf("Error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())

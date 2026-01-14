@@ -57,6 +57,9 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		// We have a response, no need to talk to rest of parent servers
 		break
 	}
+	if len(p_nsrrs) == 0 {
+		return resp, fmt.Errorf("no NS RRsets found for zone %s", zd.ZoneName)
+	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
@@ -80,6 +83,11 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		owner, err := zd.GetOwner(ns)
 		if err != nil {
 			log.Printf("Error from zd.GetOwner(%s): %v", ns, err)
+			continue
+		}
+		if owner == nil {
+			log.Printf("AnalyseZoneDelegation: Zone %s: Owner data is nil for NS %s", zd.ZoneName, ns)
+			continue
 		}
 		child_a_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)
@@ -195,7 +203,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
 		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
@@ -204,7 +212,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 
 	newapex, err := newzd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
 	log.Printf("*** oldapex.RRtypes[dns.TypeNS]:")
@@ -325,11 +333,11 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
 		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		return false, dss, nil // on initial load, we always return false, nil, nil as we don't know that the DNSKEYs have changed
+		return true, dss, nil // on initial load, we always return true, dss, nil as we don't know that the DNSKEYs have changed
 	}
 
 	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
@@ -355,12 +363,12 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
 	if oldapex == nil {
 		log.Printf("DnskeysChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		return true, nil // on initial load, we always return false, nil, nil as we don't know that the DNSKEYs have changed
+		return true, nil // on initial load, we always return true, nil as we don't know that the DNSKEYs have changed
 	}
 
 	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)

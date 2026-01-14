@@ -111,7 +111,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 				return nil
 			}
 			// Use the correct case from the Zones map
-			parentZoneName = zd.ZoneName
+			// parentZoneName not used here
 		}
 		targetZoneName = zd.ZoneName
 

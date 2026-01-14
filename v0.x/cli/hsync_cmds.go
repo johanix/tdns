@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	core "github.com/johanix/tdns/v0.x/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
@@ -181,7 +181,7 @@ var hsyncLocateCmd = &cobra.Command{
 				"DNS": agent.DnsDetails,
 			} {
 				fmt.Printf("  Transport: %s\n", transport)
-				fmt.Printf("    State: %s\n", details.State)
+				fmt.Printf("    State: %s\n", tdns.AgentStateToString[details.State])
 				if len(details.Addrs) > 0 {
 					fmt.Printf("    Endpoints:\n")
 					for _, addr := range details.Addrs {

@@ -11,7 +11,7 @@ const (
 
 	DefaultAuthCfgFile = "/etc/tdns/tdns-auth.yaml"
 
-	DefaultAgentCfgFile  = "/etc/tdns/tdns-agent.yaml"
+	DefaultAgentCfgFile    = "/etc/tdns/tdns-agent.yaml"
 	DefaultCombinerCfgFile = "/etc/tdns/tdns-combiner.yaml"
 	DefaultReporterCfgFile = "/etc/tdns/tdns-reporter.yaml"
 	DefaultScannerCfgFile  = "/etc/tdns/tdns-scanner.yaml"

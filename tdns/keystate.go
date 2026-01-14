@@ -1,14 +1,14 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
 
-	edns0 "github.com/johanix/tdns/tdns/edns0"
+	"github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	"golang.org/x/net/context"
 )
 
 func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*edns0.KeyStateOption, error) {

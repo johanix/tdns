@@ -63,12 +63,8 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 			}
 		}
 	}
-
-	//	}()
-	//	wg.Wait()
-
-	log.Println("DnsUpdateResponderEngine: terminating")
-	return nil
+	// Note: The loop above never exits normally - it always returns from within select cases
+	// The code below was unreachable and has been removed
 }
 
 func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {

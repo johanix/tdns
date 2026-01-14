@@ -11,7 +11,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -390,10 +390,6 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 		hdr += "Zonefile|"
 	}
 	hdr += "Frozen|Dirty|Options"
-	out := []string{}
-	if tdns.Globals.ShowHeaders {
-		out = append(out, hdr)
-	}
 	zoneLines := []string{}
 	for zname, zconf := range cr.Zones {
 		line := fmt.Sprintf("zone: %s\n", zname)

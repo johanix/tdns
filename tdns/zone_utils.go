@@ -67,7 +67,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 		zd.Logger.Printf("Refresher: %s: upstream serial is unchanged: %d", zd.ZoneName, zd.IncomingSerial)
 
 	default:
-		return false, fmt.Errorf("Error: cannot refresh zone %s of unknown type %d", zd.ZoneName, zd.ZoneType)
+		return false, fmt.Errorf("error: cannot refresh zone %s of unknown type %d", zd.ZoneName, zd.ZoneType)
 	}
 
 	return false, nil
@@ -973,8 +973,10 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			const fetchZoneDnskeysSql = `
 SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
 			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
-			defer rows.Close()
-			if err == nil {
+			if err != nil {
+				zd.Logger.Printf("CollectDynamicRRs: failed to query DNSKEYs for zone %s: %v", zd.ZoneName, err)
+			} else {
+				defer rows.Close()
 				for rows.Next() {
 					var keyid, flags, algorithm string
 					var keyrr string

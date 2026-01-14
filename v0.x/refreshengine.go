@@ -81,7 +81,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	//	var rc *RefreshCounter
 	var updated bool
 	var err error
-	var bd BumperData
+	// var bd BumperData
 
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
@@ -278,7 +278,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				}
 			}
 
-		case bd = <-bumpch:
+		case bd, ok := <-bumpch:
+			if !ok {
+				log.Printf("RefreshEngine: terminating due to bumpch closed")
+				ticker.Stop()
+				return
+			}
 			zone = bd.Zone
 			resp := BumperResponse{}
 			var err error
@@ -288,22 +293,35 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
-						log.Printf("%s", resp.ErrorMsg)
+						log.Print(resp.ErrorMsg)
+						// do not bump serial when in error state
+						if bd.Result != nil {
+							select {
+							case bd.Result <- resp:
+							case <-ctx.Done():
+							}
+						}
+						continue
 					}
 					resp, err = zd.BumpSerial()
 					if err != nil {
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Error bumping SOA serial for zone '%s': %v", zone, err)
-						log.Printf("%s", resp.ErrorMsg)
+						log.Print(resp.ErrorMsg)
 					}
 					log.Printf("RefreshEngine: bumping SOA serial for known zone '%s'", zone)
 				} else {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Request to bump serial for unknown zone '%s'", zone)
-					log.Printf("%s", resp.ErrorMsg)
+					log.Print(resp.ErrorMsg)
 				}
 			}
-			bd.Result <- resp
+			if bd.Result != nil {
+				select {
+				case bd.Result <- resp:
+				case <-ctx.Done():
+				}
+			}
 		}
 	}
 }

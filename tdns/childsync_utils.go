@@ -22,13 +22,13 @@ import (
 func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) (UpdateResult, error) {
 	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
-		return UpdateResult{}, fmt.Errorf("Error from CreateChildUpdate(%s): %v", pzone, err)
+		return UpdateResult{}, fmt.Errorf("error from CreateChildUpdate(%s): %v", pzone, err)
 	}
 
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
 		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
-		return UpdateResult{}, fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
+		return UpdateResult{}, fmt.Errorf("error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 	}
 	var smsg *dns.Msg
 	sak := &Sig0ActiveKeys{
@@ -40,7 +40,7 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
 			log.Printf("Error from SignMsgNG2(%s): %v", Globals.Zonename, err)
-			return UpdateResult{}, fmt.Errorf("Error from SignMsg(%s): %v", Globals.Zonename, err)
+			return UpdateResult{}, fmt.Errorf("error from SignMsg(%s): %v", Globals.Zonename, err)
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")
@@ -157,11 +157,11 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 // Parent is the zone to apply the update to.
 // XXX: This is to focused on creating updates for child delegation info. Need a more general
 // CreateChildUpdate constructs a DNS UPDATE message for the given parent zone that applies the provided additions and removals for a child delegation.
-// 
+//
 // If any removed RR is an NS whose target name is within the child zone, the function also removes A and AAAA glue RRsets for that NS name.
 // It validates that parent and child are non-empty and not ".", returning an error when validation fails.
 // When Globals.Debug is set, the resulting message is printed.
-// 
+//
 // It returns the constructed DNS UPDATE message, or an error if validation fails.
 func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
@@ -426,7 +426,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 	if len(dsync_res.Rdata) == 0 {
 		msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
 		zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
-		return "", nil, fmt.Errorf("Error: %s", msg)
+		return "", nil, fmt.Errorf("error: %s", msg)
 	}
 	schemes := viper.GetStringSlice("delegationsync.child.schemes")
 	if len(schemes) == 0 {
@@ -434,6 +434,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 		return "", nil, fmt.Errorf("no synchronizations schemes configured for child %s", zd.ZoneName)
 	}
 
+schemeLoop:
 	for _, scheme := range schemes {
 		scheme = strings.ToLower(scheme)
 
@@ -449,12 +450,12 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 			if active_drr != nil {
 				log.Printf("BestSyncSchemes: found working UPDATE config, happy with that.")
 				active_scheme = "UPDATE"
-				break
+				break schemeLoop
 			}
 
 		case "notify":
 			if active_scheme != "" {
-				break
+				break schemeLoop
 			}
 			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 			for _, drr := range dsync_res.Rdata {
@@ -465,7 +466,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 			}
 			if active_drr != nil {
 				active_scheme = "NOTIFY"
-				break
+				break schemeLoop
 			}
 
 		default:
@@ -482,7 +483,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 
 	tmp, err := net.LookupHost(active_drr.Target)
 	if err != nil {
-		return "", nil, fmt.Errorf("Error: %v", err)
+		return "", nil, fmt.Errorf("error: %v", err)
 	}
 	for _, addr := range tmp {
 		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(addr, fmt.Sprintf("%d", active_drr.Port)))

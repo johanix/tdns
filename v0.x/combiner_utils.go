@@ -77,7 +77,7 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 		return modified, nil
 	}
 
-	return false, fmt.Errorf("Not implemented")
+	return false, fmt.Errorf("not implemented")
 }
 
 // AddCombinerData adds or updates local RRsets for the zone.

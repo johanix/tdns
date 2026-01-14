@@ -80,7 +80,7 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 					// log.Printf("HsyncEngine: Retrying HELLO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 				default:
 					// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-					break
+					continue
 				}
 				if agent.ApiDetails.State != AgentStateKnown {
 					//					time.Sleep(time.Duration(helloRetryInterval) * time.Second)
@@ -197,7 +197,7 @@ func (agent *Agent) SendApiHello(msg *AgentHelloPost) (*AgentHelloResponse, erro
 	var ahr AgentHelloResponse
 	err = json.Unmarshal(resp, &ahr)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshalling HELLO response: %v", err)
+		return nil, fmt.Errorf("error unmarshalling HELLO response: %v", err)
 	}
 
 	return &ahr, nil

@@ -189,7 +189,7 @@ func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) 
 	var abr AgentBeatResponse
 	err = json.Unmarshal(resp, &abr)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshalling BEAT response: %v", err)
+		return nil, fmt.Errorf("error unmarshalling BEAT response: %v", err)
 	}
 
 	return &abr, nil
