@@ -57,6 +57,9 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		// We have a response, no need to talk to rest of parent servers
 		break
 	}
+	if len(p_nsrrs) == 0 {
+		return resp, fmt.Errorf("no NS RRsets found for zone %s", zd.ZoneName)
+	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
@@ -80,6 +83,11 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		owner, err := zd.GetOwner(ns)
 		if err != nil {
 			log.Printf("Error from zd.GetOwner(%s): %v", ns, err)
+			continue
+		}
+		if owner == nil {
+			log.Printf("AnalyseZoneDelegation: Zone %s: Owner data is nil for NS %s", zd.ZoneName, ns)
+			continue
 		}
 		child_a_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)

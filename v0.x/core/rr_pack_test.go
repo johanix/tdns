@@ -12,7 +12,9 @@ import (
 func TestCHUNKPackUnpackRoundTrip(t *testing.T) {
 	t.Run("Manifest", func(t *testing.T) {
 		manifestHMAC := make([]byte, 32)
-		rand.Read(manifestHMAC)
+		if _, err := rand.Read(manifestHMAC); err != nil {
+			t.Fatalf("failed to read manifest HMAC: %v", err)
+		}
 
 		manifestJSON := struct {
 			ChunkCount uint16                 `json:"chunk_count"`
@@ -28,7 +30,10 @@ func TestCHUNKPackUnpackRoundTrip(t *testing.T) {
 			},
 			Payload: []byte("test payload"),
 		}
-		manifestJSONBytes, _ := json.Marshal(manifestJSON)
+		manifestJSONBytes, err := json.Marshal(manifestJSON)
+		if err != nil {
+			t.Fatalf("failed to marshal manifest JSON: %v", err)
+		}
 
 		original := &CHUNK{
 			Format:     FormatJSON,
@@ -45,7 +50,9 @@ func TestCHUNKPackUnpackRoundTrip(t *testing.T) {
 
 	t.Run("DataChunk", func(t *testing.T) {
 		dataChunk := make([]byte, 100)
-		rand.Read(dataChunk)
+		if _, err := rand.Read(dataChunk); err != nil {
+			t.Fatalf("failed to read data chunk: %v", err)
+		}
 
 		original := &CHUNK{
 			Format:     FormatJSON,

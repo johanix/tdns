@@ -476,6 +476,12 @@ schemeLoop:
 		}
 	}
 
+	if active_drr == nil {
+		msg := fmt.Sprintf("zone %s: error: no working DSYNC scheme alternative found", zd.ZoneName)
+		zd.Logger.Print(msg)
+		return "", nil, errors.New(msg)
+	}
+
 	zd.Logger.Printf("BestSyncScheme: zone %s (parent %s) DSYNC alternatives are:", zd.ZoneName, dsync_res.Parent)
 	for _, drr := range dsync_res.Rdata {
 		zd.Logger.Printf("%s\tIN\tDSYNC\t%s", dsync_res.Qname, drr.String())

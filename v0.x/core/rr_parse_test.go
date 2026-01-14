@@ -15,7 +15,9 @@ func TestCHUNKParseRoundTrip(t *testing.T) {
 	t.Run("Manifest", func(t *testing.T) {
 		// Create manifest CHUNK
 		manifestHMAC := make([]byte, 32)
-		rand.Read(manifestHMAC)
+		if _, err := rand.Read(manifestHMAC); err != nil {
+			t.Fatalf("failed to read manifest HMAC: %v", err)
+		}
 
 		manifestJSON := struct {
 			ChunkCount uint16                 `json:"chunk_count"`
@@ -32,7 +34,10 @@ func TestCHUNKParseRoundTrip(t *testing.T) {
 			},
 			Payload: []byte("test payload"),
 		}
-		manifestJSONBytes, _ := json.Marshal(manifestJSON)
+		manifestJSONBytes, err := json.Marshal(manifestJSON)
+		if err != nil {
+			t.Fatalf("failed to marshal manifest JSON: %v", err)
+		}
 
 		original := &CHUNK{
 			Format:     FormatJSON,
@@ -50,7 +55,9 @@ func TestCHUNKParseRoundTrip(t *testing.T) {
 	t.Run("DataChunk", func(t *testing.T) {
 		// Create data chunk CHUNK
 		dataChunk := make([]byte, 100)
-		rand.Read(dataChunk)
+		if _, err := rand.Read(dataChunk); err != nil {
+			t.Fatalf("failed to read data chunk: %v", err)
+		}
 
 		original := &CHUNK{
 			Format:     FormatJSON,
@@ -76,6 +83,7 @@ func testCHUNKRoundTrip(t *testing.T, original *CHUNK, name string) {
 	if err := os.WriteFile(filename, []byte(str), 0644); err != nil {
 		t.Logf("Warning: Failed to write file: %v", err)
 	}
+	
 
 	// Parse the string back
 	tokens := parseCHUNKString(str)

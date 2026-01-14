@@ -50,7 +50,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
 			if err != nil {
-				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
+				return &resp, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
 			if len(privatekey) < 10 {
 				privatekey = "ULTRA SECRET KEY"
@@ -71,7 +71,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	// XXX: FIXME: "add" should also add the public key to the TrustStore.
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
-		log.Printf("[Sig0KeyMgmt]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
+		log.Printf("Sig0KeyMgmt: importing private key (type=%T): [redacted]", pkc.K)
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
@@ -279,7 +279,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	case "list":
 		rows, err := tx.Query(getAllDnskeysSql)
 		if err != nil {
-			return nil, fmt.Errorf("error from kdb.Query(%s): %v", getAllDnskeysSql, err)
+			return nil, fmt.Errorf("error from tx.Query(%s): %v", getAllDnskeysSql, err)
 		}
 		defer rows.Close()
 

@@ -86,7 +86,19 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest, imr *Imr) error {
 
 	qname := dnr.Qname
-	ntype := dnr.Msg.Question[0].Qtype
+	// ntype := dnr.Msg.Question[0].Qtype
+	if dns.Msg == nil || len(dnr.Msg.Question) == 0 {
+		log.Printf("NotifyResponder: Received NOTIFY for zone %q, but no question in message", qname)
+		m := new(dns.Msg)
+		m.SetReply(dnr.Msg)
+		m.SetRcode(dnr.Msg, dns.RcodeFormatError)
+		m.MsgHdr.Authoritative = true
+		if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
+			log.Printf("NotifyResponder: WriteMsg error on FormatError: %v", err)
+		}
+		return nil
+	}
+	ntype := dnr.Msg.Question[0].Qtype	
 
 	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone %q", dns.TypeToString[ntype], qname)
 

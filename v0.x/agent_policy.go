@@ -33,7 +33,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR type: %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
 				}
-				if rr.Header().Name != string(synchedDataUpdate.Zone) {
+				if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
 					log.Printf("SynchedDataEngine: Invalid RR name (outside apex): %s", rr.String())
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR name (outside apex): %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
