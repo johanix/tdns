@@ -64,7 +64,7 @@ func (rd MSIGNER) String() string {
 
 func (rd *MSIGNER) Parse(txt []string) error {
 	if len(txt) != 3 {
-		return errors.New("LMSIGNER requires a state, a sync method and a target")
+		return errors.New("MSIGNER requires a state, a sync method and a target")
 	}
 	state, exist := StringToState[txt[0]]
 	if !exist {

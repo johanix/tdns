@@ -20,7 +20,7 @@ const (
 // payload should be either OTS_OPT_IN or OTS_OPT_OUT
 func AddOTSOption(opt *dns.OPT, payload uint8) error {
 	if opt == nil {
-		return fmt.Errorf("LOPT RR is nil")
+		return fmt.Errorf("OPT RR is nil")
 	}
 
 	if payload != OTS_OPT_IN && payload != OTS_OPT_OUT {

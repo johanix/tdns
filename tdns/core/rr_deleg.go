@@ -363,7 +363,7 @@ func unpackDelegData(msg []byte, off int) ([]DELEGKeyValue, int, error) {
 			return nil, len(msg), err
 		}
 		if len(xs) > 0 && e.Key() <= xs[len(xs)-1].Key() {
-			return nil, len(msg), errors.New("LDELEG keys not in strictly increasing order")
+			return nil, len(msg), errors.New("DELEG keys not in strictly increasing order")
 		}
 		xs = append(xs, e)
 		off += int(length)

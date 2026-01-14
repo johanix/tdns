@@ -15,7 +15,7 @@ const (
 
 	// OPERATION field values
 	PROVIDERSYNC_OP_FORBIDDEN = 0
-	PROVIDERSYNC_OP_HEO     = 1
+	PROVIDERSYNC_OP_HELLO     = 1
 	PROVIDERSYNC_OP_HEARTBEAT = 2
 
 	// TRANSPORT field bitmask values
@@ -23,7 +23,7 @@ const (
 	PROVIDERSYNC_TRANSPORT_API = 1 << 1
 
 	// SYNCHRONIZATION-MODEL field bitmask values
-	PROVIDERSYNC_SYNC_LEADERFOOWER = 1 << 0
+	PROVIDERSYNC_SYNC_LEADERFOLLOWER = 1 << 0
 	PROVIDERSYNC_SYNC_PEERTOPEER     = 1 << 1
 )
 
@@ -71,7 +71,7 @@ func SerializeProviderSyncOption(opt *ProviderSyncOption) []byte {
 // Returns an error if the data is shorter than the minimum 4-byte header.
 func ParseProviderSyncOption(data []byte) (*ProviderSyncOption, error) {
 	if len(data) < 4 {
-		return nil, fmt.Errorf("LProviderSyncOption: data too short")
+		return nil, fmt.Errorf("ProviderSyncOption: data too short")
 	}
 
 	body := data[4:]
@@ -89,7 +89,7 @@ func ParseProviderSyncOption(data []byte) (*ProviderSyncOption, error) {
 // AddProviderSyncOption adds a ProviderSyncOption to an existing OPT RR
 func AddProviderSyncOption(opt *dns.OPT, pso *ProviderSyncOption) error {
 	if opt == nil {
-		return fmt.Errorf("LOPT RR is nil")
+		return fmt.Errorf("OPT RR is nil")
 	}
 	optionData := SerializeProviderSyncOption(pso)
 	if len(optionData) > 0xFFFF {

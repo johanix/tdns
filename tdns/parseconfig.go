@@ -251,7 +251,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			return errors.New("LParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
+			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
 		}
 	}
 
@@ -335,7 +335,7 @@ func (conf *Config) InitializeKeyDB() error {
 		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
 			log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
 			log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
-			return errors.New("LParseConfig: TDNS DB file does not exist")
+			return errors.New("ParseConfig: TDNS DB file does not exist")
 		}
 		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
 		if err != nil {

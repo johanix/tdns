@@ -33,7 +33,7 @@ func (rd NOTIFY) String() string {
 
 func (rd *NOTIFY) Parse(txt []string) error {
 	if len(txt) != 4 {
-		return errors.New("LNOTIFY requires a type, a scheme, a port and a target")
+		return errors.New("NOTIFY requires a type, a scheme, a port and a target")
 	}
 	t := dns.StringToType[txt[0]]
 	if t == 0 {

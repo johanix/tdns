@@ -91,7 +91,7 @@ func executeCombinerRequest(cmdName, zone, command string, data map[string][]str
 
 	_, buf, err := api.RequestNG("POST", "/combiner", req, true)
 	if err != nil {
-		return nil, fmt.Errorf("LAPI request failed: %w", err)
+		return nil, fmt.Errorf("API request failed: %w", err)
 	}
 
 	var resp tdns.CombinerResponse
@@ -100,7 +100,7 @@ func executeCombinerRequest(cmdName, zone, command string, data map[string][]str
 	}
 
 	if resp.Error {
-		return nil, fmt.Errorf("LAPI error: %s", resp.ErrorMsg)
+		return nil, fmt.Errorf("API error: %s", resp.ErrorMsg)
 	}
 
 	return &resp, nil

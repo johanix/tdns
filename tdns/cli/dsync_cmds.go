@@ -52,7 +52,7 @@ func StartImrForCli(rootHints string) (context.Context, context.CancelFunc, *tdn
 	// Check if ImrEngine is available
 	if Conf.Internal.ImrEngine == nil {
 		cancel()
-		return nil, nil, nil, fmt.Errorf("LImrEngine not initialized after %v. RecursorEngine may not have started properly", maxWait)
+		return nil, nil, nil, fmt.Errorf("ImrEngine not initialized after %v. RecursorEngine may not have started properly", maxWait)
 	}
 
 	return ctx, cancel, Conf.Internal.ImrEngine, nil

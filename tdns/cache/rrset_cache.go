@@ -633,14 +633,14 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 	} else {
 		// Verify root hints file exists
 		if _, err := os.Stat(hintsfile); err != nil {
-			return fmt.Errorf("LRoot hints file %s not found: %v", hintsfile, err)
+			return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
 		}
 
 		log.Printf("PrimeWithHints: reading root hints from file %s", hintsfile)
 		// Read and parse root hints file
 		data, err = os.ReadFile(hintsfile)
 		if err != nil {
-			return fmt.Errorf("LError reading root hints file %s: %v", hintsfile, err)
+			return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
 		}
 		source = hintsfile
 	}
@@ -692,7 +692,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 	}
 
 	if err := zp.Err(); err != nil {
-		return fmt.Errorf("LError parsing root hints from %s: %v", source, err)
+		return fmt.Errorf("Error parsing root hints from %s: %v", source, err)
 	}
 
 	// Store NS records for root
@@ -714,7 +714,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 			},
 		})
 	} else {
-		return fmt.Errorf("LNo NS records found in root hints from %s", source)
+		return fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
 	// Store root zone data
@@ -776,10 +776,10 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 
 	rrset, err := fetcher(context.Background(), ".", dns.TypeNS, authMap) // force re-query bypassing cache
 	if err != nil {
-		return fmt.Errorf("LError priming RRsetCache with root hints: %v", err)
+		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}
 	if rrset == nil {
-		return fmt.Errorf("LNo NS records found in root hints from %s", source)
+		return fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
 	if rrcache.Debug {

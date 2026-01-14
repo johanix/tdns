@@ -150,7 +150,7 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*core
 	cdd := zd.FindDelegation(qname, true)
 	// if childns != nil {
 	if cdd != nil && cdd.NS_rrset != nil {
-		zd.Logger.Printf("LRRset: found a delegation for %s in known zone %s",
+		zd.Logger.Printf("RRset: found a delegation for %s in known zone %s",
 			qname, zd.ZoneName)
 
 		addrs, err := ChildGlueRRsToAddrs(cdd.A_glue, cdd.AAAA_glue)
@@ -214,9 +214,9 @@ func (zd *ZoneData) LookupChildRRset(qname string, qtype uint16,
 
 	rrset, _, err := AuthDNSQuery(qname, zd.Logger, servers, qtype, verbose)
 	if err != nil {
-		zd.Logger.Printf("LCRRset: Error from AuthDNSQuery: %v", err)
+		zd.Logger.Printf("CRRset: Error from AuthDNSQuery: %v", err)
 	}
-	zd.Logger.Printf("LCRRset: looked up %s %s (%d RRs):", qname, dns.TypeToString[qtype], len(rrset.RRs))
+	zd.Logger.Printf("CRRset: looked up %s %s (%d RRs):", qname, dns.TypeToString[qtype], len(rrset.RRs))
 	// log.Printf("LookupChildRRset: done. rrset=%v", rrset)
 	return rrset, err
 }
@@ -226,9 +226,9 @@ func (zd *ZoneData) LookupChildRRsetNG(qname string, qtype uint16,
 
 	rrset, _, err := AuthDNSQuery(qname, zd.Logger, addrs, qtype, verbose)
 	if err != nil {
-		zd.Logger.Printf("LCRRsetNG: Error from AuthDNSQuery: %v", err)
+		zd.Logger.Printf("CRRsetNG: Error from AuthDNSQuery: %v", err)
 	}
-	zd.Logger.Printf("LCRRsetNG: looked up %s %s (%d RRs):", qname, dns.TypeToString[qtype], len(rrset.RRs))
+	zd.Logger.Printf("CRRsetNG: looked up %s %s (%d RRs):", qname, dns.TypeToString[qtype], len(rrset.RRs))
 	// log.Printf("LookupChildRRsetNG: done. rrset=%v", rrset)
 	return rrset, err
 }

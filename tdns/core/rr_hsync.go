@@ -76,7 +76,7 @@ func (rd HSYNC) String() string {
 func (rd *HSYNC) Parse(txt []string) error {
 	// log.Printf("parsing HSYNC: %v", txt)
 	if len(txt) != 5 {
-		return errors.New("LHSYNC requires values for State, NSmgmt and Sign plus identity and upstream domain names")
+		return errors.New("HSYNC requires values for State, NSmgmt and Sign plus identity and upstream domain names")
 	}
 	state, exist := StringToHsyncState[txt[0]]
 	if !exist {

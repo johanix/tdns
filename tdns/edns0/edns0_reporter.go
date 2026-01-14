@@ -54,7 +54,7 @@ func ReportOptionToEDNS0Local(reportOption *ReportOption) (*dns.EDNS0_LOCAL, err
 // payload should be an EDE
 func AddReportOption(opt *dns.OPT, edns0local *dns.EDNS0_LOCAL) error {
 	if opt == nil {
-		return fmt.Errorf("LOPT RR is nil")
+		return fmt.Errorf("OPT RR is nil")
 	}
 
 	if edns0local.Code != EDNS0_REPORT_OPTION_CODE {

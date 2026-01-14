@@ -47,7 +47,7 @@ func (rd *TSYNC) Parse(txt []string) error {
 	// Accept either 5 tokens (<TYPE> <alias> <transports> <v4addr> <v6addr>) or 4 tokens (<TYPE> <alias> <transports> <v4addr> <v6addr>)
 	// Also accept empty/missing v4/v6 as empty strings.
 	if len(txt) < 4 {
-		return errors.New("LTSYNC: requires at least 4 fields")
+		return errors.New("TSYNC: requires at least 4 fields")
 	}
 	var t uint16
 	idx := 0
@@ -121,12 +121,12 @@ func (rd *TSYNC) Parse(txt []string) error {
 
 	rd.Type = t
 	if alias == "" {
-		return fmt.Errorf("LTSYNC: alias is required (use '.' for none)")
+		return fmt.Errorf("TSYNC: alias is required (use '.' for none)")
 	}
 	// Ensure alias is a valid FQDN
 	alias = dns.Fqdn(alias)
 	if _, ok := dns.IsDomainName(alias); !ok {
-		return fmt.Errorf("LTSYNC: invalid alias domain name: %q", alias)
+		return fmt.Errorf("TSYNC: invalid alias domain name: %q", alias)
 	}
 	rd.Alias = alias
 	rd.Transports = transports
@@ -172,7 +172,7 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 	}
 	// Alias is mandatory - if buffer ends here, it's an error
 	if off == len(buf) {
-		return off, errors.New("LTSYNC: missing mandatory Alias field")
+		return off, errors.New("TSYNC: missing mandatory Alias field")
 	}
 	rd.Alias, off, err = dns.UnpackDomainName(buf, off)
 	if err != nil {
@@ -180,7 +180,7 @@ func (rd *TSYNC) Unpack(buf []byte) (int, error) {
 	}
 	// Validate that Alias is not empty
 	if rd.Alias == "" {
-		return off, errors.New("LTSYNC: Alias field cannot be empty")
+		return off, errors.New("TSYNC: Alias field cannot be empty")
 	}
 	// Remaining fields are optional - if buffer ends, set to empty strings
 	if off == len(buf) {
@@ -217,7 +217,7 @@ func (rd *TSYNC) Copy(dest dns.PrivateRdata) error {
 	// Copy via field assignment (safe, strings are immutable header pairs)
 	d, ok := dest.(*TSYNC)
 	if !ok {
-		return fmt.Errorf("LTSYNC: Copy: dest is not a *TSYNC")
+		return fmt.Errorf("TSYNC: Copy: dest is not a *TSYNC")
 	}
 	d.Type = rd.Type
 	d.Alias = rd.Alias
