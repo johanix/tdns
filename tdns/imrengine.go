@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/viper"
 
 	cache "github.com/johanix/tdns/tdns/cache"
-	core  "github.com/johanix/tdns/tdns/core"
+	core "github.com/johanix/tdns/tdns/core"
 	edns0 "github.com/johanix/tdns/tdns/edns0"
 	"github.com/miekg/dns"
 )
@@ -108,7 +108,8 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		if len(conf.Imr.Stubs) > 0 {
 			for _, stub := range conf.Imr.Stubs {
 				stubservers := []string{}
-				for _, server := range stub.Servers {
+				for i := range stub.Servers {
+					server := &stub.Servers[i]
 					stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
 				}
 				if !quiet {
@@ -201,7 +202,7 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 				} else if resp == nil {
 					resp = &ImrResponse{
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("ImrEngine: no response from ImrQuery"),
+						ErrorMsg: "ImrEngine: no response from ImrQuery",
 					}
 				}
 				rrq.ResponseCh <- *resp
@@ -267,8 +268,8 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		if maxiter <= 0 {
 			log.Printf("*** ImrQuery: max iterations reached. Giving up.")
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Max iterations reached. Giving up.")
-			return &resp, fmt.Errorf("Max iterations reached. Giving up.")
+			resp.ErrorMsg = "max iterations reached, giving up"
+			return &resp, fmt.Errorf("max iterations reached, giving up")
 		} else {
 			maxiter--
 		}
@@ -1286,10 +1287,10 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 	var vstate cache.ValidationState
 	if crr != nil && crr.State == cache.ValidationStateSecure {
 		// Already validated, use the cached state
-		vstate = crr.State
 		if Globals.Debug {
 			log.Printf("initializeImrTrustAnchors: %s DNSKEY RRset already validated in cache", anchorName)
 		}
+		// vstate not needed here as we're using cached state
 	} else {
 		// Not validated yet, validate using trust anchors directly
 		// This bypasses the normal validation chain which may fail for indeterminate zones
@@ -1381,10 +1382,10 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 	var nsVstate cache.ValidationState
 	if nsCrr != nil && nsCrr.State == cache.ValidationStateSecure {
 		// Already validated, use the cached state
-		nsVstate = nsCrr.State
 		if Globals.Debug {
 			log.Printf("initializeImrTrustAnchors: %s NS RRset already validated in cache", anchorName)
 		}
+		// nsVstate not needed here as we're using cached state
 	} else {
 		// Not validated yet, validate it now
 		nsVstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)

@@ -28,7 +28,7 @@ func ExampleGenerateKeyPair() {
 	// Private key: [32 hex bytes]
 }
 
-func ExampleEncryptDecrypt() {
+func ExampleEncrypt() {
 	// Generate recipient keypair
 	recipientPub, recipientPriv, _ := GenerateKeyPair()
 
@@ -61,7 +61,7 @@ func ExampleEncryptDecrypt() {
 	// Match: true
 }
 
-func ExampleDistributionID() {
+func ExampleGenerateDistributionID() {
 	// Generate a distribution ID
 	distID, err := GenerateDistributionID()
 	if err != nil {
@@ -84,7 +84,7 @@ func ExampleDistributionID() {
 	// Valid distribution ID
 }
 
-func ExampleEncryptDNSSECKey() {
+func ExampleEncrypt_encryptDNSSECKey() {
 	// Simulate encrypting a DNSSEC private key for distribution
 	recipientPub, recipientPriv, _ := GenerateKeyPair()
 

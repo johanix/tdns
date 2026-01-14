@@ -137,12 +137,12 @@ func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtRe
 
 	_, buf, err := api.RequestNG("POST", "/agent", req, true)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %v", err)
+		return nil, fmt.Errorf("LAPI request failed: %v", err)
 	}
 
 	var amr tdns.AgentMgmtResponse
 	if err := json.Unmarshal(buf, &amr); err != nil {
-		return nil, fmt.Errorf("Failed to parse response: %v", err)
+		return nil, fmt.Errorf("LFailed to parse response: %v", err)
 	}
 
 	return &amr, nil
@@ -153,15 +153,15 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	var err error
 
 	if dnsRecord == "" {
-		return fmt.Errorf("Error: DNS record is required")
+		return fmt.Errorf("LError: DNS record is required")
 	}
 
 	if rr, err = dns.NewRR(dnsRecord); err != nil {
-		return fmt.Errorf("Error: Invalid DNS record (did not parse): %v", err)
+		return fmt.Errorf("LError: Invalid DNS record (did not parse): %v", err)
 	}
 
 	if !strings.HasSuffix(rr.Header().Name, zonename) {
-		return fmt.Errorf("DNS record name %q is not part of zone %q",
+		return fmt.Errorf("LDNS record name %q is not part of zone %q",
 			rr.Header().Name, zonename)
 	}
 
@@ -170,7 +170,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	case *dns.NS, *dns.DNSKEY, *dns.KEY:
 		// all good
 	default:
-		return fmt.Errorf("Invalid RR type: %s (only NS, DNSKEY and KEY allowed)", dns.TypeToString[rr.Header().Rrtype])
+		return fmt.Errorf("LInvalid RR type: %s (only NS, DNSKEY and KEY allowed)", dns.TypeToString[rr.Header().Rrtype])
 	}
 
 	switch cmd {
@@ -184,7 +184,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 		// This is a delete RRset, signaled by the CLASS=ANY
 		rr.Header().Class = dns.ClassANY
 	default:
-		return fmt.Errorf("Invalid command: %s", cmd)
+		return fmt.Errorf("LInvalid command: %s", cmd)
 	}
 
 	rrs := []string{rr.String()}

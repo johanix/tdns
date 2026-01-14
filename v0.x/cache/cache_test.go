@@ -55,13 +55,13 @@ func TestDnskeyCacheGetSet(t *testing.T) {
 	}
 
 	cached := &CachedDnskeyRRset{
-		Name:       zonename,
-		Keyid:      keyid,
-		State:      ValidationStateSecure,
+		Name:        zonename,
+		Keyid:       keyid,
+		State:       ValidationStateSecure,
 		TrustAnchor: false,
-		Dnskey:     dnskey,
-		RRset:      rrset,
-		Expiration: time.Now().Add(1 * time.Hour),
+		Dnskey:      dnskey,
+		RRset:       rrset,
+		Expiration:  time.Now().Add(1 * time.Hour),
 	}
 
 	dkc.Set(zonename, keyid, cached)
@@ -246,4 +246,3 @@ func TestNewAuthServer(t *testing.T) {
 		t.Error("NewAuthServer(\"\") should return nil")
 	}
 }
-

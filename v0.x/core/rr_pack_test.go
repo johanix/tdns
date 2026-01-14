@@ -9,7 +9,7 @@ import (
 // TestPackUnpackRoundTrip tests that Pack() and Unpack() are inverse operations
 // This tests the binary wire format, complementing the String()/Parse() tests
 
-func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
+func TestCHUNKPackUnpackRoundTrip(t *testing.T) {
 	t.Run("Manifest", func(t *testing.T) {
 		manifestHMAC := make([]byte, 32)
 		rand.Read(manifestHMAC)
@@ -30,7 +30,7 @@ func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
 		}
 		manifestJSONBytes, _ := json.Marshal(manifestJSON)
 
-		original := &CHUNK2{
+		original := &CHUNK{
 			Format:     FormatJSON,
 			HMACLen:    32,
 			HMAC:       manifestHMAC,
@@ -40,14 +40,14 @@ func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
 			Data:       manifestJSONBytes,
 		}
 
-		testPackUnpackRoundTrip(t, original, "CHUNK2 manifest")
+		testPackUnpackRoundTrip(t, original, "CHUNK manifest")
 	})
 
 	t.Run("DataChunk", func(t *testing.T) {
 		dataChunk := make([]byte, 100)
 		rand.Read(dataChunk)
 
-		original := &CHUNK2{
+		original := &CHUNK{
 			Format:     FormatJSON,
 			HMACLen:    0, // No HMAC for data chunks
 			HMAC:       nil,
@@ -57,11 +57,11 @@ func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
 			Data:       dataChunk,
 		}
 
-		testPackUnpackRoundTrip(t, original, "CHUNK2 data chunk")
+		testPackUnpackRoundTrip(t, original, "CHUNK data chunk")
 	})
 }
 
-func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
+func testPackUnpackRoundTrip(t *testing.T, original *CHUNK, name string) {
 	// Pack to binary
 	buf := make([]byte, 65535)
 	off, err := original.Pack(buf)
@@ -70,7 +70,7 @@ func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
 	}
 
 	// Unpack from binary
-	parsed := &CHUNK2{}
+	parsed := &CHUNK{}
 	off2, err := parsed.Unpack(buf[:off])
 	if err != nil {
 		t.Fatalf("%s Unpack() failed: %v", name, err)
@@ -81,7 +81,7 @@ func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
 	}
 
 	// Compare
-	if !compareCHUNK2(t, original, parsed, name) {
+	if !compareCHUNK(t, original, parsed, name) {
 		t.Errorf("%s: Pack/Unpack round-trip failed", name)
 	}
 }

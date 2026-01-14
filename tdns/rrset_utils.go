@@ -54,9 +54,10 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 				rrs = append(rrs, rr)
 
 			} else if _, ok := rr.(*dns.RRSIG); ok {
+				_ = ok // type assertion result
 				// ignore RRSIGs for the moment
 			} else {
-				return []dns.RR{}, fmt.Errorf("Error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
+				return []dns.RR{}, fmt.Errorf("error: answer is not an %s RR: %s", dns.TypeToString[rrtype], rr.String())
 			}
 		}
 		return rrs, nil
@@ -75,6 +76,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 				rrs = append(rrs, rr)
 
 			} else if _, ok := rr.(*dns.RRSIG); ok {
+				_ = ok // type assertion result
 				// ignore RRSIGs for the moment
 			} else {
 				// Should not be fatal. Happens when querying parent for glue
@@ -99,6 +101,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 				rrs = append(rrs, rr)
 
 			} else if _, ok := rr.(*dns.RRSIG); ok {
+				_ = ok // type assertion result
 				// ignore RRSIGs for the moment
 			} else {
 				// Should not be fatal.

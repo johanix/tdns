@@ -257,7 +257,7 @@ var hsyncSendHelloCmd = &cobra.Command{
 			fmt.Printf("Agent %s located successfully\n", agentIdentity)
 
 			// Send hello message
-			fmt.Printf("Sending HELLO message to agent %s...\n", agentIdentity)
+			fmt.Printf("Sending HEO message to agent %s...\n", agentIdentity)
 
 			// Create hello message
 			helloMsg := &tdns.AgentHelloPost{
@@ -271,7 +271,7 @@ var hsyncSendHelloCmd = &cobra.Command{
 			// Send the hello message
 			amr, err := agent.SendApiHello(helloMsg)
 			if err != nil {
-				fmt.Printf("Error sending HELLO: %v\n", err)
+				fmt.Printf("Error sending HEO: %v\n", err)
 				return
 			}
 

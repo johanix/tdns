@@ -354,7 +354,7 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 // This is the agent-to-agent sync API hello handler.
 func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.AgentQs.Hello == nil {
-		log.Println("APIhello: HelloQ channel is not set. Cannot forward HELLO msgs. This is a fatal error.")
+		log.Println("APIhello: HelloQ channel is not set. Cannot forward HEO msgs. This is a fatal error.")
 		os.Exit(1)
 	}
 

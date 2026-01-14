@@ -633,10 +633,10 @@ func (ar *AgentRegistry) RemoteOperationalAgents(zone ZoneName) (*ZoneAgentData,
 	// Find remote agents for this zone
 	zad, err := ar.GetZoneAgentData(zone)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Error getting zone agent data for zone %s: %v", zone, err)
+		return nil, nil, fmt.Errorf("error getting zone agent data for zone %s: %v", zone, err)
 	}
 	if len(zad.Agents) == 0 {
-		return nil, nil, fmt.Errorf("No remote agents found for zone %s", zone)
+		return nil, nil, fmt.Errorf("no remote agents found for zone %s", zone)
 	}
 
 	// XXX: This is not quite clear: if one remote agent is unavailable for some reason,
@@ -673,7 +673,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 	agents := map[AgentId]*Agent{}
 	for _, agent := range ar.S.Items() {
 		// Make a clean copy of the agent for the response
-		saneAgent := SanitizeForJSON(*agent) // Shallow copy
+		saneAgent := SanitizeForJSON(agent) // Pass pointer to avoid copying lock
 		if foo, ok := saneAgent.(*Agent); ok {
 			agents[agent.Identity] = foo
 		} else {
@@ -719,7 +719,7 @@ func (agent *Agent) SendApiMsg(msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	var amr AgentMsgResponse
 	err = json.Unmarshal(resp, &amr)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshalling message response: %v", err)
+		return nil, fmt.Errorf("error unmarshalling message response: %v", err)
 	}
 
 	//	if amr.Status == "ok" {

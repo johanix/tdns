@@ -11,9 +11,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestCHUNK2ParseRoundTrip(t *testing.T) {
+func TestCHUNKParseRoundTrip(t *testing.T) {
 	t.Run("Manifest", func(t *testing.T) {
-		// Create manifest CHUNK2
+		// Create manifest CHUNK
 		manifestHMAC := make([]byte, 32)
 		rand.Read(manifestHMAC)
 
@@ -34,7 +34,7 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 		}
 		manifestJSONBytes, _ := json.Marshal(manifestJSON)
 
-		original := &CHUNK2{
+		original := &CHUNK{
 			Format:     FormatJSON,
 			HMACLen:    32,
 			HMAC:       manifestHMAC,
@@ -44,15 +44,15 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 			Data:       manifestJSONBytes,
 		}
 
-		testCHUNK2RoundTrip(t, original, "CHUNK2 manifest")
+		testCHUNKRoundTrip(t, original, "CHUNK manifest")
 	})
 
 	t.Run("DataChunk", func(t *testing.T) {
-		// Create data chunk CHUNK2
+		// Create data chunk CHUNK
 		dataChunk := make([]byte, 100)
 		rand.Read(dataChunk)
 
-		original := &CHUNK2{
+		original := &CHUNK{
 			Format:     FormatJSON,
 			HMACLen:    0, // No HMAC for data chunks
 			HMAC:       nil,
@@ -62,11 +62,11 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 			Data:       dataChunk,
 		}
 
-		testCHUNK2RoundTrip(t, original, "CHUNK2 data chunk")
+		testCHUNKRoundTrip(t, original, "CHUNK data chunk")
 	})
 }
 
-func testCHUNK2RoundTrip(t *testing.T, original *CHUNK2, name string) {
+func testCHUNKRoundTrip(t *testing.T, original *CHUNK, name string) {
 	// Get String() output
 	str := original.String()
 	t.Logf("%s String() output: %s", name, str)
@@ -78,20 +78,20 @@ func testCHUNK2RoundTrip(t *testing.T, original *CHUNK2, name string) {
 	}
 
 	// Parse the string back
-	tokens := parseCHUNK2String(str)
+	tokens := parseCHUNKString(str)
 
-	parsed := &CHUNK2{}
+	parsed := &CHUNK{}
 	if err := parsed.Parse(tokens); err != nil {
 		t.Fatalf("%s Parse() failed: %v (tokens: %v)", name, err, tokens)
 	}
 
 	// Compare
-	if !compareCHUNK2(t, original, parsed, name) {
+	if !compareCHUNK(t, original, parsed, name) {
 		t.Errorf("%s: Parsed RR does not match original", name)
 	}
 }
 
-func parseCHUNK2String(s string) []string {
+func parseCHUNKString(s string) []string {
 	// String format: "Sequence Total Format HMAC Data"
 	parts := strings.Fields(s)
 	if len(parts) < 5 {
@@ -109,7 +109,7 @@ func parseCHUNK2String(s string) []string {
 	return tokens
 }
 
-func compareCHUNK2(t *testing.T, a, b *CHUNK2, name string) bool {
+func compareCHUNK(t *testing.T, a, b *CHUNK, name string) bool {
 	if a.Format != b.Format {
 		t.Errorf("%s: Format mismatch: %d != %d", name, a.Format, b.Format)
 		return false

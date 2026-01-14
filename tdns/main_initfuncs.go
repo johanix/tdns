@@ -17,7 +17,6 @@ import (
 
 	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/spf13/pflag"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
@@ -74,10 +73,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter:
-		pflag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
-		pflag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
-		pflag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
-		pflag.Parse()
+		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
+		flag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
+		flag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
+		flag.Parse()
 
 		flag.Usage = func() {
 			flag.PrintDefaults()
@@ -102,13 +101,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	err := conf.ParseConfig(false) // false = initial config, not reload
 	if err != nil {
-		return fmt.Errorf("Error parsing config %q: %v", conf.Internal.CfgFile, err)
+		return fmt.Errorf("error parsing config %q: %v", conf.Internal.CfgFile, err)
 	}
 
 	logfile := viper.GetString("log.file")
 	err = SetupLogging(logfile)
 	if err != nil {
-		return fmt.Errorf("Error setting up logging: %v", err)
+		return fmt.Errorf("error setting up logging: %v", err)
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 
@@ -119,7 +118,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		if kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
-				return fmt.Errorf("Error initializing KeyDB: %v", err)
+				return fmt.Errorf("error initializing KeyDB: %v", err)
 			}
 		}
 
@@ -129,7 +128,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	err = Globals.Validate()
 	if err != nil {
-		return fmt.Errorf("Error validating TDNS globals: %v", err)
+		return fmt.Errorf("error validating TDNS globals: %v", err)
 	}
 
 	fmt.Printf("TDNS %s version %s starting.\n", Globals.App.Name, Globals.App.Version)
@@ -182,7 +181,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Parse all configured zones
 	all_zones, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {
-		return fmt.Errorf("Error parsing zones: %v", err)
+		return fmt.Errorf("error parsing zones: %v", err)
 	}
 	// Provide the complete zone list to engines that need cross-zone post-initialization
 	conf.Internal.AllZones = all_zones
@@ -192,7 +191,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Setup agent identity and publish records
 		err = conf.SetupAgent(all_zones)
 		if err != nil {
-			return fmt.Errorf("Error setting up agent: %v", err)
+			return fmt.Errorf("error setting up agent: %v", err)
 		}
 		// Initialize AgentRegistry for agent mode only
 		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
@@ -290,7 +289,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 
 	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 	if err != nil {
-		return fmt.Errorf("Error setting up agent-to-agent sync router: %v", err)
+		return fmt.Errorf("error setting up agent-to-agent sync router: %v", err)
 	}
 
 	startEngine(&Globals.App, "APIdispatcherNG", func() error {

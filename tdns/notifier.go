@@ -128,5 +128,5 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 			return res.Rcode, nil
 		}
 	}
-	return dns.RcodeServerFailure, fmt.Errorf("Error: No response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+	return dns.RcodeServerFailure, fmt.Errorf("error: No response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
 }

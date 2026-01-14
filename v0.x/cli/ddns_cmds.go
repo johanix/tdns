@@ -11,7 +11,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -184,7 +184,7 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 	}
 
 	if dr.Error {
-		return dr, fmt.Errorf(dr.ErrorMsg)
+		return dr, fmt.Errorf("%s", dr.ErrorMsg)
 	}
 
 	return dr, nil

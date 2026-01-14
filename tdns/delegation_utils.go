@@ -195,7 +195,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
 		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
@@ -204,7 +204,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 
 	newapex, err := newzd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("Error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
 	log.Printf("*** oldapex.RRtypes[dns.TypeNS]:")
@@ -325,7 +325,7 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
 		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
@@ -355,7 +355,7 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return false, fmt.Errorf("Error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
 	if oldapex == nil {

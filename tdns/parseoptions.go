@@ -118,7 +118,7 @@ func (conf *Config) parseAuthOptions() {
 }
 
 // parseZoneOptions validates and applies zone-specific option strings, updating zconf.Options and returning a map of enabled ZoneOption flags.
-// 
+//
 // It parses and normalizes the options listed in zconf.OptionsStrs, enables recognized options, and ignores unknown or invalid ones.
 // For configuration problems (unknown options, missing dependencies such as DNSSEC policy for online signing or missing multisigner config/sync channel),
 // the function records a ConfigError on zd when provided and logs the issue.

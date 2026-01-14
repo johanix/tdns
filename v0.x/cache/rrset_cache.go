@@ -331,7 +331,8 @@ func (rrcache *RRsetCacheT) ClearTLSAQuery(owner string) {
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)
 func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
-	for _, server := range servers {
+	for i := range servers {
+		server := &servers[i]
 		tmpauthserver := NewAuthServer(server.Name)
 		if tmpauthserver == nil {
 			continue // Skip invalid server names

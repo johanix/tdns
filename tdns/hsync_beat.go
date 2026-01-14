@@ -25,9 +25,9 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 			agent.mu.Unlock()
 		}
 
-		//	case "FULLBEAT":
+		//	case "FUBEAT":
 		//		if Globals.Debug {
-		//			log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
+		//			log.Printf("HeartbeatHandler: Received FUBEAT from %s", report.Identity)
 		//		}
 		//		if agent, exists := ar.S.Get(report.Identity); exists {
 		//			agent.ApiDetails.LatestRBeat = time.Now()
@@ -152,7 +152,7 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 // 	log.Printf("HsyncEngine: Sending full heartbeats to known agents")
 // 	for _, agent := range ar.S.Items() {
 // 		status, resp, err := agent.SendApiMsg(&AgentMsgPost{
-// 			MessageType: "FULLBEAT",
+// 			MessageType: "FUBEAT",
 // 			Identity:    agent.Identity,
 //			Zone:        "",
 //		})
@@ -189,7 +189,7 @@ func (agent *Agent) SendApiBeat(msg *AgentBeatPost) (*AgentBeatResponse, error) 
 	var abr AgentBeatResponse
 	err = json.Unmarshal(resp, &abr)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshalling BEAT response: %v", err)
+		return nil, fmt.Errorf("error unmarshalling BEAT response: %v", err)
 	}
 
 	return &abr, nil

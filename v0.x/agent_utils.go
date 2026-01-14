@@ -514,7 +514,7 @@ func AgentToString(a *Agent) string {
 	if a == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("%s", a.Identity)
+	return string(a.Identity)
 }
 
 // AddRemoteAgent adds an agent to the list of remote agents for a zone

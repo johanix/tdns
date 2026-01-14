@@ -43,7 +43,7 @@ func ExtractEdns0EROption(opt *dns.OPT) (string, bool) {
 // agentDomain is the domain name of the monitoring agent (RFC9567)
 func AddEROption(opt *dns.OPT, agentDomain string) error {
 	if opt == nil {
-		return fmt.Errorf("OPT RR is nil")
+		return fmt.Errorf("LOPT RR is nil")
 	}
 
 	if agentDomain == "" {
@@ -59,7 +59,7 @@ func AddEROption(opt *dns.OPT, agentDomain string) error {
 	}
 
 	if HasEROption(opt) {
-		return fmt.Errorf("ER option already present")
+		return fmt.Errorf("LER option already present")
 	}
 
 	// Pack the domain name into DNS wire format

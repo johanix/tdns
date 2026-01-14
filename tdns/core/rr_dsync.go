@@ -72,7 +72,7 @@ func (rd DSYNC) String() string {
 
 func (rd *DSYNC) Parse(txt []string) error {
 	if len(txt) != 4 {
-		return errors.New("DSYNC requires a type, a scheme, a port and a target")
+		return errors.New("LDSYNC requires a type, a scheme, a port and a target")
 	}
 	t := dns.StringToType[txt[0]]
 	if t == 0 {

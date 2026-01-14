@@ -247,11 +247,11 @@ func xxxDsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, erro
 	}
 
 	if err != nil {
-		return dsyncrrs, "", fmt.Errorf("Error from dns.Exchange(%s, DSYNC): %v", qname, err)
+		return dsyncrrs, "", fmt.Errorf("error from dns.Exchange(%s, DSYNC): %v", qname, err)
 	}
 
 	if res == nil {
-		return dsyncrrs, "", fmt.Errorf("Error: nil response to DSYNC query")
+		return dsyncrrs, "", fmt.Errorf("error: nil response to DSYNC query")
 	}
 
 	if res.Rcode == dns.RcodeSuccess {
@@ -289,7 +289,7 @@ func xxxDsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, erro
 	}
 
 	if res.Rcode != dns.RcodeSuccess {
-		return dsyncrrs, "", fmt.Errorf("Error: Query for %s DSYNC received rcode: %s",
+		return dsyncrrs, "", fmt.Errorf("error: Query for %s DSYNC received rcode: %s",
 			qname, dns.RcodeToString[res.Rcode])
 	}
 
@@ -345,7 +345,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 
 	addrs, err = net.LookupHost(dsync.Target)
 	if err != nil {
-		return nil, fmt.Errorf("Error: %v", err)
+		return nil, fmt.Errorf("error: %v", err)
 	}
 
 	if Globals.Verbose {
@@ -401,7 +401,7 @@ func xxxLookupDSYNCTarget(childzone, imr string, dtype uint16, scheme core.Dsync
 
 	addrs, err = net.LookupHost(dsync.Target)
 	if err != nil {
-		return nil, fmt.Errorf("Error: %v", err)
+		return nil, fmt.Errorf("error: %v", err)
 	}
 
 	if Globals.Verbose {

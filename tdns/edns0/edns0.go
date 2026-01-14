@@ -54,7 +54,7 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 					msgoptions.OtsOptIn = payload == OTS_OPT_IN
 					msgoptions.OtsOptOut = payload == OTS_OPT_OUT
 				} else {
-					return nil, fmt.Errorf("EDNS0_LOCAL: OTS option data length is not 1")
+					return nil, fmt.Errorf("LEDNS0_LOCAL: OTS option data length is not 1")
 				}
 			case EDNS0_ER_OPTION_CODE:
 				// Extract ER option (domain name in DNS wire format)

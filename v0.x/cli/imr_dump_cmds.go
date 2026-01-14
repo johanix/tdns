@@ -184,7 +184,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 
 			// Get snapshot of addresses in backoff (thread-safe)
 			backoffs := server.SnapshotAddressBackoffs(now)
-			if backoffs != nil && len(backoffs) > 0 {
+			if len(backoffs) > 0 {
 				hasErrors = true
 				// Sort addresses for consistent output
 				addrs := make([]string, 0, len(backoffs))

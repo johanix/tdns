@@ -168,14 +168,14 @@ func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
 	// If one is nil and the other is not, check if the non-nil one has any RRSIGs
 	if rrset == nil {
 		// Old is nil (no RRSIGs), check if new has any
-		if newrrset.RRSIGs == nil || len(newrrset.RRSIGs) == 0 {
+		if len(newrrset.RRSIGs) == 0 {
 			return false // Both effectively empty
 		}
 		return true // New has RRSIGs, old doesn't
 	}
 	if newrrset == nil {
 		// New is nil (no RRSIGs), check if old has any
-		if rrset.RRSIGs == nil || len(rrset.RRSIGs) == 0 {
+		if len(rrset.RRSIGs) == 0 {
 			return false // Both effectively empty
 		}
 		return true // Old has RRSIGs, new doesn't

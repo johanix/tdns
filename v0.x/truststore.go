@@ -79,7 +79,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 		rows, err := tx.Query(getallchildsig0keyssql)
 		if err != nil {
-			return nil, fmt.Errorf("Error from kdb.Query(%s): %v", getallchildsig0keyssql, err)
+			return nil, fmt.Errorf("error from kdb.Query(%s): %v", getallchildsig0keyssql, err)
 		}
 		defer rows.Close()
 
@@ -91,7 +91,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		for rows.Next() {
 			err := rows.Scan(&keyname, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrrstr)
 			if err != nil {
-				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
+				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = Sig0Key{
@@ -239,7 +239,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 	if tafile != "" {
 		cfgdata, err := os.ReadFile(tafile)
 		if err != nil {
-			return fmt.Errorf("Error from ReadFile(%s): %v", tafile, err)
+			return fmt.Errorf("error from ReadFile(%s): %v", tafile, err)
 		}
 
 		var tatmp TAtmp
@@ -247,14 +247,14 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 
 		err = yaml.Unmarshal(cfgdata, &tatmp)
 		if err != nil {
-			return fmt.Errorf("Error from yaml.Unmarshal(TAtmp): %v", err)
+			return fmt.Errorf("error from yaml.Unmarshal(TAtmp): %v", err)
 		}
 
 		for k, v := range tatmp {
 			k = dns.Fqdn(k)
 			rr, err := dns.NewRR(v.Dnskey)
 			if err != nil {
-				return fmt.Errorf("Error from dns.NewRR(%s): %v", v.Dnskey, err)
+				return fmt.Errorf("error from dns.NewRR(%s): %v", v.Dnskey, err)
 			}
 
 			if dnskeyrr, ok := rr.(*dns.DNSKEY); ok {
@@ -292,7 +292,7 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 
 	rows, err := kdb.Query(loadsig0sql)
 	if err != nil {
-		return fmt.Errorf("Error from kdb.Query(%s): %v", loadsig0sql, err)
+		return fmt.Errorf("error from kdb.Query(%s): %v", loadsig0sql, err)
 	}
 	defer rows.Close()
 
@@ -303,12 +303,12 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 	for rows.Next() {
 		err := rows.Scan(&keyname, &keyid, &trusted, &validated, &keyrrstr)
 		if err != nil {
-			return fmt.Errorf("Error from rows.Scan(): %v", err)
+			return fmt.Errorf("error from rows.Scan(): %v", err)
 		}
 
 		rr, err := dns.NewRR(keyrrstr)
 		if err != nil {
-			return fmt.Errorf("Error from dns.NewRR(%s): %v", keyrrstr, err)
+			return fmt.Errorf("error from dns.NewRR(%s): %v", keyrrstr, err)
 		}
 
 		if keyrr, ok := rr.(*dns.KEY); ok {
@@ -327,7 +327,7 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 	if sig0file != "" {
 		cfgdata, err := os.ReadFile(sig0file)
 		if err != nil {
-			return fmt.Errorf("Error from ReadFile(%s): %v", sig0file, err)
+			return fmt.Errorf("error from ReadFile(%s): %v", sig0file, err)
 		}
 
 		var sig0tmp Sig0tmp
@@ -339,14 +339,14 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 
 		err = yaml.Unmarshal(cfgdata, &sig0tmp)
 		if err != nil {
-			return fmt.Errorf("Error from yaml.Unmarshal(Sig0config): %v", err)
+			return fmt.Errorf("error from yaml.Unmarshal(Sig0config): %v", err)
 		}
 
 		for k, v := range sig0tmp {
 			k = dns.Fqdn(k)
 			rr, err := dns.NewRR(v.Key)
 			if err != nil {
-				return fmt.Errorf("Error from dns.NewRR(%s): %v", v.Key, err)
+				return fmt.Errorf("error from dns.NewRR(%s): %v", v.Key, err)
 			}
 
 			if keyrr, ok := rr.(*dns.KEY); ok {
@@ -400,7 +400,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	}
 	defer rows.Close()
 
-	for rows.Next() {
+	if rows.Next() {
 		var validated, dnssecvalidated, trusted bool
 		var keyrrstr string
 		err = rows.Scan(&validated, &dnssecvalidated, &trusted, &keyrrstr)
@@ -413,7 +413,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 		}
 		keyrr, ok := rr.(*dns.KEY)
 		if !ok {
-			return nil, fmt.Errorf("FindSig0TrustedKey: Error: SIG(0) key %s in KeyDB is not a KEY RR", signer)
+			return nil, fmt.Errorf("findSig0TrustedKey: error: SIG(0) key %s in KeyDB is not a KEY RR", signer)
 		}
 		sk := Sig0Key{
 			Name:            signer,

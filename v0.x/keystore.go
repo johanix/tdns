@@ -39,7 +39,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		rows, err := kdb.Query(getAllSig0KeysSql)
 		if err != nil {
 			log.Printf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
-			return &resp, fmt.Errorf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			return &resp, fmt.Errorf("error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
 
@@ -50,7 +50,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
 			if err != nil {
-				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
+				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
 			if len(privatekey) < 10 {
 				privatekey = "ULTRA SECRET KEY"
@@ -279,7 +279,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	case "list":
 		rows, err := tx.Query(getAllDnskeysSql)
 		if err != nil {
-			return nil, fmt.Errorf("Error from kdb.Query(%s): %v", getAllDnskeysSql, err)
+			return nil, fmt.Errorf("error from kdb.Query(%s): %v", getAllDnskeysSql, err)
 		}
 		defer rows.Close()
 
@@ -290,7 +290,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		for rows.Next() {
 			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr)
 			if err != nil {
-				return nil, fmt.Errorf("Error from rows.Scan(): %v", err)
+				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
 			if len(privatekey) < 10 {
 				privatekey = "ULTRA SECRET KEY"
@@ -487,7 +487,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
 			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
-			return nil, fmt.Errorf("Error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
+			return nil, fmt.Errorf("error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
 		sak.Keys = append(sak.Keys, pkc)
@@ -566,7 +566,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
 			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
-			return nil, fmt.Errorf("Error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
+			return nil, fmt.Errorf("error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
 		if (flags & 0x0001) != 0 {

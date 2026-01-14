@@ -427,7 +427,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 						default:
 							// XXX: Here we should also deal with ContextReferral and ContextNoErrNoAns
-							break
+							continue
 						}
 					}
 				default:
@@ -467,11 +467,11 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				lg.Printf("*** AuthDNSQ: rcode=NOERROR, this is a referral or neg resp")
 				nsMap := map[string]bool{}
 				for _, rr := range r.Ns {
-					switch rr.(type) {
+					switch rr := rr.(type) {
 					case *dns.NS:
 						// this is a referral
 						rrset.RRs = append(rrset.RRs, rr)
-						nsMap[rr.(*dns.NS).Ns] = true
+						nsMap[rr.Ns] = true
 					case *dns.SOA:
 						// this is a negative response, but is the SOA right?
 						if strings.HasSuffix(qname, rr.Header().Name) {
@@ -525,9 +525,9 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						log.Printf("*** AuthDNSQuery: non-glue record in Additional: %q", rr.String())
 						continue
 					}
-					switch rr.(type) {
+					switch rr := rr.(type) {
 					case *dns.A:
-						addr := rr.(*dns.A).A.String()
+						addr := rr.A.String()
 						servers = append(servers, net.JoinHostPort(addr, "53"))
 						// Use shared AuthServer instance across all zones
 						server := imr.Cache.GetOrCreateAuthServer(name)
@@ -542,7 +542,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						glue4Map[name] = tmp
 
 					case *dns.AAAA:
-						addr := rr.(*dns.AAAA).AAAA.String()
+						addr := rr.AAAA.String()
 						servers = append(servers, net.JoinHostPort(addr, "53"))
 						// Use shared AuthServer instance across all zones
 						server := imr.Cache.GetOrCreateAuthServer(name)
@@ -558,7 +558,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 					case *dns.SVCB:
 						log.Printf("Additional contains an SVCB, here we should collect the ALPN")
-						svcb := rr.(*dns.SVCB)
+						svcb := rr
 						// Ensure we have a shared AuthServer instance for this NS
 						server := imr.Cache.GetOrCreateAuthServer(name)
 						serverMap[name] = server
@@ -727,7 +727,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
 	}
 	var servernames []string
-	for k, _ := range serverMap {
+	for k := range serverMap {
 		servernames = append(servernames, k)
 	}
 	if Globals.Debug {
@@ -1029,10 +1029,7 @@ func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, 
 		return false
 	}
 
-	val := ts.Transports
-	if strings.HasPrefix(val, "transport=") {
-		val = strings.TrimPrefix(val, "transport=")
-	}
+	val := strings.TrimPrefix(ts.Transports, "transport=")
 	if !imr.Quiet {
 		log.Printf("TSYNC transport value for %s: %q", serverName, val)
 	}
@@ -1692,10 +1689,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 					log.Printf("**** parseTransportForServerFromAdditional: TSYNC transports: \"%s\"", ts.Transports)
 				}
 				if ts.Transports != "" {
-					val := ts.Transports
-					if strings.HasPrefix(val, "transport=") {
-						val = strings.TrimPrefix(val, "transport=")
-					}
+					val := strings.TrimPrefix(ts.Transports, "transport=")
 					if Globals.Verbose {
 						log.Printf("**** parseTransportForServerFromAdditional: parsing TSYNC transport value: %s", val)
 					}
@@ -1799,10 +1793,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 			for _, rr := range rrset.RRs {
 				if priv, ok := rr.(*dns.PrivateRR); ok {
 					if ts, ok := priv.Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
-						val := ts.Transports
-						if strings.HasPrefix(val, "transport=") {
-							val = strings.TrimPrefix(val, "transport=")
-						}
+						val := strings.TrimPrefix(ts.Transports, "transport=")
 						if imr.applyTransportSignalToServer(server, val) {
 							applied = true
 						}

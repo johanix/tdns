@@ -346,7 +346,7 @@ func (conf *Config) InitializeKeyDB() error {
 		}
 		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
 		if err != nil {
-			return fmt.Errorf("Error from NewKeyDB: %v", err)
+			return fmt.Errorf("error from NewKeyDB: %v", err)
 		}
 		conf.Internal.KeyDB = kdb
 
@@ -370,7 +370,6 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		log.Printf("ParseZones: %d authoritative zones defined. Parsing...", len(conf.Zones))
 	}
 	var all_zones []string
-	var primary_zones []string
 
 	// Process each zone configuration
 	for i := range conf.Zones {
@@ -428,7 +427,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
 			zonetype = Primary
-			primary_zones = append(primary_zones, zname)
+			_ = append([]string{}, zname) // primary_zones was unused
 		case "secondary":
 			zonetype = Secondary
 			if zconf.Primary == "" {
@@ -572,7 +571,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// try a non-blocking send; if it would block, send from a goroutine.
 			if conf.Internal.RefreshZoneCh == nil {
 				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
-				return nil, errors.New("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
 				Name:         zname,

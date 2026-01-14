@@ -112,7 +112,7 @@ func (rd HSYNC2) String() string {
 
 func (rd *HSYNC2) Parse(txt []string) error {
 	if len(txt) != 4 {
-		return errors.New("HSYNC2 requires: State, flags-string, identity and upstream domain names")
+		return errors.New("LHSYNC2 requires: State, flags-string, identity and upstream domain names")
 	}
 
 	// Parse State

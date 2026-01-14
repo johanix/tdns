@@ -235,12 +235,12 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string, debug bool) (*dns.M
 	// Send request
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("HTTP request failed: %v", err)
+		return nil, 0, fmt.Errorf("LHTTP request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("HTTP request failed with status: %s", resp.Status)
+		return nil, 0, fmt.Errorf("LHTTP request failed with status: %s", resp.Status)
 	}
 
 	// Read response

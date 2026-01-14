@@ -19,7 +19,7 @@ type AgentState uint8
 const (
 	AgentStateNeeded      AgentState = iota + 1 // Agent is required but we don't have complete information
 	AgentStateKnown                             // We have complete information but haven't established communication
-	AgentStateIntroduced                        // We got a nice reply to our HELLO
+	AgentStateIntroduced                        // We got a nice reply to our HEO
 	AgentStateOperational                       // We got a nice reply to our (secure) BEAT
 	AgentStateDegraded                          // Last successful heartbeat (in either direction) was more than 2x normal interval ago
 	AgentStateInterrupted                       // Last successful heartbeat (in either direction) was more than 10x normal interval ago
@@ -47,7 +47,7 @@ const (
 )
 
 var AgentMsgToString = map[AgentMsg]string{
-	AgentMsgHello:  "HELLO",
+	AgentMsgHello:  "HEO",
 	AgentMsgBeat:   "BEAT",
 	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
 	AgentMsgRfi:    "RFI",
@@ -58,7 +58,7 @@ var AgentMsgToString = map[AgentMsg]string{
 // HSYNC record for a zone where we also appear in the HSYNC RRset (i.e. we are both part of it).
 // Then the remote agent becomes NEEDED. Data collection starts. When all data (URI, SVCB,
 // TLSA, etc) has been collected (and verified) the state changes to KNOWN. At the tail end
-// of LocateAgent(), when the state changes to KNOWN, a HELLO message is sent to the remote agent.
+// of LocateAgent(), when the state changes to KNOWN, a HEO message is sent to the remote agent.
 // If we get at positive response to that state changes to INTRODUCED and we're ready to start
 // sending heartbeats. After the first positive response to a heartbeat that we sent is received
 // the state finally changes to OPERATIONAL. Should subsequent heartbeats fail, the state changes

@@ -5,10 +5,11 @@ import (
 	"log"
 	"time"
 
+	"context"
+
 	"github.com/johanix/tdns/v0.x/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	"golang.org/x/net/context"
 )
 
 func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*edns0.KeyStateOption, error) {

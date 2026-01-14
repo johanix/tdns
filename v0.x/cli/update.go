@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/gookit/goutil/dump"
-	"github.com/johanix/tdns/v0.x"
+	tdns "github.com/johanix/tdns/v0.x"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -178,7 +178,7 @@ func CreateUpdate(updateType string) {
 			fmt.Println("No records to send, please add or delete some records first")
 			return nil, fmt.Errorf("no records to send")
 		}
-		msg, err = tdns.CreateUpdate(zone, adds, removes)
+		updateMsg, err := tdns.CreateUpdate(zone, adds, removes)
 		if err != nil {
 			fmt.Printf("Error creating update: %v\n", err)
 			return nil, fmt.Errorf("error creating update: %v", err)
@@ -197,7 +197,7 @@ func CreateUpdate(updateType string) {
 
 			sak.Keys = append(sak.Keys, pkc)
 
-			m, err := tdns.SignMsg(*msg, zone, sak)
+			m, err := tdns.SignMsg(*updateMsg, zone, sak)
 			if err != nil {
 				fmt.Printf("Error signing message: %v\n", err)
 				os.Exit(1)
@@ -218,7 +218,7 @@ func CreateUpdate(updateType string) {
 				signer, sak.Keys[0].KeyId)
 			// }
 			if len(sak.Keys) > 0 {
-				m, err := tdns.SignMsg(*msg, signer, sak)
+				m, err := tdns.SignMsg(*updateMsg, signer, sak)
 				if err != nil {
 					fmt.Printf("Error signing message: %v\n", err)
 					os.Exit(1)

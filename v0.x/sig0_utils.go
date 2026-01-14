@@ -30,7 +30,7 @@ import (
 func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string, gennewkey bool) error {
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
-		return fmt.Errorf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
+		return fmt.Errorf("error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 	}
 
 	if pkc != nil {
@@ -48,7 +48,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 	if gennewkey {
 		newpkc, msg, err := kdb.GenerateKeypair(Globals.Zonename, "tdnsd", "active", dns.TypeKEY, pkc.Algorithm, "", nil) // nil = no tx
 		if err != nil {
-			return fmt.Errorf("Error from GenerateSigningKey: %v", err)
+			return fmt.Errorf("error from GenerateSigningKey: %v", err)
 		}
 		log.Println(msg)
 
@@ -60,19 +60,19 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 	}
 
 	if Globals.ImrEngine == nil {
-		return fmt.Errorf("ImrEngine not initialized: cannot lookup DSYNC target for parent zone %s (scheme=UPDATE)",
+		return fmt.Errorf("imrEngine not initialized: cannot lookup DSYNC target for parent zone %s (scheme=UPDATE)",
 			Globals.ParentZone)
 	}
 
 	dsynctarget, err := Globals.ImrEngine.LookupDSYNCTarget(ctx, Globals.ParentZone, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
-		return fmt.Errorf("Error from LookupDSYNCTarget for parent zone %s (scheme=UPDATE): %v",
+		return fmt.Errorf("error from LookupDSYNCTarget for parent zone %s (scheme=UPDATE): %v",
 			Globals.ParentZone, err)
 	}
 
 	msg, err := CreateChildUpdate(Globals.ParentZone, Globals.Zonename, adds, removes)
 	if err != nil {
-		return fmt.Errorf("Error from CreateChildUpdate(%v): %v", dsynctarget, err)
+		return fmt.Errorf("error from CreateChildUpdate(%v): %v", dsynctarget, err)
 	}
 
 	var smsg *dns.Msg
@@ -81,15 +81,15 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 		fmt.Printf("Signing update.\n")
 		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
-			return fmt.Errorf("Error from SignMsgNG(%v): %v", dsynctarget, err)
+			return fmt.Errorf("error from SignMsgNG(%v): %v", dsynctarget, err)
 		}
 	} else {
-		return fmt.Errorf("Error: Keyfile not specified, signing update not possible")
+		return fmt.Errorf("error: Keyfile not specified, signing update not possible")
 	}
 
 	rcode, _, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
-		return fmt.Errorf("Error from SendUpdate(%v): %v", dsynctarget, err)
+		return fmt.Errorf("error from SendUpdate(%v): %v", dsynctarget, err)
 	} else {
 		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", Globals.ParentZone, dsynctarget.Addresses, dns.RcodeToString[rcode])
 	}
@@ -104,18 +104,18 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 //	flags field, which is not yet set here.
 func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *Tx) (*PrivateKeyCache, string, error) {
 	if _, exist := dns.AlgorithmToString[alg]; !exist {
-		return nil, "", fmt.Errorf("GenerateKeypair: Error: unknown algorithm: %d", alg)
+		return nil, "", fmt.Errorf("LGenerateKeypair: Error: unknown algorithm: %d", alg)
 	}
 
 	if rrtype == dns.TypeDNSKEY && !slices.Contains([]string{"ZSK", "KSK", "CSK"}, keytype) {
-		return nil, "", fmt.Errorf("GenerateKeypair: Error: unknown key type: %s", keytype)
+		return nil, "", fmt.Errorf("generateKeypair: error: unknown key type: %s", keytype)
 	}
 
 	var privkey crypto.PrivateKey
 	var err error
 
 	if rrtype != dns.TypeKEY && rrtype != dns.TypeDNSKEY {
-		return nil, "", fmt.Errorf("Error: rrtype must be KEY or DNSKEY")
+		return nil, "", fmt.Errorf("error: rrtype must be KEY or DNSKEY")
 	}
 
 	var pkc *PrivateKeyCache
@@ -160,7 +160,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			}
 			nkey.(*dns.DNSKEY).Protocol = 3
 		default:
-			return nil, "", fmt.Errorf("Error: rrtype must be KEY or DNSKEY")
+			return nil, "", fmt.Errorf("error: rrtype must be KEY or DNSKEY")
 		}
 
 		nkey.Header().Name = owner
@@ -177,7 +177,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			privkey, err = nkey.(*dns.DNSKEY).Generate(bits)
 		}
 		if err != nil {
-			return nil, "", fmt.Errorf("Error from nkey.Generate: %v", err)
+			return nil, "", fmt.Errorf("error from nkey.Generate: %v", err)
 		}
 
 		// kbasename := fmt.Sprintf("K%s+%03d+%03d", owner, nkey.Algorithm, nkey.KeyTag())
@@ -192,19 +192,19 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		case *ecdsa.PrivateKey:
 			pk = privkey
 		default:
-			return nil, "", fmt.Errorf("Error: unknown private key type: %T", privkey)
+			return nil, "", fmt.Errorf("error: unknown private key type: %T", privkey)
 		}
 
 		// Convert private key to PKCS#8 PEM format for storage
 		privkeyPEM, err := PrivateKeyToPEM(pk)
 		if err != nil {
-			return nil, "", fmt.Errorf("Error from PrivateKeyToPEM: %v", err)
+			return nil, "", fmt.Errorf("error from PrivateKeyToPEM: %v", err)
 		}
 
 		// PrepareKeyCache now accepts PEM format directly
 		pkc, err = PrepareKeyCache(privkeyPEM, nkey.String())
 		if err != nil {
-			return nil, "", fmt.Errorf("Error from PrepareKeyCache: %v", err)
+			return nil, "", fmt.Errorf("error from PrepareKeyCache: %v", err)
 		}
 
 		// Replace PrivateKey field with PEM format for storage (PrepareKeyCache converts PEM to BIND
@@ -214,7 +214,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 	case "external":
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
 		if keygenprog == "" {
-			return nil, "", fmt.Errorf("Error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
+			return nil, "", fmt.Errorf("error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
 		}
 
 		algstr := dns.AlgorithmToString[alg]
@@ -270,7 +270,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		}
 
 	default:
-		return nil, "", fmt.Errorf("Error: unknown keygen mode: \"%s\" (modekey=%s)", mode, modekey)
+		return nil, "", fmt.Errorf("error: unknown keygen mode: \"%s\" (modekey=%s)", mode, modekey)
 	}
 
 	const (
@@ -334,11 +334,11 @@ func LoadSig0SigningKey(keyfile string) (*PrivateKeyCache, error) {
 		var err error
 		pkc, err = ReadPrivateKey(keyfile)
 		if err != nil {
-			return nil, fmt.Errorf("Error reading SIG(0) key file '%s': %v", keyfile, err)
+			return nil, fmt.Errorf("error reading SIG(0) key file '%s': %v", keyfile, err)
 		}
 
 		if pkc.KeyType != dns.TypeKEY {
-			return nil, fmt.Errorf("Key must be a KEY RR")
+			return nil, fmt.Errorf("key must be a KEY RR")
 		}
 	}
 	return pkc, nil

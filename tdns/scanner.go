@@ -67,8 +67,8 @@ type Scanner struct {
 	JobsMutex sync.RWMutex
 }
 
-func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) Scanner {
-	s := Scanner{
+func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) *Scanner {
+	s := &Scanner{
 		AuthQueryQ: authqueryq,
 		//		Conf:        conf,
 		//		LabDB:       conf.Internal.LabDB,
@@ -121,7 +121,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	scanner.AddLogger("GENERIC")
 
 	// Store scanner instance in Config for API handler access
-	conf.Internal.Scanner = &scanner
+	conf.Internal.Scanner = scanner
 
 	log.Printf("*** ScannerEngine: starting ***")
 	defer ticker.Stop()
@@ -372,7 +372,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 			if lg != nil {
 				lg.Printf("queryAllNSAndCompare: error querying %s %s from %s (%s): %v", qname, dns.TypeToString[qtype], nsName, nsAddrs[0], err)
 			}
-			queryErrors = append(queryErrors, fmt.Errorf("NS %s: %v", nsName, err))
+			_ = append(queryErrors, fmt.Errorf("NS %s: %v", nsName, err))
 			continue
 		}
 		if rrset == nil || len(rrset.RRs) == 0 {

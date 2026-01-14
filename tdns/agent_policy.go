@@ -42,10 +42,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		}
 
 	case "local":
-		var rrs []dns.RR
-		for _, rr := range synchedDataUpdate.Update.RRs {
-			rrs = append(rrs, rr)
-		}
+		rrs := append([]dns.RR{}, synchedDataUpdate.Update.RRs...)
 
 		// Must check for (at least): approved RRtype, apex of zone and zone with us in the HSYNC RRset
 		for _, rr := range rrs {

@@ -13,12 +13,12 @@ import (
 )
 
 func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {
-	// log.Printf("HelloHandler: Received HELLO from %s", report.Identity)
+	// log.Printf("HelloHandler: Received HEO from %s", report.Identity)
 
 	switch report.MessageType {
 	case AgentMsgHello:
 		if Globals.Debug {
-			log.Printf("HelloHandler: Received initial HELLO from %s", report.Identity)
+			log.Printf("HelloHandler: Received initial HEO from %s", report.Identity)
 		}
 		// Store in wannabe_agents until we verify it shares zones with us
 		// wannabe_agents[report.Msg.Identity] = report.Agent
@@ -35,17 +35,17 @@ func (ar *AgentRegistry) HelloRetrier() {
 		case AgentStateKnown:
 			known_agents = append(known_agents, agent.Identity)
 			go ar.SingleHello(agent, agent.InitialZone)
-			// log.Printf("HsyncEngine: Retrying HELLO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
+			// log.Printf("HsyncEngine: Retrying HEO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 		default:
-			// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
+			// log.Printf("HsyncEngine: Not retrying HEO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 			continue
 		}
 	}
 	if len(known_agents) > 0 {
-		log.Printf("HsyncEngine: Retried HELLO to %d remote agents in state KNOWN: %v", len(known_agents), known_agents)
+		log.Printf("HsyncEngine: Retried HEO to %d remote agents in state KNOWN: %v", len(known_agents), known_agents)
 	} else {
 		if Globals.Debug {
-			log.Printf("HsyncEngine: No remote agents in state KNOWN to retry HELLO to")
+			log.Printf("HsyncEngine: No remote agents in state KNOWN to retry HEO to")
 		}
 	}
 }
@@ -72,15 +72,15 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 
 			log.Printf("HelloRetrierNG: with agent %q we share the zones: %v", agent.Identity, agent.Zones)
 			for zone := range agent.Zones {
-				log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q", agent.Identity, zone)
+				log.Printf("HelloRetrierNG: trying HEO with agent %q with zone: %q", agent.Identity, zone)
 				switch agent.ApiDetails.State {
 				case AgentStateKnown:
 					ar.SingleHello(agent, zone)
 
-					// log.Printf("HsyncEngine: Retrying HELLO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
+					// log.Printf("HsyncEngine: Retrying HEO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
 				default:
-					// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-					break
+					// log.Printf("HsyncEngine: Not retrying HEO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
+					continue
 				}
 				if agent.ApiDetails.State != AgentStateKnown {
 					//					time.Sleep(time.Duration(helloRetryInterval) * time.Second)
@@ -95,7 +95,7 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 }
 
 func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
-	log.Printf("SingleHello: Sending HELLO to %s (zone %q)", agent.Identity, zone)
+	log.Printf("SingleHello: Sending HEO to %s (zone %q)", agent.Identity, zone)
 	ahr, err := agent.SendApiHello(&AgentHelloPost{
 		MessageType:  AgentMsgHello,
 		MyIdentity:   AgentId(ar.LocalAgent.Identity),
@@ -105,20 +105,20 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 	agent.mu.Lock()
 	switch {
 	case err != nil:
-		log.Printf("SingleHello: Error sending HELLO to %q: %v", agent.Identity, err)
+		log.Printf("SingleHello: Error sending HEO to %q: %v", agent.Identity, err)
 		agent.ApiDetails.LatestError = err.Error()
 
 		//	case status != http.StatusOK:
-		//		log.Printf("HsyncEngine: HELLO to %s returned status %d", agent.Identity, status)
+		//		log.Printf("HsyncEngine: HEO to %s returned status %d", agent.Identity, status)
 		//		agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
 
 	case ahr.Error:
-		log.Printf("SingleHello: Our HELLO to %q returned error: %s", agent.Identity, ahr.ErrorMsg)
+		log.Printf("SingleHello: Our HEO to %q returned error: %s", agent.Identity, ahr.ErrorMsg)
 		agent.ApiDetails.LatestError = ahr.ErrorMsg
 		agent.ApiDetails.LatestErrorTime = time.Now()
 
 	default:
-		log.Printf("SingleHello: Our HELLO to %q returned: %s", agent.Identity, ahr.Msg)
+		log.Printf("SingleHello: Our HEO to %q returned: %s", agent.Identity, ahr.Msg)
 		// if ahr.Status == "ok" {
 		agent.ApiDetails.State = AgentStateIntroduced
 		agent.ApiDetails.LatestError = ""
@@ -133,8 +133,8 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 
 	// Now let's check if we need to know this agent
 	if ahp.Zone == "" {
-		log.Printf("EvaluateHello: Error: No zone specified in HELLO message")
-		return false, "Error: No zone specified in HELLO message", nil
+		log.Printf("EvaluateHello: Error: No zone specified in HEO message")
+		return false, "Error: No zone specified in HEO message", nil
 	}
 
 	// Check if we have this zone
@@ -197,7 +197,7 @@ func (agent *Agent) SendApiHello(msg *AgentHelloPost) (*AgentHelloResponse, erro
 	var ahr AgentHelloResponse
 	err = json.Unmarshal(resp, &ahr)
 	if err != nil {
-		return nil, fmt.Errorf("Error unmarshalling HELLO response: %v", err)
+		return nil, fmt.Errorf("error unmarshalling HEO response: %v", err)
 	}
 
 	return &ahr, nil

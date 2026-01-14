@@ -704,7 +704,7 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 
 	// Compute NextDomain: extract leftmost label, add "\000", then append rest
 	// e.g., if ChildName is "child.parent.com.", NextDomain should be "child\000.parent.com."
-	nextDomain := cdd.ChildName
+	var nextDomain string
 	if firstDot := strings.Index(cdd.ChildName, "."); firstDot > 0 {
 		leftmostLabel := cdd.ChildName[:firstDot]
 		rest := cdd.ChildName[firstDot:]
