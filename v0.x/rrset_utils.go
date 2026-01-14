@@ -34,7 +34,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 	if res.Rcode != dns.RcodeSuccess {
 		//		log.Fatalf("Error: Query for %s %s received rcode: %s",
 		//			qname, dns.TypeToString[rrtype], dns.RcodeToString[res.Rcode])
-		return []dns.RR{}, fmt.Errorf("LQuery for %s %s received rcode: %s",
+		return []dns.RR{}, fmt.Errorf("Query for %s %s received rcode: %s",
 			qname, dns.TypeToString[rrtype],
 			dns.RcodeToString[res.Rcode])
 	}
@@ -212,7 +212,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			}
 
 			if res.Rcode != dns.RcodeSuccess {
-				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("LQuery for %s %s received rcode: %s",
+				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("Query for %s %s received rcode: %s",
 					req.qname, dns.TypeToString[req.rrtype], dns.RcodeToString[res.Rcode])}
 				continue
 			}

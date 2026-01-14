@@ -449,7 +449,7 @@ func (zd *ZoneData) ZoneFileName() (string, error) {
 	}
 	filetmpl := viper.GetString("dnsengine.zones.filetmpl")
 	if filetmpl == "" {
-		return "", fmt.Errorf("LZoneFileName: dnsengine.zones.filetmpl is not set")
+		return "", fmt.Errorf("ZoneFileName: dnsengine.zones.filetmpl is not set")
 	}
 	fname := fmt.Sprintf("/tmp"+filetmpl, filedir, zd.ZoneName) // Must ensure that we don't allow writing everywhere
 	fname = path.Clean(fname)
@@ -810,7 +810,7 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegationData, error) {
 	zd.Logger.Printf("FetchChildDelegationData: fetching delegation data for %s", childname)
 	if !zd.IsChildDelegation(childname) {
-		return nil, fmt.Errorf("LFetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
+		return nil, fmt.Errorf("FetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
 	}
 	//	if zd.Children[childname] != nil {
 	//		if zd.Children[childname].ParentSerial == zd.CurrentSerial || time.Since(zd.Children[childname].Timestamp) < 24*time.Hour {
@@ -841,7 +841,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 
 	bns, err := BailiwickNS(childname, owner.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
 	if err != nil {
-		return nil, fmt.Errorf("LFetchChildDelegationData: error getting in bailiwick NS for %s: %v", childname, err)
+		return nil, fmt.Errorf("FetchChildDelegationData: error getting in bailiwick NS for %s: %v", childname, err)
 	}
 
 	for _, ns := range bns {
@@ -1385,7 +1385,7 @@ func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
-			// return nil, fmt.Errorf("LFindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
+			// return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)
 			// Assume error was missing port, so add it
 			addr, port = ns, "53"
 		}

@@ -104,7 +104,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 //	flags field, which is not yet set here.
 func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *Tx) (*PrivateKeyCache, string, error) {
 	if _, exist := dns.AlgorithmToString[alg]; !exist {
-		return nil, "", fmt.Errorf("LGenerateKeypair: Error: unknown algorithm: %d", alg)
+		return nil, "", fmt.Errorf("GenerateKeypair: Error: unknown algorithm: %d", alg)
 	}
 
 	if rrtype == dns.TypeDNSKEY && !slices.Contains([]string{"ZSK", "KSK", "CSK"}, keytype) {

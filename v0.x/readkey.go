@@ -281,7 +281,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		case *dns.KEY:
 			pkc.K, err = rr.NewPrivateKey(privkey)
 			if err != nil {
-				return nil, fmt.Errorf("LPrepareKeyCache: error parsing KEY private key: %v", err)
+				return nil, fmt.Errorf("PrepareKeyCache: error parsing KEY private key: %v", err)
 			}
 			pkc.KeyType = dns.TypeKEY
 			pkc.Algorithm = rr.Algorithm
