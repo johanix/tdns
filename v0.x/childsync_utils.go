@@ -454,9 +454,6 @@ schemeLoop:
 			}
 
 		case "notify":
-			if active_scheme != "" {
-				break schemeLoop
-			}
 			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
 			for _, drr := range dsync_res.Rdata {
 				if drr.Scheme == core.SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {

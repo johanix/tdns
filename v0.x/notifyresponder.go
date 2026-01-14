@@ -87,7 +87,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	qname := dnr.Qname
 	// ntype := dnr.Msg.Question[0].Qtype
-	if dns.Msg == nil || len(dnr.Msg.Question) == 0 {
+	if dnr.Msg == nil || len(dnr.Msg.Question) == 0 {
 		log.Printf("NotifyResponder: Received NOTIFY for zone %q, but no question in message", qname)
 		m := new(dns.Msg)
 		m.SetReply(dnr.Msg)

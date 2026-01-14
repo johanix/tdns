@@ -316,7 +316,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					log.Print(resp.ErrorMsg)
 				}
 			}
-			bd.Result <- resp
 			if bd.Result != nil {
 				select {
 				case bd.Result <- resp:

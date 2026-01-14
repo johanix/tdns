@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -83,7 +84,7 @@ func testCHUNKRoundTrip(t *testing.T, original *CHUNK, name string) {
 	if err := os.WriteFile(filename, []byte(str), 0644); err != nil {
 		t.Logf("Warning: Failed to write file: %v", err)
 	}
-	
+
 
 	// Parse the string back
 	tokens := parseCHUNKString(str)
@@ -126,7 +127,7 @@ func compareCHUNK(t *testing.T, a, b *CHUNK, name string) bool {
 		t.Errorf("%s: HMACLen mismatch: %d != %d", name, a.HMACLen, b.HMACLen)
 		return false
 	}
-	if !bytesEqual(a.HMAC, b.HMAC) {
+	if !bytes.Equal(a.HMAC, b.HMAC) {
 		t.Errorf("%s: HMAC mismatch", name)
 		return false
 	}
@@ -142,7 +143,7 @@ func compareCHUNK(t *testing.T, a, b *CHUNK, name string) bool {
 		t.Errorf("%s: DataLength mismatch: %d != %d", name, a.DataLength, b.DataLength)
 		return false
 	}
-	if !bytesEqual(a.Data, b.Data) {
+	if !bytes.Equal(a.Data, b.Data) {
 		t.Errorf("%s: Data mismatch (lengths: %d != %d)", name, len(a.Data), len(b.Data))
 		return false
 	}
@@ -590,18 +591,6 @@ func compareDELEG(t *testing.T, a, b *DELEG, name string) bool {
 	if len(a.Value) != len(b.Value) {
 		t.Errorf("%s: Value length mismatch: %d != %d", name, len(a.Value), len(b.Value))
 		return false
-	}
-	return true
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
 	}
 	return true
 }
