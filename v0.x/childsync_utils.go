@@ -39,8 +39,9 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 		fmt.Printf("Signing update.\n")
 		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
-			log.Printf("Error from SignMsgNG2(%s): %v", Globals.Zonename, err)
-			return UpdateResult{}, fmt.Errorf("error from SignMsg(%s): %v", Globals.Zonename, err)
+			msg := fmt.Sprintf("error from SignMsg(%s): %v", Globals.Zonename, err)
+			log.Printf(msg)
+			return UpdateResult{}, fmt.Errorf(msg)
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")

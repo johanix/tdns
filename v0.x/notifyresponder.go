@@ -90,9 +90,12 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 	if dnr.Msg == nil || len(dnr.Msg.Question) == 0 {
 		log.Printf("NotifyResponder: Received NOTIFY for zone %q, but no question in message", qname)
 		m := new(dns.Msg)
-		m.SetReply(dnr.Msg)
-		m.SetRcode(dnr.Msg, dns.RcodeFormatError)
+		m.MsgHdr.Rcode = dns.RcodeFormatError
+		m.MsgHdr.Response = true
 		m.MsgHdr.Authoritative = true
+		if dnr.Msg != nil && len(dnr.Msg.Question) > 0 {
+			m.Question = dnr.Msg.Question
+		}
 		if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
 			log.Printf("NotifyResponder: WriteMsg error on FormatError: %v", err)
 		}

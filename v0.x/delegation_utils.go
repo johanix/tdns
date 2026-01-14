@@ -337,7 +337,7 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 	}
 	if oldapex == nil {
 		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		return false, dss, nil // on initial load, we always return false, nil, nil as we don't know that the DNSKEYs have changed
+		return true, dss, nil // on initial load, we always return true, dss, nil as we don't know that the DNSKEYs have changed
 	}
 
 	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
