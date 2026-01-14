@@ -154,4 +154,3 @@ func RegisterJSONCHUNKRR() error {
 	dns.PrivateHandle("JSONCHUNK", TypeJSONCHUNK, NewJSONCHUNK)
 	return nil
 }
-

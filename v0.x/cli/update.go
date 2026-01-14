@@ -98,13 +98,13 @@ func init() {
 }
 
 // CreateUpdate starts an interactive CLI for composing, signing, and sending DNS UPDATEs.
-// 
+//
 // It initializes the keystore and signing state, then enters a prompt loop that lets the
 // user add or delete RRs, view the pending update, sign it with SIG(0) keys (from a keyfile
 // or the keystore), select the target server, and send the update.
 // The function updates package-level globals such as `zone`, `signer`, and `server` as needed.
 // It may call os.Exit on fatal initialization or signing errors.
- // 
+//
 // The updateType parameter selects the operational context used to initialize the interactive
 // session (for example "child" or "zone") and does not affect the format of the DNS UPDATE
 // messages produced.

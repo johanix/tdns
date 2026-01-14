@@ -14,8 +14,8 @@ import (
 // It returns: a boolean that is true if the RRsets differ, a slice of records present in newrrs but not in oldrrs (adds), and a slice of records present in oldrrs but not in newrrs (removes).
 // RRsetDiffer compares old and new DNS resource records of a specific type in a zone and reports whether the RRsets differ,
 // returning slices of records that were added and removed.
- // It ignores RRSIG records and determines equality using dns.IsDuplicate. When verbose or debug are true, comparison details
- // are written to the provided logger.
+// It ignores RRSIG records and determines equality using dns.IsDuplicate. When verbose or debug are true, comparison details
+// are written to the provided logger.
 func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Logger, verbose, debug bool) (bool, []dns.RR, []dns.RR) {
 	var match, rrsets_differ bool
 	typestr := dns.TypeToString[rrtype]

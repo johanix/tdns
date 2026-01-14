@@ -77,7 +77,7 @@ func (rd CHUNK) String() string {
 	if formatStr == "" {
 		formatStr = fmt.Sprintf("FORMAT%d", rd.Format)
 	}
-	
+
 	// HMAC field (always present)
 	var hmacStr string
 	if rd.HMACLen > 0 && rd.HMAC != nil {
@@ -85,7 +85,7 @@ func (rd CHUNK) String() string {
 	} else {
 		hmacStr = `""` // Empty string for data chunks
 	}
-	
+
 	// Data field: try to parse as JSON for manifest chunks, otherwise base64
 	var dataStr string
 	if rd.Total == 0 {
@@ -107,7 +107,7 @@ func (rd CHUNK) String() string {
 		// Data chunk: base64 encode
 		dataStr = base64.StdEncoding.EncodeToString(rd.Data)
 	}
-	
+
 	// Order: Sequence Total Format HMAC Data
 	return fmt.Sprintf("%d %d %s %s %s", rd.Sequence, rd.Total, formatStr, hmacStr, dataStr)
 }
@@ -117,7 +117,7 @@ func (rd *CHUNK) Parse(txt []string) error {
 	// Format: "JSON" or "FORMAT<n>"
 	// HMAC: hex string or "" for data chunks
 	// Data: JSON (for manifest) or base64 (for data chunks)
-	
+
 	if len(txt) < 5 {
 		return errors.New("CHUNK requires 5 fields: Sequence Total Format HMAC Data")
 	}
@@ -349,4 +349,3 @@ func RegisterCHUNKRR() error {
 	dns.TypeToString[TypeCHUNK] = "CHUNK"
 	return nil
 }
-

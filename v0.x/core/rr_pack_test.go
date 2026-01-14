@@ -23,7 +23,7 @@ func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
 			ChunkCount: 2,
 			ChunkSize:  60000,
 			Metadata: map[string]interface{}{
-				"content":        "encrypted_keys",
+				"content":         "encrypted_keys",
 				"distribution_id": "test123",
 			},
 			Payload: []byte("test payload"),
@@ -61,7 +61,6 @@ func TestCHUNK2PackUnpackRoundTrip(t *testing.T) {
 	})
 }
 
-
 func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
 	// Pack to binary
 	buf := make([]byte, 65535)
@@ -86,5 +85,3 @@ func testPackUnpackRoundTrip(t *testing.T, original *CHUNK2, name string) {
 		t.Errorf("%s: Pack/Unpack round-trip failed", name)
 	}
 }
-
-
