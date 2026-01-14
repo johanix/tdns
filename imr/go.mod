@@ -3,16 +3,16 @@ module tdns-imr
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/v1.0/tdns => ../v1.0/tdns
-	github.com/johanix/tdns/v1.0/tdns/cache => ../v1.0/tdns/cache
-	github.com/johanix/tdns/v1.0/tdns/cli => ../v1.0/tdns/cli
-	github.com/johanix/tdns/v1.0/tdns/core => ../v1.0/tdns/core
-	github.com/johanix/tdns/v1.0/tdns/edns0 => ../v1.0/tdns/edns0
+	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cache => ../tdns/cache
+	github.com/johanix/tdns/tdns/cli => ../tdns/cli
+	github.com/johanix/tdns/tdns/core => ../tdns/core
+	github.com/johanix/tdns/tdns/edns0 => ../tdns/edns0
 )
 
 require (
-	github.com/johanix/tdns/v1.0/tdns v0.0.0-20251115235005-48e48cb765aa
-	github.com/johanix/tdns/v1.0/tdns/cli v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns v0.0.0-20251115235005-48e48cb765aa
+	github.com/johanix/tdns/tdns/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.16.0
 )
@@ -30,9 +30,9 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns/v1.0/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v1.0/tdns/core v0.0.0-20251122130747-9c54a3943883 // indirect
-	github.com/johanix/tdns/v1.0/tdns/edns0 v0.0.0-20251121102720-aa307d56701e // indirect
+	github.com/johanix/tdns/tdns/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/tdns/tdns/core v0.0.0-20251122130747-9c54a3943883 // indirect
+	github.com/johanix/tdns/tdns/edns0 v0.0.0-20251121102720-aa307d56701e // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect

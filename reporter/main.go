@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/johanix/tdns/v1.0/tdns"
+	"github.com/johanix/tdns/tdns"
 	"github.com/spf13/viper"
 )
 
