@@ -20,9 +20,9 @@ import (
 
 // CHUNK option content types
 const (
-	CHUNKContentTypeKeyStatus            = 1 // Key installation status report (failed/successful keys)
+	CHUNKContentTypeKeyStatus             = 1 // Key installation status report (failed/successful keys)
 	CHUNKContentTypeBootstrapConfirmation = 2 // Bootstrap confirmation (encrypted confirmation data)
-	CHUNKContentTypeComponentStatus      = 3 // Component installation status report (failed/successful components)
+	CHUNKContentTypeComponentStatus       = 3 // Component installation status report (failed/successful components)
 )
 
 // ChunkOption represents a CHUNK EDNS(0) option
@@ -44,8 +44,8 @@ type KeyStatusReport struct {
 
 // KeyStatusEntry represents a single key's installation status
 type KeyStatusEntry struct {
-	ZoneName string `json:"zone_name"` // Zone name
-	KeyID    string `json:"key_id"`    // Key ID
+	ZoneName string `json:"zone_name"`       // Zone name
+	KeyID    string `json:"key_id"`          // Key ID
 	Error    string `json:"error,omitempty"` // Error message if failed
 }
 
@@ -58,7 +58,7 @@ type ComponentStatusReport struct {
 
 // ComponentStatusEntry represents a single component's installation status
 type ComponentStatusEntry struct {
-	ComponentID string `json:"component_id"` // Component ID
+	ComponentID string `json:"component_id"`    // Component ID
 	Error       string `json:"error,omitempty"` // Error message if failed
 }
 
@@ -67,11 +67,11 @@ type ComponentStatusEntry struct {
 // Note: This struct represents the decrypted confirmation data.
 // The actual EDNS(0) option contains encrypted data.
 type BootstrapConfirmation struct {
-	NodeID         string `json:"node_id"`          // Assigned node ID
-	Status         string `json:"status"`           // Status: "success" or "error"
-	KdcHpkePubKey  string `json:"kdc_hpke_pubkey"` // KDC HPKE public key (hex encoded)
-	Timestamp      string `json:"timestamp"`        // RFC3339 timestamp
-	ErrorMessage   string `json:"error_message,omitempty"` // Error message if status is "error"
+	NodeID        string `json:"node_id"`                 // Assigned node ID
+	Status        string `json:"status"`                  // Status: "success" or "error"
+	KdcHpkePubKey string `json:"kdc_hpke_pubkey"`         // KDC HPKE public key (hex encoded)
+	Timestamp     string `json:"timestamp"`               // RFC3339 timestamp
+	ErrorMessage  string `json:"error_message,omitempty"` // Error message if status is "error"
 }
 
 // CreateChunkOption creates a CHUNK EDNS(0) option
@@ -362,4 +362,3 @@ func AddChunkOptionToMessage(msg *dns.Msg, chunkOpt *dns.EDNS0_LOCAL) error {
 
 	return nil
 }
-

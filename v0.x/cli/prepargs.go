@@ -21,13 +21,14 @@ import (
 // 2. Flag mode: reads from cobra.Command flags (pass cmd as first argument)
 //
 // Usage:
-//   PrepArgs("zonename")                    // reads from tdns.Globals.Zonename
-//   PrepArgs(cmd, "zonename")               // reads from --zone flag
-//   PrepArgs(cmd, "zonename", "service")    // reads from --zone and --service flags
+//
+//	PrepArgs("zonename")                    // reads from tdns.Globals.Zonename
+//	PrepArgs(cmd, "zonename")               // reads from --zone flag
+//	PrepArgs(cmd, "zonename", "service")    // reads from --zone and --service flags
 func PrepArgs(args ...interface{}) {
 	var cmd *cobra.Command
 	var required []string
-	
+
 	// Check if first argument is a *cobra.Command
 	if len(args) > 0 {
 		if c, ok := args[0].(*cobra.Command); ok {

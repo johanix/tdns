@@ -3,17 +3,17 @@ module tdns-auth
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/v1.0/tdns => ../v1.0/tdns
-	github.com/johanix/tdns/v1.0/tdns/cache => ../v1.0/tdns/cache
-	github.com/johanix/tdns/v1.0/tdns/core => ../v1.0/tdns/core
-	github.com/johanix/tdns/v1.0/tdns/edns0 => ../v1.0/tdns/edns0
+	github.com/johanix/tdns/tdns => ../tdns
+	github.com/johanix/tdns/tdns/cache => ../tdns/cache
+	github.com/johanix/tdns/tdns/core => ../tdns/core
+	github.com/johanix/tdns/tdns/edns0 => ../tdns/edns0
 )
 
 require (
-	github.com/johanix/tdns/v1.0/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v1.0/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/v1.0/tdns/core v0.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/v1.0/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/tdns/core v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/tdns/edns0 v0.0.0-00010101000000-000000000000 // indirect
 )
 
 require (

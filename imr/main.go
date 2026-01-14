@@ -4,8 +4,9 @@
 package main
 
 import (
-	tdns "github.com/johanix/tdns/v1.0/tdns"
 	"tdns-imr/cmd"
+
+	tdns "github.com/johanix/tdns/tdns"
 )
 
 func main() {

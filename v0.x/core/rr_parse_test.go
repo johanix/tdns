@@ -26,9 +26,9 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 			ChunkCount: 2,
 			ChunkSize:  60000,
 			Metadata: map[string]interface{}{
-				"content":        "encrypted_keys",
+				"content":         "encrypted_keys",
 				"distribution_id": "test123",
-				"node_id":        "test.node.",
+				"node_id":         "test.node.",
 			},
 			Payload: []byte("test payload"),
 		}
@@ -66,7 +66,6 @@ func TestCHUNK2ParseRoundTrip(t *testing.T) {
 	})
 }
 
-
 func testCHUNK2RoundTrip(t *testing.T, original *CHUNK2, name string) {
 	// Get String() output
 	str := original.String()
@@ -102,10 +101,10 @@ func parseCHUNK2String(s string) []string {
 	// First 4 parts: Sequence, Total, Format, HMAC
 	// Rest: Data (may contain spaces if JSON)
 	tokens := make([]string, 5)
-	tokens[0] = parts[0] // Sequence
-	tokens[1] = parts[1] // Total
-	tokens[2] = parts[2] // Format
-	tokens[3] = parts[3] // HMAC
+	tokens[0] = parts[0]                     // Sequence
+	tokens[1] = parts[1]                     // Total
+	tokens[2] = parts[2]                     // Format
+	tokens[3] = parts[3]                     // HMAC
 	tokens[4] = strings.Join(parts[4:], " ") // Data
 	return tokens
 }
@@ -141,7 +140,6 @@ func compareCHUNK2(t *testing.T, a, b *CHUNK2, name string) bool {
 	}
 	return true
 }
-
 
 func TestDSYNCParseRoundTrip(t *testing.T) {
 	original := &DSYNC{
@@ -408,7 +406,7 @@ func parseHSYNC2String(s string) []string {
 	parts := make([]string, 0)
 	inQuotes := false
 	current := ""
-	
+
 	for _, r := range s {
 		if r == '"' {
 			if inQuotes {
@@ -432,7 +430,7 @@ func parseHSYNC2String(s string) []string {
 	if current != "" {
 		parts = append(parts, current)
 	}
-	
+
 	return parts
 }
 
@@ -486,7 +484,7 @@ func parseTSYNCString(s string) []string {
 	parts := make([]string, 0)
 	inQuotes := false
 	current := ""
-	
+
 	for _, r := range s {
 		if r == '"' {
 			if inQuotes {
@@ -510,7 +508,7 @@ func parseTSYNCString(s string) []string {
 	if current != "" {
 		parts = append(parts, current)
 	}
-	
+
 	return parts
 }
 
@@ -599,4 +597,3 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
-

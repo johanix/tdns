@@ -230,4 +230,3 @@ func TestExtractKeyStateOption(t *testing.T) {
 		}
 	})
 }
-

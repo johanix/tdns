@@ -30,11 +30,11 @@ func init() {
 // in the Payload field, eliminating the need for separate JSONCHUNK queries.
 // In this case, ChunkCount should be 0 (or Payload is used instead of chunks).
 type JSONMANIFEST struct {
-	ChunkCount uint16                 `json:"chunk_count"`        // Number of JSONCHUNK records (0 if payload is inline)
+	ChunkCount uint16                 `json:"chunk_count"`          // Number of JSONCHUNK records (0 if payload is inline)
 	ChunkSize  uint16                 `json:"chunk_size,omitempty"` // Maximum size of each chunk in bytes (optional)
-	Checksum   string                 `json:"checksum,omitempty"`  // SHA-256 checksum (optional)
-	Metadata   map[string]interface{} `json:"metadata,omitempty"` // Additional metadata (must include "content")
-	Payload    []byte                 `json:"payload,omitempty"`  // Inline payload (base64-encoded in JSON, optional)
+	Checksum   string                 `json:"checksum,omitempty"`   // SHA-256 checksum (optional)
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`   // Additional metadata (must include "content")
+	Payload    []byte                 `json:"payload,omitempty"`    // Inline payload (base64-encoded in JSON, optional)
 }
 
 func NewJSONMANIFEST() dns.PrivateRdata { return new(JSONMANIFEST) }
@@ -132,4 +132,3 @@ func RegisterJSONMANIFESTRR() error {
 	dns.PrivateHandle("JSONMANIFEST", TypeJSONMANIFEST, NewJSONMANIFEST)
 	return nil
 }
-

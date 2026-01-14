@@ -71,7 +71,7 @@ var DaemonStartCmd = &cobra.Command{
 		if maxwait < MaxWait {
 			maxwait = MaxWait
 		}
-		
+
 		// Get command from CLI config if available
 		clientKey := getClientKeyFromParent(prefixcmd)
 		if clientKey == "" {
@@ -83,7 +83,7 @@ var DaemonStartCmd = &cobra.Command{
 				daemonCommand = cmdStr
 			}
 		}
-		
+
 		api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand)
 	},
 }
@@ -113,7 +113,7 @@ var DaemonRestartCmd = &cobra.Command{
 		if maxwait < MaxWait {
 			maxwait = MaxWait
 		}
-		
+
 		// Get command from CLI config if available
 		clientKey := getClientKeyFromParent(prefixcmd)
 		if clientKey == "" {
@@ -125,12 +125,12 @@ var DaemonRestartCmd = &cobra.Command{
 				daemonCommand = cmdStr
 			}
 		}
-		
+
 		// Fallback to viper for backward compatibility
 		if daemonCommand == "" {
 			daemonCommand = viper.GetString("common.command")
 		}
-		
+
 		if updateBinary {
 			dstbin := daemonCommand
 			if dstbin == "" {

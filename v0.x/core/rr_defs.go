@@ -17,10 +17,10 @@ const (
 	TypeHSYNC   = 0x0F9D
 	TypeHSYNC2  = 0x0F9E
 	TypeTSYNC   = 0x0F9F
-	TypeCHUNK    = 65015 // 0xFDF7 - Unified Chunk/Manifest
+	TypeCHUNK   = 65015 // 0xFDF7 - Unified Chunk/Manifest
 	// lots of space
 	TypeJSONMANIFEST = 65100 // Older version of CHUNK
-	TypeJSONCHUNK = 65100    // Older version of CHUNK
+	TypeJSONCHUNK    = 65100 // Older version of CHUNK
 )
 
 // Format constants for CHUNK RR type

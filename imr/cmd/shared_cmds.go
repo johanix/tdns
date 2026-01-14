@@ -4,7 +4,7 @@
 package cmd
 
 import (
-	cli "github.com/johanix/tdns/v1.0/tdns/cli"
+	cli "github.com/johanix/tdns/tdns/cli"
 )
 
 func init() {

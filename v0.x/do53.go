@@ -278,7 +278,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 
 		case dns.OpcodeUpdate:
 			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO, len(dnsupdateq))
-			
+
 			// Create DnsUpdateRequest for handler matching
 			dur := DnsUpdateRequest{
 				ResponseWriter: w,
