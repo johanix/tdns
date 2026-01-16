@@ -144,6 +144,48 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ---
 
+## Zone Management
+
+### RFC 9432 - DNS Catalog Zones
+**Status**: ✅ Fully Supported  
+**Implementation**: `tdns/v0.x/catalog.go`, `tdns/v0.x/apihandler_catalog.go`, `tdns/v0.x/cli/catalog_cmds.go`, `tdns/v0.x/refreshengine.go`  
+**Notes**: 
+- **Catalog Zone Format**: Full support for RFC 9432 catalog zone structure
+  - Version TXT record: `version.{catalog-zone}. IN TXT "2"` (required)
+  - Member zone PTR records: `{hash}.zones.{catalog-zone}. IN PTR {member-zone}`
+  - Group TXT records: `group.{hash}.zones.{catalog-zone}. IN TXT "group1" "group2"` (multiple groups per zone)
+  - Invalid. NS records for autozones (recommended by RFC)
+- **Catalog Zone Parsing**: Complete implementation of catalog zone parsing
+  - Extracts member zones and their associated groups
+  - Categorizes groups into service groups, signing groups, and meta groups
+  - Handles multiple groups per zone via TXT record RDATA
+- **Auto-Configuration**: Full support for automatic zone configuration from catalog zones
+  - Policy-based auto-configuration (`catalog.policy.zones.add: auto`)
+  - Meta group configuration for upstream, store, and zone options
+  - Automatic zone transfer initiation for newly configured zones
+  - Manual configuration always takes precedence over catalog entries
+- **Primary and Secondary Catalog Zones**: Catalog zones can be configured as either primary or secondary
+  - Primary catalog zones persist across restarts
+  - Secondary catalog zones are transferred via AXFR
+- **CLI Management**: Complete CLI support for catalog zone operations
+  - `catalog create` - Create a new catalog zone
+  - `catalog zone add/delete/list` - Manage member zones in catalog
+  - `catalog group add/delete/list` - Manage groups in catalog
+  - `catalog zone group add/delete` - Associate groups with member zones
+- **API Endpoints**: REST API support for catalog zone management
+  - `/api/v1/catalog` endpoint for all catalog operations
+  - JSON-based request/response format
+- **Configuration Validation**: Comprehensive validation of catalog zone configuration
+  - Hard fail if catalog zone is configured but `catalog:` section is missing
+  - Validation of group references (missing groups, insufficient group configuration)
+  - Error state tracking for catalog zones with configuration issues
+- **Integration**: Catalog zone processing integrated into refresh engine
+  - Automatic parsing after catalog zone transfers
+  - Callback system for applications to react to catalog zone updates
+  - Support for multiple catalog zones per server
+
+---
+
 ## DNS Transports
 
 ### RFC 7858 - Specification for DNS over Transport Layer Security (DoT)
@@ -246,7 +288,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ## Last Updated
 
-**Date**: 2025-12-03
+**Date**: 2025-01-XX
 
 This document was last updated based on codebase analysis. RFC support status should be verified against the actual implementation when making changes.
 

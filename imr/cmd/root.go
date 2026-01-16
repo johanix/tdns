@@ -133,10 +133,10 @@ func initImr() {
 	appCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	if tdns.Globals.Debug {
-		fmt.Printf("initImr: Calling conf.MainInit(%q)\n", tdns.DefaultImrCfgFile)
+		fmt.Printf("initImr: Calling conf.MainInit(\"\") // Empty string means derive from Globals.App.Name\n")
 	}
 
-	err := cli.Conf.MainInit(appCtx, tdns.DefaultImrCfgFile)
+	err := cli.Conf.MainInit(appCtx, "") // Empty string means derive from Globals.App.Name
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}

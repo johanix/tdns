@@ -151,6 +151,31 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
+
+							// Check if this is a catalog zone and parse it
+							if zd.Options[OptCatalogZone] {
+								log.Printf("CATALOG: RefreshEngine: Zone %s is a catalog zone, parsing member zones", zone)
+								catalogUpdate, err := ParseCatalogZone(zd)
+								if err != nil {
+									log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
+								} else {
+									log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)", 
+										zone, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
+									
+									// Notify all registered callbacks
+									if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
+										log.Printf("CATALOG: RefreshEngine: ERROR notifying catalog zone callbacks: %v", err)
+									} else {
+										log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
+									}
+
+									// Auto-configure zones if enabled
+									log.Printf("CATALOG: RefreshEngine: Checking auto-configure policy: catalog.policy.zones.add=%q", conf.Catalog.Policy.Zones.Add)
+									if err := AutoConfigureZonesFromCatalog(catalogUpdate, conf); err != nil {
+										log.Printf("CATALOG: RefreshEngine: ERROR auto-configuring zones: %v", err)
+									}
+								}
+							}
 						}
 					}(zd, zone, zr.Force, conf)
 
@@ -203,6 +228,31 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 					// Register the zone before any per-zone actions.
 					Zones.Set(zone, zd)
+
+					// Check if this is a catalog zone and parse it (for new zones)
+					if zd.Options[OptCatalogZone] {
+						log.Printf("CATALOG: RefreshEngine: New zone %s is a catalog zone, parsing member zones", zone)
+						catalogUpdate, err := ParseCatalogZone(zd)
+						if err != nil {
+							log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
+						} else {
+							log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)", 
+								zone, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
+							
+							// Notify all registered callbacks
+							if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
+								log.Printf("CATALOG: RefreshEngine: ERROR notifying catalog zone callbacks: %v", err)
+							} else {
+								log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
+							}
+
+							// Auto-configure zones if enabled
+							log.Printf("CATALOG: RefreshEngine: Checking auto-configure policy: catalog.policy.zones.add=%q", conf.Catalog.Policy.Zones.Add)
+							if err := AutoConfigureZonesFromCatalog(catalogUpdate, conf); err != nil {
+								log.Printf("CATALOG: RefreshEngine: ERROR auto-configuring zones: %v", err)
+							}
+						}
+					}
 
 					// Defer transport signal synthesis until all zones are initialized.
 					tryPostpass(zone)
@@ -263,8 +313,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
 						log.Printf("RefreshEngine: Error from zd.Refresh(%s): %v", zone, err)
-					}
-					if updated {
+						zd.SetError(RefreshError, "refresh error: %v", err)
+						zd.LatestError = time.Now()
+					} else if updated {
+						// Clear error state on successful refresh
+						if zd.Error && zd.ErrorType == RefreshError {
+							zd.SetError(NoError, "")
+						}
 						if resetSoaSerial {
 							zd.CurrentSerial = uint32(time.Now().Unix())
 							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",

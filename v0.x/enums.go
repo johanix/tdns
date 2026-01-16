@@ -23,6 +23,7 @@ const (
 	OptAutomaticZone
 	// OptServerSvcb
 	OptAddTransportSignal
+	OptCatalogZone
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -41,6 +42,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptAutomaticZone:     "automatic-zone",
 	// OptServerSvcb:        "create-server-svcb",
 	OptAddTransportSignal: "add-transport-signal",
+	OptCatalogZone:        "catalog-zone",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -58,6 +60,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"frozen":                 OptFrozen,
 	"automatic-zone":         OptAutomaticZone,
 	"add-transport-signal":   OptAddTransportSignal,
+	"catalog-zone":           OptCatalogZone,
 }
 
 type ImrOption uint8
@@ -115,6 +118,7 @@ const (
 	AppTypeScanner
 	AppTypeKdc // Key Distribution Center
 	AppTypeKrs // Key Receiving Service (edge receiver)
+	AppTypeEdgeSigner // NYI
 )
 
 var AppTypeToString = map[AppType]string{

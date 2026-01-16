@@ -73,6 +73,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	Globals.App.ServerBootTime = time.Now()
 	Globals.App.ServerConfigTime = time.Now()
 
+	// If defaultcfg is empty, derive it from Globals.App.Name
+	if defaultcfg == "" {
+		defaultcfg = GetDefaultConfigFile()
+		if defaultcfg == "" {
+			return fmt.Errorf("cannot determine default config file: Globals.App.Name is not set")
+		}
+	}
+
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs:
 		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")

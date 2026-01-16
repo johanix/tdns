@@ -404,7 +404,29 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 		line += fmt.Sprintf("\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
 
 		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary, zconf.Notify, zconf.Zonefile)
-		line += fmt.Sprintf("\tFrozen: %t\tDirty: %t\n", zconf.Frozen, zconf.Dirty)
+
+		// Check for catalog zone flags
+		isCatalogZone := false
+		isAutoConfigured := false
+		for _, opt := range zconf.Options {
+			if opt == tdns.OptCatalogZone {
+				isCatalogZone = true
+			}
+			if opt == tdns.OptAutomaticZone {
+				isAutoConfigured = true
+			}
+		}
+
+		configInfo := ""
+		if isCatalogZone {
+			configInfo = "Catalog Zone"
+		} else if isAutoConfigured {
+			configInfo = fmt.Sprintf("Config: auto (from catalog %s)", zconf.SourceCatalog)
+		} else {
+			configInfo = "Config: manual"
+		}
+
+		line += fmt.Sprintf("\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
 		zoneLines = append(zoneLines, line)
 	}
 

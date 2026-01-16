@@ -633,6 +633,33 @@ func (zd *ZoneData) IsChildDelegation(qname string) bool {
 }
 
 func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
+	// For new secondary zones that haven't been transferred yet, return synthetic SOA
+	// This allows the refresh engine to proceed with the first transfer without error.
+	// Primary zones must load from disk and should not use synthetic SOA.
+	if !zd.Ready && zd.ZoneType == Secondary && zd.IncomingSerial == 0 {
+		// Return synthetic SOA with serial 0 and default refresh interval
+		// Serial 0 ensures the first transfer will always proceed (any real serial > 0)
+		if zd.Verbose || zd.Debug {
+			zd.Logger.Printf("GetSOA: Zone %s is new secondary zone (not yet transferred), returning synthetic SOA with serial 0", zd.ZoneName)
+		}
+		return &dns.SOA{
+			Hdr: dns.RR_Header{
+				Name:   zd.ZoneName,
+				Rrtype: dns.TypeSOA,
+				Class:  dns.ClassINET,
+				Ttl:    86400,
+			},
+			Ns:      "invalid.",
+			Mbox:    "hostmaster." + zd.ZoneName,
+			Serial:  0,
+			Refresh: 300,    // 5 minutes default
+			Retry:   1800,   // 30 minutes
+			Expire:  1209600, // 2 weeks
+			Minttl:  86400,  // 1 day
+		}, nil
+	}
+
+	// For all other cases (primary zones, ready zones, catalog zones), require real data
 	owner, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || owner == nil {
 		return nil, err
@@ -1317,6 +1344,7 @@ func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, er
 
 	// Create a fake zone for the sidecar identity just to be able to
 	// to use to generate the TLSA.
+	// Use "invalid." as the NS record for all autozones (RFC 9432 recommendation)
 	tmpl := `
 $ORIGIN {ZONENAME}
 $TTL 86400
@@ -1327,28 +1355,27 @@ $TTL 86400
           1209600    ; expire (2 weeks)
           86400      ; minimum (1 day)
           )
-{ZONENAME}     IN NS  ns.{ZONENAME}
+{ZONENAME}     IN NS  invalid.
 `
 	currentTime := fmt.Sprintf("%d", time.Now().Unix())
 	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
 	zonedatastr = strings.ReplaceAll(zonedatastr, "{SERIAL}", currentTime)
 
-	if len(addrs) == 0 {
-		addrs = []string{"192.0.2.1"} // fake it till you make it
-	}
-
-	log.Printf("CreateAutoZone: adding NS RRs for addresses: %v", addrs)
-	for _, addr := range addrs {
-		if !isValidIP(addr) {
-			log.Printf("CreateAutoZone: invalid IP address: %s", addr)
-			return nil, fmt.Errorf("invalid IP address: %s", addr)
-		}
-		if strings.Contains(addr, ":") {
-			// IPv6 address
-			zonedatastr += fmt.Sprintf("ns.%s IN AAAA %s\n", zonename, addr)
-		} else {
-			// IPv4 address
-			zonedatastr += fmt.Sprintf("ns.%s IN A %s\n", zonename, addr)
+	// Add address records if addresses are provided
+	if len(addrs) > 0 {
+		log.Printf("CreateAutoZone: adding address records for: %v", addrs)
+		for _, addr := range addrs {
+			if !isValidIP(addr) {
+				log.Printf("CreateAutoZone: invalid IP address: %s", addr)
+				return nil, fmt.Errorf("invalid IP address: %s", addr)
+			}
+			if strings.Contains(addr, ":") {
+				// IPv6 address
+				zonedatastr += fmt.Sprintf("ns.%s IN AAAA %s\n", zonename, addr)
+			} else {
+				// IPv4 address
+				zonedatastr += fmt.Sprintf("ns.%s IN A %s\n", zonename, addr)
+			}
 		}
 	}
 

@@ -27,7 +27,7 @@ func main() {
 	defer stop()
 
 	conf := &tdns.Conf
-	err := conf.MainInit(ctx, tdns.DefaultAgentCfgFile)
+	err := conf.MainInit(ctx, "") // Empty string means derive from Globals.App.Name
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}

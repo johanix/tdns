@@ -150,6 +150,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					}
 				}
 
+				// For secondary zones, Primary should be the Upstream address, not Parent
+				primary := ""
+				if zd.ZoneType == Secondary {
+					primary = zd.Upstream
+				}
+				// For primary zones, we could show Parent if needed, but typically Primary field is for secondary zones
+
 				zconf := ZoneConf{
 					Name:         zname,
 					Type:         ZoneTypeToString[zd.ZoneType],
@@ -161,8 +168,9 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					ErrorType:    zd.ErrorType,
 					ErrorMsg:     zd.ErrorMsg,
 					RefreshCount: zd.RefreshCount,
+				SourceCatalog: zd.SourceCatalog,
 					Zonefile:     zd.Zonefile,
-					Primary:      zd.Parent,
+					Primary:      primary,
 					Downstreams:  zd.Downstreams,
 				}
 				zones[zname] = zconf

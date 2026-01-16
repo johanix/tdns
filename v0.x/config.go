@@ -24,6 +24,7 @@ type Config struct {
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
+	Catalog        CatalogConf                `yaml:"catalog" mapstructure:"catalog"`
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
 	Keys           KeyConf
@@ -162,6 +163,36 @@ type LocalAgentDnsConf struct {
 
 type DbConf struct {
 	File string // `validate:"required"`
+}
+
+// CatalogConf defines configuration for catalog zone support (RFC 9432)
+type CatalogConf struct {
+	Policy        CatalogPolicy              `yaml:"policy" mapstructure:"policy"`
+	MetaGroups    map[string]*MetaGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`
+	SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
+}
+
+// CatalogPolicy defines policy for how catalog zones are processed
+type CatalogPolicy struct {
+	Zones struct {
+		Add    string `yaml:"add" mapstructure:"add"`    // "auto" or "manual"
+		Remove string `yaml:"remove" mapstructure:"remove"` // "auto" or "manual"
+	} `yaml:"zones" mapstructure:"zones"`
+	// Note: conflict_resolution is hardcoded to "manual-priority", not configurable
+}
+
+// MetaGroupConfig provides configuration for zone transfers from catalog meta groups (RFC 9432 terminology)
+type MetaGroupConfig struct {
+	Name     string   `yaml:"-" mapstructure:"-"`          // Populated from map key
+	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
+	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
+	Store    string   `yaml:"store" mapstructure:"store"`
+	Options  []string `yaml:"options" mapstructure:"options"`
+}
+
+// SigningGroupInfo provides documentation for signing groups (RFC 9432 terminology)
+type SigningGroupInfo struct {
+	Description string `yaml:"description" mapstructure:"description"`
 }
 
 type InternalConf struct {
