@@ -2,8 +2,8 @@ github.com/cloudflare/circl v1.6.2 h1:hL7VBpHHKzrV5WTfHCaBsgx/HGbBYlgrwvNXEVDYYs
 github.com/cloudflare/circl v1.6.2/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
-github.com/johanix/tdns/v0.x v0.0.0-20260114101536-6a5d9da87af9 h1:LQAnx8qSkr4JMGexWsPeoi5T6w4kWL3rGVs/ABUoNmA=
-github.com/johanix/tdns/v0.x v0.0.0-20260114101536-6a5d9da87af9/go.mod h1:AHHieJeFSRa5fTFvX1YaR6yh+Fpw1WpRgpEpxUHJLKM=
+github.com/johanix/tdns/v2 v0.0.0-20260114101536-6a5d9da87af9 h1:LQAnx8qSkr4JMGexWsPeoi5T6w4kWL3rGVs/ABUoNmA=
+github.com/johanix/tdns/v2 v0.0.0-20260114101536-6a5d9da87af9/go.mod h1:AHHieJeFSRa5fTFvX1YaR6yh+Fpw1WpRgpEpxUHJLKM=
 github.com/miekg/dns v1.1.69 h1:Kb7Y/1Jo+SG+a2GtfoFUfDkG//csdRPwRLkCsxDG9Sc=
 github.com/miekg/dns v1.1.69/go.mod h1:7OyjD9nEba5OkqQ/hB4fy3PIoxafSZJtducccIelz3g=
 golang.org/x/crypto v0.46.0 h1:cKRW/pmt1pKAfetfu+RCEvjvZkA9RimPbh7bhFjGVBU=

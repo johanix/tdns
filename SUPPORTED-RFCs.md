@@ -148,7 +148,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ### RFC 9432 - DNS Catalog Zones
 **Status**: ✅ Fully Supported  
-**Implementation**: `tdns/v0.x/catalog.go`, `tdns/v0.x/apihandler_catalog.go`, `tdns/v0.x/cli/catalog_cmds.go`, `tdns/v0.x/refreshengine.go`  
+**Implementation**: `tdns/v2/catalog.go`, `tdns/v2/apihandler_catalog.go`, `tdns/v2/cli/catalog_cmds.go`, `tdns/v2/refreshengine.go`  
 **Notes**: 
 - **Catalog Zone Format**: Full support for RFC 9432 catalog zone structure
   - Version TXT record: `version.{catalog-zone}. IN TXT "2"` (required)
@@ -288,7 +288,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ## Last Updated
 
-**Date**: 2025-01-XX
+**Date**: 2025-01-16
 
 This document was last updated based on codebase analysis. RFC support status should be verified against the actual implementation when making changes.
 

@@ -2,7 +2,7 @@ module github.com/johanix/tdns
 
 go 1.24.0
 
-require github.com/johanix/tdns/v0.x v0.0.0-20260114101536-6a5d9da87af9
+require github.com/johanix/tdns/v2 v0.0.0-20260114101536-6a5d9da87af9
 
 require (
 	github.com/cloudflare/circl v1.6.2 // indirect
