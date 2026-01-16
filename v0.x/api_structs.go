@@ -355,10 +355,10 @@ type ScanJobStatus struct {
 
 // CatalogPost represents a request to manage catalog zones
 type CatalogPost struct {
-	Command     string `json:"command"`      // "create" | "zone-add" | "zone-delete" | "zone-list" | "component-add" | "component-delete" | "component-list" | "zone-component-add" | "zone-component-delete"
+	Command     string `json:"command"`      // "create" | "zone-add" | "zone-delete" | "zone-list" | "group-add" | "group-delete" | "group-list" | "zone-group-add" | "zone-group-delete"
 	CatalogZone string `json:"catalog_zone"` // Name of the catalog zone
 	Zone        string `json:"zone"`         // Member zone name
-	Component   string `json:"component"`    // Component name
+	Group       string `json:"group"`        // Group name (RFC 9432 terminology)
 }
 
 // CatalogResponse represents the response from catalog operations
@@ -368,5 +368,5 @@ type CatalogResponse struct {
 	ErrorMsg    string                  `json:"error_msg,omitempty"`
 	Msg         string                  `json:"msg,omitempty"`
 	Zones       map[string]*MemberZone  `json:"zones,omitempty"`        // For zone-list command
-	Components  []string                `json:"components,omitempty"`   // For component-list command
+	Groups      []string                `json:"groups,omitempty"`      // For group-list command
 }

@@ -19,13 +19,13 @@ import (
 
 var catalogName string
 var zoneName string
-var componentName string
+var groupName string
 
 // CatalogCmd is the root command for catalog zone management
 var CatalogCmd = &cobra.Command{
 	Use:   "catalog",
 	Short: "Manage catalog zones (RFC 9432)",
-	Long:  `Create and manage catalog zones, add/remove member zones and components.`,
+	Long:  `Create and manage catalog zones, add/remove member zones and groups.`,
 }
 
 // catalogCreateCmd creates a new catalog zone
@@ -150,7 +150,7 @@ var catalogZoneDeleteCmd = &cobra.Command{
 // catalogZoneListCmd lists zones in a catalog
 var catalogZoneListCmd = &cobra.Command{
 	Use:   "list --cat <catalog-zone>",
-	Short: "List zones in the catalog with their components",
+	Short: "List zones in the catalog with their groups",
 	Run: func(cmd *cobra.Command, args []string) {
 		if catalogName == "" {
 			fmt.Println("Error: --cat is required")
@@ -184,7 +184,7 @@ var catalogZoneListCmd = &cobra.Command{
 		}
 
 		// Format output
-		lines := []string{"Zone Name | Hash | Service Components | Signing Component | Meta Component"}
+		lines := []string{"Zone Name | Hash | Service Groups | Signing Group | Meta Group"}
 
 		// Sort zones by name
 		zoneNames := make([]string, 0, len(resp.Zones))
@@ -195,39 +195,39 @@ var catalogZoneListCmd = &cobra.Command{
 
 		for _, zname := range zoneNames {
 			member := resp.Zones[zname]
-			serviceComps := strings.Join(member.ServiceComponents, ", ")
-			if serviceComps == "" {
-				serviceComps = "-"
+			serviceGroups := strings.Join(member.ServiceGroups, ", ")
+			if serviceGroups == "" {
+				serviceGroups = "-"
 			}
-			signing := member.SigningComponent
+			signing := member.SigningGroup
 			if signing == "" {
 				signing = "-"
 			}
-			meta := member.MetaComponent
+			meta := member.MetaGroup
 			if meta == "" {
 				meta = "-"
 			}
 			lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s",
-				zname, member.Hash[:12]+"...", serviceComps, signing, meta))
+				zname, member.Hash[:12]+"...", serviceGroups, signing, meta))
 		}
 
 		fmt.Println(columnize.SimpleFormat(lines))
 	},
 }
 
-// CatalogComponentCmd is the subcommand group for component operations
-var CatalogComponentCmd = &cobra.Command{
-	Use:   "component",
-	Short: "Manage components in catalog",
+// CatalogGroupCmd is the subcommand group for group operations
+var CatalogGroupCmd = &cobra.Command{
+	Use:   "group",
+	Short: "Manage groups in catalog",
 }
 
-// catalogComponentAddCmd adds a component to the catalog's component list
-var catalogComponentAddCmd = &cobra.Command{
-	Use:   "add --cat <catalog-zone> --comp <component-name>",
-	Short: "Add a component to the catalog's component list",
+// catalogGroupAddCmd adds a group to the catalog's group list
+var catalogGroupAddCmd = &cobra.Command{
+	Use:   "add --cat <catalog-zone> --group <group-name>",
+	Short: "Add a group to the catalog's group list",
 	Run: func(cmd *cobra.Command, args []string) {
-		if catalogName == "" || componentName == "" {
-			fmt.Println("Error: --cat and --comp are required")
+		if catalogName == "" || groupName == "" {
+			fmt.Println("Error: --cat and --group are required")
 			os.Exit(1)
 		}
 
@@ -238,9 +238,9 @@ var catalogComponentAddCmd = &cobra.Command{
 		}
 
 		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
-			Command:     "component-add",
+			Command:     "group-add",
 			CatalogZone: catalogName,
-			Component:   componentName,
+			Group:       groupName,
 		})
 
 		if err != nil {
@@ -259,13 +259,13 @@ var catalogComponentAddCmd = &cobra.Command{
 	},
 }
 
-// catalogComponentDeleteCmd removes a component from the catalog's component list
-var catalogComponentDeleteCmd = &cobra.Command{
-	Use:   "delete --cat <catalog-zone> --comp <component-name>",
-	Short: "Remove a component from the catalog's component list",
+// catalogGroupDeleteCmd removes a group from the catalog's group list
+var catalogGroupDeleteCmd = &cobra.Command{
+	Use:   "delete --cat <catalog-zone> --group <group-name>",
+	Short: "Remove a group from the catalog's group list",
 	Run: func(cmd *cobra.Command, args []string) {
-		if catalogName == "" || componentName == "" {
-			fmt.Println("Error: --cat and --comp are required")
+		if catalogName == "" || groupName == "" {
+			fmt.Println("Error: --cat and --group are required")
 			os.Exit(1)
 		}
 
@@ -276,9 +276,9 @@ var catalogComponentDeleteCmd = &cobra.Command{
 		}
 
 		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
-			Command:     "component-delete",
+			Command:     "group-delete",
 			CatalogZone: catalogName,
-			Component:   componentName,
+			Group:       groupName,
 		})
 
 		if err != nil {
@@ -297,10 +297,10 @@ var catalogComponentDeleteCmd = &cobra.Command{
 	},
 }
 
-// catalogComponentListCmd lists components in the catalog
-var catalogComponentListCmd = &cobra.Command{
+// catalogGroupListCmd lists groups in the catalog
+var catalogGroupListCmd = &cobra.Command{
 	Use:   "list --cat <catalog-zone>",
-	Short: "List components in the catalog",
+	Short: "List groups in the catalog",
 	Run: func(cmd *cobra.Command, args []string) {
 		if catalogName == "" {
 			fmt.Println("Error: --cat is required")
@@ -314,7 +314,7 @@ var catalogComponentListCmd = &cobra.Command{
 		}
 
 		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
-			Command:     "component-list",
+			Command:     "group-list",
 			CatalogZone: catalogName,
 		})
 
@@ -328,33 +328,33 @@ var catalogComponentListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		if len(resp.Components) == 0 {
-			fmt.Printf("No components defined in catalog %s\n", catalogName)
+		if len(resp.Groups) == 0 {
+			fmt.Printf("No groups defined in catalog %s\n", catalogName)
 			return
 		}
 
-		fmt.Printf("Components in catalog %s:\n", catalogName)
-		components := resp.Components
-		sort.Strings(components)
-		for _, comp := range components {
-			fmt.Printf("  %s\n", comp)
+		fmt.Printf("Groups in catalog %s:\n", catalogName)
+		groups := resp.Groups
+		sort.Strings(groups)
+		for _, grp := range groups {
+			fmt.Printf("  %s\n", grp)
 		}
 	},
 }
 
-// CatalogZoneComponentCmd is the subcommand group for zone-component associations
-var CatalogZoneComponentCmd = &cobra.Command{
-	Use:   "component",
-	Short: "Manage component associations for zones",
+// CatalogZoneGroupCmd is the subcommand group for zone-group associations
+var CatalogZoneGroupCmd = &cobra.Command{
+	Use:   "group",
+	Short: "Manage group associations for zones",
 }
 
-// catalogZoneComponentAddCmd adds a component to a zone
-var catalogZoneComponentAddCmd = &cobra.Command{
-	Use:   "add --cat <catalog-zone> --zone <zone-name> --comp <component-name>",
-	Short: "Add a component to a zone",
+// catalogZoneGroupAddCmd adds a group to a zone
+var catalogZoneGroupAddCmd = &cobra.Command{
+	Use:   "add --cat <catalog-zone> --zone <zone-name> --group <group-name>",
+	Short: "Add a group to a zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if catalogName == "" || zoneName == "" || componentName == "" {
-			fmt.Println("Error: --cat, --zone, and --comp are required")
+		if catalogName == "" || zoneName == "" || groupName == "" {
+			fmt.Println("Error: --cat, --zone, and --group are required")
 			os.Exit(1)
 		}
 
@@ -365,10 +365,10 @@ var catalogZoneComponentAddCmd = &cobra.Command{
 		}
 
 		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
-			Command:     "zone-component-add",
+			Command:     "zone-group-add",
 			CatalogZone: catalogName,
 			Zone:        zoneName,
-			Component:   componentName,
+			Group:       groupName,
 		})
 
 		if err != nil {
@@ -387,13 +387,13 @@ var catalogZoneComponentAddCmd = &cobra.Command{
 	},
 }
 
-// catalogZoneComponentDeleteCmd removes a component from a zone
-var catalogZoneComponentDeleteCmd = &cobra.Command{
-	Use:   "delete --cat <catalog-zone> --zone <zone-name> --comp <component-name>",
-	Short: "Remove a component from a zone",
+// catalogZoneGroupDeleteCmd removes a group from a zone
+var catalogZoneGroupDeleteCmd = &cobra.Command{
+	Use:   "delete --cat <catalog-zone> --zone <zone-name> --group <group-name>",
+	Short: "Remove a group from a zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		if catalogName == "" || zoneName == "" || componentName == "" {
-			fmt.Println("Error: --cat, --zone, and --comp are required")
+		if catalogName == "" || zoneName == "" || groupName == "" {
+			fmt.Println("Error: --cat, --zone, and --group are required")
 			os.Exit(1)
 		}
 
@@ -404,10 +404,10 @@ var catalogZoneComponentDeleteCmd = &cobra.Command{
 		}
 
 		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
-			Command:     "zone-component-delete",
+			Command:     "zone-group-delete",
 			CatalogZone: catalogName,
 			Zone:        zoneName,
-			Component:   componentName,
+			Group:       groupName,
 		})
 
 		if err != nil {
@@ -453,22 +453,22 @@ func init() {
 	// Root catalog command
 	CatalogCmd.AddCommand(catalogCreateCmd)
 	CatalogCmd.AddCommand(CatalogZoneCmd)
-	CatalogCmd.AddCommand(CatalogComponentCmd)
+	CatalogCmd.AddCommand(CatalogGroupCmd)
 
 	// Zone subcommands
 	CatalogZoneCmd.AddCommand(catalogZoneAddCmd)
 	CatalogZoneCmd.AddCommand(catalogZoneDeleteCmd)
 	CatalogZoneCmd.AddCommand(catalogZoneListCmd)
-	CatalogZoneCmd.AddCommand(CatalogZoneComponentCmd)
+	CatalogZoneCmd.AddCommand(CatalogZoneGroupCmd)
 
-	// Zone component subcommands
-	CatalogZoneComponentCmd.AddCommand(catalogZoneComponentAddCmd)
-	CatalogZoneComponentCmd.AddCommand(catalogZoneComponentDeleteCmd)
+	// Zone group subcommands
+	CatalogZoneGroupCmd.AddCommand(catalogZoneGroupAddCmd)
+	CatalogZoneGroupCmd.AddCommand(catalogZoneGroupDeleteCmd)
 
-	// Component subcommands
-	CatalogComponentCmd.AddCommand(catalogComponentAddCmd)
-	CatalogComponentCmd.AddCommand(catalogComponentDeleteCmd)
-	CatalogComponentCmd.AddCommand(catalogComponentListCmd)
+	// Group subcommands
+	CatalogGroupCmd.AddCommand(catalogGroupAddCmd)
+	CatalogGroupCmd.AddCommand(catalogGroupDeleteCmd)
+	CatalogGroupCmd.AddCommand(catalogGroupListCmd)
 
 	// Flags for catalog create
 	catalogCreateCmd.Flags().StringVar(&catalogName, "name", "", "Catalog zone name (required)")
@@ -482,21 +482,21 @@ func init() {
 
 	catalogZoneListCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 
-	// Flags for component operations
-	catalogComponentAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
-	catalogComponentAddCmd.Flags().StringVar(&componentName, "comp", "", "Component name (required)")
+	// Flags for group operations
+	catalogGroupAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogGroupAddCmd.Flags().StringVar(&groupName, "group", "", "Group name (required)")
 
-	catalogComponentDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
-	catalogComponentDeleteCmd.Flags().StringVar(&componentName, "comp", "", "Component name (required)")
+	catalogGroupDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogGroupDeleteCmd.Flags().StringVar(&groupName, "group", "", "Group name (required)")
 
-	catalogComponentListCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogGroupListCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 
-	// Flags for zone-component operations
-	catalogZoneComponentAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
-	catalogZoneComponentAddCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
-	catalogZoneComponentAddCmd.Flags().StringVar(&componentName, "comp", "", "Component name (required)")
+	// Flags for zone-group operations
+	catalogZoneGroupAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogZoneGroupAddCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
+	catalogZoneGroupAddCmd.Flags().StringVar(&groupName, "group", "", "Group name (required)")
 
-	catalogZoneComponentDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
-	catalogZoneComponentDeleteCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
-	catalogZoneComponentDeleteCmd.Flags().StringVar(&componentName, "comp", "", "Component name (required)")
+	catalogZoneGroupDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogZoneGroupDeleteCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
+	catalogZoneGroupDeleteCmd.Flags().StringVar(&groupName, "group", "", "Group name (required)")
 }

@@ -167,9 +167,9 @@ type DbConf struct {
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
-	Policy            CatalogPolicy                   `yaml:"policy" mapstructure:"policy"`
-	MetaComponents    map[string]*MetaComponentConfig `yaml:"meta_components" mapstructure:"meta_components"`
-	SigningComponents map[string]*SigningComponentInfo `yaml:"signing_components" mapstructure:"signing_components"`
+	Policy        CatalogPolicy              `yaml:"policy" mapstructure:"policy"`
+	MetaGroups    map[string]*MetaGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`
+	SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
 }
 
 // CatalogPolicy defines policy for how catalog zones are processed
@@ -181,8 +181,8 @@ type CatalogPolicy struct {
 	// Note: conflict_resolution is hardcoded to "manual-priority", not configurable
 }
 
-// MetaComponentConfig provides configuration for zone transfers from catalog meta components
-type MetaComponentConfig struct {
+// MetaGroupConfig provides configuration for zone transfers from catalog meta groups (RFC 9432 terminology)
+type MetaGroupConfig struct {
 	Name     string   `yaml:"-" mapstructure:"-"`          // Populated from map key
 	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
 	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
@@ -190,8 +190,8 @@ type MetaComponentConfig struct {
 	Options  []string `yaml:"options" mapstructure:"options"`
 }
 
-// SigningComponentInfo provides documentation for signing components
-type SigningComponentInfo struct {
+// SigningGroupInfo provides documentation for signing groups (RFC 9432 terminology)
+type SigningGroupInfo struct {
 	Description string `yaml:"description" mapstructure:"description"`
 }
 

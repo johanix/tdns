@@ -199,13 +199,13 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 
 	case OptCatalogZone:
 		// Hard fail: catalog zone requires valid catalog configuration
-		if conf.Catalog.MetaComponents == nil {
-			log.Fatalf("FATAL: Zone %s is configured as a catalog zone (option catalog-zone), but catalog.meta_components is missing or incorrectly structured. Please ensure your config has:\n"+
+		if conf.Catalog.MetaGroups == nil {
+			log.Fatalf("FATAL: Zone %s is configured as a catalog zone (option catalog-zone), but catalog.meta_groups is missing or incorrectly structured. Please ensure your config has:\n"+
 				"catalog:\n"+
 				"  policy:\n"+
 				"    zones:\n"+
 				"      add: auto\n"+
-				"  meta_components:  # NOTE: This must be a sibling of 'policy', not nested under it\n"+
+				"  meta_groups:  # NOTE: This must be a sibling of 'policy', not nested under it\n"+
 				"    meta_foo:\n"+
 				"      upstream: \"...\"\n"+
 				"      store: xfr", zname)

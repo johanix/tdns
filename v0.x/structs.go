@@ -105,7 +105,7 @@ type ZoneConf struct {
 	Name         string `validate:"required"`
 	Zonefile     string
 	Type         string `validate:"required"`
-	Store        string `validate:"required"` // xfr | map | slice | reg
+	Store        string // xfr | map | slice | reg (defaults to "map" if not specified)
 	Primary      string // upstream, for secondary zones
 	Notify       []string
 	Downstreams  []string

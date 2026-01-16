@@ -45,8 +45,8 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("APICatalog: command=%s catalog=%s zone=%s component=%s",
-			data.Command, data.CatalogZone, data.Zone, data.Component)
+		log.Printf("APICatalog: command=%s catalog=%s zone=%s group=%s",
+			data.Command, data.CatalogZone, data.Zone, data.Group)
 
 		switch data.Command {
 		case "create":
@@ -61,20 +61,20 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 		case "zone-list":
 			err = handleCatalogZoneList(data.CatalogZone, &resp)
 
-		case "component-add":
-			err = handleCatalogComponentAdd(data.CatalogZone, data.Component, &resp)
+		case "group-add":
+			err = handleCatalogGroupAdd(data.CatalogZone, data.Group, &resp)
 
-		case "component-delete":
-			err = handleCatalogComponentDelete(data.CatalogZone, data.Component, &resp)
+		case "group-delete":
+			err = handleCatalogGroupDelete(data.CatalogZone, data.Group, &resp)
 
-		case "component-list":
-			err = handleCatalogComponentList(data.CatalogZone, &resp)
+		case "group-list":
+			err = handleCatalogGroupList(data.CatalogZone, &resp)
 
-		case "zone-component-add":
-			err = handleCatalogZoneComponentAdd(data.CatalogZone, data.Zone, data.Component, &resp)
+		case "zone-group-add":
+			err = handleCatalogZoneGroupAdd(data.CatalogZone, data.Zone, data.Group, &resp)
 
-		case "zone-component-delete":
-			err = handleCatalogZoneComponentDelete(data.CatalogZone, data.Zone, data.Component, &resp)
+		case "zone-group-delete":
+			err = handleCatalogZoneGroupDelete(data.CatalogZone, data.Zone, data.Group, &resp)
 
 		default:
 			resp.Error = true
@@ -218,41 +218,41 @@ func handleCatalogZoneList(catalogZoneName string, resp *CatalogResponse) error 
 	return nil
 }
 
-func handleCatalogComponentAdd(catalogZoneName, component string, resp *CatalogResponse) error {
-	if catalogZoneName == "" || component == "" {
-		return fmt.Errorf("catalog zone name and component name are required")
+func handleCatalogGroupAdd(catalogZoneName, group string, resp *CatalogResponse) error {
+	if catalogZoneName == "" || group == "" {
+		return fmt.Errorf("catalog zone name and group name are required")
 	}
 
 	catalogZoneName = dns.Fqdn(catalogZoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
-	err := cm.AddComponent(component)
+	err := cm.AddGroup(group)
 	if err != nil {
 		return err
 	}
 
-	resp.Msg = fmt.Sprintf("Component %s added to catalog %s", component, catalogZoneName)
+	resp.Msg = fmt.Sprintf("Group %s added to catalog %s", group, catalogZoneName)
 	return nil
 }
 
-func handleCatalogComponentDelete(catalogZoneName, component string, resp *CatalogResponse) error {
-	if catalogZoneName == "" || component == "" {
-		return fmt.Errorf("catalog zone name and component name are required")
+func handleCatalogGroupDelete(catalogZoneName, group string, resp *CatalogResponse) error {
+	if catalogZoneName == "" || group == "" {
+		return fmt.Errorf("catalog zone name and group name are required")
 	}
 
 	catalogZoneName = dns.Fqdn(catalogZoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
-	err := cm.RemoveComponent(component)
+	err := cm.RemoveGroup(group)
 	if err != nil {
 		return err
 	}
 
-	resp.Msg = fmt.Sprintf("Component %s removed from catalog %s", component, catalogZoneName)
+	resp.Msg = fmt.Sprintf("Group %s removed from catalog %s", group, catalogZoneName)
 	return nil
 }
 
-func handleCatalogComponentList(catalogZoneName string, resp *CatalogResponse) error {
+func handleCatalogGroupList(catalogZoneName string, resp *CatalogResponse) error {
 	if catalogZoneName == "" {
 		return fmt.Errorf("catalog zone name is required")
 	}
@@ -260,20 +260,20 @@ func handleCatalogComponentList(catalogZoneName string, resp *CatalogResponse) e
 	catalogZoneName = dns.Fqdn(catalogZoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
-	resp.Components = cm.GetComponents()
+	resp.Groups = cm.GetGroups()
 	return nil
 }
 
-func handleCatalogZoneComponentAdd(catalogZoneName, zoneName, component string, resp *CatalogResponse) error {
-	if catalogZoneName == "" || zoneName == "" || component == "" {
-		return fmt.Errorf("catalog zone name, member zone name, and component name are required")
+func handleCatalogZoneGroupAdd(catalogZoneName, zoneName, group string, resp *CatalogResponse) error {
+	if catalogZoneName == "" || zoneName == "" || group == "" {
+		return fmt.Errorf("catalog zone name, member zone name, and group name are required")
 	}
 
 	catalogZoneName = dns.Fqdn(catalogZoneName)
 	zoneName = dns.Fqdn(zoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
-	err := cm.AddZoneComponent(zoneName, component)
+	err := cm.AddZoneGroup(zoneName, group)
 	if err != nil {
 		return err
 	}
@@ -284,20 +284,20 @@ func handleCatalogZoneComponentAdd(catalogZoneName, zoneName, component string, 
 		return fmt.Errorf("failed to regenerate catalog zone: %v", err)
 	}
 
-	resp.Msg = fmt.Sprintf("Component %s added to zone %s in catalog %s", component, zoneName, catalogZoneName)
+	resp.Msg = fmt.Sprintf("Group %s added to zone %s in catalog %s", group, zoneName, catalogZoneName)
 	return nil
 }
 
-func handleCatalogZoneComponentDelete(catalogZoneName, zoneName, component string, resp *CatalogResponse) error {
-	if catalogZoneName == "" || zoneName == "" || component == "" {
-		return fmt.Errorf("catalog zone name, member zone name, and component name are required")
+func handleCatalogZoneGroupDelete(catalogZoneName, zoneName, group string, resp *CatalogResponse) error {
+	if catalogZoneName == "" || zoneName == "" || group == "" {
+		return fmt.Errorf("catalog zone name, member zone name, and group name are required")
 	}
 
 	catalogZoneName = dns.Fqdn(catalogZoneName)
 	zoneName = dns.Fqdn(zoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
-	err := cm.RemoveZoneComponent(zoneName, component)
+	err := cm.RemoveZoneGroup(zoneName, group)
 	if err != nil {
 		return err
 	}
@@ -308,7 +308,7 @@ func handleCatalogZoneComponentDelete(catalogZoneName, zoneName, component strin
 		return fmt.Errorf("failed to regenerate catalog zone: %v", err)
 	}
 
-	resp.Msg = fmt.Sprintf("Component %s removed from zone %s in catalog %s", component, zoneName, catalogZoneName)
+	resp.Msg = fmt.Sprintf("Group %s removed from zone %s in catalog %s", group, zoneName, catalogZoneName)
 	return nil
 }
 
@@ -365,18 +365,18 @@ func regenerateCatalogZone(catalogZoneName string) error {
 		ownerData.RRtypes.Set(dns.TypePTR, ptrRRset)
 		zd.Data.Set(ownerName, ownerData)
 
-		// TXT record for groups: group.{uniqueid}.zones.{catalog} with all components
-		if len(member.Components) > 0 {
+		// TXT record for groups: group.{uniqueid}.zones.{catalog} with all groups
+		if len(member.Groups) > 0 {
 			groupOwnerName := fmt.Sprintf("group.%s.zones.%s", member.Hash, catalogZoneName)
 
-			// Create TXT record with all components as strings
-			// Format: "component1" "component2" "component3" ...
-			txtStrings := make([]string, len(member.Components))
-			for i, comp := range member.Components {
-				txtStrings[i] = comp
+			// Create TXT record with all groups as strings
+			// Format: "group1" "group2" "group3" ...
+			txtStrings := make([]string, len(member.Groups))
+			for i, grp := range member.Groups {
+				txtStrings[i] = grp
 			}
 
-			// Create TXT RR with all component strings
+			// Create TXT RR with all group strings
 			txtRR := &dns.TXT{
 				Hdr: dns.RR_Header{
 					Name:   groupOwnerName,

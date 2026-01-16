@@ -18,12 +18,12 @@ import (
 
 // MemberZone represents a zone discovered in a catalog zone
 type MemberZone struct {
-	ZoneName          string    `json:"zone_name"`
-	Hash              string    `json:"hash"`
-	ServiceComponents []string  `json:"service_components"`
-	SigningComponent  string    `json:"signing_component"`
-	MetaComponent     string    `json:"meta_component"`
-	DiscoveredAt      time.Time `json:"discovered_at"`
+	ZoneName      string    `json:"zone_name"`
+	Hash          string    `json:"hash"`
+	ServiceGroups []string  `json:"service_groups"` // Groups associated with this zone (RFC 9432 terminology)
+	SigningGroup  string    `json:"signing_group"`  // Signing group for this zone
+	MetaGroup     string    `json:"meta_group"`     // Meta group for this zone
+	DiscoveredAt  time.Time `json:"discovered_at"`
 }
 
 // CatalogZoneUpdate contains information about catalog zone changes
@@ -114,7 +114,7 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 			}
 		}
 
-		// Process group.{hash}.zones.{catalog-zone}. records (TXT records with components)
+		// Process group.{hash}.zones.{catalog-zone}. records (TXT records with groups)
 		if strings.HasPrefix(ownerName, "group.") && strings.HasSuffix(ownerName, zoneSuffix) {
 			// Extract hash from owner name
 			// Format: group.{hash}.zones.{catalog-zone}.
@@ -124,14 +124,14 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 			}
 			hash := parts[1] // hash is the second part after "group"
 
-			// Get TXT records for this owner (should contain component names)
+			// Get TXT records for this owner (should contain group names)
 			txtRRset := ownerData.RRtypes.GetOnlyRRSet(dns.TypeTXT)
 			if len(txtRRset.RRs) == 0 {
 				log.Printf("CATALOG: ParseCatalogZone: Warning: group.%s has no TXT record, skipping", hash)
 				continue
 			}
 
-			// Process TXT records (each string is a component name)
+			// Process TXT records (each string is a group name)
 			for _, rr := range txtRRset.RRs {
 				txt, ok := rr.(*dns.TXT)
 				if !ok {
@@ -141,9 +141,9 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 				if memberMap[hash] == nil {
 					memberMap[hash] = &memberInfo{}
 				}
-				// TXT record contains multiple strings, each is a component
+				// TXT record contains multiple strings, each is a group
 				memberMap[hash].groups = append(memberMap[hash].groups, txt.Txt...)
-				log.Printf("CATALOG: ParseCatalogZone: Found components for hash %s: %v", hash, txt.Txt)
+				log.Printf("CATALOG: ParseCatalogZone: Found groups for hash %s: %v", hash, txt.Txt)
 			}
 		}
 	}
@@ -159,44 +159,44 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 		}
 
 		// Categorize groups by prefix
-		var serviceComponents []string
-		var signingComponent string
-		var metaComponent string
+		var serviceGroups []string
+		var signingGroup string
+		var metaGroup string
 
 		for _, group := range info.groups {
 			if strings.HasPrefix(group, "sign_") {
-				if signingComponent != "" {
-					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing components (%s, %s), using first",
-						info.zoneName, signingComponent, group)
+				if signingGroup != "" {
+					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing groups (%s, %s), using first",
+						info.zoneName, signingGroup, group)
 				} else {
-					signingComponent = group
+					signingGroup = group
 				}
 			} else if strings.HasPrefix(group, "meta_") {
-				if metaComponent != "" {
-					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple meta components (%s, %s), using first",
-						info.zoneName, metaComponent, group)
+				if metaGroup != "" {
+					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple meta groups (%s, %s), using first",
+						info.zoneName, metaGroup, group)
 				} else {
-					metaComponent = group
+					metaGroup = group
 				}
 			} else {
-				// Service component (no specific prefix)
-				serviceComponents = append(serviceComponents, group)
+				// Service group (no specific prefix)
+				serviceGroups = append(serviceGroups, group)
 			}
 		}
 
-		// Log warning if no meta component (needed for auto-configuration)
-		if metaComponent == "" {
-			log.Printf("ParseCatalogZone: Info: Zone %s has no meta component, auto-configuration not possible",
+		// Log warning if no meta group (needed for auto-configuration)
+		if metaGroup == "" {
+			log.Printf("ParseCatalogZone: Info: Zone %s has no meta group, auto-configuration not possible",
 				info.zoneName)
 		}
 
 		memberZones[info.zoneName] = &MemberZone{
-			ZoneName:          info.zoneName,
-			Hash:              hash,
-			ServiceComponents: serviceComponents,
-			SigningComponent:  signingComponent,
-			MetaComponent:     metaComponent,
-			DiscoveredAt:      now,
+			ZoneName:     info.zoneName,
+			Hash:         hash,
+			ServiceGroups: serviceGroups,
+			SigningGroup:  signingGroup,
+			MetaGroup:     metaGroup,
+			DiscoveredAt:  now,
 		}
 	}
 
@@ -213,7 +213,7 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 	// Log details about each member zone
 	for zoneName, member := range memberZones {
 		log.Printf("CATALOG: ParseCatalogZone: Member zone %s - services: %v, signing: %s, meta: %s",
-			zoneName, member.ServiceComponents, member.SigningComponent, member.MetaComponent)
+			zoneName, member.ServiceGroups, member.SigningGroup, member.MetaGroup)
 	}
 
 	return update, nil
@@ -236,18 +236,69 @@ func NotifyCatalogZoneUpdate(update *CatalogZoneUpdate) error {
 	return nil
 }
 
-// AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta components
+// AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta groups
 func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) error {
 	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Starting for catalog %s with %d member zones", update.CatalogZone, len(update.MemberZones))
 	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Policy check - catalog.policy.zones.add=%q", conf.Catalog.Policy.Zones.Add)
 	
-	if conf.Catalog.Policy.Zones.Add != "auto" {
+	// Get catalog zone's ZoneData for error reporting
+	catalogZd, catalogExists := Zones.Get(update.CatalogZone)
+	if !catalogExists {
+		log.Printf("CATALOG: Warning: Catalog zone %s not found in Zones map", update.CatalogZone)
+	}
+	
+	autoConfigureEnabled := conf.Catalog.Policy.Zones.Add == "auto"
+	
+	// VALIDATION: Check all member zones for configuration errors (applies regardless of policy)
+	errorCount := 0
+	for zoneName, member := range update.MemberZones {
+		// VALIDATION (a): Check if zone references a group that doesn't exist in config
+		// This validation applies regardless of auto-config policy
+		if member.MetaGroup != "" {
+			metaConfig, exists := conf.Catalog.MetaGroups[member.MetaGroup]
+			if !exists {
+				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which does not exist in local config. Available groups: %v",
+					zoneName, update.CatalogZone, member.MetaGroup, getMetaGroupNames(conf.Catalog.MetaGroups))
+				log.Printf("CATALOG: ERROR: %s", errorMsg)
+				if catalogExists {
+					catalogZd.SetError(ConfigError, errorMsg)
+					catalogZd.LatestError = time.Now()
+				}
+				errorCount++
+				continue
+			}
+			
+			// VALIDATION (b): Check if group config is insufficient for auto-configuration
+			// This validation only applies when auto-config is enabled
+			// Note: store defaults to "map" if not specified, so only upstream is required
+			if autoConfigureEnabled && metaConfig.Upstream == "" {
+				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which is missing required field for auto-configuration (upstream: %q). 'upstream' is required when catalog.policy.zones.add=auto",
+					zoneName, update.CatalogZone, member.MetaGroup, metaConfig.Upstream)
+				log.Printf("CATALOG: ERROR: %s", errorMsg)
+				if catalogExists {
+					catalogZd.SetError(ConfigError, errorMsg)
+					catalogZd.LatestError = time.Now()
+				}
+				errorCount++
+				continue
+			}
+		}
+	}
+	
+	if !autoConfigureEnabled {
 		log.Printf("CATALOG: Auto-configure disabled by policy (catalog.policy.zones.add=%q, expected \"auto\"), catalog provides metadata only. %d member zones will not be auto-configured.", conf.Catalog.Policy.Zones.Add, len(update.MemberZones))
+		// Clear error state if no validation errors were found (validation still runs to catch missing groups)
+		if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
+			if strings.Contains(catalogZd.ErrorMsg, "Member zone") || strings.Contains(catalogZd.ErrorMsg, "references group") {
+				log.Printf("CATALOG: All catalog zone member zone configurations are now valid, clearing previous error state")
+				catalogZd.SetError(NoError, "")
+			}
+		}
 		return nil
 	}
 
 	log.Printf("CATALOG: Auto-configure enabled, processing %d member zones from catalog %s", len(update.MemberZones), update.CatalogZone)
-	log.Printf("CATALOG: Available meta_components in config: %v", getMetaComponentNames(conf.Catalog.MetaComponents))
+	log.Printf("CATALOG: Available meta_groups in config: %v", getMetaGroupNames(conf.Catalog.MetaGroups))
 
 	processedCount := 0
 	skippedCount := 0
@@ -255,40 +306,56 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
 
 	for zoneName, member := range update.MemberZones {
 		log.Printf("CATALOG: Processing member zone %s (services: %v, signing: %s, meta: %s)", 
-			zoneName, member.ServiceComponents, member.SigningComponent, member.MetaComponent)
+			zoneName, member.ServiceGroups, member.SigningGroup, member.MetaGroup)
 		
 		// RULE 1: Manual config ALWAYS wins (hardcoded behavior)
 		if _, exists := Zones.Get(zoneName); exists {
 			log.Printf("CATALOG: Zone %s manually configured, ignoring catalog entry (services: %v, meta: %s)",
-				zoneName, member.ServiceComponents, member.MetaComponent)
+				zoneName, member.ServiceGroups, member.MetaGroup)
 			skippedCount++
 			continue
 		}
 
-		// RULE 2: Meta component is required for auto-configuration
-		if member.MetaComponent == "" {
-			log.Printf("CATALOG: Zone %s has no meta component, cannot auto-configure", zoneName)
+		// RULE 2: Meta group is required for auto-configuration
+		if member.MetaGroup == "" {
+			log.Printf("CATALOG: Zone %s has no meta group, cannot auto-configure", zoneName)
 			skippedCount++
 			continue
 		}
 
-		// RULE 3: Find meta component config
-		metaConfig, exists := conf.Catalog.MetaComponents[member.MetaComponent]
+		// Get meta group config (already validated above, but check again for safety)
+		metaConfig, exists := conf.Catalog.MetaGroups[member.MetaGroup]
 		if !exists {
-			log.Printf("CATALOG: Zone %s meta component '%s' not found in config, cannot auto-configure. Available components: %v",
-				zoneName, member.MetaComponent, getMetaComponentNames(conf.Catalog.MetaComponents))
+			// Should not happen if validation above worked, but skip just in case
+			log.Printf("CATALOG: Zone %s meta group '%s' not found in config, skipping. Available groups: %v",
+				zoneName, member.MetaGroup, getMetaGroupNames(conf.Catalog.MetaGroups))
+			skippedCount++
+			continue
+		}
+		
+		// Check if config is sufficient (already validated above, but check again for safety)
+		// Note: store defaults to "map" if not specified, so only upstream is required
+		if metaConfig.Upstream == "" {
+			log.Printf("CATALOG: Zone %s meta group '%s' is missing required field (upstream: %q), skipping",
+				zoneName, member.MetaGroup, metaConfig.Upstream)
 			skippedCount++
 			continue
 		}
 
-		// RULE 4: Auto-configure zone using meta component
-		log.Printf("CATALOG: Auto-configuring zone %s using meta component '%s' (upstream: %s, store: %s)",
-			zoneName, member.MetaComponent, metaConfig.Upstream, metaConfig.Store)
+		// Determine store value (default to "map" if not specified)
+		storeValue := metaConfig.Store
+		if storeValue == "" {
+			storeValue = "map"
+		}
+
+		// RULE 4: Auto-configure zone using meta group
+		log.Printf("CATALOG: Auto-configuring zone %s using meta group '%s' (upstream: %s, store: %s)",
+			zoneName, member.MetaGroup, metaConfig.Upstream, storeValue)
 
 		zd := &ZoneData{
 			ZoneName:      zoneName,
 			ZoneType:      Secondary,
-			ZoneStore:     parseZoneStore(metaConfig.Store),
+			ZoneStore:     parseZoneStore(storeValue),
 			Upstream:      metaConfig.Upstream,
 			Logger:        log.Default(),
 			SourceCatalog: update.CatalogZone,
@@ -297,7 +364,7 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
 			},
 		}
 
-		// Apply zone options from meta component
+		// Apply zone options from meta group
 		for _, optStr := range metaConfig.Options {
 			if opt, exists := StringToZoneOption[optStr]; exists {
 				zd.Options[opt] = true
@@ -332,40 +399,55 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
 		}
 
 		log.Printf("CATALOG: Zone %s auto-configured successfully (meta: %s, signing: %s, services: %v)",
-			zoneName, member.MetaComponent, member.SigningComponent, member.ServiceComponents)
+			zoneName, member.MetaGroup, member.SigningGroup, member.ServiceGroups)
 		configuredCount++
 		processedCount++
 	}
 
-	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Completed. Processed: %d, Configured: %d, Skipped: %d", 
-		processedCount, configuredCount, skippedCount)
+	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Completed. Processed: %d, Configured: %d, Skipped: %d, Errors: %d", 
+		processedCount, configuredCount, skippedCount, errorCount)
+	
+	// Clear error state if no errors were found and zone was previously in error
+	if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
+		// Check if the error was catalog-related (contains "Member zone" or "references group")
+		if strings.Contains(catalogZd.ErrorMsg, "Member zone") || strings.Contains(catalogZd.ErrorMsg, "references group") {
+			log.Printf("CATALOG: All catalog zone member zone configurations are now valid, clearing previous error state")
+			catalogZd.SetError(NoError, "")
+		}
+	}
+	
 	return nil
 }
 
-// getMetaComponentNames returns a list of meta component names for logging
-func getMetaComponentNames(metaComponents map[string]*MetaComponentConfig) []string {
-	if metaComponents == nil {
+// getMetaGroupNames returns a list of meta group names for logging
+func getMetaGroupNames(metaGroups map[string]*MetaGroupConfig) []string {
+	if metaGroups == nil {
 		return []string{}
 	}
-	names := make([]string, 0, len(metaComponents))
-	for name := range metaComponents {
+	names := make([]string, 0, len(metaGroups))
+	for name := range metaGroups {
 		names = append(names, name)
 	}
 	return names
 }
 
 // parseZoneStore converts a zone store string to ZoneStore type
+// Defaults to MapZone if empty or unknown (matching parseconfig.go behavior)
 func parseZoneStore(storeStr string) ZoneStore {
-	switch strings.ToLower(storeStr) {
+	storeStr = strings.ToLower(strings.TrimSpace(storeStr))
+	switch storeStr {
 	case "xfr":
 		return XfrZone
 	case "map":
 		return MapZone
 	case "slice":
 		return SliceZone
+	case "":
+		// Default to map when not specified
+		return MapZone
 	default:
-		log.Printf("Unknown zone store type %q, defaulting to xfr", storeStr)
-		return XfrZone
+		log.Printf("Unknown zone store type %q, defaulting to map", storeStr)
+		return MapZone
 	}
 }
 
@@ -373,17 +455,17 @@ func parseZoneStore(storeStr string) ZoneStore {
 
 // CatalogMembership manages the membership data for a catalog zone
 type CatalogMembership struct {
-	mu               sync.RWMutex
-	CatalogZoneName  string
-	MemberZones      map[string]*CatalogMemberZone // zonename -> member data
-	AvailableComponents []string                   // List of all defined components
+	mu              sync.RWMutex
+	CatalogZoneName string
+	MemberZones     map[string]*CatalogMemberZone // zonename -> member data
+	AvailableGroups []string                       // List of all defined groups (RFC 9432 terminology)
 }
 
 // CatalogMemberZone represents a member zone in the catalog
 type CatalogMemberZone struct {
-	ZoneName   string
-	Hash       string   // SHA256 hash of zone name (first 16 chars)
-	Components []string // List of component names associated with this zone
+	ZoneName string
+	Hash     string   // SHA256 hash of zone name (first 16 chars)
+	Groups   []string // List of group names associated with this zone (RFC 9432 terminology)
 }
 
 var (
@@ -401,9 +483,9 @@ func GetOrCreateCatalogMembership(catalogZoneName string) *CatalogMembership {
 	}
 
 	cm := &CatalogMembership{
-		CatalogZoneName:     catalogZoneName,
-		MemberZones:         make(map[string]*CatalogMemberZone),
-		AvailableComponents: []string{},
+		CatalogZoneName: catalogZoneName,
+		MemberZones:     make(map[string]*CatalogMemberZone),
+		AvailableGroups: []string{},
 	}
 	catalogMemberships[catalogZoneName] = cm
 	return cm
@@ -419,9 +501,9 @@ func (cm *CatalogMembership) AddMemberZone(zoneName string) error {
 	}
 
 	cm.MemberZones[zoneName] = &CatalogMemberZone{
-		ZoneName:   zoneName,
-		Hash:       generateZoneHash(zoneName),
-		Components: []string{},
+		ZoneName: zoneName,
+		Hash:     generateZoneHash(zoneName),
+		Groups:   []string{},
 	}
 
 	log.Printf("CATALOG: Added zone %s to catalog %s (hash: %s)", zoneName, cm.CatalogZoneName, cm.MemberZones[zoneName].Hash)
@@ -442,49 +524,49 @@ func (cm *CatalogMembership) RemoveMemberZone(zoneName string) error {
 	return nil
 }
 
-// AddComponent adds a component to the available components list
-func (cm *CatalogMembership) AddComponent(component string) error {
+// AddGroup adds a group to the available groups list
+func (cm *CatalogMembership) AddGroup(group string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
 	// Check if already exists
-	for _, c := range cm.AvailableComponents {
-		if c == component {
-			return fmt.Errorf("component %s already exists in catalog %s", component, cm.CatalogZoneName)
+	for _, g := range cm.AvailableGroups {
+		if g == group {
+			return fmt.Errorf("group %s already exists in catalog %s", group, cm.CatalogZoneName)
 		}
 	}
 
-	cm.AvailableComponents = append(cm.AvailableComponents, component)
-	log.Printf("CATALOG: Added component %s to catalog %s", component, cm.CatalogZoneName)
+	cm.AvailableGroups = append(cm.AvailableGroups, group)
+	log.Printf("CATALOG: Added group %s to catalog %s", group, cm.CatalogZoneName)
 	return nil
 }
 
-// RemoveComponent removes a component from the available components list
-func (cm *CatalogMembership) RemoveComponent(component string) error {
+// RemoveGroup removes a group from the available groups list
+func (cm *CatalogMembership) RemoveGroup(group string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
 	found := false
-	newComponents := []string{}
-	for _, c := range cm.AvailableComponents {
-		if c != component {
-			newComponents = append(newComponents, c)
+	newGroups := []string{}
+	for _, g := range cm.AvailableGroups {
+		if g != group {
+			newGroups = append(newGroups, g)
 		} else {
 			found = true
 		}
 	}
 
 	if !found {
-		return fmt.Errorf("component %s not found in catalog %s", component, cm.CatalogZoneName)
+		return fmt.Errorf("group %s not found in catalog %s", group, cm.CatalogZoneName)
 	}
 
-	cm.AvailableComponents = newComponents
-	log.Printf("CATALOG: Removed component %s from catalog %s", component, cm.CatalogZoneName)
+	cm.AvailableGroups = newGroups
+	log.Printf("CATALOG: Removed group %s from catalog %s", group, cm.CatalogZoneName)
 	return nil
 }
 
-// AddZoneComponent associates a component with a zone
-func (cm *CatalogMembership) AddZoneComponent(zoneName, component string) error {
+// AddZoneGroup associates a group with a zone
+func (cm *CatalogMembership) AddZoneGroup(zoneName, group string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -493,47 +575,47 @@ func (cm *CatalogMembership) AddZoneComponent(zoneName, component string) error 
 		return fmt.Errorf("zone %s not found in catalog %s", zoneName, cm.CatalogZoneName)
 	}
 
-	// Check if component exists in catalog's available components
-	componentExists := false
-	for _, c := range cm.AvailableComponents {
-		if c == component {
-			componentExists = true
+	// Check if group exists in catalog's available groups
+	groupExists := false
+	for _, g := range cm.AvailableGroups {
+		if g == group {
+			groupExists = true
 			break
 		}
 	}
-	if !componentExists {
-		return fmt.Errorf("component %s is not defined in catalog %s. Add it to the catalog first using 'catalog component add'", component, cm.CatalogZoneName)
+	if !groupExists {
+		return fmt.Errorf("group %s is not defined in catalog %s. Add it to the catalog first using 'catalog group add'", group, cm.CatalogZoneName)
 	}
 
-	// Check if component already associated with this zone (exact duplicate)
-	for _, c := range member.Components {
-		if c == component {
-			return fmt.Errorf("Component %s is already added to zone %s", component, zoneName)
+	// Check if group already associated with this zone (exact duplicate)
+	for _, g := range member.Groups {
+		if g == group {
+			return fmt.Errorf("Group %s is already added to zone %s", group, zoneName)
 		}
 	}
 
-	// Check for meta_ and sign_ component uniqueness (different component of same type)
-	if strings.HasPrefix(component, "meta_") {
-		for _, c := range member.Components {
-			if strings.HasPrefix(c, "meta_") {
-				return fmt.Errorf("Only one meta component allowed for %s (zone already has component %s)", zoneName, c)
+	// Check for meta_ and sign_ group uniqueness (different group of same type)
+	if strings.HasPrefix(group, "meta_") {
+		for _, g := range member.Groups {
+			if strings.HasPrefix(g, "meta_") {
+				return fmt.Errorf("Only one meta group allowed for %s (zone already has group %s)", zoneName, g)
 			}
 		}
-	} else if strings.HasPrefix(component, "sign_") {
-		for _, c := range member.Components {
-			if strings.HasPrefix(c, "sign_") {
-				return fmt.Errorf("Only one sign component allowed for %s (zone already has component %s)", zoneName, c)
+	} else if strings.HasPrefix(group, "sign_") {
+		for _, g := range member.Groups {
+			if strings.HasPrefix(g, "sign_") {
+				return fmt.Errorf("Only one sign group allowed for %s (zone already has group %s)", zoneName, g)
 			}
 		}
 	}
 
-	member.Components = append(member.Components, component)
-	log.Printf("CATALOG: Added component %s to zone %s in catalog %s", component, zoneName, cm.CatalogZoneName)
+	member.Groups = append(member.Groups, group)
+	log.Printf("CATALOG: Added group %s to zone %s in catalog %s", group, zoneName, cm.CatalogZoneName)
 	return nil
 }
 
-// RemoveZoneComponent disassociates a component from a zone
-func (cm *CatalogMembership) RemoveZoneComponent(zoneName, component string) error {
+// RemoveZoneGroup disassociates a group from a zone
+func (cm *CatalogMembership) RemoveZoneGroup(zoneName, group string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -543,21 +625,21 @@ func (cm *CatalogMembership) RemoveZoneComponent(zoneName, component string) err
 	}
 
 	found := false
-	newComponents := []string{}
-	for _, c := range member.Components {
-		if c != component {
-			newComponents = append(newComponents, c)
+	newGroups := []string{}
+	for _, g := range member.Groups {
+		if g != group {
+			newGroups = append(newGroups, g)
 		} else {
 			found = true
 		}
 	}
 
 	if !found {
-		return fmt.Errorf("component %s not associated with zone %s", component, zoneName)
+		return fmt.Errorf("group %s not associated with zone %s", group, zoneName)
 	}
 
-	member.Components = newComponents
-	log.Printf("CATALOG: Removed component %s from zone %s in catalog %s", component, zoneName, cm.CatalogZoneName)
+	member.Groups = newGroups
+	log.Printf("CATALOG: Removed group %s from zone %s in catalog %s", group, zoneName, cm.CatalogZoneName)
 	return nil
 }
 
@@ -568,45 +650,45 @@ func (cm *CatalogMembership) GetMemberZones() map[string]*MemberZone {
 
 	result := make(map[string]*MemberZone)
 	for zoneName, member := range cm.MemberZones {
-		// Categorize components by type
-		var serviceComponents []string
-		var signingComponent string
-		var metaComponent string
+		// Categorize groups by type
+		var serviceGroups []string
+		var signingGroup string
+		var metaGroup string
 
-		for _, comp := range member.Components {
-			if strings.HasPrefix(comp, "sign_") {
-				if signingComponent == "" {
-					signingComponent = comp
+		for _, grp := range member.Groups {
+			if strings.HasPrefix(grp, "sign_") {
+				if signingGroup == "" {
+					signingGroup = grp
 				}
-			} else if strings.HasPrefix(comp, "meta_") {
-				if metaComponent == "" {
-					metaComponent = comp
+			} else if strings.HasPrefix(grp, "meta_") {
+				if metaGroup == "" {
+					metaGroup = grp
 				}
 			} else {
-				serviceComponents = append(serviceComponents, comp)
+				serviceGroups = append(serviceGroups, grp)
 			}
 		}
 
 		result[zoneName] = &MemberZone{
-			ZoneName:          zoneName,
-			Hash:              member.Hash,
-			ServiceComponents: serviceComponents,
-			SigningComponent:  signingComponent,
-			MetaComponent:     metaComponent,
-			DiscoveredAt:      time.Now(),
+			ZoneName:     zoneName,
+			Hash:         member.Hash,
+			ServiceGroups: serviceGroups,
+			SigningGroup:  signingGroup,
+			MetaGroup:     metaGroup,
+			DiscoveredAt:  time.Now(),
 		}
 	}
 
 	return result
 }
 
-// GetComponents returns all available components (thread-safe copy)
-func (cm *CatalogMembership) GetComponents() []string {
+// GetGroups returns all available groups (thread-safe copy)
+func (cm *CatalogMembership) GetGroups() []string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	result := make([]string, len(cm.AvailableComponents))
-	copy(result, cm.AvailableComponents)
+	result := make([]string, len(cm.AvailableGroups))
+	copy(result, cm.AvailableGroups)
 	return result
 }
 
