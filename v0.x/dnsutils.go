@@ -86,6 +86,41 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	return soa.Serial, nil
 }
 
+// estimateRRSize estimates the size of a single RR by packing it individually
+// This gives us an approximate size without packing the entire message
+func estimateRRSize(rr dns.RR) int {
+	msg := new(dns.Msg)
+	msg.Answer = []dns.RR{rr}
+	packed, err := msg.Pack()
+	if err != nil {
+		// Conservative fallback estimate
+		return 200 // Overestimate to be safe
+	}
+	// Subtract DNS message header size (~12 bytes) to get just the RR size
+	// This is approximate but good enough for our purposes
+	if len(packed) > 12 {
+		return len(packed) - 12
+	}
+	return len(packed)
+}
+
+// estimateEnvelopeSize estimates the size of a DNS envelope by serializing it
+// This is used for accurate checks when we're close to the limit
+func estimateEnvelopeSize(rrs []dns.RR) int {
+	if len(rrs) == 0 {
+		return 0
+	}
+	// Build a test message with the RRs to estimate size
+	msg := new(dns.Msg)
+	msg.Answer = rrs
+	packed, err := msg.Pack()
+	if err != nil {
+		// If packing fails, return a conservative estimate
+		return len(rrs) * 100 // Rough estimate: ~100 bytes per RR
+	}
+	return len(packed)
+}
+
 func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	zone := dns.Fqdn(zd.ZoneName)
 
@@ -112,14 +147,28 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 
 	total_sent := 0
 	count := 0
+	batchNum := 1 // Track batch number for debug output
+	estimatedSize := 0 // Running estimate of message size
+	const maxMessageSize = 60000 // Practical limit we target (theoretical DNS max is 65536 bytes / 64K)
+	// We may overshoot maxMessageSize by up to ~1000 bytes in practice, but that's still safely below 65536
+	const safeMessageSize = 59000 // Conservative threshold to avoid "message too large" errors (leaves headroom for DNS header/overhead and compression variations)
+	const theoreticalMaxSize = 65536 // True theoretical maximum DNS message size (64K)
+	const checkSizeInterval = 50  // Check actual size every N RRs to verify estimate accuracy
+	const accurateCheckThreshold = 55000 // When estimated size exceeds this, do accurate checks more frequently
 	// env := dns.Envelope{}
 	rrs := []dns.RR{soa}
+	// Estimate size of initial SOA
+	estimatedSize += estimateRRSize(soa)
 
 	// SOA
 	// env.RR = append(env.RR, soa)
 	// XXX: If we change the SOA serial we must also recompute the RRSIG.
 	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-	rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
+	soaRRSIGs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs
+	rrs = append(rrs, soaRRSIGs...)
+	for _, sig := range soaRRSIGs {
+		estimatedSize += estimateRRSize(sig)
+	}
 	if Globals.Debug {
 		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
 	}
@@ -128,12 +177,19 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	for _, rrt := range apex.RRtypes.Keys() {
 		if rrt != dns.TypeSOA {
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRs...)
+			rrset := apex.RRtypes.GetOnlyRRSet(rrt)
+			rrs = append(rrs, rrset.RRs...)
+			for _, rr := range rrset.RRs {
+				estimatedSize += estimateRRSize(rr)
+			}
 			if Globals.Debug {
 				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
 			}
 			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			rrs = append(rrs, apex.RRtypes.GetOnlyRRSet(rrt).RRSIGs...)
+			rrs = append(rrs, rrset.RRSIGs...)
+			for _, sig := range rrset.RRSIGs {
+				estimatedSize += estimateRRSize(sig)
+			}
 		}
 	}
 	count = len(rrs)
@@ -147,6 +203,44 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrt := range owner.RRtypes.Keys() {
 				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
+				
+				// Estimate size of new RRs before adding
+				newRRSize := 0
+				for _, rr := range rrl.RRs {
+					newRRSize += estimateRRSize(rr)
+				}
+				for _, sig := range rrl.RRSIGs {
+					newRRSize += estimateRRSize(sig)
+				}
+				
+				// Check if adding this RRset would exceed limit (using running estimate)
+				// Do accurate check periodically or when estimate suggests we're close
+				if estimatedSize+newRRSize >= safeMessageSize || 
+				   (estimatedSize >= accurateCheckThreshold && len(rrs)%checkSizeInterval == 0) {
+					// Do an accurate size check before deciding
+					actualSize := estimateEnvelopeSize(rrs)
+					if actualSize >= safeMessageSize {
+						// Send current batch before adding more
+						total_sent += count
+						if zd.Verbose || Globals.Debug {
+							efficiency := float64(actualSize) / float64(safeMessageSize) * 100.0
+							maxEfficiency := float64(actualSize) / float64(maxMessageSize) * 100.0
+							theoreticalEfficiency := float64(actualSize) / float64(theoreticalMaxSize) * 100.0
+							zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d, efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max)",
+								zd.ZoneName, batchNum, count, actualSize, estimatedSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize)
+						}
+						outbound_xfr <- &dns.Envelope{RR: rrs}
+						rrs = []dns.RR{}
+						count = 0
+						estimatedSize = 0
+						batchNum++
+					} else {
+						// Update estimate with accurate measurement
+						estimatedSize = actualSize
+					}
+				}
+				
+				// Now add the RRset
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
 					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
@@ -154,12 +248,29 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
-
-				if count >= 400 {
-					total_sent += count
-					outbound_xfr <- &dns.Envelope{RR: rrs}
-					rrs = []dns.RR{}
-					count = 0
+				estimatedSize += newRRSize
+				
+				// Periodic accurate check to verify estimate accuracy
+				if len(rrs)%checkSizeInterval == 0 && estimatedSize >= accurateCheckThreshold {
+					actualSize := estimateEnvelopeSize(rrs)
+					if actualSize >= safeMessageSize {
+						total_sent += count
+						if zd.Verbose || Globals.Debug {
+							efficiency := float64(actualSize) / float64(safeMessageSize) * 100.0
+							maxEfficiency := float64(actualSize) / float64(maxMessageSize) * 100.0
+							theoreticalEfficiency := float64(actualSize) / float64(theoreticalMaxSize) * 100.0
+							zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d, efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max)",
+								zd.ZoneName, batchNum, count, actualSize, estimatedSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize)
+						}
+						outbound_xfr <- &dns.Envelope{RR: rrs}
+						rrs = []dns.RR{}
+						count = 0
+						estimatedSize = 0
+						batchNum++
+					} else {
+						// Adjust estimate based on actual measurement
+						estimatedSize = actualSize
+					}
 				}
 			}
 		}
@@ -173,6 +284,44 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrt := range omap.RRtypes.Keys() {
 				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
+				
+				// Estimate size of new RRs before adding
+				newRRSize := 0
+				for _, rr := range rrl.RRs {
+					newRRSize += estimateRRSize(rr)
+				}
+				for _, sig := range rrl.RRSIGs {
+					newRRSize += estimateRRSize(sig)
+				}
+				
+				// Check if adding this RRset would exceed limit (using running estimate)
+				// Do accurate check periodically or when estimate suggests we're close
+				if estimatedSize+newRRSize >= safeMessageSize || 
+				   (estimatedSize >= accurateCheckThreshold && len(rrs)%checkSizeInterval == 0) {
+					// Do an accurate size check before deciding
+					actualSize := estimateEnvelopeSize(rrs)
+					if actualSize >= safeMessageSize {
+						// Send current batch before adding more
+						total_sent += count
+						if zd.Verbose || Globals.Debug {
+							efficiency := float64(actualSize) / float64(safeMessageSize) * 100.0
+							maxEfficiency := float64(actualSize) / float64(maxMessageSize) * 100.0
+							theoreticalEfficiency := float64(actualSize) / float64(theoreticalMaxSize) * 100.0
+							zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d, efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max)",
+								zd.ZoneName, batchNum, count, actualSize, estimatedSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize)
+						}
+						outbound_xfr <- &dns.Envelope{RR: rrs}
+						rrs = []dns.RR{}
+						count = 0
+						estimatedSize = 0
+						batchNum++
+					} else {
+						// Update estimate with accurate measurement
+						estimatedSize = actualSize
+					}
+				}
+				
+				// Now add the RRset
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
 					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
@@ -180,12 +329,29 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				count += len(rrl.RRs)
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
-
-				if count >= 400 {
-					total_sent += count
-					outbound_xfr <- &dns.Envelope{RR: rrs}
-					rrs = []dns.RR{}
-					count = 0
+				estimatedSize += newRRSize
+				
+				// Periodic accurate check to verify estimate accuracy
+				if len(rrs)%checkSizeInterval == 0 && estimatedSize >= accurateCheckThreshold {
+					actualSize := estimateEnvelopeSize(rrs)
+					if actualSize >= safeMessageSize {
+						total_sent += count
+						if zd.Verbose || Globals.Debug {
+							efficiency := float64(actualSize) / float64(safeMessageSize) * 100.0
+							maxEfficiency := float64(actualSize) / float64(maxMessageSize) * 100.0
+							theoreticalEfficiency := float64(actualSize) / float64(theoreticalMaxSize) * 100.0
+							zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d, efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max)",
+								zd.ZoneName, batchNum, count, actualSize, estimatedSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize)
+						}
+						outbound_xfr <- &dns.Envelope{RR: rrs}
+						rrs = []dns.RR{}
+						count = 0
+						estimatedSize = 0
+						batchNum++
+					} else {
+						// Adjust estimate based on actual measurement
+						estimatedSize = actualSize
+					}
 				}
 			}
 		}
@@ -202,8 +368,18 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	}
 
 	total_sent += len(rrs)
-	zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
-		zd.ZoneName, len(rrs), total_sent)
+	// Get actual size of final message
+	finalSize := estimateEnvelopeSize(rrs)
+	if zd.Verbose || Globals.Debug {
+		efficiency := float64(finalSize) / float64(safeMessageSize) * 100.0
+		maxEfficiency := float64(finalSize) / float64(maxMessageSize) * 100.0
+		theoreticalEfficiency := float64(finalSize) / float64(theoreticalMaxSize) * 100.0
+		zd.Logger.Printf("XfrOut: Zone %s: Sending final batch #%d: %d RRs, %d bytes (efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max, total sent: %d RRs)\n",
+			zd.ZoneName, batchNum, len(rrs), finalSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize, total_sent)
+	} else {
+		zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
+			zd.ZoneName, len(rrs), total_sent)
+	}
 	outbound_xfr <- &dns.Envelope{RR: rrs}
 
 	close(outbound_xfr)

@@ -65,6 +65,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	sr.HandleFunc("/command", APIcommand(conf, rtr)).Methods("POST")
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/zone", APIzone(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+	sr.HandleFunc("/catalog", APICatalog(&Globals.App)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 
 	if Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeAgent {

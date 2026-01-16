@@ -352,3 +352,21 @@ type ScanJobStatus struct {
 	Error           bool                `json:"error,omitempty"`
 	ErrorMsg        string              `json:"error_msg,omitempty"`
 }
+
+// CatalogPost represents a request to manage catalog zones
+type CatalogPost struct {
+	Command     string `json:"command"`      // "create" | "zone-add" | "zone-delete" | "zone-list" | "component-add" | "component-delete" | "component-list" | "zone-component-add" | "zone-component-delete"
+	CatalogZone string `json:"catalog_zone"` // Name of the catalog zone
+	Zone        string `json:"zone"`         // Member zone name
+	Component   string `json:"component"`    // Component name
+}
+
+// CatalogResponse represents the response from catalog operations
+type CatalogResponse struct {
+	Time        time.Time               `json:"time"`
+	Error       bool                    `json:"error"`
+	ErrorMsg    string                  `json:"error_msg,omitempty"`
+	Msg         string                  `json:"msg,omitempty"`
+	Zones       map[string]*MemberZone  `json:"zones,omitempty"`        // For zone-list command
+	Components  []string                `json:"components,omitempty"`   // For component-list command
+}

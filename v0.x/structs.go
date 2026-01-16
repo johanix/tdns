@@ -95,6 +95,7 @@ type ZoneData struct {
 	LatestError        time.Time   // time of latest error
 	RefreshCount       int         // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	LatestRefresh      time.Time   // time of latest successful refresh
+	SourceCatalog      string      // if auto-configured, which catalog zone created this zone
 	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
 	AddTransportSignal bool        // whether to attach TransportSignal in responses
 }
@@ -116,10 +117,11 @@ type ZoneConf struct {
 	DnssecPolicy string
 	Template     string
 	MultiSigner  string
-	Error        bool      // zone is broken and cannot be used
-	ErrorType    ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg     string    // reason for the error (if known)
-	RefreshCount int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	Error         bool      // zone is broken and cannot be used
+	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg      string    // reason for the error (if known)
+	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog string    // if auto-configured, which catalog zone created this zone
 }
 
 type TemplateConf struct {

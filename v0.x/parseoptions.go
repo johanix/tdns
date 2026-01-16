@@ -197,6 +197,35 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			cleanoptions = append(cleanoptions, opt)
 			log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, ZoneOptionToString[opt], zconf.MultiSigner)
 
+	case OptCatalogZone:
+		// Hard fail: catalog zone requires valid catalog configuration
+		if conf.Catalog.MetaComponents == nil {
+			log.Fatalf("FATAL: Zone %s is configured as a catalog zone (option catalog-zone), but catalog.meta_components is missing or incorrectly structured. Please ensure your config has:\n"+
+				"catalog:\n"+
+				"  policy:\n"+
+				"    zones:\n"+
+				"      add: auto\n"+
+				"  meta_components:  # NOTE: This must be a sibling of 'policy', not nested under it\n"+
+				"    meta_foo:\n"+
+				"      upstream: \"...\"\n"+
+				"      store: xfr", zname)
+		}
+
+		// Validate catalog policy configuration
+		if conf.Catalog.Policy.Zones.Add == "" {
+			log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.add is not set. Please set it to either 'auto' or 'manual'.", zname)
+		}
+		if conf.Catalog.Policy.Zones.Add != "auto" && conf.Catalog.Policy.Zones.Add != "manual" {
+			log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.add has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.Catalog.Policy.Zones.Add)
+		}
+		if conf.Catalog.Policy.Zones.Remove != "" && conf.Catalog.Policy.Zones.Remove != "auto" && conf.Catalog.Policy.Zones.Remove != "manual" {
+			log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.remove has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.Catalog.Policy.Zones.Remove)
+		}
+
+		options[opt] = true
+		cleanoptions = append(cleanoptions, opt)
+		log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s, policy: add=%s, remove=%s)", zname, zconf.Type, conf.Catalog.Policy.Zones.Add, conf.Catalog.Policy.Zones.Remove)
+
 		default:
 			log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])
 			if zd != nil {
