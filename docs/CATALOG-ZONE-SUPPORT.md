@@ -1,99 +1,102 @@
 # TDNS Catalog Zone Support (RFC 9432)
 
 ## Overview
-Implement RFC 9432 catalog zone support in the tdns library. Catalog zones are a standard DNS mechanism for distributing zone membership information. This feature will be available to all tdns applications (tdns-auth, tdns-imr, KRS, etc.).
+RFC 9432 catalog zone support is implemented in the tdns library. Catalog zones are a standard DNS mechanism for distributing zone membership information. This feature is available to all tdns applications (tdns-auth, tdns-imr, KRS, etc.).
 
 ## Catalog Zone Format (RFC 9432)
-Each member zone has an opaque ID with multiple PTR records:
-```
-{opaque-id}.zones.{catalog-zone}. PTR {member-zonename}
-{opaque-id}.zones.{catalog-zone}. PTR group.{groupname}.groups.{catalog-zone}.
-```
+Each member zone has an opaque ID (hash) with:
+- A PTR record for the zone name: `{hash}.zones.{catalog-zone}. IN PTR {member-zonename}`
+- A TXT record for groups: `group.{hash}.zones.{catalog-zone}. IN TXT "group1" "group2" ...` (all groups in a single TXT record)
+- A version record: `version.{catalog-zone}. IN TXT "2"` (required by RFC 9432)
+
+**Note:** Autozones (zones created automatically from catalog zones) use `invalid.` as their NS record, as recommended by RFC 9432.
 
 Example from `dig @127.0.0.1 -p 5356 catalog.kdc. axfr`:
-```
+```text
 catalog.kdc.        3600  IN  SOA    ns.catalog.kdc. admin.catalog.kdc. ...
 catalog.kdc.        3600  IN  NS     ns.catalog.kdc.
+version.catalog.kdc. 0    IN  TXT    "2"
 
 ; Zone: pella.se. (hash: be0a0dc3b5fe5785)
 be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR pella.se.
-be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR group.any_se.groups.catalog.kdc.
-be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR group.sign_edge_zsk.groups.catalog.kdc.
-be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR group.meta_kdc.groups.catalog.kdc.
+group.be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk" "meta_kdc"
 
 ; Zone: foffa.se. (hash: eda1901b7f08e2ad)
 eda1901b7f08e2ad.zones.catalog.kdc. 0 IN PTR foffa.se.
-eda1901b7f08e2ad.zones.catalog.kdc. 0 IN PTR group.any_se.groups.catalog.kdc.
-eda1901b7f08e2ad.zones.catalog.kdc. 0 IN PTR group.sign_edge_dyn.groups.catalog.kdc.
-eda1901b7f08e2ad.zones.catalog.kdc. 0 IN PTR group.meta_edge.groups.catalog.kdc.
+group.eda1901b7f08e2ad.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_dyn" "meta_edge"
 ```
 
 ## Design Approach
 
 ### Use Zone Option (Not Zone Type)
-Catalog zones are **secondary zones with special parsing**. They're fetched via AXFR like any secondary zone, but after each refresh, we parse the zone data to extract member zones and groups.
+Catalog zones can be configured as either **primary** or **secondary** zones with special parsing. When configured as secondary, they're fetched via AXFR like any secondary zone. After each refresh (or on primary zones after updates), we parse the zone data to extract member zones and groups.
 
 **Configuration:**
 ```yaml
 zones:
   catalog.kdc.:
-    type: secondary          # Standard secondary zone
-    store: xfr               # XFR-only storage
-    primary: "127.0.0.1:5353"  # KDC address
+    type: primary            # Can be primary (for persistence) or secondary
+    store: map               # Zone store type
+    # For secondary:
+    # primary: "127.0.0.1:5353"  # Upstream server
     options:
       - catalog-zone         # NEW: Trigger catalog parsing
 ```
 
 **Rationale:**
-- Catalog zones ARE secondary zones (fetched via AXFR)
+- Catalog zones can be primary (for persistence across restarts) or secondary (fetched via AXFR)
 - Options modify behavior (like `online-signing`, `multisigner`)
 - Clearer semantics: type = "what it is", options = "what it does"
 - Follows existing tdns patterns
 
-### Component Type System
+### Group System (RFC 9432 Terminology)
 
-Catalog zones use a **three-component-type system** to separate concerns:
+Catalog zones use a **group system** (RFC 9432 terminology) to categorize zones:
 
-1. **Service Components** (e.g., `any_se`, `corp_internal`)
+1. **Service Groups** (e.g., `any_se`, `corp_internal`)
    - Define zone distribution: which nodes serve which zones
-   - A zone can have **multiple service components**
+   - A zone can have **multiple service groups**
    - Used by applications to filter zones (e.g., KRS checks subscriptions)
+   - No specific prefix required
 
-2. **Signing Components** (e.g., `sign_edge_zsk`, `sign_kdc`)
+2. **Signing Groups** (e.g., `sign_edge_zsk`, `sign_kdc`)
    - Define DNSSEC signing logic for the zone
-   - A zone has **exactly ONE signing component**
+   - A zone has **exactly ONE signing group**
    - Prefix: `sign_*`
 
-3. **Meta Components** (e.g., `meta_kdc`, `meta_edge`)
+3. **Meta Groups** (e.g., `meta_kdc`, `meta_edge`)
    - Define configuration metadata: upstream, TSIG, store, options
-   - A zone has **exactly ONE meta component**
+   - A zone has **exactly ONE meta group**
    - Prefix: `meta_*`
    - Required for auto-configuration
 
 **Rules:**
-- Service components: 0 or more (distribution/filtering)
-- Signing components: exactly 1 (DNSSEC policy)
-- Meta components: exactly 1 (transfer configuration)
-- If multiple signing/meta components found: log warning, use first
+- Service groups: 0 or more (distribution/filtering)
+- Signing groups: exactly 1 (DNSSEC policy)
+- Meta groups: exactly 1 (transfer configuration)
+- If multiple signing/meta groups found: log warning, use first
 
 ### Architecture
 
-1. **Add `OptCatalogZone` option** to `ZoneOption` enum
-2. **Parse after refresh** - When a zone with `catalog-zone` option is refreshed, automatically parse it
+1. **`OptCatalogZone` option** - Added to `ZoneOption` enum
+2. **Parse after refresh** - When a zone with `catalog-zone` option is refreshed (or updated for primary zones), automatically parse it
 3. **Callback registration** - Applications register callbacks to be notified of member zone changes
-4. **Auto-configuration** - Optionally auto-configure zones based on meta components
+4. **Auto-configuration** - Optionally auto-configure zones based on meta groups (when `catalog.policy.zones.add: auto`)
 5. **Manual override** - Manual zone config ALWAYS takes priority (hardcoded behavior)
+6. **Version record** - Catalog zones include `version.{catalog-zone}. IN TXT "2"` (RFC 9432 requirement)
+7. **Invalid NS** - Autozones use `invalid.` as NS record (RFC 9432 recommendation)
 
 **Flow:**
-1. Catalog zone configured as `type: secondary` with `options: [catalog-zone]`
-2. KDC sends NOTIFY → DnsEngine → NotifyResponder → RefreshEngine
-3. RefreshEngine calls `zd.ZoneTransferIn()` (standard AXFR)
-4. After successful transfer, tdns detects `OptCatalogZone` option
+1. Catalog zone configured as `type: primary` or `type: secondary` with `options: [catalog-zone]`
+2. For secondary: KDC sends NOTIFY → DnsEngine → NotifyResponder → RefreshEngine
+3. For secondary: RefreshEngine calls `zd.ZoneTransferIn()` (standard AXFR)
+4. After successful transfer (or on primary after updates), tdns detects `OptCatalogZone` option
 5. Automatically calls `ParseCatalogZone(zd)`
-6. Categorizes groups into service/signing/meta components
-7. Invokes registered callbacks with member zone changes
-8. If auto-configuration enabled, creates zone configs using meta components
-9. Applications (like KRS) filter by service components
+6. Parses PTR records for zone names and TXT records for groups
+7. Categorizes groups into service/signing/meta groups
+8. Invokes registered callbacks with member zone changes
+9. If auto-configuration enabled (`catalog.policy.zones.add: auto`), creates zone configs using meta groups
+10. Applications (like KRS) filter by service groups
 
 ### Callback Interface
 
@@ -108,12 +111,12 @@ type CatalogZoneUpdate struct {
 }
 
 type MemberZone struct {
-    ZoneName          string      // e.g., "pella.se."
-    Hash              string      // Opaque ID from catalog
-    ServiceComponents []string    // e.g., ["any_se", "corp_internal"]
-    SigningComponent  string      // e.g., "sign_edge_zsk" (exactly one)
-    MetaComponent     string      // e.g., "meta_kdc" (exactly one)
-    DiscoveredAt      time.Time
+    ZoneName      string    // e.g., "pella.se."
+    Hash          string    // Opaque ID from catalog (SHA256 hash)
+    ServiceGroups []string  // e.g., ["any_se", "corp_internal"] (RFC 9432 terminology)
+    SigningGroup  string    // e.g., "sign_edge_zsk" (exactly one)
+    MetaGroup     string    // e.g., "meta_kdc" (exactly one)
+    DiscoveredAt  time.Time
 }
 
 type CatalogZoneCallback func(update *CatalogZoneUpdate) error
@@ -134,23 +137,24 @@ tdns.RegisterCatalogZoneCallback(func(update *CatalogZoneUpdate) error {
 ```yaml
 catalog:
   policy:
-    auto_configure_zones: true       # Enable auto-configuration from catalog
-    auto_remove_zones: false         # Whether to remove zones when deleted from catalog
+    zones:
+      add: auto        # "auto" or "manual" - Enable auto-configuration from catalog
+      remove: manual   # "auto" or "manual" - Whether to remove zones when deleted from catalog
     # Note: Manual config ALWAYS overrides catalog (hardcoded behavior)
 
-  meta_components:
-    # Meta component name MUST start with "meta_"
-    # Provides configuration for zone transfers
+  meta_groups:
+    # Meta group name MUST start with "meta_"
+    # Provides configuration for zone transfers (RFC 9432 terminology)
     meta_kdc:
-      upstream: "127.0.0.1:5353"     # Where to AXFR from
+      upstream: "127.0.0.1:5353"     # Where to AXFR from (required for auto-config)
       tsig_key: "kdc-key"             # TSIG key name (optional)
-      store: "xfr"                    # Zone store type
+      store: "map"                    # Zone store type (defaults to "map" if not specified)
       options: []                     # Zone options (if any)
 
     meta_edge:
       upstream: "192.0.2.1:5353"     # Different upstream
       tsig_key: "edge-key"
-      store: "xfr"
+      store: "map"                    # Defaults to "map" if omitted
       options: []
 
     meta_central:
@@ -159,9 +163,9 @@ catalog:
       store: "map"
       options: ["online-signing"]
 
-  # Optional: Document what signing components mean (for reference only)
-  # Catalog already defines signing behavior, this is just documentation
-  signing_components:
+  # Optional: Document what signing groups mean (for reference only)
+  # Catalog already defines signing behavior, this is just documentation (RFC 9432 terminology)
+  signing_groups:
     sign_edge_zsk:
       description: "Edge signing with ZSK only"
     sign_edge_full:
@@ -184,9 +188,10 @@ tsig:
 # Zones
 zones:
   catalog.kdc.:
-    type: secondary
-    store: xfr
-    primary: "127.0.0.1:5353"
+    type: primary            # Can be primary (for persistence) or secondary
+    store: map               # Zone store type
+    # For secondary, also specify:
+    # primary: "127.0.0.1:5353"
     options:
       - catalog-zone              # Enable catalog zone parsing
 
@@ -200,7 +205,7 @@ zones:
 
 ### Conflict Resolution
 
-**Hardcoded Policy: Manual ALWAYS Wins**
+#### Hardcoded Policy: Manual ALWAYS Wins
 - If a zone is manually configured in YAML, catalog entry is ignored
 - Log warning when conflict detected
 - No configuration option to change this behavior (safety first)
@@ -208,7 +213,7 @@ zones:
 ## Implementation Steps
 
 ### 1. Add Catalog Zone Option
-**File**: `tdns/v0.x/enums.go`
+**File**: `tdns/v2/enums.go`
 
 Add new zone option:
 ```go
@@ -234,7 +239,7 @@ var StringToZoneOption = map[string]ZoneOption{
 ```
 
 ### 2. Validate Catalog Zone Option
-**File**: `tdns/v0.x/parseoptions.go`
+**File**: `tdns/v2/parseoptions.go`
 
 Add validation in `parseZoneOptions()`:
 ```go
@@ -245,17 +250,23 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
     // ... existing cases ...
 
     case OptCatalogZone:
-        // Validate: catalog-zone requires type: secondary
-        if zconf.Type != "secondary" {
-            log.Printf("Error: Zone %s: Option \"catalog-zone\" requires type: secondary. Option ignored.", zname)
-            if zd != nil {
-                zd.SetError(ConfigError, "catalog-zone option requires type: secondary")
-            }
-            continue
+        // Hard fail: catalog zone requires valid catalog configuration
+        if conf.Catalog.MetaGroups == nil {
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.meta_groups is missing or incorrectly structured", zname)
         }
+        
+        // Validate catalog policy configuration
+        if conf.Catalog.Policy.Zones.Add == "" {
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.add is not set", zname)
+        }
+        if conf.Catalog.Policy.Zones.Add != "auto" && conf.Catalog.Policy.Zones.Add != "manual" {
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.add has invalid value", zname)
+        }
+        
+        // Catalog zones can be primary or secondary
         options[opt] = true
         cleanoptions = append(cleanoptions, opt)
-        log.Printf("ParseZones: Zone %s: catalog zone option enabled", zname)
+        log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s)", zname, zconf.Type)
 
     default:
         // ... existing default handling ...
@@ -264,31 +275,33 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 ```
 
 ### 3. Add Configuration Structures
-**File**: `tdns/v0.x/config.go`
+**File**: `tdns/v2/config.go`
 
 Add catalog configuration structures:
 ```go
 type CatalogConf struct {
-    Policy            CatalogPolicy                   `yaml:"policy" mapstructure:"policy"`
-    MetaComponents    map[string]*MetaComponentConfig `yaml:"meta_components" mapstructure:"meta_components"`
-    SigningComponents map[string]*SigningComponentInfo `yaml:"signing_components" mapstructure:"signing_components"`
+    Policy        CatalogPolicy              `yaml:"policy" mapstructure:"policy"`
+    MetaGroups    map[string]*MetaGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`
+    SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
 }
 
 type CatalogPolicy struct {
-    AutoConfigureZones bool `yaml:"auto_configure_zones" mapstructure:"auto_configure_zones"`
-    AutoRemoveZones    bool `yaml:"auto_remove_zones" mapstructure:"auto_remove_zones"`
+    Zones struct {
+        Add    string `yaml:"add" mapstructure:"add"`    // "auto" or "manual"
+        Remove string `yaml:"remove" mapstructure:"remove"` // "auto" or "manual"
+    } `yaml:"zones" mapstructure:"zones"`
     // Note: conflict_resolution is hardcoded to "manual-priority", not configurable
 }
 
-type MetaComponentConfig struct {
+type MetaGroupConfig struct {
     Name     string   `yaml:"-" mapstructure:"-"`      // Populated from map key
     Upstream string   `yaml:"upstream" mapstructure:"upstream"`
     TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
-    Store    string   `yaml:"store" mapstructure:"store"`
+    Store    string   `yaml:"store" mapstructure:"store"` // Defaults to "map" if not specified
     Options  []string `yaml:"options" mapstructure:"options"`
 }
 
-type SigningComponentInfo struct {
+type SigningGroupInfo struct {
     Description string `yaml:"description" mapstructure:"description"`
 }
 
@@ -299,7 +312,7 @@ type Config struct {
 ```
 
 ### 4. Create Catalog Zone Parser
-**File**: `tdns/v0.x/catalog.go` (NEW)
+**File**: `tdns/v2/catalog.go` (NEW)
 
 Core parsing logic:
 ```go
@@ -317,12 +330,12 @@ import (
 
 // MemberZone represents a zone discovered in a catalog zone
 type MemberZone struct {
-    ZoneName          string    `json:"zone_name"`
-    Hash              string    `json:"hash"`
-    ServiceComponents []string  `json:"service_components"`
-    SigningComponent  string    `json:"signing_component"`
-    MetaComponent     string    `json:"meta_component"`
-    DiscoveredAt      time.Time `json:"discovered_at"`
+    ZoneName      string    `json:"zone_name"`
+    Hash          string    `json:"hash"`
+    ServiceGroups []string  `json:"service_groups"` // Groups associated with this zone (RFC 9432 terminology)
+    SigningGroup  string    `json:"signing_group"`  // Signing group for this zone
+    MetaGroup     string    `json:"meta_group"`     // Meta group for this zone
+    DiscoveredAt  time.Time `json:"discovered_at"`
 }
 
 // CatalogZoneUpdate contains information about catalog zone changes
@@ -440,44 +453,44 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
         }
 
         // Categorize groups by prefix
-        var serviceComponents []string
-        var signingComponent string
-        var metaComponent string
+        var serviceGroups []string
+        var signingGroup string
+        var metaGroup string
 
         for _, group := range info.groups {
             if strings.HasPrefix(group, "sign_") {
-                if signingComponent != "" {
-                    log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing components (%s, %s), using first",
-                        info.zoneName, signingComponent, group)
+                if signingGroup != "" {
+                    log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing groups (%s, %s), using first",
+                        info.zoneName, signingGroup, group)
                 } else {
-                    signingComponent = group
+                    signingGroup = group
                 }
             } else if strings.HasPrefix(group, "meta_") {
-                if metaComponent != "" {
-                    log.Printf("ParseCatalogZone: Warning: Zone %s has multiple meta components (%s, %s), using first",
-                        info.zoneName, metaComponent, group)
+                if metaGroup != "" {
+                    log.Printf("ParseCatalogZone: Warning: Zone %s has multiple meta groups (%s, %s), using first",
+                        info.zoneName, metaGroup, group)
                 } else {
-                    metaComponent = group
+                    metaGroup = group
                 }
             } else {
-                // Service component (no specific prefix)
-                serviceComponents = append(serviceComponents, group)
+                // Service group (no specific prefix)
+                serviceGroups = append(serviceGroups, group)
             }
         }
 
-        // Log warning if no meta component (needed for auto-configuration)
-        if metaComponent == "" {
-            log.Printf("ParseCatalogZone: Info: Zone %s has no meta component, auto-configuration not possible",
+        // Log warning if no meta group (needed for auto-configuration)
+        if metaGroup == "" {
+            log.Printf("ParseCatalogZone: Info: Zone %s has no meta group, auto-configuration not possible",
                 info.zoneName)
         }
 
         memberZones[info.zoneName] = &MemberZone{
-            ZoneName:          info.zoneName,
-            Hash:              hash,
-            ServiceComponents: serviceComponents,
-            SigningComponent:  signingComponent,
-            MetaComponent:     metaComponent,
-            DiscoveredAt:      now,
+            ZoneName:     info.zoneName,
+            Hash:         hash,
+            ServiceGroups: serviceGroups,
+            SigningGroup:  signingGroup,
+            MetaGroup:     metaGroup,
+            DiscoveredAt:  now,
         }
     }
 
@@ -511,10 +524,11 @@ func NotifyCatalogZoneUpdate(update *CatalogZoneUpdate) error {
     return nil
 }
 
-// AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta components
+// AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta groups
 func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) error {
-    if !conf.Catalog.Policy.AutoConfigureZones {
-        log.Printf("AutoConfigure: Disabled by policy, catalog provides metadata only")
+    if conf.Catalog.Policy.Zones.Add != "auto" {
+        log.Printf("AutoConfigure: Disabled by policy (catalog.policy.zones.add=%q), catalog provides metadata only",
+            conf.Catalog.Policy.Zones.Add)
         return nil
     }
 
@@ -522,32 +536,38 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
         // RULE 1: Manual config ALWAYS wins (hardcoded behavior)
         if _, exists := Zones.Get(zoneName); exists {
             log.Printf("CATALOG: Zone %s manually configured, ignoring catalog entry (services: %v, meta: %s)",
-                zoneName, member.ServiceComponents, member.MetaComponent)
+                zoneName, member.ServiceGroups, member.MetaGroup)
             continue
         }
 
-        // RULE 2: Meta component is required for auto-configuration
-        if member.MetaComponent == "" {
-            log.Printf("CATALOG: Zone %s has no meta component, cannot auto-configure", zoneName)
+        // RULE 2: Meta group is required for auto-configuration
+        if member.MetaGroup == "" {
+            log.Printf("CATALOG: Zone %s has no meta group, cannot auto-configure", zoneName)
             continue
         }
 
-        // RULE 3: Find meta component config
-        metaConfig, exists := conf.Catalog.MetaComponents[member.MetaComponent]
+        // RULE 3: Find meta group config
+        metaConfig, exists := conf.Catalog.MetaGroups[member.MetaGroup]
         if !exists {
-            log.Printf("CATALOG: Zone %s meta component '%s' not found in config, cannot auto-configure",
-                zoneName, member.MetaComponent)
+            log.Printf("CATALOG: Zone %s meta group '%s' not found in config, cannot auto-configure",
+                zoneName, member.MetaGroup)
             continue
         }
 
-        // RULE 4: Auto-configure zone using meta component
-        log.Printf("CATALOG: Auto-configuring zone %s using meta component '%s' (upstream: %s)",
-            zoneName, member.MetaComponent, metaConfig.Upstream)
+        // RULE 4: Auto-configure zone using meta group
+        // Store defaults to "map" if not specified
+        storeValue := metaConfig.Store
+        if storeValue == "" {
+            storeValue = "map"
+        }
+
+        log.Printf("CATALOG: Auto-configuring zone %s using meta group '%s' (upstream: %s, store: %s)",
+            zoneName, member.MetaGroup, metaConfig.Upstream, storeValue)
 
         zd := &ZoneData{
             ZoneName:  zoneName,
             ZoneType:  Secondary,
-            ZoneStore: parseZoneStore(metaConfig.Store),
+            ZoneStore: parseZoneStore(storeValue),
             Upstream:  metaConfig.Upstream,
             Logger:    log.Default(),
             Options: map[ZoneOption]bool{
@@ -555,7 +575,7 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
             },
         }
 
-        // Apply zone options from meta component
+        // Apply zone options from meta group
         for _, optStr := range metaConfig.Options {
             if opt, exists := StringToZoneOption[optStr]; exists {
                 zd.Options[opt] = true
@@ -588,7 +608,7 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
         }
 
         log.Printf("CATALOG: Zone %s auto-configured (meta: %s, signing: %s, services: %v)",
-            zoneName, member.MetaComponent, member.SigningComponent, member.ServiceComponents)
+            zoneName, member.MetaGroup, member.SigningGroup, member.ServiceGroups)
     }
 
     return nil
@@ -611,7 +631,7 @@ func parseZoneStore(storeStr string) ZoneStore {
 ```
 
 ### 5. Integrate with RefreshEngine
-**File**: `tdns/v0.x/refreshengine.go`
+**File**: `tdns/v2/refreshengine.go`
 
 After successful zone refresh, check for catalog-zone option and parse:
 
@@ -664,33 +684,33 @@ tdns.RegisterCatalogZoneCallback(func(update *tdns.CatalogZoneUpdate) error {
     log.Printf("KRS: Catalog zone %s updated with %d member zones (serial %d)",
         update.CatalogZone, len(update.MemberZones), update.Serial)
 
-    // Get subscribed components from KRS database
-    subscribedComponents, err := krsDB.GetNodeComponents()
+    // Get subscribed groups from KRS database
+    subscribedGroups, err := krsDB.GetNodeGroups()
     if err != nil {
-        return fmt.Errorf("failed to get node components: %v", err)
+        return fmt.Errorf("failed to get node groups: %v", err)
     }
     subscribedMap := make(map[string]bool)
-    for _, comp := range subscribedComponents {
-        subscribedMap[comp] = true
+    for _, grp := range subscribedGroups {
+        subscribedMap[grp] = true
     }
 
-    // Filter member zones: keep only zones with subscribed service components
+    // Filter member zones: keep only zones with subscribed service groups
     var subscribedZones []*tdns.MemberZone
     for zoneName, member := range update.MemberZones {
-        hasSubscribedComponent := false
-        for _, svc := range member.ServiceComponents {
+        hasSubscribedGroup := false
+        for _, svc := range member.ServiceGroups {
             if subscribedMap[svc] {
-                hasSubscribedComponent = true
+                hasSubscribedGroup = true
                 break
             }
         }
 
-        if hasSubscribedComponent {
+        if hasSubscribedGroup {
             subscribedZones = append(subscribedZones, member)
         }
     }
 
-    log.Printf("KRS: %d member zones match subscribed components", len(subscribedZones))
+    log.Printf("KRS: %d member zones match subscribed groups", len(subscribedZones))
 
     // Store discovered zones in KRS database for tracking
     if err := krsDB.StoreDiscoveredZones(update.MemberZones, subscribedMap); err != nil {
@@ -711,9 +731,9 @@ Add database methods for storing discovered zones:
 CREATE TABLE IF NOT EXISTS discovered_zones (
     zone_name TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
-    service_components TEXT NOT NULL,  -- JSON array
-    signing_component TEXT NOT NULL,
-    meta_component TEXT NOT NULL,
+    service_groups TEXT NOT NULL,  -- JSON array (RFC 9432 terminology)
+    signing_group TEXT NOT NULL,
+    meta_group TEXT NOT NULL,
     subscribed BOOLEAN NOT NULL,
     discovered_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
@@ -742,7 +762,7 @@ var KrsZonesCmd = &cobra.Command{
 var krsZonesListCmd = &cobra.Command{
     Use:   "list [--format table|json] [--all]",
     Short: "List zones discovered from catalog zone",
-    Long:  `Lists zones discovered from the catalog zone. By default shows only zones with subscribed components. Use --all to show all zones.`,
+    Long:  `Lists zones discovered from the catalog zone. By default shows only zones with subscribed groups. Use --all to show all zones.`,
     Run: func(cmd *cobra.Command, args []string) {
         api, err := getApiClient(true)
         if err != nil {
@@ -786,7 +806,7 @@ var krsZonesListCmd = &cobra.Command{
 
         // Table format
         var lines []string
-        lines = append(lines, "Zone Name | Service Components | Signing | Meta | Subscribed")
+        lines = append(lines, "Zone Name | Service Groups | Signing | Meta | Subscribed")
 
         for _, z := range zones {
             zone, ok := z.(map[string]interface{})
@@ -795,23 +815,23 @@ var krsZonesListCmd = &cobra.Command{
             }
 
             zoneName := getString(zone, "zone_name")
-            signingComp := getString(zone, "signing_component")
-            metaComp := getString(zone, "meta_component")
+            signingGroup := getString(zone, "signing_group")
+            metaGroup := getString(zone, "meta_group")
             subscribed := getBool(zone, "subscribed")
 
             if !showAll && !subscribed {
                 continue
             }
 
-            // Format service components
-            serviceCompsRaw, _ := zone["service_components"].([]interface{})
-            serviceStrs := make([]string, 0, len(serviceCompsRaw))
-            for _, c := range serviceCompsRaw {
-                if s, ok := c.(string); ok {
+            // Format service groups
+            serviceGroupsRaw, _ := zone["service_groups"].([]interface{})
+            serviceStrs := make([]string, 0, len(serviceGroupsRaw))
+            for _, g := range serviceGroupsRaw {
+                if s, ok := g.(string); ok {
                     serviceStrs = append(serviceStrs, s)
                 }
             }
-            serviceCompsStr := strings.Join(serviceStrs, ", ")
+            serviceGroupsStr := strings.Join(serviceStrs, ", ")
 
             subscribedStr := "No"
             if subscribed {
@@ -819,7 +839,7 @@ var krsZonesListCmd = &cobra.Command{
             }
 
             lines = append(lines, fmt.Sprintf("%s | %s | %s | %s | %s",
-                zoneName, serviceCompsStr, signingComp, metaComp, subscribedStr))
+                zoneName, serviceGroupsStr, signingGroup, metaGroup, subscribedStr))
         }
 
         fmt.Println(columnize.SimpleFormat(lines))
@@ -844,19 +864,19 @@ Construction of catalog zones will require future implementation including:
 **API Endpoints:**
 - `POST /catalog/{catalog-zone}/members` - Add a zone to the catalog
 - `DELETE /catalog/{catalog-zone}/members/{zone}` - Remove a zone from the catalog
-- `PUT /catalog/{catalog-zone}/members/{zone}` - Update zone's components
+- `PUT /catalog/{catalog-zone}/members/{zone}` - Update zone's groups
 - `GET /catalog/{catalog-zone}/members` - List all member zones
 - `GET /catalog/{catalog-zone}/members/{zone}` - Get zone details
 
 **CLI Commands:**
 ```bash
-# Add zone to catalog with components
-tdns-cli catalog add-zone catalog.kdc. pella.se. \
-  --service any_se \
-  --signing sign_edge_zsk \
-  --meta meta_kdc
+# Add zone to catalog with groups
+tdns-cli catalog zone add --cat catalog.kdc. --zone pella.se.
+tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group any_se
+tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group sign_edge_zsk
+tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group meta_kdc
 
-# Update zone's components
+# Update zone's groups
 tdns-cli catalog update-zone catalog.kdc. pella.se. \
   --service any_se,corp_internal \
   --signing sign_edge_zsk \
@@ -875,7 +895,7 @@ tdns-cli catalog export catalog.kdc. > catalog.zone
 **Database Storage:**
 - Table for catalog member zones
 - Automatic hash generation (SHA256 of zone name)
-- Component associations
+- Group associations
 - Automatic SOA serial bumping on changes
 
 **Integration Points:**
@@ -900,14 +920,15 @@ zones:
 ```yaml
 catalog:
   policy:
-    auto_configure_zones: true
-    auto_remove_zones: false
+    zones:
+      add: auto
+      remove: manual
 
-  meta_components:
+  meta_groups:
     meta_kdc:
       upstream: "127.0.0.1:5353"
       tsig_key: "kdc-key"
-      store: "xfr"
+      store: "map"              # Defaults to "map" if not specified
       options: []
 
 tsig:
@@ -928,9 +949,11 @@ zones:
 ```yaml
 catalog:
   policy:
-    auto_configure_zones: false  # Manual configuration only
+    zones:
+      add: manual               # Manual configuration only
+      remove: manual
 
-  meta_components: {}  # Not needed if auto-config disabled
+  meta_groups: {}              # Not needed if auto-config disabled
 
 zones:
   catalog.example.:
@@ -949,77 +972,69 @@ zones:
 
 ## Example Scenarios
 
-### Scenario 1: Simple Zone with All Components
-Catalog entry for `pella.se.`:
-```
-PTR pella.se.
-PTR group.any_se.groups.catalog.kdc.
-PTR group.sign_edge_zsk.groups.catalog.kdc.
-PTR group.meta_kdc.groups.catalog.kdc.
+### Scenario 1: Simple Zone with All Groups
+Catalog entry for `pella.se.` (hash: `be0a0dc3b5fe5785`):
+```text
+be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR pella.se.
+group.be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk" "meta_kdc"
 ```
 
 Parsed as:
-- Service: `[any_se]`
-- Signing: `sign_edge_zsk`
-- Meta: `meta_kdc`
+- Service groups: `[any_se]`
+- Signing group: `sign_edge_zsk`
+- Meta group: `meta_kdc`
 
 If KRS node subscribes to `any_se` and `meta_kdc` is configured, zone is auto-configured.
 
-### Scenario 2: Zone with Multiple Service Components
-Catalog entry for `internal.corp.`:
-```
-PTR internal.corp.
-PTR group.corp_internal.groups.catalog.kdc.
-PTR group.corp_external.groups.catalog.kdc.
-PTR group.sign_kdc.groups.catalog.kdc.
-PTR group.meta_central.groups.catalog.kdc.
+### Scenario 2: Zone with Multiple Service Groups
+Catalog entry for `internal.corp.` (hash: `abc123...`):
+```text
+abc123.zones.catalog.kdc. 0 IN PTR internal.corp.
+group.abc123.zones.catalog.kdc. 0 IN TXT "corp_internal" "corp_external" "sign_kdc" "meta_central"
 ```
 
 Parsed as:
-- Services: `[corp_internal, corp_external]`
-- Signing: `sign_kdc`
-- Meta: `meta_central`
+- Service groups: `[corp_internal, corp_external]`
+- Signing group: `sign_kdc`
+- Meta group: `meta_central`
 
 Node serves zone if subscribed to EITHER `corp_internal` OR `corp_external`.
 
-### Scenario 3: Missing Meta Component
-Catalog entry for `test.com.`:
-```
-PTR test.com.
-PTR group.any_se.groups.catalog.kdc.
-PTR group.sign_edge_zsk.groups.catalog.kdc.
+### Scenario 3: Missing Meta Group
+Catalog entry for `test.com.` (hash: `def456...`):
+```text
+def456.zones.catalog.kdc. 0 IN PTR test.com.
+group.def456.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk"
 ```
 
 Parsed as:
-- Services: `[any_se]`
-- Signing: `sign_edge_zsk`
-- Meta: `` (empty)
+- Service groups: `[any_se]`
+- Signing group: `sign_edge_zsk`
+- Meta group: `` (empty)
 
-Result: Info logged, zone cannot be auto-configured (meta component required).
+Result: Info logged, zone cannot be auto-configured (meta group required).
 
 ### Scenario 4: Manual Override
 Catalog entry for `example.com.` + manual config for `example.com.`
 
 Result: Manual config wins, catalog entry ignored, warning logged.
 
-### Scenario 5: Multiple Signing Components (Error)
-Catalog entry for `bad.example.`:
-```
-PTR bad.example.
-PTR group.sign_edge_zsk.groups.catalog.kdc.
-PTR group.sign_kdc.groups.catalog.kdc.  # CONFLICT!
-PTR group.meta_kdc.groups.catalog.kdc.
+### Scenario 5: Multiple Signing Groups (Warning)
+Catalog entry for `bad.example.` (hash: `ghi789...`):
+```text
+ghi789.zones.catalog.kdc. 0 IN PTR bad.example.
+group.ghi789.zones.catalog.kdc. 0 IN TXT "sign_edge_zsk" "sign_kdc" "meta_kdc"  # CONFLICT!
 ```
 
-Result: Warning logged, uses first signing component (`sign_edge_zsk`).
+Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 
 ## Critical Files
 
-1. **`tdns/v0.x/enums.go`** - Add `OptCatalogZone` option
-2. **`tdns/v0.x/parseoptions.go`** - Validate catalog-zone option
-3. **`tdns/v0.x/config.go`** - Add catalog configuration structures
-4. **`tdns/v0.x/catalog.go`** (NEW) - Catalog zone parsing, callbacks, auto-config
-5. **`tdns/v0.x/refreshengine.go`** - Trigger parsing after refresh
+1. **`tdns/v2/enums.go`** - Add `OptCatalogZone` option
+2. **`tdns/v2/parseoptions.go`** - Validate catalog-zone option
+3. **`tdns/v2/config.go`** - Add catalog configuration structures
+4. **`tdns/v2/catalog.go`** (NEW) - Catalog zone parsing, callbacks, auto-config
+5. **`tdns/v2/refreshengine.go`** - Trigger parsing after refresh
 6. **`tdns-nm/cmd/tdns-krs/main.go`** - Register KRS callback (example)
 7. **`tdns-nm/v0.x/krs/db.go`** - Store discovered zones (KRS-specific)
 8. **`tdns-nm/v0.x/cli/krs_cmds.go`** - CLI commands (KRS-specific)
@@ -1033,9 +1048,9 @@ Result: Warning logged, uses first signing component (`sign_edge_zsk`).
 | Empty catalog | Log warning, invoke callbacks with empty list |
 | Callback error | Log error, continue with other callbacks |
 | Invalid option combo | Config error, zone ignored |
-| No meta component | Log info, zone not auto-configured |
-| Meta component not found | Log warning, zone not auto-configured |
-| Multiple signing/meta components | Log warning, use first |
+| No meta group | Log info, zone not auto-configured |
+| Meta group not found | Log warning, zone not auto-configured |
+| Multiple signing/meta groups | Log warning, use first |
 | Manual vs catalog conflict | Manual wins (hardcoded), log warning |
 
 ## Verification Steps
@@ -1048,18 +1063,18 @@ Result: Warning logged, uses first signing component (`sign_edge_zsk`).
 5. **Test NOTIFY** - Update catalog on publisher, verify NOTIFY triggers refresh and re-parse
 
 ### Auto-Configuration
-1. **Enable policy** - Set `auto_configure_zones: true`
-2. **Configure meta components** - Define upstreams and TSIG
+1. **Enable policy** - Set `catalog.policy.zones.add: auto`
+2. **Configure meta groups** - Define upstreams and TSIG
 3. **Verify auto-config** - Logs show "Auto-configuring zone" messages
 4. **Check Zones map** - Auto-configured zones appear with `OptAutomaticZone`
 5. **Test zone transfer** - Auto-configured zones successfully transfer data
 
 ### KRS Integration
 1. **Register callback** - Verify "Registered catalog zone callback" in logs
-2. **Component filtering** - Verify only zones with subscribed service components are stored
+2. **Group filtering** - Verify only zones with subscribed service groups are stored
 3. **CLI query** - `krs-cli zone list` shows discovered zones
 4. **Database persistence** - Restart KRS, verify zones loaded from DB
-5. **Component updates** - Update node components, verify zone list updates
+5. **Group updates** - Update node groups, verify zone list updates
 
 ### Manual Override
 1. **Configure zone manually** - Add zone to YAML config
@@ -1070,22 +1085,22 @@ Result: Warning logged, uses first signing component (`sign_edge_zsk`).
 ### Multiple Applications
 1. **Configure catalog zone** in both KRS and tdns-auth
 2. **Verify independent handling** - Each application receives callback
-3. **Different filtering** - KRS filters by service components, tdns-auth may have different logic
+3. **Different filtering** - KRS filters by service groups, tdns-auth may have different logic
 
 ## Benefits of This Approach
 
 1. **Library-level feature** - Available to all tdns applications automatically
 2. **Standard DNS workflow** - Uses existing zone transfer, refresh, NOTIFY infrastructure
 3. **Flexible callbacks** - Applications implement their own handling logic
-4. **Configuration simplicity** - Just add `catalog-zone` option to any secondary zone
+4. **Configuration simplicity** - Just add `catalog-zone` option to any primary or secondary zone
 5. **Composable** - Can be combined with other zone options if needed
 6. **No code duplication** - Parsing logic shared across all applications
 7. **RFC compliant** - Follows RFC 9432 catalog zone specification
-8. **Clear component types** - Service, signing, and meta components have distinct purposes
-9. **No priority conflicts** - Each zone has exactly one meta and signing component
+8. **Clear group types** - Service, signing, and meta groups have distinct purposes (RFC 9432 terminology)
+9. **No priority conflicts** - Each zone has exactly one meta and signing group
 10. **Safe defaults** - Manual config always wins (hardcoded behavior)
-11. **Auto-configuration** - Optional auto-config with meta components
-12. **Application flexibility** - Each application filters zones as needed (e.g., by service components)
+11. **Auto-configuration** - Optional auto-config with meta groups
+12. **Application flexibility** - Each application filters zones as needed (e.g., by service groups)
 
 ## Future Enhancements
 
@@ -1094,6 +1109,6 @@ Result: Warning logged, uses first signing component (`sign_edge_zsk`).
 3. **Catalog zone validation** - Verify catalog zone structure compliance
 4. **Statistics** - Track catalog update metrics
 5. **Catalog zone generation** - Helper functions for applications that publish catalogs
-6. **Dynamic meta components** - Allow meta components to be updated without restart
+6. **Dynamic meta groups** - Allow meta groups to be updated without restart
 7. **Zone removal cleanup** - Automatically clean up zone data when removed from catalog
-8. **Component inheritance** - Default meta/signing components if not specified
+8. **Group inheritance** - Default meta/signing groups if not specified

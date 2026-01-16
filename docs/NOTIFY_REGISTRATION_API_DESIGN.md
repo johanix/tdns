@@ -13,7 +13,7 @@
    - Registers handler: `dnsMux.HandleFunc(".", authDNSHandler)`
    - Servers route incoming packets to `authDNSHandler`
 
-3. **`createAuthDnsHandler()`** (in `tdns/v0.x/tdns/do53.go:183`)
+3. **`createAuthDnsHandler()`** (in `tdns/v2/tdns/do53.go:183`)
    - Returns a function that processes DNS messages
    - Checks opcode: if `OpcodeNotify`, checks `conf.Internal.DnsNotifyQ`
    - If `DnsNotifyQ != nil`:
@@ -39,17 +39,17 @@
 ```
 DNS NOTIFY Packet Arrives
     ↓
-tdns.DnsEngine() [tdns/v0.x/tdns/do53.go:32]
+tdns.DnsEngine() [tdns/v2/tdns/do53.go:32]
     ↓ creates servers and calls
-createAuthDnsHandler() [tdns/v0.x/tdns/do53.go:183]
+createAuthDnsHandler() [tdns/v2/tdns/do53.go:183]
     ↓ returns handler function
-authDNSHandler function [tdns/v0.x/tdns/do53.go:189]
+authDNSHandler function [tdns/v2/tdns/do53.go:189]
     ↓ checks opcode == OpcodeNotify
     ↓ checks conf.Internal.DnsNotifyQ
     ↓ if non-nil, sends to channel
 conf.Internal.DnsNotifyQ channel [created in dzm/cmd/tdns-kdc/main.go:153]
     ↓
-tdns.NotifyHandlerWithCallback() [tdns/v0.x/tdns/notifyresponder.go:20]
+tdns.NotifyHandlerWithCallback() [tdns/v2/tdns/notifyresponder.go:20]
     ↓ reads from channel, calls callback
 Callback function [dzm/cmd/tdns-kdc/main.go:160-165]
     ↓ converts DnsNotifyRequest → KDC types
