@@ -858,6 +858,341 @@ func init() {
 ### Publishing Catalog Zones
 Publishing catalog zones is straightforward as they are normal DNS zones. The primary server simply serves the catalog zone like any other zone with PTR records following RFC 9432 format. No special implementation is required for publishing.
 
+### Notify Addresses Management
+
+**Requirement:** Support for adding, removing, and listing notify addresses for catalog zones. Since catalog zones are dynamically created via the API, we need API and CLI support for managing notify addresses.
+
+**Scope:** This feature applies **only to catalog zones** (primary catalog zone publishers). Notify addresses for member zones (secondary zones created from catalog) are managed via meta groups and are out of scope for this feature.
+
+**Implementation:**
+
+#### API Endpoints
+Add new commands to catalog zone API (e.g., `APICatalog` in `tdns/v2/apihandler_catalog.go`):
+- `notify-add`: Add a notify address to a catalog zone
+- `notify-remove`: Remove a notify address from a catalog zone
+- `notify-list`: List all notify addresses for a catalog zone
+
+**API Request Format:**
+```json
+{
+  "command": "notify-add",
+  "catalog": "catalog.example.com.",
+  "address": "192.0.2.1:53"
+}
+```
+
+**Implementation Details:**
+- Store notify addresses in `zd.Downstreams` field (`ZoneData.Downstreams`)
+- Validate address format (IP:port)
+- Ensure addresses are unique (no duplicates)
+- Update zone immediately (no regeneration needed)
+- Use existing `tdns` notify mechanism (`zd.Downstreams`)
+- Persist notify addresses (see Persistence section below)
+
+#### CLI Commands
+Add to `tdns-cli`:
+- `tdns-cli catalog notify add --cat <catalog> --addr <IP:port>`
+- `tdns-cli catalog notify remove --cat <catalog> --addr <IP:port>`
+- `tdns-cli catalog notify list --cat <catalog>`
+
+**Example:**
+```bash
+# Add notify address to catalog zone
+tdns-cli catalog notify add --cat catalog.kdc. --addr 192.0.2.1:53
+
+# List notify addresses
+tdns-cli catalog notify list --cat catalog.kdc.
+
+# Remove notify address
+tdns-cli catalog notify remove --cat catalog.kdc. --addr 192.0.2.1:53
+```
+
+### Persistence
+
+**Requirement:** Catalog zones and dynamically configured zones need to be persisted to disk for recovery across restarts. This includes:
+1. Writing zone files to disk
+2. Generating YAML config for dynamically configured zones
+3. Loading zones from disk on startup
+
+**Configuration:**
+
+Add new configuration sections to `tdns` config (e.g., `tdns-auth.yaml`):
+```yaml
+catalog:
+  # Group type prefixes (REQUIRED - defines which groups have special semantics)
+  # These prefixes identify group types in catalog zones and trigger special behavior
+  # Use "none" to disable a group type (no special semantics, all groups are ordinary)
+  group_prefixes:
+    config:  "config"     # Prefix for config/transfer groups (e.g., "configKdc")
+    signing: "sign"       # Prefix for signing groups (e.g., "signEdge")
+  
+  # Config groups define zone transfer settings for auto-configuration
+  # Only ONE config group allowed per zone (enforced if prefix != "none")
+  config_groups:
+    kdc:                  # Full group name in catalog: "configkdc"
+      upstream: "127.0.0.1:5353"
+      store: map          # Optional, defaults to "map"
+      options: []
+    
+    edge:                 # Full group name in catalog: "configedge"
+      upstream: "192.0.2.1:5353"
+      store: map
+      options: []
+  
+  # Signing groups (documentation only, not used for auto-configuration)
+  # Only ONE signing group allowed per zone (enforced if prefix != "none")
+  signing_groups:
+    edge_zsk:             # Full group name in catalog: "signedge_zsk"
+      description: "Edge signing with ZSK only"
+    kdc:                  # Full group name in catalog: "signkdc"
+      description: "Central signing at KDC"
+
+dynamiczones:
+  configfile: /var/lib/tdns/dynamic-zones.yaml  # Absolute path to dynamic config file
+  zonedirectory: /var/lib/tdns/zones            # Absolute path to zone file directory
+  
+  catalog_zones:
+    allowed: true          # Whether catalog zones are allowed
+    storage: persistent    # "memory" or "persistent"
+  
+  catalog_members:
+    allowed: true          # Whether catalog member zones are allowed
+    storage: persistent    # "memory" or "persistent"
+    add: auto              # "auto" or "manual" - Enable auto-configuration from catalog
+    remove: manual         # "auto" or "manual" - Whether to remove zones when deleted from catalog
+  
+  dynamic:
+    allowed: false         # Whether direct API-created zones are allowed (future feature)
+    storage: memory        # "memory" or "persistent"
+```
+
+**Field Descriptions:**
+
+**Catalog Configuration:**
+- `group_prefixes`: **REQUIRED** - Defines which group types have special semantics
+  - `config`: Prefix for config/transfer groups (used for auto-configuration)
+    - Groups starting with this prefix are **config groups**
+    - Only ONE config group allowed per zone
+    - Used to determine zone transfer settings (upstream, store, options)
+    - Set to `"none"` to disable config groups (no auto-configuration)
+  - `signing`: Prefix for signing groups (documentation only)
+    - Groups starting with this prefix are **signing groups**
+    - Only ONE signing group allowed per zone
+    - Currently used for documentation only, may trigger signing automation in future
+    - Set to `"none"` to disable signing groups (all groups are ordinary)
+  - **Note:** Operator controls separator by including it in prefix (e.g., `"config_"` vs `"config"`)
+  - **Validation:** Prefixes must contain valid DNS label characters, cannot start/end with hyphen
+  - **Interoperability:** Different implementations can use different prefixes to identify their special groups
+- `config_groups`: Config group definitions (used when auto-configuring zones from catalog)
+  - Key is the group name suffix (full name in catalog = `{prefix}{name}`)
+  - `upstream`: Where to AXFR member zones from (required)
+  - `store`: Zone store type - `xfr`, `map`, or `slice` (optional, defaults to `map`)
+  - `options`: Zone options array (optional)
+- `signing_groups`: Signing group definitions (documentation only)
+  - Key is the group name suffix (full name in catalog = `{prefix}{name}`)
+  - `description`: Human-readable description of signing policy
+
+**Dynamic Zones Configuration:**
+- `configfile`: Absolute path to YAML file where dynamic zone configs are stored
+  - Server must have write access to this file
+  - File format matches existing zone config format
+  - Server may create file if it doesn't exist
+  - File should be included in main config via `include:` statement (see below)
+  - If `configfile` is set but not included, log a warning (not a hard fail)
+- `zonedirectory`: Absolute path to directory where zone files are written
+  - Server must have write access to this directory
+  - Server may create directory if it doesn't exist
+  - Zone files use standard zone file format
+- `catalog_zones`: Configuration for catalog zones (primary catalog zone publishers)
+  - `allowed`: Whether catalog zones are allowed (default: `true`)
+  - `storage`: `memory` or `persistent` (default: `memory`)
+- `catalog_members`: Configuration for catalog member zones (secondary zones from catalog)
+  - `allowed`: Whether catalog member zones are allowed (default: `true`)
+  - `storage`: `memory` or `persistent` (default: `memory`)
+  - `add`: `auto` or `manual` - Enable auto-configuration from catalog
+  - `remove`: `auto` or `manual` - Whether to remove zones when deleted from catalog
+- `dynamic`: Configuration for direct API-created zones (future feature)
+  - `allowed`: Whether direct API-created zones are allowed (default: `false`)
+  - `storage`: `memory` or `persistent` (default: `memory`)
+
+**Backward Compatibility:**
+- Old `catalog.policy.zones.add/remove` settings are migrated to `dynamiczones.catalog_members.add/remove`
+- Old `meta_groups` name is migrated to `config_groups` with deprecation warning
+- Hardcoded `"meta_"` and `"sign_"` prefixes are replaced with configurable `group_prefixes`
+
+**Include Statement:**
+The dynamic config file should be included in the main config file:
+```yaml
+# Main config file (tdns-auth.yaml)
+include:
+  - /etc/tdns/dynamic-zones.yaml
+
+dynamiczones:
+  configfile: /etc/tdns/dynamic-zones.yaml
+  zonedirectory: /var/lib/tdns/zones
+  catalog_zones:
+    allowed: true
+    storage: persistent
+  catalog_members:
+    allowed: true
+    storage: persistent
+    add: auto
+    remove: manual
+```
+
+If `dynamiczones.configfile` is specified but the file is not included via `include:`, log a warning (not a hard fail) that the dynamic zones will not be loaded on startup.
+
+#### Zone File Persistence
+
+**For Catalog Zones (Primary):**
+- When `storage: persistent`:
+  - After catalog zone generation/update, write zone file to `{zonedirectory}/{catalog-zone-name}.zone`
+  - Use `zd.WriteZoneFile()` or equivalent to write zone data
+  - Include all records (SOA, version TXT, PTR, group TXT records)
+  - Update zone file whenever catalog zone is regenerated
+
+**For Member Zones (Secondary, from catalog):**
+- When `dynamiczones.catalog_members.storage: persistent`:
+  - **Only write zone file after successful inbound zone transfer** (when zone data is available)
+  - Do NOT write zone file immediately after auto-configuration (before first transfer)
+  - Update zone file on subsequent successful transfers
+  - Include all zone data (RRs, RRSIGs if signed)
+
+#### Dynamic Config File Generation
+
+**Format:**
+The dynamic config file should follow the same format as the main zone config file:
+```yaml
+zones:
+  - name: catalog.example.com.
+    zonefile: /var/lib/tdns/zones/catalog.example.com.zone
+    type: primary
+    store: map
+    options: [catalog-zone]
+    notify: [ "192.0.2.1:53", "192.0.2.2:53" ]
+    # ... other fields as needed
+
+  - name: example.com.
+    zonefile: /var/lib/tdns/zones/example.com.zone
+    type: secondary
+    store: map
+    primary: 192.0.2.10:53
+    options: [automatic-zone]
+    source_catalog: catalog.example.com.
+    # ... other fields as needed
+```
+
+**Implementation:**
+- Generate config entry when zone is created/configured
+- Update config entry when zone properties change (e.g., notify addresses)
+- Remove config entry when zone is deleted
+- Use atomic writes (write to temp file, then rename) to avoid corruption
+- Load dynamic config separately from main config at startup
+
+#### Loading on Startup
+
+**For Catalog Zones:**
+1. Check if catalog zone exists in `tdns.Zones`
+2. If not and `storage: persistent`:
+   - Check if zone file exists in `zonedirectory`
+   - If exists, load zone from file using `zd.ReadZoneFile()`
+   - Load notify addresses from dynamic config file
+   - Register with `tdns.Zones`
+   - Mark as catalog zone (`OptCatalogZone`)
+
+**For Member Zones (Secondary):**
+1. On startup, load dynamic config file
+2. For each zone in dynamic config:
+   - Check if zone file exists
+   - If exists, load zone from file
+   - Register with `tdns.Zones`
+   - If `type: secondary` and `primary` is set, trigger zone transfer
+   - Restore `SourceCatalog` field
+
+**Load Order:**
+1. Load main config file (static zones)
+2. Load dynamic config file (dynamic zones)
+3. Initialize catalog zones (if configured)
+4. Process catalog zones to auto-configure member zones
+
+#### File Management
+
+**Zone Files:**
+- Write zone files atomically (write to temp, then rename)
+- Use standard zone file format
+- Include all zone data (RRs, RRSIGs if signed)
+
+**Config File:**
+- Use YAML format matching main config
+- Write atomically (write to temp, then rename)
+- Include all zone metadata (type, store, options, notify, etc.)
+- Track `SourceCatalog` for member zones
+- **Add clear warning comment at top of file:**
+  ```yaml
+  # WARNING: This file is automatically maintained by tdns.
+  # Manual edits may be overwritten without warning when the server is running.
+  # Edits made while the server is stopped will be accepted, but may be overwritten
+  # on the next server operation that modifies this file.
+  
+  zones:
+    # ... zone configs ...
+  ```
+
+**Error Handling:**
+- If zone file is corrupted on startup:
+  - Create the zone in memory (so it appears in zone listings)
+  - Skip loading the zone file content
+  - Set persistent error on zone using `zd.SetError(ConfigError, "failed to load zone file: <details>")`
+  - Log error with details about the parse error
+  - Zone will appear in API listings with error state, allowing operator to diagnose issue
+- If config file is corrupted, log error and start with empty dynamic config
+- If directory doesn't exist, create it with appropriate permissions
+- If file write fails, log error but continue operation (zone remains in memory)
+
+#### Integration Points
+
+**In `tdns/v2/apihandler_catalog.go:regenerateCatalogZone()`:**
+- After successful regeneration, if `storage: persistent`:
+  - Write zone file to `zonedirectory`
+  - Update/add entry in dynamic config file
+
+**In `tdns/v2/catalog.go:AutoConfigureZonesFromCatalog()`:**
+- After successful zone creation, if `storage: persistent`:
+  - Write zone file to `zonedirectory` (after first transfer)
+  - Add entry to dynamic config file
+
+**In `tdns/v2/main_initfuncs.go:MainInit()`:**
+- After loading main config:
+  - Check if `dynamiczones.configfile` is set
+  - If set, check if file is included via `include:` statement
+  - If not included, log warning (not hard fail)
+  - If included and `dynamiczones.catalog_zones.storage: persistent` or `dynamiczones.catalog_members.storage: persistent`:
+    - Load dynamic config file
+    - Load zone files for dynamic zones (with error handling for corrupted files)
+
+#### Configuration Validation
+
+- Validate that `configfile` path is absolute
+- Validate that `zonedirectory` path is absolute
+- Validate that paths exist or can be created
+- Validate file/directory permissions (read/write access)
+- Check if `configfile` is included via `include:` statement
+  - If not included, log warning (not hard fail)
+  - Dynamic zones will not be loaded on startup if not included
+- If validation fails, log error and fall back to `memory` mode for that zone type
+- Validate that `catalog_members.add` and `catalog_members.remove` are either `auto` or `manual`
+
+#### Migration Considerations
+
+- Existing catalog zones in memory will be lost on restart until persistence is enabled
+- After enabling persistence, existing zones should be saved manually (via API) or regenerated
+- Dynamic config file can be manually edited while server is stopped (edits will be accepted)
+- Dynamic config file may be overwritten when server is running (warning comment in file)
+- Zone files can be manually edited (server will overwrite on next update)
+- **Breaking change:** `catalog.policy.zones.add` and `catalog.policy.zones.remove` are moved to `dynamiczones.catalog_members.add` and `dynamiczones.catalog_members.remove`
+  - Old settings may be supported for backward compatibility with deprecation warning
+  - New deployments should use `dynamiczones.catalog_members.*` settings
+
 ### Constructing Catalog Zones (Not Implemented Yet)
 Construction of catalog zones will require future implementation including:
 
@@ -1104,11 +1439,13 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 
 ## Future Enhancements
 
-1. **IXFR support** - Incremental catalog zone updates
-2. **Multiple catalogs** - Track changes across different catalog zones
-3. **Catalog zone validation** - Verify catalog zone structure compliance
-4. **Statistics** - Track catalog update metrics
-5. **Catalog zone generation** - Helper functions for applications that publish catalogs
-6. **Dynamic meta groups** - Allow meta groups to be updated without restart
-7. **Zone removal cleanup** - Automatically clean up zone data when removed from catalog
-8. **Group inheritance** - Default meta/signing groups if not specified
+1. **Notify addresses management** - API and CLI support for managing notify addresses on catalog zones (see Notify Addresses Management section)
+2. **Persistence** - Zone file and config file persistence for catalog zones and dynamically configured zones (see Persistence section)
+3. **IXFR support** - Incremental catalog zone updates
+4. **Multiple catalogs** - Track changes across different catalog zones
+5. **Catalog zone validation** - Verify catalog zone structure compliance
+6. **Statistics** - Track catalog update metrics
+7. **Catalog zone generation** - Helper functions for applications that publish catalogs
+8. **Dynamic meta groups** - Allow meta groups to be updated without restart
+9. **Zone removal cleanup** - Automatically clean up zone data when removed from catalog
+10. **Group inheritance** - Default meta/signing groups if not specified

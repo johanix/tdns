@@ -200,16 +200,17 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 
 	case OptCatalogZone:
 		// Catalog zone requires valid catalog configuration
-		if conf.Catalog.MetaGroups == nil {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.meta_groups is missing or incorrectly structured. Please ensure your config has:\n"+
+		// Check for group_prefixes (required if config_groups exist)
+		if len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
+			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
 				"catalog:\n"+
-				"  policy:\n"+
-				"    zones:\n"+
-				"      add: auto\n"+
-				"  meta_groups:  # NOTE: This must be a sibling of 'policy', not nested under it\n"+
-				"    meta_foo:\n"+
-				"      upstream: \"...\"\n"+
-				"      store: xfr", zname)
+				"  group_prefixes:\n"+
+				"    config: \"config\"\n"+
+				"    signing: \"sign\"\n"+
+				"  config_groups:\n"+
+				"    example:\n"+
+				"      upstream: \"primary-server:port\"\n"+
+				"      store: map\n", zname)
 			log.Printf("Error: %s", errorMsg)
 			if zd != nil {
 				zd.SetError(ConfigError, errorMsg)
@@ -217,25 +218,46 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			continue
 		}
 
-		// Validate catalog policy configuration
-		if conf.Catalog.Policy.Zones.Add == "" {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but catalog.policy.zones.add is not set. Please set it to either 'auto' or 'manual'.", zname)
+		// Check for config_groups (or legacy meta_groups)
+		if conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil {
+			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
+				"catalog:\n"+
+				"  group_prefixes:\n"+
+				"    config: \"config\"\n"+
+				"    signing: \"sign\"\n"+
+				"  config_groups:\n"+
+				"    example:\n"+
+				"      upstream: \"primary-server:port\"\n"+
+				"      store: map\n"+
+				"dynamiczones:\n"+
+				"  catalog_members:\n"+
+				"    add: auto\n", zname)
 			log.Printf("Error: %s", errorMsg)
 			if zd != nil {
 				zd.SetError(ConfigError, errorMsg)
 			}
 			continue
 		}
-		if conf.Catalog.Policy.Zones.Add != "auto" && conf.Catalog.Policy.Zones.Add != "manual" {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but catalog.policy.zones.add has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.Catalog.Policy.Zones.Add)
+
+		// Validate dynamiczones.catalog_members policy configuration
+		if conf.DynamicZones.CatalogMembers.Add == "" {
+			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but dynamiczones.catalog_members.add is not set. Please set it to either 'auto' or 'manual'.", zname)
 			log.Printf("Error: %s", errorMsg)
 			if zd != nil {
 				zd.SetError(ConfigError, errorMsg)
 			}
 			continue
 		}
-		if conf.Catalog.Policy.Zones.Remove != "" && conf.Catalog.Policy.Zones.Remove != "auto" && conf.Catalog.Policy.Zones.Remove != "manual" {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but catalog.policy.zones.remove has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.Catalog.Policy.Zones.Remove)
+		if conf.DynamicZones.CatalogMembers.Add != "auto" && conf.DynamicZones.CatalogMembers.Add != "manual" {
+			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but dynamiczones.catalog_members.add has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.DynamicZones.CatalogMembers.Add)
+			log.Printf("Error: %s", errorMsg)
+			if zd != nil {
+				zd.SetError(ConfigError, errorMsg)
+			}
+			continue
+		}
+		if conf.DynamicZones.CatalogMembers.Remove != "" && conf.DynamicZones.CatalogMembers.Remove != "auto" && conf.DynamicZones.CatalogMembers.Remove != "manual" {
+			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but dynamiczones.catalog_members.remove has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.DynamicZones.CatalogMembers.Remove)
 			log.Printf("Error: %s", errorMsg)
 			if zd != nil {
 				zd.SetError(ConfigError, errorMsg)

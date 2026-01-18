@@ -46,9 +46,10 @@ type ConfigEntry struct {
 //
 // The older style of multiple separate 'include' statements throughout the file
 // is not supported.
-func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, error) {
+// Returns the processed config map and a list of all included file paths (absolute).
+func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
 	if depth > 10 {
-		return nil, errors.New("maximum include depth exceeded (10 levels)")
+		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
 	}
 
 	// Read the file
@@ -57,7 +58,7 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("error reading file %s: %v", file, err)
+		return nil, nil, fmt.Errorf("error reading file %s: %v", file, err)
 	}
 
 	// Parse YAML directly into a map
@@ -67,8 +68,11 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 			log.Printf("processConfigFile: error unmarshalling YAML from %q to struct", file)
 			fmt.Printf("Config that we failed to unmarshal:\n%s\n", string(data))
 		}
-		return nil, fmt.Errorf("error parsing YAML: %v", err)
+		return nil, nil, fmt.Errorf("error parsing YAML: %v", err)
 	}
+
+	// Track included files
+	includedFiles := make([]string, 0)
 
 	// Handle includes if present
 	if includes, ok := config["include"].([]interface{}); ok {
@@ -84,10 +88,11 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 					fullPath = filepath.Join(baseDir, includeFile)
 				}
 				fullPath = filepath.Clean(fullPath)
+				includedFiles = append(includedFiles, fullPath)
 
-				included, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1)
+				included, subIncluded, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 
 				// Merge included config
@@ -106,11 +111,14 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 					// Otherwise just override
 					config[k] = v
 				}
+
+				// Add sub-included files to our list
+				includedFiles = append(includedFiles, subIncluded...)
 			}
 		}
 	}
 
-	return config, nil
+	return config, includedFiles, nil
 }
 
 func (conf *Config) ParseConfig(reload bool) error {
@@ -125,7 +133,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Process the config file and all includes
-	configMap, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -256,7 +264,15 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
-	// Populate MetaGroupConfig.Name from map keys after parsing CatalogConf
+	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
+	if conf.Catalog.ConfigGroups != nil {
+		for name, configGroup := range conf.Catalog.ConfigGroups {
+			if configGroup != nil {
+				configGroup.Name = name
+			}
+		}
+	}
+	// Also populate MetaGroups (deprecated) if present
 	if conf.Catalog.MetaGroups != nil {
 		for name, metaGroup := range conf.Catalog.MetaGroups {
 			if metaGroup != nil {
@@ -264,6 +280,19 @@ func (conf *Config) ParseConfig(reload bool) error {
 			}
 		}
 	}
+
+	// Set default values for DynamicZonesConf if not configured
+	conf.setDynamicZonesDefaults()
+
+	// Handle backward compatibility migrations
+	conf.migrateCatalogPolicyToDynamicZones()
+	conf.migrateMetaGroupsToConfigGroups()
+
+	// Validate group prefixes (required if config_groups or signing_groups are defined)
+	conf.validateGroupPrefixes()
+
+	// Validate dynamiczones configuration (check if configfile is included)
+	conf.validateDynamicZonesConfig(includedFiles)
 
 	if Globals.App.Type == AppTypeImr {
 		conf.parseImrOptions()
@@ -762,4 +791,157 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 		Lifetime:    uint32(lifetime_secs.Seconds()),
 		SigValidity: uint32(sigvalidity_secs.Seconds()),
 	}
+}
+
+// setDynamicZonesDefaults sets default values for DynamicZonesConf if not configured
+func (conf *Config) setDynamicZonesDefaults() {
+	// Default: catalog zones allowed, memory storage
+	if conf.DynamicZones.CatalogZones.Storage == "" {
+		conf.DynamicZones.CatalogZones.Storage = "memory"
+	}
+	if !conf.DynamicZones.CatalogZones.Allowed {
+		// Default to true if not explicitly set (zero value is false, but we want true as default)
+		// Check if it was explicitly set by checking if any dynamiczones config exists
+		// For now, default to true
+		conf.DynamicZones.CatalogZones.Allowed = true
+	}
+
+	// Default: catalog members allowed, memory storage, manual add/remove
+	if conf.DynamicZones.CatalogMembers.Storage == "" {
+		conf.DynamicZones.CatalogMembers.Storage = "memory"
+	}
+	if !conf.DynamicZones.CatalogMembers.Allowed {
+		// Default to true if not explicitly set
+		conf.DynamicZones.CatalogMembers.Allowed = true
+	}
+	if conf.DynamicZones.CatalogMembers.Add == "" {
+		conf.DynamicZones.CatalogMembers.Add = "manual"
+	}
+	if conf.DynamicZones.CatalogMembers.Remove == "" {
+		conf.DynamicZones.CatalogMembers.Remove = "manual"
+	}
+
+	// Default: dynamic zones not allowed, memory storage
+	if conf.DynamicZones.Dynamic.Storage == "" {
+		conf.DynamicZones.Dynamic.Storage = "memory"
+	}
+	// Dynamic zones default to not allowed (false is correct default)
+}
+
+// migrateCatalogPolicyToDynamicZones handles backward compatibility by migrating
+// catalog.policy.zones.add/remove to dynamiczones.catalog_members.add/remove
+func (conf *Config) migrateCatalogPolicyToDynamicZones() {
+	// If catalog.policy.zones.add is set but dynamiczones.catalog_members.add is not,
+	// migrate the value
+	if conf.Catalog.Policy.Zones.Add != "" && conf.DynamicZones.CatalogMembers.Add == "" {
+		conf.DynamicZones.CatalogMembers.Add = conf.Catalog.Policy.Zones.Add
+		log.Printf("WARNING: catalog.policy.zones.add is deprecated. Use dynamiczones.catalog_members.add instead. Migrated value: %s", conf.Catalog.Policy.Zones.Add)
+	}
+
+	// If catalog.policy.zones.remove is set but dynamiczones.catalog_members.remove is not,
+	// migrate the value
+	if conf.Catalog.Policy.Zones.Remove != "" && conf.DynamicZones.CatalogMembers.Remove == "" {
+		conf.DynamicZones.CatalogMembers.Remove = conf.Catalog.Policy.Zones.Remove
+		log.Printf("WARNING: catalog.policy.zones.remove is deprecated. Use dynamiczones.catalog_members.remove instead. Migrated value: %s", conf.Catalog.Policy.Zones.Remove)
+	}
+}
+
+// migrateMetaGroupsToConfigGroups handles backward compatibility by migrating
+// catalog.meta_groups to catalog.config_groups
+func (conf *Config) migrateMetaGroupsToConfigGroups() {
+	// If meta_groups is set but config_groups is empty, migrate
+	if len(conf.Catalog.MetaGroups) > 0 && len(conf.Catalog.ConfigGroups) == 0 {
+		conf.Catalog.ConfigGroups = conf.Catalog.MetaGroups
+		log.Printf("WARNING: catalog.meta_groups is deprecated. Use catalog.config_groups instead. Migrated %d groups.", len(conf.Catalog.MetaGroups))
+		// Clear meta_groups after migration
+		conf.Catalog.MetaGroups = nil
+	}
+}
+
+// validateDynamicZonesConfig validates dynamiczones configuration
+// Checks if configfile is included in the include list (warns if not)
+func (conf *Config) validateDynamicZonesConfig(includedFiles []string) {
+	if conf.DynamicZones.ConfigFile == "" {
+		return // No dynamic config file configured, nothing to validate
+	}
+
+	// Check if configfile path is absolute
+	if !filepath.IsAbs(conf.DynamicZones.ConfigFile) {
+		log.Printf("WARNING: dynamiczones.configfile must be an absolute path, got: %s", conf.DynamicZones.ConfigFile)
+		return
+	}
+
+	// Check if zone directory path is absolute
+	if conf.DynamicZones.ZoneDirectory != "" && !filepath.IsAbs(conf.DynamicZones.ZoneDirectory) {
+		log.Printf("WARNING: dynamiczones.zonedirectory must be an absolute path, got: %s", conf.DynamicZones.ZoneDirectory)
+	}
+
+	// Check if the configfile is in the include list
+	conf.CheckDynamicConfigFileIncluded(includedFiles)
+}
+
+// validateGroupPrefixes validates catalog.group_prefixes configuration
+func (conf *Config) validateGroupPrefixes() {
+	// Check if config_groups or signing_groups are defined
+	hasConfigGroups := len(conf.Catalog.ConfigGroups) > 0
+	hasSigningGroups := len(conf.Catalog.SigningGroups) > 0
+
+	if !hasConfigGroups && !hasSigningGroups {
+		// No groups defined, no need to validate prefixes
+		return
+	}
+
+	// If groups are defined, group_prefixes is REQUIRED
+	if conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "" {
+		log.Fatalf("FATAL: catalog.group_prefixes is REQUIRED when catalog.config_groups or catalog.signing_groups are configured.\n" +
+			"Please add:\n" +
+			"  catalog:\n" +
+			"    group_prefixes:\n" +
+			"      config: \"config\"    # or \"config_\" or \"none\"\n" +
+			"      signing: \"sign\"     # or \"sign_\" or \"none\"\n")
+	}
+
+	// Validate config prefix
+	if conf.Catalog.GroupPrefixes.Config != "none" {
+		if err := validateGroupPrefix(conf.Catalog.GroupPrefixes.Config, "config"); err != nil {
+			log.Fatalf("FATAL: Invalid catalog.group_prefixes.config: %v", err)
+		}
+	}
+
+	// Validate signing prefix
+	if conf.Catalog.GroupPrefixes.Signing != "none" {
+		if err := validateGroupPrefix(conf.Catalog.GroupPrefixes.Signing, "signing"); err != nil {
+			log.Fatalf("FATAL: Invalid catalog.group_prefixes.signing: %v", err)
+		}
+	}
+
+	// Check for prefix conflicts (if both are not "none" and they're the same)
+	if conf.Catalog.GroupPrefixes.Config != "none" && conf.Catalog.GroupPrefixes.Signing != "none" {
+		if conf.Catalog.GroupPrefixes.Config == conf.Catalog.GroupPrefixes.Signing {
+			log.Fatalf("FATAL: catalog.group_prefixes.config and catalog.group_prefixes.signing must be different (both are: %q)", conf.Catalog.GroupPrefixes.Config)
+		}
+	}
+}
+
+// validateGroupPrefix validates a single group prefix value
+func validateGroupPrefix(prefix string, prefixType string) error {
+	// Check length (must leave room for group name in DNS label - max 63 chars)
+	if len(prefix) > 50 {
+		return fmt.Errorf("%s prefix too long (%d chars), max 50 chars to leave room for group names", prefixType, len(prefix))
+	}
+
+	// Check for valid DNS label characters
+	// Valid: letters, digits, hyphens (but not at start/end)
+	for i, ch := range prefix {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
+			return fmt.Errorf("%s prefix contains invalid character at position %d: %q (only letters, digits, hyphens, and underscores allowed)", prefixType, i, ch)
+		}
+	}
+
+	// Check prefix doesn't start or end with hyphen
+	if len(prefix) > 0 && (prefix[0] == '-' || prefix[len(prefix)-1] == '-') {
+		return fmt.Errorf("%s prefix cannot start or end with hyphen", prefixType)
+	}
+
+	return nil
 }

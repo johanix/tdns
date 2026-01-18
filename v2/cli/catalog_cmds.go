@@ -20,6 +20,7 @@ import (
 var catalogName string
 var zoneName string
 var groupName string
+var notifyAddress string
 
 // CatalogCmd is the root command for catalog zone management
 var CatalogCmd = &cobra.Command{
@@ -499,4 +500,138 @@ func init() {
 	catalogZoneGroupDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 	catalogZoneGroupDeleteCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
 	catalogZoneGroupDeleteCmd.Flags().StringVar(&groupName, "group", "", "Group name (required)")
+
+	// Flags for notify operations
+	catalogNotifyAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogNotifyAddCmd.Flags().StringVar(&notifyAddress, "addr", "", "Notify address in IP:port format (required)")
+
+	catalogNotifyRemoveCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogNotifyRemoveCmd.Flags().StringVar(&notifyAddress, "addr", "", "Notify address in IP:port format (required)")
+
+	catalogNotifyListCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+}
+
+// CatalogNotifyCmd is the subcommand group for notify address operations
+var CatalogNotifyCmd = &cobra.Command{
+	Use:   "notify",
+	Short: "Manage notify addresses for catalog zones",
+}
+
+// catalogNotifyAddCmd adds a notify address to a catalog zone
+var catalogNotifyAddCmd = &cobra.Command{
+	Use:   "add --cat <catalog-zone> --addr <IP:port>",
+	Short: "Add a notify address to a catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" || notifyAddress == "" {
+			fmt.Println("Error: --cat and --addr are required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "notify-add",
+			CatalogZone: catalogName,
+			Address:     notifyAddress,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
+// catalogNotifyRemoveCmd removes a notify address from a catalog zone
+var catalogNotifyRemoveCmd = &cobra.Command{
+	Use:   "remove --cat <catalog-zone> --addr <IP:port>",
+	Short: "Remove a notify address from a catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" || notifyAddress == "" {
+			fmt.Println("Error: --cat and --addr are required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "notify-remove",
+			CatalogZone: catalogName,
+			Address:     notifyAddress,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
+// catalogNotifyListCmd lists all notify addresses for a catalog zone
+var catalogNotifyListCmd = &cobra.Command{
+	Use:   "list --cat <catalog-zone>",
+	Short: "List all notify addresses for a catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" {
+			fmt.Println("Error: --cat is required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "notify-list",
+			CatalogZone: catalogName,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if len(resp.NotifyAddresses) == 0 {
+			fmt.Printf("No notify addresses configured for catalog zone %s\n", catalogName)
+			return
+		}
+
+		fmt.Printf("Notify addresses for catalog zone %s:\n", catalogName)
+		for _, addr := range resp.NotifyAddresses {
+			fmt.Printf("  %s\n", addr)
+		}
+	},
 }

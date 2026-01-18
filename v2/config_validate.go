@@ -53,7 +53,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		configsections["apiserver"] = config.ApiServer
 		configsections["dnsengine"] = config.DnsEngine
 		// Validate catalog configuration if present
-		if config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "" {
+		if config.Catalog.ConfigGroups != nil || config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "" {
 			configsections["catalog"] = config.Catalog
 		}
 	default:
@@ -61,7 +61,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
 		// Validate catalog configuration if present
-		if config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "" {
+		if config.Catalog.ConfigGroups != nil || config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "" {
 			configsections["catalog"] = config.Catalog
 		}
 	}

@@ -152,6 +152,22 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if updated {
 							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 
+						// Write zone file if persistence is enabled (for catalog member zones)
+						// Only write after successful transfer (updated == true)
+						if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
+							if err != nil {
+								log.Printf("DYNAMIC-ZONES: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+								// Don't fail the operation, just log the warning
+							}
+
+							// Update dynamic config file (zone file path may have changed, or this is first write)
+							if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+								log.Printf("DYNAMIC-ZONES: Warning: Failed to update dynamic config file for %s: %v", zd.ZoneName, err)
+								// Don't fail the operation, just log the warning
+							}
+						}
+
 							// Check if this is a catalog zone and parse it
 							if zd.Options[OptCatalogZone] {
 								log.Printf("CATALOG: RefreshEngine: Zone %s is a catalog zone, parsing member zones", zone)
@@ -343,6 +359,22 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 					if updated {
 						zd.NotifyDownstreams()
+
+						// Write zone file if persistence is enabled (for catalog member zones)
+						// Only write after successful transfer (updated == true)
+						if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
+							if err != nil {
+								log.Printf("DYNAMIC-ZONES: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+								// Don't fail the operation, just log the warning
+							}
+
+							// Update dynamic config file (zone file path may have changed, or this is first write)
+							if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+								log.Printf("DYNAMIC-ZONES: Warning: Failed to update dynamic config file for %s: %v", zd.ZoneName, err)
+								// Don't fail the operation, just log the warning
+							}
+						}
 					}
 				}
 			}

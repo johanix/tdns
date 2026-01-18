@@ -159,46 +159,52 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 			continue
 		}
 
-		// Categorize groups by prefix
-		var serviceGroups []string
-		var signingGroup string
-		var metaGroup string
+	// Categorize groups by configured prefixes
+	var serviceGroups []string
+	var signingGroup string
+	var configGroup string
 
-		for _, group := range info.groups {
-			if strings.HasPrefix(group, "sign_") {
-				if signingGroup != "" {
-					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing groups (%s, %s), using first",
-						info.zoneName, signingGroup, group)
-				} else {
-					signingGroup = group
-				}
-			} else if strings.HasPrefix(group, "meta_") {
-				if metaGroup != "" {
-					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple meta groups (%s, %s), using first",
-						info.zoneName, metaGroup, group)
-				} else {
-					metaGroup = group
-				}
+	// Get configured group prefixes
+	configPrefix := Conf.Catalog.GroupPrefixes.Config
+	signingPrefix := Conf.Catalog.GroupPrefixes.Signing
+
+	for _, group := range info.groups {
+		// Check if this is a signing group (only if prefix != "none")
+		if signingPrefix != "none" && strings.HasPrefix(group, signingPrefix) {
+			if signingGroup != "" {
+				log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing groups (%s, %s), using first",
+					info.zoneName, signingGroup, group)
 			} else {
-				// Service group (no specific prefix)
-				serviceGroups = append(serviceGroups, group)
+				signingGroup = group
 			}
+		} else if configPrefix != "none" && strings.HasPrefix(group, configPrefix) {
+			// Check if this is a config group (only if prefix != "none")
+			if configGroup != "" {
+				log.Printf("ParseCatalogZone: Warning: Zone %s has multiple config groups (%s, %s), using first",
+					info.zoneName, configGroup, group)
+			} else {
+				configGroup = group
+			}
+		} else {
+			// Service group (no specific prefix), or all groups are ordinary if both prefixes are "none"
+			serviceGroups = append(serviceGroups, group)
 		}
+	}
 
-		// Log warning if no meta group (needed for auto-configuration)
-		if metaGroup == "" {
-			log.Printf("ParseCatalogZone: Info: Zone %s has no meta group, auto-configuration not possible",
-				info.zoneName)
-		}
+	// Log info if no config group (needed for auto-configuration)
+	if configPrefix != "none" && configGroup == "" {
+		log.Printf("ParseCatalogZone: Info: Zone %s has no config group, auto-configuration not possible",
+			info.zoneName)
+	}
 
-		memberZones[info.zoneName] = &MemberZone{
-			ZoneName:     info.zoneName,
-			Hash:         hash,
-			ServiceGroups: serviceGroups,
-			SigningGroup:  signingGroup,
-			MetaGroup:     metaGroup,
-			DiscoveredAt:  now,
-		}
+	memberZones[info.zoneName] = &MemberZone{
+		ZoneName:     info.zoneName,
+		Hash:         hash,
+		ServiceGroups: serviceGroups,
+		SigningGroup:  signingGroup,
+		MetaGroup:     configGroup, // Note: Field named MetaGroup for backward compat, but contains config group
+		DiscoveredAt:  now,
+	}
 	}
 
 	update := &CatalogZoneUpdate{
@@ -260,10 +266,10 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// VALIDATION (a): Check if zone references a group that doesn't exist in config
 		// This validation applies regardless of auto-config policy
 		if member.MetaGroup != "" {
-			metaConfig, exists := conf.Catalog.MetaGroups[member.MetaGroup]
+			configGroupConfig, exists := conf.Catalog.ConfigGroups[member.MetaGroup]
 			if !exists {
 				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which does not exist in local config. Available groups: %v",
-					zoneName, update.CatalogZone, member.MetaGroup, getMetaGroupNames(conf.Catalog.MetaGroups))
+					zoneName, update.CatalogZone, member.MetaGroup, getConfigGroupNames(conf.Catalog.ConfigGroups))
 				log.Printf("CATALOG: ERROR: %s", errorMsg)
 				if catalogExists {
 					catalogZd.SetError(ConfigError, errorMsg)
@@ -276,9 +282,9 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			// VALIDATION (b): Check if group config is insufficient for auto-configuration
 			// This validation only applies when auto-config is enabled
 			// Note: store defaults to "map" if not specified, so only upstream is required
-			if autoConfigureEnabled && metaConfig.Upstream == "" {
-				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which is missing required field for auto-configuration (upstream: %q). 'upstream' is required when catalog.policy.zones.add=auto",
-					zoneName, update.CatalogZone, member.MetaGroup, metaConfig.Upstream)
+			if autoConfigureEnabled && configGroupConfig.Upstream == "" {
+				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which is missing required field for auto-configuration (upstream: %q). 'upstream' is required when dynamiczones.catalog_members.add=auto",
+					zoneName, update.CatalogZone, member.MetaGroup, configGroupConfig.Upstream)
 				log.Printf("CATALOG: ERROR: %s", errorMsg)
 				if catalogExists {
 					catalogZd.SetError(ConfigError, errorMsg)
@@ -303,7 +309,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	}
 
 	log.Printf("CATALOG: Auto-configure enabled, processing %d member zones from catalog %s", len(update.MemberZones), update.CatalogZone)
-	log.Printf("CATALOG: Available meta_groups in config: %v", getMetaGroupNames(conf.Catalog.MetaGroups))
+	log.Printf("CATALOG: Available config_groups in config: %v", getConfigGroupNames(conf.Catalog.ConfigGroups))
 
 	processedCount := 0
 	skippedCount := 0
@@ -329,39 +335,39 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		}
 
 		// Get meta group config (already validated above, but check again for safety)
-		metaConfig, exists := conf.Catalog.MetaGroups[member.MetaGroup]
+		configGroupConfig, exists := conf.Catalog.ConfigGroups[member.MetaGroup]
 		if !exists {
 			// Should not happen if validation above worked, but skip just in case
-			log.Printf("CATALOG: Zone %s meta group '%s' not found in config, skipping. Available groups: %v",
-				zoneName, member.MetaGroup, getMetaGroupNames(conf.Catalog.MetaGroups))
+			log.Printf("CATALOG: Zone %s config group '%s' not found in config, skipping. Available groups: %v",
+				zoneName, member.MetaGroup, getConfigGroupNames(conf.Catalog.ConfigGroups))
 			skippedCount++
 			continue
 		}
 		
 		// Check if config is sufficient (already validated above, but check again for safety)
 		// Note: store defaults to "map" if not specified, so only upstream is required
-		if metaConfig.Upstream == "" {
-			log.Printf("CATALOG: Zone %s meta group '%s' is missing required field (upstream: %q), skipping",
-				zoneName, member.MetaGroup, metaConfig.Upstream)
+		if configGroupConfig.Upstream == "" {
+			log.Printf("CATALOG: Zone %s config group '%s' is missing required field (upstream: %q), skipping",
+				zoneName, member.MetaGroup, configGroupConfig.Upstream)
 			skippedCount++
 			continue
 		}
 
 		// Determine store value (default to "map" if not specified)
-		storeValue := metaConfig.Store
+		storeValue := configGroupConfig.Store
 		if storeValue == "" {
 			storeValue = "map"
 		}
 
-		// RULE 4: Auto-configure zone using meta group
-		log.Printf("CATALOG: Auto-configuring zone %s using meta group '%s' (upstream: %s, store: %s)",
-			zoneName, member.MetaGroup, metaConfig.Upstream, storeValue)
+		// RULE 4: Auto-configure zone using config group
+		log.Printf("CATALOG: Auto-configuring zone %s using config group '%s' (upstream: %s, store: %s)",
+			zoneName, member.MetaGroup, configGroupConfig.Upstream, storeValue)
 
 		zd := &ZoneData{
 			ZoneName:      zoneName,
 			ZoneType:      Secondary,
 			ZoneStore:     parseZoneStore(storeValue),
-			Upstream:      metaConfig.Upstream,
+			Upstream:      configGroupConfig.Upstream,
 			Logger:        log.Default(),
 			SourceCatalog: update.CatalogZone,
 			Options: map[ZoneOption]bool{
@@ -369,23 +375,23 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			},
 		}
 
-		// Apply zone options from meta group
-		for _, optStr := range metaConfig.Options {
+		// Apply zone options from config group
+		for _, optStr := range configGroupConfig.Options {
 			if opt, exists := StringToZoneOption[optStr]; exists {
 				zd.Options[opt] = true
 			}
 		}
 
 		// Configure TSIG if specified
-		if metaConfig.TsigKey != "" {
-			_, ok := Globals.TsigKeys[metaConfig.TsigKey]
+		if configGroupConfig.TsigKey != "" {
+			_, ok := Globals.TsigKeys[configGroupConfig.TsigKey]
 			if !ok {
 				log.Printf("CATALOG: Warning: TSIG key '%s' not found for zone %s",
-					metaConfig.TsigKey, zoneName)
+					configGroupConfig.TsigKey, zoneName)
 			} else {
 				// Apply TSIG configuration to zone
 				// TODO: Set zd.TsigKey = tsigDetails (depends on TSIG implementation)
-				log.Printf("CATALOG: Applied TSIG key '%s' to zone %s", metaConfig.TsigKey, zoneName)
+				log.Printf("CATALOG: Applied TSIG key '%s' to zone %s", configGroupConfig.TsigKey, zoneName)
 			}
 		}
 
@@ -393,12 +399,22 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		Zones.Set(zoneName, zd)
 		log.Printf("CATALOG: Zone %s added to Zones map", zoneName)
 
+		// Write dynamic config file if persistence is enabled
+		// Note: We write config file immediately after creation (before transfer)
+		// Zone file will be written after successful transfer (in RefreshEngine)
+		if conf.ShouldPersistZone(zd) {
+			if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+				log.Printf("CATALOG: Warning: Failed to update dynamic config file for %s: %v", zoneName, err)
+				// Don't fail the operation, just log the warning
+			}
+		}
+
 		// Trigger initial zone transfer (non-blocking with timeout and context support)
-		log.Printf("CATALOG: Triggering initial zone transfer for %s from %s", zoneName, metaConfig.Upstream)
+		log.Printf("CATALOG: Triggering initial zone transfer for %s from %s", zoneName, configGroupConfig.Upstream)
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
-			Primary:   metaConfig.Upstream,
+			Primary:   configGroupConfig.Upstream,
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}
@@ -437,15 +453,21 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 }
 
 // getMetaGroupNames returns a list of meta group names for logging
-func getMetaGroupNames(metaGroups map[string]*MetaGroupConfig) []string {
-	if metaGroups == nil {
+// getConfigGroupNames returns a list of config group names from a map
+func getConfigGroupNames(configGroups map[string]*ConfigGroupConfig) []string {
+	if configGroups == nil {
 		return []string{}
 	}
-	names := make([]string, 0, len(metaGroups))
-	for name := range metaGroups {
+	names := make([]string, 0, len(configGroups))
+	for name := range configGroups {
 		names = append(names, name)
 	}
 	return names
+}
+
+// getMetaGroupNames is deprecated, use getConfigGroupNames
+func getMetaGroupNames(metaGroups map[string]*MetaGroupConfig) []string {
+	return getConfigGroupNames(metaGroups)
 }
 
 // parseZoneStore converts a zone store string to ZoneStore type
