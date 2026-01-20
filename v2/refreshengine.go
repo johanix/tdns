@@ -199,7 +199,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									}
 
 								// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-								log.Printf("CATALOG: RefreshEngine: Checking auto-configure policy: dynamiczones.catalog_members.add=%q", conf.DynamicZones.CatalogMembers.Add)
+								// Policy is now per-catalog-zone via catalog-member-auto-create option
 									go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 										defer func() {
 											if r := recover(); r != nil {
@@ -283,7 +283,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 
 								// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-								log.Printf("CATALOG: RefreshEngine: Checking auto-configure policy: dynamiczones.catalog_members.add=%q", conf.DynamicZones.CatalogMembers.Add)
+								// Policy is now per-catalog-zone via catalog-member-auto-create option
 							go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 								defer func() {
 									if r := recover(); r != nil {

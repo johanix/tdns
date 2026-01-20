@@ -239,35 +239,37 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			continue
 		}
 
-		// Validate dynamiczones.catalog_members policy configuration
-		if conf.DynamicZones.CatalogMembers.Add == "" {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but dynamiczones.catalog_members.add is not set. Please set it to either 'auto' or 'manual'.", zname)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
-			}
-			continue
-		}
-		if conf.DynamicZones.CatalogMembers.Add != "auto" && conf.DynamicZones.CatalogMembers.Add != "manual" {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but dynamiczones.catalog_members.add has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.DynamicZones.CatalogMembers.Add)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
-			}
-			continue
-		}
-		if conf.DynamicZones.CatalogMembers.Remove != "" && conf.DynamicZones.CatalogMembers.Remove != "auto" && conf.DynamicZones.CatalogMembers.Remove != "manual" {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone, but dynamiczones.catalog_members.remove has invalid value '%s'. Must be either 'auto' or 'manual'.", zname, conf.DynamicZones.CatalogMembers.Remove)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
-			}
-			continue
-		}
-
 		options[opt] = true
 		cleanoptions = append(cleanoptions, opt)
-		log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s, policy: add=%s, remove=%s)", zname, zconf.Type, conf.DynamicZones.CatalogMembers.Add, conf.DynamicZones.CatalogMembers.Remove)
+		log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s)", zname, zconf.Type)
+
+	case OptCatalogMemberAutoCreate:
+		// Only valid on catalog zones
+		if !options[OptCatalogZone] {
+			errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-create option is only valid on catalog zones", zname)
+			log.Printf("Error: %s", errorMsg)
+			if zd != nil {
+				zd.SetError(ConfigError, errorMsg)
+			}
+			continue
+		}
+		options[opt] = true
+		cleanoptions = append(cleanoptions, opt)
+		log.Printf("ParseZones: Zone %s: catalog member auto-create enabled", zname)
+
+	case OptCatalogMemberAutoDelete:
+		// Only valid on catalog zones
+		if !options[OptCatalogZone] {
+			errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-delete option is only valid on catalog zones", zname)
+			log.Printf("Error: %s", errorMsg)
+			if zd != nil {
+				zd.SetError(ConfigError, errorMsg)
+			}
+			continue
+		}
+		options[opt] = true
+		cleanoptions = append(cleanoptions, opt)
+		log.Printf("ParseZones: Zone %s: catalog member auto-delete enabled", zname)
 
 		default:
 			log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])

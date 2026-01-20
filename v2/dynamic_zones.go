@@ -391,19 +391,18 @@ func (conf *Config) LoadDynamicZoneFilesOLD(ctx context.Context) error {
 					log.Printf("DYNAMIC-ZONES: ERROR notifying catalog zone callbacks for %s: %v", zoneName, err)
 				}
 
-				// Auto-configure member zones if policy allows (in goroutine to avoid blocking)
-				if conf.DynamicZones.CatalogMembers.Add == "auto" {
-					go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
-						defer func() {
-							if r := recover(); r != nil {
-								log.Printf("DYNAMIC-ZONES: PANIC in auto-configure goroutine for %s: %v", update.CatalogZone, r)
-							}
-						}()
-						if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-							log.Printf("DYNAMIC-ZONES: ERROR auto-configuring zones from catalog %s: %v", update.CatalogZone, err)
+				// Auto-configure member zones if catalog zone has auto-create enabled
+				// (check is done inside AutoConfigureZonesFromCatalog)
+				go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("DYNAMIC-ZONES: PANIC in auto-configure goroutine for %s: %v", update.CatalogZone, r)
 						}
-					}(catalogUpdate, conf, ctx)
-				}
+					}()
+					if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
+						log.Printf("DYNAMIC-ZONES: ERROR auto-configuring zones from catalog %s: %v", update.CatalogZone, err)
+					}
+				}(catalogUpdate, conf, ctx)
 			}
 		}
 
@@ -477,7 +476,8 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		if enabled {
 			if optStr, ok := ZoneOptionToString[opt]; ok {
 				// Skip internal options that shouldn't be in config
-				if opt != OptDirty && opt != OptFrozen {
+				// OptAutomaticZone is an internal marker (via SourceCatalog field), not a config option
+				if opt != OptDirty && opt != OptFrozen && opt != OptAutomaticZone {
 					optionsStrs = append(optionsStrs, optStr)
 				}
 			}

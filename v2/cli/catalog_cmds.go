@@ -32,11 +32,11 @@ var CatalogCmd = &cobra.Command{
 
 // catalogCreateCmd creates a new catalog zone
 var catalogCreateCmd = &cobra.Command{
-	Use:   "create --name <catalog-zone>",
+	Use:   "create --cat <catalog-zone>",
 	Short: "Create a new catalog zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		if catalogName == "" {
-			fmt.Println("Error: --name is required")
+			fmt.Println("Error: --cat is required")
 			os.Exit(1)
 		}
 
@@ -518,7 +518,7 @@ func init() {
 	CatalogNotifyCmd.AddCommand(catalogNotifyListCmd)
 
 	// Flags for catalog create/delete
-	catalogCreateCmd.Flags().StringVar(&catalogName, "name", "", "Catalog zone name (required)")
+	catalogCreateCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 	catalogDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 
 	// Flags for zone operations

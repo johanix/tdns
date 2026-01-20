@@ -1,42 +1,141 @@
+# TDNS Zone Declarations
 #
-# Defined zone options:
-#   - delegation-sync-child:	attempt delegation synchronization for zone towards parent
-#   - delegation-sync-parent:	provide delegation synchronization service towards child zones
-#   - allow-updates:		allow zone modifications via DNS UPDATE
-#   - allow-child-updates:	allow updates to child delegation data via DNS UPDATE
-#   - allow-combine:		allow zone apex RRsets NS, DNSKEY, CDS, CSYNC to be modified
-#   - fold-case:		fold domain name case before comparisons
-#   - black-lies:		implement "black lies" negative responses
-#   - dont-publish-key:		don't publish the public SIG(0) key in zone
-#   - online-signing:		sign zone on-the-fly as needed; will create DNSSEC keypair if needed
-#   - multisigner:		OBE
-#   - automatic-zone:		[not a zone option, but rather a zone property; not configurable]
-#   - add-transport-signal:	automatically syntetisize SVCB RRs to put in Additional section
-#   - catalog-zone:		mark zone as RFC 9432 catalog zone (requires catalog: config section)
+# This file contains complete zone configuration examples.
+# See auth-templates.sample.yaml for available templates and all zone options.
 #
+# Zone declaration properties:
+#   name:            Zone name (required, FQDN with trailing dot)
+#   type:            primary | secondary (required unless using template)
+#   zonefile:        Path to zone file (required for primary, optional for secondary)
+#   store:           map | slice | xfr (defaults to "map" if not specified)
+#                    - map:   Default, general-purpose (recommended for most zones)
+#                    - slice: Experimental alternative (may be faster/use less memory)
+#                    - xfr:   Zone transfer only (AXFR in/out, NO normal queries)
+#   template:        Template name to inherit settings from (optional)
+#   primary:         Upstream server for secondary zones (IP:port)
+#   notify:          List of downstream servers to notify (IP:port list)
+#   downstreams:     Alias for notify (same meaning)
+#   options:         List of zone options (see auth-templates.sample.yaml for complete list)
+#   dnssec_policy:   DNSSEC policy name (from dnssecpolicies: section)
+#   multi_signer:    Multi-signer configuration name (from multisigner: section)
+#
+# Properties set in templates can be overridden in individual zone declarations.
+#
+# ==============================================================================
 
 zones:
-   - name:            test.net
-     zonefile:        /etc/tdns/zones/test.net
-     template:        parent-primary
-
-   - name:            .
-     zonefile:        /etc/tdns/zones/root
-     template:        parent-primary
-
-   # Example: Catalog zone as primary (for persistence across restarts)
-   - name:            catalog.
+   # ===========================================================================
+   # EXAMPLE 1: Complete PRIMARY zone declaration (no template)
+   # ===========================================================================
+   - name:            example.com.
      type:            primary
+     zonefile:        /etc/tdns/zones/example.com.zone
      store:           map
+     notify:
+        - "192.0.2.1:53"       # Notify this secondary
+        - "192.0.2.2:53"       # And this one
      options:
-        - catalog-zone
-     # Catalog zone will be managed via API and persisted to database
+        - delegation-sync-parent   # Provide delegation sync for children
+        - online-signing           # Sign responses on-the-fly
+     dnssec_policy:   default
 
-   # Example: Catalog zone as secondary (fetched from upstream)
-   # - name:            catalog.
-   #   type:            secondary
-   #   store:           xfr
-   #   primary:         "192.0.2.1:5353"
-   #   options:
-   #      - catalog-zone
-   #   # Catalog zone will be transferred from upstream and parsed automatically
+   # ===========================================================================
+   # EXAMPLE 2: Complete SECONDARY zone declaration (no template)
+   # ===========================================================================
+   - name:            example.net.
+     type:            secondary
+     zonefile:        /var/lib/tdns/zones/example.net.zone  # Optional: save transferred zone
+     store:           map                                    # Default storage (serves queries)
+     primary:         "203.0.113.1:53"                      # Transfer from this server
+     options:
+        - delegation-sync-child    # Push DS/NS updates to parent
+
+   # ===========================================================================
+   # EXAMPLE 3: Zone using a TEMPLATE (with overrides)
+   # ===========================================================================
+   - name:            example.org.
+     zonefile:        /etc/tdns/zones/example.org.zone
+     template:        parent-primary    # Inherit from parent-primary template
+     notify:                            # Override template's notify list
+        - "192.0.2.10:53"
+        - "192.0.2.11:53"
+     # type, store, options, dnssec_policy inherited from template
+
+   # ===========================================================================
+   # EXAMPLE 4: Simple zone using template (minimal declaration)
+   # ===========================================================================
+   - name:            simple.example.
+     zonefile:        /etc/tdns/zones/simple.example.zone
+     template:        signed-primary     # Everything inherited from template
+
+   # ===========================================================================
+   # EXAMPLE 5: PRIMARY catalog zone (with auto-create/delete)
+   # ===========================================================================
+   - name:            catalog.example.
+     type:            primary
+     zonefile:        /var/lib/tdns/zones/catalog.example.zone
+     store:           map
+     notify:
+        - "192.0.2.20:53"      # Notify secondaries about catalog changes
+     options:
+        - catalog-zone                    # RFC 9432 catalog zone
+        - catalog-member-auto-create      # Auto-create zones from catalog
+        - catalog-member-auto-delete      # Auto-delete zones removed from catalog
+
+   # ===========================================================================
+   # EXAMPLE 6: SECONDARY catalog zone (fetched from upstream)
+   # ===========================================================================
+   - name:            catalog-upstream.
+     type:            secondary
+     zonefile:        /var/lib/tdns/zones/catalog-upstream.zone  # Optional persistence
+     store:           map
+     primary:         "203.0.113.50:5353"      # Fetch catalog from here
+     options:
+        - catalog-zone                         # Parse as catalog zone
+        - catalog-member-auto-create           # Auto-configure member zones
+        - catalog-member-auto-delete           # Auto-remove deleted zones
+
+   # ===========================================================================
+   # EXAMPLE 7: Read-only catalog (metadata only, no auto-config)
+   # ===========================================================================
+   - name:            catalog-readonly.
+     type:            secondary
+     store:           map
+     primary:         "203.0.113.60:5353"
+     options:
+        - catalog-zone           # Parse catalog but DON'T auto-configure
+                                 # (no catalog-member-auto-create option)
+
+   # ===========================================================================
+   # EXAMPLE 8: Root zone (special case)
+   # ===========================================================================
+   - name:            .
+     zonefile:        /etc/tdns/zones/root.zone
+     template:        parent-primary
+
+   # ===========================================================================
+   # EXAMPLE 9: Stealth primary (hidden, notifies public secondaries)
+   # ===========================================================================
+   - name:            stealth.example.
+     zonefile:        /etc/tdns/zones/stealth.example.zone
+     template:        stealth-primary
+     notify:                              # Override template notify list
+        - "ns1.public.example:53"
+        - "ns2.public.example:53"
+
+   # ===========================================================================
+   # EXAMPLE 10: Fast-rolling DNSSEC zone
+   # ===========================================================================
+   - name:            fastroll.example.
+     zonefile:        /etc/tdns/zones/fastroll.example.zone
+     template:        fast-roll-primary
+     notify:
+        - "192.0.2.100:53"
+
+   # ===========================================================================
+   # EXAMPLE 11: Zone with dynamic updates enabled
+   # ===========================================================================
+   - name:            dynamic.example.
+     zonefile:        /etc/tdns/zones/dynamic.example.zone
+     template:        dynamic-primary
+     # Inherits allow-updates, delegation-sync-parent, online-signing from template

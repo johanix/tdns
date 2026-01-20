@@ -250,15 +250,17 @@ func NotifyCatalogZoneUpdate(update *CatalogZoneUpdate) error {
 // AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta groups
 func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdate, conf *Config) error {
 	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Starting for catalog %s with %d member zones", update.CatalogZone, len(update.MemberZones))
-	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Policy check - dynamiczones.catalog_members.add=%q", conf.DynamicZones.CatalogMembers.Add)
 
-	// Get catalog zone's ZoneData for error reporting
+	// Get catalog zone's ZoneData to check its options
 	catalogZd, catalogExists := Zones.Get(update.CatalogZone)
 	if !catalogExists {
 		log.Printf("CATALOG: Warning: Catalog zone %s not found in Zones map", update.CatalogZone)
+		return fmt.Errorf("catalog zone %s not found", update.CatalogZone)
 	}
 
-	autoConfigureEnabled := conf.DynamicZones.CatalogMembers.Add == "auto"
+	// Check if auto-create is enabled for this catalog zone
+	autoConfigureEnabled := catalogZd.Options[OptCatalogMemberAutoCreate]
+	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Policy check - catalog zone %s has catalog-member-auto-create=%v", update.CatalogZone, autoConfigureEnabled)
 
 	// VALIDATION: Check all member zones for configuration errors (applies regardless of policy)
 	errorCount := 0
@@ -283,7 +285,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			// This validation only applies when auto-config is enabled
 			// Note: store defaults to "map" if not specified, so only upstream is required
 			if autoConfigureEnabled && configGroupConfig.Upstream == "" {
-				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which is missing required field for auto-configuration (upstream: %q). 'upstream' is required when dynamiczones.catalog_members.add=auto",
+				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which is missing required field for auto-configuration (upstream: %q). 'upstream' is required when catalog-member-auto-create is enabled",
 					zoneName, update.CatalogZone, member.MetaGroup, configGroupConfig.Upstream)
 				log.Printf("CATALOG: ERROR: %s", errorMsg)
 				if catalogExists {
@@ -297,7 +299,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	}
 
 	if !autoConfigureEnabled {
-		log.Printf("CATALOG: Auto-configure disabled by policy (dynamiczones.catalog_members.add=%q, expected \"auto\"), catalog provides metadata only. %d member zones will not be auto-configured.", conf.DynamicZones.CatalogMembers.Add, len(update.MemberZones))
+		log.Printf("CATALOG: Auto-configure disabled for catalog zone %s (catalog-member-auto-create not set), catalog provides metadata only. %d member zones will not be auto-configured.", update.CatalogZone, len(update.MemberZones))
 		// Clear error state if no validation errors were found (validation still runs to catch missing groups)
 		if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
 			if strings.Contains(catalogZd.ErrorMsg, "Member zone") || strings.Contains(catalogZd.ErrorMsg, "references group") {

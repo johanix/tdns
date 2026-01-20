@@ -313,12 +313,13 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 		return fmt.Errorf("failed to regenerate catalog zone: %v", err)
 	}
 
-	// Check if the member zone should be removed (if it's a catalog member and remove policy is "auto")
+	// Check if the member zone should be removed (if it's a catalog member and catalog has auto-delete enabled)
 	zd, exists := Zones.Get(zoneName)
 	if exists && zd.Options[OptAutomaticZone] && zd.SourceCatalog == catalogZoneName {
-		// Check removal policy
-		if Conf.DynamicZones.CatalogMembers.Remove == "auto" {
-			log.Printf("CATALOG: Auto-removing zone %s (removed from catalog %s, policy: auto)", zoneName, catalogZoneName)
+		// Check if catalog zone has auto-delete enabled
+		catalogZd, catalogExists := Zones.Get(catalogZoneName)
+		if catalogExists && catalogZd.Options[OptCatalogMemberAutoDelete] {
+			log.Printf("CATALOG: Auto-removing zone %s (removed from catalog %s, catalog has catalog-member-auto-delete enabled)", zoneName, catalogZoneName)
 			
 			// Remove from Zones map
 			Zones.Remove(zoneName)
@@ -342,7 +343,7 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 				}
 			}
 		} else {
-			log.Printf("CATALOG: Zone %s remains configured (removed from catalog %s, but removal policy is manual)", zoneName, catalogZoneName)
+			log.Printf("CATALOG: Zone %s remains configured (removed from catalog %s, but catalog does not have catalog-member-auto-delete enabled)", zoneName, catalogZoneName)
 		}
 	}
 
