@@ -19,8 +19,7 @@ imr/tdns-imr
 cli/tdns-cli
 cliv2/tdns-cliv2
 dog/dog
-kdc/tdns-kdc
-krs/tdns-krs
+dogv2/dogv2
 # old stuff; going away:
 sidecar/music-sidecar
 sidecar-cli/sidecar-cli
