@@ -158,20 +158,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				// For primary zones, we could show Parent if needed, but typically Primary field is for secondary zones
 
 				zconf := ZoneConf{
-					Name:         zname,
-					Type:         ZoneTypeToString[zd.ZoneType],
-					Store:        ZoneStoreToString[zd.ZoneStore],
-					Dirty:        zd.Options[OptDirty],
-					Frozen:       zd.Options[OptFrozen],
-					Options:      options,
-					Error:        zd.Error,
-					ErrorType:    zd.ErrorType,
-					ErrorMsg:     zd.ErrorMsg,
-					RefreshCount: zd.RefreshCount,
-				SourceCatalog: zd.SourceCatalog,
-					Zonefile:     zd.Zonefile,
-					Primary:      primary,
-					Downstreams:  zd.Downstreams,
+					Name:          zname,
+					Type:          ZoneTypeToString[zd.ZoneType],
+					Store:         ZoneStoreToString[zd.ZoneStore],
+					Dirty:         zd.Options[OptDirty],
+					Frozen:        zd.Options[OptFrozen],
+					Options:       options,
+					Error:         zd.Error,
+					ErrorType:     zd.ErrorType,
+					ErrorMsg:      zd.ErrorMsg,
+					RefreshCount:  zd.RefreshCount,
+					SourceCatalog: zd.SourceCatalog,
+					Zonefile:      zd.Zonefile,
+					Primary:       primary,
+					Notify:        zd.Downstreams, // Notify addresses (displayed by CLI)
+					Downstreams:   zd.Downstreams,
 				}
 				zones[zname] = zconf
 			}

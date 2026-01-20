@@ -1,7 +1,10 @@
+.PHONY: all v2 clean install
 
 all:
 	$(MAKE) -C ./auth/
+	$(MAKE) -C ./authv2/
 	$(MAKE) -C ./cli/
+	$(MAKE) -C ./cliv2/
 	$(MAKE) -C ./agent/
 	$(MAKE) -C ./dog/
 	$(MAKE) -C ./combiner/
@@ -10,6 +13,10 @@ all:
 	$(MAKE) -C ./scanner/
 #	$(MAKE) -C ./msa/
 #	$(MAKE) -C ./sidecar-cli/
+
+v2:
+	$(MAKE) -C ./authv2/
+	$(MAKE) -C ./cliv2/
 
 clean:
 	$(MAKE) -C ./auth/ clean

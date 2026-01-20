@@ -355,11 +355,12 @@ type ScanJobStatus struct {
 
 // CatalogPost represents a request to manage catalog zones
 type CatalogPost struct {
-	Command     string `json:"command"`      // "create" | "zone-add" | "zone-delete" | "zone-list" | "group-add" | "group-delete" | "group-list" | "zone-group-add" | "zone-group-delete" | "notify-add" | "notify-remove" | "notify-list"
-	CatalogZone string `json:"catalog_zone"` // Name of the catalog zone
-	Zone        string `json:"zone"`         // Member zone name
-	Group       string `json:"group"`        // Group name (RFC 9432 terminology)
-	Address     string `json:"address"`      // Notify address (IP:port) for notify-add/notify-remove
+	Command     string   `json:"command"`      // "create" | "zone-add" | "zone-delete" | "zone-list" | "group-add" | "group-delete" | "group-list" | "zone-group-add" | "zone-group-delete" | "notify-add" | "notify-remove" | "notify-list"
+	CatalogZone string   `json:"catalog_zone"` // Name of the catalog zone
+	Zone        string   `json:"zone"`         // Member zone name
+	Group       string   `json:"group"`        // Group name (RFC 9432 terminology)
+	Groups      []string `json:"groups"`       // Multiple groups (for zone-add with --groups flag)
+	Address     string   `json:"address"`      // Notify address (IP:port) for notify-add/notify-remove
 }
 
 // CatalogResponse represents the response from catalog operations

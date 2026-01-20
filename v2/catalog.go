@@ -29,10 +29,10 @@ type MemberZone struct {
 
 // CatalogZoneUpdate contains information about catalog zone changes
 type CatalogZoneUpdate struct {
-	CatalogZone string                    `json:"catalog_zone"`
-	MemberZones map[string]*MemberZone    `json:"member_zones"`
-	Serial      uint32                    `json:"serial"`
-	UpdateTime  time.Time                 `json:"update_time"`
+	CatalogZone string                 `json:"catalog_zone"`
+	MemberZones map[string]*MemberZone `json:"member_zones"`
+	Serial      uint32                 `json:"serial"`
+	UpdateTime  time.Time              `json:"update_time"`
 }
 
 // CatalogZoneCallback is called when a catalog zone is updated
@@ -159,52 +159,52 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 			continue
 		}
 
-	// Categorize groups by configured prefixes
-	var serviceGroups []string
-	var signingGroup string
-	var configGroup string
+		// Categorize groups by configured prefixes
+		var serviceGroups []string
+		var signingGroup string
+		var configGroup string
 
-	// Get configured group prefixes
-	configPrefix := Conf.Catalog.GroupPrefixes.Config
-	signingPrefix := Conf.Catalog.GroupPrefixes.Signing
+		// Get configured group prefixes
+		configPrefix := Conf.Catalog.GroupPrefixes.Config
+		signingPrefix := Conf.Catalog.GroupPrefixes.Signing
 
-	for _, group := range info.groups {
-		// Check if this is a signing group (only if prefix != "none")
-		if signingPrefix != "none" && strings.HasPrefix(group, signingPrefix) {
-			if signingGroup != "" {
-				log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing groups (%s, %s), using first",
-					info.zoneName, signingGroup, group)
+		for _, group := range info.groups {
+			// Check if this is a signing group (only if prefix != "none")
+			if signingPrefix != "none" && strings.HasPrefix(group, signingPrefix) {
+				if signingGroup != "" {
+					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple signing groups (%s, %s), using first",
+						info.zoneName, signingGroup, group)
+				} else {
+					signingGroup = group
+				}
+			} else if configPrefix != "none" && strings.HasPrefix(group, configPrefix) {
+				// Check if this is a config group (only if prefix != "none")
+				if configGroup != "" {
+					log.Printf("ParseCatalogZone: Warning: Zone %s has multiple config groups (%s, %s), using first",
+						info.zoneName, configGroup, group)
+				} else {
+					configGroup = group
+				}
 			} else {
-				signingGroup = group
+				// Service group (no specific prefix), or all groups are ordinary if both prefixes are "none"
+				serviceGroups = append(serviceGroups, group)
 			}
-		} else if configPrefix != "none" && strings.HasPrefix(group, configPrefix) {
-			// Check if this is a config group (only if prefix != "none")
-			if configGroup != "" {
-				log.Printf("ParseCatalogZone: Warning: Zone %s has multiple config groups (%s, %s), using first",
-					info.zoneName, configGroup, group)
-			} else {
-				configGroup = group
-			}
-		} else {
-			// Service group (no specific prefix), or all groups are ordinary if both prefixes are "none"
-			serviceGroups = append(serviceGroups, group)
 		}
-	}
 
-	// Log info if no config group (needed for auto-configuration)
-	if configPrefix != "none" && configGroup == "" {
-		log.Printf("ParseCatalogZone: Info: Zone %s has no config group, auto-configuration not possible",
-			info.zoneName)
-	}
+		// Log info if no config group (needed for auto-configuration)
+		if configPrefix != "none" && configGroup == "" {
+			log.Printf("ParseCatalogZone: Info: Zone %s has no config group, auto-configuration not possible",
+				info.zoneName)
+		}
 
-	memberZones[info.zoneName] = &MemberZone{
-		ZoneName:     info.zoneName,
-		Hash:         hash,
-		ServiceGroups: serviceGroups,
-		SigningGroup:  signingGroup,
-		MetaGroup:     configGroup, // Note: Field named MetaGroup for backward compat, but contains config group
-		DiscoveredAt:  now,
-	}
+		memberZones[info.zoneName] = &MemberZone{
+			ZoneName:      info.zoneName,
+			Hash:          hash,
+			ServiceGroups: serviceGroups,
+			SigningGroup:  signingGroup,
+			MetaGroup:     configGroup, // Note: Field named MetaGroup for backward compat, but contains config group
+			DiscoveredAt:  now,
+		}
 	}
 
 	update := &CatalogZoneUpdate{
@@ -216,7 +216,7 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 
 	log.Printf("CATALOG: ParseCatalogZone: Successfully parsed catalog zone %s (serial %d): %d member zones discovered",
 		catalogZoneName, soa.Serial, len(memberZones))
-	
+
 	// Log details about each member zone
 	for zoneName, member := range memberZones {
 		log.Printf("CATALOG: ParseCatalogZone: Member zone %s - services: %v, signing: %s, meta: %s",
@@ -250,16 +250,16 @@ func NotifyCatalogZoneUpdate(update *CatalogZoneUpdate) error {
 // AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta groups
 func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdate, conf *Config) error {
 	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Starting for catalog %s with %d member zones", update.CatalogZone, len(update.MemberZones))
-	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Policy check - catalog.policy.zones.add=%q", conf.Catalog.Policy.Zones.Add)
-	
+	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Policy check - dynamiczones.catalog_members.add=%q", conf.DynamicZones.CatalogMembers.Add)
+
 	// Get catalog zone's ZoneData for error reporting
 	catalogZd, catalogExists := Zones.Get(update.CatalogZone)
 	if !catalogExists {
 		log.Printf("CATALOG: Warning: Catalog zone %s not found in Zones map", update.CatalogZone)
 	}
-	
-	autoConfigureEnabled := conf.Catalog.Policy.Zones.Add == "auto"
-	
+
+	autoConfigureEnabled := conf.DynamicZones.CatalogMembers.Add == "auto"
+
 	// VALIDATION: Check all member zones for configuration errors (applies regardless of policy)
 	errorCount := 0
 	for zoneName, member := range update.MemberZones {
@@ -278,7 +278,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 				errorCount++
 				continue
 			}
-			
+
 			// VALIDATION (b): Check if group config is insufficient for auto-configuration
 			// This validation only applies when auto-config is enabled
 			// Note: store defaults to "map" if not specified, so only upstream is required
@@ -295,9 +295,9 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			}
 		}
 	}
-	
+
 	if !autoConfigureEnabled {
-		log.Printf("CATALOG: Auto-configure disabled by policy (catalog.policy.zones.add=%q, expected \"auto\"), catalog provides metadata only. %d member zones will not be auto-configured.", conf.Catalog.Policy.Zones.Add, len(update.MemberZones))
+		log.Printf("CATALOG: Auto-configure disabled by policy (dynamiczones.catalog_members.add=%q, expected \"auto\"), catalog provides metadata only. %d member zones will not be auto-configured.", conf.DynamicZones.CatalogMembers.Add, len(update.MemberZones))
 		// Clear error state if no validation errors were found (validation still runs to catch missing groups)
 		if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
 			if strings.Contains(catalogZd.ErrorMsg, "Member zone") || strings.Contains(catalogZd.ErrorMsg, "references group") {
@@ -316,9 +316,9 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	configuredCount := 0
 
 	for zoneName, member := range update.MemberZones {
-		log.Printf("CATALOG: Processing member zone %s (services: %v, signing: %s, meta: %s)", 
+		log.Printf("CATALOG: Processing member zone %s (services: %v, signing: %s, meta: %s)",
 			zoneName, member.ServiceGroups, member.SigningGroup, member.MetaGroup)
-		
+
 		// RULE 1: Manual config ALWAYS wins (hardcoded behavior)
 		if _, exists := Zones.Get(zoneName); exists {
 			log.Printf("CATALOG: Zone %s manually configured, ignoring catalog entry (services: %v, meta: %s)",
@@ -343,7 +343,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			skippedCount++
 			continue
 		}
-		
+
 		// Check if config is sufficient (already validated above, but check again for safety)
 		// Note: store defaults to "map" if not specified, so only upstream is required
 		if configGroupConfig.Upstream == "" {
@@ -418,7 +418,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}
-		
+
 		// Attempt non-blocking send with timeout and context cancellation support
 		select {
 		case conf.Internal.RefreshZoneCh <- zr:
@@ -437,9 +437,9 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		processedCount++
 	}
 
-	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Completed. Processed: %d, Configured: %d, Skipped: %d, Errors: %d", 
+	log.Printf("CATALOG: AutoConfigureZonesFromCatalog: Completed. Processed: %d, Configured: %d, Skipped: %d, Errors: %d",
 		processedCount, configuredCount, skippedCount, errorCount)
-	
+
 	// Clear error state if no errors were found and zone was previously in error
 	if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
 		// Check if the error was catalog-related (contains "Member zone" or "references group")
@@ -448,7 +448,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			catalogZd.SetError(NoError, "")
 		}
 	}
-	
+
 	return nil
 }
 
@@ -497,7 +497,7 @@ type CatalogMembership struct {
 	mu              sync.RWMutex
 	CatalogZoneName string
 	MemberZones     map[string]*CatalogMemberZone // zonename -> member data
-	AvailableGroups []string                       // List of all defined groups (RFC 9432 terminology)
+	AvailableGroups []string                      // List of all defined groups (RFC 9432 terminology)
 }
 
 // CatalogMemberZone represents a member zone in the catalog
@@ -690,22 +690,30 @@ func (cm *CatalogMembership) GetMemberZones() map[string]*MemberZone {
 	defer cm.mu.RUnlock()
 
 	result := make(map[string]*MemberZone)
+
+	// Get configured group prefixes
+	configPrefix := Conf.Catalog.GroupPrefixes.Config
+	signingPrefix := Conf.Catalog.GroupPrefixes.Signing
+
 	for zoneName, member := range cm.MemberZones {
-		// Categorize groups by type
+		// Categorize groups by type using configured prefixes
 		var serviceGroups []string
 		var signingGroup string
-		var metaGroup string
+		var configGroup string
 
 		for _, grp := range member.Groups {
-			if strings.HasPrefix(grp, "sign_") {
+			// Check if this is a signing group (only if prefix != "none")
+			if signingPrefix != "none" && strings.HasPrefix(grp, signingPrefix) {
 				if signingGroup == "" {
 					signingGroup = grp
 				}
-			} else if strings.HasPrefix(grp, "meta_") {
-				if metaGroup == "" {
-					metaGroup = grp
+			} else if configPrefix != "none" && strings.HasPrefix(grp, configPrefix) {
+				// Check if this is a config group (only if prefix != "none")
+				if configGroup == "" {
+					configGroup = grp
 				}
 			} else {
+				// Service group (no specific prefix), or all groups are ordinary if both prefixes are "none"
 				serviceGroups = append(serviceGroups, grp)
 			}
 		}
@@ -717,11 +725,11 @@ func (cm *CatalogMembership) GetMemberZones() map[string]*MemberZone {
 		}
 
 		result[zoneName] = &MemberZone{
-			ZoneName:     zoneName,
-			Hash:         member.Hash,
+			ZoneName:      zoneName,
+			Hash:          member.Hash,
 			ServiceGroups: serviceGroups,
 			SigningGroup:  signingGroup,
-			MetaGroup:     metaGroup,
+			MetaGroup:     configGroup, // Note: Field named MetaGroup for backward compat, but contains config group
 			DiscoveredAt:  discoveredAt,
 		}
 	}

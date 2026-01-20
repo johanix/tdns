@@ -9,6 +9,7 @@
 *.dylib
 
 auth/tdns-auth
+authv2/tdns-authv2
 server/tdns-server
 agent/tdns-agent
 combiner/tdns-combiner
@@ -16,6 +17,7 @@ reporter/tdns-reporter
 scanner/tdns-scanner
 imr/tdns-imr
 cli/tdns-cli
+cliv2/tdns-cliv2
 dog/dog
 kdc/tdns-kdc
 krs/tdns-krs

@@ -267,7 +267,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 
 		options[opt] = true
 		cleanoptions = append(cleanoptions, opt)
-		log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s, policy: add=%s, remove=%s)", zname, zconf.Type, conf.Catalog.Policy.Zones.Add, conf.Catalog.Policy.Zones.Remove)
+		log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s, policy: add=%s, remove=%s)", zname, zconf.Type, conf.DynamicZones.CatalogMembers.Add, conf.DynamicZones.CatalogMembers.Remove)
 
 		default:
 			log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])

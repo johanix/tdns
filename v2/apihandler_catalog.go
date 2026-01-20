@@ -54,8 +54,11 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 		case "create":
 			err = handleCatalogCreate(data.CatalogZone, &resp)
 
+		case "delete":
+			err = handleCatalogDelete(data.CatalogZone, &resp)
+
 		case "zone-add":
-			err = handleCatalogZoneAdd(data.CatalogZone, data.Zone, &resp)
+			err = handleCatalogZoneAdd(data.CatalogZone, data.Zone, data.Groups, &resp)
 
 		case "zone-delete":
 			err = handleCatalogZoneDelete(data.CatalogZone, data.Zone, &resp)
@@ -184,7 +187,59 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 	return nil
 }
 
-func handleCatalogZoneAdd(catalogZoneName, zoneName string, resp *CatalogResponse) error {
+func handleCatalogDelete(catalogZoneName string, resp *CatalogResponse) error {
+	if catalogZoneName == "" {
+		return fmt.Errorf("catalog zone name is required")
+	}
+
+	// Ensure zone name is FQDN
+	catalogZoneName = dns.Fqdn(catalogZoneName)
+
+	// Check if catalog zone exists
+	zd, exists := Zones.Get(catalogZoneName)
+	if !exists {
+		return fmt.Errorf("catalog zone %s not found", catalogZoneName)
+	}
+
+	// Verify it's actually a catalog zone
+	if !zd.Options[OptCatalogZone] {
+		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
+	}
+
+	log.Printf("CATALOG: Deleting catalog zone %s", catalogZoneName)
+
+	// Remove the catalog zone from Zones map
+	Zones.Remove(catalogZoneName)
+
+	// Remove catalog membership (it's a regular map, needs mutex)
+	catalogMembershipMutex.Lock()
+	delete(catalogMemberships, catalogZoneName)
+	catalogMembershipMutex.Unlock()
+
+	// Remove from dynamic config if persisted
+	if Conf.ShouldPersistZone(zd) {
+		if err := Conf.RemoveDynamicZoneFromConfig(catalogZoneName); err != nil {
+			log.Printf("CATALOG: Warning: Failed to remove catalog zone %s from dynamic config: %v", catalogZoneName, err)
+			// Don't fail the operation, just log warning
+		}
+
+		// Delete zone file if it exists
+		if Conf.DynamicZones.ZoneDirectory != "" {
+			zoneFilePath := GetDynamicZoneFilePath(catalogZoneName, Conf.DynamicZones.ZoneDirectory)
+			if err := os.Remove(zoneFilePath); err != nil && !os.IsNotExist(err) {
+				log.Printf("CATALOG: Warning: Failed to delete zone file %s: %v", zoneFilePath, err)
+			} else if err == nil {
+				log.Printf("CATALOG: Deleted zone file %s", zoneFilePath)
+			}
+		}
+	}
+
+	resp.Msg = fmt.Sprintf("Catalog zone %s deleted successfully", catalogZoneName)
+	log.Printf("CATALOG: Deleted catalog zone %s", catalogZoneName)
+	return nil
+}
+
+func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, resp *CatalogResponse) error {
 	if catalogZoneName == "" || zoneName == "" {
 		return fmt.Errorf("catalog zone name and member zone name are required")
 	}
@@ -193,18 +248,48 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, resp *CatalogRespons
 	zoneName = dns.Fqdn(zoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
+	
+	// Add the member zone
 	err := cm.AddMemberZone(zoneName)
 	if err != nil {
 		return err
 	}
 
-	// Regenerate catalog zone PTR records
+	// If groups were specified, add them to the zone atomically before regenerating
+	if len(groups) > 0 {
+		for _, group := range groups {
+			group = strings.TrimSpace(group)
+			if group == "" {
+				continue
+			}
+			
+			// Add the group to the zone
+			err = cm.AddZoneGroup(zoneName, group)
+			if err != nil {
+				// If adding a group fails, log but continue with others
+				log.Printf("CATALOG: Warning: Failed to add group %s to zone %s: %v", group, zoneName, err)
+				// Note: we don't return here - we try to add all groups
+			} else {
+				log.Printf("CATALOG: Added group %s to zone %s in catalog %s", group, zoneName, catalogZoneName)
+			}
+		}
+	}
+
+	// Regenerate catalog zone PTR records (only once, after all groups are added)
 	err = regenerateCatalogZone(catalogZoneName)
 	if err != nil {
 		return fmt.Errorf("failed to regenerate catalog zone: %v", err)
 	}
 
-	resp.Msg = fmt.Sprintf("Zone %s added to catalog %s", zoneName, catalogZoneName)
+	// Build response message
+	if len(groups) > 0 {
+		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s with groups: %s", zoneName, catalogZoneName, strings.Join(groups, ", "))
+		log.Printf("CATALOG: Added zone %s to catalog %s with groups: %s", zoneName, catalogZoneName, strings.Join(groups, ", "))
+	} else {
+		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s", zoneName, catalogZoneName)
+		log.Printf("CATALOG: Added zone %s to catalog %s", zoneName, catalogZoneName)
+	}
+	
 	return nil
 }
 
