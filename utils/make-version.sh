@@ -5,7 +5,7 @@ prog=$3
 
 versioned_progs="tdns-agent tdns-auth tdns-authv2 \
 		 tdns-combiner tdns-cli tdns-cliv2 \
-		 dog tdns-imr tdns-reporter tdns-scanner"
+		 dog dogv2 tdns-imr tdns-reporter tdns-scanner"
 
 # Check if we're on NetBSD
 if [ "$(uname -s)" = "NetBSD" ]; then
