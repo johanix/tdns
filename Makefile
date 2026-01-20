@@ -1,22 +1,23 @@
-.PHONY: all v2 clean install
+.PHONY: v1 all v2 clean install
 
-all:
+v1:
 	$(MAKE) -C ./auth/
-	$(MAKE) -C ./authv2/
 	$(MAKE) -C ./cli/
-	$(MAKE) -C ./cliv2/
 	$(MAKE) -C ./agent/
-	$(MAKE) -C ./dog/
 	$(MAKE) -C ./combiner/
 	$(MAKE) -C ./imr/
-	$(MAKE) -C ./reporter/
-	$(MAKE) -C ./scanner/
-#	$(MAKE) -C ./msa/
-#	$(MAKE) -C ./sidecar-cli/
+	$(MAKE) -C ./dog/
 
 v2:
 	$(MAKE) -C ./authv2/
 	$(MAKE) -C ./cliv2/
+	$(MAKE) -C ./dog/
+
+all:	v1 v2
+	$(MAKE) -C ./reporter/
+	$(MAKE) -C ./scanner/
+#	$(MAKE) -C ./msa/
+#	$(MAKE) -C ./sidecar-cli/
 
 clean:
 	$(MAKE) -C ./auth/ clean
