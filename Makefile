@@ -11,7 +11,7 @@ v1:
 v2:
 	$(MAKE) -C ./authv2/
 	$(MAKE) -C ./cliv2/
-	$(MAKE) -C ./dog/
+	$(MAKE) -C ./dogv2/
 
 all:	v1 v2
 	$(MAKE) -C ./reporter/
