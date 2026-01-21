@@ -255,7 +255,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 
     case OptCatalogZone:
         // Hard fail: catalog zone requires valid catalog configuration
-        if conf.Catalog.MetaGroups == nil {
+        if conf.Catalog.ConfigGroups == nil {
             log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.config_groups is missing or incorrectly structured", zname)
         }
         
@@ -459,7 +459,7 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
         // Categorize groups by prefix
         var serviceGroups []string
         var signingGroup string
-        var metaGroup string
+        var configGroup string
 
         for _, group := range info.groups {
             if strings.HasPrefix(group, "sign_") {

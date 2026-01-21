@@ -128,7 +128,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 	log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
 	options := map[ZoneOption]bool{}
 	var cleanoptions []ZoneOption
-	
+
 	// PRE-SCAN: Check if catalog-zone is in the options list
 	// This allows catalog-member-auto-create/auto-delete validation to work
 	// regardless of YAML option order
@@ -141,7 +141,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			break
 		}
 	}
-	
+
 	for _, option := range zconf.OptionsStrs {
 		option = strings.ToLower(strings.TrimSpace(option))
 		if option == "" {
@@ -212,80 +212,80 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			cleanoptions = append(cleanoptions, opt)
 			log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, ZoneOptionToString[opt], zconf.MultiSigner)
 
-	case OptCatalogZone:
-		// Catalog zone requires valid catalog configuration
-		// Note: options[OptCatalogZone] was already set in pre-scan above
-		
-		// Check for group_prefixes (required if config_groups exist)
-		if len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
-				"catalog:\n"+
-				"  group_prefixes:\n"+
-				"    config: \"config\"\n"+
-				"    signing: \"sign\"\n"+
-				"  config_groups:\n"+
-				"    example:\n"+
-				"      upstream: \"primary-server:port\"\n"+
-				"      store: map\n", zname)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
-			}
-			continue
-		}
+		case OptCatalogZone:
+			// Catalog zone requires valid catalog configuration
+			// Note: options[OptCatalogZone] was already set in pre-scan above
 
-		// Check for config_groups (or legacy meta_groups)
-		if conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil {
-			errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
-				"catalog:\n"+
-				"  group_prefixes:\n"+
-				"    config: \"config\"\n"+
-				"    signing: \"sign\"\n"+
-				"  config_groups:\n"+
-				"    example:\n"+
-				"      upstream: \"primary-server:port\"\n"+
-				"      store: map\n"+
-				"dynamiczones:\n"+
-				"  catalog_members:\n"+
-				"    add: auto\n", zname)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
+			// Check for group_prefixes (required if config_groups exist)
+			if len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
+				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
+					"catalog:\n"+
+					"  group_prefixes:\n"+
+					"    config: \"config\"\n"+
+					"    signing: \"sign\"\n"+
+					"  config_groups:\n"+
+					"    example:\n"+
+					"      upstream: \"primary-server:port\"\n"+
+					"      store: map\n", zname)
+				log.Printf("Error: %s", errorMsg)
+				if zd != nil {
+					zd.SetError(ConfigError, errorMsg)
+				}
+				continue
 			}
-			continue
-		}
 
-		// options[opt] already set in pre-scan
-		cleanoptions = append(cleanoptions, opt)
-		log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s)", zname, zconf.Type)
-
-	case OptCatalogMemberAutoCreate:
-		// Only valid on catalog zones (checked via pre-scan above)
-		if !isCatalogZone {
-			errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-create option is only valid on catalog zones (must also have catalog-zone option)", zname)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
+			// Check for config_groups (or legacy meta_groups)
+			if conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil {
+				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
+					"catalog:\n"+
+					"  group_prefixes:\n"+
+					"    config: \"config\"\n"+
+					"    signing: \"sign\"\n"+
+					"  config_groups:\n"+
+					"    example:\n"+
+					"      upstream: \"primary-server:port\"\n"+
+					"      store: map\n"+
+					"dynamiczones:\n"+
+					"  catalog_members:\n"+
+					"    add: auto\n", zname)
+				log.Printf("Error: %s", errorMsg)
+				if zd != nil {
+					zd.SetError(ConfigError, errorMsg)
+				}
+				continue
 			}
-			continue
-		}
-		options[opt] = true
-		cleanoptions = append(cleanoptions, opt)
-		log.Printf("ParseZones: Zone %s: catalog member auto-create enabled", zname)
 
-	case OptCatalogMemberAutoDelete:
-		// Only valid on catalog zones (checked via pre-scan above)
-		if !isCatalogZone {
-			errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-delete option is only valid on catalog zones (must also have catalog-zone option)", zname)
-			log.Printf("Error: %s", errorMsg)
-			if zd != nil {
-				zd.SetError(ConfigError, errorMsg)
+			// options[opt] already set in pre-scan
+			cleanoptions = append(cleanoptions, opt)
+			log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s)", zname, zconf.Type)
+
+		case OptCatalogMemberAutoCreate:
+			// Only valid on catalog zones (checked via pre-scan above)
+			if !isCatalogZone {
+				errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-create option is only valid on catalog zones (must also have catalog-zone option)", zname)
+				log.Printf("Error: %s", errorMsg)
+				if zd != nil {
+					zd.SetError(ConfigError, errorMsg)
+				}
+				continue
 			}
-			continue
-		}
-		options[opt] = true
-		cleanoptions = append(cleanoptions, opt)
-		log.Printf("ParseZones: Zone %s: catalog member auto-delete enabled", zname)
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+			log.Printf("ParseZones: Zone %s: catalog member auto-create enabled", zname)
+
+		case OptCatalogMemberAutoDelete:
+			// Only valid on catalog zones (checked via pre-scan above)
+			if !isCatalogZone {
+				errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-delete option is only valid on catalog zones (must also have catalog-zone option)", zname)
+				log.Printf("Error: %s", errorMsg)
+				if zd != nil {
+					zd.SetError(ConfigError, errorMsg)
+				}
+				continue
+			}
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+			log.Printf("ParseZones: Zone %s: catalog member auto-delete enabled", zname)
 
 		default:
 			log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])

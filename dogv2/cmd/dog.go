@@ -94,15 +94,16 @@ var rootCmd = &cobra.Command{
 				continue
 			}
 
-			if strings.HasPrefix(ucarg, "IXFR=") {
-				serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
-				tmp, err := strconv.Atoi(serialstr)
-				if err != nil {
-					log.Fatalf("Error: %v", err)
-				}
-				serial = uint32(tmp)
-				fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
+		if strings.HasPrefix(ucarg, "IXFR=") {
+			serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+			tmp, err := strconv.Atoi(serialstr)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
 			}
+			serial = uint32(tmp)
+			rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
+			fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
+		}
 
 			if strings.HasPrefix(ucarg, "+") {
 				if tdns.Globals.Debug {
@@ -151,7 +152,8 @@ var rootCmd = &cobra.Command{
 
 		_, err = strconv.Atoi(options["port"])
 		if err != nil {
-			fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
+			fmt.Printf("Error: port %q is not valid: %v\n", options["port"], err)
+			os.Exit(1)
 		}
 
 		// All args parsed, join server and port
@@ -380,11 +382,12 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 				case "QUERY", "NOTIFY", "UPDATE":
 					options["opcode"] = parts[1]
 				default:
+					// Try to parse as numeric opcode
 					opcode, err := strconv.Atoi(parts[1])
 					if err != nil {
-						fmt.Printf("Error: %v\n", err)
-						return options, nil
+						return nil, fmt.Errorf("invalid +OPCODE=%q: must be QUERY, NOTIFY, UPDATE, or a valid numeric opcode", parts[1])
 					}
+					// Validate numeric opcode is one of the accepted values
 					switch opcode {
 					case dns.OpcodeQuery:
 						options["opcode"] = "QUERY"
@@ -392,6 +395,8 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 						options["opcode"] = "NOTIFY"
 					case dns.OpcodeUpdate:
 						options["opcode"] = "UPDATE"
+					default:
+						return nil, fmt.Errorf("invalid +OPCODE=%q: opcode %d is not supported (use QUERY, NOTIFY, or UPDATE)", parts[1], opcode)
 					}
 				}
 			}
@@ -525,7 +530,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	
 	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
-		// Check if it's an IPv6 address in brackets (e.g., [::1]:port)
+		// Check if it's an IPv6 address in brackets with port (e.g., [::1]:5354)
 		if strings.HasPrefix(host, "[") && strings.Contains(host, "]:") {
 			// IPv6 with port: [::1]:5354
 			var portErr error
@@ -533,9 +538,15 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 			if portErr != nil {
 				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
 			}
+		} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			// Bare bracketed IPv6 without port (e.g., [::1])
+			// Strip the brackets and validate as IPv6
+			host = strings.Trim(host, "[]")
+			if net.ParseIP(host) == nil {
+				return nil, fmt.Errorf("%s is not a valid IPv6 address", u.Host)
+			}
+			// port remains empty
 		} else if net.ParseIP(host) != nil {
-			// XXX: This is not correct, as it will not work for IPv6 addresses in brackets
-			// 
 			// Valid IP address (IPv4 or IPv6) without port - use as-is
 			// net.ParseIP handles both IPv4 and IPv6 correctly
 			// No need to split, it's just the IP address

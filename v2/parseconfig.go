@@ -917,13 +917,25 @@ func (conf *Config) validateGroupPrefixes() error {
 		}
 	}
 
-	// Check for prefix conflicts (if both are not "none" and they're the same)
+	// Check for prefix conflicts (if both are not "none")
 	if conf.Catalog.GroupPrefixes.Config != "none" && conf.Catalog.GroupPrefixes.Signing != "none" {
+		// Check for exact equality
 		if conf.Catalog.GroupPrefixes.Config == conf.Catalog.GroupPrefixes.Signing {
 			return fmt.Errorf("catalog.group_prefixes.config and catalog.group_prefixes.signing must be different (both are: %q)", conf.Catalog.GroupPrefixes.Config)
 		}
+
+		// Check for substring/prefix conflicts to prevent misclassification
+		// e.g., "config" and "config_" would cause issues as one is a prefix of the other
+		if strings.HasPrefix(conf.Catalog.GroupPrefixes.Config, conf.Catalog.GroupPrefixes.Signing) {
+			return fmt.Errorf("catalog.group_prefixes.config (%q) cannot start with catalog.group_prefixes.signing (%q) - this would cause misclassification in group detection",
+				conf.Catalog.GroupPrefixes.Config, conf.Catalog.GroupPrefixes.Signing)
+		}
+		if strings.HasPrefix(conf.Catalog.GroupPrefixes.Signing, conf.Catalog.GroupPrefixes.Config) {
+			return fmt.Errorf("catalog.group_prefixes.signing (%q) cannot start with catalog.group_prefixes.config (%q) - this would cause misclassification in group detection",
+				conf.Catalog.GroupPrefixes.Signing, conf.Catalog.GroupPrefixes.Config)
+		}
 	}
-	
+
 	return nil
 }
 

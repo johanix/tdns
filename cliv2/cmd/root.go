@@ -16,10 +16,7 @@ import (
 )
 
 var cfgFile, cfgFileUsed string
-var StopCh chan struct{}
 var LocalConfig string
-
-// var api *tdns.ApiClient
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
@@ -84,7 +81,9 @@ func initConfig() {
 			if !os.IsNotExist(err) {
 				log.Fatalf("Error stat(%s): %v", LocalConfig, err)
 			}
+			// File doesn't exist - do not set config file or merge
 		} else {
+			// File exists - set config file and merge it
 			viper.SetConfigFile(LocalConfig)
 			if err := viper.MergeInConfig(); err != nil {
 				log.Fatalf("Error merging in local config from '%s'", LocalConfig)
@@ -94,7 +93,6 @@ func initConfig() {
 				}
 			}
 		}
-		viper.SetConfigFile(LocalConfig)
 	}
 
 	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
@@ -151,8 +149,22 @@ func initApi() {
 		fmt.Printf("\n")
 	}
 
-	// for convenience we store the API client for "server" in the old place also
-	tdns.Globals.Api = tdns.Globals.ApiClients["tdns-auth"]
+	// Validate that "tdns-auth" API client exists before assigning to tdns.Globals.Api
+	// This prevents nil dereferences in downstream code that assumes Api is non-nil
+	authClient, exists := tdns.Globals.ApiClients["tdns-auth"]
+	if !exists || authClient == nil {
+		log.Fatalf("FATAL: No API server named 'tdns-auth' found in ApiServers configuration.\n" +
+			"tdns.Globals.Api requires a configured ApiServer with name: 'tdns-auth'\n" +
+			"Please add to your config:\n" +
+			"  api_servers:\n" +
+			"    - name: tdns-auth\n" +
+			"      baseurl: http://localhost:8080\n" +
+			"      apikey: your-api-key\n" +
+			"      authmethod: X-API-Key")
+	}
+
+	// for convenience we store the API client for "tdns-auth" in the old place also
+	tdns.Globals.Api = authClient
 
 //	numtsigs := len(cconf.Keys.Tsig)
 //	if numtsigs > 0 {

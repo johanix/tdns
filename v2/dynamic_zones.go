@@ -258,7 +258,10 @@ type DynamicConfigFile struct {
 }
 
 var (
-	dynamicConfigMutex sync.Mutex // Protects dynamic config file operations
+	// dynamicConfigMutex protects concurrent access to the dynamic config file
+	// Used by both loadDynamicConfigFile() and writeDynamicConfigFile() to prevent
+	// race conditions and ensure consistency between read/write operations
+	dynamicConfigMutex sync.Mutex
 )
 
 // zoneDataToZoneConf converts a ZoneData to ZoneConf for serialization
@@ -319,10 +322,17 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 }
 
 // loadDynamicConfigFile loads the dynamic config file and returns the zone configs
+// Thread-safe: protected by dynamicConfigMutex to prevent races with writeDynamicConfigFile
 func (conf *Config) loadDynamicConfigFile() ([]ZoneConf, error) {
 	if conf.DynamicZones.ConfigFile == "" {
 		return nil, fmt.Errorf("dynamic config file path not configured")
 	}
+
+	// Acquire lock to prevent concurrent read/write operations
+	// While atomic renames protect against partial reads, this ensures
+	// consistency with write operations and prevents TOCTOU issues
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
 
 	// Check if file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {

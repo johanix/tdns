@@ -10,7 +10,7 @@ feature set:
 
 2. Respond correctly to non-DNSSEC queries.
 
-3. Respond mostly correctly to queries with DO=1 to DNSSEC signed
+3. Respond mostly correctly to queries with DO=1 to DNSSEC-signed
    zones. The support for negative responses is not quite complete.
 
 4. TDNS-AUTH is able to sign (including generating the NSEC chain) a zone 
@@ -23,7 +23,7 @@ located in **/etc/tdns/tdns-auth.yaml**
 
 In addition, TDNS-AUTH has a couple of extra features:
 
-1. There is a built in REST API, used by the mgmt tool "tdns-cli".
+1. There is a built-in REST API, used by the mgmt tool "tdns-cli".
 
 2. Support for inbound, SIG(0) signed, dynamic updates.
    No TSIG support (yet).
@@ -62,13 +62,41 @@ In addition, TDNS-AUTH has a couple of extra features:
    reading and parsing zones containing DELEG records for text files
    and receiving them via zone transfer.
 
-10. Support for a built in keystore (to store private/public DNSSEC
+10. Support for a built-in keystore (to store private/public DNSSEC
     and SIG(0) key pairs). These are used to sign zone data and DNS
     UPDATE messages.
 
-11. Support for a built in truststore (to store public DNSSEC and 
+11. Support for a built-in truststore (to store public DNSSEC and 
     SIG(0) keys). These are used to validate child CDS and CSYNC
     RRsets and DNS UPDATE messages received from child operators.
+
+12. Full support for DNS Catalog Zones (RFC 9432), including:
+    - Primary and secondary catalog zones
+    - Configurable group prefixes for flexible categorization
+    - Automatic zone discovery and configuration from catalog zones
+    - Per-catalog-zone auto-create and auto-delete policies
+    - API and CLI support for managing catalog zone membership
+    - Notify address management for catalog zones
+    - Persistence of catalog zones and their member zones
+
+13. Dynamic zone management via REST API:
+    - Create, modify, and delete zones at runtime
+    - Support for both primary and secondary dynamic zones
+    - Automatic persistence of dynamic zones to disk
+    - Dynamic configuration file generation for zone definitions
+    - Include statement support for modular configuration
+
+14. Zone templates system:
+    - Define reusable zone configuration templates
+    - Template inheritance and chaining
+    - Reduce configuration duplication for similar zones
+    - Override template settings per zone
+
+15. Zone persistence and recovery:
+    - Automatic zone file writing for dynamic zones
+    - Configuration file persistence for zone definitions
+    - Graceful handling of corrupted files on startup
+    - Atomic file writes to prevent data loss
 
 Comments, questions, pull requests, etc are welcome!
 
