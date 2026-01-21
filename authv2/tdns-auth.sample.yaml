@@ -1,0 +1,285 @@
+# Main TDNS Configuration for tdns-auth
+#
+# This is the primary configuration file for the TDNS authoritative server.
+# It includes references to separate configuration files for better organization:
+#   - auth-templates.sample.yaml: Zone templates and all zone option documentation
+#   - auth-zones.sample.yaml:     Zone declarations (rename to .yaml in production)
+#   - dynamic-zones.yaml:         Auto-generated dynamic zones (created by server)
+#
+include:
+                        - auth-templates.sample.yaml    # Zone templates (rename to .yaml when deploying)
+                        - auth-zones.sample.yaml        # Zone declarations (rename to .yaml when deploying)
+                        - /var/lib/tdns/dynamic-zones.yaml  # Dynamic zones (auto-managed, don't edit manually)
+
+service:
+                        name:              TDNS-AUTH
+                        identities:        [ ns.axfr.net., nsa.johani.org., foo.com. ]
+                        verbose:           true
+                        debug:             true    # writes processed zone to disk
+                        refresh:           true
+                        maxrefresh:        1800    # seconds. Cap refresh counter to max this
+                        reset_soa_serial:  false   # replace inbound SOA serial with unixtime.
+                        
+                        transport:
+                           type:    svcb              # svcb | tsync | none; default is none
+                           signal:  "doq:20,dot:10"   # comma sep list of doq,dot,doh and do53 with amount of total traffic ok
+
+dnsengine:
+                        addresses:    [ 127.0.0.1:5354, '[::1]:5354' ]
+                        transports:   [ doq, dot, doh ]
+                        ports:
+                           do53:  [ 53 ]
+                           doq:   [ 853 ]
+                           dot:   [ 853 ]
+                           doh:   [ 443 ]
+                        certfile:  /etc/tdns/certs/servers/localhost..crt
+                        keyfile:   /etc/tdns/certs/servers/localhost..key
+                        zones:
+                           config:    /etc/tdns/tdns-zones.yaml
+                           filedir:   /etc/tdns/zones
+                           filetmpl:  "%s/%s.zone"    # zonename.zone
+
+resignerengine:
+                        interval:  300    # seconds between runs. Reasonable value is likely ~3600
+                        keygen:
+                           mode:       internal    # internal | external
+                           generator:  /usr/sbin/dnssec-keygen
+
+imrengine:
+                        active:              true    # true | false, default is true
+                        root-hints:          /etc/tdns/root.hints    # optional, default is compiled-in hints
+                        trust-anchor-file:   /etc/tdns/root.key      # not optional, no DNSSEC validation without this
+
+apiserver:
+                        addresses:  [ 127.0.0.1:8989 ]
+                        apikey:     winter-is-coming-santa-stuck-in-chimney
+                        certfile:   /etc/tdns/certs/servers/localhost..crt
+                        keyfile:    /etc/tdns/certs/servers/localhost..key
+
+server:
+                        id:        ooga booga boo
+                        version:   tdns-server {version}
+                        hostname:  there-is-no-place-like-127.0.0.1
+
+# This entire section should probably die.
+validator:
+                        active:   true
+                        verbose:  true
+                        debug:    true
+                        dnskey:
+                           trusted:
+                              file:  /etc/tdns/trust-anchors.yaml
+                        sig0:
+                           trusted:
+                              file:  /etc/tdns/sig0-keys.yaml
+
+
+childsync:          # What to do when we are the child
+                        schemes:          [ update ]    # , notify ] # this child will use either
+                        update-ns:        true
+                        update-a:         true
+                        update-aaaa:      true
+                        sync-on-boot:     false
+                        syncwithparent:   true
+
+delegationsync:
+                        parent:
+                           # in parent zones, we support these schemes, and will publish DSYNC RRs
+                           # if allowed to:
+                           schemes:  [ notify, update ]
+                           notify:
+                              types:      [ CDS, CSYNC ]
+                              port:       5354                         # MUST be a port the dnsengine listens on
+                              target:     notifications.{ZONENAME}     # {ZONENAME} will be expanded at run-time
+                              addresses:  [ 127.0.0.1, '::1' ]         # There must be no port and also no '[]' around v6 addresses here
+                           update:
+                              types:      [ ANY ]
+                              port:       5354                         # MUST be a port the dnsengine listens on
+                              target:     updates.{ZONENAME}
+                              addresses:  [ 127.0.0.1, '::1' ]
+                              keygen:
+                                 mode:       internal    # internal | external
+                                 generator:  /opt/local/bin/dnssec-keygen
+                                 algorithm:  ED25519
+
+                        child:
+                           # in child zones, we will attempt the following schemes, if the parent
+                           # supports them and we're allowed to modify the child zone if needed
+                           # (adding CDS, CSYNC, KEY RRs, re-signing, etc):
+                           schemes:  [ notify, update ]
+                           update:
+                              keygen:
+                                 mode:       internal    # internal | external
+                                 generator:  /opt/local/bin/dnssec-keygen
+                                 algorithm:  ED25519
+
+keybootstrap:
+                        consistent-lookup:
+                           iterations:   3
+                           interval:     60     # seconds between lookups
+                           nameservers:  all    # one | all
+
+dnssecpolicies:
+                        default:
+                           algorithm:  ED25519
+                           ksk:
+                              lifetime:     forever
+                              sigvalidity:  168h    # 24*7h = 1 week
+                           zsk:
+                              lifetime:     forever
+                              sigvalidity:  2h
+                           csk:
+                              lifetime:     none
+                              sigvalidity:  168h
+
+                        fastroll:
+                           algorithm:  ED25519
+                           ksk:
+                              lifetime:     48h
+                              sigvalidity:  5h
+                           zsk:
+                              lifetime:     12h
+                              sigvalidity:  2h
+                           csk:
+                              lifetime:     none
+                              sigvalidity:  168h
+
+multisigner:
+                        mstest:
+                           controller:
+                              notify:
+                                 target:          music.{ZONENAME}
+                                 addresses:       [ 127.0.0.1, '::1' ]    # must be no '[]' around v6 addresses here.
+                                 port:            "5355"
+                                 publish-dsync:   false    # in a multi-signer sidecar setup, the zone should typically not publish any DSYNC DNSKEY RR
+                              api:
+                                 baseurl:     http://127.0.0.1:8990/api/v1
+                                 apikey:      lets-make-some-noise
+                                 authmethod:  X-API-Key
+                                 usetls:      true
+                        broken:
+                           controller:
+                              notify:
+                                 address:  127..0.0.1
+                              api:
+                                 baseurl:  foo://bar.se/
+
+# Catalog zone configuration (RFC 9432)
+# Required if any zone has the 'catalog-zone' option enabled
+#
+# Catalog zones allow centralized management of zone membership across multiple servers.
+# Member zones can be automatically configured on secondary servers based on catalog content.
+#
+# Per-catalog-zone control:
+#   Use 'catalog-member-auto-create' option on catalog zones to enable auto-configuration
+#   Use 'catalog-member-auto-delete' option on catalog zones to enable auto-deletion
+#
+catalog:
+                        # Group type prefixes (REQUIRED - defines which groups have special semantics)
+                        # These prefixes identify group types in catalog zones and trigger special behavior
+                        # Use "none" to disable a group type (no special semantics, all groups are ordinary)
+                        #
+                        # Example catalog zone record format:
+                        #   group.{uniqueid}.zones.{catalog}.  IN TXT  "{groupname}"
+                        #
+                        # Group types:
+                        #   - Config groups:  Used for auto-configuration (contain transfer settings)
+                        #   - Signing groups: Used for documentation/grouping (no auto-config semantics)
+                        #   - Service groups: General-purpose groups (no special semantics)
+                        #
+                        group_prefixes:
+                           config:   "config"    # Prefix for config/transfer groups (e.g., "configKdc", "configEdge")
+                                                 # Groups starting with this prefix define transfer settings
+                                                 # Only ONE config group allowed per member zone
+                           signing:  "sign"      # Prefix for signing groups (e.g., "signEdge", "signKdc")
+                                                 # Groups starting with this prefix indicate signing responsibility
+                                                 # Only ONE signing group allowed per member zone
+                        
+                        # Config groups define zone transfer settings for auto-configuration
+                        # When a catalog zone has 'catalog-member-auto-create' option enabled,
+                        # member zones with config groups are automatically configured using these settings
+                        #
+                        # Only ONE config group allowed per member zone (enforced if prefix != "none")
+                        config_groups:
+                           kdc:                  # Group name (will match "configkdc" in catalog zone)
+                              upstream:  "127.0.0.1:5353"    # Where to AXFR member zones from (REQUIRED)
+                              tsig_key:  ""                  # Optional TSIG key name for authentication
+                              store:     map                 # Zone store type: map (default), slice, or xfr
+                                                             # - map:   Default, general-purpose (recommended)
+                                                             # - slice: Experimental (may be faster/use less memory)
+                                                             # - xfr:   Zone transfer only (AXFR, NO normal queries)
+                              options:   []                  # Optional zone options to apply to member zones
+                                                             # Example: ["delegation-sync-child"]
+
+                           edge:                 # Group name (will match "configedge" in catalog zone)
+                              upstream:  "192.0.2.1:5353"
+                              tsig_key:  ""
+                              store:     map                 # Default storage (recommended)
+                              options:   []
+
+                        # Signing groups (documentation/informational only, not used for auto-configuration)
+                        # These groups can be used to indicate which signing infrastructure is responsible
+                        # for a zone, but they don't trigger any automatic configuration
+                        #
+                        # Only ONE signing group allowed per member zone (enforced if prefix != "none")
+                        signing_groups:
+                           edge_zsk:             # Group name (will match "signedge_zsk" in catalog zone)
+                              description:  "Edge signing with ZSK only"
+                           kdc:                  # Group name (will match "signkdc" in catalog zone)
+                              description:  "Central signing at KDC"
+
+# Dynamic zones persistence configuration
+# This section controls persistence for dynamically configured zones
+# (catalog zones, catalog member zones, and API-created zones)
+dynamiczones:
+                        # Absolute path to YAML file where dynamic zone configs are stored
+                        # This file should be included in the 'include:' section above
+                        # Server must have write access to this file
+                        configfile:     /var/lib/tdns/dynamic-zones.yaml
+                        
+                        # Absolute path to directory where zone files are written
+                        # Server must have write access to this directory
+                        zonedirectory:  /var/lib/tdns/zones
+                        
+                        # Configuration for catalog zones (primary catalog zone publishers)
+                        catalog_zones:
+                           allowed:  true          # Whether dynamic creation of catalog zones is allowed
+                           storage:  persistent    # "memory" or "persistent" - default: "memory"
+                        
+                        # Configuration for catalog member zones (secondary zones from catalog)
+                        catalog_members:
+                           allowed:  true          # Whether catalog member zones are allowed
+                           storage:  persistent    # "memory" or "persistent" - default: "memory"
+                        
+                        # Configuration for direct API-created zones (future feature)
+                        dynamic:
+                           allowed:  false    # Whether direct API-created zones are allowed (default: false)
+                           storage:  memory   # "memory" or "persistent" - default: "memory"
+
+db:
+                        file:  /var/lib/tdns/tdns-auth.db
+
+log:
+                        file:  /var/log/axfr.net/tdns-auth.log
+
+common:
+                        servername:  tdns-auth
+                        command:     /usr/local/libexec/tdns-auth
+
+# This is where registrars are declared, including where they want notifications/updates.
+# There is a mapping from child zones (per parent zone) to these registrars and that will
+# (should) cause a runtime generation of a suitable DSYNC RRset in response to queries for
+# child._dsync.parent. DSYNC
+registrars:
+                        ooga-reg:
+                           - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.ooga-reg.axfr.net.
+                           - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.ooga-reg.axfr.net.
+                           - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 updates.ooga-reg.axfr.net.
+                        booga-reg:
+                           - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.booga-reg.axfr.net.
+                           - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.booga-reg.axfr.net.
+                           - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.booga-reg.axfr.net.
+                        mooga-reg:
+                           - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.mooga-reg.axfr.net.
+                           - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.mooga-reg.axfr.net.
+                           - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.mooga-reg.axfr.net.

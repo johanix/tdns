@@ -20,6 +20,8 @@ import (
 var catalogName string
 var zoneName string
 var groupName string
+var groupNames []string // For --groups flag (multiple groups)
+var notifyAddress string
 
 // CatalogCmd is the root command for catalog zone management
 var CatalogCmd = &cobra.Command{
@@ -30,11 +32,11 @@ var CatalogCmd = &cobra.Command{
 
 // catalogCreateCmd creates a new catalog zone
 var catalogCreateCmd = &cobra.Command{
-	Use:   "create --name <catalog-zone>",
+	Use:   "create --cat <catalog-zone>",
 	Short: "Create a new catalog zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		if catalogName == "" {
-			fmt.Println("Error: --name is required")
+			fmt.Println("Error: --cat is required")
 			os.Exit(1)
 		}
 
@@ -65,6 +67,43 @@ var catalogCreateCmd = &cobra.Command{
 	},
 }
 
+// catalogDeleteCmd deletes an entire catalog zone
+var catalogDeleteCmd = &cobra.Command{
+	Use:   "delete --cat <catalog-zone>",
+	Short: "Delete an entire catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" {
+			fmt.Println("Error: --cat is required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "delete",
+			CatalogZone: catalogName,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
 // CatalogZoneCmd is the subcommand group for zone operations
 var CatalogZoneCmd = &cobra.Command{
 	Use:   "zone",
@@ -73,8 +112,8 @@ var CatalogZoneCmd = &cobra.Command{
 
 // catalogZoneAddCmd adds a zone to a catalog
 var catalogZoneAddCmd = &cobra.Command{
-	Use:   "add --cat <catalog-zone> --zone <zone-name>",
-	Short: "Add a zone to the catalog",
+	Use:   "add --cat <catalog-zone> --zone <zone-name> [--groups <group1,group2,...>]",
+	Short: "Add a zone to the catalog with optional groups",
 	Run: func(cmd *cobra.Command, args []string) {
 		if catalogName == "" || zoneName == "" {
 			fmt.Println("Error: --cat and --zone are required")
@@ -91,6 +130,7 @@ var catalogZoneAddCmd = &cobra.Command{
 			Command:     "zone-add",
 			CatalogZone: catalogName,
 			Zone:        zoneName,
+			Groups:      groupNames, // Pass the list of groups
 		})
 
 		if err != nil {
@@ -184,7 +224,7 @@ var catalogZoneListCmd = &cobra.Command{
 		}
 
 		// Format output
-		lines := []string{"Zone Name | Hash | Service Groups | Signing Group | Meta Group"}
+		lines := []string{"Zone Name | Hash | Service Groups | Signing Group | Config Group"}
 
 		// Sort zones by name
 		zoneNames := make([]string, 0, len(resp.Zones))
@@ -452,8 +492,10 @@ func SendCatalogCommand(api *tdns.ApiClient, data tdns.CatalogPost) (*tdns.Catal
 func init() {
 	// Root catalog command
 	CatalogCmd.AddCommand(catalogCreateCmd)
+	CatalogCmd.AddCommand(catalogDeleteCmd)
 	CatalogCmd.AddCommand(CatalogZoneCmd)
 	CatalogCmd.AddCommand(CatalogGroupCmd)
+	CatalogCmd.AddCommand(CatalogNotifyCmd)
 
 	// Zone subcommands
 	CatalogZoneCmd.AddCommand(catalogZoneAddCmd)
@@ -470,12 +512,19 @@ func init() {
 	CatalogGroupCmd.AddCommand(catalogGroupDeleteCmd)
 	CatalogGroupCmd.AddCommand(catalogGroupListCmd)
 
-	// Flags for catalog create
-	catalogCreateCmd.Flags().StringVar(&catalogName, "name", "", "Catalog zone name (required)")
+	// Notify subcommands
+	CatalogNotifyCmd.AddCommand(catalogNotifyAddCmd)
+	CatalogNotifyCmd.AddCommand(catalogNotifyRemoveCmd)
+	CatalogNotifyCmd.AddCommand(catalogNotifyListCmd)
+
+	// Flags for catalog create/delete
+	catalogCreateCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 
 	// Flags for zone operations
 	catalogZoneAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 	catalogZoneAddCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
+	catalogZoneAddCmd.Flags().StringSliceVar(&groupNames, "groups", []string{}, "Optional: comma-separated list of groups to add to the zone")
 
 	catalogZoneDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 	catalogZoneDeleteCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
@@ -499,4 +548,138 @@ func init() {
 	catalogZoneGroupDeleteCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
 	catalogZoneGroupDeleteCmd.Flags().StringVar(&zoneName, "zone", "", "Member zone name (required)")
 	catalogZoneGroupDeleteCmd.Flags().StringVar(&groupName, "group", "", "Group name (required)")
+
+	// Flags for notify operations
+	catalogNotifyAddCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogNotifyAddCmd.Flags().StringVar(&notifyAddress, "addr", "", "Notify address in IP:port format (required)")
+
+	catalogNotifyRemoveCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+	catalogNotifyRemoveCmd.Flags().StringVar(&notifyAddress, "addr", "", "Notify address in IP:port format (required)")
+
+	catalogNotifyListCmd.Flags().StringVar(&catalogName, "cat", "", "Catalog zone name (required)")
+}
+
+// CatalogNotifyCmd is the subcommand group for notify address operations
+var CatalogNotifyCmd = &cobra.Command{
+	Use:   "notify",
+	Short: "Manage notify addresses for catalog zones",
+}
+
+// catalogNotifyAddCmd adds a notify address to a catalog zone
+var catalogNotifyAddCmd = &cobra.Command{
+	Use:   "add --cat <catalog-zone> --addr <IP:port>",
+	Short: "Add a notify address to a catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" || notifyAddress == "" {
+			fmt.Println("Error: --cat and --addr are required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "notify-add",
+			CatalogZone: catalogName,
+			Address:     notifyAddress,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
+// catalogNotifyRemoveCmd removes a notify address from a catalog zone
+var catalogNotifyRemoveCmd = &cobra.Command{
+	Use:   "remove --cat <catalog-zone> --addr <IP:port>",
+	Short: "Remove a notify address from a catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" || notifyAddress == "" {
+			fmt.Println("Error: --cat and --addr are required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "notify-remove",
+			CatalogZone: catalogName,
+			Address:     notifyAddress,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
+		}
+	},
+}
+
+// catalogNotifyListCmd lists all notify addresses for a catalog zone
+var catalogNotifyListCmd = &cobra.Command{
+	Use:   "list --cat <catalog-zone>",
+	Short: "List all notify addresses for a catalog zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		if catalogName == "" {
+			fmt.Println("Error: --cat is required")
+			os.Exit(1)
+		}
+
+		prefixcmd, _ := getCommandContext("catalog")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		resp, err := SendCatalogCommand(api, tdns.CatalogPost{
+			Command:     "notify-list",
+			CatalogZone: catalogName,
+		})
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if resp.Error {
+			fmt.Printf("Error: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+
+		if len(resp.NotifyAddresses) == 0 {
+			fmt.Printf("No notify addresses configured for catalog zone %s\n", catalogName)
+			return
+		}
+
+		fmt.Printf("Notify addresses for catalog zone %s:\n", catalogName)
+		for _, addr := range resp.NotifyAddresses {
+			fmt.Printf("  %s\n", addr)
+		}
+	},
 }

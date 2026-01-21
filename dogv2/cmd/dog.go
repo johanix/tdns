@@ -16,9 +16,9 @@ import (
 
 	"crypto/tls"
 
-	"github.com/johanix/tdns/tdns"
-	core "github.com/johanix/tdns/tdns/core"
-	edns0 "github.com/johanix/tdns/tdns/edns0"
+	"github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
+	edns0 "github.com/johanix/tdns/v2/edns0"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -40,7 +40,7 @@ var defaultPorts = map[string]string{
 	"Do53-TCP": "53",
 	"DoT":      "853",
 	"DoH":      "443",
-	"DoQ":      "8853",
+	"DoQ":      "853",
 }
 
 var rootCmd = &cobra.Command{
@@ -94,15 +94,16 @@ var rootCmd = &cobra.Command{
 				continue
 			}
 
-			if strings.HasPrefix(ucarg, "IXFR=") {
-				serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
-				tmp, err := strconv.Atoi(serialstr)
-				if err != nil {
-					log.Fatalf("Error: %v", err)
-				}
-				serial = uint32(tmp)
-				fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
+		if strings.HasPrefix(ucarg, "IXFR=") {
+			serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+			tmp, err := strconv.Atoi(serialstr)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
 			}
+			serial = uint32(tmp)
+			rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
+			fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
+		}
 
 			if strings.HasPrefix(ucarg, "+") {
 				if tdns.Globals.Debug {
@@ -151,7 +152,8 @@ var rootCmd = &cobra.Command{
 
 		_, err = strconv.Atoi(options["port"])
 		if err != nil {
-			fmt.Printf("Error: port \"%s\" is not valid: %v\n", options["port"], err)
+			fmt.Printf("Error: port %q is not valid: %v\n", options["port"], err)
+			os.Exit(1)
 		}
 
 		// All args parsed, join server and port
@@ -255,6 +257,7 @@ var rootCmd = &cobra.Command{
 				if transport, ok := options["transport"]; ok && transport != "do53" {
 					tlsConfig = &tls.Config{
 						InsecureSkipVerify: true,
+						MinVersion:         tls.VersionTLS12,
 					}
 					// Add ALPN for DoQ
 					if transport == "DoQ" {
@@ -379,11 +382,12 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 				case "QUERY", "NOTIFY", "UPDATE":
 					options["opcode"] = parts[1]
 				default:
+					// Try to parse as numeric opcode
 					opcode, err := strconv.Atoi(parts[1])
 					if err != nil {
-						fmt.Printf("Error: %v\n", err)
-						return options, nil
+						return nil, fmt.Errorf("invalid +OPCODE=%q: must be QUERY, NOTIFY, UPDATE, or a valid numeric opcode", parts[1])
 					}
+					// Validate numeric opcode is one of the accepted values
 					switch opcode {
 					case dns.OpcodeQuery:
 						options["opcode"] = "QUERY"
@@ -391,6 +395,8 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 						options["opcode"] = "NOTIFY"
 					case dns.OpcodeUpdate:
 						options["opcode"] = "UPDATE"
+					default:
+						return nil, fmt.Errorf("invalid +OPCODE=%q: opcode %d is not supported (use QUERY, NOTIFY, or UPDATE)", parts[1], opcode)
 					}
 				}
 			}
@@ -443,16 +449,13 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 
 		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)
 	}
-
-	return options, nil
 }
 
 func ParseResolvConf() (string, error) {
 	// Read /etc/resolv.conf to get the default nameserver
 	content, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
-		fmt.Println("Error: Unable to read /etc/resolv.conf and no nameserver specified")
-		os.Exit(1)
+		return "", fmt.Errorf("unable to read /etc/resolv.conf: %w", err)
 	}
 	lines := strings.Split(string(content), "\n")
 	foundNameserver := false
@@ -467,7 +470,7 @@ func ParseResolvConf() (string, error) {
 		}
 	}
 	if !foundNameserver {
-		return "", fmt.Errorf("Error: No nameserver entry found in /etc/resolv.conf and no nameserver specified")
+		return "", fmt.Errorf("no nameserver entry found in /etc/resolv.conf")
 	}
 	return server, nil
 }
@@ -527,7 +530,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	
 	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
-		// Check if it's an IPv6 address in brackets (e.g., [::1]:port)
+		// Check if it's an IPv6 address in brackets with port (e.g., [::1]:5354)
 		if strings.HasPrefix(host, "[") && strings.Contains(host, "]:") {
 			// IPv6 with port: [::1]:5354
 			var portErr error
@@ -535,9 +538,15 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 			if portErr != nil {
 				return nil, fmt.Errorf("%s is not in host:port format: %v", u.Host, portErr)
 			}
+		} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			// Bare bracketed IPv6 without port (e.g., [::1])
+			// Strip the brackets and validate as IPv6
+			host = strings.Trim(host, "[]")
+			if net.ParseIP(host) == nil {
+				return nil, fmt.Errorf("%s is not a valid IPv6 address", u.Host)
+			}
+			// port remains empty
 		} else if net.ParseIP(host) != nil {
-			// XXX: This is not correct, as it will not work for IPv6 addresses in brackets
-			// 
 			// Valid IP address (IPv4 or IPv6) without port - use as-is
 			// net.ParseIP handles both IPv4 and IPv6 correctly
 			// No need to split, it's just the IP address

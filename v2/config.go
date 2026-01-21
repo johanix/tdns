@@ -25,6 +25,7 @@ type Config struct {
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
 	Catalog        CatalogConf                `yaml:"catalog" mapstructure:"catalog"`
+	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
 	Keys           KeyConf
@@ -167,8 +168,10 @@ type DbConf struct {
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
-	Policy        CatalogPolicy              `yaml:"policy" mapstructure:"policy"`
-	MetaGroups    map[string]*MetaGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`
+	GroupPrefixes GroupPrefixesConf            `yaml:"group_prefixes" mapstructure:"group_prefixes"`
+	Policy        CatalogPolicy                `yaml:"policy" mapstructure:"policy"`                 // Deprecated, kept for backward compatibility
+	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
+	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`      // Deprecated, kept for backward compatibility
 	SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
 }
 
@@ -181,8 +184,14 @@ type CatalogPolicy struct {
 	// Note: conflict_resolution is hardcoded to "manual-priority", not configurable
 }
 
-// MetaGroupConfig provides configuration for zone transfers from catalog meta groups (RFC 9432 terminology)
-type MetaGroupConfig struct {
+// GroupPrefixesConf defines prefixes that identify special group types in catalog zones
+type GroupPrefixesConf struct {
+	Config  string `yaml:"config" mapstructure:"config" validate:"required"`   // Prefix for config/transfer groups, or "none" to disable
+	Signing string `yaml:"signing" mapstructure:"signing" validate:"required"` // Prefix for signing groups, or "none" to disable
+}
+
+// ConfigGroupConfig provides configuration for zone transfers from catalog config groups (RFC 9432 terminology)
+type ConfigGroupConfig struct {
 	Name     string   `yaml:"-" mapstructure:"-"`          // Populated from map key
 	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
 	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
@@ -190,9 +199,35 @@ type MetaGroupConfig struct {
 	Options  []string `yaml:"options" mapstructure:"options"`
 }
 
+// MetaGroupConfig is deprecated, use ConfigGroupConfig instead
+type MetaGroupConfig = ConfigGroupConfig
+
 // SigningGroupInfo provides documentation for signing groups (RFC 9432 terminology)
 type SigningGroupInfo struct {
 	Description string `yaml:"description" mapstructure:"description"`
+}
+
+// DynamicZonesConf defines configuration for dynamically created zones (catalog zones, catalog members, etc.)
+type DynamicZonesConf struct {
+	ConfigFile    string                    `yaml:"configfile" mapstructure:"configfile"`       // Absolute path to dynamic config file
+	ZoneDirectory string                    `yaml:"zonedirectory" mapstructure:"zonedirectory"` // Absolute path to zone file directory
+	CatalogZones  DynamicZoneTypeConf       `yaml:"catalog_zones" mapstructure:"catalog_zones"`  // Configuration for catalog zones
+	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
+	Dynamic       DynamicZoneTypeConf       `yaml:"dynamic" mapstructure:"dynamic"`             // Configuration for direct API-created zones (future)
+}
+
+// DynamicZoneTypeConf defines configuration for a type of dynamic zone
+type DynamicZoneTypeConf struct {
+	Allowed bool   `yaml:"allowed" mapstructure:"allowed"` // Whether this type of zone is allowed
+	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+}
+
+// DynamicCatalogMemberConf defines configuration for catalog member zones (includes add/remove policy)
+type DynamicCatalogMemberConf struct {
+	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                                      // Whether catalog member zones are allowed
+	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"`        // "memory" or "persistent"
+	Add     string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`                     // "auto" or "manual" - Enable auto-configuration from catalog
+	Remove  string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"`               // "auto" or "manual" - Whether to remove zones when deleted from catalog
 }
 
 type InternalConf struct {

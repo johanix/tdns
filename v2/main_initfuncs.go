@@ -232,6 +232,19 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Provide the complete zone list to engines that need cross-zone post-initialization
 	conf.Internal.AllZones = all_zones
 
+	// Load dynamic zones from dynamic config file (if configured and included)
+	// This must happen after ParseZones so that main config zones take precedence
+	if conf.DynamicZones.ConfigFile != "" {
+		// Check if dynamic config file is included (warns if not)
+		// Note: includedFiles are tracked during ParseConfig, but we don't have access here
+		// The warning was already logged during ParseConfig validation
+		// For now, we'll try to load it anyway (it may have been included)
+		if err := conf.LoadDynamicZoneFiles(ctx); err != nil {
+			log.Printf("DYNAMIC-ZONES: Warning: Failed to load dynamic zones: %v", err)
+			// Don't fail startup, just log the warning
+		}
+	}
+
 	switch Globals.App.Type {
 	case AppTypeAgent:
 		// Setup agent identity and publish records

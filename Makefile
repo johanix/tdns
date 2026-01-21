@@ -1,11 +1,19 @@
+.PHONY: v1 all v2 clean install
 
-all:
+v1:
 	$(MAKE) -C ./auth/
 	$(MAKE) -C ./cli/
 	$(MAKE) -C ./agent/
-	$(MAKE) -C ./dog/
 	$(MAKE) -C ./combiner/
 	$(MAKE) -C ./imr/
+	$(MAKE) -C ./dog/
+
+v2:
+	$(MAKE) -C ./authv2/
+	$(MAKE) -C ./cliv2/
+	$(MAKE) -C ./dogv2/
+
+all:	v1 v2
 	$(MAKE) -C ./reporter/
 	$(MAKE) -C ./scanner/
 #	$(MAKE) -C ./msa/

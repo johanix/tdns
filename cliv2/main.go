@@ -1,12 +1,12 @@
 /*
- * Copyright (c) Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 package main
 
 import (
-	"dog/cmd"
+	"tdns-cliv2/cmd"
 
-	tdns "github.com/johanix/tdns/tdns"
+	tdns "github.com/johanix/tdns/v2"
 )
 
 func main() {

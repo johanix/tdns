@@ -148,13 +148,42 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
-						}
-						if updated {
-							log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
+						} else {
+							// No error from refresh - zone data is valid
+							if updated {
+								log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
 
-							// Check if this is a catalog zone and parse it
+								// Write zone file after successful update
+								// Two cases:
+								// 1. Auto-configured zones -> write to dynamic zone directory
+								// 2. Regular zones with zonefile configured -> write to configured file
+								if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+									// Auto-configured catalog member zone
+									_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
+									if err != nil {
+										log.Printf("DYNAMIC-ZONES: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+										// Don't fail the operation, just log the warning
+									}
+
+									// Update dynamic config file (zone file path may have changed, or this is first write)
+									if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+										log.Printf("DYNAMIC-ZONES: Warning: Failed to update dynamic config file for %s: %v", zd.ZoneName, err)
+										// Don't fail the operation, just log the warning
+									}
+								} else if zd.Zonefile != "" {
+									// Regular zone with zonefile configured (typically secondary zones)
+									log.Printf("RefreshEngine: Writing updated zone %s to file %s", zd.ZoneName, zd.Zonefile)
+									_, err := zd.WriteFile(zd.Zonefile)
+									if err != nil {
+										log.Printf("RefreshEngine: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+									}
+								}
+							}
+
+							// Parse catalog zones after EVERY successful refresh (updated or not)
+							// This ensures membership is populated even if zone file hasn't changed
 							if zd.Options[OptCatalogZone] {
-								log.Printf("CATALOG: RefreshEngine: Zone %s is a catalog zone, parsing member zones", zone)
+								log.Printf("CATALOG: RefreshEngine: Zone %s is a catalog zone, parsing member zones (updated=%v)", zone, updated)
 								catalogUpdate, err := ParseCatalogZone(zd)
 								if err != nil {
 									log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
@@ -169,8 +198,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 										log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
 									}
 
-									// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-									log.Printf("CATALOG: RefreshEngine: Checking auto-configure policy: catalog.policy.zones.add=%q", conf.Catalog.Policy.Zones.Add)
+								// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
+								// Policy is now per-catalog-zone via catalog-member-auto-create option
 									go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 										defer func() {
 											if r := recover(); r != nil {
@@ -253,8 +282,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
 							}
 
-							// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-							log.Printf("CATALOG: RefreshEngine: Checking auto-configure policy: catalog.policy.zones.add=%q", conf.Catalog.Policy.Zones.Add)
+								// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
+								// Policy is now per-catalog-zone via catalog-member-auto-create option
 							go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 								defer func() {
 									if r := recover(); r != nil {
@@ -343,6 +372,32 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 					if updated {
 						zd.NotifyDownstreams()
+
+						// Write zone file after successful update
+						// Two cases:
+						// 1. Auto-configured zones -> write to dynamic zone directory
+						// 2. Regular zones with zonefile configured -> write to configured file
+						if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+							// Auto-configured catalog member zone
+							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
+							if err != nil {
+								log.Printf("DYNAMIC-ZONES: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+								// Don't fail the operation, just log the warning
+							}
+
+							// Update dynamic config file (zone file path may have changed, or this is first write)
+							if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+								log.Printf("DYNAMIC-ZONES: Warning: Failed to update dynamic config file for %s: %v", zd.ZoneName, err)
+								// Don't fail the operation, just log the warning
+							}
+						} else if zd.Zonefile != "" {
+							// Regular zone with zonefile configured (typically secondary zones)
+							log.Printf("RefreshEngine: Writing updated zone %s to file %s", zd.ZoneName, zd.Zonefile)
+							_, err := zd.WriteFile(zd.Zonefile)
+							if err != nil {
+								log.Printf("RefreshEngine: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+							}
+						}
 					}
 				}
 			}

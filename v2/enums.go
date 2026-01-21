@@ -24,6 +24,8 @@ const (
 	// OptServerSvcb
 	OptAddTransportSignal
 	OptCatalogZone
+	OptCatalogMemberAutoCreate
+	OptCatalogMemberAutoDelete
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -39,10 +41,12 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptMultiSigner:       "multisigner", // OBE?
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
-	OptAutomaticZone:     "automatic-zone",
+	OptAutomaticZone:           "automatic-zone",
 	// OptServerSvcb:        "create-server-svcb",
-	OptAddTransportSignal: "add-transport-signal",
-	OptCatalogZone:        "catalog-zone",
+	OptAddTransportSignal:      "add-transport-signal",
+	OptCatalogZone:             "catalog-zone",
+	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
+	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -58,9 +62,11 @@ var StringToZoneOption = map[string]ZoneOption{
 	"multisigner":            OptMultiSigner, // OBE?
 	"dirty":                  OptDirty,
 	"frozen":                 OptFrozen,
-	"automatic-zone":         OptAutomaticZone,
-	"add-transport-signal":   OptAddTransportSignal,
-	"catalog-zone":           OptCatalogZone,
+	"automatic-zone":               OptAutomaticZone,
+	"add-transport-signal":         OptAddTransportSignal,
+	"catalog-zone":                 OptCatalogZone,
+	"catalog-member-auto-create":   OptCatalogMemberAutoCreate,
+	"catalog-member-auto-delete":   OptCatalogMemberAutoDelete,
 }
 
 type ImrOption uint8

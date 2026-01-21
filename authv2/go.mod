@@ -1,21 +1,17 @@
-module dog
+module tdns-authv2
 
 go 1.24.0
 
 replace (
-	github.com/johanix/tdns/tdns => ../tdns
-	github.com/johanix/tdns/tdns/cache => ../tdns/cache
-	github.com/johanix/tdns/tdns/cli => ../tdns/cli
-	github.com/johanix/tdns/tdns/core => ../tdns/core
-	github.com/johanix/tdns/tdns/edns0 => ../tdns/edns0
+	github.com/johanix/tdns/v2 => ../v2
+	github.com/johanix/tdns/v2/cache => ../v2/cache
+	github.com/johanix/tdns/v2/core => ../v2/core
+	github.com/johanix/tdns/v2/edns0 => ../v2/edns0
 )
 
 require (
-	github.com/johanix/tdns/tdns v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/tdns/core v0.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/tdns/edns0 v0.0.0-00010101000000-000000000000
-	github.com/miekg/dns v1.1.68
-	github.com/spf13/cobra v1.8.1
+	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
+	github.com/mattn/go-sqlite3 v1.14.28
 )
 
 require (
@@ -28,11 +24,12 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/tdns/tdns/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/miekg/dns v1.1.68 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect

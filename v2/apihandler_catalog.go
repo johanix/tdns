@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -52,8 +54,11 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 		case "create":
 			err = handleCatalogCreate(data.CatalogZone, &resp)
 
+		case "delete":
+			err = handleCatalogDelete(data.CatalogZone, &resp)
+
 		case "zone-add":
-			err = handleCatalogZoneAdd(data.CatalogZone, data.Zone, &resp)
+			err = handleCatalogZoneAdd(data.CatalogZone, data.Zone, data.Groups, &resp)
 
 		case "zone-delete":
 			err = handleCatalogZoneDelete(data.CatalogZone, data.Zone, &resp)
@@ -75,6 +80,15 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 
 		case "zone-group-delete":
 			err = handleCatalogZoneGroupDelete(data.CatalogZone, data.Zone, data.Group, &resp)
+
+		case "notify-add":
+			err = handleCatalogNotifyAdd(data.CatalogZone, data.Address, &resp)
+
+		case "notify-remove":
+			err = handleCatalogNotifyRemove(data.CatalogZone, data.Address, &resp)
+
+		case "notify-list":
+			err = handleCatalogNotifyList(data.CatalogZone, &resp)
 
 		default:
 			resp.Error = true
@@ -153,12 +167,79 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 	// Register the zone
 	Zones.Set(catalogZoneName, zd)
 
+	// Write zone file if persistence is enabled
+	if Conf.ShouldPersistZone(zd) {
+		_, err = zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory)
+		if err != nil {
+			log.Printf("CATALOG: Warning: Failed to write catalog zone file for %s: %v", catalogZoneName, err)
+			// Don't fail the operation, just log the warning
+		}
+
+		// Write dynamic config file
+		if err := Conf.AddDynamicZoneToConfig(zd); err != nil {
+			log.Printf("CATALOG: Warning: Failed to update dynamic config file for %s: %v", catalogZoneName, err)
+			// Don't fail the operation, just log the warning
+		}
+	}
+
 	resp.Msg = fmt.Sprintf("Catalog zone %s created successfully", catalogZoneName)
 	log.Printf("CATALOG: Created catalog zone %s", catalogZoneName)
 	return nil
 }
 
-func handleCatalogZoneAdd(catalogZoneName, zoneName string, resp *CatalogResponse) error {
+func handleCatalogDelete(catalogZoneName string, resp *CatalogResponse) error {
+	if catalogZoneName == "" {
+		return fmt.Errorf("catalog zone name is required")
+	}
+
+	// Ensure zone name is FQDN
+	catalogZoneName = dns.Fqdn(catalogZoneName)
+
+	// Check if catalog zone exists
+	zd, exists := Zones.Get(catalogZoneName)
+	if !exists {
+		return fmt.Errorf("catalog zone %s not found", catalogZoneName)
+	}
+
+	// Verify it's actually a catalog zone
+	if !zd.Options[OptCatalogZone] {
+		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
+	}
+
+	log.Printf("CATALOG: Deleting catalog zone %s", catalogZoneName)
+
+	// Remove the catalog zone from Zones map
+	Zones.Remove(catalogZoneName)
+
+	// Remove catalog membership (it's a regular map, needs mutex)
+	catalogMembershipMutex.Lock()
+	delete(catalogMemberships, catalogZoneName)
+	catalogMembershipMutex.Unlock()
+
+	// Remove from dynamic config if persisted
+	if Conf.ShouldPersistZone(zd) {
+		if err := Conf.RemoveDynamicZoneFromConfig(catalogZoneName); err != nil {
+			log.Printf("CATALOG: Warning: Failed to remove catalog zone %s from dynamic config: %v", catalogZoneName, err)
+			// Don't fail the operation, just log warning
+		}
+
+		// Delete zone file if it exists
+		if Conf.DynamicZones.ZoneDirectory != "" {
+			zoneFilePath := GetDynamicZoneFilePath(catalogZoneName, Conf.DynamicZones.ZoneDirectory)
+			if err := os.Remove(zoneFilePath); err != nil && !os.IsNotExist(err) {
+				log.Printf("CATALOG: Warning: Failed to delete zone file %s: %v", zoneFilePath, err)
+			} else if err == nil {
+				log.Printf("CATALOG: Deleted zone file %s", zoneFilePath)
+			}
+		}
+	}
+
+	resp.Msg = fmt.Sprintf("Catalog zone %s deleted successfully", catalogZoneName)
+	log.Printf("CATALOG: Deleted catalog zone %s", catalogZoneName)
+	return nil
+}
+
+func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, resp *CatalogResponse) error {
 	if catalogZoneName == "" || zoneName == "" {
 		return fmt.Errorf("catalog zone name and member zone name are required")
 	}
@@ -167,18 +248,48 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, resp *CatalogRespons
 	zoneName = dns.Fqdn(zoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
+	
+	// Add the member zone
 	err := cm.AddMemberZone(zoneName)
 	if err != nil {
 		return err
 	}
 
-	// Regenerate catalog zone PTR records
+	// If groups were specified, add them to the zone atomically before regenerating
+	if len(groups) > 0 {
+		for _, group := range groups {
+			group = strings.TrimSpace(group)
+			if group == "" {
+				continue
+			}
+			
+			// Add the group to the zone
+			err = cm.AddZoneGroup(zoneName, group)
+			if err != nil {
+				// If adding a group fails, log but continue with others
+				log.Printf("CATALOG: Warning: Failed to add group %s to zone %s: %v", group, zoneName, err)
+				// Note: we don't return here - we try to add all groups
+			} else {
+				log.Printf("CATALOG: Added group %s to zone %s in catalog %s", group, zoneName, catalogZoneName)
+			}
+		}
+	}
+
+	// Regenerate catalog zone PTR records (only once, after all groups are added)
 	err = regenerateCatalogZone(catalogZoneName)
 	if err != nil {
 		return fmt.Errorf("failed to regenerate catalog zone: %v", err)
 	}
 
-	resp.Msg = fmt.Sprintf("Zone %s added to catalog %s", zoneName, catalogZoneName)
+	// Build response message
+	if len(groups) > 0 {
+		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s with groups: %s", zoneName, catalogZoneName, strings.Join(groups, ", "))
+		log.Printf("CATALOG: Added zone %s to catalog %s with groups: %s", zoneName, catalogZoneName, strings.Join(groups, ", "))
+	} else {
+		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s", zoneName, catalogZoneName)
+		log.Printf("CATALOG: Added zone %s to catalog %s", zoneName, catalogZoneName)
+	}
+	
 	return nil
 }
 
@@ -200,6 +311,40 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 	err = regenerateCatalogZone(catalogZoneName)
 	if err != nil {
 		return fmt.Errorf("failed to regenerate catalog zone: %v", err)
+	}
+
+	// Check if the member zone should be removed (if it's a catalog member and catalog has auto-delete enabled)
+	zd, exists := Zones.Get(zoneName)
+	if exists && zd.Options[OptAutomaticZone] && zd.SourceCatalog == catalogZoneName {
+		// Check if catalog zone has auto-delete enabled
+		catalogZd, catalogExists := Zones.Get(catalogZoneName)
+		if catalogExists && catalogZd.Options[OptCatalogMemberAutoDelete] {
+			log.Printf("CATALOG: Auto-removing zone %s (removed from catalog %s, catalog has catalog-member-auto-delete enabled)", zoneName, catalogZoneName)
+			
+			// Remove from Zones map
+			Zones.Remove(zoneName)
+			
+			// Remove from dynamic config file
+			if Conf.ShouldPersistZone(zd) {
+				if err := Conf.RemoveDynamicZoneFromConfig(zoneName); err != nil {
+					log.Printf("CATALOG: Warning: Failed to remove zone %s from dynamic config file: %v", zoneName, err)
+					// Don't fail the operation, just log the warning
+				}
+				
+				// Optionally delete zone file (if persistence is enabled)
+				if Conf.DynamicZones.ZoneDirectory != "" {
+					zoneFilePath := GetDynamicZoneFilePath(zoneName, Conf.DynamicZones.ZoneDirectory)
+					if err := os.Remove(zoneFilePath); err != nil && !os.IsNotExist(err) {
+						log.Printf("CATALOG: Warning: Failed to delete zone file %s: %v", zoneFilePath, err)
+						// Don't fail the operation, just log the warning
+					} else if err == nil {
+						log.Printf("CATALOG: Deleted zone file %s", zoneFilePath)
+					}
+				}
+			}
+		} else {
+			log.Printf("CATALOG: Zone %s remains configured (removed from catalog %s, but catalog does not have catalog-member-auto-delete enabled)", zoneName, catalogZoneName)
+		}
 	}
 
 	resp.Msg = fmt.Sprintf("Zone %s removed from catalog %s", zoneName, catalogZoneName)
@@ -419,6 +564,186 @@ func regenerateCatalogZone(catalogZoneName string) error {
 	// Notify downstreams
 	zd.NotifyDownstreams()
 
+	// Write zone file if persistence is enabled
+	if Conf.ShouldPersistZone(zd) {
+		_, err = zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory)
+		if err != nil {
+			log.Printf("CATALOG: Warning: Failed to write catalog zone file for %s: %v", catalogZoneName, err)
+			// Don't fail the operation, just log the warning
+		}
+
+		// Write dynamic config file
+		if err := Conf.AddDynamicZoneToConfig(zd); err != nil {
+			log.Printf("CATALOG: Warning: Failed to update dynamic config file for %s: %v", catalogZoneName, err)
+			// Don't fail the operation, just log the warning
+		}
+	}
+
 	log.Printf("CATALOG: Regenerated catalog zone %s with %d member zones", catalogZoneName, len(cm.MemberZones))
+	return nil
+}
+
+// handleCatalogNotifyAdd adds a notify address to a catalog zone
+func handleCatalogNotifyAdd(catalogZoneName, address string, resp *CatalogResponse) error {
+	if catalogZoneName == "" {
+		return fmt.Errorf("catalog zone name is required")
+	}
+	if address == "" {
+		return fmt.Errorf("notify address is required")
+	}
+
+	catalogZoneName = dns.Fqdn(catalogZoneName)
+
+	// Get the catalog zone
+	zd, exists := Zones.Get(catalogZoneName)
+	if !exists {
+		return fmt.Errorf("catalog zone %s not found", catalogZoneName)
+	}
+
+	// Validate that it's a catalog zone
+	if !zd.Options[OptCatalogZone] {
+		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
+	}
+
+	// Validate address format (IP:port)
+	if err := validateNotifyAddress(address); err != nil {
+		return fmt.Errorf("invalid notify address format: %v", err)
+	}
+
+	// Check if address already exists and add if not (protected by mutex)
+	zd.mu.Lock()
+	for _, existingAddr := range zd.Downstreams {
+		if existingAddr == address {
+			zd.mu.Unlock()
+			return fmt.Errorf("notify address %s already exists for catalog zone %s", address, catalogZoneName)
+		}
+	}
+
+	// Add the address
+	zd.Downstreams = append(zd.Downstreams, address)
+	zd.mu.Unlock()
+
+	// Update dynamic config file if persistence is enabled
+	if Conf.ShouldPersistZone(zd) {
+		if err := Conf.AddDynamicZoneToConfig(zd); err != nil {
+			log.Printf("CATALOG: Warning: Failed to update dynamic config file after adding notify address: %v", err)
+			// Don't fail the operation, just log the warning
+		}
+	}
+
+	resp.Msg = fmt.Sprintf("Notify address %s added to catalog zone %s", address, catalogZoneName)
+	log.Printf("CATALOG: Added notify address %s to catalog zone %s", address, catalogZoneName)
+	return nil
+}
+
+// handleCatalogNotifyRemove removes a notify address from a catalog zone
+func handleCatalogNotifyRemove(catalogZoneName, address string, resp *CatalogResponse) error {
+	if catalogZoneName == "" {
+		return fmt.Errorf("catalog zone name is required")
+	}
+	if address == "" {
+		return fmt.Errorf("notify address is required")
+	}
+
+	catalogZoneName = dns.Fqdn(catalogZoneName)
+
+	// Get the catalog zone
+	zd, exists := Zones.Get(catalogZoneName)
+	if !exists {
+		return fmt.Errorf("catalog zone %s not found", catalogZoneName)
+	}
+
+	// Validate that it's a catalog zone
+	if !zd.Options[OptCatalogZone] {
+		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
+	}
+
+	// Find and remove the address (protected by mutex)
+	zd.mu.Lock()
+	found := false
+	newDownstreams := make([]string, 0, len(zd.Downstreams))
+	for _, existingAddr := range zd.Downstreams {
+		if existingAddr == address {
+			found = true
+			continue // Skip this address
+		}
+		newDownstreams = append(newDownstreams, existingAddr)
+	}
+
+	if !found {
+		zd.mu.Unlock()
+		return fmt.Errorf("notify address %s not found for catalog zone %s", address, catalogZoneName)
+	}
+
+	zd.Downstreams = newDownstreams
+	zd.mu.Unlock()
+
+	// Update dynamic config file if persistence is enabled
+	if Conf.ShouldPersistZone(zd) {
+		if err := Conf.AddDynamicZoneToConfig(zd); err != nil {
+			log.Printf("CATALOG: Warning: Failed to update dynamic config file after removing notify address: %v", err)
+			// Don't fail the operation, just log the warning
+		}
+	}
+
+	resp.Msg = fmt.Sprintf("Notify address %s removed from catalog zone %s", address, catalogZoneName)
+	log.Printf("CATALOG: Removed notify address %s from catalog zone %s", address, catalogZoneName)
+	return nil
+}
+
+// handleCatalogNotifyList lists all notify addresses for a catalog zone
+func handleCatalogNotifyList(catalogZoneName string, resp *CatalogResponse) error {
+	if catalogZoneName == "" {
+		return fmt.Errorf("catalog zone name is required")
+	}
+
+	catalogZoneName = dns.Fqdn(catalogZoneName)
+
+	// Get the catalog zone
+	zd, exists := Zones.Get(catalogZoneName)
+	if !exists {
+		return fmt.Errorf("catalog zone %s not found", catalogZoneName)
+	}
+
+	// Validate that it's a catalog zone
+	if !zd.Options[OptCatalogZone] {
+		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
+	}
+
+	// Return a copy of the notify addresses (protected by mutex)
+	zd.mu.Lock()
+	resp.NotifyAddresses = make([]string, len(zd.Downstreams))
+	copy(resp.NotifyAddresses, zd.Downstreams)
+	zd.mu.Unlock()
+
+	return nil
+}
+
+// validateNotifyAddress validates that an address is in IP:port format
+func validateNotifyAddress(address string) error {
+	if address == "" {
+		return fmt.Errorf("address cannot be empty")
+	}
+
+	// Split host and port using net.SplitHostPort (handles IPv4, IPv6, and bracketed IPv6)
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid address format (expected IP:port or [IPv6]:port): %w", err)
+	}
+
+	// Validate IP address
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("invalid IP address: %s", host)
+	}
+
+	// Validate port (must be numeric and in valid range)
+	portNum := 0
+	if _, err := fmt.Sscanf(port, "%d", &portNum); err != nil {
+		return fmt.Errorf("invalid port: %s", port)
+	}
+	if portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535, got: %d", portNum)
+	}
+
 	return nil
 }

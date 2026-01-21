@@ -1,0 +1,185 @@
+/*
+ * Copyright (c) 2024 Johan Stenstam, johani@johani.org
+ */
+package cmd
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
+	tdns "github.com/johanix/tdns/v2"
+	cli "github.com/johanix/tdns/v2/cli"
+)
+
+var cfgFile, cfgFileUsed string
+var LocalConfig string
+
+var rootCmd = &cobra.Command{
+	Use:   "tdns-cli",
+	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Set up CLI logging with file/line info when verbose or debug mode is enabled
+		// This runs after flags are parsed, so Globals.Verbose and Globals.Debug are available
+		tdns.SetupCliLogging()
+	},
+}
+
+// Execute adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main(). It only needs to happen once to the rootCmd.
+func Execute() {
+	cobra.CheckErr(rootCmd.Execute())
+}
+
+func init() {
+	cobra.OnInitialize(initConfig, initApi)
+
+	// Register catalog zone management commands
+	rootCmd.AddCommand(cli.CatalogCmd)
+
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
+		fmt.Sprintf("config file (default is %s)", tdns.DefaultCliCfgFile))
+	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
+	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
+
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
+		false, "debug output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
+		false, "verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
+		false, "show headers")
+}
+
+// initConfig reads in config file and ENV variables if set.
+func initConfig() {
+	if cfgFile != "" {
+		// Use config file from the flag.
+		viper.SetConfigFile(cfgFile)
+	} else {
+		viper.SetConfigFile(tdns.DefaultCliCfgFile)
+	}
+
+	viper.AutomaticEnv() // read in environment variables that match
+
+	// If a config file is found, read it in.
+	if err := viper.ReadInConfig(); err == nil {
+		if tdns.Globals.Verbose {
+			fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+		}
+		cfgFileUsed = viper.ConfigFileUsed()
+	} else {
+		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
+	}
+
+	LocalConfig = viper.GetString("cli.localconfig")
+	if LocalConfig != "" {
+		_, err := os.Stat(LocalConfig)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Fatalf("Error stat(%s): %v", LocalConfig, err)
+			}
+			// File doesn't exist - do not set config file or merge
+		} else {
+			// File exists - set config file and merge it
+			viper.SetConfigFile(LocalConfig)
+			if err := viper.MergeInConfig(); err != nil {
+				log.Fatalf("Error merging in local config from '%s'", LocalConfig)
+			} else {
+				if tdns.Globals.Verbose {
+					fmt.Printf("Merging in local config from '%s'\n", LocalConfig)
+				}
+			}
+		}
+	}
+
+	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
+	err := viper.Unmarshal(&cconf)
+	if err != nil {
+		// viper.Unmarshal failure means cconf is empty/invalid
+		// This will cause initApi() to run with empty cconf.ApiServers
+		// which leaves tdns.Globals.Api uninitialized
+		log.Fatalf("FATAL: viper.Unmarshal failed to parse config into cconf: %v\nThis would leave cconf.ApiServers empty and break initApi()/tdns.Globals.Api initialization", err)
+	}
+}
+
+var cconf CliConf
+
+// var ApiClients = map[string]*tdns.ApiClient{}
+
+type CliConf struct {
+	ApiServers []ApiDetails
+	Keys	   tdns.KeyConf
+}
+
+type ApiDetails struct {
+	Name       string `validate:"required" yaml:"name"`
+	BaseURL    string `validate:"required" yaml:"baseurl"`
+	ApiKey     string `validate:"required" yaml:"apikey"`
+	AuthMethod string `validate:"required" yaml:"authmethod"`
+	RootCA     string `yaml:"rootca"`           // Optional: path to root CA cert, or "insecure" to skip verification
+	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon (e.g., "/usr/local/libexec/tdns-auth")
+}
+
+func initApi() {
+	if tdns.Globals.Debug {
+		fmt.Printf("initApi: setting up API clients for:")
+	}
+	for _, val := range cconf.ApiServers {
+		// Validate the conf for this apiserver
+		// Use configured RootCA, or default to "insecure" if not specified
+		rootCA := val.RootCA
+		if rootCA == "" {
+			rootCA = "insecure" // Default: skip TLS verification
+		}
+		
+		tmp := tdns.NewClient(val.Name, val.BaseURL, val.ApiKey, val.AuthMethod, rootCA)
+		if tmp == nil {
+			log.Fatalf("initApi: Failed to setup API client for %q (baseurl: %s, rootca: %s). Exiting.", val.Name, val.BaseURL, rootCA)
+		}
+		tdns.Globals.ApiClients[val.Name] = tmp
+		if tdns.Globals.Debug {
+			// fmt.Printf("API client for %q set up (baseurl: %q).\n", val.Name, tmp.BaseUrl)
+			fmt.Printf(" %s ", val.Name)
+		}
+	}
+	if tdns.Globals.Debug {
+		fmt.Printf("\n")
+	}
+
+	// Validate that "tdns-auth" API client exists before assigning to tdns.Globals.Api
+	// This prevents nil dereferences in downstream code that assumes Api is non-nil
+	authClient, exists := tdns.Globals.ApiClients["tdns-auth"]
+	if !exists || authClient == nil {
+		log.Fatalf("FATAL: No API server named 'tdns-auth' found in ApiServers configuration.\n" +
+			"tdns.Globals.Api requires a configured ApiServer with name: 'tdns-auth'\n" +
+			"Please add to your config:\n" +
+			"  api_servers:\n" +
+			"    - name: tdns-auth\n" +
+			"      baseurl: http://localhost:8080\n" +
+			"      apikey: your-api-key\n" +
+			"      authmethod: X-API-Key")
+	}
+
+	// for convenience we store the API client for "tdns-auth" in the old place also
+	tdns.Globals.Api = authClient
+
+//	numtsigs := len(cconf.Keys.Tsig)
+//	if numtsigs > 0 {
+//		tdns.Globals.TsigKeys = make(map[string]*tdns.TsigDetails, numtsigs)
+//		for _, val := range cconf.Keys.Tsig {
+//			tdns.Globals.TsigKeys[val.Name] = &tdns.TsigDetails{
+//								Name:		val.Name,
+//								Algorithm:	val.Algorithm,
+//								Secret:		val.Secret,
+//							  }
+//		}
+//	}
+
+	numtsigs, _ := tdns.ParseTsigKeys(&cconf.Keys)
+	if tdns.Globals.Debug {
+		fmt.Printf("Parsed %d TSIG keys\n", numtsigs)
+	}
+}

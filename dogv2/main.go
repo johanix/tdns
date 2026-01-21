@@ -4,9 +4,9 @@
 package main
 
 import (
-	"dog/cmd"
+	"dogv2/cmd"
 
-	tdns "github.com/johanix/tdns/tdns"
+	tdns "github.com/johanix/tdns/v2"
 )
 
 func main() {

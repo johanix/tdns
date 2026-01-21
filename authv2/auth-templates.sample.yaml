@@ -1,0 +1,175 @@
+# TDNS Zone Templates Configuration
+#
+# Templates allow you to define reusable zone configurations.
+# Individual zones can reference a template and override specific settings.
+#
+# Template properties that can be set:
+#   - type:            Zone type: primary | secondary
+#   - store:           Storage backend: map | slice | xfr
+#                      - map:   Default, general-purpose (recommended for most zones)
+#                      - slice: Experimental alternative (may be faster/use less memory)
+#                      - xfr:   Zone transfer only (AXFR in/out, NO normal queries)
+#   - primary:         Upstream server for secondary zones (IP:port)
+#   - notify:          List of downstream servers to notify (IP:port)
+#   - options:         List of zone options (see below)
+#   - dnssec_policy:   DNSSEC policy name (from dnssecpolicies section)
+#   - multi_signer:    Multi-signer configuration name
+#
+# ==============================================================================
+# COMPLETE LIST OF ZONE OPTIONS
+# ==============================================================================
+#
+# DELEGATION SYNCHRONIZATION OPTIONS:
+#   delegation-sync-parent:  Provide delegation sync service towards child zones
+#                           (parent zone listens for child DS/NS/A/AAAA updates)
+#
+#   delegation-sync-child:   Attempt delegation sync with parent zone
+#                           (child zone pushes DS/NS/A/AAAA updates to parent)
+#
+# ZONE MODIFICATION OPTIONS:
+#   allow-updates:           Allow zone modifications via DNS UPDATE
+#                           (general updates to any RRset in the zone)
+#
+#   allow-child-updates:     Allow updates to child delegation data via DNS UPDATE
+#                           (only child NS, DS, A, AAAA records)
+#
+#   allow-combine:           Allow zone apex RRsets to be dynamically modified
+#                           (NS, DNSKEY, CDS, CSYNC at zone apex)
+#
+# DNSSEC OPTIONS:
+#   online-signing:          Sign zone on-the-fly as needed
+#                           (creates DNSSEC keypair if needed, signs responses)
+#
+#   dont-publish-key:        Don't publish the public SIG(0) key in zone
+#                           (key exists but is not published in zone data)
+#
+# DNS BEHAVIOR OPTIONS:
+#   fold-case:               Fold domain name case before comparisons
+#                           (case-insensitive matching for owner names)
+#
+#   black-lies:              Implement "black lies" negative responses
+#                           (RFC 7816 - minimizes NSEC exposure)
+#
+#   add-transport-signal:    Automatically synthesize SVCB RRs
+#                           (adds transport signals to Additional section)
+#
+# CATALOG ZONE OPTIONS (RFC 9432):
+#   catalog-zone:            Mark zone as RFC 9432 catalog zone
+#                           (REQUIRED: catalog: configuration section must exist)
+#                           (zone will contain member zone PTR records and group TXT records)
+#
+#   catalog-member-auto-create:   Auto-create member zones from this catalog
+#                                (only valid on catalog zones)
+#                                (when enabled, zones in catalog are automatically configured)
+#
+#   catalog-member-auto-delete:   Auto-delete member zones when removed from this catalog
+#                                (only valid on catalog zones)
+#                                (when enabled, removed zones are automatically deleted)
+#
+# INTERNAL/READ-ONLY OPTIONS (not configurable):
+#   automatic-zone:          Zone was auto-created from catalog
+#                           (internal marker, set automatically, not a config option)
+#
+#   dirty:                   Zone has pending modifications
+#                           (internal state, managed automatically)
+#
+#   frozen:                  Zone is locked against modifications
+#                           (internal state, managed automatically)
+#
+#   multisigner:             Multi-signer mode (OBE - obsolete)
+#
+# ==============================================================================
+
+templates:
+   # Basic primary zone template
+   parent-primary:
+      type:            primary
+      store:           map
+      options:
+         - delegation-sync-parent  # Provide delegation sync for children
+      dnssec_policy:   default
+
+   # Primary zone with online signing
+   signed-primary:
+      type:            primary
+      store:           map
+      options:
+         - delegation-sync-parent
+         - online-signing         # Sign on-the-fly
+      dnssec_policy:   default
+
+   # Primary zone allowing dynamic updates
+   dynamic-primary:
+      type:            primary
+      store:           map
+      options:
+         - allow-updates          # Allow DNS UPDATE
+         - delegation-sync-parent
+         - online-signing
+      dnssec_policy:   default
+
+   # Basic secondary zone template
+   basic-secondary:
+      type:            secondary
+      store:           map         # Default storage (serves normal DNS queries)
+      # primary: must be set per-zone or overridden
+
+   # Secondary with child sync
+   child-secondary:
+      type:            secondary
+      store:           map
+      options:
+         - delegation-sync-child  # Push updates to parent
+
+   # Hidden primary (doesn't notify, used with API)
+   hidden-primary:
+      type:            primary
+      store:           map
+      # notify: intentionally empty - hidden primary doesn't notify
+
+   # Catalog zone template (primary catalog publisher)
+   catalog-primary:
+      type:            primary
+      store:           map
+      options:
+         - catalog-zone                   # RFC 9432 catalog zone
+         - catalog-member-auto-create     # Auto-create member zones
+         - catalog-member-auto-delete     # Auto-delete removed zones
+
+   # Catalog zone template (secondary catalog consumer)
+   catalog-secondary:
+      type:            secondary
+      store:           map
+      options:
+         - catalog-zone                   # RFC 9432 catalog zone
+         - catalog-member-auto-create     # Auto-create member zones
+         - catalog-member-auto-delete     # Auto-delete removed zones
+      # primary: must be set per-zone
+
+   # Read-only catalog (metadata only, no auto-configuration)
+   catalog-readonly:
+      type:            secondary
+      store:           map
+      options:
+         - catalog-zone                   # Parse catalog but don't auto-configure
+
+   # Fast-rolling DNSSEC zone
+   fast-roll-primary:
+      type:            primary
+      store:           map
+      options:
+         - delegation-sync-parent
+         - online-signing
+      dnssec_policy:   fastroll           # Use fast-rolling policy
+
+   # Stealth primary (serves, but upstream fetches from it)
+   stealth-primary:
+      type:            primary
+      store:           map
+      notify:
+         - "192.0.2.1:53"                 # Notify public secondaries
+         - "192.0.2.2:53"
+      options:
+         - delegation-sync-parent
+         - online-signing
+      dnssec_policy:   default
