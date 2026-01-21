@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	cmap "github.com/orcaman/concurrent-map/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -253,208 +252,6 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	return nil
 }
 
-// LoadDynamicZoneFilesOLD is the old implementation that duplicates RefreshEngine logic
-// Kept temporarily for comparison/rollback. DELETE THIS AFTER VERIFICATION.
-func (conf *Config) LoadDynamicZoneFilesOLD(ctx context.Context) error {
-	if conf.DynamicZones.ConfigFile == "" {
-		return nil // No config file configured, nothing to load
-	}
-
-	// Check if config file exists
-	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
-		log.Printf("DYNAMIC-ZONES: Dynamic config file %s does not exist, skipping dynamic zone loading", conf.DynamicZones.ConfigFile)
-		return nil
-	}
-
-	log.Printf("DYNAMIC-ZONES: Loading dynamic zones from config file %s", conf.DynamicZones.ConfigFile)
-
-	// Load dynamic config file
-	zoneConfs, err := conf.loadDynamicConfigFile()
-	if err != nil {
-		// Error already logged in loadDynamicConfigFile
-		return nil // Start with empty config rather than failing
-	}
-
-	loadedCount := 0
-	errorCount := 0
-
-	for _, zconf := range zoneConfs {
-		zoneName := zconf.Name
-
-		// Check if zone already exists (from main config or already loaded)
-		if _, exists := Zones.Get(zoneName); exists {
-			log.Printf("DYNAMIC-ZONES: Zone %s already exists (from main config), skipping dynamic config entry", zoneName)
-			continue
-		}
-
-		// Parse zone type
-		var zoneType ZoneType
-		switch strings.ToLower(zconf.Type) {
-		case "primary":
-			zoneType = Primary
-		case "secondary":
-			zoneType = Secondary
-		default:
-			log.Printf("DYNAMIC-ZONES: Invalid zone type %q for zone %s, skipping", zconf.Type, zoneName)
-			errorCount++
-			continue
-		}
-
-		// Parse zone store
-		var zoneStore ZoneStore
-		switch strings.ToLower(zconf.Store) {
-		case "map":
-			zoneStore = MapZone
-		case "slice":
-			zoneStore = SliceZone
-		case "xfr":
-			zoneStore = XfrZone
-		default:
-			log.Printf("DYNAMIC-ZONES: Invalid zone store %q for zone %s, defaulting to map", zconf.Store, zoneName)
-			zoneStore = MapZone
-		}
-
-		// Parse options
-		options := make(map[ZoneOption]bool)
-		for _, optStr := range zconf.OptionsStrs {
-			if opt, ok := StringToZoneOption[optStr]; ok {
-				options[opt] = true
-			}
-		}
-
-		// If this is a catalog zone (has catalog-zone option), ensure it's marked
-		if options[OptCatalogZone] {
-			log.Printf("DYNAMIC-ZONES: Loading catalog zone %s from dynamic config", zoneName)
-		}
-
-		// Create ZoneData
-		zd := &ZoneData{
-			ZoneName:      zoneName,
-			ZoneStore:     zoneStore,
-			ZoneType:      zoneType,
-			Upstream:      zconf.Primary,
-			Downstreams:   zconf.Downstreams,
-			Zonefile:      zconf.Zonefile,
-			Logger:        log.Default(),
-			Options:       options,
-			SourceCatalog: zconf.SourceCatalog,
-			Data:          cmap.New[OwnerData](), // Initialize Data map for zone contents
-		}
-
-		// Try to load zone file if it exists
-		zoneFileLoaded := false
-		if conf.DynamicZones.ZoneDirectory != "" {
-			zoneFilePath := GetDynamicZoneFilePath(zoneName, conf.DynamicZones.ZoneDirectory)
-			if _, err := os.Stat(zoneFilePath); err == nil {
-				// Zone file exists, try to load it
-				updated, serial, err := zd.LoadDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
-				if err != nil {
-					// LoadDynamicZoneFile already sets error state and creates the zone
-					errorCount++
-					log.Printf("DYNAMIC-ZONES: Failed to load zone file for %s: %v", zoneName, err)
-					// Continue to register zone even if file load failed (zone will have error state)
-				} else {
-					zoneFileLoaded = true
-					// For primary zones, set RefreshCount to 1 after successful load from disk
-					// This allows the zone to serve queries (RefreshCount=0 causes SERVFAIL)
-					if zoneType == Primary {
-						zd.RefreshCount = 1
-						zd.LatestRefresh = time.Now()
-					}
-					log.Printf("DYNAMIC-ZONES: Loaded zone file for %s (serial: %d, updated: %v, RefreshCount: %d)",
-						zoneName, serial, updated, zd.RefreshCount)
-				}
-			} else {
-				// Zone file doesn't exist yet (e.g., new zone that hasn't been transferred)
-				log.Printf("DYNAMIC-ZONES: Zone file for %s does not exist yet, zone will be loaded on first transfer", zoneName)
-			}
-		}
-
-		// Register zone with Zones map
-		Zones.Set(zoneName, zd)
-
-		// If this is a catalog zone that was loaded from file, parse it immediately
-		// to populate membership so member zones can be auto-configured
-		if options[OptCatalogZone] && zoneFileLoaded {
-			// Zone file was loaded, parse it to populate membership
-			log.Printf("DYNAMIC-ZONES: Parsing catalog zone %s loaded from dynamic config", zoneName)
-			catalogUpdate, err := ParseCatalogZone(zd)
-			if err != nil {
-				log.Printf("DYNAMIC-ZONES: ERROR parsing catalog zone %s: %v", zoneName, err)
-				errorCount++
-			} else {
-				log.Printf("DYNAMIC-ZONES: Successfully parsed catalog zone %s: %d member zones found (serial: %d)",
-					zoneName, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
-
-				// Notify callbacks (this populates membership)
-				if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
-					log.Printf("DYNAMIC-ZONES: ERROR notifying catalog zone callbacks for %s: %v", zoneName, err)
-				}
-
-				// Auto-configure member zones if catalog zone has auto-create enabled
-				// (check is done inside AutoConfigureZonesFromCatalog)
-				go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
-					defer func() {
-						if r := recover(); r != nil {
-							log.Printf("DYNAMIC-ZONES: PANIC in auto-configure goroutine for %s: %v", update.CatalogZone, r)
-						}
-					}()
-					if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-						log.Printf("DYNAMIC-ZONES: ERROR auto-configuring zones from catalog %s: %v", update.CatalogZone, err)
-					}
-				}(catalogUpdate, conf, ctx)
-			}
-		}
-
-		// If it's a secondary zone with upstream, trigger a refresh
-		if zoneType == Secondary && zconf.Primary != "" && !options[OptCatalogZone] {
-			// Only trigger refresh for non-catalog secondary zones
-			// Catalog zones are handled above (parsed immediately if zone file exists)
-			zr := ZoneRefresher{
-				Name:      zoneName,
-				ZoneType:  Secondary,
-				Primary:   zconf.Primary,
-				ZoneStore: zoneStore,
-				Options:   options,
-			}
-
-			// Attempt non-blocking send
-			select {
-			case conf.Internal.RefreshZoneCh <- zr:
-				log.Printf("DYNAMIC-ZONES: Triggered zone transfer for %s from %s", zoneName, zconf.Primary)
-			case <-ctx.Done():
-				log.Printf("DYNAMIC-ZONES: Context cancelled while enqueueing zone refresh for %s", zoneName)
-			case <-time.After(5 * time.Second):
-				log.Printf("DYNAMIC-ZONES: Timeout while enqueueing zone refresh for %s", zoneName)
-			}
-		} else if zoneType == Secondary && zconf.Primary != "" && options[OptCatalogZone] {
-			// Catalog zone: trigger refresh to get latest data (even if we parsed from file)
-			zr := ZoneRefresher{
-				Name:      zoneName,
-				ZoneType:  Secondary,
-				Primary:   zconf.Primary,
-				ZoneStore: zoneStore,
-				Options:   options,
-			}
-
-			// Attempt non-blocking send
-			select {
-			case conf.Internal.RefreshZoneCh <- zr:
-				log.Printf("DYNAMIC-ZONES: Triggered zone transfer for catalog zone %s from %s", zoneName, zconf.Primary)
-			case <-ctx.Done():
-				log.Printf("DYNAMIC-ZONES: Context cancelled while enqueueing zone refresh for catalog zone %s", zoneName)
-			case <-time.After(5 * time.Second):
-				log.Printf("DYNAMIC-ZONES: Timeout while enqueueing zone refresh for catalog zone %s", zoneName)
-			}
-		}
-
-		loadedCount++
-	}
-
-	log.Printf("DYNAMIC-ZONES: Loaded %d zones from dynamic config file, %d errors", loadedCount, errorCount)
-	return nil
-}
-
 // DynamicConfigFile represents the structure of the dynamic zones config file
 type DynamicConfigFile struct {
 	Zones []ZoneConf `yaml:"zones"`
@@ -619,8 +416,8 @@ func (conf *Config) getDynamicZonesFromZonesMap() []ZoneConf {
 	var dynamicZones []ZoneConf
 
 	for zoneName := range Zones.IterBuffered() {
-		zd, exists := Zones.Get(zoneName.Key)
-		if !exists {
+		zd := zoneName.Val
+		if zd == nil {
 			continue
 		}
 

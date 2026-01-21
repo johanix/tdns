@@ -1,5 +1,7 @@
 # TDNS Catalog Zone Support (RFC 9432)
 
+**Last Updated:** 2026-01-21
+
 ## Overview
 RFC 9432 catalog zone support is implemented in the tdns library. Catalog zones are a standard DNS mechanism for distributing zone membership information. This feature is available to all tdns applications (tdns-auth, tdns-imr, KRS, etc.).
 
@@ -19,11 +21,11 @@ version.catalog.kdc. 0    IN  TXT    "2"
 
 ; Zone: pella.se. (hash: be0a0dc3b5fe5785)
 be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR pella.se.
-group.be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk" "meta_kdc"
+group.be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk" "config_kdc"
 
 ; Zone: foffa.se. (hash: eda1901b7f08e2ad)
 eda1901b7f08e2ad.zones.catalog.kdc. 0 IN PTR foffa.se.
-group.eda1901b7f08e2ad.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_dyn" "meta_edge"
+group.eda1901b7f08e2ad.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_dyn" "config_edge"
 ```
 
 ## Design Approach
@@ -64,24 +66,24 @@ Catalog zones use a **group system** (RFC 9432 terminology) to categorize zones:
    - A zone has **exactly ONE signing group**
    - Prefix: `sign_*`
 
-3. **Meta Groups** (e.g., `meta_kdc`, `meta_edge`)
+3. **Config Groups** (e.g., `config_kdc`, `config_edge`)
    - Define configuration metadata: upstream, TSIG, store, options
-   - A zone has **exactly ONE meta group**
-   - Prefix: `meta_*`
+   - A zone has **exactly ONE config group**
+   - Prefix: configurable (default: `config`)
    - Required for auto-configuration
 
 **Rules:**
 - Service groups: 0 or more (distribution/filtering)
 - Signing groups: exactly 1 (DNSSEC policy)
-- Meta groups: exactly 1 (transfer configuration)
-- If multiple signing/meta groups found: log warning, use first
+- Config groups: exactly 1 (transfer configuration)
+- If multiple signing/config groups found: log warning, use first
 
 ### Architecture
 
 1. **`OptCatalogZone` option** - Added to `ZoneOption` enum
 2. **Parse after refresh** - When a zone with `catalog-zone` option is refreshed (or updated for primary zones), automatically parse it
 3. **Callback registration** - Applications register callbacks to be notified of member zone changes
-4. **Auto-configuration** - Optionally auto-configure zones based on meta groups (when `catalog.policy.zones.add: auto`)
+4. **Auto-configuration** - Optionally auto-configure zones based on config groups (per-catalog-zone option: `catalog-member-auto-create`)
 5. **Manual override** - Manual zone config ALWAYS takes priority (hardcoded behavior)
 6. **Version record** - Catalog zones include `version.{catalog-zone}. IN TXT "2"` (RFC 9432 requirement)
 7. **Invalid NS** - Autozones use `invalid.` as NS record (RFC 9432 recommendation)
@@ -93,9 +95,9 @@ Catalog zones use a **group system** (RFC 9432 terminology) to categorize zones:
 4. After successful transfer (or on primary after updates), tdns detects `OptCatalogZone` option
 5. Automatically calls `ParseCatalogZone(zd)`
 6. Parses PTR records for zone names and TXT records for groups
-7. Categorizes groups into service/signing/meta groups
+7. Categorizes groups into service/signing/config groups based on configured prefixes
 8. Invokes registered callbacks with member zone changes
-9. If auto-configuration enabled (`catalog.policy.zones.add: auto`), creates zone configs using meta groups
+9. If auto-configuration enabled (zone option `catalog-member-auto-create`), creates zone configs using config groups
 10. Applications (like KRS) filter by service groups
 
 ### Callback Interface
@@ -115,7 +117,7 @@ type MemberZone struct {
     Hash          string    // Opaque ID from catalog (SHA256 hash)
     ServiceGroups []string  // e.g., ["any_se", "corp_internal"] (RFC 9432 terminology)
     SigningGroup  string    // e.g., "sign_edge_zsk" (exactly one)
-    MetaGroup     string    // e.g., "meta_kdc" (exactly one)
+    ConfigGroup   string    // e.g., "config_kdc" (exactly one)
     DiscoveredAt  time.Time
 }
 
@@ -136,28 +138,30 @@ tdns.RegisterCatalogZoneCallback(func(update *CatalogZoneUpdate) error {
 
 ```yaml
 catalog:
-  policy:
-    zones:
-      add: auto        # "auto" or "manual" - Enable auto-configuration from catalog
-      remove: manual   # "auto" or "manual" - Whether to remove zones when deleted from catalog
-    # Note: Manual config ALWAYS overrides catalog (hardcoded behavior)
+  # Group prefixes define how to categorize groups in catalog zones
+  # These are REQUIRED if you have config_groups defined
+  group_prefixes:
+    config: "config"   # Groups starting with this prefix are config groups
+    signing: "sign"    # Groups starting with this prefix are signing groups
+    # Use "none" to explicitly disable a group type
+    # Service groups have no prefix (any group not matching config/signing)
 
-  meta_groups:
-    # Meta group name MUST start with "meta_"
-    # Provides configuration for zone transfers (RFC 9432 terminology)
-    meta_kdc:
+  # Config groups provide configuration for auto-configured member zones
+  config_groups:
+    # Config group names should match the configured prefix (e.g., "config_kdc")
+    config_kdc:
       upstream: "127.0.0.1:5353"     # Where to AXFR from (required for auto-config)
       tsig_key: "kdc-key"             # TSIG key name (optional)
       store: "map"                    # Zone store type (defaults to "map" if not specified)
       options: []                     # Zone options (if any)
 
-    meta_edge:
+    config_edge:
       upstream: "192.0.2.1:5353"     # Different upstream
       tsig_key: "edge-key"
       store: "map"                    # Defaults to "map" if omitted
       options: []
 
-    meta_central:
+    config_central:
       upstream: "198.51.100.5:5353"
       tsig_key: "central-key"
       store: "map"
@@ -252,15 +256,14 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
     case OptCatalogZone:
         // Hard fail: catalog zone requires valid catalog configuration
         if conf.Catalog.MetaGroups == nil {
-            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.meta_groups is missing or incorrectly structured", zname)
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.config_groups is missing or incorrectly structured", zname)
         }
         
-        // Validate catalog policy configuration
-        if conf.Catalog.Policy.Zones.Add == "" {
-            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.add is not set", zname)
-        }
-        if conf.Catalog.Policy.Zones.Add != "auto" && conf.Catalog.Policy.Zones.Add != "manual" {
-            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.policy.zones.add has invalid value", zname)
+        // Validate catalog configuration
+        // (Policy is now per-zone via catalog-member-auto-create/auto-delete options)
+        // Check for required group_prefixes and config_groups
+        if len(conf.Catalog.ConfigGroups) > 0 && conf.Catalog.GroupPrefixes.Config == "" {
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.group_prefixes is not set", zname)
         }
         
         // Catalog zones can be primary or secondary
@@ -281,7 +284,8 @@ Add catalog configuration structures:
 ```go
 type CatalogConf struct {
     Policy        CatalogPolicy              `yaml:"policy" mapstructure:"policy"`
-    MetaGroups    map[string]*MetaGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`
+    GroupPrefixes GroupPrefixesConf            `yaml:"group_prefixes" mapstructure:"group_prefixes"`
+    ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
     SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
 }
 
@@ -334,7 +338,7 @@ type MemberZone struct {
     Hash          string    `json:"hash"`
     ServiceGroups []string  `json:"service_groups"` // Groups associated with this zone (RFC 9432 terminology)
     SigningGroup  string    `json:"signing_group"`  // Signing group for this zone
-    MetaGroup     string    `json:"meta_group"`     // Meta group for this zone
+    ConfigGroup   string    `json:"config_group"`   // Config group for this zone
     DiscoveredAt  time.Time `json:"discovered_at"`
 }
 
@@ -465,12 +469,12 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
                 } else {
                     signingGroup = group
                 }
-            } else if strings.HasPrefix(group, "meta_") {
-                if metaGroup != "" {
-                    log.Printf("ParseCatalogZone: Warning: Zone %s has multiple meta groups (%s, %s), using first",
-                        info.zoneName, metaGroup, group)
+            } else if strings.HasPrefix(group, conf.Catalog.GroupPrefixes.Config) {
+                if configGroup != "" {
+                    log.Printf("ParseCatalogZone: Warning: Zone %s has multiple config groups (%s, %s), using first",
+                        info.zoneName, configGroup, group)
                 } else {
-                    metaGroup = group
+                    configGroup = group
                 }
             } else {
                 // Service group (no specific prefix)
@@ -478,18 +482,18 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
             }
         }
 
-        // Log warning if no meta group (needed for auto-configuration)
-        if metaGroup == "" {
-            log.Printf("ParseCatalogZone: Info: Zone %s has no meta group, auto-configuration not possible",
+        // Log warning if no config group (needed for auto-configuration)
+        if configGroup == "" {
+            log.Printf("ParseCatalogZone: Info: Zone %s has no config group, auto-configuration not possible",
                 info.zoneName)
         }
 
         memberZones[info.zoneName] = &MemberZone{
-            ZoneName:     info.zoneName,
-            Hash:         hash,
+            ZoneName:      info.zoneName,
+            Hash:          hash,
             ServiceGroups: serviceGroups,
             SigningGroup:  signingGroup,
-            MetaGroup:     metaGroup,
+            ConfigGroup:   configGroup,
             DiscoveredAt:  now,
         }
     }
@@ -524,11 +528,12 @@ func NotifyCatalogZoneUpdate(update *CatalogZoneUpdate) error {
     return nil
 }
 
-// AutoConfigureZonesFromCatalog auto-configures zones based on catalog and meta groups
-func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) error {
-    if conf.Catalog.Policy.Zones.Add != "auto" {
-        log.Printf("AutoConfigure: Disabled by policy (catalog.policy.zones.add=%q), catalog provides metadata only",
-            conf.Catalog.Policy.Zones.Add)
+// AutoConfigureZonesFromCatalog auto-configures zones based on catalog and config groups
+func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config, catalogZd *ZoneData) error {
+    // Check if auto-create is enabled for this specific catalog zone
+    if !catalogZd.Options[OptCatalogMemberAutoCreate] {
+        log.Printf("AutoConfigure: Disabled for catalog %s (catalog-member-auto-create not set), catalog provides metadata only",
+            catalogZd.ZoneName)
         return nil
     }
 
@@ -540,42 +545,42 @@ func AutoConfigureZonesFromCatalog(update *CatalogZoneUpdate, conf *Config) erro
             continue
         }
 
-        // RULE 2: Meta group is required for auto-configuration
-        if member.MetaGroup == "" {
-            log.Printf("CATALOG: Zone %s has no meta group, cannot auto-configure", zoneName)
+        // RULE 2: Config group is required for auto-configuration
+        if member.ConfigGroup == "" {
+            log.Printf("CATALOG: Zone %s has no config group, cannot auto-configure", zoneName)
             continue
         }
 
-        // RULE 3: Find meta group config
-        metaConfig, exists := conf.Catalog.MetaGroups[member.MetaGroup]
+        // RULE 3: Find config group config
+        configGroupConfig, exists := conf.Catalog.ConfigGroups[member.ConfigGroup]
         if !exists {
-            log.Printf("CATALOG: Zone %s meta group '%s' not found in config, cannot auto-configure",
-                zoneName, member.MetaGroup)
+            log.Printf("CATALOG: Zone %s config group '%s' not found in config, cannot auto-configure",
+                zoneName, member.ConfigGroup)
             continue
         }
 
-        // RULE 4: Auto-configure zone using meta group
+        // RULE 4: Auto-configure zone using config group
         // Store defaults to "map" if not specified
-        storeValue := metaConfig.Store
+        storeValue := configGroupConfig.Store
         if storeValue == "" {
             storeValue = "map"
         }
 
-        log.Printf("CATALOG: Auto-configuring zone %s using meta group '%s' (upstream: %s, store: %s)",
-            zoneName, member.MetaGroup, metaConfig.Upstream, storeValue)
+        log.Printf("CATALOG: Auto-configuring zone %s using config group '%s' (upstream: %s, store: %s)",
+            zoneName, member.ConfigGroup, configGroupConfig.Upstream, storeValue)
 
         zd := &ZoneData{
             ZoneName:  zoneName,
             ZoneType:  Secondary,
             ZoneStore: parseZoneStore(storeValue),
-            Upstream:  metaConfig.Upstream,
+            Upstream:  configGroupConfig.Upstream,
             Logger:    log.Default(),
             Options: map[ZoneOption]bool{
                 OptAutomaticZone: true, // Mark as dynamically configured
             },
         }
 
-        // Apply zone options from meta group
+        // Apply zone options from config group
         for _, optStr := range metaConfig.Options {
             if opt, exists := StringToZoneOption[optStr]; exists {
                 zd.Options[opt] = true
@@ -733,7 +738,7 @@ CREATE TABLE IF NOT EXISTS discovered_zones (
     hash TEXT NOT NULL,
     service_groups TEXT NOT NULL,  -- JSON array (RFC 9432 terminology)
     signing_group TEXT NOT NULL,
-    meta_group TEXT NOT NULL,
+    config_group TEXT NOT NULL,
     subscribed BOOLEAN NOT NULL,
     discovered_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP NOT NULL
@@ -816,7 +821,7 @@ var krsZonesListCmd = &cobra.Command{
 
             zoneName := getString(zone, "zone_name")
             signingGroup := getString(zone, "signing_group")
-            metaGroup := getString(zone, "meta_group")
+            configGroup := getString(zone, "config_group")
             subscribed := getBool(zone, "subscribed")
 
             if !showAll && !subscribed {
@@ -862,7 +867,7 @@ Publishing catalog zones is straightforward as they are normal DNS zones. The pr
 
 **Requirement:** Support for adding, removing, and listing notify addresses for catalog zones. Since catalog zones are dynamically created via the API, we need API and CLI support for managing notify addresses.
 
-**Scope:** This feature applies **only to catalog zones** (primary catalog zone publishers). Notify addresses for member zones (secondary zones created from catalog) are managed via meta groups and are out of scope for this feature.
+**Scope:** This feature applies **only to catalog zones** (primary catalog zone publishers). Notify addresses for member zones (secondary zones created from catalog) are managed via config groups and are out of scope for this feature.
 
 **Implementation:**
 
@@ -1189,9 +1194,10 @@ zones:
 - Dynamic config file can be manually edited while server is stopped (edits will be accepted)
 - Dynamic config file may be overwritten when server is running (warning comment in file)
 - Zone files can be manually edited (server will overwrite on next update)
-- **Breaking change:** `catalog.policy.zones.add` and `catalog.policy.zones.remove` are moved to `dynamiczones.catalog_members.add` and `dynamiczones.catalog_members.remove`
-  - Old settings may be supported for backward compatibility with deprecation warning
-  - New deployments should use `dynamiczones.catalog_members.*` settings
+- **Breaking change:** Global `catalog.policy.zones.add/remove` settings are replaced with per-catalog-zone options `catalog-member-auto-create` and `catalog-member-auto-delete`
+  - This allows different policies for different catalog zones
+  - Old global settings in `dynamiczones.catalog_members.add/remove` are deprecated
+  - Use zone options for finer-grained control
 
 ### Constructing Catalog Zones (Not Implemented Yet)
 Construction of catalog zones will require future implementation including:
@@ -1205,26 +1211,26 @@ Construction of catalog zones will require future implementation including:
 
 **CLI Commands:**
 ```bash
-# Add zone to catalog with groups
+# Add zone to catalog (atomically with all groups)
+tdns-cli catalog zone add --cat catalog.kdc. --zone pella.se. --groups any_se,sign_edge_zsk,config_kdc
+
+# Or add zone first, then add groups individually
 tdns-cli catalog zone add --cat catalog.kdc. --zone pella.se.
 tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group any_se
 tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group sign_edge_zsk
-tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group meta_kdc
+tdns-cli catalog zone group add --cat catalog.kdc. --zone pella.se. --group config_kdc
 
-# Update zone's groups
-tdns-cli catalog update-zone catalog.kdc. pella.se. \
-  --service any_se,corp_internal \
-  --signing sign_edge_zsk \
-  --meta meta_kdc
+# Remove a group from a zone
+tdns-cli catalog zone group delete --cat catalog.kdc. --zone pella.se. --group any_se
 
 # Remove zone from catalog
-tdns-cli catalog remove-zone catalog.kdc. pella.se.
+tdns-cli catalog zone delete --cat catalog.kdc. --zone pella.se.
 
 # List all zones in catalog
-tdns-cli catalog list-zones catalog.kdc.
+tdns-cli catalog zone list --cat catalog.kdc.
 
-# Export catalog to zonefile format
-tdns-cli catalog export catalog.kdc. > catalog.zone
+# Delete entire catalog zone
+tdns-cli catalog delete --cat catalog.kdc.
 ```
 
 **Database Storage:**
@@ -1254,13 +1260,12 @@ zones:
 ### KRS (Catalog Zone Consumer with Auto-Configuration)
 ```yaml
 catalog:
-  policy:
-    zones:
-      add: auto
-      remove: manual
-
-  meta_groups:
-    meta_kdc:
+  group_prefixes:
+    config: "config"
+    signing: "sign"
+  
+  config_groups:
+    config_kdc:
       upstream: "127.0.0.1:5353"
       tsig_key: "kdc-key"
       store: "map"              # Defaults to "map" if not specified
@@ -1274,29 +1279,31 @@ tsig:
 zones:
   catalog.kdc.:
     type: secondary
-    store: xfr
+    store: map
     primary: "127.0.0.1:5353"
     options:
       - catalog-zone
+      - catalog-member-auto-create    # Enable auto-configuration
+      - catalog-member-auto-delete    # Auto-delete when removed from catalog
 ```
 
 ### tdns-auth (Catalog Zone Consumer, Manual Config)
 ```yaml
 catalog:
-  policy:
-    zones:
-      add: manual               # Manual configuration only
-      remove: manual
-
-  meta_groups: {}              # Not needed if auto-config disabled
+  group_prefixes:
+    config: "config"
+    signing: "sign"
+  
+  config_groups: {}            # Not needed if auto-config disabled
 
 zones:
   catalog.example.:
     type: secondary
-    store: xfr
+    store: map
     primary: "192.0.2.1:53"
     options:
       - catalog-zone
+      # NOTE: No catalog-member-auto-create/delete options - manual config only
 
   # Manually configure zones after discovering them in catalog
   zone1.example.:
@@ -1311,31 +1318,31 @@ zones:
 Catalog entry for `pella.se.` (hash: `be0a0dc3b5fe5785`):
 ```text
 be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN PTR pella.se.
-group.be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk" "meta_kdc"
+group.be0a0dc3b5fe5785.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk" "config_kdc"
 ```
 
 Parsed as:
 - Service groups: `[any_se]`
 - Signing group: `sign_edge_zsk`
-- Meta group: `meta_kdc`
+- Config group: `config_kdc`
 
-If KRS node subscribes to `any_se` and `meta_kdc` is configured, zone is auto-configured.
+If KRS node subscribes to `any_se` and `config_kdc` is configured, zone is auto-configured.
 
 ### Scenario 2: Zone with Multiple Service Groups
 Catalog entry for `internal.corp.` (hash: `abc123...`):
 ```text
 abc123.zones.catalog.kdc. 0 IN PTR internal.corp.
-group.abc123.zones.catalog.kdc. 0 IN TXT "corp_internal" "corp_external" "sign_kdc" "meta_central"
+group.abc123.zones.catalog.kdc. 0 IN TXT "corp_internal" "corp_external" "sign_kdc" "config_central"
 ```
 
 Parsed as:
 - Service groups: `[corp_internal, corp_external]`
 - Signing group: `sign_kdc`
-- Meta group: `meta_central`
+- Config group: `config_central`
 
 Node serves zone if subscribed to EITHER `corp_internal` OR `corp_external`.
 
-### Scenario 3: Missing Meta Group
+### Scenario 3: Missing Config Group
 Catalog entry for `test.com.` (hash: `def456...`):
 ```text
 def456.zones.catalog.kdc. 0 IN PTR test.com.
@@ -1345,9 +1352,9 @@ group.def456.zones.catalog.kdc. 0 IN TXT "any_se" "sign_edge_zsk"
 Parsed as:
 - Service groups: `[any_se]`
 - Signing group: `sign_edge_zsk`
-- Meta group: `` (empty)
+- Config group: `` (empty)
 
-Result: Info logged, zone cannot be auto-configured (meta group required).
+Result: Info logged, zone cannot be auto-configured (config group required).
 
 ### Scenario 4: Manual Override
 Catalog entry for `example.com.` + manual config for `example.com.`
@@ -1358,7 +1365,7 @@ Result: Manual config wins, catalog entry ignored, warning logged.
 Catalog entry for `bad.example.` (hash: `ghi789...`):
 ```text
 ghi789.zones.catalog.kdc. 0 IN PTR bad.example.
-group.ghi789.zones.catalog.kdc. 0 IN TXT "sign_edge_zsk" "sign_kdc" "meta_kdc"  # CONFLICT!
+group.ghi789.zones.catalog.kdc. 0 IN TXT "sign_edge_zsk" "sign_kdc" "config_kdc"  # CONFLICT!
 ```
 
 Result: Warning logged, uses first signing group (`sign_edge_zsk`).
@@ -1383,9 +1390,9 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 | Empty catalog | Log warning, invoke callbacks with empty list |
 | Callback error | Log error, continue with other callbacks |
 | Invalid option combo | Config error, zone ignored |
-| No meta group | Log info, zone not auto-configured |
-| Meta group not found | Log warning, zone not auto-configured |
-| Multiple signing/meta groups | Log warning, use first |
+| No config group | Log info, zone not auto-configured |
+| Config group not found | Log warning, zone not auto-configured |
+| Multiple signing/config groups | Log warning, use first |
 | Manual vs catalog conflict | Manual wins (hardcoded), log warning |
 
 ## Verification Steps
@@ -1398,9 +1405,10 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 5. **Test NOTIFY** - Update catalog on publisher, verify NOTIFY triggers refresh and re-parse
 
 ### Auto-Configuration
-1. **Enable policy** - Set `catalog.policy.zones.add: auto`
-2. **Configure meta groups** - Define upstreams and TSIG
-3. **Verify auto-config** - Logs show "Auto-configuring zone" messages
+1. **Enable per-zone** - Add `catalog-member-auto-create` option to catalog zone
+2. **Configure config groups** - Define upstreams and TSIG in `catalog.config_groups`
+3. **Configure group prefixes** - Set `catalog.group_prefixes.config` and `.signing`
+4. **Verify auto-config** - Logs show "Auto-configuring zone" messages
 4. **Check Zones map** - Auto-configured zones appear with `OptAutomaticZone`
 5. **Test zone transfer** - Auto-configured zones successfully transfer data
 
@@ -1431,10 +1439,10 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 5. **Composable** - Can be combined with other zone options if needed
 6. **No code duplication** - Parsing logic shared across all applications
 7. **RFC compliant** - Follows RFC 9432 catalog zone specification
-8. **Clear group types** - Service, signing, and meta groups have distinct purposes (RFC 9432 terminology)
-9. **No priority conflicts** - Each zone has exactly one meta and signing group
+8. **Clear group types** - Service, signing, and config groups have distinct purposes (RFC 9432 terminology)
+9. **No priority conflicts** - Each zone has exactly one config and signing group
 10. **Safe defaults** - Manual config always wins (hardcoded behavior)
-11. **Auto-configuration** - Optional auto-config with meta groups
+11. **Auto-configuration** - Optional auto-config with config groups (per-catalog-zone option)
 12. **Application flexibility** - Each application filters zones as needed (e.g., by service groups)
 
 ## Future Enhancements
@@ -1446,6 +1454,6 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 5. **Catalog zone validation** - Verify catalog zone structure compliance
 6. **Statistics** - Track catalog update metrics
 7. **Catalog zone generation** - Helper functions for applications that publish catalogs
-8. **Dynamic meta groups** - Allow meta groups to be updated without restart
+8. **Dynamic config groups** - Allow config groups to be updated without restart
 9. **Zone removal cleanup** - Automatically clean up zone data when removed from catalog
 10. **Group inheritance** - Default meta/signing groups if not specified

@@ -40,7 +40,7 @@ var defaultPorts = map[string]string{
 	"Do53-TCP": "53",
 	"DoT":      "853",
 	"DoH":      "443",
-	"DoQ":      "8853",
+	"DoQ":      "853",
 }
 
 var rootCmd = &cobra.Command{
@@ -255,6 +255,7 @@ var rootCmd = &cobra.Command{
 				if transport, ok := options["transport"]; ok && transport != "do53" {
 					tlsConfig = &tls.Config{
 						InsecureSkipVerify: true,
+						MinVersion:         tls.VersionTLS12,
 					}
 					// Add ALPN for DoQ
 					if transport == "DoQ" {
@@ -443,16 +444,13 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 
 		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)
 	}
-
-	return options, nil
 }
 
 func ParseResolvConf() (string, error) {
 	// Read /etc/resolv.conf to get the default nameserver
 	content, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
-		fmt.Println("Error: Unable to read /etc/resolv.conf and no nameserver specified")
-		os.Exit(1)
+		return "", fmt.Errorf("unable to read /etc/resolv.conf: %w", err)
 	}
 	lines := strings.Split(string(content), "\n")
 	foundNameserver := false
@@ -467,7 +465,7 @@ func ParseResolvConf() (string, error) {
 		}
 	}
 	if !foundNameserver {
-		return "", fmt.Errorf("Error: No nameserver entry found in /etc/resolv.conf and no nameserver specified")
+		return "", fmt.Errorf("no nameserver entry found in /etc/resolv.conf")
 	}
 	return server, nil
 }

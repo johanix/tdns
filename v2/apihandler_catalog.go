@@ -610,15 +610,18 @@ func handleCatalogNotifyAdd(catalogZoneName, address string, resp *CatalogRespon
 		return fmt.Errorf("invalid notify address format: %v", err)
 	}
 
-	// Check if address already exists
+	// Check if address already exists and add if not (protected by mutex)
+	zd.mu.Lock()
 	for _, existingAddr := range zd.Downstreams {
 		if existingAddr == address {
+			zd.mu.Unlock()
 			return fmt.Errorf("notify address %s already exists for catalog zone %s", address, catalogZoneName)
 		}
 	}
 
 	// Add the address
 	zd.Downstreams = append(zd.Downstreams, address)
+	zd.mu.Unlock()
 
 	// Update dynamic config file if persistence is enabled
 	if Conf.ShouldPersistZone(zd) {
@@ -655,7 +658,8 @@ func handleCatalogNotifyRemove(catalogZoneName, address string, resp *CatalogRes
 		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
 	}
 
-	// Find and remove the address
+	// Find and remove the address (protected by mutex)
+	zd.mu.Lock()
 	found := false
 	newDownstreams := make([]string, 0, len(zd.Downstreams))
 	for _, existingAddr := range zd.Downstreams {
@@ -667,10 +671,12 @@ func handleCatalogNotifyRemove(catalogZoneName, address string, resp *CatalogRes
 	}
 
 	if !found {
+		zd.mu.Unlock()
 		return fmt.Errorf("notify address %s not found for catalog zone %s", address, catalogZoneName)
 	}
 
 	zd.Downstreams = newDownstreams
+	zd.mu.Unlock()
 
 	// Update dynamic config file if persistence is enabled
 	if Conf.ShouldPersistZone(zd) {
@@ -704,9 +710,11 @@ func handleCatalogNotifyList(catalogZoneName string, resp *CatalogResponse) erro
 		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
 	}
 
-	// Return a copy of the notify addresses
+	// Return a copy of the notify addresses (protected by mutex)
+	zd.mu.Lock()
 	resp.NotifyAddresses = make([]string, len(zd.Downstreams))
 	copy(resp.NotifyAddresses, zd.Downstreams)
+	zd.mu.Unlock()
 
 	return nil
 }
@@ -717,18 +725,15 @@ func validateNotifyAddress(address string) error {
 		return fmt.Errorf("address cannot be empty")
 	}
 
-	// Split by colon to get IP and port
-	parts := strings.Split(address, ":")
-	if len(parts) != 2 {
-		return fmt.Errorf("address must be in IP:port format")
+	// Split host and port using net.SplitHostPort (handles IPv4, IPv6, and bracketed IPv6)
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid address format (expected IP:port or [IPv6]:port): %w", err)
 	}
 
-	ip := parts[0]
-	port := parts[1]
-
 	// Validate IP address
-	if net.ParseIP(ip) == nil {
-		return fmt.Errorf("invalid IP address: %s", ip)
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("invalid IP address: %s", host)
 	}
 
 	// Validate port (must be numeric and in valid range)

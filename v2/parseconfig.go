@@ -289,7 +289,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 	conf.migrateMetaGroupsToConfigGroups()
 
 	// Validate group prefixes (required if config_groups or signing_groups are defined)
-	conf.validateGroupPrefixes()
+	if err := conf.validateGroupPrefixes(); err != nil {
+		return err
+	}
 
 	// Validate dynamiczones configuration (check if configfile is included)
 	conf.validateDynamicZonesConfig(includedFiles)
@@ -881,46 +883,48 @@ func (conf *Config) validateDynamicZonesConfig(includedFiles []string) {
 }
 
 // validateGroupPrefixes validates catalog.group_prefixes configuration
-func (conf *Config) validateGroupPrefixes() {
+func (conf *Config) validateGroupPrefixes() error {
 	// Check if config_groups or signing_groups are defined
 	hasConfigGroups := len(conf.Catalog.ConfigGroups) > 0
 	hasSigningGroups := len(conf.Catalog.SigningGroups) > 0
 
 	if !hasConfigGroups && !hasSigningGroups {
 		// No groups defined, no need to validate prefixes
-		return
+		return nil
 	}
 
 	// If groups are defined, group_prefixes is REQUIRED
 	if conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "" {
-		log.Fatalf("FATAL: catalog.group_prefixes is REQUIRED when catalog.config_groups or catalog.signing_groups are configured.\n" +
+		return fmt.Errorf("catalog.group_prefixes is REQUIRED when catalog.config_groups or catalog.signing_groups are configured.\n" +
 			"Please add:\n" +
 			"  catalog:\n" +
 			"    group_prefixes:\n" +
 			"      config: \"config\"    # or \"config_\" or \"none\"\n" +
-			"      signing: \"sign\"     # or \"sign_\" or \"none\"\n")
+			"      signing: \"sign\"     # or \"sign_\" or \"none\"")
 	}
 
 	// Validate config prefix
 	if conf.Catalog.GroupPrefixes.Config != "none" {
 		if err := validateGroupPrefix(conf.Catalog.GroupPrefixes.Config, "config"); err != nil {
-			log.Fatalf("FATAL: Invalid catalog.group_prefixes.config: %v", err)
+			return fmt.Errorf("invalid catalog.group_prefixes.config: %w", err)
 		}
 	}
 
 	// Validate signing prefix
 	if conf.Catalog.GroupPrefixes.Signing != "none" {
 		if err := validateGroupPrefix(conf.Catalog.GroupPrefixes.Signing, "signing"); err != nil {
-			log.Fatalf("FATAL: Invalid catalog.group_prefixes.signing: %v", err)
+			return fmt.Errorf("invalid catalog.group_prefixes.signing: %w", err)
 		}
 	}
 
 	// Check for prefix conflicts (if both are not "none" and they're the same)
 	if conf.Catalog.GroupPrefixes.Config != "none" && conf.Catalog.GroupPrefixes.Signing != "none" {
 		if conf.Catalog.GroupPrefixes.Config == conf.Catalog.GroupPrefixes.Signing {
-			log.Fatalf("FATAL: catalog.group_prefixes.config and catalog.group_prefixes.signing must be different (both are: %q)", conf.Catalog.GroupPrefixes.Config)
+			return fmt.Errorf("catalog.group_prefixes.config and catalog.group_prefixes.signing must be different (both are: %q)", conf.Catalog.GroupPrefixes.Config)
 		}
 	}
+	
+	return nil
 }
 
 // validateGroupPrefix validates a single group prefix value

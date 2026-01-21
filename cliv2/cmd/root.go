@@ -100,7 +100,10 @@ func initConfig() {
 	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
 	err := viper.Unmarshal(&cconf)
 	if err != nil {
-		log.Printf("Error from viper.UnMarshal(cfg): %v", err)
+		// viper.Unmarshal failure means cconf is empty/invalid
+		// This will cause initApi() to run with empty cconf.ApiServers
+		// which leaves tdns.Globals.Api uninitialized
+		log.Fatalf("FATAL: viper.Unmarshal failed to parse config into cconf: %v\nThis would leave cconf.ApiServers empty and break initApi()/tdns.Globals.Api initialization", err)
 	}
 }
 
@@ -118,6 +121,7 @@ type ApiDetails struct {
 	BaseURL    string `validate:"required" yaml:"baseurl"`
 	ApiKey     string `validate:"required" yaml:"apikey"`
 	AuthMethod string `validate:"required" yaml:"authmethod"`
+	RootCA     string `yaml:"rootca"`           // Optional: path to root CA cert, or "insecure" to skip verification
 	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon (e.g., "/usr/local/libexec/tdns-auth")
 }
 
@@ -126,10 +130,16 @@ func initApi() {
 		fmt.Printf("initApi: setting up API clients for:")
 	}
 	for _, val := range cconf.ApiServers {
-		// XXX: here we should validate the conf for this apiserver
-		tmp := tdns.NewClient(val.Name, val.BaseURL, val.ApiKey, val.AuthMethod, "insecure")
+		// Validate the conf for this apiserver
+		// Use configured RootCA, or default to "insecure" if not specified
+		rootCA := val.RootCA
+		if rootCA == "" {
+			rootCA = "insecure" // Default: skip TLS verification
+		}
+		
+		tmp := tdns.NewClient(val.Name, val.BaseURL, val.ApiKey, val.AuthMethod, rootCA)
 		if tmp == nil {
-			log.Fatalf("initApi: Failed to setup API client for %q. Exiting.", val.Name)
+			log.Fatalf("initApi: Failed to setup API client for %q (baseurl: %s, rootca: %s). Exiting.", val.Name, val.BaseURL, rootCA)
 		}
 		tdns.Globals.ApiClients[val.Name] = tmp
 		if tdns.Globals.Debug {

@@ -1,6 +1,5 @@
 PROG:=tdns-cliv2
 
-GOOS ?= $(shell uname -s | tr A-Z a-z)
 # We need CGO because we now need sqlite also in tdns-cli
 # GO:=GOOS=$(GOOS) CGO_ENABLED=1 go
 GO:=CGO_ENABLED=1 go

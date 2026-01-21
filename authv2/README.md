@@ -60,7 +60,7 @@ In addition, TDNS-AUTH has a couple of extra features:
 
 9. Initial support for the experimental DELEG record type, including
    reading and parsing zones containing DELEG records for text files
-   and receiving then via zone transfer.
+   and receiving them via zone transfer.
 
 10. Support for a built in keystore (to store private/public DNSSEC
     and SIG(0) key pairs). These are used to sign zone data and DNS
@@ -68,7 +68,7 @@ In addition, TDNS-AUTH has a couple of extra features:
 
 11. Support for a built in truststore (to store public DNSSEC and 
     SIG(0) keys). These are used to validate child CDS and CSYNC
-    RRsets and DNS UPDATE messages received from child operstors.
+    RRsets and DNS UPDATE messages received from child operators.
 
 Comments, questions, pull requests, etc are welcome!
 
