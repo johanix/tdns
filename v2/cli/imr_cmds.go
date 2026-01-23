@@ -286,6 +286,11 @@ func newFlushRunner(keepStructural bool) func(cmd *cobra.Command, args []string)
 			fmt.Println("RRset cache is not initialized")
 			return
 		}
+		if len(args) == 0 {
+			fmt.Println("Error: domain name is required")
+			cmd.Help()
+			return
+		}
 		domain := dns.Fqdn(args[0])
 		trimmed := strings.TrimSuffix(domain, ".")
 		if trimmed == "" {
@@ -483,6 +488,7 @@ var imrSetLineWidthCmd = &cobra.Command{
 }
 
 func init() {
+	ImrCmd.AddCommand(ImrSetCmd) // Add debug set commands
 	ImrZoneCmd.AddCommand(imrZoneListCmd, imrZoneCheckCmd)
 	ImrQueryCmd.Annotations = map[string]string{
 		"arg1_guide": "(domain name)",

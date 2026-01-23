@@ -410,6 +410,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 									RRset:      &rrset,
 									Context:    cache.ContextAnswer,
 									Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+									Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 								})
 								return &rrset, rcode, cache.ContextAnswer, nil
 							}
@@ -418,10 +419,11 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 							// This is a negative response, and <target, qtype> has already been cached
 							// now we only need to cache <qname, qtype>
 							imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-								Name:    qname,
-								RRtype:  qtype,
-								RRset:   nil,
-								Context: cache.ContextNXDOMAIN,
+								Name:      qname,
+								RRtype:    qtype,
+								RRset:     nil,
+								Context:   cache.ContextNXDOMAIN,
+								Transport: core.TransportDo53, // AuthDNSQuery path - default to Do53
 							})
 							return nil, rcode, context, nil
 
@@ -450,6 +452,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				RRset:      &rrset,
 				Context:    cache.ContextAnswer,
 				Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+				Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 			})
 			return &rrset, rcode, cache.ContextAnswer, nil
 		} else if len(r.Ns) != 0 {
@@ -488,6 +491,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 									RRs:    []dns.RR{dns.Copy(rr)},
 								},
 								Context:    cache.ContextNoErrNoAns,
+								Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 								Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 							})
 							return nil, rcode, cache.ContextNoErrNoAns, nil
@@ -511,6 +515,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						Context:    cache.ContextReferral,
 						State:      cache.ValidationStateIndeterminate,
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 					})
 				}
 
@@ -603,6 +608,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						Context:    cache.ContextGlue,
 						State:      cache.ValidationStateIndeterminate,
 						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 					})
 				}
 
@@ -618,6 +624,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						Context:    cache.ContextGlue,
 						State:      cache.ValidationStateIndeterminate,
 						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 					})
 				}
 
@@ -646,6 +653,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					RRset:      nil,
 					Context:    cache.ContextNXDOMAIN,
 					Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
+					Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 				})
 
 				return nil, rcode, cache.ContextNXDOMAIN, nil
@@ -714,13 +722,18 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 
 // force is true if we should force a lookup even if the answer is in the cache
 // visitedZones tracks which zones we've been referred to for this qname to prevent referral loops
-func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool) (*core.RRset, int, cache.CacheContext, error) {
-	return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, make(map[string]bool))
+// requireEncrypted is true if PR flag is set and only encrypted transports should be used
+// Returns: rrset, rcode, context, transport, error
+func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, make(map[string]bool), requireEncrypted)
+	return rrset, rcode, cacheCtx, transport, err
 }
 
 // IterativeDNSQueryWithLoopDetection is the internal implementation with loop detection
 // visitedZones tracks which zones we've been referred to for this qname (format: "qname:zone")
-func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, visitedZones map[string]bool) (*core.RRset, int, cache.CacheContext, error) {
+// requireEncrypted is true if PR flag is set and only encrypted transports should be used
+// Returns: rrset, rcode, context, transport, error
+func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, visitedZones map[string]bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	lg := imr.Cache.Logger
 
 	if Globals.Debug {
@@ -743,10 +756,18 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			switch crrset.Context {
 			case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
 				// These are direct answers or negative responses - safe to use
+				// PR flag enforcement: if PR is set, skip cached data that came over unencrypted transport
+				if requireEncrypted && !core.IsEncryptedTransport(crrset.Transport) {
+					if Globals.Debug {
+						lg.Printf("IterativeDNSQuery: PR flag set but cached data for %s %s came over unencrypted transport (%s), skipping cache", qname, dns.TypeToString[qtype], core.TransportToString[crrset.Transport])
+					}
+					crrset = nil // Force query over encrypted transport
+				} else {
 				if Globals.Debug {
 					lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 				}
-				return crrset.RRset, int(crrset.Rcode), crrset.Context, nil
+				return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
+				}
 			case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
 				// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
 				if Globals.Debug {
@@ -776,9 +797,37 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	m, err := buildQuery(qname, qtype)
 	if err != nil {
 		lg.Printf("IterativeDNSQuery: Error building query: %v", err)
-		return nil, 0, cache.ContextFailure, err
+		return nil, 0, cache.ContextFailure, core.TransportDo53, err
 	}
 	// if Globals.Debug { fmt.Printf("IterativeDNSQuery: message after AddOTSToMessage: %s", m.String()) }
+
+	// If PR flag is set, verify at least one server has encrypted transports available
+	if requireEncrypted {
+		hasEncrypted := false
+		for _, server := range serverMap {
+			for _, t := range server.Transports {
+				if core.IsEncryptedTransport(t) {
+					hasEncrypted = true
+					break
+				}
+			}
+			if !hasEncrypted {
+				// Check transport weights
+				for t := range server.TransportWeights {
+					if core.IsEncryptedTransport(t) && server.TransportWeights[t] > 0 {
+						hasEncrypted = true
+						break
+					}
+				}
+			}
+			if hasEncrypted {
+				break
+			}
+		}
+		if !hasEncrypted {
+			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but no servers have encrypted transports available")
+		}
+	}
 
 	// Prioritize servers and addresses (filters out backoff addresses)
 	zoneName, zone, prioritized := imr.prioritizeServers(qname, serverMap)
@@ -790,7 +839,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	for _, tuple := range prioritized {
 		select {
 		case <-ctx.Done():
-			return nil, 0, cache.ContextFailure, ctx.Err()
+			return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
 		default:
 		}
 		server := tuple.Server
@@ -802,9 +851,18 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				addr, nsname, server.Alpn, qname, dns.TypeToString[qtype])
 		}
 
-		r, _, err := imr.tryServer(ctx, server, addr, m, qname, qtype)
-		if err != nil && imr.Cache.Verbose {
-			// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
+		r, transport, _, err := imr.tryServer(ctx, server, addr, m, qname, qtype, requireEncrypted)
+		if err != nil {
+			// If PR flag is set and we can't get encrypted transport, try next server
+			if requireEncrypted && strings.Contains(err.Error(), "PR flag requires encrypted transport") {
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: server %s has no encrypted transport for PR request, trying next server", server.Name)
+				}
+				continue // Try next server
+			}
+			if imr.Cache.Verbose {
+				// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
+			}
 			continue // go to next server
 		}
 
@@ -853,9 +911,9 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// Parse any transport signal for this specific server even on final answers
 			// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
 			imr.parseTransportForServerFromAdditional(ctx, server, r)
-			tmprrset, rcode2, ctx2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force)
+			tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, transport)
 			if err != nil || done {
-				return tmprrset, rcode2, ctx2, err
+				return tmprrset, rcode2, ctx2, transport2, err
 			}
 			// If not done, fall-through to process referral glue embedded with answers
 			nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
@@ -863,12 +921,13 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
 				if err != nil {
 					log.Printf("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional: %v", err)
-					return nil, rcode, cache.ContextFailure, err
+					return nil, rcode, cache.ContextFailure, transport, err
 				}
 				if len(serverMap) == 0 {
-					return nil, rcode, cache.ContextReferral, nil
+					return nil, rcode, cache.ContextReferral, transport, nil
 				}
-				return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones)
+				rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, requireEncrypted)
+				return rrset, rcode, cacheCtx, transport, err
 			}
 			continue
 		}
@@ -882,8 +941,8 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 			switch kind {
 			case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-				if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r); handled {
-					return nil, rcodeNeg, ctxNeg, nil
+				if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, transport); handled {
+					return nil, rcodeNeg, ctxNeg, transport, nil
 				}
 				// If not handled, fall through to try next server
 				if rcode == dns.RcodeNameError {
@@ -891,7 +950,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				}
 				continue
 			case responseKindReferral:
-				return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones)
+				return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, transport, requireEncrypted)
 			case responseKindError:
 				log.Printf("*** IterativeDNSQuery: treating response as error for %s %s (rcode=%s)",
 					qname, dns.TypeToString[qtype], dns.RcodeToString[rcode])
@@ -911,11 +970,16 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		}
 
 		if rcode == dns.RcodeSuccess {
-			return &rrset, rcode, cache.ContextFailure, nil // no point in continuing
+			return &rrset, rcode, cache.ContextFailure, transport, nil // no point in continuing
 		}
 		continue
 	}
-	return &rrset, rcode, cache.ContextNoErrNoAns, fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+	// If we get here, we tried all servers but none succeeded
+	// If PR flag was set, this might be because no encrypted transport was available
+	if requireEncrypted {
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but no answers found from any server with encrypted transport for '%s %s'", qname, dns.TypeToString[qtype])
+	}
+	return &rrset, rcode, cache.ContextNoErrNoAns, core.TransportDo53, fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
 }
 
 // CollectNSAddresses - given an NS RRset, chase down the A and AAAA records corresponding to each nsname
@@ -1232,6 +1296,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			Context:    cache.ContextGlue,
 			State:      cache.ValidationStateIndeterminate,
 			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+			Transport:  core.TransportDo53, // Glue records from Additional - default to Do53
 		})
 	}
 
@@ -1250,6 +1315,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			Context:    cache.ContextGlue,
 			State:      cache.ValidationStateIndeterminate,
 			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+			Transport:  core.TransportDo53, // Glue records from Additional - default to Do53
 		})
 	}
 
@@ -1273,45 +1339,93 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 // parseTransportString removed; use transport.ParseTransportString
 
 // pickTransport chooses a transport based on configured weights, falling back sensibly
-func pickTransport(server *cache.AuthServer, qname string) core.Transport {
+// If requireEncrypted is true, only encrypted transports (doq, dot, doh) are considered
+func pickTransport(server *cache.AuthServer, qname string, requireEncrypted bool) (core.Transport, error) {
 	if server == nil {
-		return core.TransportDo53
+		if requireEncrypted {
+			return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server is nil")
+		}
+		return core.TransportDo53, nil
 	}
+	
+	// Filter transports if encryption is required
+	var availableTransports []core.Transport
+	if requireEncrypted {
+		for _, t := range server.Transports {
+			if core.IsEncryptedTransport(t) {
+				availableTransports = append(availableTransports, t)
+			}
+		}
+		// Check if server has any encrypted transports configured
+		if len(availableTransports) == 0 {
+			// Check transport weights for encrypted options
+			hasEncrypted := false
+			for t := range server.TransportWeights {
+				if core.IsEncryptedTransport(t) && server.TransportWeights[t] > 0 {
+					hasEncrypted = true
+					break
+				}
+			}
+			if !hasEncrypted {
+				return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s has no encrypted transports available", server.Name)
+			}
+		}
+	} else {
+		availableTransports = server.Transports
+	}
+	
 	if len(server.TransportWeights) == 0 {
 		if server.PrefTransport != 0 {
-			return server.PrefTransport
+			if requireEncrypted && !core.IsEncryptedTransport(server.PrefTransport) {
+				// PrefTransport is do53, but we need encrypted - try availableTransports
+				if len(availableTransports) > 0 {
+					return availableTransports[0], nil
+				}
+				return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s only has do53", server.Name)
+			}
+			return server.PrefTransport, nil
 		}
-		if len(server.Transports) > 0 {
-			return server.Transports[0]
+		if len(availableTransports) > 0 {
+			return availableTransports[0], nil
 		}
-		return core.TransportDo53
+		if requireEncrypted {
+			return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s has no encrypted transports", server.Name)
+		}
+		return core.TransportDo53, nil
 	}
-	// Build weighted list honoring server.Transports order
+	// Build weighted list honoring server.Transports order, filtering for encrypted if required
 	var total int
 	type pair struct {
 		t core.Transport
 		w int
 	}
 	var candidates []pair
-	for _, t := range server.Transports {
+	transportsToCheck := availableTransports
+	if !requireEncrypted {
+		transportsToCheck = server.Transports
+	}
+	for _, t := range transportsToCheck {
 		if w, ok := server.TransportWeights[t]; ok && w > 0 {
 			candidates = append(candidates, pair{t: t, w: int(w)})
 			total += int(w)
 		}
 	}
-	// remainder goes to Do53
-	if total < 100 {
+	// remainder goes to Do53 (only if encryption not required)
+	if !requireEncrypted && total < 100 {
 		candidates = append(candidates, pair{t: core.TransportDo53, w: 100 - total})
 		total = 100
 	}
 	if total == 0 {
+		if requireEncrypted {
+			return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s has no encrypted transports with weights", server.Name)
+		}
 		if server.PrefTransport != 0 {
-			return server.PrefTransport
+			return server.PrefTransport, nil
 		}
 		if len(server.Transports) > 0 {
-			return server.Transports[0]
+			return server.Transports[0], nil
 		}
-		return core.TransportDo53
+		return core.TransportDo53, nil
 	}
 	// stable hash on (qname, server.Name)
 	h := fnv.New32a()
@@ -1323,10 +1437,10 @@ func pickTransport(server *cache.AuthServer, qname string) core.Transport {
 	for _, c := range candidates {
 		acc += c.w
 		if bucket < acc {
-			return c.t
+			return c.t, nil
 		}
 	}
-	return candidates[len(candidates)-1].t
+	return candidates[len(candidates)-1].t, nil
 }
 
 func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*core.RRset, error) {
@@ -1440,29 +1554,38 @@ func buildQuery(qname string, qtype uint16) (*dns.Msg, error) {
 	return m, nil
 }
 
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, m *dns.Msg, qname string, qtype uint16) (*dns.Msg, time.Duration, error) {
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, m *dns.Msg, qname string, qtype uint16, requireEncrypted bool) (*dns.Msg, core.Transport, time.Duration, error) {
 	select {
 	case <-ctx.Done():
-		return nil, 0, ctx.Err()
+		return nil, core.TransportDo53, 0, ctx.Err()
 	default:
 	}
 
-	t := pickTransport(server, qname)
+	t, err := pickTransport(server, qname, requireEncrypted)
+	if err != nil {
+		return nil, core.TransportDo53, 0, err
+	}
 	c, exist := imr.Cache.DNSClient[t]
 	if !exist {
-		return nil, 0, fmt.Errorf("no DNS client for transport %d exists", t)
+		return nil, core.TransportDo53, 0, fmt.Errorf("no DNS client for transport %d exists", t)
 	}
 	server.IncrementTransportCounter(t)
 	if Globals.Debug {
 		log.Printf("*** tryServer: calling c.Exchange with Transport=%q, server=%s (addrs: %v), addr=%q, qname=%q, qtype=%q",
 			core.TransportToString[t], server.Name, server.Addrs, addr, qname, dns.TypeToString[qtype])
 	}
+	if !imr.Quiet {
+		log.Printf("IMR: Query %s/%s to %s using transport %s (weights: doq=%d dot=%d doh=%d do53=%d)",
+			qname, dns.TypeToString[qtype], server.Name, core.TransportToString[t],
+			server.TransportWeights[core.TransportDoQ], server.TransportWeights[core.TransportDoT],
+			server.TransportWeights[core.TransportDoH], server.TransportWeights[core.TransportDo53])
+	}
 	// return c.Exchange(m, addr)
 	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
 	if err != nil {
 		log.Printf("*** tryServer: query \"%s %s\" sent to %s returned error: %v", qname, dns.TypeToString[qtype], addr, err)
 		server.RecordAddressFailure(addr, err)
-		return nil, 0, err
+		return nil, t, 0, err
 	}
 	if r != nil {
 		server.RecordAddressSuccess(addr)
@@ -1472,7 +1595,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			log.Printf("*** tryServer: query \"%s %s\" sent to %s returned no response", qname, dns.TypeToString[qtype], addr)
 		}
 	}
-	return r, 0, err
+	return r, t, 0, err
 }
 
 // applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server.
@@ -1612,7 +1735,9 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section
 func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, server *cache.AuthServer, r *dns.Msg) {
-	if imr.Options[ImrOptUseTransportSignals] != "true" {
+	// Transport signal processing is enabled by default (changed from opt-in to opt-out)
+	// Only skip if explicitly disabled
+	if imr.Options[ImrOptUseTransportSignals] == "false" {
 		return
 	}
 	if ctx == nil {
@@ -1810,12 +1935,12 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	}
 }
 
-func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool) (*core.RRset, int, cache.CacheContext, error, bool) {
+func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, transport core.Transport) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
 	if r == nil {
 		if Globals.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: nil response for qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
 		}
-		return nil, dns.RcodeServerFailure, cache.ContextFailure, fmt.Errorf("nil response in handleAnswer"), false
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, transport, fmt.Errorf("nil response in handleAnswer"), false
 	}
 
 	if Globals.Debug {
@@ -1833,22 +1958,23 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			target := rr.(*dns.CNAME).Target
 			tmprrset, rcode, context, err := imr.chaseCNAME(ctx, target, qtype, force)
 			if err != nil {
-				return nil, rcode, context, err, true
+				return nil, rcode, context, transport, err, true
 			}
 			if tmprrset != nil && len(tmprrset.RRs) != 0 {
 				rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
 				if tmprrset.RRs[0].Header().Rrtype != dns.TypeCNAME {
 					imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-						Name:    qname,
-						RRtype:  qtype,
-						Rcode:   uint8(rcode),
-						RRset:   &rrset,
-						Context: cache.ContextAnswer,
+						Name:       qname,
+						RRtype:     qtype,
+						Rcode:      uint8(rcode),
+						RRset:      &rrset,
+						Context:    cache.ContextAnswer,
 						// Should there not be some state here? State:      vstate,
 						State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+						Transport:  transport, // Transport from handleAnswer
 					})
-					return &rrset, rcode, cache.ContextAnswer, nil, true
+					return &rrset, rcode, cache.ContextAnswer, transport, nil, true
 				}
 			}
 		default:
@@ -1870,7 +1996,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, &rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 		if err != nil {
 			log.Printf("handleAnswer: failed to validate RRset: %v", err)
-			return nil, r.MsgHdr.Rcode, cache.ContextFailure, err, false
+			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 		}
 		if Globals.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
@@ -1883,6 +2009,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			Context:    cache.ContextAnswer,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+			Transport:  transport,
 		}
 		imr.Cache.Set(qname, qtype, cr)
 		if qtype == dns.TypeSVCB || qtype == core.TypeTSYNC {
@@ -1896,9 +2023,9 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		// Note: DNSKEYs are added to DnskeyCache by ValidateDNSKEYs() upon successful validation,
 		// so we don't need to add them here. This ensures keys are available immediately for
 		// validating subsequent RRsets (e.g., A records signed by ZSKs).
-		return &rrset, r.MsgHdr.Rcode, cache.ContextAnswer, nil, true
+		return &rrset, r.MsgHdr.Rcode, cache.ContextAnswer, transport, nil, true
 	}
-	return nil, r.MsgHdr.Rcode, cache.ContextFailure, nil, false
+	return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, nil, false
 }
 
 // extractReferral builds an RRset of NS records (and any RRSIGs that cover NS) from a DNS message
@@ -1935,7 +2062,7 @@ func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, strin
 	return &rrset, zonename, nsMap
 }
 
-func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool) (*core.RRset, int, cache.CacheContext, error) {
+func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
@@ -1948,7 +2075,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			if Globals.Debug {
 				imr.Cache.Logger.Printf("handleReferral: detected referral loop - already referred to zone %q for qname %q, aborting", zonename, qname)
 			}
-			return nil, r.MsgHdr.Rcode, cache.ContextFailure, fmt.Errorf("referral loop detected: already referred to zone %q for qname %q", zonename, qname)
+			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, fmt.Errorf("referral loop detected: already referred to zone %q for qname %q", zonename, qname)
 		}
 		visitedZones[referralKey] = true
 		if Globals.Debug {
@@ -1973,7 +2100,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 			if err != nil {
 				log.Printf("handleReferral: failed to validate NS RRset: %v", err)
-				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
+				return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 			}
 		}
 		// If validation state is None (not validated), set to Indeterminate for referral data
@@ -1988,6 +2115,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			Context:    cache.ContextReferral,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(nsRRset.RRs)),
+			Transport:  transport,
 		})
 	}
 	// Also collect and cache DS RRset (signed) when present in referral
@@ -2019,7 +2147,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, dsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 			if err != nil {
 				log.Printf("handleReferral: failed to validate DS RRset: %v", err)
-				return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
+				return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 			}
 		}
 		// XXX: ValidateRRset *must* return one of secure or indeterminate. There is
@@ -2032,6 +2160,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			Context:    cache.ContextReferral,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(dsRRs)),
+			Transport:  transport,
 		})
 		// Update ZoneMap based on DS validation state
 		z, ok := imr.Cache.ZoneMap.Get(zonename)
@@ -2084,7 +2213,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, nsMap, r)
 	if err != nil {
 		log.Printf("*** handleReferral: Error from CollectNSAddressesFromAdditional: %v", err)
-		return nil, r.MsgHdr.Rcode, cache.ContextFailure, err
+		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 	}
 
 	// For out-of-bailiwick nameservers, we still need their addresses if they
@@ -2135,12 +2264,13 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	}
 
 	if len(serverMap) == 0 {
-		return nil, r.MsgHdr.Rcode, cache.ContextReferral, nil
+		return nil, r.MsgHdr.Rcode, cache.ContextReferral, transport, nil
 	}
 	// rrcache.Logger.Printf("*** handleReferral: calling revalidateReferralNS for zone %s, serverMap: %+v", zonename, serverMap)
 	imr.scheduleReferralNSRevalidation(ctx, zonename, serverMap)
 	//rrcache.Logger.Printf("*** handleReferral: revalidateReferralNS returned, calling IterativeDNSQuery for zone %s, serverMap: %+v", zonename, serverMap)
-	return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones)
+	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, requireEncrypted)
+	return rrset, rcode, cacheCtx, transport, err
 }
 
 const maxNSRevalidateServers = 3
@@ -2231,6 +2361,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 			Context:    cache.ContextAnswer,
 			State:      vstate,
 			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+			Transport:  core.TransportDo53, // revalidateReferralNS - default to Do53
 		})
 	}
 
@@ -2304,7 +2435,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 	hostServerMap := map[string]*cache.AuthServer{
 		server.Name: server,
 	}
-	rrset, _, _, err := imr.IterativeDNSQuery(ctx, host, rrtype, hostServerMap, force)
+	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, host, rrtype, hostServerMap, force, false) // PR not required for glue revalidation
 	if err != nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -2323,6 +2454,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 		Context:    cache.ContextAnswer,
 		State:      vstate,
 		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
+		Transport:  core.TransportDo53, // revalidateGlueRR - default to Do53
 	})
 }
 
@@ -2451,7 +2583,7 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 	}
 }
 
-func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.CacheContext, int, bool) {
+func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport) (cache.CacheContext, int, bool) {
 	if r == nil {
 		return cache.ContextFailure, dns.RcodeServerFailure, false
 	}
@@ -2630,6 +2762,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		Expiration:   expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
 		EDECode:      edeCode,
 		EDEText:      edeText,
+		Transport:    transport,
 	})
 
 	// XXX: should do either of:
@@ -2645,6 +2778,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg) (cache.Ca
 		Context:    cache.ContextAnswer,
 		State:      soaVstate,
 		Expiration: expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
+		Transport:  transport,
 	})
 
 	return negContext, int(cachedRcode), true
@@ -2682,7 +2816,7 @@ func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, for
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
-		tmprrset, rcode, context, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force)
+		tmprrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, false) // PR not required for CNAME chasing, transport not needed
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
 			return nil, rcode, context, err
@@ -2717,7 +2851,7 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no servers for %s", name)
 	}
-	rr, _, _, err := imr.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false)
+	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false, false) // PR not required for DNSKEY fetches
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("dnskey fetch failed for %s: %v", name, err)
 	}
@@ -2739,7 +2873,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no servers for %s", qname)
 	}
-	rr, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false)
+	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, false) // PR not required for fetcher
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("fetch failed for %s %s: %v", qname, dns.TypeToString[qtype], err)
 	}
@@ -2750,7 +2884,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 // It discards the rcode and CacheContext return values, only returning the RRset and error.
 func (imr *Imr) IterativeDNSQueryFetcher() cache.RRsetFetcher {
 	return func(ctx context.Context, qname string, qtype uint16, servers map[string]*cache.AuthServer) (*core.RRset, error) {
-		rrset, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false)
+		rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, false) // PR not required for RRsetFetcher
 		return rrset, err
 	}
 }

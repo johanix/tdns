@@ -368,6 +368,23 @@ func (as *AuthServer) MergeTransportWeights(weights map[core.Transport]uint8) {
 	}
 }
 
+// SetTransportWeights replaces the entire transport weights map. Thread-safe.
+func (as *AuthServer) SetTransportWeights(weights map[core.Transport]uint8) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(weights) == 0 {
+		as.TransportWeights = nil
+		return
+	}
+	as.TransportWeights = make(map[core.Transport]uint8, len(weights))
+	for k, v := range weights {
+		as.TransportWeights[k] = v
+	}
+}
+
 func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
 	if as == nil {
 		return nil
@@ -436,6 +453,23 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 		as.TransportCounters = make(map[core.Transport]uint64)
 	}
 	as.TransportCounters[t]++
+}
+
+// SnapshotTransportCounters returns a thread-safe copy of the transport counters.
+func (as *AuthServer) SnapshotTransportCounters() map[core.Transport]uint64 {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.TransportCounters == nil {
+		return nil
+	}
+	snap := make(map[core.Transport]uint64, len(as.TransportCounters))
+	for k, v := range as.TransportCounters {
+		snap[k] = v
+	}
+	return snap
 }
 
 func (as *AuthServer) PromoteConnMode(target ConnMode) {

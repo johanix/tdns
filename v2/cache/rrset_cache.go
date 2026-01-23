@@ -62,7 +62,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil)
 	client[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "853", nil)
 	client[core.TransportDoH] = core.NewDNSClient(core.TransportDoH, "443", nil)
-	client[core.TransportDoQ] = core.NewDNSClient(core.TransportDoQ, "8853", nil)
+	client[core.TransportDoQ] = core.NewDNSClient(core.TransportDoQ, "853", nil) // RFC 9250: DoQ uses port 853
 
 	return &RRsetCacheT{
 		RRsets:                 core.NewCmap[CachedRRset](),
@@ -862,9 +862,30 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 	var edeCode uint16
 	var edeText string
 	if dnssecOK {
-		if code, text, ok := rrcache.lookupDnskeyEDE(rrset); ok {
-			edeCode = code
-			edeText = text
+		// Skip lookupDnskeyEDE when storing a DNSKEY RRset that signs itself (same zone).
+		// In this case, we're storing the DNSKEY RRset itself with EDE info, so looking up
+		// the signer's DNSKEY would be circular and wouldn't find the EDE info we're about to store.
+		// The EDE info should be provided directly by the caller (e.g., ValidateDNSKEYs).
+		skipLookup := false
+		if qtype == dns.TypeDNSKEY && rrset != nil {
+			qnameCanon := dns.CanonicalName(qname)
+			for _, raw := range rrset.RRSIGs {
+				sig, ok := raw.(*dns.RRSIG)
+				if !ok || sig == nil {
+					continue
+				}
+				signer := dns.CanonicalName(sig.SignerName)
+				if signer == qnameCanon {
+					skipLookup = true
+					break
+				}
+			}
+		}
+		if !skipLookup {
+			if code, text, ok := rrcache.lookupDnskeyEDE(rrset); ok {
+				edeCode = code
+				edeText = text
+			}
 		}
 	}
 	var cached *CachedRRset
@@ -902,23 +923,37 @@ func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, 
 		if signer == "" {
 			continue
 		}
+		// First, try the standard path: check if DS is secure, then look up DNSKEY
 		ds := rrcache.Get(signer, dns.TypeDS)
-		if ds == nil || ds.RRset == nil || len(ds.RRset.RRs) == 0 || ds.State != ValidationStateSecure {
-			continue
-		}
-		dnskey := rrcache.Get(signer, dns.TypeDNSKEY)
-		if dnskey == nil || dnskey.EDECode == 0 {
-			continue
-		}
-		text := dnskey.EDEText
-		if text == "" && dnskey.EDECode == 9 {
-			zone := strings.TrimSuffix(signer, ".")
-			if zone == "" {
-				zone = "."
+		if ds != nil && ds.RRset != nil && len(ds.RRset.RRs) > 0 && ds.State == ValidationStateSecure {
+			dnskey := rrcache.Get(signer, dns.TypeDNSKEY)
+			if dnskey != nil && dnskey.EDECode != 0 {
+				text := dnskey.EDEText
+				if text == "" && dnskey.EDECode == 9 {
+					zone := strings.TrimSuffix(signer, ".")
+					if zone == "" {
+						zone = "."
+					}
+					text = fmt.Sprintf("no DNSKEY matches DS for zone %s", zone)
+				}
+				return dnskey.EDECode, text, true
 			}
-			text = fmt.Sprintf("no DNSKEY matches DS for zone %s", zone)
 		}
-		return dnskey.EDECode, text, true
+		// Fallback: even if DS check failed, check if the signer's DNSKEY has EDE info.
+		// This propagates EDE codes (like "No DNSKEY matches DS") to dependent RRsets
+		// even when the DS validation state prevents the standard lookup path.
+		dnskey := rrcache.Get(signer, dns.TypeDNSKEY)
+		if dnskey != nil && dnskey.EDECode != 0 {
+			text := dnskey.EDEText
+			if text == "" && dnskey.EDECode == 9 {
+				zone := strings.TrimSuffix(signer, ".")
+				if zone == "" {
+					zone = "."
+				}
+				text = fmt.Sprintf("no DNSKEY matches DS for zone %s", zone)
+			}
+			return dnskey.EDECode, text, true
+		}
 	}
 	return 0, "", false
 }

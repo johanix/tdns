@@ -43,6 +43,7 @@ type CachedRRset struct {
 	Expiration time.Time
 	EDECode    uint16
 	EDEText    string
+	Transport  core.Transport // Transport used to receive this data (for privacy tracking)
 }
 
 type RRsetCacheT struct {

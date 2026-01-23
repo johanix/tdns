@@ -10,6 +10,9 @@ import (
 )
 
 const (
+	// Standard EDE codes (RFC 8914)
+	EDEDNSSECBogus uint16 = 6 // RFC 8914: DNSSEC Bogus
+
 	// Private EDE codes (above 512)
 	EDESig0KeyNotKnown uint16 = 513 + iota
 	EDESig0KeyKnownButNotTrusted
@@ -25,9 +28,11 @@ const (
 
 	EDECDSScannerNotImplemented
 	EDECSyncScannerNotImplemented
+	EDEPrivacyRequestedUnavailable // Privacy requested but only unencrypted transport available
 )
 
 var EDECodeToString = map[uint16]string{
+	EDEDNSSECBogus:                 "DNSSEC Bogus", // RFC 8914
 	EDESig0KeyNotKnown:            "SIG(0) key not known",
 	EDESig0KeyKnownButNotTrusted:  "SIG(0) key known, but not yet trusted",
 	EDEDelegationSyncNotSupported: "Delegation sync via DNS UPDATE is not supported",
@@ -41,6 +46,7 @@ var EDECodeToString = map[uint16]string{
 	EDETsigValidationFailure:      "TSIG validation failure",
 	EDECDSScannerNotImplemented:   "CDS scanner not implemented",
 	EDECSyncScannerNotImplemented: "CSYNC scanner not implemented",
+	EDEPrivacyRequestedUnavailable: "Privacy requested but only unencrypted transport available",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

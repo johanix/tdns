@@ -20,9 +20,9 @@ import (
 
 // CHUNK option content types
 const (
-	CHUNKContentTypeKeyStatus             = 1 // Key installation status report (failed/successful keys)
-	CHUNKContentTypeBootstrapConfirmation = 2 // Bootstrap confirmation (encrypted confirmation data)
-	CHUNKContentTypeComponentStatus       = 3 // Component installation status report (failed/successful components)
+	CHUNKContentTypeKeyStatus              = 1 // Key installation status report (failed/successful keys)
+	CHUNKContentTypeEnrollmentConfirmation = 2 // Enrollment confirmation (encrypted confirmation data)
+	CHUNKContentTypeComponentStatus        = 3 // Component installation status report (failed/successful components)
 )
 
 // ChunkOption represents a CHUNK EDNS(0) option
@@ -62,11 +62,11 @@ type ComponentStatusEntry struct {
 	Error       string `json:"error,omitempty"` // Error message if failed
 }
 
-// BootstrapConfirmation represents a bootstrap confirmation message
-// This is the payload for CHUNKContentTypeBootstrapConfirmation
+// EnrollmentConfirmation represents an enrollment confirmation message
+// This is the payload for CHUNKContentTypeEnrollmentConfirmation
 // Note: This struct represents the decrypted confirmation data.
 // The actual EDNS(0) option contains encrypted data.
-type BootstrapConfirmation struct {
+type EnrollmentConfirmation struct {
 	NodeID        string `json:"node_id"`                 // Assigned node ID
 	Status        string `json:"status"`                  // Status: "success" or "error"
 	KdcHpkePubKey string `json:"kdc_hpke_pubkey"`         // KDC HPKE public key (hex encoded)
@@ -140,21 +140,21 @@ func CreateComponentStatusChunkOption(successfulComponents, failedComponents []C
 	return CreateChunkOption(core.FormatJSON, nil, data), nil
 }
 
-// CreateBootstrapConfirmationOption creates a CHUNK EDNS(0) option with bootstrap confirmation content
+// CreateEnrollmentConfirmationOption creates a CHUNK EDNS(0) option with enrollment confirmation content
 // The confirmation data is encrypted using HPKE Auth mode before being placed in the option.
 // encryptedConfirmation: HPKE-encrypted confirmation data (ciphertext)
 // Returns: CHUNK EDNS(0) option, error
-func CreateBootstrapConfirmationOption(encryptedConfirmation []byte) (*dns.EDNS0_LOCAL, error) {
+func CreateEnrollmentConfirmationOption(encryptedConfirmation []byte) (*dns.EDNS0_LOCAL, error) {
 	if len(encryptedConfirmation) == 0 {
 		return nil, fmt.Errorf("encrypted confirmation data cannot be empty")
 	}
 
 	// Prepend content type byte to the encrypted data
 	data := make([]byte, 1+len(encryptedConfirmation))
-	data[0] = CHUNKContentTypeBootstrapConfirmation
+	data[0] = CHUNKContentTypeEnrollmentConfirmation
 	copy(data[1:], encryptedConfirmation)
 
-	// Create option with no HMAC (bootstrap confirmation is already encrypted)
+	// Create option with no HMAC (enrollment confirmation is already encrypted)
 	return CreateChunkOption(core.FormatJSON, nil, data), nil
 }
 
@@ -291,10 +291,10 @@ func ParseComponentStatusReport(chunkOpt *ChunkOption) (uint8, *ComponentStatusR
 	return contentType, &report, nil
 }
 
-// ParseBootstrapConfirmation parses a bootstrap confirmation from CHUNK option data
+// ParseEnrollmentConfirmation parses an enrollment confirmation from CHUNK option data
 // Returns the content type and the encrypted confirmation data
 // Note: The returned data is still encrypted and must be decrypted using HPKE Auth mode
-func ParseBootstrapConfirmation(chunkOpt *ChunkOption) (uint8, []byte, error) {
+func ParseEnrollmentConfirmation(chunkOpt *ChunkOption) (uint8, []byte, error) {
 	if len(chunkOpt.Data) < 1 {
 		return 0, nil, fmt.Errorf("CHUNK option data too short for content type")
 	}
@@ -302,8 +302,8 @@ func ParseBootstrapConfirmation(chunkOpt *ChunkOption) (uint8, []byte, error) {
 	contentType := chunkOpt.Data[0]
 	encryptedData := chunkOpt.Data[1:]
 
-	if contentType != CHUNKContentTypeBootstrapConfirmation {
-		return contentType, nil, fmt.Errorf("unsupported content type: %d (expected %d)", contentType, CHUNKContentTypeBootstrapConfirmation)
+	if contentType != CHUNKContentTypeEnrollmentConfirmation {
+		return contentType, nil, fmt.Errorf("unsupported content type: %d (expected %d)", contentType, CHUNKContentTypeEnrollmentConfirmation)
 	}
 
 	return contentType, encryptedData, nil

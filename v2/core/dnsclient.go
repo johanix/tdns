@@ -55,6 +55,11 @@ func StringToTransport(s string) (Transport, error) {
 	}
 }
 
+// IsEncryptedTransport returns true if the transport is encrypted (doq, dot, doh), false for do53
+func IsEncryptedTransport(t Transport) bool {
+	return t == TransportDoT || t == TransportDoH || t == TransportDoQ
+}
+
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
 	Port            string

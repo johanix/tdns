@@ -30,12 +30,12 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 
 	ports := viper.GetStringSlice("dnsengine.ports.doq")
 	if len(ports) == 0 {
-		ports = []string{"8853"}
+		ports = []string{"853"}
 	}
 	var listeners []*quic.Listener
 	for _, addr := range doqaddrs {
 		for _, port := range ports {
-			hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 8853
+			hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 853
 			log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
 			listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
 				MaxIdleTimeout:  time.Duration(30) * time.Second,

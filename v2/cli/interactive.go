@@ -159,31 +159,82 @@ func executor(input string) {
 		return
 	}
 
-	// Split the input into args and execute via Cobra
-	args := strings.Fields(input)
+	// Split the input into args, respecting quotes
+	args := splitArgs(input)
 
-	// Find the command but don't execute it via rootCmd.Execute()
-	cmd, flags, err := cmdRoot.Find(args)
+	// Find the command
+	cmd, cmdArgs, err := cmdRoot.Find(args)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
-	// Execute just the command's Run function with remaining args
 	// Friendly behavior: if user typed "query" with no args (often from "q<TAB><ENTER>"),
 	// assume they meant to quit.
-	if cmd.Name() == "query" && (len(flags) == 0 || (len(flags) == 1 && strings.TrimSpace(flags[0]) == "")) {
+	if cmd.Name() == "query" && (len(cmdArgs) == 0 || (len(cmdArgs) == 1 && strings.TrimSpace(cmdArgs[0]) == "")) {
 		fmt.Println("query was empty, assuming you meant 'quit'")
 		Terminate()
 		return
 	}
+
+	// Reset flags before parsing (important for interactive mode)
+	cmd.Flags().Parse([]string{})
+	
+	// Parse flags properly
+	if err := cmd.ParseFlags(cmdArgs); err != nil {
+		// Check if this is a help request
+		if strings.Contains(err.Error(), "help requested") {
+			// Display help for this command
+			cmd.Help()
+			return
+		}
+		fmt.Printf("Error parsing flags: %v\n", err)
+		return
+	}
+
+	// Get remaining args after flag parsing
+	remainingArgs := cmd.Flags().Args()
+
+	// Execute the command
 	if cmd.Run != nil {
-		cmd.Run(cmd, flags)
+		cmd.Run(cmd, remainingArgs)
 	} else if cmd.RunE != nil {
-		if err := cmd.RunE(cmd, flags); err != nil {
+		if err := cmd.RunE(cmd, remainingArgs); err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
 	}
+}
+
+// splitArgs splits a command line string into args, respecting quotes
+func splitArgs(input string) []string {
+	var args []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+	
+	for _, r := range input {
+		switch {
+		case (r == '"' || r == '\'') && !inQuote:
+			inQuote = true
+			quoteChar = r
+		case r == quoteChar && inQuote:
+			inQuote = false
+			quoteChar = 0
+		case r == ' ' && !inQuote:
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	
+	return args
 }
 
 // findCommonPrefix returns the common prefix of all matches

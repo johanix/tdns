@@ -62,6 +62,7 @@ var rootCmd = &cobra.Command{
 		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
 		+DO_BIT: Set the DO (DNSEC OK) bit
 		+DELEG: Set the DELEG bit in queries
+		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
 		+MULTI: Present RRs in multi-line format
 	`,
 
@@ -217,7 +218,11 @@ var rootCmd = &cobra.Command{
 					opt.Hdr.Ttl |= 1 << 14
 				}
 				if options["de_bit"] == "true" {
-					// Set DE bit (bit 13)
+					// Set DE bit (bit 13) - Note: DE and PR share bit 13, they're mutually exclusive
+					opt.Hdr.Ttl |= 1 << 13
+				}
+				if options["pr_bit"] == "true" {
+					// Set PR bit (bit 13) - Privacy Requested
 					opt.Hdr.Ttl |= 1 << 13
 				}
 				if ots, ok := options["ots"]; ok {
@@ -345,6 +350,9 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		return options, nil
 	case "+DELEG", "+DE":
 		options["de_bit"] = "true"
+		return options, nil
+	case "+PRIVACY", "+PR":
+		options["pr_bit"] = "true"
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
