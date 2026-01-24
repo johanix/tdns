@@ -911,7 +911,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// Parse any transport signal for this specific server even on final answers
 			// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
 			imr.parseTransportForServerFromAdditional(ctx, server, r)
-			tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, transport)
+			tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, transport, requireEncrypted)
 			if err != nil || done {
 				return tmprrset, rcode2, ctx2, transport2, err
 			}
@@ -1935,7 +1935,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	}
 }
 
-func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, transport core.Transport) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
+func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, transport core.Transport, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
 	if r == nil {
 		if Globals.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: nil response for qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
@@ -1956,7 +1956,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		case dns.TypeCNAME:
 			rrset.RRs = append(rrset.RRs, rr)
 			target := rr.(*dns.CNAME).Target
-			tmprrset, rcode, context, err := imr.chaseCNAME(ctx, target, qtype, force)
+			tmprrset, rcode, context, err := imr.chaseCNAME(ctx, target, qtype, force, requireEncrypted)
 			if err != nil {
 				return nil, rcode, context, transport, err, true
 			}
@@ -2800,7 +2800,7 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
-func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool) (*core.RRset, int, cache.CacheContext, error) {
+func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, error) {
 	maxchase := 10
 	cur := target
 	for i := 0; i < maxchase; i++ {
@@ -2816,7 +2816,7 @@ func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, for
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
-		tmprrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, false) // PR not required for CNAME chasing, transport not needed
+		tmprrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, requireEncrypted)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
 			return nil, rcode, context, err

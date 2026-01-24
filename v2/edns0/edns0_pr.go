@@ -9,9 +9,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// PR (Privacy Requested) flag bit - bit 13 in OPT header TTL
+// PR (Privacy Requested) flag bit - bit 12 in OPT header TTL
 const (
-	EDNS0_PR_FLAG_BIT = 13 // Privacy Requested flag bit position
+	EDNS0_PR_FLAG_BIT = 12 // Privacy Requested flag bit position
 )
 
 // SetPRFlag sets the PR (Privacy Requested) flag in an OPT RR

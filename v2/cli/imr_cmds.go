@@ -488,7 +488,6 @@ var imrSetLineWidthCmd = &cobra.Command{
 }
 
 func init() {
-	ImrCmd.AddCommand(ImrSetCmd) // Add debug set commands
 	ImrZoneCmd.AddCommand(imrZoneListCmd, imrZoneCheckCmd)
 	ImrQueryCmd.Annotations = map[string]string{
 		"arg1_guide": "(domain name)",

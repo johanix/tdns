@@ -395,9 +395,11 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 				flags = append(flags, "co")
 			}
 			if (rr.Hdr.Ttl & (1 << 13)) != 0 {
-				// Bit 13 can be either PR (Privacy Requested) or DE (Delegation Extension)
-				// They are mutually exclusive. We show "pr" as that's the current implementation.
-				// In practice, context determines which flag is intended.
+				// Bit 13 is DE (Delegation Extension)
+				flags = append(flags, "de")
+			}
+			if (rr.Hdr.Ttl & (1 << 12)) != 0 {
+				// Bit 12 is PR (Privacy Requested)
 				flags = append(flags, "pr")
 			}
 			flagsStr := ""

@@ -514,9 +514,10 @@ func DnssecGenDS() error {
 			continue
 		}
 
-		// Filter for KSKs (keys with KSK flag bit 0 set, flags & 0x0001 != 0)
-		// Note: KSK flag is bit 0 (0x0001), SEP bit is bit 8 (0x0100)
-		// For DS generation, we want KSKs (bit 0 set)
+		// Filter for KSKs (keys with SEP flag bit 0 set, flags & 0x0001 != 0)
+		// Note: SEP flag is bit 0 (0x0001), ZONE flag is bit 8 (0x0100)
+		// ZSK = 256 (0x0100) = only ZONE flag, KSK = 257 (0x0101) = ZONE + SEP flags
+		// For DS generation, we want KSKs (SEP bit 0 set)
 		if v.Flags&0x0001 == 0 {
 			continue
 		}
@@ -529,7 +530,7 @@ func DnssecGenDS() error {
 			fmt.Printf("No KSK with keyid %d found for zone %s\n", keyid, zone)
 		} else {
 			fmt.Printf("No KSK (Key Signing Key) found for zone %s\n", zone)
-			fmt.Println("KSKs are identified by having the SEP (Secure Entry Point) bit set (flags & 0x100 != 0)")
+			fmt.Println("KSKs are identified by having the SEP (Secure Entry Point) bit set (flags & 0x0001 != 0)")
 		}
 		return nil
 	}

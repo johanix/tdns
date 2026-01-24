@@ -13,7 +13,7 @@ Features:
 - if **tdns-imr** is started without arguments (the normal case) it will enter
   a command loop (i.e. it provides an interactive CLI). 
 
-- supports modern DNS transports (DoT, DoH and DoQ) in addtion to Do53 (UDP/TCP).
+- supports modern DNS transports (DoT, DoH and DoQ) in addition to Do53 (UDP/TCP).
 
 Planned, not yet implemented:
 
@@ -21,7 +21,7 @@ Planned, not yet implemented:
   opportunistic inclusion of an SVCB record in the Additional section on
   responses.
 
-- Use authoritiative nameserver preferred transport (if any, from the cached
+- Use authoritative nameserver preferred transport (if any, from the cached
   ALPN data).
 
 The **tdns-imr** interactive CLI has the following implemented or planned

@@ -655,7 +655,14 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// If PR flag is set and we can't get encrypted transport, return SERVFAIL+EDE
 				if msgoptions.PR && strings.Contains(err.Error(), "PR flag requires encrypted transport") {
 					m.SetRcode(r, dns.RcodeServerFailure)
-					edns0.AttachEDEToResponse(m, edns0.EDEPrivacyRequestedUnavailable)
+					// Include zone name in EDE text for better diagnostics
+					var edeText string
+					if bestmatch != "" {
+						edeText = fmt.Sprintf("Privacy requested but only unencrypted transport available for zone %s", bestmatch)
+					} else {
+						edeText = "Privacy requested but only unencrypted transport available"
+					}
+					edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
 					w.WriteMsg(m)
 					return
 				}

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  */
-package cmd
+package main
 
 import (
 	"context"
@@ -19,7 +19,6 @@ import (
 )
 
 var cfgFile, cfgFileUsed string
-var StopCh chan struct{}
 var LocalConfig string
 
 var cliflag bool
@@ -51,6 +50,12 @@ func Execute() {
 	cobra.CheckErr(rootCmd.Execute())
 }
 
+// ExecuteContext adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main() with a context. It only needs to happen once to the rootCmd.
+func ExecuteContext(ctx context.Context) {
+	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
+}
+
 func init() {
 	cobra.OnInitialize(initConfig, initImr)
 
@@ -76,7 +81,6 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	cfgFile = cli.Conf.Internal.CfgFile // this gets populated from MainInit()
 	if cfgFile != "" {
 		fmt.Printf("tdns-imr: config file is '%s'\n", cfgFile)
 		// Use config file from the flag.
@@ -124,13 +128,22 @@ func initConfig() {
 	}
 }
 
-// initImr initializes the application context, prepares configuration, installs signal handlers, sets up the IMR API router, and starts the IMR service.
+// initImr initializes the application, prepares configuration, sets up the IMR API router, and starts the IMR service.
 // 
-// It establishes a cancellable context that is cancelled on SIGINT or SIGTERM, calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
+// It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
 func initImr() {
-	// conf := cli.Conf
-
-	appCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Get context from cobra command context
+	appCtx = rootCmd.Context()
+	if appCtx == nil {
+		// Fallback if context is not set (should not happen with ExecuteContext)
+		appCtx = context.Background()
+	}
+	
+	// Create a cancel function for MainLoop by wrapping the context
+	// This allows MainLoop to cancel the context when APIStopCh is closed
+	var cancel context.CancelFunc
+	appCtx, cancel = context.WithCancel(appCtx)
+	appCancel = cancel
 
 	if tdns.Globals.Debug {
 		fmt.Printf("initImr: Calling conf.MainInit(\"\") // Empty string means derive from Globals.App.Name\n")
