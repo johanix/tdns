@@ -70,9 +70,15 @@ func (b *Backend) ParsePublicKey(data []byte) (crypto.PublicKey, error) {
 	}
 
 	// Verify it's an ECDSA key suitable for ECDH-ES (this backend only supports ECDSA P-256)
-	if _, ok := jwk.Key.(*ecdsa.PublicKey); !ok {
+	ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
+	if !ok {
 		return nil, crypto.NewBackendError("jose", "parse_public_key",
 			fmt.Errorf("unsupported key type: expected ECDSA public key (P-256)"))
+	}
+	// Verify the curve is P-256
+	if ecdsaKey.Curve != elliptic.P256() {
+		return nil, crypto.NewBackendError("jose", "parse_public_key",
+			fmt.Errorf("unsupported curve: expected P-256, got %s", ecdsaKey.Curve.Params().Name))
 	}
 
 	return &publicKey{jwk: jwk}, nil
@@ -92,9 +98,15 @@ func (b *Backend) ParsePrivateKey(data []byte) (crypto.PrivateKey, error) {
 	}
 
 	// Verify it's an ECDSA key suitable for ECDH-ES (this backend only supports ECDSA P-256)
-	if _, ok := jwk.Key.(*ecdsa.PrivateKey); !ok {
+	ecdsaKey, ok := jwk.Key.(*ecdsa.PrivateKey)
+	if !ok {
 		return nil, crypto.NewBackendError("jose", "parse_private_key",
 			fmt.Errorf("unsupported key type: expected ECDSA private key (P-256)"))
+	}
+	// Verify the curve is P-256
+	if ecdsaKey.Curve != elliptic.P256() {
+		return nil, crypto.NewBackendError("jose", "parse_private_key",
+			fmt.Errorf("unsupported curve: expected P-256, got %s", ecdsaKey.Curve.Params().Name))
 	}
 
 	return &privateKey{jwk: jwk}, nil

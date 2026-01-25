@@ -471,7 +471,10 @@ func DnssecKeyMgmt(cmd string) error {
 
 func DnssecGenDS() error {
 	prefixcmd, _ := getCommandContext("keystore")
-	api, _ := getApiClient(prefixcmd, true)
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		return fmt.Errorf("failed to get API client: %w", err)
+	}
 
 	// First, list all DNSSEC keys to find the ones for our zone
 	data := tdns.KeystorePost{
