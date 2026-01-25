@@ -14,7 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/johanix/tdns/v2/crypto"
 )
 
@@ -164,7 +164,12 @@ func (b *Backend) Decrypt(privKey crypto.PrivateKey, ciphertext []byte) ([]byte,
 	}
 
 	// Parse JWE compact serialization
-	jwe, err := jose.ParseEncrypted(string(ciphertext))
+	// v4 requires explicit algorithm specification for security
+	jwe, err := jose.ParseEncrypted(
+		string(ciphertext),
+		[]jose.KeyAlgorithm{jose.ECDH_ES},
+		[]jose.ContentEncryption{jose.A256GCM},
+	)
 	if err != nil {
 		return nil, crypto.NewBackendError("jose", "decrypt", err)
 	}

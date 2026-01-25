@@ -552,7 +552,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				if Globals.Debug {
 					log.Printf("ImrResponder: hasEDNS0=%v, EDECode=%d, State=%s", hasEDNS0, crrset.EDECode, cache.ValidationStateToString[crrset.State])
 				}
-				if crrset.EDECode != 0 {
+				if crrset.EDECode != 0 && hasEDNS0 {
 					edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
 					if Globals.Debug {
 						log.Printf("ImrResponder: attached EDE code %d to response", crrset.EDECode)
@@ -655,14 +655,17 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// If PR flag is set and we can't get encrypted transport, return SERVFAIL+EDE
 				if msgoptions.PR && strings.Contains(err.Error(), "PR flag requires encrypted transport") {
 					m.SetRcode(r, dns.RcodeServerFailure)
-					// Include zone name in EDE text for better diagnostics
-					var edeText string
-					if bestmatch != "" {
-						edeText = fmt.Sprintf("Privacy requested but only unencrypted transport available for zone %s", bestmatch)
-					} else {
-						edeText = "Privacy requested but only unencrypted transport available"
+					// Attach EDE only if query had EDNS0
+					if r.IsEdns0() != nil {
+						// Include zone name in EDE text for better diagnostics
+						var edeText string
+						if bestmatch != "" {
+							edeText = fmt.Sprintf("Privacy requested but only unencrypted transport available for zone %s", bestmatch)
+						} else {
+							edeText = "Privacy requested but only unencrypted transport available"
+						}
+						edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
 					}
-					edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
 					w.WriteMsg(m)
 					return
 				}
@@ -895,10 +898,10 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 			if cached.State == cache.ValidationStateSecure {
 				resp.AuthenticatedData = true
 			}
-			attachNegativeEDE(resp, msgoptions, cached)
+			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
 		}
-		attachNegativeEDE(resp, msgoptions, cached)
+		attachNegativeEDE(resp, msgoptions, cached, src)
 		appendSOAFromMsg(src, msgoptions, resp)
 		return true
 	}
@@ -910,7 +913,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 			if cached.State == cache.ValidationStateSecure && msgoptions.DO {
 				resp.AuthenticatedData = true
 			}
-			attachNegativeEDE(resp, msgoptions, cached)
+			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
 		}
 	}
@@ -919,7 +922,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		if cached.State == cache.ValidationStateSecure {
 			resp.AuthenticatedData = true
 		}
-		attachNegativeEDE(resp, msgoptions, cached)
+		attachNegativeEDE(resp, msgoptions, cached, src)
 		return true
 	}
 	neg = buildNegAuthorityFromMsg(src)
@@ -930,19 +933,22 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		if cached != nil {
 			resp.AuthenticatedData = cached.State == cache.ValidationStateSecure
 		}
-		attachNegativeEDE(resp, msgoptions, cached)
+		attachNegativeEDE(resp, msgoptions, cached, src)
 		return true
 	}
-	attachNegativeEDE(resp, msgoptions, cached)
+	attachNegativeEDE(resp, msgoptions, cached, src)
 	appendSOAFromMsg(src, msgoptions, resp)
 	return true
 }
 
-func attachNegativeEDE(resp *dns.Msg, msgoptions *edns0.MsgOptions, cached *cache.CachedRRset) {
+func attachNegativeEDE(resp *dns.Msg, msgoptions *edns0.MsgOptions, cached *cache.CachedRRset, req *dns.Msg) {
 	if resp == nil || cached == nil || cached.EDECode == 0 {
 		return
 	}
-	edns0.AttachEDEToResponseWithText(resp, cached.EDECode, cached.EDEText, msgoptions.DO)
+	// Only attach EDE if the original request had EDNS0
+	if req != nil && req.IsEdns0() != nil {
+		edns0.AttachEDEToResponseWithText(resp, cached.EDECode, cached.EDEText, msgoptions.DO)
+	}
 }
 
 func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uint16, msgoptions *edns0.MsgOptions, m *dns.Msg) bool {

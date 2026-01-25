@@ -491,7 +491,7 @@ func DnssecGenDS() error {
 	}
 
 	// Filter keys for the specified zone and optionally keyid
-	ksks := []tdns.DnssecKey{}
+	ksks := make([]tdns.DnssecKey, 0, len(tr.Dnskeys))
 	for k, v := range tr.Dnskeys {
 		parts := strings.Split(k, "::")
 		if len(parts) != 2 {
@@ -508,6 +508,7 @@ func DnssecGenDS() error {
 		if err != nil {
 			continue
 		}
+		v.Keyid = uint16(parsedKeyid)
 
 		// If --keyid was specified, filter by it
 		if keyid != 0 && uint16(parsedKeyid) != uint16(keyid) {
@@ -523,6 +524,10 @@ func DnssecGenDS() error {
 		}
 
 		ksks = append(ksks, v)
+
+		sort.Slice(ksks, func(i, j int) bool {
+			return ksks[i].Keyid < ksks[j].Keyid
+		})
 	}
 
 	if len(ksks) == 0 {

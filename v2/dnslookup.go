@@ -1956,13 +1956,18 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		case dns.TypeCNAME:
 			rrset.RRs = append(rrset.RRs, rr)
 			target := rr.(*dns.CNAME).Target
-			tmprrset, rcode, context, err := imr.chaseCNAME(ctx, target, qtype, force, requireEncrypted)
+			tmprrset, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, target, qtype, force, requireEncrypted)
 			if err != nil {
 				return nil, rcode, context, transport, err, true
 			}
 			if tmprrset != nil && len(tmprrset.RRs) != 0 {
 				rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
 				if tmprrset.RRs[0].Header().Rrtype != dns.TypeCNAME {
+					// Combine transports: downgrade to unencrypted if any hop was unencrypted
+					combinedTransport := chaseTransport
+					if !core.IsEncryptedTransport(transport) || !core.IsEncryptedTransport(chaseTransport) {
+						combinedTransport = core.TransportDo53
+					}
 					imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 						Name:       qname,
 						RRtype:     qtype,
@@ -1972,9 +1977,9 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 						// Should there not be some state here? State:      vstate,
 						State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
-						Transport:  transport, // Transport from handleAnswer
+						Transport:  combinedTransport, // Combined transport from initial query and CNAME chase
 					})
-					return &rrset, rcode, cache.ContextAnswer, transport, nil, true
+					return &rrset, rcode, cache.ContextAnswer, combinedTransport, nil, true
 				}
 			}
 		default:
@@ -2800,40 +2805,50 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
-func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, error) {
+func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	maxchase := 10
 	cur := target
+	var combinedTransport core.Transport = core.TransportDoQ // Start with encrypted, will downgrade if needed
+	hasUnencryptedHop := false
 	for i := 0; i < maxchase; i++ {
 		select {
 		case <-ctx.Done():
-			return nil, 0, cache.ContextFailure, ctx.Err()
+			return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
 		default:
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", cur)
 		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZone(cur)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZone: %v", err)
-			return nil, dns.RcodeServerFailure, cache.ContextFailure, err
+			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
-		tmprrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, requireEncrypted)
+		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, requireEncrypted)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
-			return nil, rcode, context, err
+			return nil, rcode, context, core.TransportDo53, err
+		}
+		// Track if any hop used unencrypted transport
+		if !core.IsEncryptedTransport(hopTransport) {
+			hasUnencryptedHop = true
+			combinedTransport = core.TransportDo53
+		} else if !hasUnencryptedHop {
+			// Only update if we haven't seen an unencrypted hop yet
+			combinedTransport = hopTransport
 		}
 		if tmprrset != nil && len(tmprrset.RRs) != 0 {
 			if tmprrset.RRs[0].Header().Rrtype == dns.TypeCNAME {
 				cur = tmprrset.RRs[0].(*dns.CNAME).Target
 				continue
 			}
-			return tmprrset, rcode, context, nil
+			return tmprrset, rcode, context, combinedTransport, nil
 		}
 		if rcode == dns.RcodeNameError {
 			// Cache negative for the original qname will be handled by caller
-			return nil, rcode, context, nil
+			return nil, rcode, context, combinedTransport, nil
 		}
 	}
-	return nil, dns.RcodeServerFailure, cache.ContextFailure, fmt.Errorf("CNAME chase exceeded max depth")
+	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("CNAME chase exceeded max depth")
 }
 
 func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RRset, error) {

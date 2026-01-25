@@ -45,7 +45,7 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	msgoptions.CO = (opt.Hdr.Ttl & (1 << 14)) != 0
 
 	// Extract PR bit (Privacy Requested) - bit 12 (requires encrypted transport)
-	msgoptions.PR = (opt.Hdr.Ttl & (1 << 12)) != 0
+	msgoptions.PR = (opt.Hdr.Ttl & (1 << EDNS0_PR_FLAG_BIT)) != 0
 
 	// Loop once through all EDNS0 options and extract them based on their code
 	for _, option := range opt.Option {

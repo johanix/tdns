@@ -162,6 +162,7 @@ func initImr() {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	go func() {
+		defer signal.Stop(hup)
 		for {
 			select {
 			case <-appCtx.Done():
