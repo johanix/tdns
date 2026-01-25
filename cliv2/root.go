@@ -1,9 +1,10 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
-package cmd
+package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -32,6 +33,12 @@ var rootCmd = &cobra.Command{
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	cobra.CheckErr(rootCmd.Execute())
+}
+
+// ExecuteContext adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main() with a context for signal handling.
+func ExecuteContext(ctx context.Context) {
+	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
 }
 
 func init() {

@@ -1,6 +1,6 @@
 module github.com/johanix/tdns/v2/hpke
 
-go 1.25.4
+go 1.25.2
 
 require (
 	github.com/cloudflare/circl v1.6.2

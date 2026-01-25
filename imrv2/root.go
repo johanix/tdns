@@ -1,0 +1,185 @@
+/*
+ * Copyright (c) 2025 Johan Stenstam, johani@johani.org
+ */
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
+	tdns "github.com/johanix/tdns/v2"
+	cli "github.com/johanix/tdns/v2/cli"
+)
+
+var cfgFile, cfgFileUsed string
+var LocalConfig string
+
+var cliflag bool
+var appCtx context.Context
+var appCancel context.CancelFunc
+
+var rootCmd = &cobra.Command{
+	Use:   "tdns-imr",
+	Short: "Interactive DNS lookup tool",
+	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		if cliflag {
+			cli.StartInteractiveMode() // old go-prompt version
+			// StartInteractiveMode() // old go-prompt version
+			// startReadlineMode() // new readline version
+			return
+		} else {
+			fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
+			cli.Conf.MainLoop(appCtx, appCancel)
+		}
+	},
+}
+
+// Execute adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main(). It only needs to happen once to the rootCmd.
+func Execute() {
+	cobra.CheckErr(rootCmd.Execute())
+}
+
+// ExecuteContext adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main() with a context. It only needs to happen once to the rootCmd.
+func ExecuteContext(ctx context.Context) {
+	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
+}
+
+func init() {
+	cobra.OnInitialize(initConfig, initImr)
+
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
+		fmt.Sprintf("config file (default is %s)", tdns.DefaultImrCfgFile))
+	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
+	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
+
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
+		false, "debug output")
+	rootCmd.PersistentFlags().BoolVarP(&cliflag, "cli", "", false, "CLI mode")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
+		false, "verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
+		false, "show headers")
+
+	// Add exit and quit commands for interactive mode
+	// rootCmd.AddCommand(exitCmd)
+
+	cli.SetRootCommand(rootCmd)
+	// SetRootCommand(rootCmd)
+}
+
+// initConfig reads in config file and ENV variables if set.
+func initConfig() {
+	if cfgFile != "" {
+		fmt.Printf("tdns-imr: config file is '%s'\n", cfgFile)
+		// Use config file from the flag.
+		viper.SetConfigFile(cfgFile)
+	} else {
+		viper.SetConfigFile(tdns.DefaultImrCfgFile)
+	}
+
+	viper.AutomaticEnv() // read in environment variables that match
+
+	// If a config file is found, read it in.
+	if err := viper.ReadInConfig(); err == nil {
+		if tdns.Globals.Verbose {
+			fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+		}
+		cfgFileUsed = viper.ConfigFileUsed()
+	} else {
+		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
+	}
+
+	LocalConfig = viper.GetString("imr.localconfig")
+	if LocalConfig != "" {
+		_, err := os.Stat(LocalConfig)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Fatalf("Error stat(%s): %v", LocalConfig, err)
+			}
+			// File doesn't exist, skip merging
+		} else {
+			viper.SetConfigFile(LocalConfig)
+			if err := viper.MergeInConfig(); err != nil {
+				log.Fatalf("Error merging in local config from '%s': %v", LocalConfig, err)
+			} else {
+				if tdns.Globals.Verbose {
+					fmt.Printf("Merging in local config from '%s'\n", LocalConfig)
+				}
+			}
+		}
+	}
+
+	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
+	err := viper.Unmarshal(&cli.Conf)
+	if err != nil {
+		log.Printf("Error from viper.UnMarshal(cfg): %v", err)
+	}
+}
+
+// initImr initializes the application, prepares configuration, sets up the IMR API router, and starts the IMR service.
+// 
+// It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
+func initImr() {
+	// Get context from cobra command context
+	appCtx = rootCmd.Context()
+	if appCtx == nil {
+		// Fallback if context is not set (should not happen with ExecuteContext)
+		appCtx = context.Background()
+	}
+	
+	// Create a cancel function for MainLoop by wrapping the context
+	// This allows MainLoop to cancel the context when APIStopCh is closed
+	var cancel context.CancelFunc
+	appCtx, cancel = context.WithCancel(appCtx)
+	appCancel = cancel
+
+	if tdns.Globals.Debug {
+		fmt.Printf("initImr: Calling conf.MainInit(\"\") // Empty string means derive from Globals.App.Name\n")
+	}
+
+	err := cli.Conf.MainInit(appCtx, "") // Empty string means derive from Globals.App.Name
+	if err != nil {
+		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
+	}
+
+	if tdns.Globals.Debug {
+		fmt.Printf("initImr: Calling conf.StartImr()\n")
+	}
+
+	// SIGHUP reload watcher
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func(ctx context.Context, hup chan os.Signal) {
+		defer signal.Stop(hup)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				if _, err := cli.Conf.ParseZones(ctx, true); err != nil {
+					log.Printf("SIGHUP reload failed: %v", err)
+				}
+			}
+		}
+	}(appCtx, hup)
+
+	imrrouter, err := cli.Conf.SetupSimpleAPIRouter(appCtx)
+	if err != nil {
+		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error setting up IMR API router: %v", err))
+	}
+	err = cli.Conf.StartImr(appCtx, imrrouter)
+	if err != nil {
+		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error starting threads: %v", err))
+	}
+}

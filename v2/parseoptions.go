@@ -38,11 +38,21 @@ func (conf *Config) parseImrOptions() {
 		}
 
 		switch imrOpt {
-		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport, ImrOptQueryForTransportTLSA, ImrOptUseTransportSignals:
+		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport, ImrOptQueryForTransportTLSA:
 			if optval != "" {
 				log.Printf("ParseConfig: IMR option %q does not accept a value; provided value %q will be ignored", key, optval)
 			}
 			clean[imrOpt] = "true"
+		case ImrOptUseTransportSignals:
+			// This option is now opt-out: enabled by default, only disabled if explicitly set to false
+			if optval == "false" {
+				clean[imrOpt] = "false"
+			} else {
+				if optval != "" && optval != "true" {
+					log.Printf("ParseConfig: IMR option %q has invalid value %q (use 'false' to disable); ignoring", key, optval)
+				}
+				// Default to enabled (don't set in map, absence = enabled)
+			}
 		case ImrOptTransportSignalType:
 			val := strings.ToLower(optval)
 			if val == "" {

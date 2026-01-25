@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/johanix/tdns/v2"
@@ -198,6 +199,24 @@ var keystoreDnssecSetStateCmd = &cobra.Command{
 	},
 }
 
+var keystoreDnssecGenDSCmd = &cobra.Command{
+	Use:   "gen-ds",
+	Short: "Generate DS records for a zone's KSK(s) from the keystore",
+	Long:  `Generate DS (Delegation Signer) records for a zone's KSK (Key Signing Key) DNSKEY records stored in the keystore. The command queries the keystore for DNSKEY records for the specified zone, filters for KSKs (keys with the SEP bit set), and generates DS records using SHA-256 and SHA-384 digest algorithms. If --keyid is not specified, DS records are generated for all KSKs in the zone.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		if keyid < 0 || keyid > 65535 {
+			fmt.Printf("Error: keyid must be between 0 and 65535, got %d\n", keyid)
+			os.Exit(1)
+		}
+		err := DnssecGenDS()
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	// rootCmd.AddCommand(KeystoreCmd)
 	KeystoreCmd.AddCommand(keystoreSig0Cmd, keystoreDnssecCmd)
@@ -206,10 +225,12 @@ func init() {
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
-	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd)
+	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd, keystoreDnssecGenDSCmd)
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreSig0AddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreSig0ImportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import SIG(0) key for")
 	keystoreSig0ImportCmd.MarkFlagRequired("file")
 	keystoreSig0AddCmd.MarkFlagRequired("file")
 	keystoreSig0AddCmd.MarkFlagRequired("zone")
@@ -222,7 +243,9 @@ func init() {
 	keystoreSig0GenerateCmd.MarkFlagRequired("state")
 
 	keystoreDnssecAddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreDnssecAddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add DNSSEC key for")
 	keystoreDnssecImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreDnssecImportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import DNSSEC key for")
 	keystoreDnssecImportCmd.MarkFlagRequired("file")
 	keystoreDnssecAddCmd.MarkFlagRequired("file")
 	keystoreDnssecAddCmd.MarkFlagRequired("zone")
@@ -236,6 +259,10 @@ func init() {
 	keystoreDnssecGenerateCmd.MarkFlagRequired("keytype")
 	keystoreDnssecGenerateCmd.MarkFlagRequired("state")
 	// keystoreDnssecGenerateCmd.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
+
+	keystoreDnssecGenDSCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to generate DS records for")
+	keystoreDnssecGenDSCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of specific KSK to generate DS for (optional, if not specified, generates for all KSKs)")
+	keystoreDnssecGenDSCmd.MarkFlagRequired("zone")
 }
 
 func Sig0KeyMgmt(cmd string) error {
@@ -436,6 +463,135 @@ func DnssecKeyMgmt(cmd string) error {
 	case "add", "import", "generate", "delete", "setstate":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
+		}
+	}
+
+	return nil
+}
+
+func DnssecGenDS() error {
+	prefixcmd, _ := getCommandContext("keystore")
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		return fmt.Errorf("failed to get API client: %w", err)
+	}
+
+	// First, list all DNSSEC keys to find the ones for our zone
+	data := tdns.KeystorePost{
+		Command:    "dnssec-mgmt",
+		SubCommand: "list",
+	}
+
+	tr, err := SendKeystoreCmd(api, data)
+	if err != nil {
+		return fmt.Errorf("error listing DNSSEC keys: %v", err)
+	}
+
+	if tr.Error {
+		return fmt.Errorf("error from keystore: %s", tr.ErrorMsg)
+	}
+
+	if len(tr.Dnskeys) == 0 {
+		fmt.Printf("No DNSSEC keys found in keystore\n")
+		return nil
+	}
+
+	zone := dns.Fqdn(tdns.Globals.Zonename)
+	trimmed := strings.TrimSuffix(zone, ".")
+	if trimmed == "" {
+		return fmt.Errorf("cannot generate DS for root zone")
+	}
+
+	// Filter keys for the specified zone and optionally keyid
+	ksks := make([]tdns.DnssecKey, 0, len(tr.Dnskeys))
+	for k, v := range tr.Dnskeys {
+		parts := strings.Split(k, "::")
+		if len(parts) != 2 {
+			continue
+		}
+		keyZone := dns.Fqdn(parts[0])
+		if keyZone != zone {
+			continue
+		}
+
+		// Parse keyid from the map key
+		keyidStr := parts[1]
+		parsedKeyid, err := strconv.ParseUint(keyidStr, 10, 16)
+		if err != nil {
+			if tdns.Globals.Verbose {
+				fmt.Printf("Warning: skipping key with invalid keyid %s: %v\n", keyidStr, err)
+			}
+			continue
+		}
+		v.Keyid = uint16(parsedKeyid)
+
+		// If --keyid was specified, filter by it
+		if keyid != 0 && uint16(parsedKeyid) != uint16(keyid) {
+			continue
+		}
+
+		// Filter for KSKs (keys with SEP flag bit 0 set, flags & 0x0001 != 0)
+		// Note: SEP flag is bit 0 (0x0001), ZONE flag is bit 8 (0x0100)
+		// ZSK = 256 (0x0100) = only ZONE flag, KSK = 257 (0x0101) = ZONE + SEP flags
+		// For DS generation, we want KSKs (SEP bit 0 set)
+		if v.Flags&0x0001 == 0 {
+			continue
+		}
+
+		ksks = append(ksks, v)
+	}
+
+	// Sort KSKs by Keyid after collecting all of them
+	sort.Slice(ksks, func(i, j int) bool {
+		return ksks[i].Keyid < ksks[j].Keyid
+	})
+
+	if len(ksks) == 0 {
+		if keyid != 0 {
+			fmt.Printf("No KSK with keyid %d found for zone %s\n", keyid, zone)
+		} else {
+			fmt.Printf("No KSK (Key Signing Key) found for zone %s\n", zone)
+			fmt.Println("KSKs are identified by having the SEP (Secure Entry Point) bit set (flags & 0x0001 != 0)")
+		}
+		return nil
+	}
+
+	fmt.Printf("Found %d KSK(s) for zone %s\n\n", len(ksks), zone)
+	fmt.Println("DS records (for parent zone):")
+	fmt.Println()
+
+	// Generate DS records for each KSK using SHA-256 and SHA-384
+	for i, ksk := range ksks {
+		// Parse the DNSKEY record from Keystr (the Key field may not be populated)
+		rr, err := dns.NewRR(ksk.Keystr)
+		if err != nil {
+			fmt.Printf("Error parsing DNSKEY record for keyid %d: %v\n", ksk.Keyid, err)
+			continue
+		}
+		dnskey, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			fmt.Printf("Error: keyid %d is not a DNSKEY record\n", ksk.Keyid)
+			continue
+		}
+
+		keytag := dnskey.KeyTag()
+		algorithm := dnskey.Algorithm
+		alg := dns.AlgorithmToString[algorithm]
+
+		// Generate DS with SHA-256 (digest type 2)
+		ds256 := dnskey.ToDS(dns.SHA256)
+		if ds256 != nil {
+			fmt.Printf("%s. IN DS %d %d %d %s ; %s (SHA-256)\n", trimmed, keytag, algorithm, dns.SHA256, ds256.Digest, alg)
+		}
+
+		// Generate DS with SHA-384 (digest type 4)
+		ds384 := dnskey.ToDS(dns.SHA384)
+		if ds384 != nil {
+			fmt.Printf("%s. IN DS %d %d %d %s ; %s (SHA-384)\n", trimmed, keytag, algorithm, dns.SHA384, ds384.Digest, alg)
+		}
+
+		if i < len(ksks)-1 {
+			fmt.Println()
 		}
 	}
 

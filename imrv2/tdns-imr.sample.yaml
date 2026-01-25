@@ -3,8 +3,8 @@ imrengine:
    root-hints:          "/etc/tdns/root.hints"   # Optional: path to root hints file. If empty, uses compiled-in hints.
    addresses:           [ 127.0.0.1:99, '[::1]:99']
    transports:          [ do53, dot, doq ]
-   certfile:            /etc/hsync-test/certs/hoola.bandoola..crt
-   keyfile:             /etc/hsync-test/certs/hoola.bandoola..key
+   certfile:            /etc/hsync-test/certs/hoola.bandoola.crt
+   keyfile:             /etc/hsync-test/certs/hoola.bandoola.key
    
    # IMR Options (all are boolean flags, no values needed):
    # - query-for-transport: Query for transport signals opportunistically when observed

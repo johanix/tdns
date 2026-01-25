@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cmd
+package main
 
 import (
 	cli "github.com/johanix/tdns/v2/cli"

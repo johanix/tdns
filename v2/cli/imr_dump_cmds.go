@@ -135,6 +135,10 @@ var dumpAuthServersCmd = &cobra.Command{
 					if len(server.TransportSignal) > 0 {
 						fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
 					}
+					// Show transport usage counters
+					if counters := formatTransportCounters(server); counters != "" {
+						fmt.Printf("    Transport usage: %s\n", counters)
+					}
 					if tlsaSnapshot := server.SnapshotTLSARecords(); len(tlsaSnapshot) > 0 {
 						fmt.Printf("    TLSA records:\n")
 						var owners []string
@@ -454,7 +458,14 @@ var dumpDnskeysCmd = &cobra.Command{
 				if stateStr == "" {
 					stateStr = "none"
 				}
-				fmt.Printf("\n%s DS (state: %s%s, TTL: %s)\n", owner, stateStr, signerInfo, ov.ds.expires)
+				// Get transport from cached DS RRset if available
+				transportStr := "unknown"
+				if Conf.Internal.RRsetCache != nil {
+					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDS); c != nil {
+						transportStr = formatTransport(c.Transport)
+					}
+				}
+				fmt.Printf("\n%s DS (state: %s%s, transport: %s, TTL: %s)\n", owner, stateStr, signerInfo, transportStr, ov.ds.expires)
 				for _, s := range ov.ds.rrs {
 					fmt.Printf("  %s\n", maskDsLine(s))
 				}
@@ -483,7 +494,14 @@ var dumpDnskeysCmd = &cobra.Command{
 					}
 				}
 
-				fmt.Printf("\n%s DNSKEY (state: %s%s, TTL: %s)\n", owner, stateStr, signerInfo, rrsetTTL)
+				// Get transport from cached DNSKEY RRset
+				transportStr := "unknown"
+				if Conf.Internal.RRsetCache != nil {
+					if c := Conf.Internal.RRsetCache.Get(owner, dns.TypeDNSKEY); c != nil {
+						transportStr = formatTransport(c.Transport)
+					}
+				}
+				fmt.Printf("\n%s DNSKEY (state: %s%s, transport: %s, TTL: %s)\n", owner, stateStr, signerInfo, transportStr, rrsetTTL)
 				lines := []string{"KeyID | Flags | TTL | Details"}
 				for _, v := range ov.dnskey {
 					ta := ""
@@ -538,6 +556,44 @@ func formatTransportWeights(server *cache.AuthServer) string {
 	return "[]"
 }
 
+// formatTransport formats a transport value for display.
+// Returns the transport name (doq, dot, doh, do53) or "unknown" if invalid.
+func formatTransport(t core.Transport) string {
+	if t == 0 {
+		return "unknown"
+	}
+	if name, ok := core.TransportToString[t]; ok {
+		return name
+	}
+	return "unknown"
+}
+
+// formatTransportCounters formats the transport usage counters for display.
+// Returns a string showing queries sent per transport, ordered by transport type.
+// Example: "doq:1234 dot:567 do53:89"
+func formatTransportCounters(server *cache.AuthServer) string {
+	if server == nil {
+		return ""
+	}
+	counters := server.SnapshotTransportCounters()
+	if len(counters) == 0 {
+		return "none"
+	}
+	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
+	var parts []string
+	var total uint64
+	for _, t := range order {
+		if count, ok := counters[t]; ok && count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], count))
+			total += count
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return fmt.Sprintf("%s (total: %d)", strings.Join(parts, " "), total)
+}
+
 // If the state has no known mapping, it returns "[unset]".
 func validationStateString(state cache.ValidationState) string {
 	if s := cache.ValidationStateToString[state]; s != "" {
@@ -548,7 +604,7 @@ func validationStateString(state cache.ValidationState) string {
 
 // printAuthServerVerbose prints detailed information about the given auth server.
 // It emits the server name, source, addresses, ALPN values, transport weights or transports,
-// connection mode, and an optional raw transport signal. If TLSA records are available it
+// connection mode, transport counters, and an optional raw transport signal. If TLSA records are available it
 // lists each owner with validation state, TTL, expiration and the associated RRs and RRSIG count;
 // otherwise it prints that no TLSA records are present.
 func printAuthServerVerbose(name string, server *cache.AuthServer) {
@@ -560,6 +616,10 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {
 		fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
+	}
+	// Show transport usage counters
+	if counters := formatTransportCounters(server); counters != "" {
+		fmt.Printf("    Transport usage: %s\n", counters)
 	}
 	if tlsaSnapshot := server.SnapshotTLSARecords(); len(tlsaSnapshot) > 0 {
 		fmt.Printf("    TLSA records:\n")
@@ -715,7 +775,8 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 	rrtype := dns.TypeToString[uint16(tmp)]
 	stateStr := validationStateString(item.Val.State)
 	ttlStr := tdns.TtlPrint(item.Val.Expiration)
-	fmt.Printf("\n%s %s (state: %s, TTL: %s)\n", parts[0], rrtype, stateStr, ttlStr)
+	transportStr := formatTransport(item.Val.Transport)
+	fmt.Printf("\n%s %s (state: %s, transport: %s, TTL: %s)\n", parts[0], rrtype, stateStr, transportStr, ttlStr)
 
 	switch item.Val.Context {
 	case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:

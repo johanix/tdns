@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )
@@ -385,9 +386,45 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 	for _, rr := range m.Extra {
 		switch rr := rr.(type) {
 		case *dns.OPT:
-			fmt.Printf(";; EDNS: version: %d, flags: MRF, udp: %d\n", rr.Version(), rr.UDPSize())
+			// Extract and display EDNS0 flags
+			flags := []string{}
+			if rr.Do() {
+				flags = append(flags, "do")
+			}
+			if (rr.Hdr.Ttl & (1 << 14)) != 0 {
+				flags = append(flags, "co")
+			}
+			if (rr.Hdr.Ttl & (1 << 13)) != 0 {
+				// Bit 13 is DE (Delegation Extension)
+				flags = append(flags, "de")
+			}
+			if (rr.Hdr.Ttl & (1 << 12)) != 0 {
+				// Bit 12 is PR (Privacy Requested)
+				flags = append(flags, "pr")
+			}
+			flagsStr := ""
+			if len(flags) > 0 {
+				flagsStr = " " + strings.Join(flags, " ")
+			}
+			fmt.Printf(";; EDNS: version: %d, flags:%s; udp: %d\n", rr.Version(), flagsStr, rr.UDPSize())
 			for _, option := range rr.Option {
-				fmt.Printf(";; EDNS: option: %s\n", option.String())
+				// Format EDE options specially to avoid duplicate text from miekg/dns library
+				if ede, ok := option.(*dns.EDNS0_EDE); ok {
+					edeText := ede.ExtraText
+					if edeText == "" {
+						// Try to get text from our mapping or miekg/dns mapping
+						if s, ok := edns0.EDECodeToString[ede.InfoCode]; ok {
+							edeText = s
+						} else if s, ok := dns.ExtendedErrorCodeToString[ede.InfoCode]; ok {
+							edeText = s
+						} else {
+							edeText = fmt.Sprintf("Unknown EDE code: %d", ede.InfoCode)
+						}
+					}
+					fmt.Printf(";; EDNS: option: %d (%s)\n", ede.InfoCode, edeText)
+				} else {
+					fmt.Printf(";; EDNS: option: %s\n", option.String())
+				}
 			}
 		}
 	}
@@ -411,6 +448,10 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 	}
 	fmt.Printf("\n;; ADDITIONAL SECTION:\n")
 	for _, rr := range m.Extra {
+		// Skip OPT RR - we already printed it above with custom format
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
 		if err = PrintRR(rr, leftpad, options); err != nil {
 			fmt.Printf("Error from PrintRR: %v\n", err)
 		}

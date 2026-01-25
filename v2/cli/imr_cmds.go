@@ -286,6 +286,11 @@ func newFlushRunner(keepStructural bool) func(cmd *cobra.Command, args []string)
 			fmt.Println("RRset cache is not initialized")
 			return
 		}
+		if len(args) == 0 {
+			fmt.Println("Error: domain name is required")
+			cmd.Help()
+			return
+		}
 		domain := dns.Fqdn(args[0])
 		trimmed := strings.TrimSuffix(domain, ".")
 		if trimmed == "" {

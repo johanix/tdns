@@ -2,9 +2,10 @@
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
 
-package cmd
+package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -62,6 +63,7 @@ var rootCmd = &cobra.Command{
 		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
 		+DO_BIT: Set the DO (DNSEC OK) bit
 		+DELEG: Set the DELEG bit in queries
+		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
 		+MULTI: Present RRs in multi-line format
 	`,
 
@@ -146,6 +148,23 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Warn if PR flag is set but transport is unencrypted
+		// TODO: Once resolver supports encrypted transports, change this to hard fail
+		if options["pr_bit"] == "true" {
+			transportStr := options["transport"]
+			transport, err := core.StringToTransport(transportStr)
+			if err != nil {
+				fmt.Printf("Error: invalid transport %s: %v\n", transportStr, err)
+				os.Exit(1)
+			}
+			if !core.IsEncryptedTransport(transport) {
+				// Hard fail (commented out until resolver supports encrypted transports):
+				// fmt.Printf("Error: PR (Privacy Requested) flag requires encrypted transport, but %s is unencrypted\n", transportStr)
+				// os.Exit(1)
+				fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but transport %s is unencrypted. This is unsafe and leaks information.\n", transportStr)
+			}
+		}
+
 		if rrtype == 0 {
 			rrtype = dns.TypeA
 		}
@@ -164,7 +183,8 @@ var rootCmd = &cobra.Command{
 		}
 
 		if tdns.Globals.Debug {
-			fmt.Printf("*** Will send %s to server %s using transport %s\n", options["opcode"], options["server"], options["transport"])
+			fmt.Printf("*** Will send %s to server %s using transport %s, port %s\n",
+				options["opcode"], options["server"], options["transport"], options["port"])
 		}
 
 		for _, qname := range cleanArgs {
@@ -217,8 +237,12 @@ var rootCmd = &cobra.Command{
 					opt.Hdr.Ttl |= 1 << 14
 				}
 				if options["de_bit"] == "true" {
-					// Set DE bit (bit 13)
+					// Set DE bit (bit 13) - Delegation Extension
 					opt.Hdr.Ttl |= 1 << 13
+				}
+				if options["pr_bit"] == "true" {
+					// Set PR bit (bit 12) - Privacy Requested
+					opt.Hdr.Ttl |= 1 << 12
 				}
 				if ots, ok := options["ots"]; ok {
 					var otsValue uint8
@@ -289,9 +313,29 @@ var rootCmd = &cobra.Command{
 				} else {
 					options["transport"] = transport
 				}
+
+				// Warn if PR flag is set but transport is unencrypted
+				// TODO: Once resolver supports encrypted transports, change this to hard fail
+				if options["pr_bit"] == "true" {
+					if !core.IsEncryptedTransport(t) {
+						// Hard fail (commented out until resolver supports encrypted transports):
+						// fmt.Printf("Error: PR (Privacy Requested) flag requires encrypted transport, but %s is unencrypted\n", options["transport"])
+						// os.Exit(1)
+						fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but transport %s is unencrypted. This is unsafe and leaks information.\n", options["transport"])
+					}
+				}
+
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
+					// Warn if PR flag is set and we're falling back to unencrypted TCP
+					// TODO: Once resolver supports encrypted transports, change this to hard fail
+					if options["pr_bit"] == "true" {
+						// Hard fail (commented out until resolver supports encrypted transports):
+						// fmt.Printf("Error: PR (Privacy Requested) flag requires encrypted transport, but response was truncated and fallback to Do53-TCP is unencrypted\n")
+						// os.Exit(1)
+						fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but response was truncated, falling back to unencrypted Do53-TCP. This is unsafe and leaks information.\n")
+					}
 					fmt.Println(";; Truncated UDP response received; retrying over TCP")
 					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, core.WithForceTCP())
 					res, _, err = tcpClient.Exchange(m, server, false)
@@ -314,6 +358,15 @@ var rootCmd = &cobra.Command{
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
+// ExecuteContext adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main() with a context for signal handling.
+func ExecuteContext(ctx context.Context) {
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -345,6 +398,9 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		return options, nil
 	case "+DELEG", "+DE":
 		options["de_bit"] = "true"
+		return options, nil
+	case "+PRIVACY", "+PR":
+		options["pr_bit"] = "true"
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"

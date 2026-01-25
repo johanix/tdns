@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Johan Stenstam, johani@johani.org
+ * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
 package main
 
@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+	tdns.Globals.App.Type = tdns.AppTypeImr
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Date = appDate

@@ -682,6 +682,16 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		if rrcache.Verbose {
 			log.Printf("ValidateDNSKEYs: no DS-backed DNSKEY/RRSIG combination validated for %s", name)
 		}
+		// Store the DNSKEY RRset as bogus with EDE code 9 (DNSKEY Missing/No DNSKEY matches DS)
+		// This ensures that dependent RRsets can retrieve the EDE info via lookupDnskeyEDE
+		edeText := fmt.Sprintf("No DNSKEY matches DS RRs of %s", name)
+		rrcache.MarkRRsetBogus(name, dns.TypeDNSKEY, rrset, true)
+		// Update the cached entry with the specific EDE code and text
+		if cached := rrcache.Get(name, dns.TypeDNSKEY); cached != nil {
+			cached.EDECode = 9 // RFC 8914: DNSKEY Missing
+			cached.EDEText = edeText
+			rrcache.Set(name, dns.TypeDNSKEY, cached)
+		}
 		return ValidationStateBogus, nil
 	}
 
@@ -738,6 +748,16 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			return ValidationStateSecure, nil
 		}
 		// none of the TA keys validated, return bogus
+		// Store the DNSKEY RRset as bogus with EDE code 9 (DNSKEY Missing/No DNSKEY matches DS)
+		// This ensures that dependent RRsets can retrieve the EDE info via lookupDnskeyEDE
+		edeText := fmt.Sprintf("No DNSKEY matches DS RRs of %s", name)
+		rrcache.MarkRRsetBogus(name, dns.TypeDNSKEY, rrset, true)
+		// Update the cached entry with the specific EDE code and text
+		if cached := rrcache.Get(name, dns.TypeDNSKEY); cached != nil {
+			cached.EDECode = 9 // RFC 8914: DNSKEY Missing
+			cached.EDEText = edeText
+			rrcache.Set(name, dns.TypeDNSKEY, cached)
+		}
 		return ValidationStateBogus, nil
 	}
 
@@ -786,6 +806,16 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		// None of the seeded DS records validated
 		if rrcache.Verbose {
 			log.Printf("ValidateDNSKEYs: no DNSKEY/RRSIG combination validated against seeded DS for %s", name)
+		}
+		// Store the DNSKEY RRset as bogus with EDE code 9 (DNSKEY Missing/No DNSKEY matches DS)
+		// This ensures that dependent RRsets can retrieve the EDE info via lookupDnskeyEDE
+		edeText := fmt.Sprintf("No DNSKEY matches DS RRs of %s", name)
+		rrcache.MarkRRsetBogus(name, dns.TypeDNSKEY, rrset, true)
+		// Update the cached entry with the specific EDE code and text
+		if cached := rrcache.Get(name, dns.TypeDNSKEY); cached != nil {
+			cached.EDECode = 9 // RFC 8914: DNSKEY Missing
+			cached.EDEText = edeText
+			rrcache.Set(name, dns.TypeDNSKEY, cached)
 		}
 		return ValidationStateBogus, nil
 	}

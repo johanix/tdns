@@ -288,7 +288,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		case len(authservers) == 0:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
-				rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, false) // PR not required for resolveNSAddresses
 				if err != nil {
 					log.Printf("Error from IterativeDNSQuery: %v", err)
 					// return false, nil // Continue trying
@@ -350,7 +350,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			log.Printf("ImrQuery: sending query \"%s %s\" to %d auth servers: %s", qname, dns.TypeToString[qtype], len(authservers), strings.Join(auths, ", "))
 		}
 
-		rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+		rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, false) // PR not required for resolveNSAddresses
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -489,6 +489,15 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {
+		// PR flag enforcement: if PR is set, skip cached data that came over unencrypted transport
+		if msgoptions.PR && !core.IsEncryptedTransport(crrset.Transport) {
+			if Globals.Debug {
+				log.Printf("ImrResponder: PR flag set but cached data for %s %s came over unencrypted transport (%s), skipping cache", qname, dns.TypeToString[qtype], core.TransportToString[crrset.Transport])
+			}
+			crrset = nil // Force query over encrypted transport
+		}
+	}
+	if crrset != nil {
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
 			m.SetRcode(r, dns.RcodeNameError)
@@ -501,6 +510,12 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			//	m.AuthenticatedData = true
 			// }
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			// Set PR flag in response if Answer came over encrypted transport
+			if core.IsEncryptedTransport(crrset.Transport) {
+				if err := edns0.SetPRFlagInMessage(m); err != nil {
+					log.Printf("ImrResponder: failed to set PR flag in response: %v", err)
+				}
+			}
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns &&
@@ -515,16 +530,39 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			//	m.AuthenticatedData = true
 			// }
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			// Set PR flag in response if Answer came over encrypted transport
+			if core.IsEncryptedTransport(crrset.Transport) {
+				if err := edns0.SetPRFlagInMessage(m); err != nil {
+					log.Printf("ImrResponder: failed to set PR flag in response: %v", err)
+				}
+			}
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
 			crrset.RRset != nil && crrset.RRset.RRtype == qtype:
 			if !msgoptions.CD && (crrset.EDECode != 0 || crrset.State == cache.ValidationStateBogus) {
+				if Globals.Debug {
+					log.Printf("ImrResponder: returning SERVFAIL for bogus cached data: qname=%s, qtype=%s, EDECode=%d, State=%s", qname, dns.TypeToString[qtype], crrset.EDECode, cache.ValidationStateToString[crrset.State])
+				}
 				m.Answer = nil
 				m.Ns = nil
 				m.SetRcode(r, dns.RcodeServerFailure)
-				if crrset.EDECode != 0 {
+				// Attach EDE if query had EDNS0 (check if request had OPT RR)
+				hasEDNS0 := r.IsEdns0() != nil
+				if Globals.Debug {
+					log.Printf("ImrResponder: hasEDNS0=%v, EDECode=%d, State=%s", hasEDNS0, crrset.EDECode, cache.ValidationStateToString[crrset.State])
+				}
+				if crrset.EDECode != 0 && hasEDNS0 {
 					edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
+					if Globals.Debug {
+						log.Printf("ImrResponder: attached EDE code %d to response", crrset.EDECode)
+					}
+				} else if crrset.State == cache.ValidationStateBogus && hasEDNS0 {
+					// Attach EDE 6 (DNSSEC Bogus) if no specific EDE code is set and query had EDNS0
+					edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+					if Globals.Debug {
+						log.Printf("ImrResponder: attached EDE 6 (DNSSEC Bogus) to response")
+					}
 				}
 				w.WriteMsg(m)
 				return
@@ -538,6 +576,12 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			//	m.AuthenticatedData = true
 			// }
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			// Set PR flag in response if Answer came over encrypted transport
+			if core.IsEncryptedTransport(crrset.Transport) {
+				if err := edns0.SetPRFlagInMessage(m); err != nil {
+					log.Printf("ImrResponder: failed to set PR flag in response: %v", err)
+				}
+			}
 			w.WriteMsg(m)
 			return
 		}
@@ -572,12 +616,12 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// We try the query for each address we discover, similar to the original code.
 				done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 					// Try querying with the current set of authservers
-					rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+					rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.PR)
 					if err != nil {
 						log.Printf("Error from IterativeDNSQuery: %v", err)
 						return false, nil // Continue trying with next address
 					}
-					done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
+					done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r, transport)
 					if err != nil {
 						return true, err // Error occurred, stop trying
 					}
@@ -605,13 +649,30 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				log.Printf("ImrResponder: sending \"%s %s\" query to %d authservers for %q", qname, dns.TypeToString[qtype],
 					len(authservers), bestmatch)
 			}
-			rrset, rcode, context, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false)
+			rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.PR)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
+				// If PR flag is set and we can't get encrypted transport, return SERVFAIL+EDE
+				if msgoptions.PR && strings.Contains(err.Error(), "PR flag requires encrypted transport") {
+					m.SetRcode(r, dns.RcodeServerFailure)
+					// Attach EDE only if query had EDNS0
+					if r.IsEdns0() != nil {
+						// Include zone name in EDE text for better diagnostics
+						var edeText string
+						if bestmatch != "" {
+							edeText = fmt.Sprintf("Privacy requested but only unencrypted transport available for zone %s", bestmatch)
+						} else {
+							edeText = "Privacy requested but only unencrypted transport available"
+						}
+						edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
+					}
+					w.WriteMsg(m)
+					return
+				}
 				w.WriteMsg(m)
 				return
 			}
-			done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r)
+			done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r, transport)
 			if err != nil {
 				return
 			}
@@ -634,7 +695,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 // returns true if we have a response (i.e. we're done), false if we have an error
 // all errors are treated as "done"
-func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context cache.CacheContext, msgoptions *edns0.MsgOptions, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg) (bool, error) {
+func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context cache.CacheContext, msgoptions *edns0.MsgOptions, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg, transport core.Transport) (bool, error) {
 	log.Printf("ProcessAuthDNSResponse: qname: %q, rrset: %+v, rcode: %d, context: %d, DO: %v, CD: %v", qname, rrset, rcode, context, msgoptions.DO, msgoptions.CD)
 	m.SetRcode(r, rcode)
 	if rrset != nil {
@@ -645,6 +706,12 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		m.Answer = rrset.RRs
 		if msgoptions.DO {
 			m.Answer = append(m.Answer, rrset.RRSIGs...)
+		}
+		// Set PR flag in response if Answer came over encrypted transport
+		if core.IsEncryptedTransport(transport) {
+			if err := edns0.SetPRFlagInMessage(m); err != nil {
+				log.Printf("ProcessAuthDNSResponse: failed to set PR flag in response: %v", err)
+			}
 		}
 		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
 		vstate := cache.ValidationStateNone
@@ -658,6 +725,10 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 				if err != nil {
 					log.Printf("ProcessAuthDNSResponse: failed to validate RRset: %v", err)
 					m.SetRcode(r, dns.RcodeServerFailure)
+					// Attach EDE 6 (DNSSEC Bogus) if validation failed and query had EDNS0
+					if r.IsEdns0() != nil {
+						edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+					}
 					w.WriteMsg(m)
 					return false, err
 				}
@@ -672,14 +743,28 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			w.WriteMsg(m)
 			return true, nil
 		}
-
+		// Validation was attempted but failed (bogus or indeterminate)
+		if vstate == cache.ValidationStateBogus {
+			m.Answer = nil
+			m.Ns = nil
+			m.SetRcode(r, dns.RcodeServerFailure)
+			edeCode, edeText := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO)
+			// Attach EDE if query had EDNS0 (check if request had OPT RR)
+			if r.IsEdns0() != nil {
+				if edeCode != 0 {
+					edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
+				} else {
+					// Attach EDE 6 (DNSSEC Bogus) as fallback if no specific EDE code is available
+					edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+				}
+			}
+			w.WriteMsg(m)
+			return true, nil
+		}
+		// Indeterminate or other validation state - return SERVFAIL without EDE
 		m.Answer = nil
 		m.Ns = nil
 		m.SetRcode(r, dns.RcodeServerFailure)
-		edeCode, edeText := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO)
-		if msgoptions.DO && edeCode != 0 {
-			edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
-		}
 		w.WriteMsg(m)
 		return true, nil
 	}
@@ -813,10 +898,10 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 			if cached.State == cache.ValidationStateSecure {
 				resp.AuthenticatedData = true
 			}
-			attachNegativeEDE(resp, msgoptions, cached)
+			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
 		}
-		attachNegativeEDE(resp, msgoptions, cached)
+		attachNegativeEDE(resp, msgoptions, cached, src)
 		appendSOAFromMsg(src, msgoptions, resp)
 		return true
 	}
@@ -828,7 +913,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 			if cached.State == cache.ValidationStateSecure && msgoptions.DO {
 				resp.AuthenticatedData = true
 			}
-			attachNegativeEDE(resp, msgoptions, cached)
+			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
 		}
 	}
@@ -837,7 +922,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		if cached.State == cache.ValidationStateSecure {
 			resp.AuthenticatedData = true
 		}
-		attachNegativeEDE(resp, msgoptions, cached)
+		attachNegativeEDE(resp, msgoptions, cached, src)
 		return true
 	}
 	neg = buildNegAuthorityFromMsg(src)
@@ -848,19 +933,22 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		if cached != nil {
 			resp.AuthenticatedData = cached.State == cache.ValidationStateSecure
 		}
-		attachNegativeEDE(resp, msgoptions, cached)
+		attachNegativeEDE(resp, msgoptions, cached, src)
 		return true
 	}
-	attachNegativeEDE(resp, msgoptions, cached)
+	attachNegativeEDE(resp, msgoptions, cached, src)
 	appendSOAFromMsg(src, msgoptions, resp)
 	return true
 }
 
-func attachNegativeEDE(resp *dns.Msg, msgoptions *edns0.MsgOptions, cached *cache.CachedRRset) {
+func attachNegativeEDE(resp *dns.Msg, msgoptions *edns0.MsgOptions, cached *cache.CachedRRset, req *dns.Msg) {
 	if resp == nil || cached == nil || cached.EDECode == 0 {
 		return
 	}
-	edns0.AttachEDEToResponseWithText(resp, cached.EDECode, cached.EDEText, msgoptions.DO)
+	// Only attach EDE if the original request had EDNS0
+	if req != nil && req.IsEdns0() != nil {
+		edns0.AttachEDEToResponseWithText(resp, cached.EDECode, cached.EDEText, msgoptions.DO)
+	}
 }
 
 func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uint16, msgoptions *edns0.MsgOptions, m *dns.Msg) bool {
@@ -1368,7 +1456,7 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 // validateNSRRsetForAnchor validates the NS RRset for a trust anchor zone.
 func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer) {
 	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
-	nsRRset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true)
+		nsRRset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true, false) // PR not required for trust anchor initialization
 	if err != nil {
 		log.Printf("initializeImrTrustAnchors: warning: failed to fetch %s NS RRset: %v (continuing)", anchorName, err)
 		return
@@ -1440,7 +1528,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 			return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 		}
 	}
-	rrset, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true)
+	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true, false) // PR not required for trust anchor initialization
 	if err != nil {
 		return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
 	}
