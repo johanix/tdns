@@ -111,7 +111,7 @@ func initConfig() {
 		} else {
 			viper.SetConfigFile(LocalConfig)
 			if err := viper.MergeInConfig(); err != nil {
-				log.Fatalf("Error merging in local config from '%s'", LocalConfig)
+				log.Fatalf("Error merging in local config from '%s': %v", LocalConfig, err)
 			} else {
 				if tdns.Globals.Verbose {
 					fmt.Printf("Merging in local config from '%s'\n", LocalConfig)

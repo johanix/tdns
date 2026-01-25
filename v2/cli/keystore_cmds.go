@@ -224,7 +224,9 @@ func init() {
 	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd, keystoreDnssecGenDSCmd)
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreSig0AddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
 	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreSig0ImportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import SIG(0) key for")
 	keystoreSig0ImportCmd.MarkFlagRequired("file")
 	keystoreSig0AddCmd.MarkFlagRequired("file")
 	keystoreSig0AddCmd.MarkFlagRequired("zone")
@@ -237,7 +239,9 @@ func init() {
 	keystoreSig0GenerateCmd.MarkFlagRequired("state")
 
 	keystoreDnssecAddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreDnssecAddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add DNSSEC key for")
 	keystoreDnssecImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	keystoreDnssecImportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import DNSSEC key for")
 	keystoreDnssecImportCmd.MarkFlagRequired("file")
 	keystoreDnssecAddCmd.MarkFlagRequired("file")
 	keystoreDnssecAddCmd.MarkFlagRequired("zone")
@@ -252,6 +256,7 @@ func init() {
 	keystoreDnssecGenerateCmd.MarkFlagRequired("state")
 	// keystoreDnssecGenerateCmd.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
 
+	keystoreDnssecGenDSCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to generate DS records for")
 	keystoreDnssecGenDSCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of specific KSK to generate DS for (optional, if not specified, generates for all KSKs)")
 	keystoreDnssecGenDSCmd.MarkFlagRequired("zone")
 }
@@ -524,11 +529,12 @@ func DnssecGenDS() error {
 		}
 
 		ksks = append(ksks, v)
-
-		sort.Slice(ksks, func(i, j int) bool {
-			return ksks[i].Keyid < ksks[j].Keyid
-		})
 	}
+
+	// Sort KSKs by Keyid after collecting all of them
+	sort.Slice(ksks, func(i, j int) bool {
+		return ksks[i].Keyid < ksks[j].Keyid
+	})
 
 	if len(ksks) == 0 {
 		if keyid != 0 {
