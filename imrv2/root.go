@@ -108,6 +108,7 @@ func initConfig() {
 			if !os.IsNotExist(err) {
 				log.Fatalf("Error stat(%s): %v", LocalConfig, err)
 			}
+			// File doesn't exist, skip merging
 		} else {
 			viper.SetConfigFile(LocalConfig)
 			if err := viper.MergeInConfig(); err != nil {
@@ -118,7 +119,6 @@ func initConfig() {
 				}
 			}
 		}
-		viper.SetConfigFile(LocalConfig)
 	}
 
 	cli.ValidateConfig(nil, cfgFileUsed) // will terminate on error
@@ -161,19 +161,19 @@ func initImr() {
 	// SIGHUP reload watcher
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
-	go func() {
+	go func(ctx context.Context, hup chan os.Signal) {
 		defer signal.Stop(hup)
 		for {
 			select {
-			case <-appCtx.Done():
+			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, err := cli.Conf.ParseZones(appCtx, true); err != nil {
+				if _, err := cli.Conf.ParseZones(ctx, true); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}
 		}
-	}()
+	}(appCtx, hup)
 
 	imrrouter, err := cli.Conf.SetupSimpleAPIRouter(appCtx)
 	if err != nil {

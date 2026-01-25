@@ -64,12 +64,18 @@ func (b *Backend) ParsePublicKey(data []byte) (crypto.PublicKey, error) {
 	}
 
 	// Verify it's a public key
-	if jwk.IsPublic() {
-		return &publicKey{jwk: jwk}, nil
+	if !jwk.IsPublic() {
+		return nil, crypto.NewBackendError("jose", "parse_public_key",
+			fmt.Errorf("not a public key"))
 	}
 
-	return nil, crypto.NewBackendError("jose", "parse_public_key",
-		fmt.Errorf("not a public key"))
+	// Verify it's an ECDSA key suitable for ECDH-ES (this backend only supports ECDSA P-256)
+	if _, ok := jwk.Key.(*ecdsa.PublicKey); !ok {
+		return nil, crypto.NewBackendError("jose", "parse_public_key",
+			fmt.Errorf("unsupported key type: expected ECDSA public key (P-256)"))
+	}
+
+	return &publicKey{jwk: jwk}, nil
 }
 
 // ParsePrivateKey deserializes a JOSE private key from JWK JSON
@@ -80,12 +86,18 @@ func (b *Backend) ParsePrivateKey(data []byte) (crypto.PrivateKey, error) {
 	}
 
 	// Verify it's a private key (has private key material)
-	if !jwk.IsPublic() {
-		return &privateKey{jwk: jwk}, nil
+	if jwk.IsPublic() {
+		return nil, crypto.NewBackendError("jose", "parse_private_key",
+			fmt.Errorf("not a private key (missing private key material)"))
 	}
 
-	return nil, crypto.NewBackendError("jose", "parse_private_key",
-		fmt.Errorf("not a private key (missing private key material)"))
+	// Verify it's an ECDSA key suitable for ECDH-ES (this backend only supports ECDSA P-256)
+	if _, ok := jwk.Key.(*ecdsa.PrivateKey); !ok {
+		return nil, crypto.NewBackendError("jose", "parse_private_key",
+			fmt.Errorf("unsupported key type: expected ECDSA private key (P-256)"))
+	}
+
+	return &privateKey{jwk: jwk}, nil
 }
 
 // SerializePublicKey serializes a JOSE public key to JWK JSON

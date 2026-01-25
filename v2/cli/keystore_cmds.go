@@ -205,6 +205,10 @@ var keystoreDnssecGenDSCmd = &cobra.Command{
 	Long:  `Generate DS (Delegation Signer) records for a zone's KSK (Key Signing Key) DNSKEY records stored in the keystore. The command queries the keystore for DNSKEY records for the specified zone, filters for KSKs (keys with the SEP bit set), and generates DS records using SHA-256 and SHA-384 digest algorithms. If --keyid is not specified, DS records are generated for all KSKs in the zone.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
+		if keyid < 0 || keyid > 65535 {
+			fmt.Printf("Error: keyid must be between 0 and 65535, got %d\n", keyid)
+			os.Exit(1)
+		}
 		err := DnssecGenDS()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -511,6 +515,9 @@ func DnssecGenDS() error {
 		keyidStr := parts[1]
 		parsedKeyid, err := strconv.ParseUint(keyidStr, 10, 16)
 		if err != nil {
+			if tdns.Globals.Verbose {
+				fmt.Printf("Warning: skipping key with invalid keyid %s: %v\n", keyidStr, err)
+			}
 			continue
 		}
 		v.Keyid = uint16(parsedKeyid)
