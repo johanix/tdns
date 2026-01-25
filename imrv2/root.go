@@ -29,17 +29,16 @@ var rootCmd = &cobra.Command{
 	Use:   "tdns-imr",
 	Short: "Interactive DNS lookup tool",
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
+	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) == 0 {
-			if cliflag {
-				cli.StartInteractiveMode() // old go-prompt version
-				// StartInteractiveMode() // old go-prompt version
-				// startReadlineMode() // new readline version
-				return
-			} else {
-				fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
-				cli.Conf.MainLoop(appCtx, appCancel)
-			}
+		if cliflag {
+			cli.StartInteractiveMode() // old go-prompt version
+			// StartInteractiveMode() // old go-prompt version
+			// startReadlineMode() // new readline version
+			return
+		} else {
+			fmt.Printf("tdns-imr: Starting in daemon mode, no CLI\n")
+			cli.Conf.MainLoop(appCtx, appCancel)
 		}
 	},
 }

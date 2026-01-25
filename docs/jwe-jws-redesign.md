@@ -1,7 +1,7 @@
 # JOSE JWE/JWS Redesign for Encrypted Distributions
 
 ## Document Version
-- **Date**: 2025-01-25
+- **Date**: 2026-01-25
 - **Status**: Design Phase (Pre-Implementation)
 - **Author**: Architecture Review
 - **Project**: TDNS-NM Crypto V2 Enhancement
