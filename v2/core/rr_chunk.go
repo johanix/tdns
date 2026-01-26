@@ -8,13 +8,18 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
+)
+
+var (
+	// ManifestJSONFormat controls whether manifest chunks are displayed as JSON or base64
+	// true = JSON (default), false = base64
+	ManifestJSONFormat = true
 )
 
 func init() {
@@ -25,39 +30,39 @@ func init() {
 // Fixed RDATA structure with all fields always present (some unused depending on context)
 //
 // RDATA structure (fixed field order):
-//   - Format (uint8): Format identifier (used when Total=0, stored from manifest when Total>0)
+//   - Format (uint8): Format identifier (used for manifest, stored from manifest for data chunks)
 //   - HMAC length (uint16): Length of HMAC (0 for data chunks, >0 for manifest)
 //   - HMAC ([]byte): HMAC-SHA256 checksum (only present if HMAC length > 0)
-//   - Sequence (uint16): Chunk sequence number (unused when Total=0, used when Total>0)
-//   - Total (uint16): Total chunks or 0 for manifest (0 = manifest, >0 = data chunk)
+//   - Sequence (uint16): Chunk sequence number (0 for manifest, 1..N for data chunks)
+//   - Total (uint16): Total number of data chunks (for manifest: number of data chunks, for data chunks: same value)
 //   - Data length (uint16): Length of data
 //   - Data ([]byte): Format-specific data (JSON manifest or chunk payload)
 //
 // Semantics:
-//   - When Total=0: This is a manifest chunk
+//   - When Sequence=0: This is a manifest chunk
 //     * Format: Set (e.g., FormatJSON=1)
 //     * HMAC length: >0 (typically 32 for SHA-256)
 //     * HMAC: Present (length from HMAC length field)
-//     * Sequence: Unused (can be 0)
-//     * Total: 0 (indicates manifest)
+//     * Sequence: 0 (indicates manifest)
+//     * Total: Number of data chunks (e.g., 9 if there are 9 data chunks)
 //     * Data: JSON data (ChunkCount, ChunkSize, Metadata, Payload)
 //
-//   - When Total>0: This is a data chunk
+//   - When Sequence>0: This is a data chunk
 //     * Format: Stored from CHUNK manifest (e.g., FormatJSON=1)
 //     * HMAC length: 0
 //     * HMAC: Not present (HMACLen=0)
-//     * Sequence: Chunk sequence number (0-based)
-//     * Total: Total number of chunks
+//     * Sequence: Chunk sequence number (1-based: 1, 2, 3, ..., Total)
+//     * Total: Total number of chunks (same for all chunks in a distribution)
 //     * Data: Chunk payload data
 //
 // Presentation format (space-separated values):
 //   - Manifest chunk: <sequence> <total> <format> <hmac> <json-data>
 //     Example:
-//     node.distid.control. IN CHUNK 0 0 JSON a889a20e0722d903fe0772226ddd21bce465056f94785ea3dbba74069c897092
-//                                    {"chunk_count":1,"chunk_size":60000,"metadata":{"content":"encrypted_keys","distribution_id":"3a29c33a"},"payload":"<base64-encoded-payload>"}"
+//     node.distid.control. IN CHUNK 0 9 JSON a889a20e0722d903fe0772226ddd21bce465056f94785ea3dbba74069c897092
+//                                    {"chunk_count":9,"chunk_size":200,"metadata":{"content":"key_operations","distribution_id":"3a29c33a"},"payload":"<base64-encoded-payload>"}"
 //   - Data chunk: <sequence> <total> <format> <hmac> <base64-data>
 //     Example:
-//     node.distid.control. IN CHUNK 1 2 JSON "" bWhBdGRTlac0hX2p0eGZzSW9kcHJKZ2d...QY1c3b05uYTd3aWpORXlLUDMrWG10T3c9PQ==
+//     node.distid.control. IN CHUNK 1 9 JSON "" bWhBdGRTlac0hX2p0eGZzSW9kcHJKZ2d...QY1c3b05uYTd3aWpORXlLUDMrWG10T3c9PQ==
 
 type CHUNK struct {
 	Format     uint8  // Format identifier (used for manifest, unused for data chunks)
@@ -86,25 +91,54 @@ func (rd CHUNK) String() string {
 		hmacStr = `""` // Empty string for data chunks
 	}
 
-	// Data field: try to parse as JSON for manifest chunks, otherwise base64
+	// Data field: JSON for manifest chunks, base64 for data chunks
 	var dataStr string
-	if rd.Total == 0 {
-		// Manifest chunk: try to parse JSON for better display
-		var manifestData struct {
-			ChunkCount uint16                 `json:"chunk_count"`
-			ChunkSize  uint16                 `json:"chunk_size,omitempty"`
-			Metadata   map[string]interface{} `json:"metadata,omitempty"`
-			Payload    []byte                 `json:"payload,omitempty"`
-		}
-		if err := json.Unmarshal(rd.Data, &manifestData); err == nil {
-			jsonBytes, _ := json.Marshal(manifestData)
-			dataStr = string(jsonBytes)
-		} else {
-			// Fallback if JSON parsing fails
-			dataStr = base64.StdEncoding.EncodeToString(rd.Data)
+	if rd.Sequence == 0 {
+		// Manifest chunk: data should be JSON
+		dataBytes := rd.Data
+		
+		// Check if data is already JSON (starts with '{' or '[')
+		if len(dataBytes) > 0 && (dataBytes[0] == '{' || dataBytes[0] == '[') {
+			// Already JSON - use as-is
+			if ManifestJSONFormat {
+				dataStr = string(dataBytes)
+			} else {
+				// Re-encode JSON as base64 if config says so
+				dataStr = base64.StdEncoding.EncodeToString(dataBytes)
+			}
+		} else if len(dataBytes) > 0 {
+			// Data doesn't start with '{' or '[' - this is unexpected for manifest chunks
+			// Try to decode as base64 (might have been encoded somewhere)
+			// Doesn't look like JSON - try to decode as base64
+			// The Data field appears to contain base64-encoded JSON
+			dataStrTrimmed := strings.TrimSpace(string(dataBytes))
+			decoded, err := base64.StdEncoding.DecodeString(dataStrTrimmed)
+			if err == nil && len(decoded) > 0 && (decoded[0] == '{' || decoded[0] == '[') {
+				// Successfully decoded to JSON
+				if ManifestJSONFormat {
+					dataStr = string(decoded)
+				} else {
+					// Config says base64, but we decoded it - re-encode
+					dataStr = base64.StdEncoding.EncodeToString(decoded)
+				}
+			} else {
+				// Decoding failed or result isn't JSON
+				// This shouldn't happen for valid manifest chunks
+				if ManifestJSONFormat {
+					// Try to output decoded anyway if decoding succeeded (even if not JSON)
+					if err == nil && len(decoded) > 0 {
+						dataStr = string(decoded)
+					} else {
+						// Fallback: output original (might be malformed)
+						dataStr = string(dataBytes)
+					}
+				} else {
+					dataStr = string(dataBytes)
+				}
+			}
 		}
 	} else {
-		// Data chunk: base64 encode
+		// Data chunk: always base64 encode
 		dataStr = base64.StdEncoding.EncodeToString(rd.Data)
 	}
 
@@ -167,7 +201,7 @@ func (rd *CHUNK) Parse(txt []string) error {
 
 	// Parse Data (JSON for manifest, base64 for data chunk)
 	dataStr := txt[4]
-	if rd.Total == 0 {
+	if rd.Sequence == 0 {
 		// Manifest: data is JSON
 		rd.Data = []byte(dataStr)
 		rd.DataLength = uint16(len(rd.Data))

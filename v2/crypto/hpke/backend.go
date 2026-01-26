@@ -8,6 +8,8 @@
 package hpke
 
 import (
+	"fmt"
+
 	"github.com/johanix/tdns/v2/crypto"
 	hpkelib "github.com/johanix/tdns/v2/hpke"
 )
@@ -126,6 +128,20 @@ func (b *Backend) Decrypt(privKey crypto.PrivateKey, ciphertext []byte) ([]byte,
 	}
 
 	return plaintext, nil
+}
+
+// GetEphemeralKey extracts the ephemeral public key from HPKE ciphertext
+// For HPKE, the first 32 bytes of ciphertext is the encapsulated key (ephemeral public key)
+func (b *Backend) GetEphemeralKey(ciphertext []byte) ([]byte, error) {
+	if len(ciphertext) < 32 {
+		return nil, crypto.NewBackendError("hpke", "get_ephemeral_key",
+			fmt.Errorf("ciphertext too short: %d bytes (expected at least 32)", len(ciphertext)))
+	}
+
+	// Extract first 32 bytes (encapsulated key)
+	ephemeralPub := make([]byte, 32)
+	copy(ephemeralPub, ciphertext[:32])
+	return ephemeralPub, nil
 }
 
 // privateKey implements crypto.PrivateKey for HPKE

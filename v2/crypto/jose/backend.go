@@ -207,6 +207,19 @@ func (b *Backend) Decrypt(privKey crypto.PrivateKey, ciphertext []byte) ([]byte,
 	return plaintext, nil
 }
 
+// GetEphemeralKey extracts the ephemeral public key from JOSE ciphertext
+// For JOSE (JWE), the ephemeral key is embedded in the JWE header and cannot
+// be extracted without parsing the full JWE structure. Since the recipient
+// extracts it during decryption, we return nil to indicate no separate
+// ephemeral key field is needed.
+func (b *Backend) GetEphemeralKey(ciphertext []byte) ([]byte, error) {
+	// JOSE (JWE) wraps the ephemeral key exchange within the ciphertext itself:
+	// The JWE header contains the ephemeral public key used for ECDH-ES key agreement,
+	// so there's no separate ephemeralPubKey field needed. The recipient extracts it
+	// from the JWE header during decryption.
+	return nil, nil
+}
+
 // privateKey implements crypto.PrivateKey for JOSE
 type privateKey struct {
 	jwk jose.JSONWebKey // JWK with private key material

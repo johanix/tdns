@@ -40,6 +40,12 @@ type Backend interface {
 	// Decrypt decrypts ciphertext using the private key
 	// Expects ciphertext in backend-specific format
 	Decrypt(privateKey PrivateKey, ciphertext []byte) ([]byte, error)
+
+	// GetEphemeralKey extracts the ephemeral public key from ciphertext
+	// Returns the ephemeral public key bytes, or nil/empty if the backend
+	// embeds the ephemeral key within the ciphertext format (e.g., JWE header)
+	// This allows the encryption layer to be truly backend-agnostic
+	GetEphemeralKey(ciphertext []byte) ([]byte, error)
 }
 
 // PrivateKey represents a private key (backend-specific implementation)

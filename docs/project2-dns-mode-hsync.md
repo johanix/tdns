@@ -1,10 +1,29 @@
 # Project 2: DNS Mode for Multi-Provider DNSSEC Coordination
 
 ## Document Version
-- **Date**: 2025-01-25
-- **Status**: Requirements and Design Phase (Pre-Implementation)
+- **Date**: 2025-01-25 (Updated: 2025-01-26)
+- **Status**: Design Complete + Refactoring Update
 - **Author**: Architecture Review
 - **Project**: TDNS Multi-Provider DNS Synchronization
+
+## UPDATE: Recent Crypto and CHUNK Infrastructure Refactoring
+
+**Significant changes have been made to the crypto layer and CHUNK infrastructure**:
+
+✅ **Already Complete**:
+- Backend abstraction interface with plugin registry (tdns/v2/crypto/)
+- HPKE and JOSE backend implementations
+- CHUNK RR type unified in tdns/v2/core
+- Feature flag architecture for gradual V1→V2 migration
+- Cross-backend testing framework
+- Confirmation framework with EDNS(0) CHUNK option support
+- NOTIFY RR type unified in tdns/v2/core
+
+**Impact on Project 2**:
+- Generalized infrastructure is largely in place
+- Phase 2 (Generalization) is partially done and low-risk
+- Can proceed with Phase 3 (DNS Mode) immediately
+- Crypto abstraction makes JWE/JWS integration cleaner for future work
 
 ## Executive Summary
 
@@ -337,30 +356,40 @@ Agent A → Agent B:
 - [ ] Identify generalization opportunities
 - [ ] Plan generalized comms framework
 
-### Phase 2: Generalization (tdns/v2)
-- [ ] Extract KDC/KRS-specific code
-- [ ] Create generalized CHUNK sender/receiver
-- [ ] Create generalized NOTIFY handler
-- [ ] Create generalized confirmation accumulator
-- [ ] Move to tdns/v2 as shared infrastructure
+### Phase 2: Infrastructure Generalization (Phase A - Parallel with Project Decision)
+**Status**: Partially complete, ready for completion
+- ✅ Backend abstraction (ALREADY DONE)
+- ✅ Feature flag architecture (ALREADY DONE)
+- ✅ CHUNK RR type unified (ALREADY DONE)
+- [ ] Move CHUNK format utilities from tnm to tdns/v2/core (~50 lines)
+- [ ] Move NOTIFY helpers from tnm to tdns/v2/core (~50 lines)
+- [ ] Move confirmation framework from tnm to tdns/v2/core (~80 lines)
+- [ ] Create transport abstraction framework in tdns/v2/agent
 
-### Phase 3: DNS Mode Implementation
-- [ ] Implement CHUNK operations for hello, sync, confirmation
-- [ ] Implement NOTIFY(CHUNK) handling
-- [ ] Implement long-term key discovery via DNS
-- [ ] Add DNS mode to agent discovery logic
-- [ ] Add DNS mode communication alongside API mode
+### Phase 3: DNS Mode Implementation (Project 2)
+- [ ] Transport abstraction interface for agents
+- [ ] REST transport implementation (refactor existing)
+- [ ] DNS transport implementation (new)
+- [ ] DNS message handler for agent communication
+- [ ] Agent HELLO operation via DNS
+- [ ] Agent heartbeat (BEAT) via DNS
+- [ ] Agent sync data operations via DNS
+- [ ] Persistent confirmation database schema
+- [ ] Confirmation accumulation and reporting
 
-### Phase 4: Agent Integration
-- [ ] Update agent to use generalized comms framework
-- [ ] Implement multi-transport (API + DNS mode)
+### Phase 4: DNS Mode Integration
+- [ ] Update agent discovery to support DNS endpoints
+- [ ] Implement transport fallback (API → DNS)
 - [ ] Update combiner to use generalized comms
-- [ ] Implement confirmation handling and logging
+- [ ] Implement agent-to-agent sync operations
+- [ ] Implement agent-to-combiner modification instructions
+- [ ] Multi-transport confirmation handling
 
 ### Phase 5: Testing and Debug Infrastructure
 - [ ] Add debug CLI commands for isolated testing
 - [ ] Simulate provider discovery
 - [ ] Simulate CHUNK operations
+- [ ] Test DNS mode operations
 - [ ] Test confirmation flows
 - [ ] Full end-to-end multi-provider test
 

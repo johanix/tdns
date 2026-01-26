@@ -21,135 +21,188 @@ This document presents findings from detailed code analysis of both systems:
 
 ## Part 1: Generalization Opportunities (tdns-nm → tdns/v2)
 
+### STATUS UPDATE: Much of Phase A Already Complete
+
+The recent refactoring has already moved or unified significant infrastructure in tdns/v2/core:
+- ✅ **CHUNK RR type** unified in `v2/core/rr_chunk.go`
+- ✅ **NOTIFY RR type** moved to `v2/core/rr_notify.go`
+- ✅ **Transport parsing** extracted to `v2/core/transport.go`
+- ✅ **JSONMANIFEST/JSONCHUNK RR types** moved to `v2/core/`
+- ✅ **Backend abstraction** completed in `v2/crypto/backend.go` and `registry.go`
+- ✅ **Crypto helpers** created in `tnm/crypto_helpers.go` for shared utilities
+
 ### 1.1 CHUNK Protocol Utilities
 
-**Status**: Ready to move immediately, zero KDC/KRS coupling
+**Status**: ✅ **ALREADY UNIFIED** in tdns/v2
 
-**Files to Extract:**
-- `tnm/chunk_format.go` (118 lines)
-- `tnm/chunks.go` (94 lines)
+**Location**: `tdns/v2/core/rr_chunk.go`
 
-**Functions:**
-```
-CreateCHUNKManifest()           # Create manifest with metadata
-ExtractManifestData()            # Parse manifest RRdata
-SplitIntoCHUNKs()               # Split data into sequence 1, 2, 3, ..., N
-ReassembleCHUNKChunks()         # Reassemble chunks into complete data
-```
+**Implementation**:
+- Unified CHUNK RR type (0xFDF7 = 65015) with fixed RDATA structure
+- Supports both manifest chunks (Sequence=0) and data chunks (Sequence>0)
+- Integrated HMAC integrity verification
+- Format field (uint8) supports multiple serialization types (JSON, JOSE, etc.)
 
-**Destination**: `tdns/v2/core/chunk_protocol.go`
+**Supporting Files**:
+- `tnm/chunk_format.go` - Manifest structure, metadata, payload handling
+- `tnm/chunks.go` - (if still exists) Legacy splitting/reassembly
 
-**Why**: These are pure DNS protocol utilities with no business logic coupling
+**What Still Needs Review**:
+- Can `tnm/chunk_format.go` functions be moved to `v2/core/` alongside RR definition?
+- Can `tnm/chunks.go` splitting logic be moved to `v2/core/`?
+- These are still in tnm but could be purely generic
 
-**Impact**: None - these are new utilities, not replacing anything
+**Impact**: None - already unified, just verify tnm utilities can move
 
 ---
 
 ### 1.2 HMAC Manifest Integrity
 
-**Status**: Ready to move, needs minor generalization
+**Status**: ✅ **ALREADY IMPLEMENTED** in CHUNK RR type
 
-**Location**: `tnm/chunk_format.go` lines 85-115
+**Location**: `tdns/v2/core/rr_chunk.go` + `tnm/chunk_format.go`
 
-**Functions:**
+**Implementation**:
+- HMAC-SHA256 is integrated into CHUNK RR structure itself
+- Manifest chunks (Sequence=0) include HMAC field (when HMACLen > 0)
+- HMAC calculated over Format byte + manifest data
+- Generic key size (not tied to 32-byte assumption)
+
+**Current Functions** (in tnm):
 ```go
 CalculateCHUNKHMAC(chunk *ChunkRecord, pubKey []byte) []byte
 VerifyCHUNKHMAC(chunk *ChunkRecord, pubKey []byte) (bool, error)
 ```
 
-**Current Issue**: Uses 32-byte assumption (HPKE key size), hardcoded HMAC-SHA256
+**Generalization Status**:
+- ✅ Already generic (any key size)
+- ✅ Already applies to any data, not just keys
+- ✅ Works for multi-recipient scenarios
+- **Question**: Can these functions move from tnm to `v2/core/` for shared use?
 
-**Generalization Needed**:
-- Accept any `[]byte` as key (works for any length)
-- Document that algorithm is HMAC-SHA256 (hard requirement for TDNS)
-
-**Destination**: `tdns/v2/core/chunk_integrity.go`
-
-**Why**: Generic integrity mechanism for any manifested data (keys, sync data, etc.)
-
-**Impact**: None - functions are already algorithm-agnostic for key size
+**Impact**: None - already complete and generic
 
 ---
 
 ### 1.3 Crypto Transport Layer
 
-**Status**: Ready to move, pure abstraction
+**Status**: ✅ **FULLY ABSTRACTED** with backend interface
 
-**Location**: `tnm/hpke_transport_v2.go` (62 lines)
+**Location**: `tdns/v2/crypto/backend.go` (interface) + backend implementations
 
-**Functions:**
-```go
-EncryptAndEncodeV2(plaintext []byte, pubKey crypto.PublicKey, backend crypto.Backend) (string, error)
-DecodeAndDecryptV2(encoded string, privKey crypto.PrivateKey, backend crypto.Backend) ([]byte, error)
-```
+**Architecture**:
+- **Unified Backend interface** - `backend.Encrypt()` and `backend.Decrypt()` methods
+- **Backend registry** (`registry.go`) - Thread-safe plugin system
+- **Auto-registration** - Backends register via `init()` on import
 
-**Format**:
-- Input: plaintext, public key (as crypto.PublicKey interface)
-- Output: base64-encoded ciphertext (backend-specific format inside)
-- Supported backends: HPKE, JOSE (auto-registered)
+**Backends Implemented**:
+1. **HPKE** (`tdns/v2/crypto/hpke/backend.go`)
+   - Wraps X25519 from `tdns/v2/hpke`
+   - Key format: Raw 32-byte keys
+   - Ephemeral key: First 32 bytes of ciphertext
+
+2. **JOSE** (`tdns/v2/crypto/jose/backend.go`)
+   - P-256 ECDSA implementation
+   - Key format: JWK (JSON Web Key) encoding
+   - Algorithm: ECDH-ES + A256GCM
+   - Ephemeral key: Embedded in JWE header
 
 **Current Usage Pattern**:
 ```go
+backend, _ := crypto.GetBackend("jose")
+
 // KDC encrypts key:
-ciphertext, _ := EncryptAndEncodeV2(privateKeyBytes, nodePublicKey, joseBackend)
+ciphertext, _ := backend.Encrypt(nodePublicKey, privateKeyBytes)
 
 // KRS decrypts key:
-plaintext, _ := DecodeAndDecryptV2(ciphertext, nodePrivateKey, joseBackend)
+plaintext, _ := backend.Decrypt(nodePrivateKey, ciphertext)
 ```
 
-**Destination**: `tdns/v2/crypto/transport.go`
+**Helper Functions** (in `tnm/crypto_helpers.go`):
+```go
+EncryptPayload()           # Wrapper around backend.Encrypt()
+ExtractEphemeralKey()      # Backend-agnostic ephemeral key extraction
+SelectBackend()            # Choose HPKE or JOSE based on node config
+```
 
-**Why**: Generic encrypt/encode and decode/decrypt - used by KDC, KRS, and soon agents/combiners
+**Why Already Complete**:
+- ✅ Zero coupling to business logic
+- ✅ Backend-agnostic and extensible
+- ✅ Both KDC and KRS use identical interface
+- ✅ Agents can reuse same backends
+- ✅ Supports future backends (RSA, EdDSA, etc.)
 
-**Impact**: None - zero coupling to business logic, already backend-agnostic
+**Impact**: None - fully abstracted and ready for use
 
 ---
 
 ### 1.4 NOTIFY Pattern Utilities
 
-**Status**: Ready to move, needs extraction from KDC-specific code
+**Status**: ✅ **UNIFIED RR TYPE** in tdns/v2/core
 
-**Location**: `tnm/kdc/notify.go` (96 lines)
+**Location**: `tdns/v2/core/rr_notify.go` + `tnm/kdc/notify.go`
 
-**Functions to Extract**:
+**RR Type**:
+- NOTIFY RR (TypeNOTIFY = 0x0F9A) unified in `v2/core/`
+- Structure: Type, Scheme, Port, Target FQDN
+- Generalized for any distribution event (not just keys)
+
+**Implementation** (in tnm):
 ```go
-SendNotifyWithCHUNK(qname string, qtype uint16, remoteAddr string) error
-ExtractDistributionIDFromQNAME(qname string, controlZone string) (string, error)
-ParseNotifyManifestOption(edns0Option dns.Option) (*ManifestMetadata, error)
+SendNotifyWithCHUNK()              # Send NOTIFY signal
+SendNotifyWithDistributionID()     # KDC→KRS notifications
+HandleKrsNotify()                  # KRS receiver
 ```
 
-**Current Usage**:
-- KDC sends NOTIFY with distribution ID in QNAME
-- KRS receives NOTIFY, extracts distribution ID
-- KDC confirms via NOTIFY with manifest option containing status
+**Generalization Opportunity**:
+- ✅ NOTIFY RR type already generic
+- ⚠️ Utility functions still in tnm (SendNotifyWithDistributionID, etc.)
+- These functions use distribution-specific QNAME encoding
+- Could be made generic for agents
 
-**Generalization**:
-- Make zone/domain-agnostic
-- Support custom correlation ID extraction
-- Generic confirmation option parsing
+**For Phase A**:
+- Extract distribution ID encoding logic to generic correlation ID handler
+- Create generic NOTIFY sending helper in `v2/core/`
+- Enable both KDC and agents to use identical pattern
 
-**Destination**: `tdns/v2/core/notify_patterns.go`
-
-**Why**: Both KDC→KRS and Agent→Agent communication uses identical NOTIFY pattern
-
-**Impact**: None - new utilities, enables both systems to use same pattern
+**Impact**: Low - extraction of ~50 lines to make fully generic
 
 ---
 
 ### 1.5 Confirmation Accumulation Pattern
 
-**Status**: Partially generalizable, needs abstraction
+**Status**: ✅ **IMPLEMENTED** for KDC/KRS, needs generalization for agents
 
-**Location**: `tnm/krs/confirm.go` (159 lines)
+**Location**: `tnm/krs/confirm.go` (159 lines) + `tdns/v2/edns0/edns0_chunk.go`
 
-**Current Structure**:
+**Current Implementation**:
 - KRS accumulates per-operation success/failure
-- KeyStatusEntry: zone_name, key_id, error_status
-- ComponentStatusEntry: component_id, error_status
-- Asynchronously sent back to KDC via NOTIFY(CHUNK)
+- `KeyStatusEntry`: zone_name, key_id, error_status
+- `ComponentStatusEntry`: component_id, error_status
+- Sent back to KDC via NOTIFY(CHUNK) with EDNS(0) option
+- CHUNK EDNS(0) option (code 65004) carries confirmation data
 
-**What Can Move**:
+**Functions**:
 ```go
+SendConfirmationToKDC()         # Async send via NOTIFY
+SendComponentConfirmationToKDC()
+```
+
+**What Exists**:
+- ✅ EDNS(0) CHUNK option structure defined
+- ✅ KeyStatusReport and ComponentStatusReport types
+- ✅ Asynchronous NOTIFY-based delivery
+- ✅ Generic enough for other status types
+
+**For Phase A**:
+- Extract confirmation accumulation logic to `tdns/v2/core/`
+- Define generic `ConfirmationEntry` interface
+- Create reusable `ConfirmationAccumulator`
+- Keep status-specific types in KDC/KRS/agent implementations
+
+**Implementation**:
+```go
+// In tdns/v2/core/confirmation.go (NEW)
 type ConfirmationEntry interface {
     GetId() string
     GetStatus() string
@@ -161,49 +214,55 @@ type ConfirmationAccumulator struct {
     startTime time.Time
     completedTime *time.Time
 }
-
-func (ca *ConfirmationAccumulator) AddSuccess(id string, details string)
-func (ca *ConfirmationAccumulator) AddFailure(id string, error string)
-func (ca *ConfirmationAccumulator) Marshal() ([]byte, error)
 ```
 
-**Destination**: `tdns/v2/core/confirmation.go`
-
-**Why**: Same pattern needed for agent sync confirmations
-
-**Implementation Note**: KRS and agents implement the ConfirmationEntry interface with their own types
-
-**Impact**: None - new abstraction, reduces duplication
+**Impact**: Low - extraction of ~80 lines to make generic
 
 ---
 
 ### 1.6 Manifest Metadata and Enrichment
 
-**Status**: Partially generalizable
+**Status**: ✅ **SCHEMA DEFINED**, functions in tnm, backend selection generic
 
-**Location**: `tnm/kdc/chunks_v2.go` (420 lines)
+**Location**:
+- `tnm/chunk_format.go` - Manifest structure definition
+- `tnm/kdc/chunks_v2.go` - Distribution-specific metadata building
+- `tnm/crypto_helpers.go` - Backend selection helpers
 
-**What Can Move**:
-- Metadata JSON schema definition
-- Metadata marshaling/unmarshaling
-- Backend selection logic (generalizable)
+**Current Implementation**:
 
-**What Stays KDC-Specific**:
-- Distribution event preparation (zone-specific logic)
-- Content type determination (roll_key, delete_key, etc.)
-- Caching strategy (distribution-specific)
-
-**Generalizable Functions**:
-```go
-SelectBackendForRecipient(supportedBackends []string, preferredBackend string) (string, error)
-EnrichMetadata(base map[string]interface{}, backend string, ttl time.Duration) map[string]interface{}
+**Manifest JSON Schema** (in `chunk_format.go`):
+```json
+{
+  "chunk_count": <number>,
+  "chunk_size": <bytes>,
+  "metadata": {
+    "content": "key_operations|node_operations|mgmt_operations|mixed_operations",
+    "distribution_id": "<uuid>",
+    "node_id": "<node-id>",
+    "timestamp": <unix-timestamp>
+  },
+  "payload": "<base64-or-inline>"
+}
 ```
 
-**Destination**: `tdns/v2/crypto/backend_selection.go`
+**Generic Functions** (in `crypto_helpers.go`):
+```go
+SelectBackendForNode(supportedBackends []string) string
+ExtractEphemeralKey(backend Backend, ciphertext []byte) []byte
+```
 
-**Why**: Agents need same backend selection logic for recipients
+**KDC-Specific** (in `chunks_v2.go`):
+- Distribution event preparation
+- Content type determination (key_ops, node_ops, etc.)
+- Caching and chunk splitting strategy
 
-**Impact**: Minor - clarifies backend selection patterns
+**For Phase A**:
+- Already separated properly
+- Backend selection is generic and reusable
+- Manifest schema is content-agnostic
+
+**Impact**: None - already well-separated
 
 ---
 
@@ -410,23 +469,47 @@ func (agent *Agent) SendBeat(ctx context.Context) error {
 
 ## Part 3: JWE/JWS Redesign Disruption Assessment
 
+### 3.0 Current State with New Abstraction
+
+**IMPORTANT**: The crypto abstraction layer is **already implemented**. This changes the disruption assessment significantly.
+
+**Current Implementation** (post-refactoring):
+
+```go
+// Both KDC and KRS use same backend interface
+backend, _ := crypto.GetBackend("jose")
+
+// KDC (encrypt_v2.go):
+ciphertext, _ := backend.Encrypt(nodePublicKey, privateKeyBytes)
+
+// KRS (decrypt_v2.go):
+plaintext, _ := backend.Decrypt(nodePrivateKey, ciphertext)
+```
+
+**Key Advantage**: The backend interface is **transport-agnostic**
+- Current: Each backend returns raw bytes (internal format specific)
+- JWE/JWS: Can be implemented inside backend without changing call sites
+
 ### 3.1 Current Crypto Usage in KDC/KRS
 
-**Current Implementation Pattern**:
+**Abstraction Already in Place**:
 
 ```go
 // KDC (encrypt_v2.go):
-encrypted, _ := EncryptAndEncodeV2(key, nodePublicKey, backend)
-// Stored as: base64(backend-specific ciphertext)
+backend, _ := crypto.GetBackend(selectedBackend)
+ciphertext, _ := backend.Encrypt(nodePublicKey, plaintext)
+// Format determined by backend, not caller
 
-// KRS (crypto_router.go):
-decrypted, _ := DecodeAndDecryptV2(encrypted, nodePrivateKey, backend)
-// backend name stored in manifest metadata
+// KRS (decrypt_v2.go):
+backend, _ := crypto.GetBackend(backendName)
+plaintext, _ := backend.Decrypt(nodePrivateKey, ciphertext)
+// Format determined by backend, caller doesn't care
 ```
 
-**Current Serialization**: `base64(ciphertext)`
-- HPKE: `base64(encapsulated_key || encrypted_data)`
-- JOSE: `base64(JWE_compact_serialization)`
+**Current Serialization**: `raw backend output`
+- HPKE: Raw ciphertext with ephemeral key prefix
+- JOSE: JWE compact serialization (5 parts)
+- **Both stored as binary, wrapped in base64 for transport**
 
 ---
 
@@ -461,43 +544,59 @@ Where `JWE_JSON_PAYLOAD` is:
 
 ### 3.3 Disruption Analysis: KDC Side
 
-**Current Calls to Encryption**:
+**Current Implementation** (with abstraction already in place):
 
 **File: `tnm/kdc/encrypt_v2.go`**
 ```go
 func EncryptKeyForNodeV2(key *DNSSECKey, node *Node, backend crypto.Backend) {
-    ciphertext, _ := backend.Encrypt(nodePublicKey, key.PrivateKey)
-    // Store ciphertext
+    ciphertext, _ := backend.Encrypt(node.PublicKey, key.PrivateKey)
+    // Store ciphertext (format determined by backend)
 }
 ```
 
 **With JWE/JWS, would become**:
-```go
-func EncryptKeyForNodeV2(key *DNSSECKey, nodeList []*Node, backend crypto.Backend) {
-    // Build recipients array from node list
-    recipients := make([]JWERecipient, len(nodeList))
-    for i, node := range nodeList {
-        recipients[i] = JWERecipient{
-            header: {...},
-            publicKey: node.PublicKey,
-        }
-    }
 
-    jwe, _ := backend.EncryptMultiRecipient(key.PrivateKey, recipients)
-    jws, _ := kdcPrivateKey.Sign(jwe)
-    // Store JWS
+**Option A: Internal to backend (LOWEST DISRUPTION)**
+```go
+// No changes to function signatures!
+// Backend.Encrypt() internally returns JWE/JWS
+func EncryptKeyForNodeV2(key *DNSSECKey, node *Node, backend crypto.Backend) {
+    ciphertext, _ := backend.Encrypt(node.PublicKey, key.PrivateKey)
+    // KDC doesn't care - backend handles JWE/JWS internally
 }
 ```
 
-**Disruption Level**: **MEDIUM**
-- Function signature changes (single node → recipients list)
-- Adds recipient loop logic
-- KDC callers must change to pass recipient list
-- **~30-50 lines of change**
+**Option B: Explicit multi-recipient at call site (MEDIUM DISRUPTION)**
+```go
+func EncryptKeyForNodeV2(key *DNSSECKey, nodeList []*Node, backend crypto.Backend) {
+    recipients := make([]PublicKey, len(nodeList))
+    for i, node := range nodeList {
+        recipients[i] = node.PublicKey
+    }
+    ciphertext, _ := backend.EncryptMultiRecipient(recipients, key.PrivateKey)
+    // Store ciphertext (JWE with multiple recipients)
+}
+```
 
-**Affected Callers**:
-- `prepareChunksForNodeV2()` in `chunks_v2.go` (line 63-90)
-- Any test code that calls `EncryptKeyForNodeV2()`
+**Disruption Level**: **LOW TO MEDIUM** (depending on implementation approach)
+
+**Option A Advantages**:
+- ✅ No function signature changes
+- ✅ No caller code modifications
+- ✅ Backend abstraction works perfectly
+- ✅ KDC remains single-recipient in API, multi-recipient internally
+
+**Option B Advantages**:
+- ✅ Explicit multi-recipient support at call site
+- ✅ KDC can control recipient list
+- ✅ Better for future optimization
+- ❌ Requires caller changes (~30-50 lines)
+- ❌ Affects `prepareChunksForNodeV2()` in `chunks_v2.go`
+
+**Recommendation**: **Use Option A** (internal to backend)
+- Keeps KDC code unchanged
+- Leverages the abstraction properly
+- Multi-recipient becomes an optimization detail
 
 ---
 
@@ -514,31 +613,49 @@ func DecryptAndStoreKeyV2(encrypted []byte, nodePrivKey crypto.PrivateKey, backe
 ```
 
 **With JWE/JWS, would become**:
+
+**Option A: Internal to backend (LOWEST DISRUPTION)**
 ```go
-func DecryptAndStoreKeyV2(jws []byte, nodePrivKey crypto.PrivateKey, kdcPubKey crypto.PublicKey, backend crypto.Backend) {
-    // 1. Verify JWS signature (cheap operation)
-    if !jws.Verify(kdcPubKey) {
-        return error("signature verification failed")
-    }
-
-    // 2. Extract JWE from JWS payload
-    jwe := jws.GetPayload()
-
-    // 3. Decrypt JWE with node's private key
-    plaintext, _ := backend.DecryptMultiRecipient(nodePrivKey, jwe)
-    // Store plaintext as key
+// Function signature unchanged
+func DecryptAndStoreKeyV2(encrypted []byte, nodePrivKey crypto.PrivateKey, backend crypto.Backend) {
+    // Backend.Decrypt() internally handles JWS verification
+    plaintext, _ := backend.Decrypt(nodePrivKey, encrypted)
+    // KDC public key passed via context or config
 }
 ```
 
-**Disruption Level**: **MEDIUM**
-- Function signature changes (need KDC public key for verification)
-- Adds JWS verification logic
-- Adds multi-recipient decryption logic
-- **~40-60 lines of change**
+**Option B: Explicit verification at call site (MEDIUM DISRUPTION)**
+```go
+func DecryptAndStoreKeyV2(jws []byte, nodePrivKey crypto.PrivateKey, kdcPubKey crypto.PublicKey, backend crypto.Backend) {
+    // 1. Verify JWS signature (cheap operation)
+    verified, _ := VerifyJWS(jws, kdcPubKey)
+    if !verified {
+        return error("signature verification failed")
+    }
 
-**Affected Callers**:
-- `ProcessDistribution()` in `krs/chunk.go` (line 145-200)
-- Test code that calls `DecryptAndStoreKeyV2()`
+    // 2. Extract JWE and decrypt
+    plaintext, _ := backend.Decrypt(nodePrivKey, extractJWEPayload(jws))
+}
+```
+
+**Disruption Level**: **VERY LOW** (if using Option A)
+
+**Option A Advantages**:
+- ✅ No function signature changes
+- ✅ No caller modifications needed
+- ✅ KDC public key can be obtained from enrollment
+- ✅ Minimal code changes
+
+**Option B Advantages**:
+- ✅ Explicit control over verification
+- ✅ Clear signature checking
+- ❌ Function signature changes
+- ❌ Caller code modifications (~40-60 lines)
+
+**Recommendation**: **Use Option A** (internal to backend)
+- KDC public key available from node enrollment
+- Backend handles JWS verification as part of Decrypt()
+- KRS code essentially unchanged
 
 ---
 
@@ -608,26 +725,39 @@ jws, _ := agentPrivKey.Sign(jwe)
 
 ---
 
-### 3.7 Overall Disruption Assessment
+### 3.7 Overall Disruption Assessment (Updated for Current State)
 
-**Total Changes Required for JWE/JWS**:
+**CRITICAL FINDING**: The crypto abstraction layer **already in place reduces disruption significantly**
 
-| Component | Files | Lines Changed | Disruption |
-|-----------|-------|----------------|-----------|
-| KDC Encryption | 1-2 | 30-50 | MEDIUM |
-| KRS Decryption | 1-2 | 40-60 | MEDIUM |
-| Manifest Parsing | 1-2 | 20-30 | LOW |
-| Agent DNS Mode | 2-3 | 100-150 | MEDIUM |
-| Backend Interface | 1 | 50-100 | MEDIUM |
-| Tests | 3-5 | 150-200 | MEDIUM |
-| **TOTAL** | **9-15** | **~400-600** | **MEDIUM** |
+**Total Changes Required for JWE/JWS** (with backend abstraction):
 
-**Key Insight**: Changes are **localized, not pervasive**
-- Affect 9-15 files in tdns-nm and tdns/v2
-- Core data structures stay mostly same
-- Function signatures change but call sites are small in number
-- Can be implemented incrementally
-- Backward compatibility strategy (Option B in design doc) allows V1 to stay unchanged
+| Component | Files | Lines Changed | Disruption | Notes |
+|-----------|-------|----------------|-----------|-------|
+| Backend interface | 2 | 100-200 | MEDIUM | Add multi-recipient methods to Backend interface |
+| HPKE backend | 1 | 30-50 | LOW | Adapter for current implementation |
+| JOSE backend | 1 | 50-100 | LOW | Add JWE/JWS envelope support |
+| KDC Encryption | 0 | 0 | NONE | If using Option A (internal to backend) |
+| KRS Decryption | 0 | 0 | NONE | If using Option A (internal to backend) |
+| KDC callers (Option B) | 1-2 | 30-50 | MEDIUM | Only if Option B chosen |
+| KRS callers (Option B) | 1-2 | 40-60 | MEDIUM | Only if Option B chosen |
+| Manifest metadata | 1-2 | 20-30 | LOW | Add JWE/JWS format indicators |
+| Agent integration | 2-3 | 100-150 | MEDIUM | Add JWE/JWS to agent communication |
+| Tests | 3-5 | 150-200 | LOW-MEDIUM | Extend existing cross-backend tests |
+| **TOTAL (Option A)** | **~10** | **~250-400** | **LOW** |
+| **TOTAL (Option B)** | **~12** | **~400-600** | **MEDIUM** |
+
+**Key Insight**: **The backend abstraction makes JWE/JWS an implementation detail**
+- ✅ No changes needed to KDC encryption callers (Option A)
+- ✅ No changes needed to KRS decryption callers (Option A)
+- ✅ Multi-recipient is backend optimization, not caller-visible
+- ✅ Can be implemented incrementally
+- ✅ Backward compatibility: feature flag on backends or per-node
+- ✅ V1 (direct HPKE) remains unchanged as fallback
+
+**Comparison to Pre-Refactoring Assessment**:
+- **Before**: 400-600 lines across 9-15 files (MEDIUM-HIGH disruption)
+- **After**: 250-400 lines across 10 files, mostly backend internals (LOW disruption)
+- **Reason**: Backend abstraction eliminates call-site changes
 
 ---
 
@@ -715,38 +845,44 @@ jws, _ := agentPrivKey.Sign(jwe)
 
 ---
 
-## Part 5: Recommendation
+## Part 5: Recommendation (Updated Based on Refactoring)
 
-### 5.1 Recommended Path: **Project 2 First**
+### 5.1 Recommended Path: **EITHER ORDER NOW VIABLE**, Strategic Preference for **Project 2 First**
 
-**Reasoning**:
+**KEY CHANGE**: The crypto abstraction refactoring dramatically reduces JWE/JWS implementation risk.
+
+**Project 1 Disruption Reassessment**:
+- **Old estimate**: 400-600 lines across 9-15 files (MEDIUM-HIGH disruption)
+- **New estimate**: 250-400 lines, mostly backend internals (LOW disruption)
+- **Reason**: Backend abstraction encapsulates multi-recipient implementation
+
+**Reasoning for Project 2 First (Still Recommended)**:
 
 1. **Unblocks multi-provider coordination immediately**
    - DNS zone owners can start using multi-provider DNS with TDNS
    - Agents can communicate and synchronize zones
-   - Immediate business value
+   - Immediate business value while Project 1 develops
 
-2. **Simpler Project 2 implementation** (~2-3 months)
-   - Uses existing single-recipient crypto
-   - No multi-recipient complexity
-   - Agents are 2-3 providers (multi-recipient not critical)
-   - Cleaner, less risky delivery
+2. **Project 2 is genuinely simpler** (~2-3 months)
+   - Agents are 2-3 providers (multi-recipient not needed)
+   - Single-recipient crypto is sufficient
+   - No JWE/JWS complexity adds to agent development
 
-3. **Project 1 can be cleaner as Project 2 stabilizes**
-   - After agents are working, Project 1 becomes a pure upgrade
-   - Refactoring agents to JWE/JWS is straightforward
-   - KDC/KRS already have patterns from agents
+3. **Parallelization is now more practical**
+   - Project 2 team works on agent transport abstraction (DNS mode)
+   - Project 1 team works on backend implementations independently
+   - Both can develop simultaneously without much interaction
+   - Low risk of conflicts due to abstraction layer
 
-4. **Parallelization opportunity**
-   - Project 2 develops in tdns/v2 (agents)
-   - Project 1 development can occur simultaneously in backends (crypto layer)
-   - Two teams can work independently
+4. **Project 1 can leverage Project 2 patterns**
+   - Agents develop confirmation framework
+   - KDC/KRS can adopt agent patterns later
+   - Better unified architecture
 
-5. **Lower disruption risk**
-   - Project 2 adds new functionality (DNS mode)
-   - Doesn't change existing API mode
-   - Existing systems continue working
-   - Project 1 (later) upgrades everything to JWE/JWS
+5. **Lower delivery risk for both**
+   - Project 2 adds new functionality (no disruption)
+   - Project 1 is internal optimization (well-isolated by abstraction)
+   - Can be rolled out independently of each other
 
 ### 5.2 Implementation Sequence
 
@@ -778,37 +914,49 @@ jws, _ := agentPrivKey.Sign(jwe)
 
 ---
 
-## Appendix A: Generalization Checklist
+## Appendix A: Generalization Checklist (Updated for Current Refactoring)
 
-### To Move from tdns-nm/tnm to tdns/v2
+### Already Complete ✅
+- [x] CHUNK RR type unified in `tdns/v2/core/rr_chunk.go`
+- [x] NOTIFY RR type unified in `tdns/v2/core/rr_notify.go`
+- [x] Backend abstraction interface in `tdns/v2/crypto/backend.go`
+- [x] Backend registry system in `tdns/v2/crypto/registry.go`
+- [x] HPKE backend implementation
+- [x] JOSE backend implementation
+- [x] Transport parsing in `tdns/v2/core/transport.go`
+- [x] JSONMANIFEST and JSONCHUNK RR types unified
+- [x] Shared crypto helpers in `tnm/crypto_helpers.go`
+- [x] Feature flag architecture for V1→V2 migration
 
-- [ ] `chunk_format.go` → `tdns/v2/core/chunk_protocol.go`
-  - CreateCHUNKManifest
-  - ExtractManifestData
-  - SplitIntoCHUNKs
-  - ReassembleCHUNKChunks
+### Phase A - Final Extraction (Still Needed)
 
-- [ ] `chunk_format.go` (HMAC functions) → `tdns/v2/core/chunk_integrity.go`
-  - CalculateCHUNKHMAC
-  - VerifyCHUNKHMAC
+- [ ] `tnm/chunk_format.go` functions → `tdns/v2/core/chunk_utilities.go`
+  - [ ] `CreateCHUNKManifest()` - Manifest creation
+  - [ ] `ExtractManifestData()` - Manifest parsing
+  - [ ] `CalculateCHUNKHMAC()` - HMAC calculation
+  - [ ] `VerifyCHUNKHMAC()` - HMAC verification
+  - **Status**: Move manifest utilities (already generic)
 
-- [ ] `hpke_transport_v2.go` → `tdns/v2/crypto/transport.go`
-  - EncryptAndEncodeV2
-  - DecodeAndDecryptV2
+- [ ] `tnm/chunks.go` functions → `tdns/v2/core/chunk_utilities.go`
+  - [ ] `SplitIntoCHUNKs()` - Chunk splitting
+  - [ ] `ReassembleCHUNKChunks()` - Chunk reassembly
+  - **Status**: Move if still needed (CHUNK RR now handles directly)
 
-- [ ] `kdc/notify.go` (utilities) → `tdns/v2/core/notify_patterns.go`
-  - SendNotifyWithCHUNK
-  - ExtractCorrelationID
-  - ParseNotifyManifestOption
+- [ ] `tnm/kdc/notify.go` (utilities) → `tdns/v2/core/notify_helpers.go`
+  - [ ] `ExtractDistributionIDFromQNAME()` - Generalize to correlation ID
+  - [ ] `ParseNotifyOption()` - Generic option parsing
+  - **Status**: Extract to make agent-compatible
 
-- [ ] `krs/confirm.go` (abstraction) → `tdns/v2/core/confirmation.go`
-  - ConfirmationEntry interface
-  - ConfirmationAccumulator
-  - Accumulation logic
+- [ ] `tnm/krs/confirm.go` (abstraction) → `tdns/v2/core/confirmation.go`
+  - [ ] `ConfirmationEntry` interface
+  - [ ] `ConfirmationAccumulator` generic accumulator
+  - [ ] Keep status-specific types (KeyStatusEntry, etc.) in tnm
+  - **Status**: Extract accumulation framework
 
-- [ ] `kdc/chunks_v2.go` (backend selection) → `tdns/v2/crypto/backend_selection.go`
-  - SelectBackendForRecipient
-  - EnrichMetadata
+- [ ] `tnm/manifest.go` (if needed) → `tdns/v2/core/manifest.go`
+  - [ ] Metadata building helpers
+  - [ ] Inline payload sizing logic
+  - **Status**: Check if can be moved as-is
 
 ---
 
