@@ -120,33 +120,45 @@ Protected headers are:
 }
 ```
 
-### 3. HPKE Transition Strategy (Option B)
+### 3. HPKE Transition Strategy
 
-**For HPKE backend during V2 transition**:
+**Three code paths with different evolution**:
 
-**Phase 1 (Now)**:
-- HPKE continues using custom wrapper (no change to current V2)
-- JOSE uses new JWE/JWS format
-- Both sit under same "use_crypto_v2" feature flag
-- Single-recipient distributions for HPKE (separate per node)
-- Multi-recipient distributions for JOSE
+**V1 (Direct HPKE) Evolution**:
+- **Now**: Custom JSON + HPKE (unchanged, must remain functional)
+- **Later**: JWE(HPKE) - standard JWE format, no JWS layer
+- **Scope**: Single-recipient only, DNSSEC provides integrity
+- **Timeline**: Independent of Project 1, lower priority
 
-**Phase 2 (Future)**:
-- When IETF draft `draft-ietf-jose-hpke` becomes RFC
-- When major libraries implement HPKE-in-JWE
-- Wrap HPKE encryption in same JWE/JWS envelope
-- Gain multi-recipient support for HPKE too
+**V2 with JOSE**:
+- **Phase 1 (Project 1)**: JWS(JWE(JOSE)) format
+- Standard RFC 7515 (JWS) and RFC 7516 (JWE)
+- Multi-recipient support via JWE JSON Serialization
+- Full signing chain for authenticated distribution
 
-**Code Pattern**:
+**V2 with HPKE**:
+- **Phase 1 (Now)**: HPKE continues using custom wrapper
+- **Phase 2 (Project 1 completion)**: JWS(JWE(HPKE)) with our interpretation
+- Multi-recipient support for HPKE
+- **Note**: Not waiting for IETF RFC `draft-ietf-jose-hpke` - this is our interpretation for internal TDNS use
+- **Future**: If/when IETF RFC emerges, consider alignment (out of scope now)
+
+**Code Pattern After Project 1**:
 ```go
 if backend == "jose" {
-    // Use new JWE/JWS format with multi-recipient
+    // Standard JWS(JWE) with RFC-compliant JOSE
     return encryptWithJWEJWS(plaintext, nodePublicKeys, kdcPrivateKey)
 } else if backend == "hpke" {
-    // Keep current custom wrapper (single-recipient)
-    return encryptWithCustomWrapper(plaintext, nodePublicKey, kdcPrivateKey)
+    // Our interpretation of JWS(JWE(HPKE))
+    return encryptWithJWEJWS_HPKE(plaintext, nodePublicKeys, kdcPrivateKey)
 }
 ```
+
+**Future Option** (out of scope):
+- Once V2's JWS(JWE(HPKE)) is stable and tested
+- Could potentially retire V1 entirely
+- V2's JWS(JWE(HPKE)) would supersede V1's JWE(HPKE)
+- Decision deferred based on operational experience
 
 ### 4. Serialization Format
 
@@ -202,24 +214,28 @@ Distribution: JWS(JWE(zsk, [node1_pubkey, node2_pubkey, node3_pubkey]))
 
 ## Backward Compatibility Strategy
 
-### V1 (Original - Unchanged)
-- Keep existing code path completely untouched
-- No JWE/JWS changes
-- HPKE-only, single-recipient, custom JSON wrapper
+### V1 (Original) Evolution
+- **Now**: Keep existing code path completely untouched during Project 1
+- **Later (independent)**: Migrate V1 to JWE(HPKE) - standard format, no JWS
+- **Purpose**: Eliminate custom JSON, single-recipient only
+- **Future option**: Once V2 stable, consider retiring V1 entirely
 
-### V2 Transition Path
-1. **Phase 1 (This redesign)**:
-   - V2 with JOSE → JWE/JWS (new format)
-   - V2 with HPKE → custom wrapper (unchanged)
+### V2 Transition Path (Project 1)
+1. **Phase 1 (Initial JWE/JWS)**:
+   - V2 with JOSE → JWS(JWE(JOSE)) (RFC-compliant)
+   - V2 with HPKE → custom wrapper (unchanged initially)
    - Feature flag controls V1 vs V2
 
-2. **Phase 2 (Future)**:
-   - Migrate HPKE to JWE/JWS when IETF standardization complete
-   - Unify all V2 under single JWE/JWS envelope
+2. **Phase 2 (Project 1 completion)**:
+   - Migrate V2 HPKE to JWS(JWE(HPKE)) with our interpretation
+   - Unify all V2 under JWE/JWS envelope
+   - Multi-recipient support for both JOSE and HPKE
+   - **Not dependent on IETF RFC** - internal TDNS implementation
 
-3. **Phase 3 (Later)**:
-   - Deprecate V1
-   - Remove custom JSON wrapper entirely
+3. **Phase 3 (Future, out of scope)**:
+   - If IETF RFC for HPKE-in-JOSE emerges, consider alignment
+   - Potentially deprecate V1 if V2 proves stable
+   - Remove legacy custom JSON wrapper entirely
 
 ### Migration Window
 - V1 and V2 coexist during transition
@@ -356,7 +372,7 @@ KDC:
 - RFC 7516: JSON Web Encryption (JWE)
 - RFC 7518: JSON Web Algorithms (JWA)
 - RFC 9180: Hybrid Public Key Encryption
-- draft-ietf-jose-hpke: HPKE in JOSE (future reference)
+- draft-ietf-jose-hpke: HPKE in JOSE (informational only; our implementation is independent)
 
 ## Appendix: Example JWE/JWS Structure
 

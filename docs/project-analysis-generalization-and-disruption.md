@@ -1,21 +1,42 @@
 # Project Analysis: Generalization Opportunities and JWE/JWS Disruption Assessment
 
 ## Document Version
-- **Date**: 2025-01-25
-- **Status**: Analysis Complete - Ready for Decision
+- **Date**: 2025-01-25 (Updated: 2025-01-26)
+- **Status**: Analysis Complete + Architecture Clarified - Ready for Phase A
 - **Analysis**: Code Examination Results (KDC/KRS in tdns-nm, Agents/HSYNC in tdns/v2)
+
+## IMPORTANT: Architecture Clarification (V1/V2 Evolution)
+
+**Three distinct code paths with different evolution**:
+
+1. **V1 (Direct HPKE)**:
+   - Now: custom JSON + HPKE (unchanged, must remain functional)
+   - Later: JWE(HPKE) - standard JWE format, no JWS layer
+   - Single-recipient only, DNSSEC provides integrity
+   - Future option: retire once V2 is stable
+
+2. **V2 with JOSE** (Project 1):
+   - JWS(JWE(JOSE)) - fully RFC-compliant
+   - Multi-recipient support
+
+3. **V2 with HPKE** (Project 1 completion):
+   - JWS(JWE(HPKE)) with our interpretation (not IETF RFC-dependent)
+   - Multi-recipient support
+   - Internal TDNS use only
+
+**Key principle**: HPKE must always have a working implementation throughout all transitions.
 
 ## Executive Summary
 
 This document presents findings from detailed code analysis of both systems:
 
-1. **~400-500 lines** of pure protocol utilities in tdns-nm/tnm can be extracted to tdns/v2 as shared infrastructure
+1. **~230 lines** of pure protocol utilities remain in tdns-nm/tnm to extract (much already done)
 2. **Agent infrastructure in tdns/v2** is partially ready for multi-transport but needs:
    - Transport abstraction layer (currently REST API only)
    - Persistent confirmation database
    - DNS RR-based message serialization
-3. **JWE/JWS Redesign disruption assessment**: Moderate impact, manageable with planning
-4. **Recommendation**: **Project 2 first**, then Project 1 (JWE/JWS) as an upgrade
+3. **JWE/JWS Redesign disruption assessment**: LOW impact (backend abstraction contains it)
+4. **Recommendation**: **Project 2 first**, then Project 1 (JWE/JWS) as upgrade (both are now viable)
 
 ---
 
