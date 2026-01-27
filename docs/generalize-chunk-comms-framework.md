@@ -40,7 +40,7 @@ Operations infrastructure (DistributionEntry, JWS(JWE), manifests)
 ```
 tdns (generic DNS + operations framework)
   ├─ crypto/ (backends: hpke, jose)
-  ├─ distributions/ (NEW - generic framework)
+  ├─ distrib/ (NEW - generic framework)
   │   ├─ types.go (OperationEntry, DistributionMetadata)
   │   ├─ transport.go (JWS(JWE()) helpers)
   │   ├─ manifest.go (CHUNK manifest - JWT format)
@@ -68,7 +68,7 @@ tdns-nm (KDC/KRS - uses distributions framework)
 
 ### 1. Package Location
 
-**Decision**: `github.com/johanix/tdns/v2/distributions/`
+**Decision**: `github.com/johanix/tdns/v2/distrib/`
 
 **Rationale:**
 - Part of tdns (generic DNS infrastructure)
@@ -95,7 +95,7 @@ The **distribution pattern** applies to any reliable delivery over DNS:
 
 ### 3. What's Generic vs Domain-Specific
 
-**Generic (tdns/distributions):**
+**Generic (tdns/distrib):**
 - ✅ Distribution record model
 - ✅ Distribution states (pending, confirmed, failed, expired)
 - ✅ Confirmation tracking
@@ -197,11 +197,11 @@ CREATE TABLE distribution_records (
 ### Phase 1: Create Package Structure ✅
 **Goal**: Establish empty package structure in tdns repo
 
-**Location**: `github.com/johanix/tdns/v2/distributions/`
+**Location**: `github.com/johanix/tdns/v2/distrib/`
 
 **Files**:
 ```
-distributions/
+distrib/
 ├── doc.go                    # Package documentation
 ├── types.go                  # Core types (stub)
 ├── transport.go              # JWS(JWE) helpers (stub)
@@ -223,13 +223,13 @@ distributions/
 ---
 
 ### Phase 2: Move Core Types and Interfaces
-**Goal**: Define generic types and interfaces in tdns/distributions
+**Goal**: Define generic types and interfaces in tdns/distrib
 
 **Source files (tdns-nm)**:
 - `tnm/distribution.go` (DistributionEntry)
 - `tnm/kdc/structs.go` (DistributionRecord - extract generic parts)
 
-**Destination**: `tdns/v2/distributions/types.go`
+**Destination**: `tdns/v2/distrib/types.go`
 
 **What to move**:
 - `OperationEntry` struct (generic operation format)
@@ -241,15 +241,15 @@ distributions/
 - `DistributionStore` interface (persistence)
 
 **Files to create**:
-- `distributions/types.go` - Core types and structs
-- `distributions/tracker.go` - DistributionTracker interface
-- `distributions/persistence.go` - DistributionStore interface + SQL schema
+- `distrib/types.go` - Core types and structs
+- `distrib/tracker.go` - DistributionTracker interface
+- `distrib/persistence.go` - DistributionStore interface + SQL schema
 
 **Tasks**:
 - [ ] Create types.go with OperationEntry, DistributionMetadata, ManifestData
 - [ ] Create tracker.go with DistributionTracker interface
 - [ ] Create persistence.go with DistributionStore interface and SQL schema
-- [ ] Update tdns-nm to import from tdns/distributions (aliases for now)
+- [ ] Update tdns-nm to import from tdns/distrib (aliases for now)
 - [ ] Commit: "distributions: add core types and interfaces"
 
 **Verification**: tdns-nm still compiles with new imports
@@ -257,11 +257,11 @@ distributions/
 ---
 
 ### Phase 3: Move Transport Functions
-**Goal**: Move JWS(JWE()) encoding/decoding functions to tdns/distributions
+**Goal**: Move JWS(JWE()) encoding/decoding functions to tdns/distrib
 
 **Source**: `tnm/hpke_transport_v2.go`
 
-**Destination**: `tdns/v2/distributions/transport.go`
+**Destination**: `tdns/v2/distrib/transport.go`
 
 **Functions to move**:
 - `EncryptSignAndEncodeV2()` → `EncryptSignAndEncode()`
@@ -271,9 +271,9 @@ distributions/
 - Helper functions: `splitJWS()`, `base64Decode()`
 
 **Tasks**:
-- [ ] Copy functions from tnm/hpke_transport_v2.go to distributions/transport.go
+- [ ] Copy functions from tnm/hpke_transport_v2.go to distrib/transport.go
 - [ ] Update function names (remove V2 suffix)
-- [ ] Update imports in tdns-nm to use distributions.EncryptSignAndEncode
+- [ ] Update imports in tdns-nm to use distrib.EncryptSignAndEncode
 - [ ] Keep old functions in tnm as wrappers (temporary, for compatibility)
 - [ ] Run tests
 - [ ] Commit: "distributions: add transport functions"
@@ -286,13 +286,13 @@ distributions/
 ---
 
 ### Phase 4: Move Manifest Operations
-**Goal**: Move CHUNK manifest creation/parsing to tdns/distributions
+**Goal**: Move CHUNK manifest creation/parsing to tdns/distrib
 
 **Source**:
 - `tnm/chunk.go` (CreateCHUNKManifest, ParseCHUNKManifest)
 - `tnm/kdc/chunks_v2.go` (manifest building logic)
 
-**Destination**: `tdns/v2/distributions/manifest.go`
+**Destination**: `tdns/v2/distrib/manifest.go`
 
 **Functions to move**:
 - `CreateCHUNKManifest()` → `CreateManifest()`
@@ -302,9 +302,9 @@ distributions/
 - `SplitIntoCHUNKs()`
 
 **Tasks**:
-- [ ] Move manifest functions to distributions/manifest.go
+- [ ] Move manifest functions to distrib/manifest.go
 - [ ] Update imports in tdns-nm
-- [ ] Update tnm/kdc/chunks_v2.go to use distributions.CreateManifest
+- [ ] Update tnm/kdc/chunks_v2.go to use distrib.CreateManifest
 - [ ] Keep wrappers in tnm for compatibility
 - [ ] Run tests
 - [ ] Commit: "distributions: add manifest operations"
@@ -317,7 +317,7 @@ distributions/
 ---
 
 ### Phase 5: Refactor tdns-nm to Use distributions Package
-**Goal**: Update tdns-nm (KDC/KRS) to use tdns/distributions instead of local implementations
+**Goal**: Update tdns-nm (KDC/KRS) to use tdns/distrib instead of local implementations
 
 **Files to update**:
 - `tnm/kdc/chunks_v2.go` (use distributions for manifest, transport)
@@ -325,20 +325,20 @@ distributions/
 - `tnm/distribution.go` (type aliases, temporary)
 
 **Changes**:
-1. **KDC Distribution Creation**: Use `distributions.CreateManifest()`
-2. **KDC Payload Building**: Use `distributions.EncryptSignAndEncode()`
-3. **KRS Distribution Processing**: Use `distributions.ParseManifest()`
-4. **KRS Payload Decryption**: Use `distributions.DecodeDecryptAndVerify()`
+1. **KDC Distribution Creation**: Use `distrib.CreateManifest()`
+2. **KDC Payload Building**: Use `distrib.EncryptSignAndEncode()`
+3. **KRS Distribution Processing**: Use `distrib.ParseManifest()`
+4. **KRS Payload Decryption**: Use `distrib.DecodeDecryptAndVerify()`
 5. **Type Aliases**: Create temporary aliases in tnm/distribution.go
 
 **Tasks**:
-- [ ] Update all imports in tdns-nm to use distributions package
-- [ ] Replace local types with distributions.OperationEntry, etc.
-- [ ] Replace local functions with distributions.CreateManifest, etc.
+- [ ] Update all imports in tdns-nm to use distrib package
+- [ ] Replace local types with distrib.OperationEntry, etc.
+- [ ] Replace local functions with distrib.CreateManifest, etc.
 - [ ] Run full test suite
 - [ ] Test end-to-end: KDC create distribution → KRS receive → confirm
 - [ ] Remove old implementations from tnm (keep type aliases temporarily)
-- [ ] Commit: "tdns-nm: migrate to distributions package"
+- [ ] Commit: "tdns-nm: migrate to distrib package"
 
 **Verification**:
 - All tdns-nm tests pass
@@ -360,7 +360,7 @@ distributions/
 
 **Implementation**:
 
-**New file**: `distributions/manifest_jwt.go`
+**New file**: `distrib/manifest_jwt.go`
 
 **Key types**:
 ```go
@@ -412,7 +412,7 @@ type KdcConf struct {
 4. Gradual rollout: Enable JWT on KDC, KRS handles both
 
 **Tasks**:
-- [ ] Implement JWT manifest creation/parsing in distributions/manifest_jwt.go
+- [ ] Implement JWT manifest creation/parsing in distrib/manifest_jwt.go
 - [ ] Add FormatJWT constant to core/chunk.go
 - [ ] Add use_jwt_manifest config flag to KDC
 - [ ] Update KDC to create JWT manifests (when enabled)
@@ -436,10 +436,10 @@ type KdcConf struct {
 **Goal**: Comprehensive testing and documentation
 
 **Unit Tests**:
-- `distributions/transport_test.go` - Test all transport functions
-- `distributions/manifest_test.go` - Test manifest operations (JSON)
-- `distributions/manifest_jwt_test.go` - Test JWT functionality
-- `distributions/types_test.go` - Test type conversions
+- `distrib/transport_test.go` - Test all transport functions
+- `distrib/manifest_test.go` - Test manifest operations (JSON)
+- `distrib/manifest_jwt_test.go` - Test JWT functionality
+- `distrib/types_test.go` - Test type conversions
 
 **Integration Tests**:
 - End-to-end KDC → KRS with JWT
@@ -447,10 +447,10 @@ type KdcConf struct {
 - Error cases (bad signatures, expired manifests, etc.)
 
 **Documentation**:
-- `distributions/README.md` - Package overview and usage
-- `distributions/MIGRATION.md` - Migration guide (JSON → JWT)
-- `distributions/ARCHITECTURE.md` - Design decisions and patterns
-- Update main tdns README with distributions package info
+- `distrib/README.md` - Package overview and usage
+- `distrib/MIGRATION.md` - Migration guide (JSON → JWT)
+- `distrib/ARCHITECTURE.md` - Design decisions and patterns
+- Update main tdns README with distrib package info
 
 **Performance Testing**:
 - Benchmark: JWT vs JSON manifest
@@ -505,9 +505,9 @@ Each phase is independently committable and testable:
 ✅ KDC can create JWT manifests
 ✅ KRS can parse JWT manifests
 ✅ Backward compatibility maintained (JSON manifests still work)
-✅ Code in tdns/distributions is generic (no KDC-specific logic)
+✅ Code in tdns/distrib is generic (no KDC-specific logic)
 ✅ Documentation complete
-✅ Ready for HSYNC to use distributions package
+✅ Ready for HSYNC to use distrib package
 
 ---
 
@@ -516,7 +516,7 @@ Each phase is independently committable and testable:
 ### Phase 8: HSYNC Integration
 - Define HSYNC-specific operations (sync_start, sync_chunk, sync_complete)
 - Implement DistributionTracker for HSYNC agents
-- Use distributions package for agent-to-agent communication
+- Use distrib package for agent-to-agent communication
 
 ### Phase 9: Deprecate JSON Manifest
 - Set default to JWT manifest
