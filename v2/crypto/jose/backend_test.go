@@ -455,3 +455,421 @@ func TestJWEFormat(t *testing.T) {
 		t.Error("decrypt verification failed")
 	}
 }
+
+// TestEncryptMultiRecipient tests multi-recipient JWE encryption
+// NOTE: Phase 2 limitation - currently only encrypts for first recipient
+func TestEncryptMultiRecipient(t *testing.T) {
+	backend := NewBackend()
+
+	// Generate 3 keypairs
+	privKeys := make([]crypto.PrivateKey, 3)
+	pubKeys := make([]crypto.PublicKey, 3)
+	for i := 0; i < 3; i++ {
+		priv, pub, err := backend.GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair(%d) failed: %v", i, err)
+		}
+		privKeys[i] = priv
+		pubKeys[i] = pub
+	}
+
+	plaintext := []byte("Multi-recipient test message")
+
+	// Test with metadata
+	metadata := map[string]interface{}{
+		"distribution_id": "test-dist-123",
+		"timestamp":       "2025-01-26T10:00:00Z",
+		"sender":          "kdc.example.com",
+	}
+
+	// Encrypt for all 3 recipients (currently only encrypts for first)
+	ciphertext, err := backend.EncryptMultiRecipient(pubKeys, plaintext, metadata)
+	if err != nil {
+		t.Fatalf("EncryptMultiRecipient failed: %v", err)
+	}
+
+	if len(ciphertext) == 0 {
+		t.Fatal("ciphertext is empty")
+	}
+
+	// PHASE 2 LIMITATION: Only first recipient can decrypt
+	// First recipient should be able to decrypt
+	decrypted, err := backend.DecryptMultiRecipient(privKeys[0], ciphertext)
+	if err != nil {
+		t.Fatalf("Recipient 0 (first): DecryptMultiRecipient failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("Recipient 0: decrypted text doesn't match original")
+	}
+
+	// Other recipients cannot decrypt (expected limitation)
+	for i := 1; i < len(privKeys); i++ {
+		_, err := backend.DecryptMultiRecipient(privKeys[i], ciphertext)
+		if err == nil {
+			t.Logf("Recipient %d: Unexpectedly succeeded (Phase 2 limitation means only first recipient should work)", i)
+		}
+	}
+}
+
+// TestEncryptMultiRecipientSingle tests multi-recipient with single recipient
+func TestEncryptMultiRecipientSingle(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, pubKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	plaintext := []byte("Single recipient via multi-recipient API")
+
+	// Encrypt for single recipient
+	ciphertext, err := backend.EncryptMultiRecipient([]crypto.PublicKey{pubKey}, plaintext, nil)
+	if err != nil {
+		t.Fatalf("EncryptMultiRecipient failed: %v", err)
+	}
+
+	// Decrypt
+	decrypted, err := backend.DecryptMultiRecipient(privKey, ciphertext)
+	if err != nil {
+		t.Fatalf("DecryptMultiRecipient failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("decrypted text doesn't match original")
+	}
+}
+
+// TestEncryptMultiRecipientMany tests with 5 recipients
+// NOTE: Phase 2 limitation - currently only encrypts for first recipient
+func TestEncryptMultiRecipientMany(t *testing.T) {
+	backend := NewBackend()
+
+	// Generate 5 keypairs
+	const numRecipients = 5
+	privKeys := make([]crypto.PrivateKey, numRecipients)
+	pubKeys := make([]crypto.PublicKey, numRecipients)
+	for i := 0; i < numRecipients; i++ {
+		priv, pub, err := backend.GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair(%d) failed: %v", i, err)
+		}
+		privKeys[i] = priv
+		pubKeys[i] = pub
+	}
+
+	plaintext := []byte("Message for 5 recipients")
+
+	// Encrypt for all recipients (currently only encrypts for first)
+	ciphertext, err := backend.EncryptMultiRecipient(pubKeys, plaintext, nil)
+	if err != nil {
+		t.Fatalf("EncryptMultiRecipient failed: %v", err)
+	}
+
+	// PHASE 2 LIMITATION: Only first recipient can decrypt
+	decrypted, err := backend.DecryptMultiRecipient(privKeys[0], ciphertext)
+	if err != nil {
+		t.Fatalf("Recipient 0 (first): DecryptMultiRecipient failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("Recipient 0: decrypted text doesn't match")
+	}
+}
+
+// TestSign tests JWS signing
+func TestSign(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, _, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	data := []byte("Data to sign")
+
+	// Sign
+	signature, err := backend.Sign(privKey, data)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	if len(signature) == 0 {
+		t.Fatal("signature is empty")
+	}
+
+	// Verify it looks like JWS compact serialization (3 parts)
+	parts := strings.Split(string(signature), ".")
+	if len(parts) != 3 {
+		t.Errorf("expected 3 parts in JWS compact serialization, got %d", len(parts))
+	}
+}
+
+// TestVerify tests JWS signature verification
+func TestVerify(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, pubKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	data := []byte("Data to sign and verify")
+
+	// Sign
+	signature, err := backend.Sign(privKey, data)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Verify
+	valid, err := backend.Verify(pubKey, data, signature)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+
+	if !valid {
+		t.Error("signature verification failed, expected valid")
+	}
+}
+
+// TestVerifyWrongKey tests signature verification with wrong public key
+func TestVerifyWrongKey(t *testing.T) {
+	backend := NewBackend()
+
+	privKey1, _, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (1) failed: %v", err)
+	}
+
+	_, pubKey2, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (2) failed: %v", err)
+	}
+
+	data := []byte("Data to sign")
+
+	// Sign with key 1
+	signature, err := backend.Sign(privKey1, data)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Try to verify with key 2 (should fail)
+	valid, err := backend.Verify(pubKey2, data, signature)
+	if err != nil {
+		// Verification can fail with error or return false
+		return
+	}
+
+	if valid {
+		t.Error("signature verification should fail with wrong key")
+	}
+}
+
+// TestVerifyModifiedData tests signature verification with modified data
+func TestVerifyModifiedData(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, pubKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	originalData := []byte("Original data")
+	modifiedData := []byte("Modified data")
+
+	// Sign original data
+	signature, err := backend.Sign(privKey, originalData)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Try to verify modified data (should fail)
+	valid, err := backend.Verify(pubKey, modifiedData, signature)
+	if err != nil {
+		// Verification can fail with error or return false
+		return
+	}
+
+	if valid {
+		t.Error("signature verification should fail with modified data")
+	}
+}
+
+// TestEncryptAndSign tests full JWS(JWE(...)) creation
+// NOTE: Phase 2 limitation - currently only encrypts for first recipient
+func TestEncryptAndSign(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	// Generate signing keypair
+	signingKey, verifyKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (signing) failed: %v", err)
+	}
+
+	// Generate 2 recipient keypairs
+	privKeys := make([]crypto.PrivateKey, 2)
+	pubKeys := make([]crypto.PublicKey, 2)
+	for i := 0; i < 2; i++ {
+		priv, pub, err := backend.GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair (recipient %d) failed: %v", i, err)
+		}
+		privKeys[i] = priv
+		pubKeys[i] = pub
+	}
+
+	plaintext := []byte("Authenticated and encrypted distribution")
+
+	metadata := map[string]interface{}{
+		"distribution_id": "dist-456",
+		"timestamp":       "2025-01-26T12:00:00Z",
+	}
+
+	// Encrypt and sign (currently only encrypts for first recipient)
+	jws, err := backend.EncryptAndSign(pubKeys, plaintext, signingKey, metadata)
+	if err != nil {
+		t.Fatalf("EncryptAndSign failed: %v", err)
+	}
+
+	if len(jws) == 0 {
+		t.Fatal("JWS output is empty")
+	}
+
+	// Verify it's JWS compact serialization (3 parts)
+	parts := strings.Split(string(jws), ".")
+	if len(parts) != 3 {
+		t.Errorf("expected 3 parts in JWS, got %d", len(parts))
+	}
+
+	// PHASE 2 LIMITATION: Only first recipient can decrypt and verify
+	decrypted, err := backend.DecryptAndVerify(privKeys[0], verifyKey, jws)
+	if err != nil {
+		t.Fatalf("Recipient 0: DecryptAndVerify failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("Recipient 0: decrypted text doesn't match")
+	}
+}
+
+// TestDecryptAndVerifyInvalidSignature tests that DecryptAndVerify fails with wrong verify key
+func TestDecryptAndVerifyInvalidSignature(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	// Generate two signing keypairs
+	signingKey1, _, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (signing1) failed: %v", err)
+	}
+
+	_, verifyKey2, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (signing2) failed: %v", err)
+	}
+
+	// Generate recipient keypair
+	recipientPriv, recipientPub, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (recipient) failed: %v", err)
+	}
+
+	plaintext := []byte("Test message")
+
+	// Encrypt and sign with key 1
+	jws, err := backend.EncryptAndSign([]crypto.PublicKey{recipientPub}, plaintext, signingKey1, nil)
+	if err != nil {
+		t.Fatalf("EncryptAndSign failed: %v", err)
+	}
+
+	// Try to decrypt and verify with key 2 (should fail)
+	_, err = backend.DecryptAndVerify(recipientPriv, verifyKey2, jws)
+	if err == nil {
+		t.Error("DecryptAndVerify should fail with wrong verify key")
+	}
+}
+
+// TestDecryptMultiRecipientWrongKey tests that decryption fails with wrong key
+// NOTE: Phase 2 limitation - currently only encrypts for first recipient
+func TestDecryptMultiRecipientWrongKey(t *testing.T) {
+	backend := NewBackend()
+
+	// Generate 2 keypairs for recipients
+	privKey1, pubKey1, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (1) failed: %v", err)
+	}
+
+	_, pubKey2, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (2) failed: %v", err)
+	}
+
+	// Generate a third keypair (not a recipient)
+	privKey3, _, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (3) failed: %v", err)
+	}
+
+	plaintext := []byte("Secret for recipients 1 and 2 only")
+
+	// Encrypt for recipients 1 and 2 (currently only encrypts for first)
+	ciphertext, err := backend.EncryptMultiRecipient([]crypto.PublicKey{pubKey1, pubKey2}, plaintext, nil)
+	if err != nil {
+		t.Fatalf("EncryptMultiRecipient failed: %v", err)
+	}
+
+	// PHASE 2 LIMITATION: Only recipient 1 (first) should succeed
+	_, err = backend.DecryptMultiRecipient(privKey1, ciphertext)
+	if err != nil {
+		t.Errorf("Recipient 1 (first) decrypt failed: %v", err)
+	}
+
+	// Recipient 3 (not included) should fail
+	_, err = backend.DecryptMultiRecipient(privKey3, ciphertext)
+	if err == nil {
+		t.Error("Decrypt with non-recipient key should fail")
+	}
+}
+
+// TestEncryptMultiRecipientNoRecipients tests error handling for empty recipients
+func TestEncryptMultiRecipientNoRecipients(t *testing.T) {
+	backend := NewBackend()
+
+	plaintext := []byte("test")
+
+	// Try to encrypt with no recipients (should fail)
+	_, err := backend.EncryptMultiRecipient([]crypto.PublicKey{}, plaintext, nil)
+	if err == nil {
+		t.Error("EncryptMultiRecipient with no recipients should fail")
+	}
+}
+
+// TestBackwardCompatibility tests that DecryptMultiRecipient can decrypt old Encrypt output
+func TestBackwardCompatibility(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, pubKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	plaintext := []byte("Backward compatibility test")
+
+	// Encrypt with old single-recipient Encrypt method (compact serialization)
+	oldCiphertext, err := backend.Encrypt(pubKey, plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt failed: %v", err)
+	}
+
+	// Decrypt with new DecryptMultiRecipient method (should handle compact serialization)
+	decrypted, err := backend.DecryptMultiRecipient(privKey, oldCiphertext)
+	if err != nil {
+		t.Fatalf("DecryptMultiRecipient failed on compact serialization: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("backward compatibility: decrypted text doesn't match")
+	}
+}

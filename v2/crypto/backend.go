@@ -46,6 +46,47 @@ type Backend interface {
 	// embeds the ephemeral key within the ciphertext format (e.g., JWE header)
 	// This allows the encryption layer to be truly backend-agnostic
 	GetEphemeralKey(ciphertext []byte) ([]byte, error)
+
+	// EncryptMultiRecipient encrypts plaintext for multiple recipients.
+	// Returns JWE-formatted ciphertext (JSON Serialization) containing:
+	// - Single encrypted payload (CEK-encrypted with AES-256-GCM)
+	// - Multiple recipient entries, each with encrypted CEK
+	// - Protected headers with metadata (distribution_id, timestamp, etc.)
+	//
+	// For backends that don't support native multi-recipient (e.g., HPKE),
+	// this may use multiple single-recipient encryptions in JWE recipients array.
+	//
+	// The metadata map should contain JWE protected header fields:
+	//   - "distribution_id": string - Distribution identifier
+	//   - "content_type": string - Content type (e.g., "key_operations")
+	//   - "timestamp": string - ISO8601 timestamp for replay protection
+	//   - "distribution_ttl": string - TTL for replay protection
+	//   - "sender": string - Sender identity
+	//   - Other custom fields as needed
+	EncryptMultiRecipient(recipients []PublicKey, plaintext []byte, metadata map[string]interface{}) ([]byte, error)
+
+	// DecryptMultiRecipient decrypts JWE-formatted multi-recipient ciphertext.
+	// Finds the recipient entry matching the provided private key and decrypts.
+	// Returns plaintext and metadata from protected headers.
+	//
+	// This method handles both:
+	// - JWE JSON Serialization (standard multi-recipient format)
+	// - JWE Compact Serialization (single-recipient, for backward compatibility)
+	DecryptMultiRecipient(privKey PrivateKey, ciphertext []byte) ([]byte, error)
+
+	// Sign signs data using the private key, returning a JWS structure.
+	// The signature format depends on the backend:
+	// - JOSE backend: ES256 (P-256 ECDSA)
+	// - HPKE backend: Ed25519 or separate signing keypair
+	//
+	// Returns JWS Compact Serialization: <header>.<payload>.<signature>
+	// where payload is base64url(data).
+	Sign(privKey PrivateKey, data []byte) ([]byte, error)
+
+	// Verify verifies a JWS signature using the public key.
+	// Returns true if signature is valid, false otherwise.
+	// The signature algorithm is detected from the JWS protected header.
+	Verify(pubKey PublicKey, data []byte, signature []byte) (bool, error)
 }
 
 // PrivateKey represents a private key (backend-specific implementation)

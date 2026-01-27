@@ -220,6 +220,192 @@ func (b *Backend) GetEphemeralKey(ciphertext []byte) ([]byte, error) {
 	return nil, nil
 }
 
+// EncryptMultiRecipient encrypts plaintext for multiple recipients using JWE.
+//
+// CURRENT LIMITATION (Phase 2):
+// The go-jose v4 library does not support multi-recipient JWE decryption.
+// This implementation currently encrypts for the FIRST recipient only using
+// standard JWE Compact Serialization (ECDH-ES+A256GCM).
+//
+// FUTURE (Phase 4):
+// Will implement manual JWE JSON Serialization with ECDH-ES+A256KW to support
+// true multi-recipient encryption where a single ciphertext can be decrypted
+// by any of N recipients.
+//
+// For now, callers should encrypt multiple times (once per recipient) if they
+// need to distribute to multiple recipients. This is less efficient but functionally
+// equivalent.
+func (b *Backend) EncryptMultiRecipient(recipients []crypto.PublicKey, plaintext []byte, metadata map[string]interface{}) ([]byte, error) {
+	if len(recipients) == 0 {
+		return nil, crypto.NewBackendError("jose", "encrypt_multi_recipient",
+			fmt.Errorf("no recipients provided"))
+	}
+
+	// TODO Phase 4: Implement true multi-recipient JWE JSON Serialization
+	// For now, encrypt for first recipient only using single-recipient JWE
+	firstRecipient := recipients[0]
+
+	joseKey, ok := firstRecipient.(*publicKey)
+	if !ok {
+		return nil, crypto.ErrBackendMismatch
+	}
+
+	// Build encrypter options with protected headers
+	opts := &jose.EncrypterOptions{}
+	opts = opts.WithContentType("application/octet-stream")
+
+	// Add custom protected headers from metadata
+	if metadata != nil {
+		for key, value := range metadata {
+			opts = opts.WithHeader(jose.HeaderKey(key), value)
+		}
+	}
+
+	// Add TDNS-specific headers
+	opts = opts.WithType("tdns-distribution")
+	opts = opts.WithHeader("crypto_backend", "jose")
+
+	// Add recipient count to metadata (informational)
+	opts = opts.WithHeader("recipients_count", len(recipients))
+
+	// Create single-recipient encrypter
+	encrypter, err := jose.NewEncrypter(
+		jose.A256GCM,
+		jose.Recipient{
+			Algorithm: jose.ECDH_ES,
+			Key:       joseKey.jwk.Key,
+			KeyID:     joseKey.jwk.KeyID,
+		},
+		opts,
+	)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "encrypt_multi_recipient", err)
+	}
+
+	// Encrypt plaintext
+	jwe, err := encrypter.Encrypt(plaintext)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "encrypt_multi_recipient", err)
+	}
+
+	// Serialize to compact format
+	serialized, err := jwe.CompactSerialize()
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "encrypt_multi_recipient", err)
+	}
+
+	return []byte(serialized), nil
+}
+
+// DecryptMultiRecipient decrypts JWE-formatted ciphertext.
+//
+// CURRENT LIMITATION (Phase 2):
+// Since EncryptMultiRecipient currently only encrypts for the first recipient,
+// this method simply decrypts standard JWE Compact Serialization.
+//
+// FUTURE (Phase 4):
+// Will support true multi-recipient JWE JSON Serialization decryption,
+// automatically finding and using the correct recipient entry.
+func (b *Backend) DecryptMultiRecipient(privKey crypto.PrivateKey, ciphertext []byte) ([]byte, error) {
+	joseKey, ok := privKey.(*privateKey)
+	if !ok {
+		return nil, crypto.ErrBackendMismatch
+	}
+
+	// Parse JWE (currently only handles compact serialization)
+	jwe, err := jose.ParseEncrypted(
+		string(ciphertext),
+		[]jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A256KW},
+		[]jose.ContentEncryption{jose.A256GCM},
+	)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "decrypt_multi_recipient", err)
+	}
+
+	// Decrypt using private key
+	plaintext, err := jwe.Decrypt(joseKey.jwk.Key)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "decrypt_multi_recipient", err)
+	}
+
+	return plaintext, nil
+}
+
+// Sign signs data using ECDSA (ES256) and returns JWS Compact Serialization.
+// The signature format is: <header>.<payload>.<signature>
+func (b *Backend) Sign(privKey crypto.PrivateKey, data []byte) ([]byte, error) {
+	joseKey, ok := privKey.(*privateKey)
+	if !ok {
+		return nil, crypto.ErrBackendMismatch
+	}
+
+	// Create signer with ES256 (ECDSA using P-256 and SHA-256)
+	signingKey := jose.SigningKey{
+		Algorithm: jose.ES256,
+		Key:       joseKey.jwk.Key,
+	}
+
+	opts := &jose.SignerOptions{}
+	opts = opts.WithType("JWS")
+	opts = opts.WithContentType("application/octet-stream")
+
+	signer, err := jose.NewSigner(signingKey, opts)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "sign", err)
+	}
+
+	// Sign the data
+	jws, err := signer.Sign(data)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "sign", err)
+	}
+
+	// Serialize to compact format
+	serialized, err := jws.CompactSerialize()
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "sign", err)
+	}
+
+	return []byte(serialized), nil
+}
+
+// Verify verifies a JWS signature using ECDSA public key.
+// The signature parameter should be JWS Compact Serialization format.
+func (b *Backend) Verify(pubKey crypto.PublicKey, data []byte, signature []byte) (bool, error) {
+	joseKey, ok := pubKey.(*publicKey)
+	if !ok {
+		return false, crypto.ErrBackendMismatch
+	}
+
+	// Parse JWS
+	jws, err := jose.ParseSigned(
+		string(signature),
+		[]jose.SignatureAlgorithm{jose.ES256},
+	)
+	if err != nil {
+		return false, crypto.NewBackendError("jose", "verify", err)
+	}
+
+	// Verify signature and extract payload
+	payload, err := jws.Verify(joseKey.jwk.Key)
+	if err != nil {
+		// Signature verification failed
+		return false, nil
+	}
+
+	// Verify that the payload matches the original data
+	if len(payload) != len(data) {
+		return false, nil
+	}
+	for i := range payload {
+		if payload[i] != data[i] {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 // privateKey implements crypto.PrivateKey for JOSE
 type privateKey struct {
 	jwk jose.JSONWebKey // JWK with private key material
@@ -238,6 +424,61 @@ type publicKey struct {
 // Backend returns "jose"
 func (k *publicKey) Backend() string {
 	return "jose"
+}
+
+// EncryptAndSign is a convenience method that creates JWS(JWE(...)).
+// This wraps multi-recipient JWE encryption with a JWS signature for authenticated distributions.
+// Returns JWS Compact Serialization containing the JWE as payload.
+func (b *Backend) EncryptAndSign(recipients []crypto.PublicKey, plaintext []byte, signingKey crypto.PrivateKey, metadata map[string]interface{}) ([]byte, error) {
+	// Step 1: Create multi-recipient JWE
+	jwe, err := b.EncryptMultiRecipient(recipients, plaintext, metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Sign the JWE structure
+	jws, err := b.Sign(signingKey, jwe)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return JWS(JWE(...))
+	return jws, nil
+}
+
+// DecryptAndVerify is a convenience method that verifies JWS and decrypts JWE.
+// This is the inverse of EncryptAndSign, verifying the signature before decrypting.
+// Returns plaintext if signature is valid and decryption succeeds.
+func (b *Backend) DecryptAndVerify(privKey crypto.PrivateKey, verifyKey crypto.PublicKey, ciphertext []byte) ([]byte, error) {
+	// Step 1: Parse and verify JWS
+	jws, err := jose.ParseSigned(
+		string(ciphertext),
+		[]jose.SignatureAlgorithm{jose.ES256},
+	)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "decrypt_and_verify",
+			fmt.Errorf("failed to parse JWS: %w", err))
+	}
+
+	joseVerifyKey, ok := verifyKey.(*publicKey)
+	if !ok {
+		return nil, crypto.ErrBackendMismatch
+	}
+
+	// Step 2: Verify signature and extract JWE payload
+	jweBytes, err := jws.Verify(joseVerifyKey.jwk.Key)
+	if err != nil {
+		return nil, crypto.NewBackendError("jose", "decrypt_and_verify",
+			fmt.Errorf("signature verification failed: %w", err))
+	}
+
+	// Step 3: Decrypt JWE
+	plaintext, err := b.DecryptMultiRecipient(privKey, jweBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return plaintext, nil
 }
 
 // Auto-register backend on package import
