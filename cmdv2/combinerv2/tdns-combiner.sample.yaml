@@ -1,0 +1,36 @@
+include:
+   - combiner-zones.yaml
+
+apiserver:
+   usetls:		true
+   addresses:           [ 127.0.0.1:8085 ]
+   apikey:              you-have-stolen-my-frotzblinger
+   certFile:            /etc/tdns/certs/localhost..crt
+   keyFile:             /etc/tdns/certs/localhost..key
+
+service:
+   name:                TDNS-COMBINER
+   verbose:             true
+   debug:               true   # writes processed zone to disk
+   refresh:             true
+   maxrefresh:          1800    # seconds. Cap refresh counter to max this
+
+dnsengine:
+   addresses:           [ 127.0.0.1:5366, '[::1]:5366']
+   transports:		[ doq, dot, do53 ]
+   zones:
+      config:           /etc/tdns/tdns-czones.yaml
+      filedir:          /etc/tdns/czones
+      filetmpl:         "%s/%s.zone.new"                # zonename.zone
+
+common:
+   command:		/usr/local/libexec/tdns-combiner
+   rootca:      	../etc/certs/PublicRootCAs.pem
+   debug:		true
+   verbose:		true
+
+log:
+   file:		/var/log/tdns/tdns-combiner.log
+
+db:
+   file:		/var/tmp/tdns-combiner.db

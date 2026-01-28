@@ -26,17 +26,17 @@ const (
 // Format constants for CHUNK RR type
 const (
 	FormatJSON = 1 // JSON format (original format)
+	FormatJWT  = 2 // JWT format (signed manifest with flattened claims)
 	// Future formats can be added as needed:
-	// FormatJSONv2 = 9  // Example: if JSON v2 is needed in the future
-	// FormatBinary = 2  // Example: binary format
-	// FormatProtobuf = 3 // Example: protobuf format
+	// FormatBinary = 3  // Example: binary format
+	// FormatProtobuf = 4 // Example: protobuf format
 )
 
 // FormatToString maps format constants to their string representations
 var FormatToString = map[uint8]string{
 	FormatJSON: "JSON",
+	FormatJWT:  "JWT",
 	// Future formats:
-	// FormatJSONv2: "JSONv2",
 	// FormatBinary: "BINARY",
 	// FormatProtobuf: "PROTOBUF",
 }
@@ -46,8 +46,8 @@ var FormatToString = map[uint8]string{
 // also add the corresponding entry here.
 var StringToFormat = map[string]uint8{
 	"JSON": FormatJSON,
+	"JWT":  FormatJWT,
 	// Future formats will be added here when FormatToString is updated:
-	// "JSONv2": FormatJSONv2,
 	// "BINARY": FormatBinary,
 	// "PROTOBUF": FormatProtobuf,
 }

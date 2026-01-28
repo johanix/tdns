@@ -62,7 +62,8 @@ func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*CHUNK, erro
 // ExtractManifestData extracts ManifestData from a CHUNK manifest record.
 //
 // This function parses the JSON data from a manifest chunk (Sequence=0) and returns
-// the structured ManifestData. Only JSON format is currently supported.
+// the structured ManifestData. Only FormatJSON is supported by this function.
+// For FormatJWT manifests, use distrib.ExtractJWTManifestData instead.
 //
 // Parameters:
 //   - chunk: The CHUNK record to extract from (must have Sequence=0)
@@ -70,15 +71,19 @@ func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*CHUNK, erro
 // Returns:
 //   - The parsed ManifestData structure, or an error if:
 //     - Chunk is not a manifest (Sequence != 0)
-//     - Format is not FormatJSON
+//     - Format is not FormatJSON (use distrib.ExtractJWTManifestData for FormatJWT)
 //     - JSON parsing fails
 func ExtractManifestData(chunk *CHUNK) (*ManifestData, error) {
 	if chunk.Sequence != 0 {
 		return nil, fmt.Errorf("ExtractManifestData can only be called for manifest chunks (Sequence=0), got Sequence=%d", chunk.Sequence)
 	}
 
+	if chunk.Format == FormatJWT {
+		return nil, fmt.Errorf("FormatJWT manifests require signature verification; use distrib.ExtractJWTManifestData instead")
+	}
+
 	if chunk.Format != FormatJSON {
-		return nil, fmt.Errorf("unsupported CHUNK format: %d (expected FormatJSON=%d)", chunk.Format, FormatJSON)
+		return nil, fmt.Errorf("unsupported CHUNK format: %d (expected FormatJSON=%d or FormatJWT=%d)", chunk.Format, FormatJSON, FormatJWT)
 	}
 
 	var manifestData ManifestData
@@ -87,6 +92,17 @@ func ExtractManifestData(chunk *CHUNK) (*ManifestData, error) {
 	}
 
 	return &manifestData, nil
+}
+
+// IsJWTManifest checks if a CHUNK manifest uses JWT format.
+// This can be used for format auto-detection before choosing the appropriate extraction method.
+func IsJWTManifest(chunk *CHUNK) bool {
+	return chunk.Sequence == 0 && chunk.Format == FormatJWT
+}
+
+// IsJSONManifest checks if a CHUNK manifest uses JSON format.
+func IsJSONManifest(chunk *CHUNK) bool {
+	return chunk.Sequence == 0 && chunk.Format == FormatJSON
 }
 
 // CalculateCHUNKHMAC calculates HMAC-SHA256 for a CHUNK manifest record.

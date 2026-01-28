@@ -1,18 +1,20 @@
 .PHONY: v1 all v2 clean install
 
 v1:
-	$(MAKE) -C ./auth/
-	$(MAKE) -C ./cli/
-	$(MAKE) -C ./agent/
-	$(MAKE) -C ./combiner/
-	$(MAKE) -C ./imr/
-	$(MAKE) -C ./dog/
+	$(MAKE) -C ./cmd/auth/
+	$(MAKE) -C ./cmd/cli/
+	$(MAKE) -C ./cmd/agent/
+	$(MAKE) -C ./cmd/combiner/
+	$(MAKE) -C ./cmd/imr/
+	$(MAKE) -C ./cmd/dog/
 
 v2:
-	$(MAKE) -C ./authv2/
-	$(MAKE) -C ./cliv2/
-	$(MAKE) -C ./imrv2/
-	$(MAKE) -C ./dogv2/
+	$(MAKE) -C ./cmdv2/authv2/
+	$(MAKE) -C ./cmdv2/cliv2/
+	$(MAKE) -C ./cmdv2/agentv2/
+	$(MAKE) -C ./cmdv2/combinerv2/
+	$(MAKE) -C ./cmdv2/imrv2/
+	$(MAKE) -C ./cmdv2/dogv2/
 
 all:	v1 v2
 	$(MAKE) -C ./reporter/

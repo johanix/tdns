@@ -48,6 +48,24 @@ func VerifyCHUNKHMAC(chunk *core.CHUNK, hmacKey []byte) (bool, error) {
 	return core.VerifyCHUNKHMAC(chunk, hmacKey)
 }
 
+// IsJWTManifest is re-exported from core for convenience.
+// Checks if a CHUNK manifest uses JWT format.
+func IsJWTManifest(chunk *core.CHUNK) bool {
+	return core.IsJWTManifest(chunk)
+}
+
+// IsJSONManifest is re-exported from core for convenience.
+// Checks if a CHUNK manifest uses JSON format.
+func IsJSONManifest(chunk *core.CHUNK) bool {
+	return core.IsJSONManifest(chunk)
+}
+
+// Format constants re-exported from core for convenience.
+const (
+	FormatJSON = core.FormatJSON
+	FormatJWT  = core.FormatJWT
+)
+
 // CreateManifestMetadata creates base metadata for a distribution manifest.
 // This is used to populate the Metadata field of ManifestData.
 //
@@ -76,10 +94,8 @@ func CreateManifestMetadata(contentType, distributionID, receiverID string, extr
 }
 
 // ShouldIncludePayloadInline determines if a payload should be included inline in the manifest.
-// Returns true if the payload fits within DNS message size limits.
-//
-// The thresholds are designed to ensure the entire manifest fits in a single
-// DNS response (typically 1232 bytes for EDNS0).
+// DEPRECATED: This function uses hardcoded UDP-era thresholds (500/1200 bytes).
+// For TCP transport, use ShouldIncludePayloadInlineWithLimit instead.
 //
 // Parameters:
 //   - payloadSize: Size of the payload in bytes
@@ -88,10 +104,26 @@ func CreateManifestMetadata(contentType, distributionID, receiverID string, extr
 // Returns:
 //   - true if payload should be included inline, false if it should be chunked
 func ShouldIncludePayloadInline(payloadSize, estimatedTotalSize int) bool {
-	const inlinePayloadThreshold = 500  // Max payload size for inline
-	const maxTotalSize = 1200           // Max total manifest size
+	const inlinePayloadThreshold = 500 // Max payload size for inline (legacy UDP limit)
+	const maxTotalSize = 1200          // Max total manifest size (legacy UDP limit)
 
 	return payloadSize <= inlinePayloadThreshold && estimatedTotalSize < maxTotalSize
+}
+
+// ShouldIncludePayloadInlineWithLimit determines if a payload should be included inline in the manifest.
+// Returns true if the estimated manifest size (including payload) fits within the maxSize limit.
+//
+// For TCP transport (which TDNS uses), maxSize can be up to 64KB.
+// The maxSize should come from configuration (e.g., KdcConf.GetChunkMaxSize()).
+//
+// Parameters:
+//   - estimatedTotalSize: Estimated total manifest size including payload
+//   - maxSize: Maximum allowed manifest size (from config, typically up to 64KB for TCP)
+//
+// Returns:
+//   - true if payload should be included inline, false if it should be chunked
+func ShouldIncludePayloadInlineWithLimit(estimatedTotalSize, maxSize int) bool {
+	return estimatedTotalSize <= maxSize
 }
 
 // EstimateManifestSize estimates the size of a CHUNK manifest with given metadata and payload.
@@ -269,12 +301,14 @@ func PrepareDistributionChunks(payload []byte, contentType, distributionID, rece
 	// Create metadata
 	metadata := CreateManifestMetadata(contentType, distributionID, receiverID, extraMetadata)
 
+	// Use default chunk size if not specified
+	if chunkSize <= 0 {
+		chunkSize = 60000 // Default for TCP transport
+	}
+
 	// Estimate manifest size to determine if payload should be inline
-	payloadSize := len(payload)
 	testSize := EstimateManifestSize(metadata, payload)
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+	includeInline := ShouldIncludePayloadInlineWithLimit(testSize, chunkSize)
 
 	var dataChunks []*core.CHUNK
 	var chunkCount uint16

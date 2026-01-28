@@ -1,0 +1,132 @@
+# Main TDNS configuration
+include:
+  - agent-zones.yaml
+
+agent:
+   identity:		agent.provider.
+   api:
+      addresses:
+         publish:	[ 1.2.3.4 ]
+         listen:	[ 127.0.0.1:8999 ]
+      baseurl:		https://api.{TARGET}:{PORT}/api/v1 # TARGET will be expanded to identity
+      port:		8999
+      certfile:		/etc/tdns/certs/agent.provider..crt
+      keyfile:		/etc/tdns/certs/agent.provider..key
+   dns:
+      addresses:
+         publish:	[ 1.2.3.4 ]
+         listen:	[ 127.0.0.1:8998 ]
+      baseurl:		dns://dns.{TARGET}:{PORT}/ # TARGET will be expanded to identity
+      port:		8998
+
+service:
+   name:		TDNS-AGENT
+   verbose:		true
+   debug:		true   # writes processed zone to disk
+   refresh:		true
+   maxrefresh:		1800    # seconds. Cap refresh counter to max this
+
+dnsengine:
+   addresses:		[ 127.0.0.1:5357, '[::1]:5357']
+   transports:		[ doq, dot, do53 ]
+   zones:
+#      config:		/etc/tdns/tdns-zones.yaml
+      filedir:		/etc/tdns/zones
+      filetmpl:		"%s/%s.zone.new"		# zonename.zone
+
+apiserver:
+   addresses:     	[ 127.0.0.1:8987 ]
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
+   certfile:		/etc/tdns/certs/localhost..crt
+   keyfile:		/etc/tdns/certs/localhost..key
+
+server:
+   id:			ooga booga boo
+   version:		tdns-agent {version}
+   hostname:		there-is-no-place-like-127.0.0.1
+
+validator:
+   active:		true
+   verbose:		true
+   debug:		true
+   dnskey:
+      trusted:
+         file:		/etc/tdns/trust-anchors.yaml
+   sig0:
+      trusted:
+         file:		/etc/tdns/sig0-keys.yaml
+
+resolver:
+   address:		8.8.8.8:53 
+
+delegationsync:
+   parent:
+      # in parent zones, we support these schemes, and will publish DSYNC RRs
+      # if allowed to:
+      schemes:		[ notify, update ]
+      notify:
+         types:		[ CDS, CSYNC ]
+         port:		5354				# MUST be a port the dnsengine listens on
+         target:	notifications.{ZONENAME}	# {ZONENAME} will be expanded at run-time
+         addresses:	[ 127.0.0.1, '::1' ]		# There must be no port and also no '[]' around v6 addresses here
+      update:
+         types:		[ ANY ]
+         port:		5354				# MUST be a port the dnsengine listens on
+         target:	updates.{ZONENAME}
+         addresses:	[ 127.0.0.1, '::1' ]
+         keygen:
+            mode:	internal # internal | external
+            generator:	/opt/local/bin/dnssec-keygen
+            algorithm:	ED25519
+
+   child:
+      # in child zones, we will attempt the following schemes, if the parent
+      # supports them and we're allowed to modify the child zone if needed
+      # (adding CDS, CSYNC, KEY RRs, re-signing, etc):
+      schemes:		[ notify, update ]
+      update:
+         keygen:
+            mode:	external # internal | external
+            generator:	/opt/local/bin/dnssec-keygen
+            algorithm:	ED25519
+
+keybootstrap:
+   consistent-lookup:
+      iterations:	3
+      interval:		60	# seconds between lookups
+      nameservers:	all	# one | all
+
+dnssecpolicies:
+   default:
+      algorithm:        ED25519
+      ksk:
+         lifetime:      forever
+         sigvalidity:   168h    # 24*7h = 1 week
+      zsk:
+         lifetime:      forever
+         sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
+
+   fastroll:
+      algorithm:        ED25519
+      ksk:
+         lifetime:      48h
+         sigvalidity:   5h
+      zsk:
+         lifetime:      12h
+         sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
+
+db:
+   file:		/var/tmp/tdns-agent.db
+
+log:
+   file:		/var/log/tdns/tdns-agent.log
+
+common:
+   servername:		tdns-agent
+   command:		/usr/local/libexec/tdns-agent
