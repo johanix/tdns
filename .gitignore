@@ -8,7 +8,7 @@
 *.so
 *.dylib
 
-cmdv1/*/version.go
+cmd/*/version.go
 cmdv2/*/version.go
 
 cmd/auth/tdns-auth

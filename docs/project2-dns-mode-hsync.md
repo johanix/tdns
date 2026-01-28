@@ -1,8 +1,8 @@
 # Project 2: DNS Mode for Multi-Provider DNSSEC Coordination
 
 ## Document Version
-- **Date**: 2025-01-25 (Updated: 2025-01-26)
-- **Status**: Design Complete + Refactoring Update
+- **Date**: 2026-01-25 (Updated: 2025-01-28)
+- **Status**: Design Refined - Ready for Phase Discussion
 - **Author**: Architecture Review
 - **Project**: TDNS Multi-Provider DNS Synchronization
 
@@ -146,7 +146,7 @@ Each provider (identified as domain name like `agent.providerB.com`) can be cont
 Agent A wants to send sync data to Agent B:
 
 1. Agent A creates CHUNK with sync data
-   - Encrypted with Agent B's public key (+ optional multi-recipient)
+   - Encrypted with Agent B's public key
    - Signed by Agent A with its private key
    - Protected headers contain operation type, sequence, correlation IDs
 
@@ -180,7 +180,17 @@ Agent A wants to send sync data to Agent B:
 **Sync Operation**:
 - Carries coordination data (new NS records, DNSKEY changes, etc.)
 - Type-specific (NS sync, DNSSEC sync, glue sync, etc.)
+- **Always zone-specific**: Each operation targets exactly one zone
+- Agent only announces facts about its own provider
 - Includes operation-specific fields
+
+**Relocate Operation** (DDoS Mitigation):
+- After secure communication is established, agents can relocate to private addresses
+- Public HSYNC addresses are potential DDoS targets (discoverable by adversaries)
+- Relocate payload contains new address:port inside encrypted envelope
+- New address is invisible to adversaries (only decryptable by authenticated peer)
+- Operational communication continues on private addresses
+- Allows separation of "discovery address" from "operational address"
 
 **Confirmation Operation**:
 - Response to any operation
@@ -190,6 +200,15 @@ Agent A wants to send sync data to Agent B:
 
 ## Agent-to-Agent Communication
 
+### Key Principle: Agents Only Speak for Themselves
+
+**Critical constraint**: An agent can ONLY make statements about its own provider. Agent A cannot make statements about what provider B or provider C should do. This ensures:
+- Clear authority boundaries (each agent speaks for exactly one provider)
+- No ambiguity about source of information
+- No delegation of authority between providers
+
+Each agent announces facts about itself: "For zone X, provider P (that I represent) serves on nameservers [list]"
+
 ### Scenario: NS Record Coordination
 
 ```
@@ -198,35 +217,39 @@ Providers: A (ns1.providerA.com), B (ns1.providerB.com)
 
 1. Zone owner adds new provider C
    - Updates HSYNC RRset to include ns1.providerC.com
-   - All existing providers see updated RRset
+   - All existing providers see updated HSYNC RRset
 
 2. Agent A detects HSYNC change
-   - Sees new provider C in RRset
+   - Sees new provider C in HSYNC RRset
    - Initiates DNS mode discovery for Agent C
+   - Performs Hello handshake with Agent C
 
-3. Agent A sends Sync(NS) CHUNK to Agent B and Agent C
-   - Multi-recipient encryption: each agent gets their encrypted_key
-   - Payload: "NS RRset should be: ns1.A, ns1.B, ns1.C"
+3. Agent A announces its NS records to Agent B and Agent C
+   - Agent A sends Sync(NS) to Agent B (encrypted for B's public key)
+   - Agent A sends Sync(NS) to Agent C (encrypted for C's public key)
+   - Payload: "For zone example.com, provider A serves on nameservers: [ns1.providerA.com, ns2.providerA.com]"
+   - Note: Agent A only announces its own records, never speaks for B or C
 
-4. Agent B receives and decrypts
-   - Queries signer for current NS RRset
-   - If different, sends Confirmation(NS) with difference details
+4. Agent B and Agent C announce their own NS records
+   - Agent B sends Sync(NS) to A and C: "For zone example.com, provider B serves on: [ns1.providerB.com]"
+   - Agent C sends Sync(NS) to A and B: "For zone example.com, provider C serves on: [ns1.providerC.com]"
 
-5. Agent B sends modification instruction to its Combiner
-   - Combiner receives CHUNK via Sync(NS) from Agent B
-   - Agent B tells Combiner: "ensure NS RRset includes ns1.C"
+5. Each agent locally computes the combined NS RRset
+   - Agent B receives announcements from A and C
+   - Combines with its own knowledge: {ns1.A, ns2.A, ns1.B, ns1.C}
+   - Instructs local Combiner: "ensure NS RRset contains all four records"
 
 6. Combiner modifies zone as it passes to signer
-   - When zone transfer from owner arrives, combiner injects NS record for C
+   - When zone transfer from owner arrives, combiner injects NS records
    - Signer signs the merged zone
-   - Resulting NS RRset now includes all three providers
+   - Resulting NS RRset now includes all providers' nameservers
 
 7. Agent B detects signer's zone changed
    - Sends Confirmation(NS) to Agent A
-   - "Successfully updated NS RRset: {ns1.A, ns1.B, ns1.C}"
+   - "For zone example.com: successfully applied NS records"
 
 8. Agent A receives confirmation
-   - Marks synchronization complete
+   - Marks synchronization complete for zone example.com with provider B
    - Logs completion for operator visibility
 ```
 
@@ -235,37 +258,47 @@ Providers: A (ns1.providerA.com), B (ns1.providerB.com)
 ### Scenario: Combiner Receives Sync Instructions
 
 ```
-Agent at Provider B wants Combiner to modify zone:
+Agent at Provider B wants Combiner to modify zone example.com:
 
-1. Agent receives Sync(NS) CHUNK from Agent A
-   - Contains new NS record for provider C
+1. Agent receives Sync(NS) announcements from Agent A and Agent C
+   - A announces: "For zone example.com, provider A serves on: [ns1.A, ns2.A]"
+   - C announces: "For zone example.com, provider C serves on: [ns1.C]"
 
-2. Agent sends Modification CHUNK to local Combiner
+2. Agent B locally computes combined NS RRset for zone example.com
+   - Own records: [ns1.B]
+   - From A: [ns1.A, ns2.A]
+   - From C: [ns1.C]
+   - Combined: [ns1.A, ns2.A, ns1.B, ns1.C]
+
+3. Agent B sends Modification CHUNK to local Combiner
    - Type: Sync(NS)
-   - Payload: "Add NS record ns1.C"
+   - Zone: example.com
+   - Payload: "For zone example.com, ensure NS RRset contains: [ns1.A, ns2.A, ns1.B, ns1.C]"
    - Signed by Agent with its private key
    - Encrypted with Combiner's public key (or symmetric shared secret)
 
-3. Combiner receives NOTIFY(CHUNK) from Agent
+4. Combiner receives NOTIFY(CHUNK) from Agent
    - Queries Agent for modification CHUNK
 
-4. Combiner decrypts and verifies
+5. Combiner decrypts and verifies
    - Validates Agent signature (Agent public key known from enrollment)
    - Checks modification is within allowed scope (NS, glue, DNSKEY, CDS, CSYNC only)
+   - Checks modification is for a zone the combiner manages
 
-5. Combiner applies modification to next zone transfer
-   - Modifications are temporary per-transfer (held in memory)
-   - When zone owner sends new AXFR, combiner merges in modifications
+6. Combiner applies modification to next zone transfer
+   - Modifications are zone-specific and temporary per-transfer (held in memory)
+   - When zone owner sends new AXFR for example.com, combiner merges in modifications
    - Sends merged zone to signer
 
-6. Combiner sends Confirmation CHUNK back to Agent
+7. Combiner sends Confirmation CHUNK back to Agent
+   - Zone: example.com
    - Details what was applied
    - References to DNSSEC signatures for proof
    - Signed by Combiner with its private key
 
-7. Agent receives Confirmation
+8. Agent receives Confirmation
    - Validates Combiner signature
-   - Logs successful application
+   - Logs successful application for zone example.com
 ```
 
 ## Confirmation Pattern: Critical Importance
@@ -302,7 +335,7 @@ Confirmation Operation:
 | **Frequency** | Infrequent | Infrequent | Infrequent |
 | **Criticality** | High (DNSSEC keys) | High (zone structure) | High (zone mods) |
 | **Transport** | CHUNK/NOTIFY | CHUNK/NOTIFY | CHUNK/NOTIFY |
-| **Encryption** | JWE (single/multi-recipient) | JWE (single/multi-recipient) | JWE |
+| **Encryption** | JWE (single-recipient) | JWE (single-recipient) | JWE |
 | **Confirmation** | Detailed per-zone per-key | Detailed per-zone per-record | Detailed per-modification |
 | **Authentication** | KDC signs with long-term key | Agent signs with long-term key | Agent/Combiner sign |
 | **Endpoint Discovery** | KRS registers via enrollment | DNS (DNSSEC-authenticated) | Local (combiner is local) |
@@ -344,83 +377,141 @@ Agent A → Agent B:
 - Same database tables, schemas, confirmations
 - Transport layer abstraction: transparent to business logic
 
+## Security Considerations
+
+### DDoS Mitigation: The Relocate Operation
+
+**Problem**: The agent's public address is discoverable via DNS:
+- HSYNC record contains the provider name (e.g., `agent.providerA.com`)
+- Address lookups are public and DNSSEC-authenticated
+- Adversaries can easily discover the agent's "official" address:port
+- This makes the public endpoint a potential DDoS target
+
+**Solution**: Relocate to private operational addresses after initial discovery:
+
+```
+1. Discovery Phase (Public Address)
+   - Agent B discovers Agent A via HSYNC RRset
+   - Looks up agent.providerA.com address via DNS
+   - Initiates Hello handshake on public address
+   - Establishes secure communication (mutual authentication)
+
+2. Relocate Operation (Move to Private Address)
+   - Agent A sends Relocate operation to Agent B
+   - Payload (encrypted, inside JWE): { "new_address": "10.x.y.z", "new_port": 5354 }
+   - Address is invisible to adversaries (only Agent B can decrypt)
+   - Agent B acknowledges and switches to new address
+
+3. Operational Phase (Private Address)
+   - All subsequent Sync, Confirmation operations use private address
+   - Public address remains for new peer discovery only
+   - Private address can be changed periodically for additional security
+```
+
+**Benefits**:
+- Separation of "discovery address" from "operational address"
+- Private addresses are not publicly discoverable
+- Reduces attack surface for established peer relationships
+- Allows address rotation without disrupting discovery
+
+### Encryption and Authentication
+
+All agent-to-agent communication is:
+- **Encrypted**: JWE with recipient's public key (asymmetric)
+- **Signed**: JWS with sender's private key
+- **Replay-protected**: Timestamps and correlation IDs
+- **Zone-scoped**: Each operation targets a specific zone
+
 ## Implementation Scope
 
-### Phase 1: Design and Infrastructure (Current)
+### Phase 1: Review and Evaluation of Existing API-Mode Communications
+**Goal**: Understand and evaluate the existing API-mode communications layer
+
+Note: The existing API-mode code is incomplete and not in production use. There are no backwards compatibility constraints - we can redesign as needed to create a clean, transport-neutral communications layer that works for both API mode and DNS mode.
+
 - ✅ Define HSYNC RRset format
 - ✅ Specify API mode endpoint discovery
 - ✅ Define DNS mode protocol
-- ✅ Design CHUNK operations
+- ✅ Design CHUNK operations (including Relocate for DDoS mitigation)
 - ✅ Specify confirmation format
-- [ ] Examine existing agent code (tdns/v2)
-- [ ] Identify generalization opportunities
-- [ ] Plan generalized comms framework
+- [ ] Examine existing agent code in tdns/v2
+- [ ] Evaluate existing API-mode communications (what works, what doesn't)
+- [ ] Identify what can be reused vs. redesigned
+- [ ] Plan transport-neutral comms framework (API mode + DNS mode unified)
 
-### Phase 2: Infrastructure Generalization (Phase A - Parallel with Project Decision)
-**Status**: Partially complete, ready for completion
-- ✅ Backend abstraction (ALREADY DONE)
-- ✅ Feature flag architecture (ALREADY DONE)
-- ✅ CHUNK RR type unified (ALREADY DONE)
-- [ ] Move CHUNK format utilities from tnm to tdns/v2/core (~50 lines)
-- [ ] Move NOTIFY helpers from tnm to tdns/v2/core (~50 lines)
-- [ ] Move confirmation framework from tnm to tdns/v2/core (~80 lines)
-- [ ] Create transport abstraction framework in tdns/v2/agent
+### Phase 2: Infrastructure Generalization
+**Status**: Generic infrastructure complete; transport abstraction is the main remaining work
 
-### Phase 3: DNS Mode Implementation (Project 2)
-- [ ] Transport abstraction interface for agents
-- [ ] REST transport implementation (refactor existing)
-- [ ] DNS transport implementation (new)
+**Already Complete:**
+- ✅ Backend abstraction (crypto layer)
+- ✅ Feature flag architecture
+- ✅ CHUNK RR type unified in tdns/v2/core
+- ✅ CHUNK utilities moved to tdns/v2/core/chunk_utilities.go and tdns/v2/distrib/
+- ✅ NOTIFY helpers moved to tdns/v2/core/notify_helpers.go
+- ✅ Confirmation types in tdns/v2/distrib/confirmation.go
+- ✅ JWT manifest format in tdns/v2/distrib/manifest_jwt.go
+
+**Remaining (Key Task):**
+- [ ] **Create transport abstraction framework** in tdns/v2/agent
+
+The transport abstraction is the critical piece that allows both API mode and DNS mode to share the same business logic. It needs to define:
+- Transport interface (Send, Receive, Confirm operations)
+- REST transport implementation (refactor existing API-mode code)
+- DNS transport implementation (new, uses NOTIFY + CHUNK queries)
+- Peer state management (discovery address vs. operational address for Relocate)
+- Confirmation handling abstraction
+
+### Phase 3: DNS Mode Implementation
+Build DNS transport on top of the transport abstraction:
+- [ ] DNS transport implementation (NOTIFY + CHUNK query pattern)
 - [ ] DNS message handler for agent communication
 - [ ] Agent HELLO operation via DNS
-- [ ] Agent heartbeat (BEAT) via DNS
-- [ ] Agent sync data operations via DNS
-- [ ] Persistent confirmation database schema
-- [ ] Confirmation accumulation and reporting
+- [ ] Agent BEAT (heartbeat) operation via DNS
+- [ ] Agent Sync operations via DNS (NS, DNSKEY, glue, CDS/CSYNC)
+- [ ] Agent Relocate operation via DNS
+- [ ] Confirmation sending via DNS
 
-### Phase 4: DNS Mode Integration
+### Phase 4: Integration and Operations
 - [ ] Update agent discovery to support DNS endpoints
-- [ ] Implement transport fallback (API → DNS)
-- [ ] Update combiner to use generalized comms
-- [ ] Implement agent-to-agent sync operations
-- [ ] Implement agent-to-combiner modification instructions
-- [ ] Multi-transport confirmation handling
+- [ ] Implement transport fallback (API → DNS → retry)
+- [ ] Update combiner to use transport abstraction
+- [ ] Persistent confirmation database schema
+- [ ] Confirmation accumulation and operator reporting
+- [ ] Peer state persistence (addresses, keys, zone mappings)
 
 ### Phase 5: Testing and Debug Infrastructure
-- [ ] Add debug CLI commands for isolated testing
-- [ ] Simulate provider discovery
-- [ ] Simulate CHUNK operations
-- [ ] Test DNS mode operations
+- [ ] Debug CLI commands: `agent hsync query`, `agent discovery`, `agent chunk send/recv`
+- [ ] Simulate provider discovery (mocked DNS responses)
+- [ ] Test CHUNK operations in isolation
+- [ ] Test DNS mode operations end-to-end
 - [ ] Test confirmation flows
-- [ ] Full end-to-end multi-provider test
+- [ ] Multi-provider integration test (2-3 providers coordinating)
 
-## Critical Decision: Project 1 vs Project 2 Ordering
+## Design Decisions
 
-### Context
-- **Project 1 (JWE/JWS Redesign)**: Multi-recipient support, better JOSE integration
-- **Project 2 (DNS Mode)**: Agent-to-agent communication, immediate need
+### Single-Recipient Encryption (Simplified)
 
-### Trade-offs
+With only 2-3 providers per zone, multi-recipient JWE encryption is not needed:
+- The go-jose library does not support multi-recipient mode
+- The overhead of separate encryption for 2-3 recipients is minimal
+- Single-recipient JWE simplifies implementation and debugging
+- Each agent encrypts separately for each peer
 
-**Project 2 First Rationale**:
-- Agent-to-agent typically 2-3 providers (multi-recipient not critical now)
-- Can use existing single-recipient crypto
-- Faster to deliver agent communication
-- Can upgrade to multi-recipient later
-- Establishes generalized comms framework
+### Agents Only Speak for Themselves
 
-**Project 1 First Rationale**:
-- Multi-recipient reduces encryption overhead (important for future KDC/KRS scale)
-- Stabilizes crypto layer before building DNS mode on top
-- Cleaner integration if transport layer doesn't change mid-implementation
-- If JWE/JWS requires API changes, better done before DNS mode heavily uses CHUNK
+A fundamental constraint of the protocol:
+- Agent A can ONLY announce facts about provider A
+- Agent A cannot make statements about what provider B or C should do
+- Each agent announces its own records; recipients locally combine them
+- This ensures clear authority boundaries and no ambiguity about information sources
 
-### To Determine: Disruption Analysis Needed
+### Zone-Specific Communication
 
-**Key Question**: How disruptive is JWE/JWS to CHUNK comms APIs?
-- If mostly internal (serialization, key handling) → Project 2 first is safe
-- If requires API changes (CHUNK operation structure, encryption calls) → Project 1 first is safer
-
-**Analysis Step**: Examine current KDC/KRS CHUNK usage patterns in tdns-nm to determine disruption scope.
+All synchronization operations are scoped to specific zones:
+- Agents may coordinate thousands of zones between them
+- Different zones can have different nameserver configurations
+- Each Sync operation targets exactly one zone
+- Confirmations reference the specific zone they apply to
 
 ## Data Model Integration: API Mode + DNS Mode
 
@@ -454,7 +545,8 @@ Both API mode and DNS mode must feed identical data into:
 - CHUNK operations: encode/decode/sign/verify
 - Confirmation accumulation: structure and reporting
 - Discovery: DNS lookups with DNSSEC validation
-- Encryption/decryption: single and multi-recipient
+- Encryption/decryption: single-recipient JWE
+- Relocate operation: address transition
 
 ### Integration Tests
 - Agent discovery via HSYNC
@@ -506,12 +598,12 @@ This would eliminate duplication and make DNS mode implementation cleaner.
 
 ## Open Questions for Investigation
 
-1. **Current API Mode Implementation**: Where in tdns/v2 is agent discovery and API communication implemented?
-2. **Data Models**: What database tables store agent sync data? How is it keyed?
-3. **Confirmation System**: How are confirmations currently handled in API mode?
+1. **Current API Mode Implementation**: Where in tdns/v2 is agent discovery and API communication implemented? What works and what needs redesign?
+2. **Data Models**: What database tables store agent sync data? How is it keyed per-zone?
+3. **Confirmation System**: How are confirmations currently handled in API mode? Can they be unified?
 4. **KDC/KRS Generalization**: What parts of tdns-nm/tnm/kdc and tdns-nm/tnm/krs can be extracted and generalized?
-5. **Multi-Transport**: How should API mode and DNS mode coexist in the agent code?
-6. **Encryption Calls**: How deeply are KDC/KRS specific the encryption operation calls?
+5. **Transport Abstraction**: What abstraction layer allows API mode and DNS mode to share the same business logic?
+6. **Relocate Operation**: Where should private operational addresses be stored and managed?
 
 ## References
 
@@ -525,11 +617,10 @@ This would eliminate duplication and make DNS mode implementation cleaner.
 
 ---
 
-**Document Status**: Ready for code investigation
+**Document Status**: Design refined, ready for phase discussion
 
 **Next Steps**:
-1. Examine tdns/v2 agent/HSYNC implementation
-2. Examine tdns-nm/tnm KDC/KRS communication patterns
-3. Map generalization opportunities
-4. Assess JWE/JWS disruption
-5. Make Project 1 vs Project 2 ordering decision
+1. Review and evaluate existing API-mode communications in tdns/v2
+2. Identify what works and what needs redesign
+3. Design transport-neutral communications abstraction
+4. Plan Phase 2+ implementation based on evaluation findings
