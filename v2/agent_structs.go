@@ -129,13 +129,14 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S              core.ConcurrentMap[AgentId, *Agent]
-	RegularS       map[AgentId]*Agent
-	RemoteAgents   map[ZoneName][]AgentId
-	mu             sync.RWMutex    // protects remoteAgents
-	LocalAgent     *LocalAgentConf // our own identity
-	LocateInterval int             // seconds to wait between locating agents (until success)
-	helloContexts  map[AgentId]context.CancelFunc
+	S                core.ConcurrentMap[AgentId, *Agent]
+	RegularS         map[AgentId]*Agent
+	RemoteAgents     map[ZoneName][]AgentId
+	mu               sync.RWMutex    // protects remoteAgents
+	LocalAgent       *LocalAgentConf // our own identity
+	LocateInterval   int             // seconds to wait between locating agents (until success)
+	helloContexts   map[AgentId]context.CancelFunc
+	TransportManager *TransportManager // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 }
 
 type AgentBeatPost struct {
@@ -272,6 +273,92 @@ type AgentMgmtResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+
+	// HSYNC debug data (Phase 5)
+	HsyncPeers         []*HsyncPeerInfo         `json:"hsync_peers,omitempty"`
+	HsyncSyncOps       []*HsyncSyncOpInfo       `json:"hsync_sync_ops,omitempty"`
+	HsyncConfirmations []*HsyncConfirmationInfo `json:"hsync_confirmations,omitempty"`
+	HsyncEvents        []*HsyncTransportEvent   `json:"hsync_events,omitempty"`
+	HsyncMetrics       *HsyncMetricsInfo        `json:"hsync_metrics,omitempty"`
+}
+
+// HsyncPeerInfo contains peer information for CLI display
+type HsyncPeerInfo struct {
+	PeerID             string    `json:"peer_id"`
+	State              string    `json:"state"`
+	StateReason        string    `json:"state_reason,omitempty"`
+	DiscoverySource    string    `json:"discovery_source,omitempty"`
+	DiscoveryTime      time.Time `json:"discovery_time,omitempty"`
+	PreferredTransport string    `json:"preferred_transport"`
+	APIHost            string    `json:"api_host,omitempty"`
+	APIPort            int       `json:"api_port,omitempty"`
+	APIAvailable       bool      `json:"api_available"`
+	DNSHost            string    `json:"dns_host,omitempty"`
+	DNSPort            int       `json:"dns_port,omitempty"`
+	DNSAvailable       bool      `json:"dns_available"`
+	LastContactAt      time.Time `json:"last_contact_at,omitempty"`
+	LastHelloAt        time.Time `json:"last_hello_at,omitempty"`
+	LastBeatAt         time.Time `json:"last_beat_at,omitempty"`
+	BeatInterval       int       `json:"beat_interval"`
+	BeatsSent          int64     `json:"beats_sent"`
+	BeatsReceived      int64     `json:"beats_received"`
+	FailedContacts     int       `json:"failed_contacts"`
+}
+
+// HsyncSyncOpInfo contains sync operation information for CLI display
+type HsyncSyncOpInfo struct {
+	CorrelationID string    `json:"correlation_id"`
+	ZoneName      string    `json:"zone_name"`
+	SyncType      string    `json:"sync_type"`
+	Direction     string    `json:"direction"`
+	SenderID      string    `json:"sender_id"`
+	ReceiverID    string    `json:"receiver_id"`
+	Status        string    `json:"status"`
+	StatusMessage string    `json:"status_message,omitempty"`
+	Transport     string    `json:"transport,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	SentAt        time.Time `json:"sent_at,omitempty"`
+	ReceivedAt    time.Time `json:"received_at,omitempty"`
+	ConfirmedAt   time.Time `json:"confirmed_at,omitempty"`
+	RetryCount    int       `json:"retry_count"`
+}
+
+// HsyncConfirmationInfo contains confirmation information for CLI display
+type HsyncConfirmationInfo struct {
+	CorrelationID string    `json:"correlation_id"`
+	ConfirmerID   string    `json:"confirmer_id"`
+	Status        string    `json:"status"`
+	Message       string    `json:"message,omitempty"`
+	ConfirmedAt   time.Time `json:"confirmed_at"`
+	ReceivedAt    time.Time `json:"received_at"`
+}
+
+// HsyncTransportEvent contains transport event information for CLI display
+type HsyncTransportEvent struct {
+	EventTime    time.Time `json:"event_time"`
+	PeerID       string    `json:"peer_id,omitempty"`
+	ZoneName     string    `json:"zone_name,omitempty"`
+	EventType    string    `json:"event_type"`
+	Transport    string    `json:"transport,omitempty"`
+	Direction    string    `json:"direction,omitempty"`
+	Success      bool      `json:"success"`
+	ErrorCode    string    `json:"error_code,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+}
+
+// HsyncMetricsInfo contains aggregated metrics for CLI display
+type HsyncMetricsInfo struct {
+	SyncsSent      int64 `json:"syncs_sent"`
+	SyncsReceived  int64 `json:"syncs_received"`
+	SyncsConfirmed int64 `json:"syncs_confirmed"`
+	SyncsFailed    int64 `json:"syncs_failed"`
+	BeatsSent      int64 `json:"beats_sent"`
+	BeatsReceived  int64 `json:"beats_received"`
+	BeatsMissed    int64 `json:"beats_missed"`
+	AvgLatency     int64 `json:"avg_latency"`
+	MaxLatency     int64 `json:"max_latency"`
+	APIOperations  int64 `json:"api_operations"`
+	DNSOperations  int64 `json:"dns_operations"`
 }
 
 // The ...Plus structs are always the original struct + a response channel

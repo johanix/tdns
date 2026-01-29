@@ -6,7 +6,9 @@ replace (
 	github.com/johanix/tdns/v2 => ../../v2
 	github.com/johanix/tdns/v2/cache => ../../v2/cache
 	github.com/johanix/tdns/v2/core => ../../v2/core
+	github.com/johanix/tdns/v2/crypto => ../../v2/crypto
 	github.com/johanix/tdns/v2/edns0 => ../../v2/edns0
+	github.com/johanix/tdns/v2/hpke => ../../v2/hpke
 )
 
 require (
@@ -26,6 +28,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
+	github.com/johanix/tdns/v2/crypto v0.0.0-20260125163255-f23369628cc7 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

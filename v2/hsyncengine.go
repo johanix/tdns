@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	agenttransport "github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -443,26 +444,66 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			return
 		}
 
-		// Send message to each agent
+		// Send message to each agent (use TransportManager fallback when available)
 		for _, agent := range zad.Agents {
-			amr, err := agent.SendApiMsg(&AgentMsgPost{
-				MessageType:  AgentMsgNotify,
-				MyIdentity:   AgentId(ar.LocalAgent.Identity),
-				YourIdentity: agent.Identity,
-				Zone:         msg.Zone,
-				RRs:          msg.RRs, // ZoneUpdate
-				Time:         time.Now(),
-			})
+			var syncErr error
+			var syncMsg string
+			var syncFailed bool
 
-			if err != nil {
-				log.Printf("CommandHandler: Error sending message to agent %s: %v", agent.Identity, err)
-				errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.Identity, err))
-				continue
+			if ar.TransportManager != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				peer := ar.TransportManager.SyncPeerFromAgent(agent)
+				syncReq := &agenttransport.SyncRequest{
+					SenderID:  ar.LocalAgent.Identity,
+					Zone:      string(msg.Zone),
+					SyncType:  agenttransport.SyncTypeNS,
+					Records:   msg.RRs,
+					Timestamp: time.Now(),
+				}
+				syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+				cancel()
+				if err != nil {
+					syncErr = err
+					syncFailed = true
+					syncMsg = err.Error()
+				} else if syncResp != nil && syncResp.Status != agenttransport.ConfirmSuccess {
+					syncFailed = true
+					syncMsg = syncResp.Message
+				} else if syncResp != nil {
+					syncMsg = syncResp.Message
+				}
+			} else {
+				amr, err := agent.SendApiMsg(&AgentMsgPost{
+					MessageType:  AgentMsgNotify,
+					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					YourIdentity: agent.Identity,
+					Zone:         msg.Zone,
+					RRs:          msg.RRs,
+					Time:         time.Now(),
+				})
+				if err != nil {
+					syncErr = err
+					syncFailed = true
+					syncMsg = err.Error()
+				} else {
+					syncMsg = amr.Msg
+					syncFailed = amr.Error
+					if amr.ErrorMsg != "" {
+						syncMsg = amr.ErrorMsg
+					}
+				}
 			}
 
-			resp.Msg = amr.Msg
-			resp.Error = amr.Error
-			resp.ErrorMsg = amr.ErrorMsg
+			if syncErr != nil {
+				log.Printf("CommandHandler: Error sending message to agent %s: %v", agent.Identity, syncErr)
+				errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.Identity, syncErr))
+				continue
+			}
+			resp.Msg = syncMsg
+			resp.Error = syncFailed
+			if syncFailed {
+				resp.ErrorMsg = syncMsg
+			}
 		}
 		if len(errstrs) > 0 {
 			resp.Error = true

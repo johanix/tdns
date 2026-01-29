@@ -199,8 +199,26 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 						ar := conf.Internal.AgentRegistry
 						log.Printf("SynchedDataEngine: Update applied, local data has changed, need to send update both to combiner and remote agents")
 
-						// TODO: Send update to combiner
-						// TODO: Send update to remote agents
+						// Send update to combiner via CHUNK handler
+						if conf.Internal.CombinerHandler != nil && synchedDataUpdate.Update != nil {
+							correlationID := fmt.Sprintf("local-%d", time.Now().UnixNano())
+							combinerReq := ConvertZoneUpdateToSyncRequest(
+								synchedDataUpdate.Update,
+								string(synchedDataUpdate.AgentId),
+								correlationID,
+							)
+							combinerResp := SendToCombiner(conf.Internal.CombinerHandler, combinerReq)
+							if combinerResp.Status != "ok" {
+								log.Printf("SynchedDataEngine: Combiner update %s: %s", combinerResp.Status, combinerResp.Message)
+								if combinerResp.Status == "error" {
+									errstrs = append(errstrs, fmt.Sprintf("Combiner error: %s", combinerResp.Message))
+								}
+							} else {
+								log.Printf("SynchedDataEngine: Combiner update successful: %s", combinerResp.Message)
+							}
+						}
+
+						// Send update to remote agents
 						// Find remote agents for this zone
 						zad, notOperationalAgents, err := ar.RemoteOperationalAgents(synchedDataUpdate.Zone)
 						if err != nil {
@@ -292,6 +310,26 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 					resp.Msg = msg
 					if change {
 						log.Printf("SynchedDataEngine: Update applied, remote data has changed, need to send update to combiner")
+
+						// 4. Send the update to the combiner via CHUNK handler
+						if conf.Internal.CombinerHandler != nil && synchedDataUpdate.Update != nil {
+							correlationID := fmt.Sprintf("remote-%d", time.Now().UnixNano())
+							combinerReq := ConvertZoneUpdateToSyncRequest(
+								synchedDataUpdate.Update,
+								string(synchedDataUpdate.AgentId),
+								correlationID,
+							)
+							combinerResp := SendToCombiner(conf.Internal.CombinerHandler, combinerReq)
+							if combinerResp.Status != "ok" {
+								log.Printf("SynchedDataEngine: Combiner update %s: %s", combinerResp.Status, combinerResp.Message)
+								if combinerResp.Status == "error" {
+									resp.Error = true
+									resp.ErrorMsg = fmt.Sprintf("Combiner error: %s", combinerResp.Message)
+								}
+							} else {
+								log.Printf("SynchedDataEngine: Combiner update successful: %s", combinerResp.Message)
+							}
+						}
 					}
 				}
 				if synchedDataUpdate.Response != nil {
@@ -301,8 +339,6 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 						log.Printf("SynchedDataEngine: Response channel blocked, skipping response")
 					}
 				}
-				// 4. Send the update to the combiner if it is applicable.
-				// XXX: NYI
 			}
 
 		case sdcmd := <-SDcmdQ:

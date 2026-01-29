@@ -254,7 +254,34 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 		// Initialize AgentRegistry for agent mode only
 		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
-		// dump.P(conf.Internal.AgentRegistry)
+		// Initialize CombinerChunkHandler for CHUNK-based combiner updates
+		// Use agent identity as control zone for in-process combiner
+		conf.Internal.CombinerHandler = NewCombinerChunkHandler(conf.Agent.Identity)
+
+		// Initialize HSYNC database tables (peer state, sync operations, confirmations)
+		if conf.Internal.KeyDB != nil {
+			if err := conf.Internal.KeyDB.InitHsyncTables(); err != nil {
+				return fmt.Errorf("InitHsyncTables: %w", err)
+			}
+			log.Printf("MainInit: HSYNC database tables initialized")
+		}
+
+		// Create TransportManager for API + DNS mode with fallback
+		controlZone := conf.Agent.Dns.ControlZone
+		if controlZone == "" {
+			controlZone = conf.Agent.Identity
+		}
+		tm := NewTransportManager(&TransportManagerConfig{
+			LocalID:       conf.Agent.Identity,
+			ControlZone:   controlZone,
+			APITimeout:    10 * time.Second,
+			DNSTimeout:    5 * time.Second,
+			AgentRegistry: conf.Internal.AgentRegistry,
+			AgentQs:       conf.Internal.AgentQs,
+		})
+		conf.Internal.TransportManager = tm
+		conf.Internal.AgentRegistry.TransportManager = tm
+		log.Printf("MainInit: TransportManager created (control zone: %s)", controlZone)
 	case AppTypeAuth, AppTypeCombiner:
 		// ... existing auth/combiner setup ...
 	default:
@@ -340,6 +367,15 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	kdb := conf.Internal.KeyDB
 	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
 	startEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
+
+	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
+	if conf.Internal.TransportManager != nil {
+		if err := conf.Internal.TransportManager.RegisterChunkNotifyHandler(); err != nil {
+			log.Printf("StartAgent: failed to register CHUNK NOTIFY handler: %v", err)
+		} else {
+			conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
+		}
+	}
 
 	// Agent-specific
 	//log.Printf("TDNS %s (%s): starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])

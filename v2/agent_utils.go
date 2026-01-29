@@ -378,6 +378,10 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				ar.S.Set(remoteid, agent)
 				log.Printf("LocateAgent: remote agent %s is now KNOWN, stopping retry loop", remoteid)
 
+				if ar.TransportManager != nil {
+					ar.TransportManager.OnAgentDiscoveryComplete(agent)
+				}
+
 				// If we're in known state and have a zone, try to send hello
 				if zonename != "" {
 					ar.AddZoneToAgent(remoteid, zonename)

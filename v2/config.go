@@ -158,8 +158,9 @@ type LocalAgentDnsConf struct {
 		Publish []string
 		Listen  []string
 	}
-	BaseUrl string
-	Port    uint16
+	BaseUrl     string
+	Port        uint16
+	ControlZone string `yaml:"control_zone" mapstructure:"control_zone"` // Zone used for NOTIFY(CHUNK) QNAMEs in DNS mode (default: agent identity)
 }
 
 type DbConf struct {
@@ -275,6 +276,8 @@ type InternalConf struct {
 	KrsDB               interface{} // *krs.KrsDB - using interface{} to avoid circular import
 	KrsConf             interface{} // *krs.KrsConf - using interface{} to avoid circular import
 	Scanner             *Scanner    // Scanner instance for async job tracking
+	CombinerHandler     *CombinerChunkHandler // CHUNK-based combiner handler
+	TransportManager    *TransportManager    // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
 }
 
 type AgentQs struct {

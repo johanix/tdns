@@ -160,6 +160,108 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Found existing agent %s", amp.AgentId)
 
+		// HSYNC debug commands (Phase 5)
+		case "hsync-peer-status":
+			if kdb == nil {
+				resp.Error = true
+				resp.ErrorMsg = "KeyDB not configured"
+				return
+			}
+
+			state := ""
+			if amp.AgentId != "" {
+				// Filter by specific peer
+				peer, err := kdb.GetPeer(string(amp.AgentId))
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("error getting peer: %v", err)
+					return
+				}
+				if peer != nil {
+					resp.HsyncPeers = []*HsyncPeerInfo{PeerRecordToInfo(peer)}
+				}
+			} else {
+				// List all peers
+				peers, err := kdb.ListPeers(state)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("error listing peers: %v", err)
+					return
+				}
+				for _, peer := range peers {
+					resp.HsyncPeers = append(resp.HsyncPeers, PeerRecordToInfo(peer))
+				}
+			}
+			resp.Msg = fmt.Sprintf("Found %d peers", len(resp.HsyncPeers))
+
+		case "hsync-sync-ops":
+			if kdb == nil {
+				resp.Error = true
+				resp.ErrorMsg = "KeyDB not configured"
+				return
+			}
+
+			ops, err := kdb.ListSyncOperations(string(amp.Zone), 50)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("error listing sync operations: %v", err)
+				return
+			}
+			for _, op := range ops {
+				resp.HsyncSyncOps = append(resp.HsyncSyncOps, SyncOpRecordToInfo(op))
+			}
+			resp.Msg = fmt.Sprintf("Found %d sync operations", len(resp.HsyncSyncOps))
+
+		case "hsync-confirmations":
+			if kdb == nil {
+				resp.Error = true
+				resp.ErrorMsg = "KeyDB not configured"
+				return
+			}
+
+			confs, err := kdb.ListSyncConfirmations("", 50)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("error listing confirmations: %v", err)
+				return
+			}
+			for _, conf := range confs {
+				resp.HsyncConfirmations = append(resp.HsyncConfirmations, ConfirmRecordToInfo(conf))
+			}
+			resp.Msg = fmt.Sprintf("Found %d confirmations", len(resp.HsyncConfirmations))
+
+		case "hsync-transport-events":
+			if kdb == nil {
+				resp.Error = true
+				resp.ErrorMsg = "KeyDB not configured"
+				return
+			}
+
+			events, err := kdb.ListTransportEvents(string(amp.AgentId), 100)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("error listing transport events: %v", err)
+				return
+			}
+			resp.HsyncEvents = events
+			resp.Msg = fmt.Sprintf("Found %d transport events", len(resp.HsyncEvents))
+
+		case "hsync-metrics":
+			if kdb == nil {
+				resp.Error = true
+				resp.ErrorMsg = "KeyDB not configured"
+				return
+			}
+
+			metrics, err := kdb.GetAggregatedMetrics()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("error getting metrics: %v", err)
+				return
+			}
+			resp.HsyncMetrics = metrics
+			resp.Msg = "Aggregated metrics"
+
 			//		case "list-known-agents":
 			//			resp.Agents, err = conf.Internal.Registry.GetRemoteAgents(cp.Zone)
 
@@ -289,6 +391,121 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			case <-time.After(2 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = "No response from SynchedDataCmd after 2 seconds, state unknown"
+			}
+
+		// HSYNC debug commands (Phase 5)
+		case "hsync-chunk-send":
+			// TODO: Implement CHUNK send for DNS transport testing
+			// This requires access to the TransportManager and DNS transport
+			resp.Msg = "CHUNK send not yet implemented - requires DNS transport setup"
+			resp.Status = "ok"
+
+		case "hsync-chunk-recv":
+			// TODO: Show recently received CHUNKs
+			// This would require a ring buffer of received messages
+			resp.Msg = "CHUNK receive log not yet implemented - requires message logging"
+			resp.Status = "ok"
+
+		case "hsync-init-db":
+			if conf.Internal.KeyDB == nil {
+				resp.Error = true
+				resp.ErrorMsg = "KeyDB not available"
+				return
+			}
+			if err := conf.Internal.KeyDB.InitHsyncTables(); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("InitHsyncTables failed: %v", err)
+				return
+			}
+			resp.Msg = "HSYNC database tables initialized successfully"
+			resp.Status = "ok"
+
+		case "hsync-inject-sync":
+			// Inject a simulated sync from a remote agent for testing
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "sender agent ID is required"
+				return
+			}
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+
+			// Parse the RRs
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// Create the ZoneUpdate with RRs (not RRsets, as these are individual RRs to be added)
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: amp.AgentId,
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			// Also populate RRsets for the current processing logic
+			// (The SynchedDataEngine currently uses RRsets)
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+			}
+
+			log.Printf("hsync-inject-sync: Injecting %d RRs from %q for zone %q", len(parsedRRs), amp.AgentId, amp.Zone)
+
+			// Create response channel
+			cresp := make(chan *AgentMsgResponse, 1)
+
+			// Send to SynchedDataEngine
+			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    amp.AgentId,
+				UpdateType: "remote",
+				Update:     zu,
+				Response:   cresp,
+			}
+
+			// Wait for response
+			select {
+			case r := <-cresp:
+				if r.Error {
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
+					resp.Msg = fmt.Sprintf("Sync injection failed: %s", r.ErrorMsg)
+				} else {
+					resp.Msg = fmt.Sprintf("Sync injected successfully: %d RRs processed from %q", len(parsedRRs), amp.AgentId)
+					if r.Msg != "" {
+						resp.Msg += " - " + r.Msg
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
+				resp.Status = "timeout"
 			}
 
 		default:

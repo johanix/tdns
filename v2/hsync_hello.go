@@ -12,6 +12,14 @@ import (
 	"github.com/miekg/dns"
 )
 
+func (ar *AgentRegistry) sharedZonesForAgent(agent *Agent) []string {
+	zones := make([]string, 0, len(agent.Zones))
+	for z := range agent.Zones {
+		zones = append(zones, string(z))
+	}
+	return zones
+}
+
 func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {
 	// log.Printf("HelloHandler: Received HELLO from %s", report.Identity)
 
@@ -96,6 +104,33 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 
 func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 	log.Printf("SingleHello: Sending HELLO to %s (zone %q)", agent.Identity, zone)
+
+	// Prefer TransportManager (API → DNS fallback) when available
+	if ar.TransportManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		sharedZones := ar.sharedZonesForAgent(agent)
+		helloResp, err := ar.TransportManager.SendHelloWithFallback(ctx, agent, sharedZones)
+		agent.mu.Lock()
+		if err != nil {
+			log.Printf("SingleHello: TransportManager HELLO to %q failed: %v", agent.Identity, err)
+			agent.ApiDetails.LatestError = err.Error()
+			agent.ApiDetails.LatestErrorTime = time.Now()
+		} else if helloResp != nil && !helloResp.Accepted {
+			log.Printf("SingleHello: Our HELLO to %q was not accepted: %s", agent.Identity, helloResp.RejectReason)
+			agent.ApiDetails.LatestError = helloResp.RejectReason
+			agent.ApiDetails.LatestErrorTime = time.Now()
+		} else {
+			log.Printf("SingleHello: Our HELLO to %q accepted via transport fallback", agent.Identity)
+			agent.ApiDetails.State = AgentStateIntroduced
+			agent.ApiDetails.LatestError = ""
+		}
+		ar.S.Set(agent.Identity, agent)
+		agent.mu.Unlock()
+		return
+	}
+
+	// Fallback: API-only
 	ahr, err := agent.SendApiHello(&AgentHelloPost{
 		MessageType:  AgentMsgHello,
 		MyIdentity:   AgentId(ar.LocalAgent.Identity),
@@ -108,10 +143,6 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		log.Printf("SingleHello: Error sending HELLO to %q: %v", agent.Identity, err)
 		agent.ApiDetails.LatestError = err.Error()
 
-		//	case status != http.StatusOK:
-		//		log.Printf("HsyncEngine: HELLO to %s returned status %d", agent.Identity, status)
-		//		agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
-
 	case ahr.Error:
 		log.Printf("SingleHello: Our HELLO to %q returned error: %s", agent.Identity, ahr.ErrorMsg)
 		agent.ApiDetails.LatestError = ahr.ErrorMsg
@@ -119,10 +150,8 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 
 	default:
 		log.Printf("SingleHello: Our HELLO to %q returned: %s", agent.Identity, ahr.Msg)
-		// if ahr.Status == "ok" {
 		agent.ApiDetails.State = AgentStateIntroduced
 		agent.ApiDetails.LatestError = ""
-		// }
 	}
 	ar.S.Set(agent.Identity, agent)
 	agent.mu.Unlock()

@@ -58,13 +58,39 @@ func (ar *AgentRegistry) SendHeartbeats() {
 
 		go func(a *Agent) {
 			agent := a
-			abr, err := agent.SendApiBeat(&AgentBeatPost{
-				MessageType:    AgentMsgBeat,
-				MyIdentity:     AgentId(ar.LocalAgent.Identity),
-				YourIdentity:   agent.Identity,
-				MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
-				// Zone:        "",
-			})
+			var err error
+			var beatAck bool
+			var beatMsg string
+
+			if ar.TransportManager != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				sequence := uint64(0)
+				agent.mu.RLock()
+				if agent.ApiDetails.SentBeats > 0 {
+					sequence = uint64(agent.ApiDetails.SentBeats)
+				}
+				agent.mu.RUnlock()
+				beatResp, beatErr := ar.TransportManager.SendBeatWithFallback(ctx, agent, sequence)
+				err = beatErr
+				if beatResp != nil {
+					beatAck = beatResp.Ack
+					beatMsg = beatResp.State
+				}
+			} else {
+				abr, apiErr := agent.SendApiBeat(&AgentBeatPost{
+					MessageType:    AgentMsgBeat,
+					MyIdentity:     AgentId(ar.LocalAgent.Identity),
+					YourIdentity:   agent.Identity,
+					MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
+				})
+				err = apiErr
+				if abr != nil {
+					beatAck = !abr.Error
+					beatMsg = abr.Msg
+				}
+			}
+
 			agent.mu.Lock()
 			switch {
 			case err != nil:
@@ -74,19 +100,11 @@ func (ar *AgentRegistry) SendHeartbeats() {
 					agent.ApiDetails.LatestErrorTime = time.Now()
 				}
 
-			//			case status != http.StatusOK:
-			//				log.Printf("HsyncEngine: Error: heartbeat to %s returned status %d", agent.Identity, status)
-			//				if agent.ApiDetails.LatestError == "" {
-			//					agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
-			//					agent.ApiDetails.LatestErrorTime = time.Now()
-			//				}
-
-			case abr.Error:
-				agent.ApiDetails.LatestError = abr.ErrorMsg
+			case !beatAck:
+				agent.ApiDetails.LatestError = beatMsg
 				agent.ApiDetails.LatestErrorTime = time.Now()
 
 			default:
-				//				if abr.Status == "ok" {
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.LatestError = ""
@@ -111,7 +129,6 @@ func (ar *AgentRegistry) SendHeartbeats() {
 					}
 					agent.DeferredTasks = remainingTasks
 				}
-				//				}
 			}
 			agent.CheckState(ar.LocalAgent.Remote.BeatInterval)
 			ar.S.Set(agent.Identity, agent)
