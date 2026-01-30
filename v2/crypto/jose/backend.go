@@ -142,6 +142,17 @@ func (b *Backend) SerializePrivateKey(key crypto.PrivateKey) ([]byte, error) {
 	return data, nil
 }
 
+// PublicFromPrivate returns the public key corresponding to the given private key.
+// Used by CLI "keys show" to derive public JWK from configured private key file.
+func (b *Backend) PublicFromPrivate(priv crypto.PrivateKey) (crypto.PublicKey, error) {
+	josePriv, ok := priv.(*privateKey)
+	if !ok {
+		return nil, crypto.ErrBackendMismatch
+	}
+	pubJWK := josePriv.jwk.Public()
+	return &publicKey{jwk: pubJWK}, nil
+}
+
 // Encrypt encrypts plaintext for the recipient using JWE (ECDH-ES+A256GCM)
 func (b *Backend) Encrypt(recipientPubKey crypto.PublicKey, plaintext []byte) ([]byte, error) {
 	joseKey, ok := recipientPubKey.(*publicKey)

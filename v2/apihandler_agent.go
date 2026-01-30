@@ -4,14 +4,20 @@
 package tdns
 
 import (
-	// "encoding/json"
+	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -46,12 +52,11 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		// XXX: hsync cmds should move to its own endpoint, not be mixed with agent
 		var zd *ZoneData
 		var exist bool
-		amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
-
-		switch amp.Command {
-		case "config", "hsync-agentstatus":
-			// do nothing
-		default:
+		noZoneCommands := map[string]bool{
+			"config": true, "hsync-agentstatus": true, "combiner-dnsping": true, "combiner-apiping": true,
+		}
+		if !noZoneCommands[amp.Command] {
+			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
 			zd, exist = Zones.Get(string(amp.Zone))
 			if !exist {
 				resp.Error = true
@@ -68,6 +73,93 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.AgentConfig = tmp.(LocalAgentConf)
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
+
+		case "combiner-dnsping":
+			if conf.Agent.Combiner == nil || conf.Agent.Combiner.Address == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent.combiner.address not configured"
+				return
+			}
+			if conf.Internal.TransportManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not configured (DNS transport disabled?)"
+				return
+			}
+			host, portStr, err := net.SplitHostPort(conf.Agent.Combiner.Address)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("invalid agent.combiner.address %q: %v", conf.Agent.Combiner.Address, err)
+				return
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil || port < 1 || port > 65535 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("invalid port in agent.combiner.address %q", conf.Agent.Combiner.Address)
+				return
+			}
+			peer := transport.NewPeer("combiner")
+			peer.SetDiscoveryAddress(&transport.Address{
+				Host:      host,
+				Port:      uint16(port),
+				Transport: "udp",
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("dnsping failed: %v", err)
+				return
+			}
+			if !pingResp.OK {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("combiner did not acknowledge (responder: %s)", pingResp.ResponderID)
+				return
+			}
+			resp.Msg = fmt.Sprintf("dnsping ok: %s echoed nonce", pingResp.ResponderID)
+
+		case "combiner-apiping":
+			if conf.Agent.Combiner == nil || conf.Agent.Combiner.ApiBaseUrl == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent.combiner.api_base_url not configured"
+				return
+			}
+			url := strings.TrimSuffix(conf.Agent.Combiner.ApiBaseUrl, "/") + "/ping"
+			body := PingPost{Msg: "agent combiner ping", Pings: 1}
+			data, _ := json.Marshal(body)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("build request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			client := &http.Client{
+				Timeout: 10 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				},
+			}
+			res, err := client.Do(req)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("apiping failed: %v", err)
+				return
+			}
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("combiner API returned %d", res.StatusCode)
+				return
+			}
+			var pr PingResponse
+			if err := json.NewDecoder(res.Body).Decode(&pr); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("decode combiner ping response: %v", err)
+				return
+			}
+			resp.Msg = fmt.Sprintf("apiping ok: %s", pr.Msg)
 
 		case "update-local-zonedata":
 			log.Printf("API: update-local-zonedata: added RRs: %+v", amp.AddedRRs)

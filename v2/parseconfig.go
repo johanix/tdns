@@ -64,6 +64,47 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	// Parse YAML directly into a map
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(data, &config); err != nil {
+		// On parse error, show context around the reported line to help diagnose
+		// (e.g. tabs, wrong indentation, stray colons)
+		errStr := err.Error()
+		var lineNum int
+		if idx := strings.Index(errStr, "line "); idx >= 0 {
+			rest := errStr[idx+5:]
+			end := 0
+			for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+				end++
+			}
+			if end > 0 {
+				fmt.Sscanf(rest[:end], "%d", &lineNum)
+			}
+		}
+		if lineNum > 0 {
+				lines := strings.Split(string(data), "\n")
+				start := lineNum - 4
+				if start < 0 {
+					start = 0
+				}
+				end := lineNum + 2
+				if end > len(lines) {
+					end = len(lines)
+				}
+				log.Printf("YAML error at line %d. Context (lines %d-%d):", lineNum, start+1, end)
+				for i := start; i < end; i++ {
+					line := lines[i]
+					// Reveal tabs and other problematic chars for the failing line
+					if i == lineNum-1 {
+						reveal := strings.ReplaceAll(line, "\t", "\\t")
+						reveal = strings.ReplaceAll(reveal, "\r", "\\r")
+						if reveal != line {
+							log.Printf("  %d: %s  [raw: %s]", i+1, line, reveal)
+						} else {
+							log.Printf("  %d: %s", i+1, line)
+						}
+					} else {
+						log.Printf("  %d: %s", i+1, line)
+					}
+				}
+			}
 		if Globals.Debug {
 			log.Printf("processConfigFile: error unmarshalling YAML from %q to struct", file)
 			fmt.Printf("Config that we failed to unmarshal:\n%s\n", string(data))

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -126,6 +127,9 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 		// Confirmations go to the transport's pending confirmation handler
 		h.handleConfirmation(incomingMsg)
 
+	case "ping":
+		// Ping: validate and send confirmation with echoed nonce in same response
+		return h.handlePing(w, msg, correlationID, payload)
 	default:
 		// All other messages (hello, beat, sync, relocate) go to hsyncengine
 		select {
@@ -177,7 +181,7 @@ func (h *ChunkNotifyHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
 
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
-			if localOpt.Code == EDNS0_CHUNK_OPTION_CODE {
+			if localOpt.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
 				return localOpt.Data, nil
 			}
 		}
@@ -212,6 +216,49 @@ func (h *ChunkNotifyHandler) parsePayload(correlationID string, payload []byte, 
 		ReceivedAt:    time.Now(),
 		SourceAddr:    sourceAddr,
 	}, nil
+}
+
+// handlePing processes an incoming ping: parse payload, echo nonce in EDNS0 CHUNK response.
+func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, correlationID string, payload []byte) error {
+	var ping DnsPingPayload
+	if err := json.Unmarshal(payload, &ping); err != nil {
+		log.Printf("ChunkNotifyHandler: Failed to parse ping payload: %v", err)
+		return h.sendResponse(w, req, dns.RcodeFormatError)
+	}
+	if ping.Type != "ping" || ping.Nonce == "" {
+		log.Printf("ChunkNotifyHandler: Invalid ping payload (type=%q nonce=%q)", ping.Type, ping.Nonce)
+		return h.sendResponse(w, req, dns.RcodeFormatError)
+	}
+
+	confirm := &DnsPingConfirmPayload{
+		Type:          "ping_confirm",
+		SenderID:      h.LocalID,
+		Nonce:         ping.Nonce,
+		CorrelationID: correlationID,
+		Status:        "ok",
+		Timestamp:     time.Now().Unix(),
+	}
+	confirmJSON, err := json.Marshal(confirm)
+	if err != nil {
+		return h.sendResponse(w, req, dns.RcodeServerFailure)
+	}
+
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.Authoritative = true
+	resp.Rcode = dns.RcodeSuccess
+	resp.SetEdns0(4096, true)
+	opt := resp.IsEdns0()
+	if opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+			Data: confirmJSON,
+		})
+	}
+	if w != nil {
+		return w.WriteMsg(resp)
+	}
+	return nil
 }
 
 // handleConfirmation processes an incoming confirmation message.

@@ -102,13 +102,25 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 		return ErrNotHandled // Let other handlers try
 	}
 
-	log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY correlation=%s qname=%s", correlationID, req.Qname)
+	if h.ControlZone != "" {
+		log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q correlation_id=%q control_zone=%q", req.Qname, correlationID, h.ControlZone)
+	} else {
+		log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q correlation_id=%q", req.Qname, correlationID)
+	}
 
 	// Extract CHUNK payload from EDNS0
 	payload, err := h.extractChunkPayload(req.Msg)
 	if err != nil {
 		log.Printf("CombinerChunkHandler: Failed to extract CHUNK payload: %v", err)
 		return h.sendErrorResponse(req, correlationID, "failed to extract payload")
+	}
+
+	// Parse type first to handle ping without altering zone state
+	var typeOnly struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &typeOnly); err == nil && typeOnly.Type == "ping" {
+		return h.handlePing(req, correlationID, payload)
 	}
 
 	// Parse the sync payload
@@ -126,9 +138,20 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 }
 
 // extractCorrelationID extracts the correlation ID from the QNAME.
-// QNAME format: <correlationID>.<controlZone>
+// QNAME format: <correlationID>.<controlZone> when control zone is set;
+// when control zone is empty, the first label of qname is used (e.g. 44a6eb71.agent.provider. -> 44a6eb71).
 func (h *CombinerChunkHandler) extractCorrelationID(qname string) (string, error) {
 	qname = dns.Fqdn(qname)
+
+	// Treat "." and "" as "no control zone" so we use first-label extraction
+	if h.ControlZone == "" || h.ControlZone == "." {
+		// No control zone configured: use first label as correlation ID (e.g. 58ba28e99c221009.agent.provider. -> 58ba28e99c221009)
+		labels := dns.SplitDomainName(qname)
+		if len(labels) == 0 {
+			return "", fmt.Errorf("qname %s has no labels", qname)
+		}
+		return labels[0], nil
+	}
 
 	// Check if qname ends with control zone
 	if len(qname) <= len(h.ControlZone) {
@@ -148,7 +171,62 @@ func (h *CombinerChunkHandler) extractCorrelationID(qname string) (string, error
 	return correlationID, nil
 }
 
-// extractChunkPayload extracts the CHUNK data from EDNS0 option.
+// handlePing responds to a ping with ping_confirm (echoed nonce); no zone state change.
+func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, correlationID string, payload []byte) error {
+	var ping struct {
+		Type      string `json:"type"`
+		SenderID  string `json:"sender_id"`
+		Nonce     string `json:"nonce"`
+		Timestamp int64  `json:"timestamp"`
+	}
+	if err := json.Unmarshal(payload, &ping); err != nil {
+		log.Printf("CombinerChunkHandler: Failed to parse ping payload: %v", err)
+		return h.sendErrorResponse(req, correlationID, "invalid ping payload")
+	}
+	if ping.Type != "ping" || ping.Nonce == "" {
+		log.Printf("CombinerChunkHandler: Invalid ping (type=%q nonce=%q)", ping.Type, ping.Nonce)
+		return h.sendErrorResponse(req, correlationID, "invalid ping")
+	}
+
+	confirmPayload := struct {
+		Type          string `json:"type"`
+		SenderID      string `json:"sender_id"`
+		Nonce         string `json:"nonce"`
+		CorrelationID string `json:"correlation_id"`
+		Status        string `json:"status"`
+		Timestamp     int64  `json:"timestamp"`
+	}{
+		Type:          "ping_confirm",
+		SenderID:      "combiner",
+		Nonce:         ping.Nonce,
+		CorrelationID: correlationID,
+		Status:        "ok",
+		Timestamp:     time.Now().Unix(),
+	}
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return h.sendErrorResponse(req, correlationID, "failed to build ping_confirm")
+	}
+
+	resp := new(dns.Msg)
+	resp.SetReply(req.Msg)
+	resp.Authoritative = true
+	resp.Rcode = dns.RcodeSuccess
+	resp.SetEdns0(4096, true)
+	opt := resp.IsEdns0()
+	if opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+			Data: payloadBytes,
+		})
+	}
+	if req.ResponseWriter != nil {
+		return req.ResponseWriter.WriteMsg(resp)
+	}
+	return nil
+}
+
+// extractChunkPayload extracts the CHUNK data from EDNS0 option (code 65004).
 func (h *CombinerChunkHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
 	opt := msg.IsEdns0()
 	if opt == nil {

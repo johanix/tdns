@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -330,6 +331,102 @@ func (t *DNSTransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 	}, nil
 }
 
+// Ping sends a liveness probe via DNS NOTIFY(CHUNK); response carries ping_confirm in EDNS0.
+func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (*PingResponse, error) {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return nil, NewTransportError("DNS", "Ping", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	correlationID := generateCorrelationID()
+	qname := t.buildNotifyQNAME(correlationID)
+
+	payload := &DnsPingPayload{
+		Type:      "ping",
+		SenderID:  req.SenderID,
+		Nonce:     req.Nonce,
+		Timestamp: req.Timestamp.Unix(),
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("failed to marshal ping payload: %w", err), false)
+	}
+
+	m := new(dns.Msg)
+	m.SetNotify(qname)
+	m.Question = []dns.Question{
+		{Name: qname, Qtype: TypeCHUNK, Qclass: dns.ClassINET},
+	}
+	m.SetEdns0(4096, true)
+	opt := m.IsEdns0()
+	if opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+			Data: payloadJSON,
+		})
+	}
+
+	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
+	}
+	if res.Rcode != dns.RcodeSuccess {
+		return &PingResponse{
+			ResponderID: peer.ID,
+			OK:          false,
+			Timestamp:   time.Now(),
+		}, nil
+	}
+
+	// Parse EDNS0 CHUNK from response for ping_confirm
+	confirm, err := extractPingConfirmFromResponse(res)
+	if err != nil {
+		return &PingResponse{
+			ResponderID: peer.ID,
+			OK:          false,
+			Timestamp:   time.Now(),
+		}, nil
+	}
+	if confirm.Nonce != req.Nonce {
+		return &PingResponse{
+			ResponderID: peer.ID,
+			OK:          false,
+			Timestamp:   time.Now(),
+		}, nil
+	}
+
+	return &PingResponse{
+		ResponderID: confirm.SenderID,
+		Nonce:       confirm.Nonce,
+		OK:          confirm.Status == "ok",
+		Timestamp:   time.Unix(confirm.Timestamp, 0),
+	}, nil
+}
+
+// extractPingConfirmFromResponse extracts DnsPingConfirmPayload from response EDNS0 CHUNK.
+func extractPingConfirmFromResponse(res *dns.Msg) (*DnsPingConfirmPayload, error) {
+	opt := res.IsEdns0()
+	if opt == nil {
+		return nil, fmt.Errorf("no EDNS0 in response")
+	}
+	for _, o := range opt.Option {
+		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			var confirm DnsPingConfirmPayload
+			if err := json.Unmarshal(local.Data, &confirm); err != nil {
+				return nil, err
+			}
+			if confirm.Type != "ping_confirm" {
+				return nil, fmt.Errorf("expected ping_confirm, got %s", confirm.Type)
+			}
+			return &confirm, nil
+		}
+	}
+	return nil, fmt.Errorf("no CHUNK option in response")
+}
+
 // Confirm sends an acknowledgment of a sync operation via DNS.
 // Uses NOTIFY(CHUNK) with status in EDNS0 option.
 func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
@@ -370,7 +467,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	opt := m.IsEdns0()
 	if opt != nil {
 		chunkOpt := &dns.EDNS0_LOCAL{
-			Code: EDNS0_CHUNK_OPTION_CODE,
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
 			Data: payloadJSON,
 		}
 		opt.Option = append(opt.Option, chunkOpt)
@@ -415,7 +512,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	opt := m.IsEdns0()
 	if opt != nil {
 		chunkOpt := &dns.EDNS0_LOCAL{
-			Code: EDNS0_CHUNK_OPTION_CODE,
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
 			Data: finalPayload,
 		}
 		opt.Option = append(opt.Option, chunkOpt)
@@ -550,14 +647,27 @@ type DnsConfirmPayload struct {
 	Timestamp     int64  `json:"timestamp"`
 }
 
-// Constants for DNS transport
-// These should match the values in core and edns0 packages
-const (
-	// TypeCHUNK is the DNS RRtype for CHUNK records
-	// Should match core.TypeCHUNK
-	TypeCHUNK = 65015
+// DnsPingPayload represents a ping (liveness) message payload.
+type DnsPingPayload struct {
+	Type      string `json:"type"`
+	SenderID  string `json:"sender_id"`
+	Nonce     string `json:"nonce"`
+	Timestamp int64  `json:"timestamp"`
+}
 
-	// EDNS0_CHUNK_OPTION_CODE is the EDNS0 option code for CHUNK data
-	// Should match edns0.EDNS0_CHUNK_OPTION_CODE
-	EDNS0_CHUNK_OPTION_CODE = 65015
+// DnsPingConfirmPayload is the response to a ping; echoes the nonce.
+type DnsPingConfirmPayload struct {
+	Type          string `json:"type"`
+	SenderID      string `json:"sender_id"`
+	Nonce         string `json:"nonce"`
+	CorrelationID string `json:"correlation_id"`
+	Status        string `json:"status"`
+	Timestamp     int64  `json:"timestamp"`
+}
+
+// Constants for DNS transport
+// TypeCHUNK is the DNS RRtype for CHUNK records (should match core.TypeCHUNK).
+// EDNS0 CHUNK option code is edns0.EDNS0_CHUNK_OPTION_CODE (65004); do not use RR type as option code.
+const (
+	TypeCHUNK = 65015 // 0xFDF7 - matches core.TypeCHUNK
 )

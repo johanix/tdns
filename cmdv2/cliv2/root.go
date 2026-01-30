@@ -126,8 +126,9 @@ type ApiDetails struct {
 	BaseURL    string `validate:"required" yaml:"baseurl"`
 	ApiKey     string `validate:"required" yaml:"apikey"`
 	AuthMethod string `validate:"required" yaml:"authmethod"`
-	RootCA     string `yaml:"rootca"`           // Optional: path to root CA cert, or "insecure" to skip verification
-	Command    string `yaml:"command,omitempty"` // Optional: command to start the daemon (e.g., "/usr/local/libexec/tdns-auth")
+	RootCA     string `yaml:"rootca"`             // Optional: path to root CA cert, or "insecure" to skip verification
+	Command    string `yaml:"command,omitempty"`  // Optional: command to start the daemon (e.g., "/usr/local/libexec/tdns-auth")
+	ConfigFile string `yaml:"config_file,omitempty"` // Optional: path to server config (for keys generate/show)
 }
 
 func initApi() {

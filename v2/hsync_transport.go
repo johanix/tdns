@@ -9,6 +9,8 @@ package tdns
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"time"
@@ -16,6 +18,13 @@ import (
 	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/johanix/tdns/v2/core"
 )
+
+// generatePingNonce returns a random nonce for ping requests.
+func generatePingNonce() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // TransportManager manages multiple transports for agent communication.
 type TransportManager struct {
@@ -442,6 +451,23 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	}
 
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s", peer.ID)
+}
+
+// SendPing sends a CHUNK-based ping to a peer; prefers DNS transport (API does not implement ping).
+func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
+	req := &transport.PingRequest{
+		SenderID:  tm.LocalID,
+		Nonce:     generatePingNonce(),
+		Timestamp: time.Now(),
+	}
+	// Prefer DNS for ping (API transport returns "not implemented")
+	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+		return tm.DNSTransport.Ping(ctx, peer, req)
+	}
+	if tm.APITransport != nil && peer.APIEndpoint != "" {
+		return tm.APITransport.Ping(ctx, peer, req)
+	}
+	return nil, fmt.Errorf("no transport available for ping to %s", peer.ID)
 }
 
 // SendBeatWithFallback sends a heartbeat to a peer with transport fallback.

@@ -4,6 +4,12 @@ include:
 
 agent:
    identity:		agent.provider.
+   # Secure CHUNK comms with combiner (no enrollment; configure keys and address)
+   long_term_jose_priv_key:	/etc/tdns/agent.jose.private
+   combiner:
+      address:		1.2.3.4:5678
+      long_term_jose_pub_key:	/etc/tdns/combiner.jose.pub
+      # api_base_url:	https://1.2.3.4:8085/api/v1   # optional; for tdns-cli agent combiner ping --api
    api:
       addresses:
          publish:	[ 1.2.3.4 ]

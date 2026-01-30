@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -146,7 +147,7 @@ func (h *MessageHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
 
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
-			if localOpt.Code == EDNS0_CHUNK_OPTION_CODE {
+			if localOpt.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
 				return localOpt.Data, nil
 			}
 		}

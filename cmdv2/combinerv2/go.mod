@@ -9,6 +9,7 @@ replace (
 	github.com/johanix/tdns/v2/crypto => ../../v2/crypto
 	github.com/johanix/tdns/v2/edns0 => ../../v2/edns0
 	github.com/johanix/tdns/v2/hpke => ../../v2/hpke
+	github.com/johanix/tdns/v2/jose => ../../v2/jose
 )
 
 require (
@@ -25,6 +26,7 @@ require github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 require (
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/gookit/color v1.5.4 // indirect

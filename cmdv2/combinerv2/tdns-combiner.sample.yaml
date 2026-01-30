@@ -1,6 +1,13 @@
 include:
    - combiner-zones.yaml
 
+# Secure CHUNK comms with agent (no enrollment; configure keys and address)
+long_term_jose_priv_key:	/etc/tdns/combiner.jose.private
+agent_peer:
+   address:		1.2.3.4:5678
+   long_term_jose_pub_key:	/etc/tdns/agent.jose.pub
+   # identity:		agent.provider.   # optional; NOTIFY(CHUNK) QNAME suffix for correlation ID (default: use first label)
+
 apiserver:
    usetls:		true
    addresses:           [ 127.0.0.1:8085 ]

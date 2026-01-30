@@ -238,6 +238,12 @@ func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 	}, nil
 }
 
+// Ping is not implemented for API transport; use DNS transport for ping.
+func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (*PingResponse, error) {
+	return nil, NewTransportError("API", "Ping", peer.ID,
+		fmt.Errorf("ping not implemented for API transport; use DNS transport"), false)
+}
+
 // Confirm sends an acknowledgment of a sync operation via HTTPS API.
 func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
 	addr := peer.CurrentAddress()

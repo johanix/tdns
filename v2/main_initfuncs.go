@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/miekg/dns"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	// "github.com/johanix/tdns/v2"
@@ -284,6 +285,19 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		log.Printf("MainInit: TransportManager created (control zone: %s)", controlZone)
 	case AppTypeAuth, AppTypeCombiner:
 		// ... existing auth/combiner setup ...
+		if Globals.App.Type == AppTypeCombiner {
+			controlZone := ""
+			if conf.AgentPeer != nil && conf.AgentPeer.Identity != "" {
+				controlZone = dns.Fqdn(conf.AgentPeer.Identity)
+				if controlZone == "." {
+					controlZone = "" // "." is not a valid control zone; use first-label extraction
+				}
+			}
+			if err := RegisterCombinerChunkHandler(controlZone); err != nil {
+				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
+			}
+			log.Printf("MainInit: Combiner CHUNK handler registered (control zone: %q)", controlZone)
+		}
 	default:
 		// ... existing auth/agent/combiner setup ...
 	}

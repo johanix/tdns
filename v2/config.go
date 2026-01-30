@@ -35,6 +35,10 @@ type Config struct {
 		File string `validate:"required"`
 	}
 	Agent    LocalAgentConf
+	// AgentPeer (combiner only): the agent we talk to; yaml key "agent_peer" to avoid conflict with Agent
+	AgentPeer *PeerConf `yaml:"agent_peer"`
+	// LongTermJosePrivKey (combiner only): path to our JOSE private key for secure CHUNK
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	Internal InternalConf
 }
 
@@ -117,6 +121,14 @@ type ApiServerAppConf struct {
 	ApiKey    string
 }
 
+// PeerConf holds address and public key path for the other party (agent or combiner).
+type PeerConf struct {
+	Address             string `yaml:"address"`
+	LongTermJosePubKey  string `yaml:"long_term_jose_pub_key"`
+	ApiBaseUrl          string `yaml:"api_base_url,omitempty"`  // Optional: for API ping (e.g. https://combiner:8085/api/v1)
+	Identity            string `yaml:"identity,omitempty"`      // Optional: agent identity (combiner only); NOTIFY(CHUNK) QNAME suffix for correlation ID extraction
+}
+
 type LocalAgentConf struct {
 	Identity string `validate:"required,hostname"`
 	Local    struct {
@@ -128,6 +140,10 @@ type LocalAgentConf struct {
 	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
+	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
+	Combiner *PeerConf `yaml:"combiner"`
+	// Our JOSE keypair for secure CHUNK (agent: path to private key; public derived or adjacent .pub)
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	Xfr struct {
 		Outgoing struct {
 			Addresses []string `yaml:"addresses,omitempty"`

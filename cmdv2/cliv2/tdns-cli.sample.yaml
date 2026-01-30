@@ -8,6 +8,7 @@ apiservers:
      baseurl:           https://127.0.0.1:8987/api/v1
      apikey:            winter-is-coming-santa-stuck-in-chimney
      authmethod:        X-API-Key
+     # config_file:     /etc/tdns/tdns-agent.yaml   # optional; for tdns-cli agent keys generate/show
 
    - name:              tdns-reporter
      baseurl:           https://127.0.0.1:8991/api/v1
@@ -28,6 +29,7 @@ apiservers:
      baseurl:           https://127.0.0.1:8085/api/v1
      apikey:            you-have-stolen-my-frotzblinger
      authmethod:        X-API-Key
+     # config_file:     /etc/tdns/tdns-combiner.yaml # optional; for tdns-cli combiner keys generate/show
 
 keys:
    tsig:
