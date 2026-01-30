@@ -9,12 +9,11 @@ package transport
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns/v2/edns0"
@@ -51,6 +50,15 @@ type DNSTransport struct {
 
 	// SecureWrapper handles optional JWS/JWE encryption for payloads
 	SecureWrapper *SecurePayloadWrapper
+
+	// chunkMode: "edns0" or "query"; when "query", payload is stored and NOTIFY sent without EDNS0
+	chunkMode string
+	chunkGet  func(qname string) ([]byte, bool)
+	chunkSet  func(qname string, payload []byte)
+	// chunkQueryEndpoint: for query mode, address (host:port) where we answer CHUNK queries
+	chunkQueryEndpoint string
+	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
+	chunkQueryEndpointInNotify bool
 }
 
 // pendingOperation tracks an operation awaiting confirmation
@@ -87,6 +95,16 @@ type DNSTransportConfig struct {
 
 	// PayloadCrypto is optional - if set, enables JWS/JWE encryption for payloads
 	PayloadCrypto *PayloadCrypto
+
+	// ChunkMode: "edns0" (default) = payload in EDNS0 option; "query" = store payload, send NOTIFY without EDNS0; receiver fetches via CHUNK query
+	ChunkMode string
+	// For ChunkMode "query": optional get/set for payload store (keyed by qname). If nil, query mode is effectively disabled.
+	ChunkPayloadGet func(qname string) ([]byte, bool)
+	ChunkPayloadSet func(qname string, payload []byte)
+	// ChunkQueryEndpoint: for query mode, the address (host:port) where this agent answers CHUNK queries
+	ChunkQueryEndpoint string
+	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agent.address)
+	ChunkQueryEndpointInNotify bool
 }
 
 // NewDNSTransport creates a new DNSTransport with the given configuration.
@@ -104,6 +122,11 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		DNSClient:            &dns.Client{Timeout: timeout, Net: "udp"},
 		pendingConfirmations: make(map[string]*pendingOperation),
 		ConfirmationChan:     make(chan *IncomingConfirmation, 100),
+		chunkMode:            cfg.ChunkMode,
+		chunkGet:             cfg.ChunkPayloadGet,
+		chunkSet:             cfg.ChunkPayloadSet,
+		chunkQueryEndpoint:        cfg.ChunkQueryEndpoint,
+		chunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
 	}
 
 	// Set up secure payload wrapper if crypto is configured
@@ -119,11 +142,18 @@ func (t *DNSTransport) Name() string {
 	return "DNS"
 }
 
-// generateCorrelationID creates a unique correlation ID for tracking operations.
+// Correlation ID: 8 hex chars = epoch (when transport first used) + per-operation counter (tdns-kdc style).
+var (
+	correlationEpochOnce sync.Once
+	correlationEpoch      int64
+	correlationCounter    uint64
+)
+
+// generateCorrelationID returns a unique 8-character (hex) ID: base = unix epoch when first used, then +1 per call.
 func generateCorrelationID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	correlationEpochOnce.Do(func() { correlationEpoch = time.Now().Unix() })
+	n := atomic.AddUint64(&correlationCounter, 1)
+	return fmt.Sprintf("%08x", uint32(correlationEpoch+int64(n-1)))
 }
 
 // ensureFQDN ensures a domain name ends with a dot.
@@ -353,18 +383,34 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 			fmt.Errorf("failed to marshal ping payload: %w", err), false)
 	}
 
+	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
+	if useQueryMode {
+		t.chunkSet(qname, payloadJSON)
+	}
+
 	m := new(dns.Msg)
 	m.SetNotify(qname)
 	m.Question = []dns.Question{
 		{Name: qname, Qtype: TypeCHUNK, Qclass: dns.ClassINET},
 	}
-	m.SetEdns0(4096, true)
-	opt := m.IsEdns0()
-	if opt != nil {
-		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: payloadJSON,
-		})
+	if !useQueryMode {
+		m.SetEdns0(4096, true)
+		opt := m.IsEdns0()
+		if opt != nil {
+			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+				Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+				Data: payloadJSON,
+			})
+		}
+	} else if t.chunkQueryEndpoint != "" && t.chunkQueryEndpointInNotify {
+		m.SetEdns0(4096, true)
+		opt := m.IsEdns0()
+		if opt != nil {
+			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+				Code: edns0.EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
+				Data: []byte(t.chunkQueryEndpoint),
+			})
+		}
 	}
 
 	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
@@ -500,6 +546,11 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		}
 	}
 
+	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
+	if useQueryMode {
+		t.chunkSet(qname, finalPayload)
+	}
+
 	// Create NOTIFY message
 	m := new(dns.Msg)
 	m.SetNotify(qname)
@@ -507,15 +558,25 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		{Name: qname, Qtype: TypeCHUNK, Qclass: dns.ClassINET},
 	}
 
-	// Add payload as CHUNK EDNS0 option
-	m.SetEdns0(4096, true)
-	opt := m.IsEdns0()
-	if opt != nil {
-		chunkOpt := &dns.EDNS0_LOCAL{
-			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: finalPayload,
+	// EDNS0: payload in edns0 mode; in query mode include CHUNK query endpoint so receiver knows where to send CHUNK query
+	if !useQueryMode {
+		m.SetEdns0(4096, true)
+		opt := m.IsEdns0()
+		if opt != nil {
+			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+				Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+				Data: finalPayload,
+			})
 		}
-		opt.Option = append(opt.Option, chunkOpt)
+	} else if t.chunkQueryEndpoint != "" && t.chunkQueryEndpointInNotify {
+		m.SetEdns0(4096, true)
+		opt := m.IsEdns0()
+		if opt != nil {
+			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+				Code: edns0.EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
+				Data: []byte(t.chunkQueryEndpoint),
+			})
+		}
 	}
 
 	// Register pending operation

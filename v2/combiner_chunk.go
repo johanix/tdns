@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -56,9 +58,6 @@ type RejectedItem struct {
 // It extracts the sync payload from incoming NOTIFY(CHUNK) messages and
 // applies the updates to the appropriate zone.
 type CombinerChunkHandler struct {
-	// ControlZone for QNAME parsing
-	ControlZone string
-
 	// RequestChan receives sync requests (for async processing if needed)
 	RequestChan chan *CombinerSyncRequestPlus
 
@@ -73,9 +72,9 @@ type CombinerSyncRequestPlus struct {
 }
 
 // NewCombinerChunkHandler creates a new combiner CHUNK handler.
-func NewCombinerChunkHandler(controlZone string) *CombinerChunkHandler {
+// Control zone is derived dynamically from each NOTIFY qname as qname minus the leftmost label (no static config).
+func NewCombinerChunkHandler() *CombinerChunkHandler {
 	return &CombinerChunkHandler{
-		ControlZone: dns.Fqdn(controlZone),
 		RequestChan: make(chan *CombinerSyncRequestPlus, 100),
 	}
 }
@@ -95,24 +94,20 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 		return fmt.Errorf("nil request or message")
 	}
 
-	// Extract correlation ID from QNAME
-	correlationID, err := h.extractCorrelationID(req.Qname)
+	// Extract correlation ID and control zone from QNAME: {distid}.{controlzone}. (distid = first label, control zone = rest)
+	correlationID, controlZone, err := h.extractCorrelationIDAndControlZone(req.Qname)
 	if err != nil {
 		log.Printf("CombinerChunkHandler: Failed to extract correlation ID from %s: %v", req.Qname, err)
 		return ErrNotHandled // Let other handlers try
 	}
 
-	if h.ControlZone != "" {
-		log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q correlation_id=%q control_zone=%q", req.Qname, correlationID, h.ControlZone)
-	} else {
-		log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q correlation_id=%q", req.Qname, correlationID)
-	}
+	log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q correlation_id=%q control_zone=%q", req.Qname, correlationID, controlZone)
 
-	// Extract CHUNK payload from EDNS0
-	payload, err := h.extractChunkPayload(req.Msg)
+	// Get CHUNK payload: from EDNS0 (edns0 mode) or via CHUNK query to NOTIFY source (query mode or fallback)
+	payload, err := h.getChunkPayload(ctx, req)
 	if err != nil {
-		log.Printf("CombinerChunkHandler: Failed to extract CHUNK payload: %v", err)
-		return h.sendErrorResponse(req, correlationID, "failed to extract payload")
+		log.Printf("CombinerChunkHandler: Failed to get CHUNK payload: %v", err)
+		return h.sendErrorResponse(req, correlationID, "failed to get payload")
 	}
 
 	// Parse type first to handle ping without altering zone state
@@ -137,38 +132,22 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 	return h.sendConfirmResponse(req, resp)
 }
 
-// extractCorrelationID extracts the correlation ID from the QNAME.
-// QNAME format: <correlationID>.<controlZone> when control zone is set;
-// when control zone is empty, the first label of qname is used (e.g. 44a6eb71.agent.provider. -> 44a6eb71).
-func (h *CombinerChunkHandler) extractCorrelationID(qname string) (string, error) {
+// extractCorrelationIDAndControlZone derives correlation ID and control zone from the QNAME.
+// QNAME format: {distid}.{controlzone}. — distid has no dots (single label), so correlation ID = first label, control zone = rest (qname minus leftmost label).
+func (h *CombinerChunkHandler) extractCorrelationIDAndControlZone(qname string) (correlationID, controlZone string, err error) {
 	qname = dns.Fqdn(qname)
-
-	// Treat "." and "" as "no control zone" so we use first-label extraction
-	if h.ControlZone == "" || h.ControlZone == "." {
-		// No control zone configured: use first label as correlation ID (e.g. 58ba28e99c221009.agent.provider. -> 58ba28e99c221009)
-		labels := dns.SplitDomainName(qname)
-		if len(labels) == 0 {
-			return "", fmt.Errorf("qname %s has no labels", qname)
-		}
-		return labels[0], nil
+	labels := dns.SplitDomainName(qname)
+	if len(labels) == 0 {
+		return "", "", fmt.Errorf("qname %s has no labels", qname)
 	}
-
-	// Check if qname ends with control zone
-	if len(qname) <= len(h.ControlZone) {
-		return "", fmt.Errorf("qname %s too short for control zone %s", qname, h.ControlZone)
+	correlationID = labels[0]
+	if len(labels) == 1 {
+		controlZone = ""
+		return correlationID, controlZone, nil
 	}
-
-	// Extract the prefix (correlation ID)
-	if qname[len(qname)-len(h.ControlZone):] != h.ControlZone {
-		return "", fmt.Errorf("qname %s does not end with control zone %s", qname, h.ControlZone)
-	}
-
-	correlationID := qname[:len(qname)-len(h.ControlZone)-1] // -1 for the dot
-	if correlationID == "" {
-		return "", fmt.Errorf("empty correlation ID in qname %s", qname)
-	}
-
-	return correlationID, nil
+	// Control zone = qname minus leftmost label (e.g. 65a1b2c3.agent.provider. -> agent.provider.)
+	controlZone = qname[len(labels[0])+1:] // +1 for the dot after first label
+	return correlationID, controlZone, nil
 }
 
 // handlePing responds to a ping with ping_confirm (echoed nonce); no zone state change.
@@ -224,6 +203,82 @@ func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, correlationID s
 		return req.ResponseWriter.WriteMsg(resp)
 	}
 	return nil
+}
+
+// getChunkPayload returns the CHUNK payload from the NOTIFY. Receiver adapts: first try EDNS(0) CHUNK option;
+// if none, fetch via CHUNK query to the sender. Query target is the CHUNK query endpoint from the NOTIFY (if present), else the connection peer (may fail for ephemeral ports).
+func (h *CombinerChunkHandler) getChunkPayload(ctx context.Context, req *DnsNotifyRequest) ([]byte, error) {
+	// Always try EDNS0 first; receiver adapts to sender's choice
+	payload, err := h.extractChunkPayload(req.Msg)
+	if err == nil {
+		return payload, nil
+	}
+
+	// No EDNS0 payload: fetch via CHUNK query. Use CHUNK_QUERY_ENDPOINT from NOTIFY if present, else static config (combiner.agent.address).
+	queryTarget := extractChunkQueryEndpoint(req.Msg)
+	if queryTarget == "" && Conf.Combiner != nil && Conf.Combiner.Agent != nil && Conf.Combiner.Agent.Address != "" {
+		queryTarget = strings.TrimSpace(Conf.Combiner.Agent.Address)
+	}
+	if queryTarget == "" {
+		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option, no combiner.agent.address)")
+	}
+	return fetchChunkPayloadViaQuery(ctx, queryTarget, req.Qname)
+}
+
+// extractChunkQueryEndpoint returns the sender's CHUNK query endpoint (host:port) from the NOTIFY EDNS0 option (code 65005), or "" if absent.
+func extractChunkQueryEndpoint(msg *dns.Msg) string {
+	opt := msg.IsEdns0()
+	if opt == nil {
+		return ""
+	}
+	for _, o := range opt.Option {
+		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_QUERY_ENDPOINT_CODE {
+			s := string(local.Data)
+			if s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// fetchChunkPayloadViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data.
+func fetchChunkPayloadViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, error) {
+	// Ensure server has a port (default 53)
+	if host, port, err := net.SplitHostPort(serverAddr); err != nil {
+		if host != "" {
+			serverAddr = net.JoinHostPort(host, "53")
+		} else {
+			serverAddr = net.JoinHostPort(serverAddr, "53")
+		}
+	} else if port == "" {
+		serverAddr = net.JoinHostPort(host, "53")
+	}
+
+	m := new(dns.Msg)
+	q := dns.Fqdn(qname)
+	m.SetQuestion(q, core.TypeCHUNK)
+	m.RecursionDesired = false
+	c := &dns.Client{Timeout: 5 * time.Second, Net: "udp"}
+	in, _, err := c.ExchangeContext(ctx, m, serverAddr)
+	if err != nil {
+		return nil, fmt.Errorf("CHUNK query to %s failed: %w", serverAddr, err)
+	}
+	if in == nil || in.Rcode != dns.RcodeSuccess {
+		rcode := dns.RcodeSuccess
+		if in != nil {
+			rcode = in.Rcode
+		}
+		return nil, fmt.Errorf("CHUNK query to %s returned rcode %s", serverAddr, dns.RcodeToString[rcode])
+	}
+	for _, rr := range in.Answer {
+		if prr, ok := rr.(*dns.PrivateRR); ok && prr.Hdr.Rrtype == core.TypeCHUNK {
+			if chunk, ok := prr.Data.(*core.CHUNK); ok && chunk != nil {
+				return chunk.Data, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no CHUNK RR in response from %s", serverAddr)
 }
 
 // extractChunkPayload extracts the CHUNK data from EDNS0 option (code 65004).
@@ -442,10 +497,10 @@ func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, correlat
 }
 
 // RegisterCombinerChunkHandler registers the combiner's CHUNK handler.
-// This should be called during combiner initialization.
-func RegisterCombinerChunkHandler(controlZone string) error {
-	handler := NewCombinerChunkHandler(controlZone)
-	log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for combiner (control zone: %s)", controlZone)
+// Control zone is derived per NOTIFY from qname (qname minus leftmost label); no static config.
+func RegisterCombinerChunkHandler() error {
+	handler := NewCombinerChunkHandler()
+	log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for combiner (control zone derived from qname)")
 	return RegisterNotifyHandler(core.TypeCHUNK, handler.CreateNotifyHandlerFunc())
 }
 

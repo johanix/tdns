@@ -61,6 +61,13 @@ type TransportManagerConfig struct {
 	DNSTimeout    time.Duration
 	AgentRegistry *AgentRegistry
 	AgentQs       *AgentQs
+	// ChunkMode: "edns0" or "query"; when "query", agent stores payload and sends NOTIFY without EDNS0; receiver fetches via CHUNK query
+	ChunkMode         string
+	ChunkPayloadStore ChunkPayloadStore
+	// ChunkQueryEndpoint: for query mode, address (host:port) where agent answers CHUNK queries
+	ChunkQueryEndpoint string
+	// ChunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0 option 65005); when false, receiver uses static config (e.g. combiner.agent.address)
+	ChunkQueryEndpointInNotify bool
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -81,11 +88,20 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 
 	// Create DNS transport if control zone is configured
 	if cfg.ControlZone != "" {
-		tm.DNSTransport = transport.NewDNSTransport(&transport.DNSTransportConfig{
-			LocalID:     cfg.LocalID,
-			ControlZone: cfg.ControlZone,
-			Timeout:     cfg.DNSTimeout,
-		})
+		dnsCfg := &transport.DNSTransportConfig{
+			LocalID:                    cfg.LocalID,
+			ControlZone:                cfg.ControlZone,
+			Timeout:                    cfg.DNSTimeout,
+			ChunkMode:                  cfg.ChunkMode,
+			ChunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
+			ChunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
+		}
+		if cfg.ChunkPayloadStore != nil {
+			store := cfg.ChunkPayloadStore
+			dnsCfg.ChunkPayloadGet = func(qname string) ([]byte, bool) { return store.Get(qname) }
+			dnsCfg.ChunkPayloadSet = func(qname string, payload []byte) { store.Set(qname, payload) }
+		}
+		tm.DNSTransport = transport.NewDNSTransport(dnsCfg)
 
 		// Create CHUNK NOTIFY handler
 		tm.ChunkHandler = transport.NewChunkNotifyHandler(

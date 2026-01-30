@@ -10,14 +10,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/miekg/dns"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	// "github.com/johanix/tdns/v2"
@@ -25,6 +27,30 @@ import (
 )
 
 var engineWg sync.WaitGroup
+
+// buildChunkQueryEndpoint returns "host:port" for the agent's DNS service so the receiver of a NOTIFY(CHUNK) knows where to send the CHUNK query. Prefers Publish so the combiner can reach the agent.
+func buildChunkQueryEndpoint(conf *Config) string {
+	dns := &conf.Agent.Dns
+	port := dns.Port
+	if port == 0 {
+		port = 53
+	}
+	var host string
+	if len(dns.Addresses.Publish) > 0 {
+		host = strings.TrimSpace(dns.Addresses.Publish[0])
+	}
+	if host == "" && len(dns.Addresses.Listen) > 0 {
+		host = strings.TrimSpace(dns.Addresses.Listen[0])
+	}
+	if host == "" {
+		return ""
+	}
+	// If host already contains a port, use as-is
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+}
 
 // startEngine wraps engine functions in a goroutine with error handling.
 // It logs errors if the engine function returns an error, preventing silent failures.
@@ -255,9 +281,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 		// Initialize AgentRegistry for agent mode only
 		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
-		// Initialize CombinerChunkHandler for CHUNK-based combiner updates
-		// Use agent identity as control zone for in-process combiner
-		conf.Internal.CombinerHandler = NewCombinerChunkHandler(conf.Agent.Identity)
+		// Initialize CombinerChunkHandler for CHUNK-based combiner updates (in-process)
+		conf.Internal.CombinerHandler = NewCombinerChunkHandler()
 
 		// Initialize HSYNC database tables (peer state, sync operations, confirmations)
 		if conf.Internal.KeyDB != nil {
@@ -272,31 +297,64 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		if controlZone == "" {
 			controlZone = conf.Agent.Identity
 		}
+		chunkMode := conf.Agent.Dns.ChunkMode
+		if chunkMode == "" {
+			chunkMode = "edns0"
+		}
+		var chunkStore ChunkPayloadStore
+		var chunkQueryEndpoint string
+		var chunkQueryEndpointInNotify bool
+		if chunkMode == "query" {
+			cep := strings.TrimSpace(conf.Agent.Dns.ChunkQueryEndpoint)
+			if cep != "include" && cep != "none" {
+				return fmt.Errorf("agent.dns.chunk_mode=query requires agent.dns.chunk_query_endpoint to be \"include\" or \"none\" (got %q)", conf.Agent.Dns.ChunkQueryEndpoint)
+			}
+			chunkQueryEndpointInNotify = (cep == "include")
+			chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
+			conf.Internal.ChunkPayloadStore = chunkStore
+			if err := RegisterChunkQueryHandler(chunkStore); err != nil {
+				log.Printf("MainInit: failed to register CHUNK query handler: %v", err)
+			} else {
+				log.Printf("MainInit: CHUNK query handler registered (chunk_mode=query)")
+			}
+			// Build CHUNK query endpoint (host:port) so receiver knows where to send CHUNK query; prefer Publish so combiner can reach us
+			chunkQueryEndpoint = buildChunkQueryEndpoint(conf)
+			if chunkQueryEndpoint == "" {
+				log.Printf("MainInit: chunk_mode=query but no agent.dns address/port; CHUNK query endpoint will be empty")
+			}
+		}
 		tm := NewTransportManager(&TransportManagerConfig{
-			LocalID:       conf.Agent.Identity,
-			ControlZone:   controlZone,
-			APITimeout:    10 * time.Second,
-			DNSTimeout:    5 * time.Second,
-			AgentRegistry: conf.Internal.AgentRegistry,
-			AgentQs:       conf.Internal.AgentQs,
+			LocalID:                    conf.Agent.Identity,
+			ControlZone:                controlZone,
+			APITimeout:                 10 * time.Second,
+			DNSTimeout:                 5 * time.Second,
+			AgentRegistry:              conf.Internal.AgentRegistry,
+			AgentQs:                    conf.Internal.AgentQs,
+			ChunkMode:                  chunkMode,
+			ChunkPayloadStore:          chunkStore,
+			ChunkQueryEndpoint:         chunkQueryEndpoint,
+			ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
-		log.Printf("MainInit: TransportManager created (control zone: %s)", controlZone)
+		log.Printf("MainInit: TransportManager created (control zone: %s, chunk_mode: %s)", controlZone, chunkMode)
 	case AppTypeAuth, AppTypeCombiner:
 		// ... existing auth/combiner setup ...
 		if Globals.App.Type == AppTypeCombiner {
-			controlZone := ""
-			if conf.AgentPeer != nil && conf.AgentPeer.Identity != "" {
-				controlZone = dns.Fqdn(conf.AgentPeer.Identity)
-				if controlZone == "." {
-					controlZone = "" // "." is not a valid control zone; use first-label extraction
+			if conf.Combiner == nil {
+				return fmt.Errorf("combiner config block is required for combiner app type")
+			}
+			chunkMode := strings.TrimSpace(conf.Combiner.ChunkMode)
+			if chunkMode == "query" {
+				cep := strings.TrimSpace(conf.Combiner.ChunkQueryEndpoint)
+				if cep != "include" && cep != "none" {
+					return fmt.Errorf("combiner.chunk_mode=query requires combiner.chunk_query_endpoint to be \"include\" or \"none\" (got %q)", conf.Combiner.ChunkQueryEndpoint)
 				}
 			}
-			if err := RegisterCombinerChunkHandler(controlZone); err != nil {
+			if err := RegisterCombinerChunkHandler(); err != nil {
 				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
 			}
-			log.Printf("MainInit: Combiner CHUNK handler registered (control zone: %q)", controlZone)
+			log.Printf("MainInit: Combiner CHUNK handler registered")
 		}
 	default:
 		// ... existing auth/agent/combiner setup ...

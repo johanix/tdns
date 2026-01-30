@@ -137,7 +137,10 @@ func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 	case AppTypeAgent:
 		return conf.Agent.LongTermJosePrivKey
 	case AppTypeCombiner:
-		return conf.LongTermJosePrivKey
+		if conf.Combiner != nil {
+			return conf.Combiner.LongTermJosePrivKey
+		}
+		return ""
 	default:
 		return ""
 	}

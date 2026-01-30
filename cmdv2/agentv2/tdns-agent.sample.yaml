@@ -24,6 +24,11 @@ agent:
          listen:	[ 127.0.0.1:8998 ]
       baseurl:		dns://dns.{TARGET}:{PORT}/ # TARGET will be expanded to identity
       port:		8998
+      # control_zone:	agent.provider.   # optional; zone used for NOTIFY(CHUNK) QNAMEs (default: agent identity)
+      # chunk_mode:	edns0   # default: send payload in EDNS(0) CHUNK option (code 65004)
+      # chunk_mode:	query   # store payload by qname; send NOTIFY without payload; receiver fetches via CHUNK query (then chunk_query_endpoint is required)
+      # chunk_query_endpoint:	include   # when chunk_mode=query: signal CHUNK query endpoint in NOTIFY (EDNS0 option 65005). Required when chunk_mode=query.
+      # chunk_query_endpoint:	none      # when chunk_mode=query: do not add endpoint to NOTIFY; receiver uses agent_peer.address
 
 service:
    name:		TDNS-AGENT

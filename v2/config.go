@@ -35,11 +35,20 @@ type Config struct {
 		File string `validate:"required"`
 	}
 	Agent    LocalAgentConf
-	// AgentPeer (combiner only): the agent we talk to; yaml key "agent_peer" to avoid conflict with Agent
-	AgentPeer *PeerConf `yaml:"agent_peer"`
-	// LongTermJosePrivKey (combiner only): path to our JOSE private key for secure CHUNK
-	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
+	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
+}
+
+// LocalCombinerConf holds combiner-specific config (symmetric to LocalAgentConf).
+type LocalCombinerConf struct {
+	// LongTermJosePrivKey: path to our JOSE private key for secure CHUNK
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	// Chunk config (same key names as agent.dns for consistency)
+	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                    // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
+	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
+	// Agent (combiner only): the agent we talk to; symmetric to agent.combiner
+	Agent *PeerConf `yaml:"agent"`
 }
 
 type AppDetails struct {
@@ -177,6 +186,9 @@ type LocalAgentDnsConf struct {
 	BaseUrl     string
 	Port        uint16
 	ControlZone string `yaml:"control_zone" mapstructure:"control_zone"` // Zone used for NOTIFY(CHUNK) QNAMEs in DNS mode (default: agent identity)
+	// Chunk config (same key names as combiner for consistency)
+	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                    // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
+	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agent.address
 }
 
 type DbConf struct {
@@ -294,6 +306,7 @@ type InternalConf struct {
 	Scanner             *Scanner    // Scanner instance for async job tracking
 	CombinerHandler     *CombinerChunkHandler // CHUNK-based combiner handler
 	TransportManager    *TransportManager    // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
+	ChunkPayloadStore   ChunkPayloadStore    // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
 }
 
 type AgentQs struct {
