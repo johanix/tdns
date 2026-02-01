@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -53,8 +54,8 @@ type DNSTransport struct {
 
 	// chunkMode: "edns0" or "query"; when "query", payload is stored and NOTIFY sent without EDNS0
 	chunkMode string
-	chunkGet  func(qname string) ([]byte, bool)
-	chunkSet  func(qname string, payload []byte)
+	chunkGet  func(qname string) ([]byte, uint8, bool)
+	chunkSet  func(qname string, payload []byte, format uint8)
 	// chunkQueryEndpoint: for query mode, address (host:port) where we answer CHUNK queries
 	chunkQueryEndpoint string
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
@@ -99,8 +100,9 @@ type DNSTransportConfig struct {
 	// ChunkMode: "edns0" (default) = payload in EDNS0 option; "query" = store payload, send NOTIFY without EDNS0; receiver fetches via CHUNK query
 	ChunkMode string
 	// For ChunkMode "query": optional get/set for payload store (keyed by qname). If nil, query mode is effectively disabled.
-	ChunkPayloadGet func(qname string) ([]byte, bool)
-	ChunkPayloadSet func(qname string, payload []byte)
+	// Format: FormatJSON=1, FormatJWT=2 (from core package)
+	ChunkPayloadGet func(qname string) ([]byte, uint8, bool)
+	ChunkPayloadSet func(qname string, payload []byte, format uint8)
 	// ChunkQueryEndpoint: for query mode, the address (host:port) where this agent answers CHUNK queries
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agent.address)
@@ -383,9 +385,23 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 			fmt.Errorf("failed to marshal ping payload: %w", err), false)
 	}
 
+	// Optionally encrypt the payload if secure wrapper is configured
+	finalPayload := payloadJSON
+	var payloadFormat uint8 = core.FormatJSON
+	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
+		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		if err != nil {
+			log.Printf("DNS Ping: Failed to encrypt payload for %s: %v (sending unencrypted)", peer.ID, err)
+			// Continue with unencrypted payload for now
+		} else {
+			finalPayload = encrypted
+			payloadFormat = core.FormatJWT
+		}
+	}
+
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
 	if useQueryMode {
-		t.chunkSet(qname, payloadJSON)
+		t.chunkSet(qname, finalPayload, payloadFormat)
 	}
 
 	m := new(dns.Msg)
@@ -399,7 +415,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		if opt != nil {
 			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
 				Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-				Data: payloadJSON,
+				Data: finalPayload,
 			})
 		}
 	} else if t.chunkQueryEndpoint != "" && t.chunkQueryEndpointInNotify {
@@ -501,6 +517,18 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
 	}
 
+	// Optionally encrypt the payload if secure wrapper is configured
+	finalPayload := payloadJSON
+	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
+		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		if err != nil {
+			log.Printf("DNS Confirm: Failed to encrypt payload for %s: %v (sending unencrypted)", peer.ID, err)
+			// Continue with unencrypted payload for now
+		} else {
+			finalPayload = encrypted
+		}
+	}
+
 	// Create NOTIFY message
 	m := new(dns.Msg)
 	m.SetNotify(qname)
@@ -514,7 +542,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	if opt != nil {
 		chunkOpt := &dns.EDNS0_LOCAL{
 			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: payloadJSON,
+			Data: finalPayload,
 		}
 		opt.Option = append(opt.Option, chunkOpt)
 	}
@@ -536,6 +564,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 
 	// Optionally encrypt the payload if secure wrapper is configured
 	finalPayload := payload
+	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
 		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
 		if err != nil {
@@ -543,12 +572,13 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 			// Continue with unencrypted payload for now - could be made stricter
 		} else {
 			finalPayload = encrypted
+			payloadFormat = core.FormatJWT
 		}
 	}
 
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
 	if useQueryMode {
-		t.chunkSet(qname, finalPayload)
+		t.chunkSet(qname, finalPayload, payloadFormat)
 	}
 
 	// Create NOTIFY message

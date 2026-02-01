@@ -22,8 +22,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	// "github.com/johanix/tdns/v2"
-	// "github.com/orcaman/concurrent-map/v2"
+
+	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns/v2/crypto/jose"
 )
 
 var engineWg sync.WaitGroup
@@ -323,6 +325,19 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				log.Printf("MainInit: chunk_mode=query but no agent.dns address/port; CHUNK query endpoint will be empty")
 			}
 		}
+
+		// Initialize PayloadCrypto for secure CHUNK transport (optional)
+		var payloadCrypto *transport.PayloadCrypto
+		if conf.Agent.LongTermJosePrivKey != "" {
+			pc, err := initPayloadCrypto(conf)
+			if err != nil {
+				log.Printf("MainInit: PayloadCrypto initialization failed: %v (CHUNK payloads will be unencrypted)", err)
+			} else {
+				payloadCrypto = pc
+				log.Printf("MainInit: PayloadCrypto initialized (encryption enabled)")
+			}
+		}
+
 		tm := NewTransportManager(&TransportManagerConfig{
 			LocalID:                    conf.Agent.Identity,
 			ControlZone:                controlZone,
@@ -334,6 +349,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			ChunkPayloadStore:          chunkStore,
 			ChunkQueryEndpoint:         chunkQueryEndpoint,
 			ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
+			PayloadCrypto:              payloadCrypto,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
@@ -491,4 +507,67 @@ func Shutdowner(conf *Config, msg string) {
 	log.Printf("%s: all engines finished", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
+}
+
+// initPayloadCrypto initializes PayloadCrypto from the agent config.
+// Loads the local JOSE private key and the combiner's public key (if configured).
+func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
+	// Use JOSE backend for key operations
+	backend := jose.NewBackend()
+
+	// Load local private key
+	privKeyPath := conf.Agent.LongTermJosePrivKey
+	privKeyData, err := os.ReadFile(privKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read private key %s: %w", privKeyPath, err)
+	}
+
+	privKey, err := backend.ParsePrivateKey(privKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+
+	// Derive public key from private key
+	joseBackend, ok := backend.(*jose.Backend)
+	if !ok {
+		return nil, fmt.Errorf("backend is not JOSE")
+	}
+	pubKey, err := joseBackend.PublicFromPrivate(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("derive public key: %w", err)
+	}
+
+	// Create PayloadCrypto instance
+	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
+		Backend: backend.(crypto.Backend),
+		Enabled: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create PayloadCrypto: %w", err)
+	}
+
+	// Set local keys
+	pc.SetLocalKeys(privKey, pubKey)
+	log.Printf("initPayloadCrypto: Loaded local JOSE key from %s", privKeyPath)
+
+	// Load combiner's public key if configured
+	if conf.Agent.Combiner != nil && conf.Agent.Combiner.LongTermJosePubKey != "" {
+		combinerPubKeyPath := conf.Agent.Combiner.LongTermJosePubKey
+		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
+		if err != nil {
+			log.Printf("initPayloadCrypto: failed to read combiner public key %s: %v (combiner encryption disabled)", combinerPubKeyPath, err)
+		} else {
+			combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
+			if err != nil {
+				log.Printf("initPayloadCrypto: failed to parse combiner public key: %v (combiner encryption disabled)", err)
+			} else {
+				// Add combiner as peer for both encryption and verification
+				pc.AddPeerKey("combiner", combinerPubKey)
+				pc.AddPeerVerificationKey("combiner", combinerPubKey)
+				log.Printf("initPayloadCrypto: Loaded combiner public key from %s", combinerPubKeyPath)
+			}
+		}
+	}
+
+	return pc, nil
 }

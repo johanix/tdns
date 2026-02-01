@@ -68,6 +68,10 @@ type TransportManagerConfig struct {
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0 option 65005); when false, receiver uses static config (e.g. combiner.agent.address)
 	ChunkQueryEndpointInNotify bool
+
+	// PayloadCrypto enables JWS/JWE encryption for CHUNK payloads (optional)
+	// If set and Enabled, all outgoing CHUNK payloads will be encrypted and signed
+	PayloadCrypto *transport.PayloadCrypto
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -95,11 +99,12 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			ChunkMode:                  cfg.ChunkMode,
 			ChunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 			ChunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
+			PayloadCrypto:              cfg.PayloadCrypto,
 		}
 		if cfg.ChunkPayloadStore != nil {
 			store := cfg.ChunkPayloadStore
-			dnsCfg.ChunkPayloadGet = func(qname string) ([]byte, bool) { return store.Get(qname) }
-			dnsCfg.ChunkPayloadSet = func(qname string, payload []byte) { store.Set(qname, payload) }
+			dnsCfg.ChunkPayloadGet = func(qname string) ([]byte, uint8, bool) { return store.Get(qname) }
+			dnsCfg.ChunkPayloadSet = func(qname string, payload []byte, format uint8) { store.Set(qname, payload, format) }
 		}
 		tm.DNSTransport = transport.NewDNSTransport(dnsCfg)
 

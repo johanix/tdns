@@ -259,7 +259,9 @@ func fetchChunkPayloadViaQuery(ctx context.Context, serverAddr, qname string) ([
 	q := dns.Fqdn(qname)
 	m.SetQuestion(q, core.TypeCHUNK)
 	m.RecursionDesired = false
-	c := &dns.Client{Timeout: 5 * time.Second, Net: "udp"}
+
+	// Use TCP for CHUNK queries - encrypted payloads (JWS/JWE + base64) are too large for UDP
+	c := &dns.Client{Timeout: 5 * time.Second, Net: "tcp"}
 	in, _, err := c.ExchangeContext(ctx, m, serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("CHUNK query to %s failed: %w", serverAddr, err)
