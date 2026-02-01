@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -52,6 +53,17 @@ func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, erro
 
 func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
+
+	// Initialize distribution cache if needed (for agent/combiner)
+	if conf.Internal.DistributionCache == nil {
+		if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
+			conf.Internal.DistributionCache = NewDistributionCache()
+			// Start background GC to purge old distributions every minute
+			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+			log.Printf("Initialized distribution cache with automatic cleanup")
+		}
+	}
+
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey
 	if apikey == "" {
@@ -77,6 +89,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 
 	if Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.Internal.DistributionCache)).Methods("POST")
 		// XXX: Should be behind a debug requirement, but for now always present
 		// if Globals.Debug {
 		log.Printf("Setting up debug endpoint for agent API")
@@ -90,6 +103,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	}
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/combiner/distrib", conf.APIcombinerDistrib(conf.Internal.DistributionCache)).Methods("POST")
 	}
 
 	if Globals.App.Type == AppTypeKdc {

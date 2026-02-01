@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	tdns "github.com/johanix/tdns/v2"
+	_ "github.com/johanix/tdns/v2/core" // Import for RR type registration
 )
 
 func main() {

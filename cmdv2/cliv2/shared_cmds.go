@@ -81,5 +81,12 @@ func init() {
 	// From ../tdns/cli/auth_cmds.go:
 	rootCmd.AddCommand(cli.AuthCmd)
 
+	// From ../tdns/cli/jwt_cmds.go:
+	rootCmd.AddCommand(cli.JwtCmd)
+
+	// From ../tdns/cli/distrib_cmds.go:
+	cli.AgentCmd.AddCommand(cli.AgentDistribCmd)
+	cli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
+
 	rootCmd.AddCommand(cli.VersionCmd)
 }

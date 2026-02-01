@@ -213,7 +213,7 @@ var DebugAgentRegistryCmd = &cobra.Command{
 	Short: "Test the agent registry",
 	Run: func(cmd *cobra.Command, args []string) {
 		conf := tdns.Config{
-			Agent: tdns.LocalAgentConf{
+			Agent: &tdns.LocalAgentConf{
 				Identity: "local",
 			},
 		}

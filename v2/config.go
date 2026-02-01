@@ -34,7 +34,7 @@ type Config struct {
 	Log            struct {
 		File string `validate:"required"`
 	}
-	Agent    LocalAgentConf
+	Agent    *LocalAgentConf `yaml:"agent"`
 	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
 	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
@@ -151,6 +151,8 @@ type LocalAgentConf struct {
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
 	Combiner *PeerConf `yaml:"combiner"`
+	// Peer agents (agent only): map of agent identities to their config for agent-to-agent communication
+	Peers map[string]*PeerConf `yaml:"peers"`
 	// Our JOSE keypair for secure CHUNK (agent: path to private key; public derived or adjacent .pub)
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	Xfr struct {
@@ -307,6 +309,7 @@ type InternalConf struct {
 	CombinerHandler     *CombinerChunkHandler // CHUNK-based combiner handler
 	TransportManager    *TransportManager    // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
 	ChunkPayloadStore   ChunkPayloadStore    // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	DistributionCache   *DistributionCache   // In-memory cache of distributions (agent/combiner)
 }
 
 type AgentQs struct {

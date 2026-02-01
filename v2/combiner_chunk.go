@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -63,6 +64,11 @@ type CombinerChunkHandler struct {
 
 	// Debug enables verbose logging
 	Debug bool
+
+	// SecureWrapper handles decryption of incoming JWS/JWE payloads from the agent.
+	// Uses the generic transport crypto infrastructure.
+	// If nil, payloads are expected to be plaintext JSON.
+	SecureWrapper *transport.SecurePayloadWrapper
 }
 
 // CombinerSyncRequestPlus includes a response channel for async processing.
@@ -108,6 +114,17 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 	if err != nil {
 		log.Printf("CombinerChunkHandler: Failed to get CHUNK payload: %v", err)
 		return h.sendErrorResponse(req, correlationID, "failed to get payload")
+	}
+
+	// Decrypt payload if secure wrapper is configured
+	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() {
+		decrypted, err := h.SecureWrapper.UnwrapIncoming("agent", payload)
+		if err != nil {
+			log.Printf("CombinerChunkHandler: Failed to decrypt payload: %v", err)
+			return h.sendErrorResponse(req, correlationID, "failed to decrypt payload")
+		}
+		payload = decrypted
+		log.Printf("CombinerChunkHandler: Decrypted payload (%d bytes)", len(payload))
 	}
 
 	// Parse type first to handle ping without altering zone state
@@ -500,9 +517,15 @@ func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, correlat
 
 // RegisterCombinerChunkHandler registers the combiner's CHUNK handler.
 // Control zone is derived per NOTIFY from qname (qname minus leftmost label); no static config.
-func RegisterCombinerChunkHandler() error {
+// If secureWrapper is provided, the handler will decrypt incoming JWT payloads from the agent.
+func RegisterCombinerChunkHandler(secureWrapper *transport.SecurePayloadWrapper) error {
 	handler := NewCombinerChunkHandler()
-	log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for combiner (control zone derived from qname)")
+	handler.SecureWrapper = secureWrapper
+	if secureWrapper != nil && secureWrapper.IsEnabled() {
+		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler with crypto enabled")
+	} else {
+		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler (control zone derived from qname)")
+	}
 	return RegisterNotifyHandler(core.TypeCHUNK, handler.CreateNotifyHandlerFunc())
 }
 

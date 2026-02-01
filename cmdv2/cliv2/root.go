@@ -14,6 +14,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	cli "github.com/johanix/tdns/v2/cli"
+	_ "github.com/johanix/tdns/v2/core" // Import for RR type registration (CHUNK, etc.)
 )
 
 var cfgFile, cfgFileUsed string

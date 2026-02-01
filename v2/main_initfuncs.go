@@ -32,6 +32,9 @@ var engineWg sync.WaitGroup
 
 // buildChunkQueryEndpoint returns "host:port" for the agent's DNS service so the receiver of a NOTIFY(CHUNK) knows where to send the CHUNK query. Prefers Publish so the combiner can reach the agent.
 func buildChunkQueryEndpoint(conf *Config) string {
+	if conf.Agent == nil {
+		return ""
+	}
 	dns := &conf.Agent.Dns
 	port := dns.Port
 	if port == 0 {
@@ -276,6 +279,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	switch Globals.App.Type {
 	case AppTypeAgent:
+		if conf.Agent == nil {
+			return fmt.Errorf("agent config block is required for agent app type")
+		}
 		// Setup agent identity and publish records
 		err = conf.SetupAgent(all_zones)
 		if err != nil {
@@ -327,15 +333,17 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 
 		// Initialize PayloadCrypto for secure CHUNK transport (optional)
+		// Config validation already checked that key files exist
 		var payloadCrypto *transport.PayloadCrypto
 		if conf.Agent.LongTermJosePrivKey != "" {
 			pc, err := initPayloadCrypto(conf)
 			if err != nil {
-				log.Printf("MainInit: PayloadCrypto initialization failed: %v (CHUNK payloads will be unencrypted)", err)
-			} else {
-				payloadCrypto = pc
-				log.Printf("MainInit: PayloadCrypto initialized (encryption enabled)")
+				return fmt.Errorf("failed to initialize agent crypto: %w", err)
 			}
+			payloadCrypto = pc
+			log.Printf("MainInit: PayloadCrypto initialized (encryption enabled)")
+		} else {
+			log.Printf("MainInit: Agent crypto not configured - CHUNK payloads will be unencrypted")
 		}
 
 		tm := NewTransportManager(&TransportManagerConfig{
@@ -354,6 +362,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
 		log.Printf("MainInit: TransportManager created (control zone: %s, chunk_mode: %s)", controlZone, chunkMode)
+
+		// Register peer agents from static config
+		if err := registerPeerAgents(conf, tm); err != nil {
+			return fmt.Errorf("failed to register peer agents: %w", err)
+		}
 	case AppTypeAuth, AppTypeCombiner:
 		// ... existing auth/combiner setup ...
 		if Globals.App.Type == AppTypeCombiner {
@@ -367,7 +380,20 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					return fmt.Errorf("combiner.chunk_mode=query requires combiner.chunk_query_endpoint to be \"include\" or \"none\" (got %q)", conf.Combiner.ChunkQueryEndpoint)
 				}
 			}
-			if err := RegisterCombinerChunkHandler(); err != nil {
+			// Initialize combiner crypto for decrypting agent payloads
+			// Config validation already checked that key files exist
+			var secureWrapper *transport.SecurePayloadWrapper
+			if conf.Combiner.LongTermJosePrivKey != "" {
+				var err error
+				secureWrapper, err = initCombinerCrypto(conf)
+				if err != nil {
+					return fmt.Errorf("failed to initialize combiner crypto: %w", err)
+				}
+				log.Printf("MainInit: Combiner crypto initialized for decrypting agent payloads")
+			} else {
+				log.Printf("MainInit: Combiner crypto not configured - encrypted payloads will be rejected")
+			}
+			if err := RegisterCombinerChunkHandler(secureWrapper); err != nil {
 				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
 			}
 			log.Printf("MainInit: Combiner CHUNK handler registered")
@@ -512,6 +538,10 @@ func Shutdowner(conf *Config, msg string) {
 // initPayloadCrypto initializes PayloadCrypto from the agent config.
 // Loads the local JOSE private key and the combiner's public key (if configured).
 func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
+	if conf.Agent == nil {
+		return nil, fmt.Errorf("agent config is not set")
+	}
+
 	// Use JOSE backend for key operations
 	backend := jose.NewBackend()
 
@@ -569,5 +599,132 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 		}
 	}
 
+	// Load peer agent public keys if configured
+	if conf.Agent.Peers != nil {
+		for peerID, peerConf := range conf.Agent.Peers {
+			if peerConf.LongTermJosePubKey != "" {
+				peerPubKeyPath := peerConf.LongTermJosePubKey
+				peerPubKeyData, err := os.ReadFile(peerPubKeyPath)
+				if err != nil {
+					log.Printf("initPayloadCrypto: failed to read peer %s public key %s: %v (peer encryption disabled)", peerID, peerPubKeyPath, err)
+					continue
+				}
+				peerPubKey, err := backend.ParsePublicKey(peerPubKeyData)
+				if err != nil {
+					log.Printf("initPayloadCrypto: failed to parse peer %s public key: %v (peer encryption disabled)", peerID, err)
+					continue
+				}
+				// Add peer agent for both encryption and verification
+				// Use peerID directly as the peer identifier (e.g., "agent2.example.com")
+				pc.AddPeerKey(peerID, peerPubKey)
+				pc.AddPeerVerificationKey(peerID, peerPubKey)
+				log.Printf("initPayloadCrypto: Loaded peer %s public key from %s", peerID, peerPubKeyPath)
+			}
+		}
+	}
+
 	return pc, nil
+}
+
+// initCombinerCrypto initializes crypto for the combiner to decrypt agent payloads.
+// Returns a SecurePayloadWrapper configured with the combiner's private key and agent's public key.
+func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
+	// Use the JOSE backend
+	backend := jose.NewBackend()
+
+	// Load combiner's private key
+	privKeyPath := conf.Combiner.LongTermJosePrivKey
+	privKeyData, err := os.ReadFile(privKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read combiner private key %s: %w", privKeyPath, err)
+	}
+	localPrivKey, err := backend.ParsePrivateKey(privKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse combiner private key: %w", err)
+	}
+	log.Printf("initCombinerCrypto: Loaded combiner private key from %s", privKeyPath)
+
+	// Derive public key from private key
+	joseBackend, ok := backend.(*jose.Backend)
+	if !ok {
+		return nil, fmt.Errorf("backend is not JOSE")
+	}
+	localPubKey, err := joseBackend.PublicFromPrivate(localPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive public key: %w", err)
+	}
+
+	// Load agent's public key for signature verification
+	if conf.Combiner.Agent == nil || conf.Combiner.Agent.LongTermJosePubKey == "" {
+		return nil, fmt.Errorf("combiner.agent.long_term_jose_pub_key not configured")
+	}
+	agentPubKeyPath := conf.Combiner.Agent.LongTermJosePubKey
+	agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agent public key %s: %w", agentPubKeyPath, err)
+	}
+	agentVerifyKey, err := backend.ParsePublicKey(agentPubKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse agent public key: %w", err)
+	}
+	log.Printf("initCombinerCrypto: Loaded agent public key from %s", agentPubKeyPath)
+
+	// Create PayloadCrypto instance using the generic transport infrastructure
+	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
+		Backend: backend.(crypto.Backend),
+		Enabled: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PayloadCrypto: %w", err)
+	}
+
+	// Set local keys for decryption
+	pc.SetLocalKeys(localPrivKey, localPubKey)
+
+	// Add agent as peer for verification (agent sends to combiner, combiner verifies)
+	pc.AddPeerKey("agent", agentVerifyKey)
+	pc.AddPeerVerificationKey("agent", agentVerifyKey)
+
+	return transport.NewSecurePayloadWrapper(pc), nil
+}
+
+// registerPeerAgents registers peer agents from the static config into the TransportManager.
+// This allows agent-to-agent communication using the same transport infrastructure.
+func registerPeerAgents(conf *Config, tm *TransportManager) error {
+	if conf.Agent == nil || conf.Agent.Peers == nil {
+		return nil // No peers configured
+	}
+
+	for peerID, peerConf := range conf.Agent.Peers {
+		// Parse address
+		if peerConf.Address == "" {
+			log.Printf("registerPeerAgents: Skipping peer %s (no address configured)", peerID)
+			continue
+		}
+
+		// Parse host:port
+		host, portStr, err := net.SplitHostPort(peerConf.Address)
+		if err != nil {
+			log.Printf("registerPeerAgents: Failed to parse address %s for peer %s: %v", peerConf.Address, peerID, err)
+			continue
+		}
+		port, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil {
+			log.Printf("registerPeerAgents: Invalid port %s for peer %s: %v", portStr, peerID, err)
+			continue
+		}
+
+		// Create peer and set discovery address
+		peer := tm.PeerRegistry.GetOrCreate(peerID)
+		addr := &transport.Address{
+			Host:      host,
+			Port:      uint16(port),
+			Transport: "udp", // DNS transport uses UDP by default
+		}
+		peer.SetDiscoveryAddress(addr)
+
+		log.Printf("registerPeerAgents: Registered peer %s with address %s", peerID, peerConf.Address)
+	}
+
+	return nil
 }

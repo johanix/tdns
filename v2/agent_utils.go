@@ -68,7 +68,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		// S:              cmap.New[*Agent](),
 		S:              core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:   make(map[ZoneName][]AgentId),
-		LocalAgent:     &conf.Agent,
+		LocalAgent:     conf.Agent,
 		LocateInterval: li,
 		helloContexts:  make(map[AgentId]context.CancelFunc),
 	}
