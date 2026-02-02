@@ -101,7 +101,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		}
 		return nil
 	}
-	ntype := dnr.Msg.Question[0].Qtype	
+	ntype := dnr.Msg.Question[0].Qtype
 
 	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone %q", dns.TypeToString[ntype], qname)
 

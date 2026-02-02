@@ -763,10 +763,10 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					crrset = nil // Force query over encrypted transport
 				} else {
-				if Globals.Debug {
-					lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
-				}
-				return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
+					if Globals.Debug {
+						lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+					}
+					return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
 				}
 			case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
 				// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
@@ -1347,7 +1347,7 @@ func pickTransport(server *cache.AuthServer, qname string, requireEncrypted bool
 		}
 		return core.TransportDo53, nil
 	}
-	
+
 	// Filter transports if encryption is required
 	var availableTransports []core.Transport
 	if requireEncrypted {
@@ -1373,7 +1373,7 @@ func pickTransport(server *cache.AuthServer, qname string, requireEncrypted bool
 	} else {
 		availableTransports = server.Transports
 	}
-	
+
 	if len(server.TransportWeights) == 0 {
 		if server.PrefTransport != 0 {
 			if requireEncrypted && !core.IsEncryptedTransport(server.PrefTransport) {
@@ -1969,11 +1969,11 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 						combinedTransport = core.TransportDo53
 					}
 					imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-						Name:       qname,
-						RRtype:     qtype,
-						Rcode:      uint8(rcode),
-						RRset:      &rrset,
-						Context:    cache.ContextAnswer,
+						Name:    qname,
+						RRtype:  qtype,
+						Rcode:   uint8(rcode),
+						RRset:   &rrset,
+						Context: cache.ContextAnswer,
 						// Should there not be some state here? State:      vstate,
 						State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
 						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
@@ -2459,7 +2459,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 		Context:    cache.ContextAnswer,
 		State:      vstate,
 		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
-		Transport:  core.TransportDo53, // revalidateGlueRR - default to Do53
+		Transport:  core.TransportDo53,                         // revalidateGlueRR - default to Do53
 	})
 }
 

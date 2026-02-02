@@ -117,17 +117,17 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 	}
 
 	t := &DNSTransport{
-		LocalID:              cfg.LocalID,
-		ControlZone:          ensureFQDN(cfg.ControlZone),
-		ListenAddr:           cfg.ListenAddr,
-		Timeout:              timeout,
-		DNSClient:            &dns.Client{Timeout: timeout, Net: "udp"},
-		pendingConfirmations: make(map[string]*pendingOperation),
-		ConfirmationChan:     make(chan *IncomingConfirmation, 100),
-		chunkMode:            cfg.ChunkMode,
-		chunkGet:             cfg.ChunkPayloadGet,
-		chunkSet:             cfg.ChunkPayloadSet,
-		chunkQueryEndpoint:        cfg.ChunkQueryEndpoint,
+		LocalID:                    cfg.LocalID,
+		ControlZone:                ensureFQDN(cfg.ControlZone),
+		ListenAddr:                 cfg.ListenAddr,
+		Timeout:                    timeout,
+		DNSClient:                  &dns.Client{Timeout: timeout, Net: "udp"},
+		pendingConfirmations:       make(map[string]*pendingOperation),
+		ConfirmationChan:           make(chan *IncomingConfirmation, 100),
+		chunkMode:                  cfg.ChunkMode,
+		chunkGet:                   cfg.ChunkPayloadGet,
+		chunkSet:                   cfg.ChunkPayloadSet,
+		chunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 		chunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
 	}
 
@@ -147,8 +147,8 @@ func (t *DNSTransport) Name() string {
 // Correlation ID: 8 hex chars = epoch (when transport first used) + per-operation counter (tdns-kdc style).
 var (
 	correlationEpochOnce sync.Once
-	correlationEpoch      int64
-	correlationCounter    uint64
+	correlationEpoch     int64
+	correlationCounter   uint64
 )
 
 // generateCorrelationID returns a unique 8-character (hex) ID: base = unix epoch when first used, then +1 per call.

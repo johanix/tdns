@@ -34,7 +34,7 @@ type Config struct {
 	Log            struct {
 		File string `validate:"required"`
 	}
-	Agent    *LocalAgentConf `yaml:"agent"`
+	Agent *LocalAgentConf `yaml:"agent"`
 	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
 	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
@@ -45,7 +45,7 @@ type LocalCombinerConf struct {
 	// LongTermJosePrivKey: path to our JOSE private key for secure CHUNK
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	// Chunk config (same key names as agent.dns for consistency)
-	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                    // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
+	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
 	// Agent (combiner only): the agent we talk to; symmetric to agent.combiner
 	Agent *PeerConf `yaml:"agent"`
@@ -132,10 +132,10 @@ type ApiServerAppConf struct {
 
 // PeerConf holds address and public key path for the other party (agent or combiner).
 type PeerConf struct {
-	Address             string `yaml:"address"`
-	LongTermJosePubKey  string `yaml:"long_term_jose_pub_key"`
-	ApiBaseUrl          string `yaml:"api_base_url,omitempty"`  // Optional: for API ping (e.g. https://combiner:8085/api/v1)
-	Identity            string `yaml:"identity,omitempty"`      // Optional: agent identity (combiner only); NOTIFY(CHUNK) QNAME suffix for correlation ID extraction
+	Address            string `yaml:"address"`
+	LongTermJosePubKey string `yaml:"long_term_jose_pub_key"`
+	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional: for API ping (e.g. https://combiner:8085/api/v1)
+	Identity           string `yaml:"identity,omitempty"`     // Optional: agent identity (combiner only); NOTIFY(CHUNK) QNAME suffix for correlation ID extraction
 }
 
 type LocalAgentConf struct {
@@ -155,7 +155,7 @@ type LocalAgentConf struct {
 	Peers map[string]*PeerConf `yaml:"peers"`
 	// Our JOSE keypair for secure CHUNK (agent: path to private key; public derived or adjacent .pub)
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
-	Xfr struct {
+	Xfr                 struct {
 		Outgoing struct {
 			Addresses []string `yaml:"addresses,omitempty"`
 			Auth      []string `yaml:"auth,omitempty"`
@@ -189,7 +189,7 @@ type LocalAgentDnsConf struct {
 	Port        uint16
 	ControlZone string `yaml:"control_zone" mapstructure:"control_zone"` // Zone used for NOTIFY(CHUNK) QNAMEs in DNS mode (default: agent identity)
 	// Chunk config (same key names as combiner for consistency)
-	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                    // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
+	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agent.address
 }
 
@@ -199,17 +199,17 @@ type DbConf struct {
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
-	GroupPrefixes GroupPrefixesConf            `yaml:"group_prefixes" mapstructure:"group_prefixes"`
-	Policy        CatalogPolicy                `yaml:"policy" mapstructure:"policy"`                 // Deprecated, kept for backward compatibility
+	GroupPrefixes GroupPrefixesConf             `yaml:"group_prefixes" mapstructure:"group_prefixes"`
+	Policy        CatalogPolicy                 `yaml:"policy" mapstructure:"policy"` // Deprecated, kept for backward compatibility
 	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
-	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`      // Deprecated, kept for backward compatibility
-	SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
+	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"` // Deprecated, kept for backward compatibility
+	SigningGroups map[string]*SigningGroupInfo  `yaml:"signing_groups" mapstructure:"signing_groups"`
 }
 
 // CatalogPolicy defines policy for how catalog zones are processed
 type CatalogPolicy struct {
 	Zones struct {
-		Add    string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`    // "auto" or "manual"
+		Add    string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`       // "auto" or "manual"
 		Remove string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"` // "auto" or "manual"
 	} `yaml:"zones" mapstructure:"zones"`
 	// Note: conflict_resolution is hardcoded to "manual-priority", not configurable
@@ -223,7 +223,7 @@ type GroupPrefixesConf struct {
 
 // ConfigGroupConfig provides configuration for zone transfers from catalog config groups (RFC 9432 terminology)
 type ConfigGroupConfig struct {
-	Name     string   `yaml:"-" mapstructure:"-"`          // Populated from map key
+	Name     string   `yaml:"-" mapstructure:"-"` // Populated from map key
 	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
 	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
 	Store    string   `yaml:"store" mapstructure:"store"`
@@ -240,25 +240,25 @@ type SigningGroupInfo struct {
 
 // DynamicZonesConf defines configuration for dynamically created zones (catalog zones, catalog members, etc.)
 type DynamicZonesConf struct {
-	ConfigFile    string                    `yaml:"configfile" mapstructure:"configfile"`       // Absolute path to dynamic config file
-	ZoneDirectory string                    `yaml:"zonedirectory" mapstructure:"zonedirectory"` // Absolute path to zone file directory
-	CatalogZones  DynamicZoneTypeConf       `yaml:"catalog_zones" mapstructure:"catalog_zones"`  // Configuration for catalog zones
+	ConfigFile     string                   `yaml:"configfile" mapstructure:"configfile"`           // Absolute path to dynamic config file
+	ZoneDirectory  string                   `yaml:"zonedirectory" mapstructure:"zonedirectory"`     // Absolute path to zone file directory
+	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog_zones" mapstructure:"catalog_zones"`     // Configuration for catalog zones
 	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
-	Dynamic       DynamicZoneTypeConf       `yaml:"dynamic" mapstructure:"dynamic"`             // Configuration for direct API-created zones (future)
+	Dynamic        DynamicZoneTypeConf      `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones (future)
 }
 
 // DynamicZoneTypeConf defines configuration for a type of dynamic zone
 type DynamicZoneTypeConf struct {
-	Allowed bool   `yaml:"allowed" mapstructure:"allowed"` // Whether this type of zone is allowed
+	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                              // Whether this type of zone is allowed
 	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
 }
 
 // DynamicCatalogMemberConf defines configuration for catalog member zones (includes add/remove policy)
 type DynamicCatalogMemberConf struct {
-	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                                      // Whether catalog member zones are allowed
-	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"`        // "memory" or "persistent"
-	Add     string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`                     // "auto" or "manual" - Enable auto-configuration from catalog
-	Remove  string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"`               // "auto" or "manual" - Whether to remove zones when deleted from catalog
+	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                              // Whether catalog member zones are allowed
+	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+	Add     string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`               // "auto" or "manual" - Enable auto-configuration from catalog
+	Remove  string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"`         // "auto" or "manual" - Whether to remove zones when deleted from catalog
 }
 
 type InternalConf struct {
@@ -301,15 +301,15 @@ type InternalConf struct {
 	ZoneDataRepo        *ZoneDataRepo
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	KdcDB               interface{} // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf             interface{} // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB               interface{} // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf             interface{} // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner             *Scanner    // Scanner instance for async job tracking
+	KdcDB               interface{}           // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf             interface{}           // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB               interface{}           // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf             interface{}           // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner             *Scanner              // Scanner instance for async job tracking
 	CombinerHandler     *CombinerChunkHandler // CHUNK-based combiner handler
-	TransportManager    *TransportManager    // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
-	ChunkPayloadStore   ChunkPayloadStore    // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	DistributionCache   *DistributionCache   // In-memory cache of distributions (agent/combiner)
+	TransportManager    *TransportManager     // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
+	ChunkPayloadStore   ChunkPayloadStore     // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	DistributionCache   *DistributionCache    // In-memory cache of distributions (agent/combiner)
 }
 
 type AgentQs struct {

@@ -223,13 +223,13 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 
 	total_sent := 0
 	count := 0
-	batchNum := 1 // Track batch number for debug output
-	estimatedSize := 0 // Running estimate of message size
+	batchNum := 1                // Track batch number for debug output
+	estimatedSize := 0           // Running estimate of message size
 	const maxMessageSize = 60000 // Practical limit we target (theoretical DNS max is 65536 bytes / 64K)
 	// We may overshoot maxMessageSize by up to ~1000 bytes in practice, but that's still safely below 65536
-	const safeMessageSize = 59000 // Conservative threshold to avoid "message too large" errors (leaves headroom for DNS header/overhead and compression variations)
-	const theoreticalMaxSize = 65536 // True theoretical maximum DNS message size (64K)
-	const checkSizeInterval = 50  // Check actual size every N RRs to verify estimate accuracy
+	const safeMessageSize = 59000        // Conservative threshold to avoid "message too large" errors (leaves headroom for DNS header/overhead and compression variations)
+	const theoreticalMaxSize = 65536     // True theoretical maximum DNS message size (64K)
+	const checkSizeInterval = 50         // Check actual size every N RRs to verify estimate accuracy
 	const accurateCheckThreshold = 55000 // When estimated size exceeds this, do accurate checks more frequently
 	// env := dns.Envelope{}
 	rrs := []dns.RR{soa}
@@ -290,7 +290,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrt := range owner.RRtypes.Keys() {
 				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
-				
+
 				// Estimate size of new RRs before adding
 				newRRSize := 0
 				for _, rr := range rrl.RRs {
@@ -299,10 +299,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				for _, sig := range rrl.RRSIGs {
 					newRRSize += estimateRRSize(sig)
 				}
-				
+
 				// Check if batch should be flushed before adding new RRs
 				maybeFlushBatch(bs, newRRSize, false)
-				
+
 				// Now add the RRset
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
@@ -312,7 +312,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 				estimatedSize += newRRSize
-				
+
 				// Periodic accurate check to verify estimate accuracy
 				maybeFlushBatch(bs, 0, true)
 			}
@@ -327,7 +327,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrt := range omap.RRtypes.Keys() {
 				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
-				
+
 				// Estimate size of new RRs before adding
 				newRRSize := 0
 				for _, rr := range rrl.RRs {
@@ -336,10 +336,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				for _, sig := range rrl.RRSIGs {
 					newRRSize += estimateRRSize(sig)
 				}
-				
+
 				// Check if batch should be flushed before adding new RRs
 				maybeFlushBatch(bs, newRRSize, false)
-				
+
 				// Now add the RRset
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
@@ -349,7 +349,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 				estimatedSize += newRRSize
-				
+
 				// Periodic accurate check to verify estimate accuracy
 				maybeFlushBatch(bs, 0, true)
 			}

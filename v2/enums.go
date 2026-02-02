@@ -41,7 +41,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptMultiSigner:       "multisigner", // OBE?
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
-	OptAutomaticZone:           "automatic-zone",
+	OptAutomaticZone:     "automatic-zone",
 	// OptServerSvcb:        "create-server-svcb",
 	OptAddTransportSignal:      "add-transport-signal",
 	OptCatalogZone:             "catalog-zone",
@@ -50,23 +50,23 @@ var ZoneOptionToString = map[ZoneOption]string{
 }
 
 var StringToZoneOption = map[string]ZoneOption{
-	"delegation-sync-parent": OptDelSyncParent,
-	"delegation-sync-child":  OptDelSyncChild,
-	"allow-updates":          OptAllowUpdates,
-	"allow-child-updates":    OptAllowChildUpdates,
-	"allow-combine":          OptAllowCombine,
-	"fold-case":              OptFoldCase,
-	"black-lies":             OptBlackLies,
-	"dont-publish-key":       OptDontPublishKey,
-	"online-signing":         OptOnlineSigning,
-	"multisigner":            OptMultiSigner, // OBE?
-	"dirty":                  OptDirty,
-	"frozen":                 OptFrozen,
-	"automatic-zone":               OptAutomaticZone,
-	"add-transport-signal":         OptAddTransportSignal,
-	"catalog-zone":                 OptCatalogZone,
-	"catalog-member-auto-create":   OptCatalogMemberAutoCreate,
-	"catalog-member-auto-delete":   OptCatalogMemberAutoDelete,
+	"delegation-sync-parent":     OptDelSyncParent,
+	"delegation-sync-child":      OptDelSyncChild,
+	"allow-updates":              OptAllowUpdates,
+	"allow-child-updates":        OptAllowChildUpdates,
+	"allow-combine":              OptAllowCombine,
+	"fold-case":                  OptFoldCase,
+	"black-lies":                 OptBlackLies,
+	"dont-publish-key":           OptDontPublishKey,
+	"online-signing":             OptOnlineSigning,
+	"multisigner":                OptMultiSigner, // OBE?
+	"dirty":                      OptDirty,
+	"frozen":                     OptFrozen,
+	"automatic-zone":             OptAutomaticZone,
+	"add-transport-signal":       OptAddTransportSignal,
+	"catalog-zone":               OptCatalogZone,
+	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
+	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 }
 
 type ImrOption uint8
@@ -122,8 +122,8 @@ const (
 	AppTypeCli
 	AppTypeReporter
 	AppTypeScanner
-	AppTypeKdc // Key Distribution Center
-	AppTypeKrs // Key Receiving Service (edge receiver)
+	AppTypeKdc        // Key Distribution Center
+	AppTypeKrs        // Key Receiving Service (edge receiver)
 	AppTypeEdgeSigner // NYI
 )
 

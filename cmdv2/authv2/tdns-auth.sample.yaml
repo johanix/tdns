@@ -34,10 +34,6 @@ dnsengine:
                            doh:   [ 443 ]
                         certfile:  /etc/tdns/certs/servers/localhost..crt
                         keyfile:   /etc/tdns/certs/servers/localhost..key
-                        zones:
-                           config:    /etc/tdns/tdns-zones.yaml
-                           filedir:   /etc/tdns/zones
-                           filetmpl:  "%s/%s.zone"    # zonename.zone
 
 resignerengine:
                         interval:  300    # seconds between runs. Reasonable value is likely ~3600
@@ -60,19 +56,6 @@ server:
                         id:        ooga booga boo
                         version:   tdns-server {version}
                         hostname:  there-is-no-place-like-127.0.0.1
-
-# This entire section should probably die.
-validator:
-                        active:   true
-                        verbose:  true
-                        debug:    true
-                        dnskey:
-                           trusted:
-                              file:  /etc/tdns/trust-anchors.yaml
-                        sig0:
-                           trusted:
-                              file:  /etc/tdns/sig0-keys.yaml
-
 
 childsync:          # What to do when we are the child
                         schemes:          [ update ]    # , notify ] # this child will use either

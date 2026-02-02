@@ -182,16 +182,16 @@ type RelocateResponse struct {
 // PingRequest is a lightweight liveness probe.
 type PingRequest struct {
 	SenderID  string    // Identity of the sender
-	Nonce    string    // Random nonce to be echoed in response
+	Nonce     string    // Random nonce to be echoed in response
 	Timestamp time.Time // Request timestamp
 }
 
 // PingResponse is the response to a ping; echoes the nonce on success.
 type PingResponse struct {
 	ResponderID string    // Identity of the responder
-	Nonce      string    // Echoed nonce from request
-	OK         bool      // True if responder acknowledged
-	Timestamp  time.Time // Response timestamp
+	Nonce       string    // Echoed nonce from request
+	OK          bool      // True if responder acknowledged
+	Timestamp   time.Time // Response timestamp
 }
 
 // ConfirmRequest confirms receipt and processing of a sync operation.

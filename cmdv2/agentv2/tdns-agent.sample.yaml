@@ -49,10 +49,7 @@ service:
 dnsengine:
    addresses:		[ 127.0.0.1:5357, '[::1]:5357']
    transports:		[ doq, dot, do53 ]
-   zones:
-#      config:		/etc/tdns/tdns-zones.yaml
-      filedir:		/etc/tdns/zones
-      filetmpl:		"%s/%s.zone.new"		# zonename.zone
+   # Zone file path comes from zone's zonefile: when set (no filedir/filetmpl needed)
 
 apiserver:
    addresses:     	[ 127.0.0.1:8987 ]

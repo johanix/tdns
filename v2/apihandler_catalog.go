@@ -248,7 +248,7 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, res
 	zoneName = dns.Fqdn(zoneName)
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
-	
+
 	// Add the member zone
 	err := cm.AddMemberZone(zoneName)
 	if err != nil {
@@ -262,7 +262,7 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, res
 			if group == "" {
 				continue
 			}
-			
+
 			// Add the group to the zone
 			err = cm.AddZoneGroup(zoneName, group)
 			if err != nil {
@@ -289,7 +289,7 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, res
 		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s", zoneName, catalogZoneName)
 		log.Printf("CATALOG: Added zone %s to catalog %s", zoneName, catalogZoneName)
 	}
-	
+
 	return nil
 }
 
@@ -320,17 +320,17 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 		catalogZd, catalogExists := Zones.Get(catalogZoneName)
 		if catalogExists && catalogZd.Options[OptCatalogMemberAutoDelete] {
 			log.Printf("CATALOG: Auto-removing zone %s (removed from catalog %s, catalog has catalog-member-auto-delete enabled)", zoneName, catalogZoneName)
-			
+
 			// Remove from Zones map
 			Zones.Remove(zoneName)
-			
+
 			// Remove from dynamic config file
 			if Conf.ShouldPersistZone(zd) {
 				if err := Conf.RemoveDynamicZoneFromConfig(zoneName); err != nil {
 					log.Printf("CATALOG: Warning: Failed to remove zone %s from dynamic config file: %v", zoneName, err)
 					// Don't fail the operation, just log the warning
 				}
-				
+
 				// Optionally delete zone file (if persistence is enabled)
 				if Conf.DynamicZones.ZoneDirectory != "" {
 					zoneFilePath := GetDynamicZoneFilePath(zoneName, Conf.DynamicZones.ZoneDirectory)

@@ -79,32 +79,32 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 			}
 		}
 		if lineNum > 0 {
-				lines := strings.Split(string(data), "\n")
-				start := lineNum - 4
-				if start < 0 {
-					start = 0
-				}
-				end := lineNum + 2
-				if end > len(lines) {
-					end = len(lines)
-				}
-				log.Printf("YAML error at line %d. Context (lines %d-%d):", lineNum, start+1, end)
-				for i := start; i < end; i++ {
-					line := lines[i]
-					// Reveal tabs and other problematic chars for the failing line
-					if i == lineNum-1 {
-						reveal := strings.ReplaceAll(line, "\t", "\\t")
-						reveal = strings.ReplaceAll(reveal, "\r", "\\r")
-						if reveal != line {
-							log.Printf("  %d: %s  [raw: %s]", i+1, line, reveal)
-						} else {
-							log.Printf("  %d: %s", i+1, line)
-						}
+			lines := strings.Split(string(data), "\n")
+			start := lineNum - 4
+			if start < 0 {
+				start = 0
+			}
+			end := lineNum + 2
+			if end > len(lines) {
+				end = len(lines)
+			}
+			log.Printf("YAML error at line %d. Context (lines %d-%d):", lineNum, start+1, end)
+			for i := start; i < end; i++ {
+				line := lines[i]
+				// Reveal tabs and other problematic chars for the failing line
+				if i == lineNum-1 {
+					reveal := strings.ReplaceAll(line, "\t", "\\t")
+					reveal = strings.ReplaceAll(reveal, "\r", "\\r")
+					if reveal != line {
+						log.Printf("  %d: %s  [raw: %s]", i+1, line, reveal)
 					} else {
 						log.Printf("  %d: %s", i+1, line)
 					}
+				} else {
+					log.Printf("  %d: %s", i+1, line)
 				}
 			}
+		}
 		if Globals.Debug {
 			log.Printf("processConfigFile: error unmarshalling YAML from %q to struct", file)
 			fmt.Printf("Config that we failed to unmarshal:\n%s\n", string(data))

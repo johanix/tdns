@@ -31,10 +31,7 @@ service:
 dnsengine:
    addresses:           [ 127.0.0.1:5366, '[::1]:5366']
    transports:		[ doq, dot, do53 ]
-   zones:
-      config:           /etc/tdns/tdns-czones.yaml
-      filedir:          /etc/tdns/czones
-      filetmpl:         "%s/%s.zone.new"                # zonename.zone
+   # Zone list from include: (combiner-zones); zone paths from zonefile: when set
 
 common:
    command:		/usr/local/libexec/tdns-combiner

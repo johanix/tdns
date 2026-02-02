@@ -36,17 +36,17 @@ import (
 // All metadata fields are top-level claims rather than nested in a "metadata" object.
 type JWTManifestClaims struct {
 	// Standard JWT claims
-	Issuer   string `json:"iss,omitempty"`   // Sender ID
-	Subject  string `json:"sub,omitempty"`   // "distribution"
-	IssuedAt int64  `json:"iat,omitempty"`   // Unix timestamp
+	Issuer   string `json:"iss,omitempty"` // Sender ID
+	Subject  string `json:"sub,omitempty"` // "distribution"
+	IssuedAt int64  `json:"iat,omitempty"` // Unix timestamp
 
 	// Distribution identification
 	DistributionID string `json:"distribution_id"`
 	ReceiverID     string `json:"receiver_id"`
 
 	// Content description
-	Content string `json:"content"`           // Content type (e.g., "mgmt_operations")
-	Crypto  string `json:"crypto,omitempty"`  // Crypto backend (e.g., "jose")
+	Content string `json:"content"`          // Content type (e.g., "mgmt_operations")
+	Crypto  string `json:"crypto,omitempty"` // Crypto backend (e.g., "jose")
 
 	// Chunk information
 	ChunkCount uint16 `json:"chunk_count"`          // Number of data chunks (0 = inline)
@@ -118,10 +118,10 @@ func CreateJWTManifest(claims *JWTManifestClaims, signingKey crypto.PrivateKey, 
 	// Create CHUNK record
 	chunk := &core.CHUNK{
 		Format:     core.FormatJWT,
-		HMACLen:    0,    // JWT has its own signature, no separate HMAC needed
+		HMACLen:    0, // JWT has its own signature, no separate HMAC needed
 		HMAC:       nil,
-		Sequence:   0,                  // Manifest is always sequence 0
-		Total:      claims.ChunkCount,  // Total data chunks
+		Sequence:   0,                 // Manifest is always sequence 0
+		Total:      claims.ChunkCount, // Total data chunks
 		DataLength: uint16(len(jws)),
 		Data:       jws,
 	}

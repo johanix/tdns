@@ -188,9 +188,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								if err != nil {
 									log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
 								} else {
-									log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)", 
+									log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)",
 										zone, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
-									
+
 									// Notify all registered callbacks
 									if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
 										log.Printf("CATALOG: RefreshEngine: ERROR notifying catalog zone callbacks: %v", err)
@@ -198,8 +198,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 										log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
 									}
 
-								// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-								// Policy is now per-catalog-zone via catalog-member-auto-create option
+									// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
+									// Policy is now per-catalog-zone via catalog-member-auto-create option
 									go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 										defer func() {
 											if r := recover(); r != nil {
@@ -272,9 +272,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if err != nil {
 							log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
 						} else {
-							log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)", 
+							log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)",
 								zone, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
-							
+
 							// Notify all registered callbacks
 							if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
 								log.Printf("CATALOG: RefreshEngine: ERROR notifying catalog zone callbacks: %v", err)
@@ -282,8 +282,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
 							}
 
-								// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-								// Policy is now per-catalog-zone via catalog-member-auto-create option
+							// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
+							// Policy is now per-catalog-zone via catalog-member-auto-create option
 							go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 								defer func() {
 									if r := recover(); r != nil {

@@ -102,21 +102,21 @@ type ZoneData struct {
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
-	Name         string `validate:"required"`
-	Zonefile     string
-	Type         string `validate:"required"`
-	Store        string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary      string // upstream, for secondary zones
-	Notify       []string
-	Downstreams  []string
-	OptionsStrs  []string     `yaml:"options" mapstructure:"options"`
-	Options      []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
-	Frozen       bool         // true if zone is frozen; not a config param
-	Dirty        bool         // true if zone has been modified; not a config param
-	UpdatePolicy UpdatePolicyConf
-	DnssecPolicy string
-	Template     string
-	MultiSigner  string
+	Name          string `validate:"required"`
+	Zonefile      string
+	Type          string `validate:"required"`
+	Store         string // xfr | map | slice | reg (defaults to "map" if not specified)
+	Primary       string // upstream, for secondary zones
+	Notify        []string
+	Downstreams   []string
+	OptionsStrs   []string     `yaml:"options" mapstructure:"options"`
+	Options       []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
+	Frozen        bool         // true if zone is frozen; not a config param
+	Dirty         bool         // true if zone has been modified; not a config param
+	UpdatePolicy  UpdatePolicyConf
+	DnssecPolicy  string
+	Template      string
+	MultiSigner   string
 	Error         bool      // zone is broken and cannot be used
 	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg      string    // reason for the error (if known)

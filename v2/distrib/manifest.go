@@ -174,8 +174,8 @@ func EstimateManifestSize(metadata map[string]interface{}, payload []byte) int {
 //
 // Returns:
 //   - Slice of CHUNK records, or nil if:
-//     - Data would result in more than 65535 chunks
-//     - Any chunk would exceed 65535 bytes
+//   - Data would result in more than 65535 chunks
+//   - Any chunk would exceed 65535 bytes
 func SplitIntoCHUNKs(data []byte, chunkSize int, format uint8) []*core.CHUNK {
 	if chunkSize <= 0 {
 		chunkSize = 60000 // Default
@@ -229,11 +229,11 @@ func SplitIntoCHUNKs(data []byte, chunkSize int, format uint8) []*core.CHUNK {
 //
 // Returns:
 //   - The reassembled data bytes, or error if:
-//     - No chunks provided
-//     - Total is 0 or exceeds 65535
-//     - Chunk count doesn't match Total
-//     - Missing sequence numbers
-//     - Sequence numbers out of range
+//   - No chunks provided
+//   - Total is 0 or exceeds 65535
+//   - Chunk count doesn't match Total
+//   - Missing sequence numbers
+//   - Sequence numbers out of range
 func ReassembleCHUNKs(chunks []*core.CHUNK) ([]byte, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks to reassemble")

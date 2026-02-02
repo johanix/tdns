@@ -442,17 +442,13 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	return true, nil
 }
 
+// ZoneFileName returns the path to use for this zone's file. Only zones with zonefile: set
+// (in config) are written to disk; autozones and secondaries without zonefile are not persisted.
 func (zd *ZoneData) ZoneFileName() (string, error) {
-	filedir := viper.GetString("dnsengine.zones.filedir")
-	if filedir == "" {
-		return "", fmt.Errorf("zoneFileName: dnsengine.zones.filedir is not set")
+	if zd.Zonefile == "" {
+		return "", fmt.Errorf("zone has no zonefile (autozone or secondary not persisted); not written to disk")
 	}
-	filetmpl := viper.GetString("dnsengine.zones.filetmpl")
-	if filetmpl == "" {
-		return "", fmt.Errorf("ZoneFileName: dnsengine.zones.filetmpl is not set")
-	}
-	fname := fmt.Sprintf("/tmp"+filetmpl, filedir, zd.ZoneName) // Must ensure that we don't allow writing everywhere
-	fname = path.Clean(fname)
+	fname := path.Clean(zd.Zonefile)
 	dirname := path.Dir(fname)
 	if _, err := os.Stat(dirname); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirname, 0755); err != nil {
@@ -652,10 +648,10 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 			Ns:      "invalid.",
 			Mbox:    "hostmaster." + zd.ZoneName,
 			Serial:  0,
-			Refresh: 300,    // 5 minutes default
-			Retry:   1800,   // 30 minutes
+			Refresh: 300,     // 5 minutes default
+			Retry:   1800,    // 30 minutes
 			Expire:  1209600, // 2 weeks
-			Minttl:  86400,  // 1 day
+			Minttl:  86400,   // 1 day
 		}, nil
 	}
 
@@ -1364,12 +1360,12 @@ $TTL 86400
 	// Add address records if addresses are provided
 	if len(addrs) > 0 {
 		log.Printf("CreateAutoZone: adding address records for: %v", addrs)
-		
+
 		// Update NS record to point to ns.{zonename} instead of invalid. when addresses are provided
 		// This ensures the NS and glue records use the same owner name (no orphaned records)
 		nsTarget := fmt.Sprintf("ns.%s", zonename)
 		zonedatastr = strings.ReplaceAll(zonedatastr, "invalid.", nsTarget)
-		
+
 		for _, addr := range addrs {
 			if !isValidIP(addr) {
 				log.Printf("CreateAutoZone: invalid IP address: %s", addr)

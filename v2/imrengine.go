@@ -1456,7 +1456,7 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 // validateNSRRsetForAnchor validates the NS RRset for a trust anchor zone.
 func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer) {
 	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
-		nsRRset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true, false) // PR not required for trust anchor initialization
+	nsRRset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true, false) // PR not required for trust anchor initialization
 	if err != nil {
 		log.Printf("initializeImrTrustAnchors: warning: failed to fetch %s NS RRset: %v (continuing)", anchorName, err)
 		return

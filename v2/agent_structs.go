@@ -135,7 +135,7 @@ type AgentRegistry struct {
 	mu               sync.RWMutex    // protects remoteAgents
 	LocalAgent       *LocalAgentConf // our own identity
 	LocateInterval   int             // seconds to wait between locating agents (until success)
-	helloContexts   map[AgentId]context.CancelFunc
+	helloContexts    map[AgentId]context.CancelFunc
 	TransportManager *TransportManager // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 }
 
