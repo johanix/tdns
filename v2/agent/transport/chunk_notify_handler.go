@@ -13,10 +13,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/johanix/tdns/v2/edns0"
+	"github.com/johanix/tdns/v2/notifyerrors"
 	"github.com/miekg/dns"
 )
 
@@ -37,6 +39,12 @@ type ChunkNotifyHandler struct {
 
 	// SecureWrapper handles optional JWS/JWE decryption for payloads
 	SecureWrapper *SecurePayloadWrapper
+
+	// GetPeerAddress returns the configured address (host:port) for a peer by identity.
+	// Used in chunk_mode=query when NOTIFY has no EDNS0 CHUNK_QUERY_ENDPOINT: receiver uses
+	// this to send the CHUNK query to the correct host:port (e.g. from agent.peers config).
+	// If nil, fallback is NOTIFY source with port 53.
+	GetPeerAddress func(senderID string) (address string, ok bool)
 }
 
 // NewChunkNotifyHandler creates a new ChunkNotifyHandler.
@@ -89,36 +97,41 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 	correlationID, err := h.extractCorrelationID(qname)
 	if err != nil {
 		log.Printf("ChunkNotifyHandler: Failed to extract correlation ID from %s: %v", qname, err)
-		return h.sendResponse(w, msg, dns.RcodeFormatError)
+		_ = h.sendResponse(w, msg, dns.RcodeFormatError)
+		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
 
-	// Extract CHUNK payload from EDNS0 option
+	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
 	payload, err := h.extractChunkPayload(msg)
 	if err != nil {
-		log.Printf("ChunkNotifyHandler: Failed to extract CHUNK payload: %v", err)
-		return h.sendResponse(w, msg, dns.RcodeFormatError)
+		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
+		payload, err = h.fetchChunkViaQuery(ctx, qname, correlationID, msg, w)
+		if err != nil {
+			log.Printf("ChunkNotifyHandler: Failed to get CHUNK payload (EDNS0 and query mode): %v", err)
+			_ = h.sendResponse(w, msg, dns.RcodeFormatError)
+			return notifyerrors.ErrNotifyHandlerErrorResponse
+		}
 	}
 
-	// Optionally decrypt the payload if secure wrapper is configured
-	// Note: We need to extract sender ID first to look up verification key
-	// This creates a chicken-egg problem - we parse header to get sender,
-	// then decrypt with sender's key, then parse full message
-	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() {
-		// Check if payload is encrypted
-		if IsPayloadEncrypted(payload) {
-			// Try to extract sender_id from potential plaintext header
-			// For now, we'll need to try decryption with a known peer key
-			// A more robust approach would embed sender_id outside encryption
-			log.Printf("ChunkNotifyHandler: Encrypted payload detected from %s", sourceAddr)
-			// Decryption will be attempted during parsePayload with peer lookup
+	// Decrypt the payload if it is encrypted (try sender's key first from QNAME, then other peers)
+	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && IsPayloadEncrypted(payload) {
+		log.Printf("ChunkNotifyHandler: Encrypted payload detected from %s", sourceAddr)
+		senderHint := extractSenderHintFromQname(qname)
+		decrypted, _, err := h.SecureWrapper.UnwrapIncomingTryAllPeers(payload, senderHint)
+		if err != nil {
+			log.Printf("ChunkNotifyHandler: Failed to decrypt payload from %s: %v", sourceAddr, err)
+			_ = h.sendResponse(w, msg, dns.RcodeFormatError)
+			return notifyerrors.ErrNotifyHandlerErrorResponse
 		}
+		payload = decrypted
 	}
 
 	// Parse the payload
 	incomingMsg, err := h.parsePayload(correlationID, payload, sourceAddr)
 	if err != nil {
 		log.Printf("ChunkNotifyHandler: Failed to parse payload: %v", err)
-		return h.sendResponse(w, msg, dns.RcodeFormatError)
+		_ = h.sendResponse(w, msg, dns.RcodeFormatError)
+		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
 
 	// Route based on message type
@@ -138,7 +151,8 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 				incomingMsg.Type, incomingMsg.SenderID, incomingMsg.CorrelationID)
 		default:
 			log.Printf("ChunkNotifyHandler: Incoming channel full, dropping %s message", incomingMsg.Type)
-			return h.sendResponse(w, msg, dns.RcodeServerFailure)
+			_ = h.sendResponse(w, msg, dns.RcodeServerFailure)
+			return notifyerrors.ErrNotifyHandlerErrorResponse
 		}
 	}
 
@@ -163,6 +177,18 @@ func (h *ChunkNotifyHandler) extractCorrelationID(qname string) (string, error) 
 	return correlationID, nil
 }
 
+// extractSenderHintFromQname returns the sender identity hint from QNAME for decryption order.
+// QNAME format: <correlationID>.<senderZone> e.g. "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab."
+// Used to try the sender's key first when decrypting (avoids trying "combiner" first for agent-to-agent NOTIFYs).
+func extractSenderHintFromQname(qname string) string {
+	qname = ensureFQDN(qname)
+	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
+	if len(labels) < 2 {
+		return ""
+	}
+	return ensureFQDN(strings.Join(labels[1:], "."))
+}
+
 // extractChunkPayload extracts the CHUNK payload from the EDNS0 option.
 func (h *ChunkNotifyHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
 	if msg == nil {
@@ -183,6 +209,59 @@ func (h *ChunkNotifyHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
 	}
 
 	return nil, fmt.Errorf("no CHUNK EDNS0 option found")
+}
+
+// extractChunkQueryEndpointFromMsg returns the sender's CHUNK query endpoint (host:port) from NOTIFY EDNS0 option 65005, or "" if absent.
+func extractChunkQueryEndpointFromMsg(msg *dns.Msg) string {
+	if msg == nil {
+		return ""
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		return ""
+	}
+	for _, o := range opt.Option {
+		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_QUERY_ENDPOINT_CODE {
+			s := string(local.Data)
+			if s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// fetchChunkViaQuery fetches the CHUNK payload via DNS CHUNK query when NOTIFY had no EDNS0 payload (chunk_mode=query).
+// Builds qname as {receiver}.{distid}.{sender} and queries the sender (from EDNS0 option 65005 or NOTIFY source).
+func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, correlationID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
+	if h.Transport == nil {
+		return nil, fmt.Errorf("no transport for CHUNK query")
+	}
+	senderFromQname := extractSenderHintFromQname(qname)
+	if senderFromQname == "" {
+		return nil, fmt.Errorf("cannot derive sender from NOTIFY qname %q for query mode", qname)
+	}
+	// CHUNK query qname = {receiver}.{distid}.{sender}
+	chunkQueryQname := buildChunkQueryQname(h.LocalID, correlationID, senderFromQname)
+	queryTarget := extractChunkQueryEndpointFromMsg(msg)
+	if queryTarget == "" && h.GetPeerAddress != nil {
+		// Use configured peer address (e.g. from agent.peers) so we use correct host:port
+		if addr, ok := h.GetPeerAddress(senderFromQname); ok && addr != "" {
+			queryTarget = addr
+		}
+	}
+	if queryTarget == "" && w != nil {
+		// Fallback: NOTIFY source; CHUNK query goes to DNS port (53)
+		queryTarget = w.RemoteAddr().String()
+		if host, _, err := net.SplitHostPort(queryTarget); err == nil && host != "" {
+			queryTarget = net.JoinHostPort(host, "53")
+		}
+	}
+	if queryTarget == "" {
+		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option 65005, no peer address for %q)", senderFromQname)
+	}
+	payload, _, err := h.Transport.FetchChunkViaQuery(ctx, queryTarget, chunkQueryQname)
+	return payload, err
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
@@ -218,11 +297,13 @@ func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, corr
 	var ping DnsPingPayload
 	if err := json.Unmarshal(payload, &ping); err != nil {
 		log.Printf("ChunkNotifyHandler: Failed to parse ping payload: %v", err)
-		return h.sendResponse(w, req, dns.RcodeFormatError)
+		_ = h.sendResponse(w, req, dns.RcodeFormatError)
+		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
 	if ping.Type != "ping" || ping.Nonce == "" {
 		log.Printf("ChunkNotifyHandler: Invalid ping payload (type=%q nonce=%q)", ping.Type, ping.Nonce)
-		return h.sendResponse(w, req, dns.RcodeFormatError)
+		_ = h.sendResponse(w, req, dns.RcodeFormatError)
+		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
 
 	confirm := &DnsPingConfirmPayload{
@@ -235,7 +316,8 @@ func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, corr
 	}
 	confirmJSON, err := json.Marshal(confirm)
 	if err != nil {
-		return h.sendResponse(w, req, dns.RcodeServerFailure)
+		_ = h.sendResponse(w, req, dns.RcodeServerFailure)
+		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
 
 	resp := new(dns.Msg)

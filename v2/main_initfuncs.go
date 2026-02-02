@@ -301,6 +301,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			log.Printf("MainInit: HSYNC database tables initialized")
 		}
 
+		// Distribution cache for "agent distrib list": keep completed distributions for 5 minutes, then GC purges them; incomplete are never auto-purged
+		if conf.Internal.DistributionCache == nil {
+			conf.Internal.DistributionCache = NewDistributionCache()
+			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+			log.Printf("MainInit: distribution cache initialized (GC every 1m; completed kept 5m)")
+		}
+
 		// Create TransportManager for API + DNS mode with fallback
 		controlZone := conf.Agent.Dns.ControlZone
 		if controlZone == "" {
@@ -359,6 +366,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			ChunkQueryEndpoint:         chunkQueryEndpoint,
 			ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 			PayloadCrypto:              payloadCrypto,
+			DistributionCache:          conf.Internal.DistributionCache,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm

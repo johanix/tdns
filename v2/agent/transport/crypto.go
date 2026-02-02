@@ -117,6 +117,15 @@ func (pc *PayloadCrypto) GetPeerVerificationKey(peerID string) (crypto.PublicKey
 	return key, exists
 }
 
+// PeerVerificationKeyIDs returns the list of peer IDs we have verification keys for (for try-decrypt on incoming).
+func (pc *PayloadCrypto) PeerVerificationKeyIDs() []string {
+	ids := make([]string, 0, len(pc.PeerVerificationKeys))
+	for id := range pc.PeerVerificationKeys {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // EncryptPayload encrypts a payload for a specific peer.
 // Returns base64-encoded ciphertext.
 // If encryption is disabled, returns the original payload as-is.
@@ -405,7 +414,7 @@ func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]
 
 	decrypted, err := w.crypto.DecryptAndVerifyPayload(peerID, payload)
 	if err != nil {
-		log.Printf("SecurePayloadWrapper: Decryption failed for peer %s: %v", peerID, err)
+		log.Printf("SecurePayloadWrapper: Decryption failed for peer %q: %v", peerID, err)
 		return nil, err
 	}
 
@@ -415,4 +424,42 @@ func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]
 // IsEnabled returns true if encryption is enabled.
 func (w *SecurePayloadWrapper) IsEnabled() bool {
 	return w.crypto != nil && w.crypto.Enabled
+}
+
+// UnwrapIncomingTryAllPeers decrypts an incoming payload by trying each known peer's verification key.
+// senderHint is optional: if non-empty and we have that peer's key, try it first (e.g. from QNAME: "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab.").
+// Use when the sender might be unknown; returns decrypted payload and the peer ID that worked.
+// If payload is not encrypted, returns (payload, "", nil). If decryption fails for all peers, returns (nil, "", err).
+// Individual peer failures are not logged (only final "decryption failed for all" is surfaced).
+func (w *SecurePayloadWrapper) UnwrapIncomingTryAllPeers(payload []byte, senderHint string) (decrypted []byte, peerID string, err error) {
+	if w.crypto == nil || !w.crypto.Enabled {
+		return payload, "", nil
+	}
+	if !IsPayloadEncrypted(payload) {
+		return payload, "", nil
+	}
+	allIDs := w.crypto.PeerVerificationKeyIDs()
+	// Try senderHint first if we have that peer's key (QNAME tells us sender, e.g. agent.alpha.dnslab.)
+	tryOrder := make([]string, 0, len(allIDs))
+	if senderHint != "" {
+		for _, id := range allIDs {
+			if id == senderHint {
+				tryOrder = append(tryOrder, senderHint)
+				break
+			}
+		}
+	}
+	for _, id := range allIDs {
+		if id != senderHint {
+			tryOrder = append(tryOrder, id)
+		}
+	}
+	for _, id := range tryOrder {
+		dec, err := w.crypto.DecryptAndVerifyPayload(id, payload)
+		if err != nil {
+			continue
+		}
+		return dec, id, nil
+	}
+	return nil, "", fmt.Errorf("decryption failed for all known peers")
 }

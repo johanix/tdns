@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
+	"github.com/johanix/tdns/v2/notifyerrors"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -236,7 +238,14 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 							log.Printf("DnsHandler: NOTIFY handled by registered handler (qname=%s, qtype=%s)", qname, dns.TypeToString[qtype])
 						}
 						return
-					} else if err == ErrNotHandled {
+					}
+					if errors.Is(err, notifyerrors.ErrNotifyHandlerErrorResponse) {
+						// Handler sent an error response (e.g. decryption failed); do not try next handler
+						handled = true
+						log.Printf("DnsHandler: NOTIFY handler responded with error (qname=%s, qtype=%s)", qname, dns.TypeToString[qtype])
+						return
+					}
+					if err == ErrNotHandled {
 						// Handler doesn't handle this NOTIFY, try next handler
 						if Globals.Debug {
 							log.Printf("DnsHandler: NOTIFY handler returned ErrNotHandled, trying next handler")

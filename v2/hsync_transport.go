@@ -72,6 +72,9 @@ type TransportManagerConfig struct {
 	// PayloadCrypto enables JWS/JWE encryption for CHUNK payloads (optional)
 	// If set and Enabled, all outgoing CHUNK payloads will be encrypted and signed
 	PayloadCrypto *transport.PayloadCrypto
+
+	// DistributionCache: when set, outgoing CHUNK operations (ping, hello, etc.) are registered for "agent distrib list"
+	DistributionCache *DistributionCache
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -106,6 +109,23 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			dnsCfg.ChunkPayloadGet = func(qname string) ([]byte, uint8, bool) { return store.Get(qname) }
 			dnsCfg.ChunkPayloadSet = func(qname string, payload []byte, format uint8) { store.Set(qname, payload, format) }
 		}
+		if cfg.DistributionCache != nil {
+			cache := cfg.DistributionCache
+			dnsCfg.DistributionAdd = func(qname string, senderID string, receiverID string, operation string, correlationID string) {
+				cache.Add(qname, &DistributionInfo{
+					DistributionID: correlationID,
+					SenderID:       senderID,
+					ReceiverID:     receiverID,
+					Operation:      operation,
+					ContentType:    "",
+					State:          "pending",
+					CreatedAt:      time.Now(),
+					CompletedAt:   nil,
+					QNAME:          qname,
+				})
+			}
+			dnsCfg.DistributionMarkCompleted = func(qname string) { cache.MarkCompleted(qname) }
+		}
 		tm.DNSTransport = transport.NewDNSTransport(dnsCfg)
 
 		// Create CHUNK NOTIFY handler
@@ -114,6 +134,15 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			cfg.LocalID,
 			tm.DNSTransport,
 		)
+		// In chunk_mode=query without EDNS0 CHUNK_QUERY_ENDPOINT, use configured peer address (e.g. agent.peers)
+		tm.ChunkHandler.GetPeerAddress = func(senderID string) (string, bool) {
+			peer, ok := tm.PeerRegistry.Get(senderID)
+			if !ok || peer.CurrentAddress() == nil {
+				return "", false
+			}
+			addr := peer.CurrentAddress()
+			return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
+		}
 	}
 
 	return tm

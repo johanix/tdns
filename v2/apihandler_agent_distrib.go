@@ -86,7 +86,8 @@ func (dc *DistributionCache) List(senderID string) []*DistributionInfo {
 	return results
 }
 
-// PurgeCompleted removes completed distributions older than the given duration
+// PurgeCompleted removes completed distributions older than the given duration.
+// Incomplete distributions (CompletedAt == nil) are never purged; only explicit "purge --force" removes them.
 func (dc *DistributionCache) PurgeCompleted(olderThan time.Duration) int {
 	count := 0
 	cutoff := time.Now().Add(-olderThan)
@@ -320,14 +321,15 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 	}
 }
 
-// StartDistributionGC starts a background goroutine that periodically purges old distributions
+// StartDistributionGC starts a background goroutine that periodically purges completed distributions
+// older than 5 minutes. Incomplete distributions are never purged by GC (only "purge --force" removes them).
 func StartDistributionGC(cache *DistributionCache, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for range ticker.C {
 			count := cache.PurgeCompleted(5 * time.Minute)
 			if count > 0 {
-				log.Printf("Distribution GC: purged %d completed distributions", count)
+				log.Printf("Distribution GC: purged %d completed distributions (kept ≥5m after completion)", count)
 			}
 		}
 	}()

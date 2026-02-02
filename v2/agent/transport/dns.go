@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,6 +62,9 @@ type DNSTransport struct {
 	chunkQueryEndpoint string
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
 	chunkQueryEndpointInNotify bool
+
+	distributionAdd           func(qname string, senderID string, receiverID string, operation string, correlationID string)
+	distributionMarkCompleted func(qname string)
 }
 
 // pendingOperation tracks an operation awaiting confirmation
@@ -107,6 +112,10 @@ type DNSTransportConfig struct {
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agent.address)
 	ChunkQueryEndpointInNotify bool
+
+	// Optional: register distributions for "agent distrib list". Called when sending; MarkCompleted when response is success.
+	DistributionAdd          func(qname string, senderID string, receiverID string, operation string, correlationID string)
+	DistributionMarkCompleted func(qname string)
 }
 
 // NewDNSTransport creates a new DNSTransport with the given configuration.
@@ -129,6 +138,8 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		chunkSet:                   cfg.ChunkPayloadSet,
 		chunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 		chunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
+		distributionAdd:            cfg.DistributionAdd,
+		distributionMarkCompleted:  cfg.DistributionMarkCompleted,
 	}
 
 	// Set up secure payload wrapper if crypto is configured
@@ -170,8 +181,17 @@ func ensureFQDN(name string) string {
 }
 
 // buildNotifyQNAME constructs a NOTIFY QNAME from correlation ID and control zone.
+// NOTIFY qname = {distid}.{sender} e.g. "69812b15.agent.alpha.dnslab."
 func (t *DNSTransport) buildNotifyQNAME(correlationID string) string {
 	return correlationID + "." + t.ControlZone
+}
+
+// buildChunkQueryQname constructs the CHUNK query/store qname: {receiver}.{distid}.{sender}.
+// Used when chunk_mode=query: sender stores under this key; receiver fetches with this qname.
+func buildChunkQueryQname(receiverID, distID, senderID string) string {
+	r := strings.TrimSuffix(ensureFQDN(receiverID), ".")
+	s := strings.TrimSuffix(ensureFQDN(senderID), ".")
+	return ensureFQDN(r + "." + distID + "." + s)
 }
 
 // Hello sends a hello handshake request to a peer via DNS.
@@ -373,6 +393,10 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	correlationID := generateCorrelationID()
 	qname := t.buildNotifyQNAME(correlationID)
 
+	if t.distributionAdd != nil {
+		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", correlationID)
+	}
+
 	payload := &DnsPingPayload{
 		Type:      "ping",
 		SenderID:  req.SenderID,
@@ -400,7 +424,9 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
 	if useQueryMode {
-		t.chunkSet(qname, finalPayload, payloadFormat)
+		// Store under CHUNK query qname so receiver can fetch: {receiver}.{distid}.{sender}
+		chunkQueryQname := buildChunkQueryQname(peer.ID, correlationID, t.ControlZone)
+		t.chunkSet(chunkQueryQname, finalPayload, payloadFormat)
 	}
 
 	m := new(dns.Msg)
@@ -435,28 +461,27 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
 	}
 	if res.Rcode != dns.RcodeSuccess {
-		return &PingResponse{
-			ResponderID: peer.ID,
-			OK:          false,
-			Timestamp:   time.Now(),
-		}, nil
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("NOTIFY returned rcode %s (e.g. decryption/verification failed)", dns.RcodeToString[res.Rcode]), true)
 	}
 
 	// Parse EDNS0 CHUNK from response for ping_confirm
 	confirm, err := extractPingConfirmFromResponse(res)
 	if err != nil {
-		return &PingResponse{
-			ResponderID: peer.ID,
-			OK:          false,
-			Timestamp:   time.Now(),
-		}, nil
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("invalid ping response: %w", err), true)
 	}
 	if confirm.Nonce != req.Nonce {
-		return &PingResponse{
-			ResponderID: peer.ID,
-			OK:          false,
-			Timestamp:   time.Now(),
-		}, nil
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("ping response nonce mismatch"), true)
+	}
+	if confirm.Status != "ok" {
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("peer responded with status %q", confirm.Status), true)
+	}
+
+	if t.distributionMarkCompleted != nil {
+		t.distributionMarkCompleted(qname)
 	}
 
 	return &PingResponse{
@@ -560,6 +585,10 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, correlationID string, payload []byte) (*operationResponse, error) {
 	addr := peer.CurrentAddress()
 
+	if t.distributionAdd != nil {
+		t.distributionAdd(qname, t.LocalID, peer.ID, opType, correlationID)
+	}
+
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payload
 	var payloadFormat uint8 = core.FormatJSON
@@ -575,7 +604,9 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
 	if useQueryMode {
-		t.chunkSet(qname, finalPayload, payloadFormat)
+		// Store under CHUNK query qname: {receiver}.{distid}.{sender}
+		chunkQueryQname := buildChunkQueryQname(peer.ID, correlationID, t.ControlZone)
+		t.chunkSet(chunkQueryQname, finalPayload, payloadFormat)
 	}
 
 	// Create NOTIFY message
@@ -638,6 +669,10 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	if res.Rcode != dns.RcodeSuccess {
 		return nil, NewTransportError("DNS", opType, peer.ID,
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
+	}
+
+	if t.distributionMarkCompleted != nil {
+		t.distributionMarkCompleted(qname)
 	}
 
 	// For confirmation-based operations, wait for async confirmation
@@ -751,6 +786,45 @@ type DnsPingConfirmPayload struct {
 	CorrelationID string `json:"correlation_id"`
 	Status        string `json:"status"`
 	Timestamp     int64  `json:"timestamp"`
+}
+
+// FetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.
+// Used by the receiver in chunk_mode=query when NOTIFY has no EDNS0 payload.
+func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
+	if host, port, err := net.SplitHostPort(serverAddr); err != nil {
+		if host != "" {
+			serverAddr = net.JoinHostPort(host, "53")
+		} else {
+			serverAddr = net.JoinHostPort(serverAddr, "53")
+		}
+	} else if port == "" {
+		serverAddr = net.JoinHostPort(host, "53")
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(qname), TypeCHUNK)
+	m.RecursionDesired = false
+
+	c := &dns.Client{Timeout: t.Timeout, Net: "tcp"}
+	in, _, err := c.ExchangeContext(ctx, m, serverAddr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("CHUNK query to %s failed: %w", serverAddr, err)
+	}
+	if in == nil || in.Rcode != dns.RcodeSuccess {
+		rcode := dns.RcodeSuccess
+		if in != nil {
+			rcode = in.Rcode
+		}
+		return nil, 0, fmt.Errorf("CHUNK query to %s returned rcode %s", serverAddr, dns.RcodeToString[rcode])
+	}
+	for _, rr := range in.Answer {
+		if prr, ok := rr.(*dns.PrivateRR); ok && prr.Hdr.Rrtype == TypeCHUNK {
+			if chunk, ok := prr.Data.(*core.CHUNK); ok && chunk != nil {
+				return chunk.Data, chunk.Format, nil
+			}
+		}
+	}
+	return nil, 0, fmt.Errorf("no CHUNK RR in response from %s", serverAddr)
 }
 
 // Constants for DNS transport
