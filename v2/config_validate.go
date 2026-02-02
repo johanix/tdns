@@ -199,14 +199,14 @@ func ValidateConfigWithCustomValidator(v *viper.Viper, cfgfile string) error {
 // ValidateCryptoFiles validates that configured crypto key files exist and are readable.
 // This is called during config validation to provide early feedback about missing files.
 func ValidateCryptoFiles(config *Config) error {
-	// Validate agent crypto files if configured
-	if config.Agent != nil && config.Agent.LongTermJosePrivKey != "" {
+	// Validate agent crypto files if configured (paths are trimmed inside validateFileExists)
+	if config.Agent != nil && strings.TrimSpace(config.Agent.LongTermJosePrivKey) != "" {
 		if err := validateFileExists(config.Agent.LongTermJosePrivKey, "agent private key"); err != nil {
 			return err
 		}
 
 		// Check combiner public key if configured
-		if config.Agent.Combiner != nil && config.Agent.Combiner.LongTermJosePubKey != "" {
+		if config.Agent.Combiner != nil && strings.TrimSpace(config.Agent.Combiner.LongTermJosePubKey) != "" {
 			if err := validateFileExists(config.Agent.Combiner.LongTermJosePubKey, "combiner public key (agent.combiner)"); err != nil {
 				return err
 			}
@@ -215,7 +215,7 @@ func ValidateCryptoFiles(config *Config) error {
 		// Check peer agent public keys if configured
 		if config.Agent.Peers != nil {
 			for peerID, peerConf := range config.Agent.Peers {
-				if peerConf.LongTermJosePubKey != "" {
+				if strings.TrimSpace(peerConf.LongTermJosePubKey) != "" {
 					if err := validateFileExists(peerConf.LongTermJosePubKey, fmt.Sprintf("peer agent %s public key", peerID)); err != nil {
 						return err
 					}
@@ -225,13 +225,13 @@ func ValidateCryptoFiles(config *Config) error {
 	}
 
 	// Validate combiner crypto files if configured
-	if config.Combiner != nil && config.Combiner.LongTermJosePrivKey != "" {
+	if config.Combiner != nil && strings.TrimSpace(config.Combiner.LongTermJosePrivKey) != "" {
 		if err := validateFileExists(config.Combiner.LongTermJosePrivKey, "combiner private key"); err != nil {
 			return err
 		}
 
 		// Check agent public key if configured
-		if config.Combiner.Agent != nil && config.Combiner.Agent.LongTermJosePubKey != "" {
+		if config.Combiner.Agent != nil && strings.TrimSpace(config.Combiner.Agent.LongTermJosePubKey) != "" {
 			if err := validateFileExists(config.Combiner.Agent.LongTermJosePubKey, "agent public key (combiner.agent)"); err != nil {
 				return err
 			}
@@ -242,12 +242,17 @@ func ValidateCryptoFiles(config *Config) error {
 }
 
 // validateFileExists checks if a file exists and is readable.
+// Path is trimmed so that config values with accidental trailing whitespace or newlines are handled correctly.
 func validateFileExists(path, description string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("%s path is empty", description)
+	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("%s file does not exist: %s", description, path)
+			return fmt.Errorf("%s file does not exist: %q", description, path)
 		}
-		return fmt.Errorf("cannot access %s file %s: %w", description, path, err)
+		return fmt.Errorf("cannot access %s file %q: %w", description, path, err)
 	}
 	return nil
 }

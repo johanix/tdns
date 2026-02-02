@@ -147,24 +147,19 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 }
 
 // extractCorrelationID extracts the correlation ID from a QNAME.
-// QNAME format: <correlationID>.<controlzone>
+// QNAME format: <correlationID>.<zone> — the first label is the correlation ID; the rest is the sender's
+// control zone (or any zone). We do not require QNAME to end with our control zone: NOTIFY(CHUNK)
+// can be sent agent-to-agent, so the sender uses its own control zone in the QNAME.
 func (h *ChunkNotifyHandler) extractCorrelationID(qname string) (string, error) {
 	qname = ensureFQDN(qname)
-	controlZone := h.ControlZone
-
-	// Check if QNAME ends with control zone
-	if !strings.HasSuffix(strings.ToLower(qname), strings.ToLower(controlZone)) {
-		return "", fmt.Errorf("QNAME %s does not end with control zone %s", qname, controlZone)
+	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
+	if len(labels) == 0 {
+		return "", fmt.Errorf("empty QNAME")
 	}
-
-	// Extract correlation ID (everything before the control zone)
-	correlationID := qname[:len(qname)-len(controlZone)]
-	correlationID = strings.TrimSuffix(correlationID, ".")
-
+	correlationID := labels[0]
 	if correlationID == "" {
 		return "", fmt.Errorf("no correlation ID in QNAME %s", qname)
 	}
-
 	return correlationID, nil
 }
 

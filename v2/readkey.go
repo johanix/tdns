@@ -20,6 +20,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// StripKeyFileComments removes lines that are empty or start with '#' (after trim),
+// so JWK/key files with comment headers (e.g. KDC/KRS-style) parse as valid JSON.
+// Preserves line breaks and indentation of kept lines.
+func StripKeyFileComments(data []byte) []byte {
+	lines := strings.Split(string(data), "\n")
+	var out []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			out = append(out, line)
+		}
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
 type BindPrivateKey struct {
 	Private_Key_Format string `yaml:"Private-key-format"`
 	Algorithm          string `yaml:"Algorithm"`

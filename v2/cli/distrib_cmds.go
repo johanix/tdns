@@ -83,6 +83,16 @@ var combinerDistribPeersCmd = &cobra.Command{
 	},
 }
 
+var agentDistribOpCmd = &cobra.Command{
+	Use:   "op [operation]",
+	Short: "Run an operation toward a peer",
+	Long:  `Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping (use --dns or --api for combiner ping).`,
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		runDistribOp(cmd, args[0])
+	},
+}
+
 func listDistributions(cmd *cobra.Command, component string) {
 	prefixcmd, _ := getCommandContext("distrib")
 	api, err := getApiClient(prefixcmd, true)
@@ -298,6 +308,60 @@ func purgeDistributions(cmd *cobra.Command, component string) {
 	}
 }
 
+func runDistribOp(cmd *cobra.Command, operation string) {
+	prefixcmd, _ := getCommandContext("distrib")
+	if prefixcmd != "agent" {
+		log.Fatalf("distrib op must be run under agent (e.g. tdns-cliv2 agent distrib op ping --to combiner)")
+	}
+	to, err := cmd.Flags().GetString("to")
+	if err != nil || to == "" {
+		log.Fatalf("--to is required (e.g. --to combiner or --to agent.delta.dnslab.)")
+	}
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error getting API client: %v", err)
+	}
+
+	req := map[string]interface{}{
+		"command": "op",
+		"op":      operation,
+		"to":      strings.TrimSpace(to),
+	}
+	if strings.TrimSpace(strings.ToLower(operation)) == "ping" {
+		dnsFlag, _ := cmd.Flags().GetBool("dns")
+		apiFlag, _ := cmd.Flags().GetBool("api")
+		if dnsFlag && apiFlag {
+			log.Fatalf("use either --dns or --api, not both")
+		}
+		if apiFlag {
+			req["ping_transport"] = "api"
+		} else {
+			req["ping_transport"] = "dns"
+		}
+	}
+
+	_, buf, err := api.RequestNG("POST", "/agent/distrib", req, true)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if resp["error"] == true {
+		if msg, ok := resp["error_msg"].(string); ok {
+			log.Fatalf("Error: %s", msg)
+		}
+		log.Fatalf("Error: %v", resp["error_msg"])
+	}
+
+	if msg, ok := resp["msg"].(string); ok && msg != "" {
+		fmt.Printf("%s\n", msg)
+	}
+}
+
 func listDistribPeers(cmd *cobra.Command, component string) {
 	prefixcmd, _ := getCommandContext("distrib")
 	api, err := getApiClient(prefixcmd, true)
@@ -398,10 +462,14 @@ func getStringValue(m map[string]interface{}, keys ...string) string {
 
 func init() {
 	// Register distrib commands under agent
-	AgentDistribCmd.AddCommand(agentDistribListCmd, agentDistribPurgeCmd, agentDistribPeersCmd)
+	AgentDistribCmd.AddCommand(agentDistribListCmd, agentDistribPurgeCmd, agentDistribPeersCmd, agentDistribOpCmd)
 	agentDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 	agentDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
 	agentDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	agentDistribOpCmd.Flags().StringP("to", "t", "", "Recipient identity (e.g. combiner, agent.delta.dnslab.)")
+	agentDistribOpCmd.MarkFlagRequired("to")
+	agentDistribOpCmd.Flags().Bool("dns", false, "For ping: use CHUNK-based DNS ping (default)")
+	agentDistribOpCmd.Flags().Bool("api", false, "For ping: use HTTPS API ping")
 
 	// Register distrib commands under combiner
 	CombinerDistribCmd.AddCommand(combinerDistribListCmd, combinerDistribPurgeCmd, combinerDistribPeersCmd)

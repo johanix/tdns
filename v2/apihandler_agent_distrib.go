@@ -6,13 +6,16 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // DistributionInfo holds information about a distribution
@@ -108,8 +111,11 @@ func (dc *DistributionCache) PurgeAll() int {
 
 // AgentDistribPost represents a request to the agent distrib API
 type AgentDistribPost struct {
-	Command string `json:"command"` // "list", "purge"
-	Force   bool   `json:"force,omitempty"`
+	Command       string `json:"command"`                  // "list", "purge", "peers", "op"
+	Force         bool   `json:"force,omitempty"`          // for purge
+	Op            string `json:"op,omitempty"`            // for op: operation name (e.g. "ping")
+	To            string `json:"to,omitempty"`            // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
+	PingTransport string `json:"ping_transport,omitempty"` // for op ping: "dns" (default) or "api"
 }
 
 // DistributionSummary contains summary information about a distribution
@@ -250,6 +256,63 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			json.NewEncoder(w).Encode(fullResp)
 			return
 
+		case "op":
+			// Run operation toward a peer: distrib op {operation} --to {identity}
+			if req.Op == "" || req.To == "" {
+				resp.Error = true
+				resp.ErrorMsg = "op and to are required (e.g. op=ping, to=combiner)"
+				return
+			}
+			toIdentity := strings.TrimSpace(strings.ToLower(req.To))
+			opName := strings.TrimSpace(strings.ToLower(req.Op))
+
+			switch opName {
+			case "ping":
+				if toIdentity == "combiner" {
+					useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
+					pingResp := doCombinerPing(conf, useAPI)
+					resp.Error = pingResp.Error
+					resp.ErrorMsg = pingResp.ErrorMsg
+					resp.Msg = pingResp.Msg
+				} else {
+					// Ping to peer agent: same mechanism as combiner (SendPing); lookup peer by FQDN identity
+					if conf.Internal.TransportManager == nil {
+						resp.Error = true
+						resp.ErrorMsg = "TransportManager not configured"
+						return
+					}
+					toFqdn := dns.Fqdn(req.To)
+					peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(toFqdn)
+					if !ok {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("unknown peer identity %q (use \"distrib peers\" to list)", req.To)
+						return
+					}
+					if peer.CurrentAddress() == nil {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("peer %q has no address configured", req.To)
+						return
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
+					if err != nil {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("ping failed: %v", err)
+						return
+					}
+					if !pingResp.OK {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("peer did not acknowledge (responder: %s)", pingResp.ResponderID)
+						return
+					}
+					resp.Msg = fmt.Sprintf("dnsping ok: %s echoed nonce", pingResp.ResponderID)
+				}
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown operation %q (supported: ping)", req.Op)
+			}
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", req.Command)
@@ -295,16 +358,11 @@ func listKnownPeers(conf *Config) []PeerInfo {
 
 	// For agents: list the combiner (if configured) and remote agents
 
-	// 1. Check if we have a combiner configured
+	// 1. Check if we have a combiner configured (identity is always "combiner" for CLI --to)
 	if conf.Agent != nil && conf.Agent.Combiner != nil {
 		combiner := conf.Agent.Combiner
-		// Use Identity if set, otherwise fall back to Address
-		peerID := combiner.Identity
-		if peerID == "" {
-			peerID = combiner.Address
-		}
 		peerInfo := PeerInfo{
-			PeerID:      peerID,
+			PeerID:      "combiner",
 			PeerType:    "combiner",
 			Address:     combiner.Address,
 			CryptoType:  "JOSE",
@@ -313,15 +371,39 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		peers = append(peers, peerInfo)
 	}
 
-	// 2. Check AgentRegistry for remote agents
+	// 2. Add statically configured peer agents (agent.peers); use FQDN for identity
+	if conf.Agent != nil && conf.Agent.Peers != nil {
+		for peerID, peerConf := range conf.Agent.Peers {
+			if peerConf.Address == "" {
+				continue
+			}
+			peerInfo := PeerInfo{
+				PeerID:      dns.Fqdn(peerID),
+				PeerType:    "agent",
+				Address:     peerConf.Address,
+				CryptoType:  "JOSE",
+				DistribSent: 0,
+			}
+			peers = append(peers, peerInfo)
+		}
+	}
+
+	// 3. Add remote agents from AgentRegistry (HELLO-discovered); skip if already in peers from config; use FQDN
+	seen := make(map[string]bool)
+	for _, p := range peers {
+		seen[p.PeerID] = true
+	}
 	if conf.Internal.AgentRegistry != nil {
 		ar := conf.Internal.AgentRegistry
 
-		// Iterate through all agents in the registry
 		for tuple := range ar.S.IterBuffered() {
 			agent := tuple.Val
+			agentIDFqdn := dns.Fqdn(string(agent.Identity))
+			if seen[agentIDFqdn] {
+				continue
+			}
+			seen[agentIDFqdn] = true
 
-			// Get address from ApiDetails or DnsDetails
 			address := ""
 			if agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 				address = agent.ApiDetails.BaseUri
@@ -329,22 +411,18 @@ func listKnownPeers(conf *Config) []PeerInfo {
 				address = agent.DnsDetails.BaseUri
 			}
 
-			// Extract peer info from the agent
 			peerInfo := PeerInfo{
-				PeerID:      string(agent.Identity),
+				PeerID:      agentIDFqdn,
 				PeerType:    "agent",
 				Address:     address,
-				CryptoType:  "JOSE", // Default assumption
-				DistribSent: 0,      // TODO: track actual count
+				CryptoType:  "JOSE",
+				DistribSent: 0,
 			}
-
-			// Check if we have API or DNS contact info
 			if agent.ApiDetails != nil && agent.ApiDetails.HelloTime != (time.Time{}) {
 				peerInfo.LastUsed = agent.ApiDetails.HelloTime
 			} else if agent.DnsDetails != nil && agent.DnsDetails.HelloTime != (time.Time{}) {
 				peerInfo.LastUsed = agent.DnsDetails.HelloTime
 			}
-
 			peers = append(peers, peerInfo)
 		}
 	}

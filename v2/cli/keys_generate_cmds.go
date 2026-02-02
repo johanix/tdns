@@ -107,6 +107,7 @@ func runRootKeysGenerate(cmd *cobra.Command, args []string) {
 	keyID := keyIDFromPub("jose", pubKeyBytes)
 	generatedAt := time.Now().Format(time.RFC3339)
 
+	// Write file with comment header (KDC/KRS style); parsers use StripKeyFileComments before JSON parse.
 	keyContent := fmt.Sprintf(`# JOSE Private Key (P-256) - agent/combiner long-term
 # Generated: %s
 # KeyID: %s
@@ -138,7 +139,8 @@ func runRootKeysGenerate(cmd *cobra.Command, args []string) {
 		if err != nil {
 			log.Fatalf("Error formatting JOSE public key JSON: %v", err)
 		}
-		if err := os.WriteFile(josePubfile, pubPrettyBytes, 0644); err != nil {
+		pubWithNewline := append(pubPrettyBytes, '\n')
+		if err := os.WriteFile(josePubfile, pubWithNewline, 0644); err != nil {
 			log.Fatalf("Error writing JOSE public key file: %v", err)
 		}
 		absPub, _ := filepath.Abs(josePubfile)

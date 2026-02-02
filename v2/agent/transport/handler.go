@@ -116,25 +116,18 @@ func (h *MessageHandler) HandleNotify(msg *dns.Msg, sourceAddr string) (*dns.Msg
 }
 
 // extractCorrelationID extracts the correlation ID from a QNAME.
-// QNAME format: <correlationID>.<controlzone>
+// QNAME format: <correlationID>.<zone> — the first label is the correlation ID; the rest is the sender's
+// control zone. We do not require QNAME to end with our control zone: NOTIFY(CHUNK) can be agent-to-agent.
 func (h *MessageHandler) extractCorrelationID(qname string) (string, error) {
-	// Ensure both are FQDNs
 	qname = ensureFQDN(qname)
-	controlZone := ensureFQDN(h.ControlZone)
-
-	// Check if QNAME ends with control zone
-	if !strings.HasSuffix(qname, controlZone) {
-		return "", fmt.Errorf("QNAME %s does not end with control zone %s", qname, controlZone)
+	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
+	if len(labels) == 0 {
+		return "", fmt.Errorf("empty QNAME")
 	}
-
-	// Extract correlation ID (everything before the control zone)
-	correlationID := strings.TrimSuffix(qname, controlZone)
-	correlationID = strings.TrimSuffix(correlationID, ".")
-
+	correlationID := labels[0]
 	if correlationID == "" {
 		return "", fmt.Errorf("no correlation ID in QNAME %s", qname)
 	}
-
 	return correlationID, nil
 }
 

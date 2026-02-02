@@ -385,18 +385,17 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 			fmt.Errorf("failed to marshal ping payload: %w", err), false)
 	}
 
-	// Optionally encrypt the payload if secure wrapper is configured
+	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payloadJSON
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
 		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
-			log.Printf("DNS Ping: Failed to encrypt payload for %s: %v (sending unencrypted)", peer.ID, err)
-			// Continue with unencrypted payload for now
-		} else {
-			finalPayload = encrypted
-			payloadFormat = core.FormatJWT
+			return nil, NewTransportError("DNS", "Ping", peer.ID,
+				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
+		finalPayload = encrypted
+		payloadFormat = core.FormatJWT
 	}
 
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
@@ -517,16 +516,15 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
 	}
 
-	// Optionally encrypt the payload if secure wrapper is configured
+	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payloadJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
 		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
-			log.Printf("DNS Confirm: Failed to encrypt payload for %s: %v (sending unencrypted)", peer.ID, err)
-			// Continue with unencrypted payload for now
-		} else {
-			finalPayload = encrypted
+			return NewTransportError("DNS", "Confirm", peer.ID,
+				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
+		finalPayload = encrypted
 	}
 
 	// Create NOTIFY message
@@ -562,18 +560,17 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, correlationID string, payload []byte) (*operationResponse, error) {
 	addr := peer.CurrentAddress()
 
-	// Optionally encrypt the payload if secure wrapper is configured
+	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payload
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
 		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
 		if err != nil {
-			log.Printf("DNS: Failed to encrypt payload for %s: %v (sending unencrypted)", peer.ID, err)
-			// Continue with unencrypted payload for now - could be made stricter
-		} else {
-			finalPayload = encrypted
-			payloadFormat = core.FormatJWT
+			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
+				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
+		finalPayload = encrypted
+		payloadFormat = core.FormatJWT
 	}
 
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil

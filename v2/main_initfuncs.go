@@ -26,6 +26,7 @@ import (
 	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
+	"github.com/miekg/dns"
 )
 
 var engineWg sync.WaitGroup
@@ -335,7 +336,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Initialize PayloadCrypto for secure CHUNK transport (optional)
 		// Config validation already checked that key files exist
 		var payloadCrypto *transport.PayloadCrypto
-		if conf.Agent.LongTermJosePrivKey != "" {
+		if strings.TrimSpace(conf.Agent.LongTermJosePrivKey) != "" {
 			pc, err := initPayloadCrypto(conf)
 			if err != nil {
 				return fmt.Errorf("failed to initialize agent crypto: %w", err)
@@ -383,7 +384,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			// Initialize combiner crypto for decrypting agent payloads
 			// Config validation already checked that key files exist
 			var secureWrapper *transport.SecurePayloadWrapper
-			if conf.Combiner.LongTermJosePrivKey != "" {
+			if strings.TrimSpace(conf.Combiner.LongTermJosePrivKey) != "" {
 				var err error
 				secureWrapper, err = initCombinerCrypto(conf)
 				if err != nil {
@@ -545,12 +546,16 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	// Use JOSE backend for key operations
 	backend := jose.NewBackend()
 
-	// Load local private key
-	privKeyPath := conf.Agent.LongTermJosePrivKey
+	// Load local private key (trim path so trailing whitespace/newlines from config do not cause "file not found")
+	privKeyPath := strings.TrimSpace(conf.Agent.LongTermJosePrivKey)
 	privKeyData, err := os.ReadFile(privKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("read private key %s: %w", privKeyPath, err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("private key file not found: %q: %w", privKeyPath, err)
+		}
+		return nil, fmt.Errorf("read private key %q: %w", privKeyPath, err)
 	}
+	privKeyData = StripKeyFileComments(privKeyData)
 
 	privKey, err := backend.ParsePrivateKey(privKeyData)
 	if err != nil {
@@ -581,12 +586,17 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	log.Printf("initPayloadCrypto: Loaded local JOSE key from %s", privKeyPath)
 
 	// Load combiner's public key if configured
-	if conf.Agent.Combiner != nil && conf.Agent.Combiner.LongTermJosePubKey != "" {
-		combinerPubKeyPath := conf.Agent.Combiner.LongTermJosePubKey
+	if conf.Agent.Combiner != nil && strings.TrimSpace(conf.Agent.Combiner.LongTermJosePubKey) != "" {
+		combinerPubKeyPath := strings.TrimSpace(conf.Agent.Combiner.LongTermJosePubKey)
 		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
 		if err != nil {
-			log.Printf("initPayloadCrypto: failed to read combiner public key %s: %v (combiner encryption disabled)", combinerPubKeyPath, err)
+			if os.IsNotExist(err) {
+				log.Printf("initPayloadCrypto: combiner public key file not found %q: %v (combiner encryption disabled)", combinerPubKeyPath, err)
+			} else {
+				log.Printf("initPayloadCrypto: failed to read combiner public key %q: %v (combiner encryption disabled)", combinerPubKeyPath, err)
+			}
 		} else {
+			combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
 			combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
 			if err != nil {
 				log.Printf("initPayloadCrypto: failed to parse combiner public key: %v (combiner encryption disabled)", err)
@@ -602,20 +612,25 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	// Load peer agent public keys if configured
 	if conf.Agent.Peers != nil {
 		for peerID, peerConf := range conf.Agent.Peers {
-			if peerConf.LongTermJosePubKey != "" {
-				peerPubKeyPath := peerConf.LongTermJosePubKey
+			if strings.TrimSpace(peerConf.LongTermJosePubKey) != "" {
+				peerPubKeyPath := strings.TrimSpace(peerConf.LongTermJosePubKey)
 				peerPubKeyData, err := os.ReadFile(peerPubKeyPath)
 				if err != nil {
-					log.Printf("initPayloadCrypto: failed to read peer %s public key %s: %v (peer encryption disabled)", peerID, peerPubKeyPath, err)
+					if os.IsNotExist(err) {
+						log.Printf("initPayloadCrypto: peer %s public key file not found %q: %v (peer encryption disabled)", peerID, peerPubKeyPath, err)
+					} else {
+						log.Printf("initPayloadCrypto: failed to read peer %s public key %q: %v (peer encryption disabled)", peerID, peerPubKeyPath, err)
+					}
 					continue
 				}
+				peerPubKeyData = StripKeyFileComments(peerPubKeyData)
 				peerPubKey, err := backend.ParsePublicKey(peerPubKeyData)
 				if err != nil {
 					log.Printf("initPayloadCrypto: failed to parse peer %s public key: %v (peer encryption disabled)", peerID, err)
 					continue
 				}
-				// Add peer agent for both encryption and verification
-				// Use peerID directly as the peer identifier (e.g., "agent2.example.com")
+				// Add peer agent for both encryption and verification; use FQDN so lookup by peer.ID (FQDN) finds the key
+				peerID = dns.Fqdn(peerID)
 				pc.AddPeerKey(peerID, peerPubKey)
 				pc.AddPeerVerificationKey(peerID, peerPubKey)
 				log.Printf("initPayloadCrypto: Loaded peer %s public key from %s", peerID, peerPubKeyPath)
@@ -632,12 +647,16 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	// Use the JOSE backend
 	backend := jose.NewBackend()
 
-	// Load combiner's private key
-	privKeyPath := conf.Combiner.LongTermJosePrivKey
+	// Load combiner's private key (trim path so trailing whitespace/newlines from config do not cause "file not found")
+	privKeyPath := strings.TrimSpace(conf.Combiner.LongTermJosePrivKey)
 	privKeyData, err := os.ReadFile(privKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read combiner private key %s: %w", privKeyPath, err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("combiner private key file not found: %q: %w", privKeyPath, err)
+		}
+		return nil, fmt.Errorf("failed to read combiner private key %q: %w", privKeyPath, err)
 	}
+	privKeyData = StripKeyFileComments(privKeyData)
 	localPrivKey, err := backend.ParsePrivateKey(privKeyData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse combiner private key: %w", err)
@@ -655,14 +674,18 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	}
 
 	// Load agent's public key for signature verification
-	if conf.Combiner.Agent == nil || conf.Combiner.Agent.LongTermJosePubKey == "" {
+	if conf.Combiner.Agent == nil || strings.TrimSpace(conf.Combiner.Agent.LongTermJosePubKey) == "" {
 		return nil, fmt.Errorf("combiner.agent.long_term_jose_pub_key not configured")
 	}
-	agentPubKeyPath := conf.Combiner.Agent.LongTermJosePubKey
+	agentPubKeyPath := strings.TrimSpace(conf.Combiner.Agent.LongTermJosePubKey)
 	agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read agent public key %s: %w", agentPubKeyPath, err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("agent public key file not found: %q: %w", agentPubKeyPath, err)
+		}
+		return nil, fmt.Errorf("failed to read agent public key %q: %w", agentPubKeyPath, err)
 	}
+	agentPubKeyData = StripKeyFileComments(agentPubKeyData)
 	agentVerifyKey, err := backend.ParsePublicKey(agentPubKeyData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse agent public key: %w", err)
@@ -714,8 +737,9 @@ func registerPeerAgents(conf *Config, tm *TransportManager) error {
 			continue
 		}
 
-		// Create peer and set discovery address
-		peer := tm.PeerRegistry.GetOrCreate(peerID)
+		// Register peer under FQDN identity so "distrib peers" and "distrib op --to" use consistent FQDN
+		peerIDFqdn := dns.Fqdn(peerID)
+		peer := tm.PeerRegistry.GetOrCreate(peerIDFqdn)
 		addr := &transport.Address{
 			Host:      host,
 			Port:      uint16(port),
@@ -723,7 +747,7 @@ func registerPeerAgents(conf *Config, tm *TransportManager) error {
 		}
 		peer.SetDiscoveryAddress(addr)
 
-		log.Printf("registerPeerAgents: Registered peer %s with address %s", peerID, peerConf.Address)
+		log.Printf("registerPeerAgents: Registered peer %s with address %s", peerIDFqdn, peerConf.Address)
 	}
 
 	return nil

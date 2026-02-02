@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
@@ -61,9 +62,9 @@ func runKeysGenerate(conf *Config, appType AppType, backend crypto.Backend, args
 		return err
 	}
 
-	privPath := getKeysPrivKeyPath(conf, appType)
+	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf, appType))
 	if *output != "" {
-		privPath = *output
+		privPath = strings.TrimSpace(*output)
 	}
 	if privPath == "" {
 		return fmt.Errorf("no key path: set long_term_jose_priv_key in server config or use -output")
@@ -100,15 +101,19 @@ func runKeysGenerate(conf *Config, appType AppType, backend crypto.Backend, args
 }
 
 func runKeysShow(conf *Config, appType AppType, backend crypto.Backend, args []string) error {
-	privPath := getKeysPrivKeyPath(conf, appType)
+	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf, appType))
 	if privPath == "" {
 		return fmt.Errorf("no key path: set long_term_jose_priv_key in server config")
 	}
 
 	data, err := os.ReadFile(privPath)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", privPath, err)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("private key file not found: %q: %w", privPath, err)
+		}
+		return fmt.Errorf("read %q: %w", privPath, err)
 	}
+	data = StripKeyFileComments(data)
 
 	privKey, err := backend.ParsePrivateKey(data)
 	if err != nil {
