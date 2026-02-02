@@ -21,8 +21,8 @@ clean:
 #	$(MAKE) -C ./sidecar-cli/ clean
 
 install:
-#	$(MAKE) -C ./cmd/ install
-#	$(MAKE) -C ./cmdv2/ install
+	$(MAKE) -C ./cmd/ install
+	$(MAKE) -C ./cmdv2/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install
 

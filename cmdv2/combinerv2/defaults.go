@@ -4,5 +4,5 @@
 package main
 
 const (
-	DefaultCfgFile = "/etc/tdns/tdns-combiner.yaml"
+	DefaultCfgFile = "/etc/tdns/tdns-combinerv2.yaml"
 )

@@ -24,9 +24,13 @@ var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
 	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Set up CLI logging with file/line info when verbose or debug mode is enabled
-		// This runs after flags are parsed, so Globals.Verbose and Globals.Debug are available
 		tdns.SetupCliLogging()
+		// keys generate (root-level) does not need config or API
+		if isRootKeysCommand(cmd) {
+			return
+		}
+		initConfig()
+		initApi()
 	},
 }
 
@@ -42,8 +46,20 @@ func ExecuteContext(ctx context.Context) {
 	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
 }
 
+// isRootKeysCommand returns true if cmd is the root-level "keys" (e.g. keys generate).
+// Those commands do not require config or API. Root has Use "tdns-cli".
+func isRootKeysCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() == "keys" {
+			p := c.Parent()
+			return p != nil && p.Name() == "tdns-cli"
+		}
+	}
+	return false
+}
+
 func init() {
-	cobra.OnInitialize(initConfig, initApi)
+	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
 	// Register catalog zone management commands
 	rootCmd.AddCommand(cli.CatalogCmd)

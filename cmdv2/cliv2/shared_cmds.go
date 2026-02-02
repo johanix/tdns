@@ -60,7 +60,10 @@ func init() {
 	// From ../tdns/cli/agent_cmds.go:
 	rootCmd.AddCommand(cli.AgentCmd)
 
-	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show)
+	// Root-level keys (generate JOSE for agent/combiner; no config required)
+	rootCmd.AddCommand(cli.RootKeysCmd)
+
+	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show) — under agent/combiner, uses config
 	cli.AgentCmd.AddCommand(cli.KeysCmd)
 	cli.CombinerCmd.AddCommand(cli.KeysCmd)
 

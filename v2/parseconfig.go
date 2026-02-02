@@ -300,8 +300,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 			conf.Internal.DnssecPolicies[name] = tmp
 		}
 
+		// If no "default" policy in config, use built-in default (e.g. for agent autozone).
+		// An explicit dnssecpolicies.default in YAML overrides this.
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			return errors.New("ParseConfig: DnssecPolicy 'default' not defined. Default policy is required")
+			conf.Internal.DnssecPolicies["default"] = builtinDefaultDnssecPolicy()
 		}
 	}
 
@@ -418,12 +420,18 @@ func (conf *Config) InitializeKeyDB() error {
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
 
-		// Verify that we have a MUSIC DB file.
-		fmt.Printf("Verifying existence of TDNS DB file: %s\n", dbFile)
+		// Create DB file and parent directory if missing (auto-initialize on first run).
 		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-			log.Printf("ParseConfig: TDNS DB file '%s' does not exist.", dbFile)
-			log.Printf("Please initialize TDNS DB using 'tdns-cli|sidecar-cli db init -f %s'.", dbFile)
-			return errors.New("ParseConfig: TDNS DB file does not exist")
+			if Globals.Verbose {
+				log.Printf("InitializeKeyDB: TDNS DB file %s does not exist, creating.", dbFile)
+			}
+			dir := filepath.Dir(dbFile)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("ParseConfig: failed to create DB directory %s: %v", dir, err)
+			}
+			if err := os.WriteFile(dbFile, nil, 0664); err != nil {
+				return fmt.Errorf("ParseConfig: failed to create TDNS DB file %s: %v", dbFile, err)
+			}
 		}
 		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
 		if err != nil {
@@ -806,6 +814,19 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	onStack[name] = false
 	Templates[name] = t
 	return t, nil
+}
+
+// builtinDefaultDnssecPolicy returns the built-in "default" DNSSEC policy used when
+// no dnssecpolicies.default is defined in config (e.g. for agent autozone). An explicit
+// dnssecpolicies.default in YAML overrides this. No automatic key rollovers.
+func builtinDefaultDnssecPolicy() DnssecPolicy {
+	return DnssecPolicy{
+		Name:      "default",
+		Algorithm: dns.ED25519,
+		KSK:       GenKeyLifetime("forever", "168h"),
+		ZSK:       GenKeyLifetime("forever", "2h"),
+		CSK:       GenKeyLifetime("none", "168h"),
+	}
 }
 
 func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
