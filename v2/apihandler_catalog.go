@@ -129,7 +129,7 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 
 	// Use CreateAutoZone to create the catalog zone
 	kdb := &KeyDB{} // Empty KeyDB for catalog zones
-	zd, err := kdb.CreateAutoZone(catalogZoneName, []string{})
+	zd, err := kdb.CreateAutoZone(catalogZoneName, []string{}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create catalog zone: %v", err)
 	}

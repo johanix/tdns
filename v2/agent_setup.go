@@ -5,16 +5,17 @@
 package tdns
 
 import (
-	"crypto"
 	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
+	"crypto/elliptic"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gookit/goutil/dump"
+	"github.com/johanix/tdns/v2/crypto/jose"
 	"github.com/miekg/dns"
 )
 
@@ -42,13 +44,21 @@ func createDeferredUpdate(zoneName, description string, action func() error) Def
 func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 	log.Printf("SetupAgentAutoZone: Zone %q not found, creating a minimal auto zone", zonename)
 
-	addrs, err := conf.FindDnsEngineAddrs()
-	if err != nil {
-		return nil, fmt.Errorf("SetupAgentAutoZone: failed to find nameserver addresses: %v", err)
+	var zd *ZoneData
+	var err error
+	if len(conf.Agent.Local.Nameservers) > 0 {
+		nsNames := make([]string, len(conf.Agent.Local.Nameservers))
+		for i, ns := range conf.Agent.Local.Nameservers {
+			nsNames[i] = dns.Fqdn(ns)
+		}
+		zd, err = conf.Internal.KeyDB.CreateAutoZone(zonename, nil, nsNames)
+	} else {
+		addrs, findErr := conf.FindDnsEngineAddrs()
+		if findErr != nil {
+			return nil, fmt.Errorf("SetupAgentAutoZone: failed to find nameserver addresses: %v", findErr)
+		}
+		zd, err = conf.Internal.KeyDB.CreateAutoZone(zonename, addrs, nil)
 	}
-
-	// dump.P(addrs)
-	zd, err := conf.Internal.KeyDB.CreateAutoZone(zonename, addrs)
 	if err != nil {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
@@ -230,13 +240,15 @@ func (conf *Config) SetupDnsTransport() error {
 			}
 			log.Printf("SetupDnsTransport: successfully published KEY record for agent %q", identity)
 
-			// Publish JWK record (modern alternative to KEY)
-			err = zd.AgentJWKKeyPrep(identity, zd.KeyDB)
+			// Publish JWK record for JOSE/HPKE keys at dns.<identity>
+			// This is separate from SIG(0) KEY records - JWK is for payload crypto
+			publishName := "dns." + identity
+			err = zd.AgentJWKKeyPrep(publishName, zd.KeyDB)
 			if err != nil {
-				log.Printf("SetupDnsTransport: warning: failed to publish JWK record: %v (continuing with KEY only)", err)
-				// Don't fail setup if JWK publication fails - KEY record is still functional
+				log.Printf("SetupDnsTransport: warning: failed to publish JWK record: %v (continuing without JWK)", err)
+				// Don't fail setup if JWK publication fails - it's optional
 			} else {
-				log.Printf("SetupDnsTransport: successfully published JWK record for agent %q", identity)
+				log.Printf("SetupDnsTransport: successfully published JWK record at %q", publishName)
 			}
 
 			// Publish SVCB record with addresses
@@ -382,10 +394,17 @@ func (zd *ZoneData) AgentSig0KeyPrep(name string, kdb *KeyDB) error {
 	return zd.Sig0KeyPreparation(name, alg, kdb)
 }
 
-// AgentJWKKeyPrep publishes a JWK record for the agent by extracting the public key
-// from the SIG(0) key pair. This provides RFC 7517 compliant public key discovery.
-func (zd *ZoneData) AgentJWKKeyPrep(name string, kdb *KeyDB) error {
-	log.Printf("AgentJWKKeyPrep: Zone %s: publishing JWK record for name %s", zd.ZoneName, name)
+// AgentJWKKeyPrep publishes a JWK record for the agent's JOSE/HPKE long-term public keys.
+// This provides RFC 7517 compliant public key discovery for payload encryption/signing.
+//
+// NOTE: This is separate from SIG(0) keys (which use KEY records). JOSE/HPKE keys are used
+// for CHUNK payload encryption/signing, not DNS UPDATE authentication.
+//
+// Parameters:
+//   - publishname: The name where the JWK record will be published (typically "dns.<identity>")
+//   - kdb: The key database (unused, kept for interface compatibility)
+func (zd *ZoneData) AgentJWKKeyPrep(publishname string, kdb *KeyDB) error {
+	log.Printf("AgentJWKKeyPrep: Zone %s: publishing JWK record at %s", zd.ZoneName, publishname)
 
 	// Check if JWK publication is disabled
 	if zd.Options[OptDontPublishJWK] {
@@ -393,42 +412,98 @@ func (zd *ZoneData) AgentJWKKeyPrep(name string, kdb *KeyDB) error {
 		return nil
 	}
 
-	// Get the active SIG(0) keys for this zone
-	sig0Keys, err := kdb.GetSig0Keys(zd.ZoneName, "active")
+	// Load JOSE private key from config
+	privKeyPath := strings.TrimSpace(Conf.Agent.LongTermJosePrivKey)
+	if privKeyPath == "" {
+		return fmt.Errorf("AgentJWKKeyPrep: no JOSE key path configured")
+	}
+
+	privKeyData, err := os.ReadFile(privKeyPath)
 	if err != nil {
-		return fmt.Errorf("AgentJWKKeyPrep: failed to get SIG(0) keys for zone %s: %w", zd.ZoneName, err)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("AgentJWKKeyPrep: JOSE key file not found: %q", privKeyPath)
+		}
+		return fmt.Errorf("AgentJWKKeyPrep: failed to read JOSE key: %w", err)
 	}
 
-	if sig0Keys == nil || len(sig0Keys.Keys) == 0 {
-		return fmt.Errorf("AgentJWKKeyPrep: no active SIG(0) keys found for zone %s", zd.ZoneName)
+	// Strip comments from key file
+	privKeyData = StripKeyFileComments(privKeyData)
+
+	// Use JOSE backend to parse the key
+	backend := jose.NewBackend()
+	privKey, err := backend.ParsePrivateKey(privKeyData)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to parse JOSE private key: %w", err)
 	}
 
-	// Use the first active key (typically there's only one for agents)
-	keyCache := sig0Keys.Keys[0]
-	if keyCache.K == nil {
-		return fmt.Errorf("AgentJWKKeyPrep: private key is nil in key cache")
+	// Derive public key from private key
+	joseBackend, ok := backend.(*jose.Backend)
+	if !ok {
+		return fmt.Errorf("AgentJWKKeyPrep: backend is not JOSE")
+	}
+	josePubKey, err := joseBackend.PublicFromPrivate(privKey)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to derive public key: %w", err)
 	}
 
-	// Extract public key from private key
-	var publicKey crypto.PublicKey
-	switch priv := keyCache.K.(type) {
-	case *ecdsa.PrivateKey:
-		publicKey = &priv.PublicKey
-	case ed25519.PrivateKey:
-		publicKey = priv.Public()
-	case *rsa.PrivateKey:
-		publicKey = &priv.PublicKey
-	default:
-		return fmt.Errorf("AgentJWKKeyPrep: unsupported private key type: %T", keyCache.K)
+	// Serialize the JOSE public key to JWK JSON to extract the underlying key
+	pubKeyData, err := backend.SerializePublicKey(josePubKey)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to serialize public key: %w", err)
 	}
 
-	// Publish the JWK record
-	err = zd.PublishJWKRR(name, publicKey)
+	// Parse the JWK JSON to extract the underlying ECDSA public key
+	var jwk struct {
+		Key *ecdsa.PublicKey `json:"-"` // Will be populated by custom unmarshaling
+		Kty string           `json:"kty"`
+		Crv string           `json:"crv"`
+		X   string           `json:"x"`
+		Y   string           `json:"y"`
+	}
+	if err := json.Unmarshal(pubKeyData, &jwk); err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to parse JWK: %w", err)
+	}
+
+	// Manually decode the ECDSA coordinates from the JWK
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.X)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to decode X coordinate: %w", err)
+	}
+	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.Y)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to decode Y coordinate: %w", err)
+	}
+
+	// Reconstruct the ECDSA public key
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+	ecdsaPubKey := &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     x,
+		Y:     y,
+	}
+
+	// Check if HPKE key exists (future support)
+	// For now, we only have JOSE key (P-256)
+	// TODO: Check for HPKE X25519 key when implemented
+
+	// Determine "use" field:
+	// - If only P-256 key: NO "use" field (used for both sign and encrypt)
+	// - If both P-256 and X25519: add "use":"sig" for P-256, "use":"enc" for X25519
+	hasHPKEKey := false // TODO: Check if HPKE key exists
+	use := ""
+	if hasHPKEKey {
+		use = "sig" // P-256 is for signing when HPKE present
+	}
+	// else: leave empty (dual-use)
+
+	// Publish the JWK record at the publishname (dns.<identity>)
+	err = zd.PublishJWKRR(publishname, ecdsaPubKey, use)
 	if err != nil {
 		return fmt.Errorf("AgentJWKKeyPrep: failed to publish JWK record: %w", err)
 	}
 
-	log.Printf("AgentJWKKeyPrep: successfully published JWK record for %s", name)
+	log.Printf("AgentJWKKeyPrep: successfully published JWK record at %s", publishname)
 	return nil
 }
 

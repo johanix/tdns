@@ -141,7 +141,8 @@ type PeerConf struct {
 type LocalAgentConf struct {
 	Identity string `validate:"required,hostname"`
 	Local    struct {
-		Notify []string // secondaries to notify for an agent autozone
+		Notify      []string // secondaries to notify for an agent autozone
+		Nameservers []string `yaml:"nameservers,omitempty"` // authoritative NS hostnames for the agent autozone (FQDN, no glue; must be outside the autozone)
 	}
 	Remote struct {
 		LocateInterval int    // time in seconds

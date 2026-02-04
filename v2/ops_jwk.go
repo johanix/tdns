@@ -22,28 +22,34 @@ import (
 // Parameters:
 //   - owner: The DNS name for the JWK record (typically the agent identity)
 //   - publicKey: The crypto.PublicKey to encode and publish
+//   - use: The intended use ("" to omit, "sig" for signing, "enc" for encryption)
 //
 // Returns error if encoding fails or zone update fails.
-func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey) error {
+func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey, use string) error {
 	if publicKey == nil {
 		return fmt.Errorf("PublishJWKRR: public key is nil")
 	}
 
-	// Encode public key to JWK format
-	jwkData, algorithm, err := core.EncodePublicKeyToJWK(publicKey)
+	// Encode public key to JWK format with optional "use" field
+	jwkData, algorithm, err := core.EncodePublicKeyToJWK(publicKey, use)
 	if err != nil {
 		return fmt.Errorf("PublishJWKRR: failed to encode public key to JWK: %w", err)
 	}
 
-	log.Printf("PublishJWKRR: Encoded %s public key to JWK (algorithm: %s, size: %d bytes)",
-		owner, algorithm, len(jwkData))
+	useInfo := "dual-use"
+	if use != "" {
+		useInfo = fmt.Sprintf("use=%s", use)
+	}
+
+	log.Printf("PublishJWKRR: Encoded %s public key to JWK (algorithm: %s, %s, size: %d bytes)",
+		owner, algorithm, useInfo, len(jwkData))
 
 	// Validate the encoded JWK before publishing
 	if err := core.ValidateJWK(jwkData); err != nil {
 		return fmt.Errorf("PublishJWKRR: encoded JWK is invalid: %w", err)
 	}
 
-	// Create JWK RR
+	// Create JWK RR with generator function for proper copying
 	jwkRR := &dns.PrivateRR{
 		Hdr: dns.RR_Header{
 			Name:   dns.Fqdn(owner),
@@ -55,6 +61,24 @@ func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey) error
 			JWKData: jwkData,
 		},
 	}
+	// Set the generator function - required for dns.Copy() to work
+	// This is normally set by PrivateHandle during parsing, but must be set manually
+	// when creating PrivateRR programmatically
+	jwkRR = &dns.PrivateRR{
+		Hdr:  jwkRR.Hdr,
+		Data: jwkRR.Data,
+	}
+	// Access the internal generator through reflection or use the registered one
+	// Actually, we need to use the TypeToRR function to get a properly initialized RR
+	tempRR := dns.TypeToRR[core.TypeJWK]()
+	jwkRR = tempRR.(*dns.PrivateRR)
+	jwkRR.Hdr = dns.RR_Header{
+		Name:   dns.Fqdn(owner),
+		Rrtype: core.TypeJWK,
+		Class:  dns.ClassINET,
+		Ttl:    3600,
+	}
+	jwkRR.Data.(*core.JWK).JWKData = jwkData
 
 	// Send update request to zone
 	updateRequest := UpdateRequest{
@@ -66,7 +90,7 @@ func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey) error
 
 	select {
 	case zd.KeyDB.UpdateQ <- updateRequest:
-		log.Printf("PublishJWKRR: Successfully queued JWK record for %s (algorithm: %s)", owner, algorithm)
+		log.Printf("PublishJWKRR: Successfully queued JWK record for %s (algorithm: %s, %s)", owner, algorithm, useInfo)
 		return nil
 	default:
 		return fmt.Errorf("PublishJWKRR: failed to send update request (channel full)")

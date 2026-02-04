@@ -82,14 +82,16 @@ type Agent struct {
 }
 
 type AgentDetails struct {
-	Addrs   []string
-	Port    uint16
-	BaseUri string
-	UriRR   *dns.URI
+	Addrs        []string
+	Port         uint16
+	BaseUri      string
+	UriRR        *dns.URI
 	//	SvcbRR  *dns.SVCB
-	Host   string    // the host part of the BaseUri
-	KeyRR  *dns.KEY  // for DNS transport
-	TlsaRR *dns.TLSA // for HTTPS transport
+	Host         string    // the host part of the BaseUri
+	KeyRR        *dns.KEY  // for DNS transport (legacy)
+	JWKData      string    // JWK data (preferred for DNS transport)
+	KeyAlgorithm string    // Key algorithm (e.g., "ES256")
+	TlsaRR       *dns.TLSA // for HTTPS transport
 	//	LastHB      time.Time
 	Endpoint    string
 	ContactInfo string // "none", "partial", "complete"

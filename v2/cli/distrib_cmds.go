@@ -409,9 +409,22 @@ func listDistribPeers(cmd *cobra.Command, component string) {
 }
 
 func displayPeers(peers []interface{}, verbose bool) {
-	// Always use tabular format (compact and readable)
+	if verbose {
+		// Verbose mode: show detailed information for each peer
+		for i, pRaw := range peers {
+			if i > 0 {
+				fmt.Println() // Blank line between peers
+			}
+			if p, ok := pRaw.(map[string]interface{}); ok {
+				displayPeerVerbose(p)
+			}
+		}
+		return
+	}
+
+	// Compact mode: use tabular format
 	var rows []string
-	rows = append(rows, "Identity | Type | Address | Crypto | # Distribs")
+	rows = append(rows, "Identity | Type | Transport | Address | Crypto | # Distribs")
 
 	for _, pRaw := range peers {
 		if p, ok := pRaw.(map[string]interface{}); ok {
@@ -425,6 +438,11 @@ func displayPeers(peers []interface{}, verbose bool) {
 				peerType = "-"
 			}
 
+			transport := getStringValue(p, "transport")
+			if transport == "" {
+				transport = "-"
+			}
+
 			address := getStringValue(p, "address")
 			if address == "" {
 				address = "-"
@@ -432,7 +450,7 @@ func displayPeers(peers []interface{}, verbose bool) {
 
 			cryptoType := getStringValue(p, "crypto_type", "crypto")
 			if cryptoType == "" {
-				cryptoType = "JOSE"
+				cryptoType = "-"
 			}
 
 			distribSent := 0
@@ -440,13 +458,104 @@ func displayPeers(peers []interface{}, verbose bool) {
 				distribSent = int(ds)
 			}
 
-			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %d", peerID, peerType, address, cryptoType, distribSent))
+			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %d", peerID, peerType, transport, address, cryptoType, distribSent))
 		}
 	}
 
 	if len(rows) > 1 {
 		output := columnize.SimpleFormat(rows)
 		fmt.Println(output)
+	}
+}
+
+func displayPeerVerbose(p map[string]interface{}) {
+	peerID := getStringValue(p, "peer_id", "id")
+	if peerID == "" {
+		return
+	}
+
+	fmt.Printf("=== Peer: %s ===\n", peerID)
+	fmt.Printf("  Type:           %s\n", getStringValue(p, "peer_type", "type"))
+	fmt.Printf("  Transport:      %s\n", getStringValue(p, "transport"))
+	fmt.Printf("  Crypto:         %s\n", getStringValue(p, "crypto_type", "crypto"))
+
+	// Endpoint information
+	if apiUri := getStringValue(p, "api_uri"); apiUri != "" {
+		fmt.Printf("  API URI:        %s\n", apiUri)
+	}
+	if dnsUri := getStringValue(p, "dns_uri"); dnsUri != "" {
+		fmt.Printf("  DNS URI:        %s\n", dnsUri)
+	}
+	if address := getStringValue(p, "address"); address != "" && address != "-" {
+		fmt.Printf("  Address:        %s\n", address)
+	}
+
+	// Port
+	if port, ok := p["port"].(float64); ok && port > 0 {
+		fmt.Printf("  Port:           %d\n", int(port))
+	}
+
+	// IP addresses
+	if addrs, ok := p["addresses"].([]interface{}); ok && len(addrs) > 0 {
+		fmt.Printf("  IP Addresses:   ")
+		for i, addr := range addrs {
+			if i > 0 {
+				fmt.Printf(", ")
+			}
+			fmt.Printf("%v", addr)
+		}
+		fmt.Println()
+	}
+
+	// Key information
+	fmt.Println()
+	if hasJWK, ok := p["has_jwk"].(bool); ok && hasJWK {
+		fmt.Printf("  JWK Record:     ✓ Present\n")
+		if algorithm := getStringValue(p, "key_algorithm"); algorithm != "" {
+			fmt.Printf("    Algorithm:    %s\n", algorithm)
+		}
+		if jwkData := getStringValue(p, "jwk_data"); jwkData != "" {
+			if len(jwkData) <= 80 {
+				fmt.Printf("    Data:         %s\n", jwkData)
+			} else {
+				fmt.Printf("    Data:         %s... (%d bytes)\n", jwkData[:77], len(jwkData))
+			}
+		}
+	} else {
+		fmt.Printf("  JWK Record:     ✗ Not found\n")
+	}
+	if hasKEY, ok := p["has_key"].(bool); ok && hasKEY {
+		fmt.Printf("  KEY Record:     ✓ Present (legacy fallback)\n")
+	} else if hasJWK, ok := p["has_jwk"].(bool); !ok || !hasJWK {
+		// Only show "not found" if also no JWK
+		fmt.Printf("  KEY Record:     ✗ Not found\n")
+	}
+	if hasTLSA, ok := p["has_tlsa"].(bool); ok && hasTLSA {
+		fmt.Printf("  TLSA Record:    ✓ Present\n")
+	} else if transport := getStringValue(p, "transport"); transport == "API" {
+		// Only show "not found" for API transport
+		fmt.Printf("  TLSA Record:    ✗ Not found\n")
+	}
+
+	// State information
+	if state := getStringValue(p, "state"); state != "" {
+		fmt.Printf("  State:          %s\n", state)
+	}
+	if contactInfo := getStringValue(p, "contact_info"); contactInfo != "" {
+		fmt.Printf("  Contact Info:   %s\n", contactInfo)
+	}
+
+	// Partial discovery warning
+	if partial, ok := p["partial"].(bool); ok && partial {
+		fmt.Printf("  ⚠ Discovery:    Partial (some records missing)\n")
+	}
+
+	// Usage statistics
+	if distribSent, ok := p["distrib_sent"].(float64); ok {
+		fmt.Printf("  Distributions:  %d sent\n", int(distribSent))
+	}
+	if lastUsedStr := getStringValue(p, "last_used"); lastUsedStr != "" && lastUsedStr != "0001-01-01T00:00:00Z" {
+		fmt.Printf("  Last Used:      %s\n", lastUsedStr)
 	}
 }
 

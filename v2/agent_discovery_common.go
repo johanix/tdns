@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
  * Common DNS lookup helpers for agent discovery.
- * Provides shared functions for looking up agent contact information and keys.
+ * Provides shared IMR-based functions for looking up agent contact information and keys.
  */
 
 package tdns
@@ -13,91 +13,86 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"time"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
-// getResolvers returns the configured DNS resolvers for agent discovery.
-func getResolvers() []string {
-	resolverAddress := viper.GetString("resolver.address")
-	if resolverAddress == "" {
-		resolverAddress = "8.8.8.8:53"
-	}
-	return []string{resolverAddress}
-}
-
-// lookupAgentJWK looks up JWK record for an agent identity.
+// lookupAgentJWK looks up JWK record for an agent identity using the IMR engine.
 // Returns: (jwk-data, public-key, algorithm, error)
 //
 // The JWK record contains a base64url-encoded JSON Web Key per RFC 7517.
 // This function decodes the JWK to a crypto.PublicKey for immediate use.
-func lookupAgentJWK(ctx context.Context, identity string) (string, crypto.PublicKey, string, error) {
+//
+// The JWK record is published at dns.<identity> following DNS transport naming conventions.
+func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, crypto.PublicKey, string, error) {
 	identity = dns.Fqdn(identity)
-	resolvers := getResolvers()
-	timeout := 5 * time.Second
-	retries := 2
 
-	log.Printf("AgentDiscovery: Looking up JWK at %s", identity)
+	// JWK records are published at dns.<identity> (with DNS transport records)
+	jwkQname := "dns." + identity
+	log.Printf("AgentDiscovery: Looking up JWK at %s", jwkQname)
 
-	// Query for JWK record
-	rrset, err := RecursiveDNSQueryWithServers(identity, core.TypeJWK, timeout, retries, resolvers)
+	// Query for JWK record using IMR
+	resp, err := imr.ImrQuery(ctx, jwkQname, core.TypeJWK, dns.ClassINET, nil)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("JWK query failed for %s: %w", identity, err)
+		return "", nil, "", fmt.Errorf("JWK query failed for %s: %w", jwkQname, err)
 	}
 
-	if rrset == nil || len(rrset.RRs) == 0 {
-		return "", nil, "", fmt.Errorf("no JWK record found for %s", identity)
+	if resp.Error {
+		return "", nil, "", fmt.Errorf("JWK query error for %s: %s", jwkQname, resp.ErrorMsg)
+	}
+
+	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+		return "", nil, "", fmt.Errorf("no JWK record found at %s", jwkQname)
 	}
 
 	// Extract JWK record (expecting dns.PrivateRR wrapping our JWK PrivateRdata)
-	for _, rr := range rrset.RRs {
+	for _, rr := range resp.RRset.RRs {
 		if privateRR, ok := rr.(*dns.PrivateRR); ok {
 			if jwk, ok := privateRR.Data.(*core.JWK); ok {
 				// Validate JWK data
 				if err := core.ValidateJWK(jwk.JWKData); err != nil {
-					log.Printf("AgentDiscovery: Invalid JWK data for %s: %v", identity, err)
+					log.Printf("AgentDiscovery: Invalid JWK data at %s: %v", jwkQname, err)
 					continue
 				}
 
 				// Decode to public key
 				publicKey, algorithm, err := core.DecodeJWKToPublicKey(jwk.JWKData)
 				if err != nil {
-					log.Printf("AgentDiscovery: Failed to decode JWK for %s: %v", identity, err)
+					log.Printf("AgentDiscovery: Failed to decode JWK at %s: %v", jwkQname, err)
 					continue
 				}
 
-				log.Printf("AgentDiscovery: Found JWK record for %s (algorithm: %s)", identity, algorithm)
+				log.Printf("AgentDiscovery: Found JWK record at %s (algorithm: %s)", jwkQname, algorithm)
 				return jwk.JWKData, publicKey, algorithm, nil
 			}
 		}
 	}
 
-	return "", nil, "", fmt.Errorf("no valid JWK record found for %s", identity)
+	return "", nil, "", fmt.Errorf("no valid JWK record found at %s", jwkQname)
 }
 
-// lookupAgentKEY looks up KEY record for an agent identity (legacy fallback).
+// lookupAgentKEY looks up KEY record for an agent identity (legacy fallback) using the IMR engine.
 // Returns: (key-rr, error)
-func lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
+func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
 	identity = dns.Fqdn(identity)
-	resolvers := getResolvers()
-	timeout := 5 * time.Second
-	retries := 2
 
 	log.Printf("AgentDiscovery: Looking up KEY at %s (legacy fallback)", identity)
 
-	keyRRset, err := RecursiveDNSQueryWithServers(identity, dns.TypeKEY, timeout, retries, resolvers)
+	resp, err := imr.ImrQuery(ctx, identity, dns.TypeKEY, dns.ClassINET, nil)
 	if err != nil {
 		return nil, fmt.Errorf("KEY query failed for %s: %w", identity, err)
 	}
 
-	if keyRRset == nil || len(keyRRset.RRs) == 0 {
+	if resp.Error {
+		return nil, fmt.Errorf("KEY query error for %s: %s", identity, resp.ErrorMsg)
+	}
+
+	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return nil, fmt.Errorf("no KEY record found for %s", identity)
 	}
 
-	for _, rr := range keyRRset.RRs {
+	for _, rr := range resp.RRset.RRs {
 		if keyRR, ok := rr.(*dns.KEY); ok {
 			log.Printf("AgentDiscovery: Found KEY record for %s (algorithm %d)", identity, keyRR.Algorithm)
 			return keyRR, nil
@@ -107,28 +102,29 @@ func lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
 	return nil, fmt.Errorf("no valid KEY record found for %s", identity)
 }
 
-// lookupAgentAPIEndpoint looks up the API endpoint URI for an agent.
+// lookupAgentAPIEndpoint looks up the API endpoint URI for an agent using the IMR engine.
 // Queries: _https._tcp.<identity> URI
 // Returns: (uri, host, port, error)
-func lookupAgentAPIEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
+func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
 	identity = dns.Fqdn(identity)
-	resolvers := getResolvers()
-	timeout := 5 * time.Second
-	retries := 2
 
 	apiQname := "_https._tcp." + identity
 	log.Printf("AgentDiscovery: Looking up API URI at %s", apiQname)
 
-	apiUriRRset, err := RecursiveDNSQueryWithServers(apiQname, dns.TypeURI, timeout, retries, resolvers)
+	resp, err := imr.ImrQuery(ctx, apiQname, dns.TypeURI, dns.ClassINET, nil)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("API URI query failed for %s: %w", apiQname, err)
 	}
 
-	if apiUriRRset == nil || len(apiUriRRset.RRs) == 0 {
+	if resp.Error {
+		return "", "", 0, fmt.Errorf("API URI query error for %s: %s", apiQname, resp.ErrorMsg)
+	}
+
+	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return "", "", 0, fmt.Errorf("no API URI record found at %s", apiQname)
 	}
 
-	for _, rr := range apiUriRRset.RRs {
+	for _, rr := range resp.RRset.RRs {
 		if uriRR, ok := rr.(*dns.URI); ok {
 			// Parse URI to extract host and port
 			parsed, err := url.Parse(uriRR.Target)
@@ -153,28 +149,29 @@ func lookupAgentAPIEndpoint(ctx context.Context, identity string) (string, strin
 	return "", "", 0, fmt.Errorf("no valid API URI record found at %s", apiQname)
 }
 
-// lookupAgentDNSEndpoint looks up the DNS endpoint URI for an agent (optional).
-// Queries: _dns._udp.<identity> URI
+// lookupAgentDNSEndpoint looks up the DNS endpoint URI for an agent (optional) using the IMR engine.
+// Queries: _dns._tcp.<identity> URI
 // Returns: (uri, host, port, error)
-func lookupAgentDNSEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
+func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
 	identity = dns.Fqdn(identity)
-	resolvers := getResolvers()
-	timeout := 5 * time.Second
-	retries := 2
 
-	dnsQname := "_dns._udp." + identity
+	dnsQname := "_dns._tcp." + identity
 	log.Printf("AgentDiscovery: Looking up DNS URI at %s", dnsQname)
 
-	dnsUriRRset, err := RecursiveDNSQueryWithServers(dnsQname, dns.TypeURI, timeout, retries, resolvers)
+	resp, err := imr.ImrQuery(ctx, dnsQname, dns.TypeURI, dns.ClassINET, nil)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("DNS URI query failed for %s: %w", dnsQname, err)
 	}
 
-	if dnsUriRRset == nil || len(dnsUriRRset.RRs) == 0 {
+	if resp.Error {
+		return "", "", 0, fmt.Errorf("DNS URI query error for %s: %s", dnsQname, resp.ErrorMsg)
+	}
+
+	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return "", "", 0, fmt.Errorf("no DNS URI record found at %s", dnsQname)
 	}
 
-	for _, rr := range dnsUriRRset.RRs {
+	for _, rr := range resp.RRset.RRs {
 		if uriRR, ok := rr.(*dns.URI); ok {
 			// Parse URI to extract host and port
 			parsed, err := url.Parse(uriRR.Target)
@@ -199,28 +196,29 @@ func lookupAgentDNSEndpoint(ctx context.Context, identity string) (string, strin
 	return "", "", 0, fmt.Errorf("no valid DNS URI record found at %s", dnsQname)
 }
 
-// lookupAgentTLSA looks up TLSA record for an agent's HTTPS service.
-// Queries: _443._tcp.<identity> TLSA
+// lookupAgentTLSA looks up TLSA record for an agent's HTTPS service using the IMR engine.
+// Queries: _<port>._tcp.<identity> TLSA
 // Returns: (tlsa-rr, error)
-func lookupAgentTLSA(ctx context.Context, identity string, port uint16) (*dns.TLSA, error) {
+func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint16) (*dns.TLSA, error) {
 	identity = dns.Fqdn(identity)
-	resolvers := getResolvers()
-	timeout := 5 * time.Second
-	retries := 2
 
 	tlsaQname := fmt.Sprintf("_%d._tcp.%s", port, identity)
 	log.Printf("AgentDiscovery: Looking up TLSA at %s", tlsaQname)
 
-	tlsaRRset, err := RecursiveDNSQueryWithServers(tlsaQname, dns.TypeTLSA, timeout, retries, resolvers)
+	resp, err := imr.ImrQuery(ctx, tlsaQname, dns.TypeTLSA, dns.ClassINET, nil)
 	if err != nil {
 		return nil, fmt.Errorf("TLSA query failed for %s: %w", tlsaQname, err)
 	}
 
-	if tlsaRRset == nil || len(tlsaRRset.RRs) == 0 {
+	if resp.Error {
+		return nil, fmt.Errorf("TLSA query error for %s: %s", tlsaQname, resp.ErrorMsg)
+	}
+
+	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return nil, fmt.Errorf("no TLSA record found at %s", tlsaQname)
 	}
 
-	for _, rr := range tlsaRRset.RRs {
+	for _, rr := range resp.RRset.RRs {
 		if tlsaRR, ok := rr.(*dns.TLSA); ok {
 			log.Printf("AgentDiscovery: Found TLSA record at %s (usage %d, selector %d, type %d)",
 				tlsaQname, tlsaRR.Usage, tlsaRR.Selector, tlsaRR.MatchingType)
@@ -231,42 +229,58 @@ func lookupAgentTLSA(ctx context.Context, identity string, port uint16) (*dns.TL
 	return nil, fmt.Errorf("no valid TLSA record found at %s", tlsaQname)
 }
 
-// lookupAgentAddresses looks up A and AAAA records for an agent.
-// Returns: (addresses, error)
-func lookupAgentAddresses(ctx context.Context, identity string) ([]string, error) {
-	identity = dns.Fqdn(identity)
-	resolvers := getResolvers()
-	timeout := 5 * time.Second
-	retries := 2
+// lookupServiceAddresses looks up SVCB record for a service name using the IMR engine.
+// Queries SVCB at the service name (e.g., dns.<identity> or api.<identity>).
+// Returns: (addresses, error) - addresses extracted from ipv4hint and ipv6hint parameters
+func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) ([]string, error) {
+	serviceName = dns.Fqdn(serviceName)
 
 	var addresses []string
 
-	log.Printf("AgentDiscovery: Looking up A/AAAA at %s", identity)
+	log.Printf("AgentDiscovery: Looking up SVCB at %s", serviceName)
 
-	// Query A records
-	aRRset, err := RecursiveDNSQueryWithServers(identity, dns.TypeA, timeout, retries, resolvers)
-	if err == nil && aRRset != nil {
-		for _, rr := range aRRset.RRs {
-			if aRR, ok := rr.(*dns.A); ok {
-				addresses = append(addresses, aRR.A.String())
-			}
-		}
+	// Query SVCB record
+	resp, err := imr.ImrQuery(ctx, serviceName, dns.TypeSVCB, dns.ClassINET, nil)
+	if err != nil {
+		return nil, fmt.Errorf("SVCB query failed for %s: %w", serviceName, err)
 	}
 
-	// Query AAAA records
-	aaaaRRset, err := RecursiveDNSQueryWithServers(identity, dns.TypeAAAA, timeout, retries, resolvers)
-	if err == nil && aaaaRRset != nil {
-		for _, rr := range aaaaRRset.RRs {
-			if aaaaRR, ok := rr.(*dns.AAAA); ok {
-				addresses = append(addresses, aaaaRR.AAAA.String())
+	if resp.Error {
+		return nil, fmt.Errorf("SVCB query error for %s: %s", serviceName, resp.ErrorMsg)
+	}
+
+	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+		return nil, fmt.Errorf("no SVCB record found at %s", serviceName)
+	}
+
+	// Extract addresses from SVCB ipv4hint and ipv6hint parameters
+	for _, rr := range resp.RRset.RRs {
+		if svcbRR, ok := rr.(*dns.SVCB); ok {
+			// Extract IPv4 addresses from ipv4hint
+			for _, kv := range svcbRR.Value {
+				if kv.Key() == dns.SVCB_IPV4HINT {
+					if ipv4hint, ok := kv.(*dns.SVCBIPv4Hint); ok {
+						for _, ip := range ipv4hint.Hint {
+							addresses = append(addresses, ip.String())
+						}
+					}
+				}
+				// Extract IPv6 addresses from ipv6hint
+				if kv.Key() == dns.SVCB_IPV6HINT {
+					if ipv6hint, ok := kv.(*dns.SVCBIPv6Hint); ok {
+						for _, ip := range ipv6hint.Hint {
+							addresses = append(addresses, ip.String())
+						}
+					}
+				}
 			}
 		}
 	}
 
 	if len(addresses) == 0 {
-		return nil, fmt.Errorf("no A/AAAA records found for %s", identity)
+		return nil, fmt.Errorf("no IP hints found in SVCB record at %s", serviceName)
 	}
 
-	log.Printf("AgentDiscovery: Found %d address(es) for %s: %v", len(addresses), identity, addresses)
+	log.Printf("AgentDiscovery: Found %d address(es) for %s from SVCB: %v", len(addresses), serviceName, addresses)
 	return addresses, nil
 }

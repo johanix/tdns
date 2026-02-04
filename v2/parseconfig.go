@@ -408,14 +408,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 func (conf *Config) InitializeKeyDB() error {
 	// dbFile := viper.GetString("db.file")
-	dbFile := conf.Db.File
+	dbFile := strings.TrimSpace(conf.Db.File)
+	// Hard fail if database file is unset (before filepath.Clean which would turn "" into ".")
+	if dbFile == "" {
+		return fmt.Errorf("db.file is required but not set (must be specified in config)")
+	}
 	// Ensure the database file path is within allowed boundaries
 	dbFile = filepath.Clean(dbFile)
+	if dbFile == "." {
+		return fmt.Errorf("db.file is unset (got '.' from empty path); must specify a valid database file path")
+	}
 	if strings.Contains(dbFile, "..") {
 		return errors.New("invalid database file path: must not contain directory traversal")
-	}
-	if dbFile == "" {
-		return fmt.Errorf("invalid database file: '%s'", dbFile)
 	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:

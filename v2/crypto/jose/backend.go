@@ -142,6 +142,34 @@ func (b *Backend) SerializePrivateKey(key crypto.PrivateKey) ([]byte, error) {
 	return data, nil
 }
 
+// PublicKeyFromStdlib wraps a stdlib crypto.PublicKey in a JOSE backend wrapper.
+// This allows converting discovered keys (from JWK records, etc.) to JOSE publicKey type.
+// Supports ECDSA P-256 public keys from stdlib.
+func (b *Backend) PublicKeyFromStdlib(stdlibKey interface{}) (crypto.PublicKey, error) {
+	// Type assert to ECDSA public key
+	ecdsaKey, ok := stdlibKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, crypto.NewBackendError("jose", "public_key_from_stdlib",
+			fmt.Errorf("unsupported stdlib key type: expected *ecdsa.PublicKey, got %T", stdlibKey))
+	}
+
+	// Verify the curve is P-256
+	if ecdsaKey.Curve != elliptic.P256() {
+		return nil, crypto.NewBackendError("jose", "public_key_from_stdlib",
+			fmt.Errorf("unsupported curve: expected P-256, got %s", ecdsaKey.Curve.Params().Name))
+	}
+
+	// Create JWK wrapper
+	jwk := jose.JSONWebKey{
+		Key:       ecdsaKey,
+		KeyID:     "", // No key ID for discovered keys
+		Algorithm: string(jose.ECDH_ES),
+		Use:       "enc",
+	}
+
+	return &publicKey{jwk: jwk}, nil
+}
+
 // PublicFromPrivate returns the public key corresponding to the given private key.
 // Used by CLI "keys show" to derive public JWK from configured private key file.
 func (b *Backend) PublicFromPrivate(priv crypto.PrivateKey) (crypto.PublicKey, error) {

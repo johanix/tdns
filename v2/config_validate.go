@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
@@ -73,6 +74,16 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	// Validate crypto key files if configured
 	if err := ValidateCryptoFiles(&config); err != nil {
 		return fmt.Errorf("Config \"%s\" crypto validation failed: %v", cfgfile, err)
+	}
+
+	// Validate agent.nameservers if configured (FQDN, outside autozone)
+	if err := ValidateAgentNameservers(&config); err != nil {
+		return fmt.Errorf("Config \"%s\" agent.local.nameservers validation failed: %v", cfgfile, err)
+	}
+
+	// Validate database file is set for apps that require it
+	if err := ValidateDatabaseFile(&config); err != nil {
+		return fmt.Errorf("Config \"%s\" database validation failed: %v", cfgfile, err)
 	}
 
 	return nil
@@ -196,6 +207,30 @@ func ValidateConfigWithCustomValidator(v *viper.Viper, cfgfile string) error {
 	return nil
 }
 
+// ValidateAgentNameservers ensures agent.local.nameservers are non-empty and outside the agent autozone (no glue).
+// Each entry is normalized to FQDN (dns.Fqdn) in place so the config never carries non-FQDN names.
+func ValidateAgentNameservers(config *Config) error {
+	if config.Agent == nil || len(config.Agent.Local.Nameservers) == 0 {
+		return nil
+	}
+	zoneFqdn := dns.Fqdn(config.Agent.Identity)
+	for i, ns := range config.Agent.Local.Nameservers {
+		ns = strings.TrimSpace(ns)
+		if ns == "" {
+			return fmt.Errorf("agent.local.nameservers: empty entry")
+		}
+		nsFqdn := dns.Fqdn(ns)
+		if nsFqdn == "." {
+			return fmt.Errorf("agent.local.nameservers: empty entry")
+		}
+		if dns.IsSubDomain(zoneFqdn, nsFqdn) {
+			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, config.Agent.Identity)
+		}
+		config.Agent.Local.Nameservers[i] = nsFqdn
+	}
+	return nil
+}
+
 // ValidateCryptoFiles validates that configured crypto key files exist and are readable.
 // This is called during config validation to provide early feedback about missing files.
 func ValidateCryptoFiles(config *Config) error {
@@ -238,6 +273,24 @@ func ValidateCryptoFiles(config *Config) error {
 		}
 	}
 
+	return nil
+}
+
+// ValidateDatabaseFile validates that the database file path is set for apps that require it.
+// If db.file is unset or empty, this function returns an error (hard fail).
+func ValidateDatabaseFile(config *Config) error {
+	// Only validate for app types that require a database
+	switch Globals.App.Type {
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
+		dbFile := strings.TrimSpace(config.Db.File)
+		if dbFile == "" {
+			return fmt.Errorf("db.file is required but not set (must be specified in config)")
+		}
+		// Also check if it's just "." (which filepath.Clean("") returns)
+		if dbFile == "." {
+			return fmt.Errorf("db.file is unset (got '.' from empty path); must specify a valid database file path")
+		}
+	}
 	return nil
 }
 

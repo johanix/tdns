@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,28 +30,26 @@ var JwtCmd = &cobra.Command{
 
 var jwtInspectCmd = &cobra.Command{
 	Use:   "inspect [file|-]",
-	Short: "Inspect JWT-wrapped payloads from CHUNK records",
-	Long: `Inspect JWT-wrapped payloads from CHUNK records.
+	Short: "Inspect JWT from CHUNK or JWK RDATA from JWK records",
+	Long: `Inspect JWT-wrapped payloads from CHUNK records, or decode JWK RDATA from JWK records.
 
-Reads DNS wire format from stdin (or file) and extracts JWT payload from CHUNK RR.
-Can optionally verify JWS signatures and decrypt JWE payloads.
+Reads DNS wire or text (dig-style) from stdin (or file). If the response contains a CHUNK RR,
+decodes and inspects the JWT (with optional verify/decrypt). If it contains a JWK RR,
+base64-decodes the RDATA and prints the JWK as pretty JSON.
 
 Examples:
-  # Basic inspection (no decryption)
+  # Inspect CHUNK (JWT)
   dogv2 node.dist123.kdc. CHUNK | tdns-cli jwt inspect -
 
-  # With signature verification
+  # Inspect JWK (pretty-print JSON)
+  dogv2 dns.agent.provider. JWK | tdns-cli jwt inspect -
+
+  # With signature verification (CHUNK only)
   dogv2 node.dist123.kdc. CHUNK | tdns-cli jwt inspect - --verify --verify-key /path/to/kdc.jose.pub
 
-  # Full decryption and verification
-  dogv2 node.dist123.kdc. CHUNK | tdns-cli jwt inspect - \
-    --verify --verify-key /path/to/kdc.jose.pub \
-    --decrypt --decrypt-key /path/to/node.jose.priv \
-    --backend jose
-
 Input format auto-detection:
-  - DNS wire format (from dogv2/dig)
-  - DNS text format (zone file style)
+  - DNS wire format (from dogv2/dig): CHUNK → JWT; JWK → base64-decode and pretty JSON
+  - DNS text format (zone file / dig style): same
   - Base64-encoded JWT (starts with eyJ...)
   - Raw CHUNK RDATA`,
 	Args: cobra.MaximumNArgs(1),
@@ -84,19 +83,36 @@ Input format auto-detection:
 			log.Fatal("No input data")
 		}
 
-		// Extract JWT from input
-		jwt, chunkInfo, err := extractJWTFromInput(input)
+		// Extract payload from input (JWT from CHUNK or base64 from JWK)
+		payloadType, data, chunkInfo, err := extractPayloadFromInput(input)
 		if err != nil {
-			log.Fatalf("Error extracting JWT: %v", err)
+			log.Fatalf("Error extracting payload: %v", err)
 		}
 
-		// Inspect JWT structure
-		result, err := inspectJWT(jwt, chunkInfo, verifyFlag, verifyKeyFile, decryptFlag, decryptKeyFile, backend, verbose)
+		if payloadType == "jwk" {
+			// JWK RDATA: base64url-decode and pretty-print JSON
+			decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(data)))
+			if err != nil {
+				log.Fatalf("Error decoding JWK RDATA (base64url): %v", err)
+			}
+			var j map[string]interface{}
+			if err := json.Unmarshal(decoded, &j); err != nil {
+				log.Fatalf("Error parsing JWK JSON: %v", err)
+			}
+			out, err := json.MarshalIndent(j, "", "  ")
+			if err != nil {
+				log.Fatalf("Error formatting JSON: %v", err)
+			}
+			fmt.Println(string(out))
+			return
+		}
+
+		// CHUNK/JWT path
+		result, err := inspectJWT(data, chunkInfo, verifyFlag, verifyKeyFile, decryptFlag, decryptKeyFile, backend, verbose)
 		if err != nil {
 			log.Fatalf("Error inspecting JWT: %v", err)
 		}
 
-		// Output results
 		if outputFormat == "json" {
 			jsonOut, err := json.MarshalIndent(result, "", "  ")
 			if err != nil {
@@ -121,33 +137,34 @@ func init() {
 	jwtInspectCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show all headers)")
 }
 
-// extractJWTFromInput auto-detects input format and extracts JWT payload
-func extractJWTFromInput(input []byte) ([]byte, *chunkInfo, error) {
-	// Try base64 JWT first (starts with eyJ...) - most common and fastest check
+// extractPayloadFromInput auto-detects input format and extracts JWT (from CHUNK) or JWK RDATA.
+// Returns payloadType "jwt" or "jwk", data (JWT bytes or base64 JWK string), and optional chunkInfo for CHUNK.
+func extractPayloadFromInput(input []byte) (payloadType string, data []byte, info *chunkInfo, err error) {
 	trimmed := strings.TrimSpace(string(input))
+
+	// Try base64 JWT first (starts with eyJ...) - most common and fastest check
 	if len(trimmed) > 10 && strings.HasPrefix(trimmed, "eyJ") {
-		// JWT format is header.payload.signature - check if it has dots
 		if strings.Count(trimmed, ".") >= 2 {
-			return []byte(trimmed), &chunkInfo{Format: "raw-jwt"}, nil
+			return "jwt", []byte(trimmed), &chunkInfo{Format: "raw-jwt"}, nil
 		}
 	}
 
-	// Try DNS wire format
-	if jwt, info, err := tryDNSWireFormat(input); err == nil {
-		return jwt, info, nil
+	// Try DNS wire format (may contain CHUNK or JWK)
+	if kind, payload, info, e := tryDNSWireFormat(input); e == nil {
+		return kind, payload, info, nil
 	}
 
-	// Try DNS text format
-	if jwt, info, err := tryDNSTextFormat(input); err == nil {
-		return jwt, info, nil
+	// Try DNS text format (may contain CHUNK or JWK)
+	if kind, payload, info, e := tryDNSTextFormat(input); e == nil {
+		return kind, payload, info, nil
 	}
 
 	// Try raw CHUNK RDATA
-	if jwt, info, err := tryRawCHUNK(input); err == nil {
-		return jwt, info, nil
+	if jwt, info, e := tryRawCHUNK(input); e == nil {
+		return "jwt", jwt, info, nil
 	}
 
-	return nil, nil, fmt.Errorf("unable to detect input format (tried: base64 JWT, DNS wire, DNS text, raw CHUNK)")
+	return "", nil, nil, fmt.Errorf("unable to detect input format (tried: base64 JWT, DNS wire, DNS text, raw CHUNK)")
 }
 
 type chunkInfo struct {
@@ -158,15 +175,18 @@ type chunkInfo struct {
 	HMAC       []byte
 }
 
-func tryDNSWireFormat(input []byte) ([]byte, *chunkInfo, error) {
+func tryDNSWireFormat(input []byte) (payloadType string, data []byte, info *chunkInfo, err error) {
 	msg := new(dns.Msg)
 	if err := msg.Unpack(input); err != nil {
-		return nil, nil, err
+		return "", nil, nil, err
 	}
 
-	// Look for CHUNK RR in Answer section
 	for _, rr := range msg.Answer {
-		if prr, ok := rr.(*dns.PrivateRR); ok && prr.Hdr.Rrtype == core.TypeCHUNK {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		if prr.Hdr.Rrtype == core.TypeCHUNK {
 			if chunk, ok := prr.Data.(*core.CHUNK); ok && chunk != nil {
 				info := &chunkInfo{
 					Format:     fmt.Sprintf("DNS wire, CHUNK format=%d", chunk.Format),
@@ -175,58 +195,72 @@ func tryDNSWireFormat(input []byte) ([]byte, *chunkInfo, error) {
 					DataLength: chunk.DataLength,
 					HMAC:       chunk.HMAC,
 				}
-				return chunk.Data, info, nil
+				return "jwt", chunk.Data, info, nil
+			}
+		}
+		if prr.Hdr.Rrtype == core.TypeJWK {
+			if jwk, ok := prr.Data.(*core.JWK); ok && jwk != nil && jwk.JWKData != "" {
+				return "jwk", []byte(jwk.JWKData), nil, nil
 			}
 		}
 	}
 
-	return nil, nil, fmt.Errorf("no CHUNK RR found in DNS message")
+	return "", nil, nil, fmt.Errorf("no CHUNK or JWK RR found in DNS message")
 }
 
-func tryDNSTextFormat(input []byte) ([]byte, *chunkInfo, error) {
+func tryDNSTextFormat(input []byte) (payloadType string, data []byte, info *chunkInfo, err error) {
 	scanner := bufio.NewScanner(strings.NewReader(string(input)))
+	var jwkBuf strings.Builder
+	inJwk := false
+
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
 
-		// Skip empty lines and comments (lines starting with ;)
-		if line == "" || strings.HasPrefix(line, ";") {
+		// Skip empty lines and comments
+		if trimmed == "" || strings.HasPrefix(trimmed, ";") {
 			continue
 		}
 
-		// Only process lines containing CHUNK
-		if !strings.Contains(line, "CHUNK") {
+		// Check for JWK line: " JWK " or " JWK (" (multi-line)
+		if strings.Contains(trimmed, " JWK ") {
+			idx := strings.Index(trimmed, " JWK ")
+			rest := strings.TrimSpace(trimmed[idx+5:]) // after " JWK "
+			inJwk = true
+			jwkBuf.Reset()
+			jwkBuf.WriteString(rest)
+			if s := extractQuotedBase64(jwkBuf.String()); s != "" {
+				return "jwk", []byte(s), nil, nil
+			}
+			continue
+		}
+		if inJwk {
+			jwkBuf.WriteString(strings.TrimSpace(trimmed)) // no space between continuation lines (base64 is contiguous)
+			if s := extractQuotedBase64(jwkBuf.String()); s != "" {
+				return "jwk", []byte(s), nil, nil
+			}
 			continue
 		}
 
-		// CHUNK text format: <name> <ttl> <class> CHUNK <sequence> <total> <format> <hmac> <data>
-		// Example: gbg.iis.se.6962b872.kdc. 300 IN CHUNK 0 7 JWT "" eyJhbGc...
-		// The JWT is the last field after the HMAC field
-		fields := strings.Fields(line)
+		// CHUNK line
+		if !strings.Contains(trimmed, "CHUNK") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
 		if len(fields) < 9 {
-			continue // Not enough fields for a CHUNK RR
+			continue
 		}
-
-		// Check if it's actually a CHUNK line (field 3 should be "CHUNK")
 		if fields[3] != "CHUNK" {
 			continue
 		}
-
-		// Parse CHUNK fields
-		// fields[4] = sequence, fields[5] = total, fields[6] = format, fields[7] = hmac, fields[8+] = data
 		var sequence, total uint64
-		var err error
-
 		if sequence, err = strconv.ParseUint(fields[4], 10, 16); err != nil {
 			continue
 		}
 		if total, err = strconv.ParseUint(fields[5], 10, 16); err != nil {
 			continue
 		}
-
-		// Extract the JWT (last field)
 		jwt := fields[len(fields)-1]
-
-		// Verify it looks like a JWT (starts with eyJ and has dots)
 		if strings.HasPrefix(jwt, "eyJ") && strings.Count(jwt, ".") >= 2 {
 			info := &chunkInfo{
 				Format:     fmt.Sprintf("DNS text, CHUNK format=%s", fields[6]),
@@ -234,11 +268,25 @@ func tryDNSTextFormat(input []byte) ([]byte, *chunkInfo, error) {
 				Total:      uint16(total),
 				DataLength: uint16(len(jwt)),
 			}
-			return []byte(jwt), info, nil
+			return "jwt", []byte(jwt), info, nil
 		}
 	}
 
-	return nil, nil, fmt.Errorf("no CHUNK RR with JWT found in DNS text format")
+	return "", nil, nil, fmt.Errorf("no CHUNK or JWK RR found in DNS text format")
+}
+
+// extractQuotedBase64 finds a substring between first " and last " (JWK RDATA is base64url, no internal quotes).
+// Returns empty string if no complete quoted string is present.
+func extractQuotedBase64(s string) string {
+	start := strings.Index(s, "\"")
+	if start < 0 {
+		return ""
+	}
+	end := strings.LastIndex(s, "\"")
+	if end <= start {
+		return ""
+	}
+	return s[start+1 : end]
 }
 
 func tryRawCHUNK(input []byte) ([]byte, *chunkInfo, error) {

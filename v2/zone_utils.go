@@ -1328,7 +1328,7 @@ func isValidIP(addr string) bool {
 	return ip != nil
 }
 
-func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
+func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string, nsNames []string) (*ZoneData, error) {
 	if zonename == "" {
 		return nil, fmt.Errorf("zonename cannot be empty")
 	}
@@ -1357,8 +1357,16 @@ $TTL 86400
 	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
 	zonedatastr = strings.ReplaceAll(zonedatastr, "{SERIAL}", currentTime)
 
-	// Add address records if addresses are provided
-	if len(addrs) > 0 {
+	// Explicit nameserver hostnames (no glue): use for NS RRset only
+	if len(nsNames) > 0 {
+		log.Printf("CreateAutoZone: using configured nameservers (no glue): %v", nsNames)
+		nsLines := ""
+		for _, n := range nsNames {
+			nsLines += fmt.Sprintf("%s     IN NS  %s\n", zonename, dns.Fqdn(n))
+		}
+		zonedatastr = strings.ReplaceAll(zonedatastr, zonename+"     IN NS  invalid.\n", nsLines)
+	} else if len(addrs) > 0 {
+		// Add address records if addresses are provided (NS ns.{zone} + glue)
 		log.Printf("CreateAutoZone: adding address records for: %v", addrs)
 
 		// Update NS record to point to ns.{zonename} instead of invalid. when addresses are provided

@@ -21,31 +21,35 @@ import (
 
 // AgentDiscoveryResult holds the result of discovering an agent.
 type AgentDiscoveryResult struct {
-	Identity     string
-	APIUri       string           // Base URI from URI record (e.g., https://agent.example.com:8443/api)
-	DNSUri       string           // DNS endpoint if discovered
-	JWKData      string           // Base64url-encoded JWK (preferred)
-	PublicKey    crypto.PublicKey // Decoded public key from JWK
-	KeyAlgorithm string           // Algorithm from JWK (e.g., "ES256")
-	LegacyKeyRR  *dns.KEY         // Legacy KEY record (fallback if no JWK)
-	TLSA         *dns.TLSA        // TLSA record for TLS verification
-	Addresses    []string         // IP addresses from A/AAAA
-	Port         uint16           // Port from URI record
-	Error        error            // Any error during discovery
-	Partial      bool             // True if some records were found but discovery incomplete
+	Identity      string
+	APIUri        string           // Base URI from URI record (e.g., https://agent.example.com:8443/api)
+	DNSUri        string           // DNS endpoint if discovered
+	JWKData       string           // Base64url-encoded JWK (preferred)
+	PublicKey     crypto.PublicKey // Decoded public key from JWK
+	KeyAlgorithm  string           // Algorithm from JWK (e.g., "ES256")
+	LegacyKeyRR   *dns.KEY         // Legacy KEY record (fallback if no JWK)
+	TLSA          *dns.TLSA        // TLSA record for TLS verification
+	APIAddresses  []string         // IP addresses for API service from SVCB
+	DNSAddresses  []string         // IP addresses for DNS service from SVCB
+	Port          uint16           // Port from URI record
+	Error         error            // Any error during discovery
+	Partial       bool             // True if some records were found but discovery incomplete
 }
 
 // DiscoverAgent performs DNS-based discovery of an agent's contact information.
-// Looks up:
-//   - URI record at _https._tcp.<identity> for API endpoint
-//   - URI record at _dns._udp.<identity> for DNS endpoint (optional)
-//   - JWK record at <identity> for public key (preferred)
-//   - KEY record at <identity> for public key (fallback)
-//   - TLSA record at _443._tcp.<identity> for TLS verification
-//   - A/AAAA records at <identity> for IP addresses
+// Discovery flow for API transport:
+//   1. URI record at _https._tcp.<identity> → get API endpoint URI and port
+//   2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
+//   3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
+//
+// Discovery flow for DNS transport (optional):
+//   1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
+//   2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
+//   3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
+//   4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
 //
 // Returns a result structure with all discovered information.
-func DiscoverAgent(ctx context.Context, identity string) *AgentDiscoveryResult {
+func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscoveryResult {
 	result := &AgentDiscoveryResult{
 		Identity: identity,
 	}
@@ -54,62 +58,77 @@ func DiscoverAgent(ctx context.Context, identity string) *AgentDiscoveryResult {
 	identity = dns.Fqdn(identity)
 
 	// 1. Look up API URI (_https._tcp.<identity> URI)
-	apiUri, _, apiPort, err := lookupAgentAPIEndpoint(ctx, identity)
+	// This gives us the API endpoint URI and the port
+	apiUri, apiHost, apiPort, err := imr.lookupAgentAPIEndpoint(ctx, identity)
 	if err == nil {
 		result.APIUri = apiUri
 		result.Port = apiPort
+
+		// 1a. Look up SVCB at api.<identity> to get IP addresses
+		apiServiceName := "api." + identity
+		addresses, err := imr.lookupServiceAddresses(ctx, apiServiceName)
+		if err == nil {
+			result.APIAddresses = addresses
+		} else {
+			log.Printf("AgentDiscovery: No SVCB record found for API service at %s: %v", apiServiceName, err)
+			result.Partial = true
+		}
+
+		// 1b. Look up TLSA at _<port>._tcp.api.<identity> for TLS verification
+		tlsaRR, err := imr.lookupAgentTLSA(ctx, apiServiceName, apiPort)
+		if err == nil {
+			result.TLSA = tlsaRR
+		} else {
+			log.Printf("AgentDiscovery: No TLSA record found for API service: %v", err)
+			result.Partial = true
+		}
+
+		log.Printf("AgentDiscovery: Found API endpoint %s at %s", apiUri, apiHost)
 	} else {
 		log.Printf("AgentDiscovery: No API URI record found: %v", err)
 		result.Partial = true
 	}
 
 	// 2. Look up DNS URI (_dns._udp.<identity> URI) - optional
-	dnsUri, _, _, err := lookupAgentDNSEndpoint(ctx, identity)
+	// This gives us the DNS endpoint URI
+	dnsUri, dnsHost, dnsPort, err := imr.lookupAgentDNSEndpoint(ctx, identity)
 	if err == nil {
 		result.DNSUri = dnsUri
+
+		// 2a. Look up SVCB at dns.<identity> to get IP addresses
+		dnsServiceName := "dns." + identity
+		addresses, err := imr.lookupServiceAddresses(ctx, dnsServiceName)
+		if err == nil {
+			result.DNSAddresses = addresses
+		} else {
+			log.Printf("AgentDiscovery: No SVCB record found for DNS service at %s: %v", dnsServiceName, err)
+			result.Partial = true
+		}
+
+		// 2b. Look up JWK at dns.<identity> for JOSE/HPKE public key
+		jwkData, publicKey, algorithm, err := imr.lookupAgentJWK(ctx, identity)
+		if err == nil {
+			result.JWKData = jwkData
+			result.PublicKey = publicKey
+			result.KeyAlgorithm = algorithm
+			log.Printf("AgentDiscovery: Found JWK record for %s (algorithm: %s)", identity, algorithm)
+		} else {
+			log.Printf("AgentDiscovery: No JWK record found for %s: %v", identity, err)
+
+			// 2c. Fallback to KEY record for legacy support
+			keyRR, err := imr.lookupAgentKEY(ctx, identity)
+			if err == nil {
+				result.LegacyKeyRR = keyRR
+				log.Printf("AgentDiscovery: Using legacy KEY record for %s (algorithm %d)", identity, keyRR.Algorithm)
+			} else {
+				log.Printf("AgentDiscovery: No KEY record found for %s: %v", identity, err)
+				result.Partial = true
+			}
+		}
+
+		log.Printf("AgentDiscovery: Found DNS endpoint %s at %s:%d", dnsUri, dnsHost, dnsPort)
 	} else {
 		log.Printf("AgentDiscovery: No DNS URI record found (optional): %v", err)
-	}
-
-	// 3. Look up JWK record (<identity> JWK) for public key - PREFERRED
-	jwkData, publicKey, algorithm, err := lookupAgentJWK(ctx, identity)
-	if err == nil {
-		result.JWKData = jwkData
-		result.PublicKey = publicKey
-		result.KeyAlgorithm = algorithm
-		log.Printf("AgentDiscovery: Found JWK record for %s (algorithm: %s)", identity, algorithm)
-	} else {
-		log.Printf("AgentDiscovery: No JWK record found for %s: %v", identity, err)
-
-		// 3b. Fallback to KEY record for legacy support
-		keyRR, err := lookupAgentKEY(ctx, identity)
-		if err == nil {
-			result.LegacyKeyRR = keyRR
-			log.Printf("AgentDiscovery: Using legacy KEY record for %s (algorithm %d)", identity, keyRR.Algorithm)
-		} else {
-			log.Printf("AgentDiscovery: No KEY record found for %s: %v", identity, err)
-			result.Partial = true
-		}
-	}
-
-	// 4. Look up TLSA record (_<port>._tcp.<identity> TLSA) for TLS verification
-	if result.Port > 0 {
-		tlsaRR, err := lookupAgentTLSA(ctx, identity, result.Port)
-		if err == nil {
-			result.TLSA = tlsaRR
-		} else {
-			log.Printf("AgentDiscovery: No TLSA record found: %v", err)
-			result.Partial = true
-		}
-	}
-
-	// 5. Look up A/AAAA records (<identity> A/AAAA) for IP addresses
-	addresses, err := lookupAgentAddresses(ctx, identity)
-	if err == nil {
-		result.Addresses = addresses
-	} else {
-		log.Printf("AgentDiscovery: No A/AAAA records found: %v", err)
-		result.Partial = true
 	}
 
 	// Check if we have enough information to contact the agent
@@ -133,22 +152,26 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 	peer := tm.PeerRegistry.GetOrCreate(result.Identity)
 	peer.SetState(transport.PeerStateKnown, "discovered via DNS")
 
-	// Set discovery address based on what we found
+	// Register API transport address
 	if result.APIUri != "" {
-		// Parse API URI to extract host and port
 		parsed, err := url.Parse(result.APIUri)
 		if err != nil {
 			return fmt.Errorf("invalid API URI %q: %w", result.APIUri, err)
 		}
 
-		host := parsed.Hostname()
 		port := uint16(443) // default
 		if parsed.Port() != "" {
-			// Parse port from URL
 			var p int
 			fmt.Sscanf(parsed.Port(), "%d", &p)
 			port = uint16(p)
 		}
+
+		// Use discovered IP address instead of hostname (DNS-34 fix)
+		if len(result.APIAddresses) == 0 {
+			return fmt.Errorf("no IP addresses discovered for API transport (DNS-35 prevention)")
+		}
+		host := result.APIAddresses[0]
+		log.Printf("AgentDiscovery: Using discovered IP %s for API transport (from SVCB)", host)
 
 		addr := &transport.Address{
 			Host:      host,
@@ -160,15 +183,16 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		peer.APIEndpoint = result.APIUri
 		peer.PreferredTransport = "API"
 
-		log.Printf("AgentDiscovery: Registered peer %s with API endpoint %s", result.Identity, result.APIUri)
-	} else if result.DNSUri != "" {
-		// Parse DNS URI for DNS-based transport
+		log.Printf("AgentDiscovery: Registered peer %s with API endpoint %s (address: %s:%d)", result.Identity, result.APIUri, host, port)
+	}
+
+	// Register DNS transport address (DNS-33 fix: NOT else if - both can exist)
+	if result.DNSUri != "" {
 		parsed, err := url.Parse(result.DNSUri)
 		if err != nil {
 			return fmt.Errorf("invalid DNS URI %q: %w", result.DNSUri, err)
 		}
 
-		host := parsed.Hostname()
 		port := uint16(53) // default DNS port
 		if parsed.Port() != "" {
 			var p int
@@ -176,15 +200,25 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			port = uint16(p)
 		}
 
+		// Use discovered IP address instead of hostname (DNS-34 fix)
+		if len(result.DNSAddresses) == 0 {
+			return fmt.Errorf("no IP addresses discovered for DNS transport (DNS-35 prevention)")
+		}
+		host := result.DNSAddresses[0]
+		log.Printf("AgentDiscovery: Using discovered IP %s for DNS transport (from SVCB)", host)
+
 		addr := &transport.Address{
 			Host:      host,
 			Port:      port,
 			Transport: "udp",
 		}
+
+		// If both transports exist, DNS address goes to DiscoveryAddress (preferred for ping)
+		// API address was already set above but will be overwritten
 		peer.SetDiscoveryAddress(addr)
 		peer.PreferredTransport = "DNS"
 
-		log.Printf("AgentDiscovery: Registered peer %s with DNS endpoint %s", result.Identity, result.DNSUri)
+		log.Printf("AgentDiscovery: Registered peer %s with DNS endpoint %s (address: %s:%d)", result.Identity, result.DNSUri, host, port)
 	}
 
 	// Store TLSA for TLS verification
@@ -194,9 +228,26 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 
 	// Store JWK public key if available (preferred)
 	if result.JWKData != "" && result.PublicKey != nil {
-		// Store the JWK data and decoded public key
-		// TODO: Add JWK fields to Peer struct when available
-		log.Printf("AgentDiscovery: Stored JWK public key for %s (algorithm: %s)", result.Identity, result.KeyAlgorithm)
+		// Add peer's public key to PayloadCrypto for encryption
+		if tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
+			payloadCrypto := tm.DNSTransport.SecureWrapper.GetCrypto()
+			if payloadCrypto != nil && payloadCrypto.Backend != nil {
+				// Wrap the stdlib crypto.PublicKey in a backend-specific wrapper
+				// The backend can reconstruct its own PublicKey type from the raw key
+				wrappedKey, err := payloadCrypto.Backend.PublicKeyFromStdlib(result.PublicKey)
+				if err != nil {
+					log.Printf("AgentDiscovery: Warning: Failed to wrap public key for %s: %v", result.Identity, err)
+				} else {
+					payloadCrypto.AddPeerKey(result.Identity, wrappedKey)
+					payloadCrypto.AddPeerVerificationKey(result.Identity, wrappedKey)
+					log.Printf("AgentDiscovery: Added JWK public key to PayloadCrypto for %s (algorithm: %s)", result.Identity, result.KeyAlgorithm)
+				}
+			} else {
+				log.Printf("AgentDiscovery: Warning: Cannot add peer key - PayloadCrypto not configured")
+			}
+		} else {
+			log.Printf("AgentDiscovery: Warning: Cannot add peer key - SecureWrapper not configured")
+		}
 	}
 
 	// Also add to AgentRegistry if available (for backward compatibility)
@@ -219,16 +270,21 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			agent.ApiDetails.ContactInfo = "complete"
 			agent.ApiDetails.State = AgentStateKnown
 			agent.ApiDetails.TlsaRR = result.TLSA
-			agent.ApiDetails.Addrs = result.Addresses
+			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
 		}
 		if result.DNSUri != "" {
 			agent.DnsDetails.BaseUri = result.DNSUri
 			agent.DnsDetails.ContactInfo = "complete"
 			agent.DnsDetails.State = AgentStateKnown
-			// Store KEY record if using legacy fallback, otherwise nil
+			// Store JWK data if available (preferred)
+			if result.JWKData != "" {
+				agent.DnsDetails.JWKData = result.JWKData
+				agent.DnsDetails.KeyAlgorithm = result.KeyAlgorithm
+			}
+			// Store KEY record if using legacy fallback
 			agent.DnsDetails.KeyRR = result.LegacyKeyRR
-			agent.DnsDetails.Addrs = result.Addresses
+			agent.DnsDetails.Addrs = result.DNSAddresses
 			agent.DnsMethod = true
 		}
 
@@ -243,7 +299,13 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 func (tm *TransportManager) DiscoverAndRegisterAgent(ctx context.Context, identity string) error {
 	log.Printf("AgentDiscovery: Starting discovery for agent %s", identity)
 
-	result := DiscoverAgent(ctx, identity)
+	// Get IMR engine from global config
+	imr := Conf.Internal.ImrEngine
+	if imr == nil {
+		return fmt.Errorf("IMR engine not available for discovery")
+	}
+
+	result := DiscoverAgent(ctx, imr, identity)
 	if result.Error != nil {
 		return fmt.Errorf("discovery failed for %s: %w", identity, result.Error)
 	}

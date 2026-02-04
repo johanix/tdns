@@ -87,6 +87,11 @@ type Backend interface {
 	// Returns true if signature is valid, false otherwise.
 	// The signature algorithm is detected from the JWS protected header.
 	Verify(pubKey PublicKey, data []byte, signature []byte) (bool, error)
+
+	// PublicKeyFromStdlib wraps a stdlib crypto.PublicKey in a backend-specific wrapper.
+	// This allows converting discovered keys (from JWK records, etc.) to backend-specific types.
+	// The stdlib key type must be compatible with the backend (e.g., ECDSA for JOSE).
+	PublicKeyFromStdlib(stdlibKey interface{}) (PublicKey, error)
 }
 
 // PrivateKey represents a private key (backend-specific implementation)

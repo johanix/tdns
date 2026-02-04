@@ -524,7 +524,15 @@ func (ar *AgentRegistry) DiscoverAgentAsync(remoteid AgentId, zonename ZoneName,
 	// Spawn async goroutine for discovery using the new path
 	go func() {
 		ctx := context.Background()
-		result := DiscoverAgent(ctx, string(remoteid))
+
+		// Get IMR engine from global config
+		imr := Conf.Internal.ImrEngine
+		if imr == nil {
+			log.Printf("DiscoverAgentAsync: ERROR: IMR engine not available")
+			return
+		}
+
+		result := DiscoverAgent(ctx, imr, string(remoteid))
 
 		if result.Error != nil {
 			log.Printf("DiscoverAgentAsync: discovery failed for %s: %v", remoteid, result.Error)

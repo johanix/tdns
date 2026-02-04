@@ -19,6 +19,24 @@ agent:
    #    agent3.example.com:
    #       address:		3.4.5.6:5301
    #       long_term_jose_pub_key:	/etc/tdns/agent3.jose.pub
+   # --- agent autozone and secondaries (agent.local) ---
+   local:
+      # Secondaries to send NOTIFY to when the agent autozone changes
+      notify:	[]
+      # Authoritative nameserver hostnames for the agent autozone (normalized to FQDN; no glue; must be outside the autozone)
+      # nameservers:	[ ns1.example.org., ns2.example.org ]
+   # --- discovery and heartbeat (agent.remote) ---
+   remote:
+      LocateInterval:	60    # seconds between locate/discovery runs
+      BeatInterval:	30    # seconds between heartbeats to the same destination
+   # --- zone transfer (agent.xfr): allow AXFR/IXFR to/from listed addresses, optional TSIG ---
+   xfr:
+      outgoing:
+         addresses:	[]   # allow AXFR/IXFR from these addresses
+         auth:	[]   # TSIG key names for outgoing XFR auth
+      incoming:
+         addresses:	[]   # allow AXFR/IXFR to these addresses
+         auth:	[]   # TSIG key names for incoming XFR auth
    api:
       addresses:
          publish:	[ 1.2.3.4 ]

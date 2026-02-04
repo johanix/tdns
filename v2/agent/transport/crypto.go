@@ -426,6 +426,12 @@ func (w *SecurePayloadWrapper) IsEnabled() bool {
 	return w.crypto != nil && w.crypto.Enabled
 }
 
+// GetCrypto returns the underlying PayloadCrypto instance.
+// This allows access to methods like AddPeerKey for dynamic peer registration.
+func (w *SecurePayloadWrapper) GetCrypto() *PayloadCrypto {
+	return w.crypto
+}
+
 // UnwrapIncomingTryAllPeers decrypts an incoming payload by trying each known peer's verification key.
 // senderHint is optional: if non-empty and we have that peer's key, try it first (e.g. from QNAME: "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab.").
 // Use when the sender might be unknown; returns decrypted payload and the peer ID that worked.

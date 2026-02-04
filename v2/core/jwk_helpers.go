@@ -35,7 +35,9 @@ type JWKKey struct {
 //   - ed25519.PublicKey (for X25519, converted from Ed25519)
 //
 // The returned algorithm string is one of: "ES256" (P-256), "X25519"
-func EncodePublicKeyToJWK(key crypto.PublicKey) (string, string, error) {
+//
+// The use parameter specifies the intended use: "" (omit), "sig" (signing), "enc" (encryption)
+func EncodePublicKeyToJWK(key crypto.PublicKey, use string) (string, string, error) {
 	if key == nil {
 		return "", "", fmt.Errorf("public key is nil")
 	}
@@ -65,6 +67,7 @@ func EncodePublicKeyToJWK(key crypto.PublicKey) (string, string, error) {
 			Crv: "P-256",
 			X:   base64.RawURLEncoding.EncodeToString(xPadded),
 			Y:   base64.RawURLEncoding.EncodeToString(yPadded),
+			Use: use, // Set the "use" field
 		}
 		algorithm = "ES256"
 
@@ -74,6 +77,7 @@ func EncodePublicKeyToJWK(key crypto.PublicKey) (string, string, error) {
 	//         Kty: "OKP",
 	//         Crv: "X25519",
 	//         X:   base64.RawURLEncoding.EncodeToString(k),
+	//         Use: use,
 	//     }
 	//     algorithm = "X25519"
 

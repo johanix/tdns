@@ -33,12 +33,25 @@ type DistributionInfo struct {
 
 // PeerInfo holds information about a peer agent with established keys
 type PeerInfo struct {
-	PeerID      string
-	PeerType    string // "combiner" or "agent"
-	Address     string
-	CryptoType  string // "JOSE" or "HPKE"
-	DistribSent int    // Number of distributions sent to this peer
-	LastUsed    time.Time
+	PeerID       string
+	PeerType     string // "combiner" or "agent"
+	Transport    string // "API" or "DNS"
+	Address      string
+	CryptoType   string    // "JOSE" or "HPKE" (for DNS), "TLS" (for API), or "-"
+	DistribSent  int       // Number of distributions sent to this peer
+	LastUsed     time.Time // Last time this peer was used
+	Addresses    []string  // IP addresses from discovery
+	Port         uint16    // Port number
+	JWKData      string    // JWK data if available
+	KeyAlgorithm string    // Key algorithm (e.g., "ES256")
+	HasJWK       bool      // Whether JWK is available
+	HasKEY       bool      // Whether KEY record is available
+	HasTLSA      bool      // Whether TLSA record is available
+	APIUri       string    // Full API URI
+	DNSUri       string    // Full DNS URI
+	Partial      bool      // Whether discovery was partial
+	State        string    // Agent state
+	ContactInfo  string    // Contact info status
 }
 
 // DistributionCache is an in-memory cache of distributions keyed by QNAME
@@ -230,10 +243,44 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				peerMaps[i] = map[string]interface{}{
 					"peer_id":      peer.PeerID,
 					"peer_type":    peer.PeerType,
+					"transport":    peer.Transport,
 					"address":      peer.Address,
 					"crypto_type":  peer.CryptoType,
 					"distrib_sent": peer.DistribSent,
 				}
+
+				// Add extended discovery information
+				if peer.APIUri != "" {
+					peerMaps[i]["api_uri"] = peer.APIUri
+				}
+				if peer.DNSUri != "" {
+					peerMaps[i]["dns_uri"] = peer.DNSUri
+				}
+				if peer.Port > 0 {
+					peerMaps[i]["port"] = peer.Port
+				}
+				if len(peer.Addresses) > 0 {
+					peerMaps[i]["addresses"] = peer.Addresses
+				}
+				if peer.JWKData != "" {
+					peerMaps[i]["jwk_data"] = peer.JWKData
+					peerMaps[i]["has_jwk"] = true
+				} else {
+					peerMaps[i]["has_jwk"] = false
+				}
+				if peer.KeyAlgorithm != "" {
+					peerMaps[i]["key_algorithm"] = peer.KeyAlgorithm
+				}
+				peerMaps[i]["has_key"] = peer.HasKEY
+				peerMaps[i]["has_tlsa"] = peer.HasTLSA
+				peerMaps[i]["partial"] = peer.Partial
+				if peer.State != "" {
+					peerMaps[i]["state"] = peer.State
+				}
+				if peer.ContactInfo != "" {
+					peerMaps[i]["contact_info"] = peer.ContactInfo
+				}
+
 				if !peer.LastUsed.IsZero() {
 					peerMaps[i]["last_used"] = peer.LastUsed.Format(time.RFC3339)
 				}
@@ -432,6 +479,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		peerInfo := PeerInfo{
 			PeerID:      peerID,
 			PeerType:    "agent",
+			Transport:   "DNS",
 			Address:     agent.Address,
 			CryptoType:  "JOSE",
 			DistribSent: 0, // TODO: track actual count
@@ -448,6 +496,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		peerInfo := PeerInfo{
 			PeerID:      "combiner",
 			PeerType:    "combiner",
+			Transport:   "DNS",
 			Address:     combiner.Address,
 			CryptoType:  "JOSE",
 			DistribSent: 0, // TODO: track actual count
@@ -464,6 +513,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 			peerInfo := PeerInfo{
 				PeerID:      dns.Fqdn(peerID),
 				PeerType:    "agent",
+				Transport:   "DNS",
 				Address:     peerConf.Address,
 				CryptoType:  "JOSE",
 				DistribSent: 0,
@@ -473,9 +523,10 @@ func listKnownPeers(conf *Config) []PeerInfo {
 	}
 
 	// 3. Add remote agents from AgentRegistry (HELLO-discovered); skip if already in peers from config; use FQDN
-	seen := make(map[string]bool)
+	// Create separate entries for API and DNS transports
+	seen := make(map[string]bool) // key: peerID+transport
 	for _, p := range peers {
-		seen[p.PeerID] = true
+		seen[p.PeerID+":"+p.Transport] = true
 	}
 	if conf.Internal.AgentRegistry != nil {
 		ar := conf.Internal.AgentRegistry
@@ -483,31 +534,61 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		for tuple := range ar.S.IterBuffered() {
 			agent := tuple.Val
 			agentIDFqdn := dns.Fqdn(string(agent.Identity))
-			if seen[agentIDFqdn] {
-				continue
-			}
-			seen[agentIDFqdn] = true
 
-			address := ""
+			// Add API transport entry if available
 			if agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
-				address = agent.ApiDetails.BaseUri
-			} else if agent.DnsDetails != nil && agent.DnsDetails.BaseUri != "" {
-				address = agent.DnsDetails.BaseUri
+				key := agentIDFqdn + ":API"
+				if !seen[key] {
+					seen[key] = true
+					peerInfo := PeerInfo{
+						PeerID:      agentIDFqdn,
+						PeerType:    "agent",
+						Transport:   "API",
+						Address:     agent.ApiDetails.BaseUri,
+						CryptoType:  "TLS",
+						DistribSent: 0, // TODO: track actual count per transport
+						APIUri:      agent.ApiDetails.BaseUri,
+						Port:        agent.ApiDetails.Port,
+						Addresses:   agent.ApiDetails.Addrs,
+						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
+						State:       string(agent.State),
+						ContactInfo: agent.ApiDetails.ContactInfo,
+					}
+					if !agent.ApiDetails.HelloTime.IsZero() {
+						peerInfo.LastUsed = agent.ApiDetails.HelloTime
+					}
+					peers = append(peers, peerInfo)
+				}
 			}
 
-			peerInfo := PeerInfo{
-				PeerID:      agentIDFqdn,
-				PeerType:    "agent",
-				Address:     address,
-				CryptoType:  "JOSE",
-				DistribSent: 0,
+			// Add DNS transport entry if available
+			if agent.DnsDetails != nil && agent.DnsDetails.BaseUri != "" {
+				key := agentIDFqdn + ":DNS"
+				if !seen[key] {
+					seen[key] = true
+					peerInfo := PeerInfo{
+						PeerID:       agentIDFqdn,
+						PeerType:     "agent",
+						Transport:    "DNS",
+						Address:      agent.DnsDetails.BaseUri,
+						CryptoType:   "JOSE",
+						DistribSent:  0, // TODO: track actual count per transport
+						DNSUri:       agent.DnsDetails.BaseUri,
+						Port:         agent.DnsDetails.Port,
+						Addresses:    agent.DnsDetails.Addrs,
+						JWKData:      agent.DnsDetails.JWKData,
+						KeyAlgorithm: agent.DnsDetails.KeyAlgorithm,
+						HasJWK:       agent.DnsDetails.JWKData != "",
+						HasKEY:       agent.DnsDetails.KeyRR != nil,
+						State:        string(agent.State),
+						ContactInfo:  agent.DnsDetails.ContactInfo,
+					}
+					if !agent.DnsDetails.HelloTime.IsZero() {
+						peerInfo.LastUsed = agent.DnsDetails.HelloTime
+					}
+					peers = append(peers, peerInfo)
+				}
 			}
-			if agent.ApiDetails != nil && agent.ApiDetails.HelloTime != (time.Time{}) {
-				peerInfo.LastUsed = agent.ApiDetails.HelloTime
-			} else if agent.DnsDetails != nil && agent.DnsDetails.HelloTime != (time.Time{}) {
-				peerInfo.LastUsed = agent.DnsDetails.HelloTime
-			}
-			peers = append(peers, peerInfo)
 		}
 	}
 
