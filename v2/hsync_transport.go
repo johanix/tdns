@@ -120,7 +120,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 					ContentType:    "",
 					State:          "pending",
 					CreatedAt:      time.Now(),
-					CompletedAt:   nil,
+					CompletedAt:    nil,
 					QNAME:          qname,
 				})
 			}

@@ -460,9 +460,95 @@ func getStringValue(m map[string]interface{}, keys ...string) string {
 	return ""
 }
 
+// agentDistribDiscoverCmd performs DNS-based discovery of an agent's contact information
+var agentDistribDiscoverCmd = &cobra.Command{
+	Use:   "discover <agent-identity>",
+	Short: "Discover and register agent contact information via DNS",
+	Long: `Performs DNS-based discovery of an agent's contact information and registers it.
+
+Looks up URI, KEY, TLSA, and A/AAAA records to discover:
+  - API endpoint (_https._tcp.<identity> URI)
+  - DNS endpoint (_dns._udp.<identity> URI)
+  - Public key (<identity> KEY)
+  - TLS certificate (_443._tcp.<identity> TLSA)
+  - IP addresses (<identity> A/AAAA)
+
+After discovery, the agent is registered in PeerRegistry and can be used
+with 'distrib op' commands.
+
+Example:
+  tdns-cliv2 agent distrib discover agent.delta.dnslab.
+  tdns-cliv2 agent distrib discover provider.example.com`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		agentIdentity := args[0]
+		runAgentDiscover(agentIdentity)
+	},
+}
+
+func runAgentDiscover(agentIdentity string) {
+	prefixcmd, _ := getCommandContext("distrib")
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error getting API client: %v", err)
+	}
+
+	reqBody := map[string]interface{}{
+		"command":  "discover",
+		"agent_id": agentIdentity,
+	}
+
+	fmt.Printf("Discovering agent %s...\n", agentIdentity)
+
+	_, buf, err := api.RequestNG("POST", "/agent/distrib", reqBody, true)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		log.Fatalf("Error parsing response: %v", err)
+	}
+
+	if errVal, ok := resp["error"].(bool); ok && errVal {
+		if errMsg, ok := resp["error_msg"].(string); ok {
+			log.Fatalf("Error: %s", errMsg)
+		}
+		log.Fatalf("Discovery failed")
+	}
+
+	if msg, ok := resp["msg"].(string); ok {
+		fmt.Println(msg)
+	}
+
+	// Display discovered information if available
+	if discoveryInfo, ok := resp["discovery"].(map[string]interface{}); ok {
+		fmt.Println("\nDiscovered information:")
+		if apiUri, ok := discoveryInfo["api_uri"].(string); ok && apiUri != "" {
+			fmt.Printf("  API endpoint:  %s\n", apiUri)
+		}
+		if dnsUri, ok := discoveryInfo["dns_uri"].(string); ok && dnsUri != "" {
+			fmt.Printf("  DNS endpoint:  %s\n", dnsUri)
+		}
+		if addrs, ok := discoveryInfo["addresses"].([]interface{}); ok && len(addrs) > 0 {
+			fmt.Printf("  IP addresses:  ")
+			for i, addr := range addrs {
+				if i > 0 {
+					fmt.Print(", ")
+				}
+				fmt.Print(addr)
+			}
+			fmt.Println()
+		}
+		if partial, ok := discoveryInfo["partial"].(bool); ok && partial {
+			fmt.Println("  Warning: Partial discovery (some DNS records missing)")
+		}
+	}
+}
+
 func init() {
 	// Register distrib commands under agent
-	AgentDistribCmd.AddCommand(agentDistribListCmd, agentDistribPurgeCmd, agentDistribPeersCmd, agentDistribOpCmd)
+	AgentDistribCmd.AddCommand(agentDistribListCmd, agentDistribPurgeCmd, agentDistribPeersCmd, agentDistribOpCmd, agentDistribDiscoverCmd)
 	agentDistribListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 	agentDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
 	agentDistribPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")

@@ -263,7 +263,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			agent, err := conf.Internal.AgentRegistry.GetAgentInfo(amp.AgentId)
 			if err != nil {
 				// Start async lookup and return a message that lookup is in progress
-				conf.Internal.AgentRegistry.LocateAgent(amp.AgentId, "", nil)
+				conf.Internal.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent lookup in progress for %s", amp.AgentId)
 				return
@@ -271,7 +271,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			// If agent info is incomplete, start a new lookup
 			if agent.State == AgentStateNeeded {
-				conf.Internal.AgentRegistry.LocateAgent(amp.AgentId, "", nil)
+				conf.Internal.AgentRegistry.DiscoverAgentAsync(amp.AgentId, "", nil)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent information is incomplete for %s, lookup in progress", amp.AgentId)
 				return

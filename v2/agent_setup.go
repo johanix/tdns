@@ -5,6 +5,10 @@
 package tdns
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -226,6 +230,15 @@ func (conf *Config) SetupDnsTransport() error {
 			}
 			log.Printf("SetupDnsTransport: successfully published KEY record for agent %q", identity)
 
+			// Publish JWK record (modern alternative to KEY)
+			err = zd.AgentJWKKeyPrep(identity, zd.KeyDB)
+			if err != nil {
+				log.Printf("SetupDnsTransport: warning: failed to publish JWK record: %v (continuing with KEY only)", err)
+				// Don't fail setup if JWK publication fails - KEY record is still functional
+			} else {
+				log.Printf("SetupDnsTransport: successfully published JWK record for agent %q", identity)
+			}
+
 			// Publish SVCB record with addresses
 			var value []dns.SVCBKeyValue
 			var ipv4hint, ipv6hint []net.IP
@@ -367,6 +380,56 @@ func (zd *ZoneData) AgentSig0KeyPrep(name string, kdb *KeyDB) error {
 	}
 
 	return zd.Sig0KeyPreparation(name, alg, kdb)
+}
+
+// AgentJWKKeyPrep publishes a JWK record for the agent by extracting the public key
+// from the SIG(0) key pair. This provides RFC 7517 compliant public key discovery.
+func (zd *ZoneData) AgentJWKKeyPrep(name string, kdb *KeyDB) error {
+	log.Printf("AgentJWKKeyPrep: Zone %s: publishing JWK record for name %s", zd.ZoneName, name)
+
+	// Check if JWK publication is disabled
+	if zd.Options[OptDontPublishJWK] {
+		log.Printf("AgentJWKKeyPrep: Zone %s: JWK publication disabled by dont-publish-jwk option", zd.ZoneName)
+		return nil
+	}
+
+	// Get the active SIG(0) keys for this zone
+	sig0Keys, err := kdb.GetSig0Keys(zd.ZoneName, "active")
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to get SIG(0) keys for zone %s: %w", zd.ZoneName, err)
+	}
+
+	if sig0Keys == nil || len(sig0Keys.Keys) == 0 {
+		return fmt.Errorf("AgentJWKKeyPrep: no active SIG(0) keys found for zone %s", zd.ZoneName)
+	}
+
+	// Use the first active key (typically there's only one for agents)
+	keyCache := sig0Keys.Keys[0]
+	if keyCache.K == nil {
+		return fmt.Errorf("AgentJWKKeyPrep: private key is nil in key cache")
+	}
+
+	// Extract public key from private key
+	var publicKey crypto.PublicKey
+	switch priv := keyCache.K.(type) {
+	case *ecdsa.PrivateKey:
+		publicKey = &priv.PublicKey
+	case ed25519.PrivateKey:
+		publicKey = priv.Public()
+	case *rsa.PrivateKey:
+		publicKey = &priv.PublicKey
+	default:
+		return fmt.Errorf("AgentJWKKeyPrep: unsupported private key type: %T", keyCache.K)
+	}
+
+	// Publish the JWK record
+	err = zd.PublishJWKRR(name, publicKey)
+	if err != nil {
+		return fmt.Errorf("AgentJWKKeyPrep: failed to publish JWK record: %w", err)
+	}
+
+	log.Printf("AgentJWKKeyPrep: successfully published JWK record for %s", name)
+	return nil
 }
 
 func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {

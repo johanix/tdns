@@ -114,7 +114,7 @@ type DNSTransportConfig struct {
 	ChunkQueryEndpointInNotify bool
 
 	// Optional: register distributions for "agent distrib list". Called when sending; MarkCompleted when response is success.
-	DistributionAdd          func(qname string, senderID string, receiverID string, operation string, correlationID string)
+	DistributionAdd           func(qname string, senderID string, receiverID string, operation string, correlationID string)
 	DistributionMarkCompleted func(qname string)
 }
 

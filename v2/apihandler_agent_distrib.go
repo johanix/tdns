@@ -112,11 +112,12 @@ func (dc *DistributionCache) PurgeAll() int {
 
 // AgentDistribPost represents a request to the agent distrib API
 type AgentDistribPost struct {
-	Command       string `json:"command"`                  // "list", "purge", "peers", "op"
+	Command       string `json:"command"`                  // "list", "purge", "peers", "op", "discover"
 	Force         bool   `json:"force,omitempty"`          // for purge
-	Op            string `json:"op,omitempty"`            // for op: operation name (e.g. "ping")
-	To            string `json:"to,omitempty"`            // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
+	Op            string `json:"op,omitempty"`             // for op: operation name (e.g. "ping")
+	To            string `json:"to,omitempty"`             // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
 	PingTransport string `json:"ping_transport,omitempty"` // for op ping: "dns" (default) or "api"
+	AgentId       string `json:"agent_id,omitempty"`       // for discover: agent identity to discover
 }
 
 // DistributionSummary contains summary information about a distribution
@@ -285,9 +286,26 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					toFqdn := dns.Fqdn(req.To)
 					peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(toFqdn)
 					if !ok {
-						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("unknown peer identity %q (use \"distrib peers\" to list)", req.To)
-						return
+						// Attempt dynamic discovery for unknown agents
+						log.Printf("API: agent %q not found in PeerRegistry, attempting discovery", toFqdn)
+						discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer discoveryCancel()
+
+						discErr := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
+						if discErr != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("unknown peer identity %q and discovery failed: %v (use \"distrib peers\" to list known peers)", req.To, discErr)
+							return
+						}
+
+						// Try to get peer again after discovery
+						peer, ok = conf.Internal.TransportManager.PeerRegistry.Get(toFqdn)
+						if !ok {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("peer %q discovered but not registered properly", req.To)
+							return
+						}
+						log.Printf("API: Successfully discovered and registered agent %q", toFqdn)
 					}
 					if peer.CurrentAddress() == nil {
 						resp.Error = true
@@ -313,6 +331,70 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("unknown operation %q (supported: ping)", req.Op)
 			}
+
+		case "discover":
+			// Discover agent contact information via DNS
+			if req.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id is required for discover command"
+				return
+			}
+			if conf.Internal.TransportManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not configured"
+				return
+			}
+
+			agentId := strings.TrimSpace(req.AgentId)
+			log.Printf("API: Starting discovery for agent %s", agentId)
+
+			discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentId)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("discovery failed: %v", err)
+				return
+			}
+
+			// Get the peer to return discovery information
+			peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(dns.Fqdn(agentId))
+			if !ok {
+				resp.Error = true
+				resp.ErrorMsg = "agent discovered but not found in registry"
+				return
+			}
+
+			// Build discovery result for response
+			discoveryInfo := map[string]interface{}{
+				"identity": peer.ID,
+			}
+			if peer.APIEndpoint != "" {
+				discoveryInfo["api_uri"] = peer.APIEndpoint
+			}
+			if addr := peer.CurrentAddress(); addr != nil {
+				discoveryInfo["host"] = addr.Host
+				discoveryInfo["port"] = addr.Port
+				discoveryInfo["transport"] = addr.Transport
+			}
+			discoveryInfo["state"] = peer.GetState().String()
+			discoveryInfo["preferred_transport"] = peer.PreferredTransport
+
+			// Return result through handledManually
+			respMap := SanitizeForJSON(resp).(AgentDistribResponse)
+			w.Header().Set("Content-Type", "application/json")
+
+			fullResp := map[string]interface{}{
+				"time":      respMap.Time,
+				"msg":       fmt.Sprintf("Successfully discovered agent %s", agentId),
+				"error":     false,
+				"discovery": discoveryInfo,
+			}
+
+			handledManually = true
+			json.NewEncoder(w).Encode(fullResp)
+			return
 
 		default:
 			resp.Error = true

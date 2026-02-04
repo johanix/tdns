@@ -16,6 +16,7 @@ const (
 	OptFoldCase
 	OptBlackLies
 	OptDontPublishKey
+	OptDontPublishJWK
 	OptOnlineSigning
 	OptMultiSigner // OBE?
 	OptDirty
@@ -37,6 +38,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptFoldCase:          "fold-case",
 	OptBlackLies:         "black-lies",
 	OptDontPublishKey:    "dont-publish-key",
+	OptDontPublishJWK:    "dont-publish-jwk",
 	OptOnlineSigning:     "online-signing",
 	OptMultiSigner:       "multisigner", // OBE?
 	OptDirty:             "dirty",
@@ -58,6 +60,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"fold-case":                  OptFoldCase,
 	"black-lies":                 OptBlackLies,
 	"dont-publish-key":           OptDontPublishKey,
+	"dont-publish-jwk":           OptDontPublishJWK,
 	"online-signing":             OptOnlineSigning,
 	"multisigner":                OptMultiSigner, // OBE?
 	"dirty":                      OptDirty,

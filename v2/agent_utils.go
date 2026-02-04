@@ -97,6 +97,11 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 // }
 
 // LocateAgent is completely asynchronous with no return values
+//
+// DEPRECATED: This function has critical concurrency issues (see docs/locateagent-review-findings.md).
+// It will be replaced by the refactored discovery mechanism using common helpers from
+// agent_discovery_common.go. Keep this implementation for backward compatibility until
+// the migration is complete.
 func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
 	log.Printf("LocateAgent: looking up agent %s", remoteid)
 
@@ -272,13 +277,15 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			}
 
 			// Only proceed with KEY if we have the target name
+			// TODO: Migrate to JWK lookup using lookupAgentJWK() from agent_discovery_common.go
+			// This is a legacy fallback mechanism - new code should use JWK records
 			agent.mu.RLock()
 			tmpnilkey := agent.DnsDetails.KeyRR == nil
 			tmphost := agent.DnsDetails.Host
 			agent.mu.RUnlock()
 			if tmpnilkey && tmphost != "" {
 				go func() {
-					// Look up KEY
+					// Look up KEY (legacy)
 					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tmphost), dns.TypeKEY, timeout, retries, resolvers)
 					if err != nil {
 						log.Printf("LocateAgent: error response to KEY query: %v", err)
@@ -473,6 +480,80 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 	return svcbrr, addrs, port, targetName, nil
 }
 
+// DiscoverAgentAsync performs agent discovery and registration asynchronously using the new discovery path.
+// This is the recommended replacement for the deprecated LocateAgent() function.
+// It uses DiscoverAgent() + RegisterDiscoveredAgent() from agent_discovery.go.
+//
+// Parameters:
+//   - remoteid: The agent identity to discover
+//   - zonename: Optional zone name to associate with the agent
+//   - deferredTask: Optional task to execute when discovery completes
+//
+// The function is completely asynchronous with no return values.
+// Discovery results are logged and registered in both PeerRegistry and AgentRegistry.
+func (ar *AgentRegistry) DiscoverAgentAsync(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
+	log.Printf("DiscoverAgentAsync: looking up agent %s", remoteid)
+
+	// Skip if this is our own identity
+	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
+		log.Printf("DiscoverAgentAsync: skipping self-identification for %s", remoteid)
+		return
+	}
+
+	// Check if we already know this agent
+	agent, exists := ar.S.Get(remoteid)
+	if exists {
+		if zonename != "" {
+			ar.AddZoneToAgent(remoteid, zonename)
+		}
+
+		// If the agent exists in the registry, then it is at least in the state "needed".
+		// That implies that either there is already a discovery running, or one has
+		// already completed. In neither case do we need a new discovery, so we just return.
+		log.Printf("DiscoverAgentAsync: agent %s already exists in state %d", remoteid, agent.State)
+		return
+	}
+
+	// Check if we have TransportManager available
+	if ar.TransportManager == nil {
+		log.Printf("DiscoverAgentAsync: ERROR: No TransportManager available, falling back to deprecated LocateAgent")
+		ar.LocateAgent(remoteid, zonename, deferredTask)
+		return
+	}
+
+	// Spawn async goroutine for discovery using the new path
+	go func() {
+		ctx := context.Background()
+		result := DiscoverAgent(ctx, string(remoteid))
+
+		if result.Error != nil {
+			log.Printf("DiscoverAgentAsync: discovery failed for %s: %v", remoteid, result.Error)
+			return
+		}
+
+		// Register the discovered agent
+		err := ar.TransportManager.RegisterDiscoveredAgent(result)
+		if err != nil {
+			log.Printf("DiscoverAgentAsync: registration failed for %s: %v", remoteid, err)
+			return
+		}
+
+		// Associate zone if provided
+		if zonename != "" {
+			ar.AddZoneToAgent(remoteid, zonename)
+		}
+
+		// Note: deferredTask execution is not yet implemented
+		// The original LocateAgent() also doesn't execute deferred tasks
+		// TODO: Implement deferred task execution when the agent becomes operational
+		if deferredTask != nil {
+			log.Printf("DiscoverAgentAsync: deferred task provided for agent %s zone %s (not yet implemented)", remoteid, zonename)
+		}
+
+		log.Printf("DiscoverAgentAsync: successfully discovered and registered agent %s", remoteid)
+	}()
+}
+
 // Create a new synchronous function for code that needs immediate results
 func (ar *AgentRegistry) GetAgentInfo(identity AgentId) (*Agent, error) {
 	// Skip if this is our own identity
@@ -506,7 +587,7 @@ func (ar *AgentRegistry) xxxIdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([
 					continue
 				}
 				// Found another agent, try to locate it
-				ar.LocateAgent(AgentId(hsync.Identity), "", nil)
+				ar.DiscoverAgentAsync(AgentId(hsync.Identity), "", nil)
 			}
 		}
 	}
@@ -663,7 +744,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					}
 
 					// Need to sync with Upstream - do this asynchronously
-					ar.LocateAgent(AgentId(hsync.Upstream), zonename,
+					ar.DiscoverAgentAsync(AgentId(hsync.Upstream), zonename,
 						&DeferredAgentTask{
 							Precondition: func() bool {
 								if agent, exists := ar.S.Get(AgentId(hsync.Upstream)); exists {
@@ -687,7 +768,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 						})
 				} else if AgentId(hsync.Upstream) == ourId {
 					// Need to sync with Upstream - do this asynchronously
-					ar.LocateAgent(AgentId(hsync.Identity), zonename,
+					ar.DiscoverAgentAsync(AgentId(hsync.Identity), zonename,
 						&DeferredAgentTask{
 							// XXX: This is not complete, as there is no check for the Precondition
 							// XXX: some sort of periodic check is needed to ensure that the agent is still
@@ -716,7 +797,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 				} else {
 					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Identity)
 					// Not our target, locate agent asynchronously
-					ar.LocateAgent(AgentId(hsync.Identity), zonename, nil)
+					ar.DiscoverAgentAsync(AgentId(hsync.Identity), zonename, nil)
 				}
 			}
 		}
