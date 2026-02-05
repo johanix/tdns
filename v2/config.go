@@ -143,7 +143,7 @@ type LocalAgentConf struct {
 	// SupportedMechanisms: List of active transport mechanisms (default: ["api", "dns"] if both configured)
 	// Valid values: "api", "dns"
 	// Set to ["api"] to disable DNS transport, ["dns"] to disable API transport
-	SupportedMechanisms []string `yaml:"supported_mechanisms"`
+	SupportedMechanisms []string `yaml:"supported_mechanisms" mapstructure:"supported_mechanisms"`
 	Local               struct {
 		Notify      []string // secondaries to notify for an agent autozone
 		Nameservers []string `yaml:"nameservers,omitempty"` // authoritative NS hostnames for the agent autozone (FQDN, no glue; must be outside the autozone)
