@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns/v2/edns0"
@@ -45,6 +46,15 @@ type ChunkNotifyHandler struct {
 	// this to send the CHUNK query to the correct host:port (e.g. from agent.peers config).
 	// If nil, fallback is NOTIFY source with port 53.
 	GetPeerAddress func(senderID string) (address string, ok bool)
+
+	// IsAgentAuthorized checks if a sender is authorized to send us messages.
+	// This is called BEFORE expensive operations (decryption, query fetch) to prevent DoS attacks.
+	// If nil, no authorization check is performed (not recommended for production).
+	IsAgentAuthorized func(senderID string, zone string) (authorized bool, reason string)
+
+	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
+	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
+	unsolicitedCount uint64
 }
 
 // NewChunkNotifyHandler creates a new ChunkNotifyHandler.
@@ -101,6 +111,28 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
 
+	// SECURITY: Authorization check BEFORE expensive operations (DoS mitigation)
+	// Extract sender hint from QNAME (cheap operation) and check authorization
+	senderHint := extractSenderHintFromQname(qname)
+	if h.IsAgentAuthorized != nil && senderHint != "" {
+		// Extract zone from QNAME if available (for HSYNC-based authorization)
+		var zone string
+		if len(msg.Question) > 0 {
+			zone = msg.Question[0].Name
+		}
+
+		authorized, reason := h.IsAgentAuthorized(senderHint, zone)
+		if !authorized {
+			// NOT AUTHORIZED: Increment counter, log, and silently drop (no response to avoid info leak)
+			count := atomic.AddUint64(&h.unsolicitedCount, 1)
+			log.Printf("ChunkNotifyHandler: REJECTED unauthorized NOTIFY from %s (hint: %s): %s [total rejected: %d]",
+				sourceAddr, senderHint, reason, count)
+			// Do NOT send response - silent drop to avoid confirming we exist
+			return nil
+		}
+		log.Printf("ChunkNotifyHandler: Sender %s authorized: %s", senderHint, reason)
+	}
+
 	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
 	payload, err := h.extractChunkPayload(msg)
 	if err != nil {
@@ -113,17 +145,23 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 		}
 	}
 
-	// Decrypt the payload if it is encrypted (try sender's key first from QNAME, then other peers)
+	// Decrypt the payload if it is encrypted
+	// SECURITY: Use strict decryption - ONLY try the authorized peer's key to prevent DoS
 	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && IsPayloadEncrypted(payload) {
 		log.Printf("ChunkNotifyHandler: Encrypted payload detected from %s", sourceAddr)
-		senderHint := extractSenderHintFromQname(qname)
-		decrypted, _, err := h.SecureWrapper.UnwrapIncomingTryAllPeers(payload, senderHint)
+
+		// Use strict decryption: ONLY the senderHint's key (prevents DoS via QNAME forgery)
+		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
 		if err != nil {
-			log.Printf("ChunkNotifyHandler: Failed to decrypt payload from %s: %v", sourceAddr, err)
-			_ = h.sendResponse(w, msg, dns.RcodeFormatError)
-			return notifyerrors.ErrNotifyHandlerErrorResponse
+			// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
+			count := atomic.AddUint64(&h.unsolicitedCount, 1)
+			log.Printf("ChunkNotifyHandler: FORGERY ATTEMPT detected from %s: QNAME claimed to be %s but crypto verification failed: %v [total rejected: %d]",
+				sourceAddr, senderHint, err, count)
+			// Silent drop - don't confirm we exist or give error details to attacker
+			return nil
 		}
 		payload = decrypted
+		log.Printf("ChunkNotifyHandler: Successfully decrypted payload from %s using key for %s", sourceAddr, senderHint)
 	}
 
 	// Parse the payload
@@ -391,4 +429,10 @@ func (h *ChunkNotifyHandler) CreateNotifyHandlerFunc() interface{} {
 	return func(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
 		return h.HandleChunkNotify(ctx, qname, msg, w)
 	}
+}
+
+// UnsolicitedMessageCount returns the number of rejected messages from unauthorized senders.
+// This counter is used for DoS attack monitoring and should be exported via metrics/monitoring.
+func (h *ChunkNotifyHandler) UnsolicitedMessageCount() uint64 {
+	return atomic.LoadUint64(&h.unsolicitedCount)
 }

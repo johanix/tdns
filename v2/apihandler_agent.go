@@ -157,6 +157,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		var exist bool
 		noZoneCommands := map[string]bool{
 			"config": true, "hsync-agentstatus": true, "combiner-dnsping": true, "combiner-apiping": true,
+			"discover": true, "hsync-locate": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -251,6 +252,19 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			resp.Agents = []*Agent{agent}
 			resp.Msg = fmt.Sprintf("Data for remote agent %q", amp.AgentId)
+
+		case "discover":
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "No agent identity specified"
+				return
+			}
+
+			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
+
+			// Trigger discovery (always starts fresh discovery)
+			conf.Internal.AgentRegistry.DiscoverAgentAsync(amp.AgentId, amp.Zone, nil)
+			resp.Msg = fmt.Sprintf("Discovery started for agent %s", amp.AgentId)
 
 		case "hsync-locate":
 			if amp.AgentId == "" {

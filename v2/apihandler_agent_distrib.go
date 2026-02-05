@@ -333,8 +333,18 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					toFqdn := dns.Fqdn(req.To)
 					peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(toFqdn)
 					if !ok {
-						// Attempt dynamic discovery for unknown agents
-						log.Printf("API: agent %q not found in PeerRegistry, attempting discovery", toFqdn)
+						// DNS-42: Authorization check BEFORE discovery
+						// Prevents DoS attack via discovery amplification
+						authorized, reason := conf.Internal.TransportManager.IsAgentAuthorized(toFqdn, "")
+						if !authorized {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", req.To, reason)
+							log.Printf("API: REJECTED discovery attempt for unauthorized agent %q: %s", toFqdn, reason)
+							return
+						}
+
+						// Attempt dynamic discovery for authorized but unknown agents
+						log.Printf("API: agent %q not found in PeerRegistry, attempting discovery (authorized: %s)", toFqdn, reason)
 						discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
 						defer discoveryCancel()
 
@@ -393,12 +403,24 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			}
 
 			agentId := strings.TrimSpace(req.AgentId)
-			log.Printf("API: Starting discovery for agent %s", agentId)
+			agentFqdn := dns.Fqdn(agentId)
+
+			// DNS-42: Authorization check BEFORE discovery
+			// Prevents DoS attack via discovery amplification
+			authorized, reason := conf.Internal.TransportManager.IsAgentAuthorized(agentFqdn, "")
+			if !authorized {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", agentId, reason)
+				log.Printf("API: REJECTED discovery attempt for unauthorized agent %q: %s", agentFqdn, reason)
+				return
+			}
+
+			log.Printf("API: Starting discovery for agent %s (authorized: %s)", agentId, reason)
 
 			discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
-			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentId)
+			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("discovery failed: %v", err)
@@ -504,25 +526,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		peers = append(peers, peerInfo)
 	}
 
-	// 2. Add statically configured peer agents (agent.peers); use FQDN for identity
-	if conf.Agent != nil && conf.Agent.Peers != nil {
-		for peerID, peerConf := range conf.Agent.Peers {
-			if peerConf.Address == "" {
-				continue
-			}
-			peerInfo := PeerInfo{
-				PeerID:      dns.Fqdn(peerID),
-				PeerType:    "agent",
-				Transport:   "DNS",
-				Address:     peerConf.Address,
-				CryptoType:  "JOSE",
-				DistribSent: 0,
-			}
-			peers = append(peers, peerInfo)
-		}
-	}
-
-	// 3. Add remote agents from AgentRegistry (HELLO-discovered); skip if already in peers from config; use FQDN
+	// 2. Add remote agents from AgentRegistry (discovered via DNS); use FQDN
 	// Create separate entries for API and DNS transports
 	seen := make(map[string]bool) // key: peerID+transport
 	for _, p := range peers {

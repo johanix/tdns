@@ -51,6 +51,9 @@ type TransportManager struct {
 
 	// AgentQs for routing messages to hsyncengine
 	agentQs *AgentQs
+
+	// SupportedMechanisms lists active transports ("api", "dns")
+	SupportedMechanisms []string
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -75,26 +78,43 @@ type TransportManagerConfig struct {
 
 	// DistributionCache: when set, outgoing CHUNK operations (ping, hello, etc.) are registered for "agent distrib list"
 	DistributionCache *DistributionCache
+
+	// SupportedMechanisms lists active transports ("api", "dns"); default: both if configured
+	SupportedMechanisms []string
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
 func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
-	tm := &TransportManager{
-		LocalID:       cfg.LocalID,
-		ControlZone:   cfg.ControlZone,
-		PeerRegistry:  transport.NewPeerRegistry(),
-		agentRegistry: cfg.AgentRegistry,
-		agentQs:       cfg.AgentQs,
+	// Default to both transports if not specified (backward compatibility for tests)
+	// Production configs MUST specify supported_mechanisms explicitly (validated at config load)
+	supportedMechanisms := cfg.SupportedMechanisms
+	if len(supportedMechanisms) == 0 {
+		log.Printf("WARNING: TransportManager created without supported_mechanisms - defaulting to [api, dns]")
+		supportedMechanisms = []string{"api", "dns"}
 	}
 
-	// Create API transport
-	tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
-		LocalID:        cfg.LocalID,
-		DefaultTimeout: cfg.APITimeout,
-	})
+	tm := &TransportManager{
+		LocalID:             cfg.LocalID,
+		ControlZone:         cfg.ControlZone,
+		PeerRegistry:        transport.NewPeerRegistry(),
+		agentRegistry:       cfg.AgentRegistry,
+		agentQs:             cfg.AgentQs,
+		SupportedMechanisms: supportedMechanisms,
+	}
 
-	// Create DNS transport if control zone is configured
-	if cfg.ControlZone != "" {
+	// Create API transport if supported
+	if tm.isTransportSupported("api") {
+		tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
+			LocalID:        cfg.LocalID,
+			DefaultTimeout: cfg.APITimeout,
+		})
+		log.Printf("TransportManager: API transport enabled")
+	} else {
+		log.Printf("TransportManager: API transport disabled by configuration")
+	}
+
+	// Create DNS transport if control zone is configured AND supported
+	if cfg.ControlZone != "" && tm.isTransportSupported("dns") {
 		dnsCfg := &transport.DNSTransportConfig{
 			LocalID:                    cfg.LocalID,
 			ControlZone:                cfg.ControlZone,
@@ -143,9 +163,32 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			addr := peer.CurrentAddress()
 			return fmt.Sprintf("%s:%d", addr.Host, addr.Port), true
 		}
+
+		// DoS mitigation: Check authorization BEFORE expensive operations (decryption, query fetch)
+		tm.ChunkHandler.IsAgentAuthorized = func(senderID string, zone string) (bool, string) {
+			return tm.IsAgentAuthorized(senderID, zone)
+		}
+		log.Printf("TransportManager: DNS transport enabled")
+	} else if cfg.ControlZone == "" {
+		log.Printf("TransportManager: DNS transport not configured (no control zone)")
+	} else {
+		log.Printf("TransportManager: DNS transport disabled by configuration")
 	}
 
 	return tm
+}
+
+// isTransportSupported checks if a transport mechanism is enabled in configuration.
+func (tm *TransportManager) isTransportSupported(mechanism string) bool {
+	if len(tm.SupportedMechanisms) == 0 {
+		return true // Default: all transports supported
+	}
+	for _, m := range tm.SupportedMechanisms {
+		if m == mechanism {
+			return true
+		}
+	}
+	return false
 }
 
 // RegisterChunkNotifyHandler registers the CHUNK NOTIFY handler with tdns.
@@ -216,15 +259,49 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
+	// DNS-38: Authorization check BEFORE routing to hsyncengine
+	// This prevents discovery amplification attacks by rejecting unauthorized senders
+	// Use helper method to get zones from either old or new format
+	sharedZones := payload.GetSharedZones()
+	var zone string
+	if len(sharedZones) > 0 {
+		zone = sharedZones[0] // Use first shared zone for HSYNC check
+	}
+	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	authorized, reason := tm.IsAgentAuthorized(senderID, zone)
+	if !authorized {
+		log.Printf("TransportManager: REJECTED DNS hello from %s: %s", senderID, reason)
+		// Security audit log - this may indicate attack attempt
+		log.Printf("TransportManager: Security: Unauthorized Hello attempt from %s (zone: %q)", senderID, zone)
+		return
+	}
+	log.Printf("TransportManager: DNS hello from %s authorized: %s", senderID, reason)
+
+	// DNS-37: Update PeerRegistry state (DNS hello accepted → INTRODUCING state)
+	peer := tm.PeerRegistry.GetOrCreate(senderID)
+	peer.SetState(transport.PeerStateIntroducing, "DNS hello accepted and authorized")
+	peer.LastHelloReceived = time.Now()
+
+	// Also update AgentRegistry if available (for backward compatibility)
+	if tm.agentRegistry != nil {
+		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
+		if exists {
+			agent.DnsDetails.State = AgentStateIntroduced
+			agent.DnsDetails.HelloTime = time.Now()
+			agent.DnsDetails.LastContactTime = time.Now()
+			tm.agentRegistry.S.Set(agent.Identity, agent)
+		}
+	}
+
 	// Convert to AgentMsgReport for the existing hsyncengine
 	report := &AgentMsgReport{
 		MessageType: AgentMsgHello,
-		Identity:    AgentId(payload.SenderID),
+		Identity:    AgentId(senderID),
 	}
 
 	select {
 	case tm.agentQs.Hello <- report:
-		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine", payload.SenderID)
+		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING)", payload.SenderID)
 	default:
 		log.Printf("TransportManager: Hello channel full, dropping message from %s", payload.SenderID)
 	}
@@ -238,18 +315,80 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	// Convert to AgentMsgReport for the existing hsyncengine
-	report := &AgentMsgReport{
-		MessageType:  AgentMsgBeat,
-		Identity:     AgentId(payload.SenderID),
-		BeatInterval: uint32(30), // Default, could be extracted from payload
+	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+
+	// DNS-51: Authorization check for Beat messages
+	// Beat includes Zones field (list of zones sender believes are shared)
+	// Authorization succeeds if:
+	// 1. Sender in authorized_peers config, OR
+	// 2. Sender in HSYNC for any zone in Zones list, OR
+	// 3. Zones list empty AND sender previously authorized (agent in OPERATIONAL state)
+
+	var authorized bool
+	var reason string
+
+	// Try config path first (works for all cases)
+	if tm.isInAuthorizedPeers(senderID) {
+		authorized = true
+		reason = "found in agent.authorized_peers"
+	} else if len(payload.Zones) > 0 {
+		// Try HSYNC path for each zone in the Beat
+		for _, zone := range payload.Zones {
+			if auth, rsn := tm.IsAgentAuthorized(senderID, zone); auth {
+				authorized = true
+				reason = rsn
+				break
+			}
+		}
+	} else {
+		// Empty zone list - check if agent exists and was previously authorized
+		if tm.agentRegistry != nil {
+			agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
+			if exists && agent.State == AgentStateOperational {
+				authorized = true
+				reason = "previously authorized agent (OPERATIONAL state, empty zone list)"
+			}
+		}
 	}
 
-	select {
+	if !authorized {
+		log.Printf("TransportManager: REJECTED DNS beat from %s: not authorized (zones: %v)", senderID, payload.Zones)
+		log.Printf("TransportManager: Security: Unauthorized Beat attempt from %s", senderID)
+		return
+	}
+	log.Printf("TransportManager: DNS beat from %s authorized: %s (zones: %v)", senderID, reason, payload.Zones)
+
+	// DNS-37: Update peer state on successful beat
+	peer := tm.PeerRegistry.GetOrCreate(senderID)
+	peer.LastBeatReceived = time.Now()
+	peer.SetState(transport.PeerStateOperational, "Beat received from operational peer")
+
+	// Also update AgentRegistry if available
+	if tm.agentRegistry != nil {
+		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
+		if exists {
+			agent.DnsDetails.State = AgentStateOperational
+			agent.DnsDetails.LastContactTime = time.Now()
+			tm.agentRegistry.S.Set(agent.Identity, agent)
+		}
+	}
+
+	beatInterval := payload.MyBeatInterval
+	if beatInterval == 0 {
+		beatInterval = 30 // Default if not provided
+	}
+
+	report := &AgentMsgReport{
+		MessageType:  AgentMsgBeat,
+		Identity:     AgentId(senderID),
+		BeatInterval: beatInterval,
+	}
+
+	select{
 	case tm.agentQs.Beat <- report:
-		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine", payload.SenderID)
+		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL)", senderID)
 	default:
-		log.Printf("TransportManager: Beat channel full, dropping message from %s", payload.SenderID)
+		log.Printf("TransportManager: Beat channel full, dropping message from %s", senderID)
 	}
 }
 
@@ -261,26 +400,61 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	// Convert to AgentMsgPostPlus for the existing hsyncengine
+	senderID := payload.GetSenderID()   // Use helper method to get sender ID from either format
+	records := payload.GetRecords()      // Use helper method to get records from either format
+	zone := payload.Zone
+
+	// Determine message type (NOTIFY, RFI, or STATUS)
+	messageType := AgentMsgNotify // Default to NOTIFY for backward compatibility
+	if payload.MessageType != 0 {
+		// New format includes MessageType field
+		messageType = AgentMsg(payload.MessageType)
+	}
+	msgTypeStr := core.AgentMsgToString[core.AgentMsg(messageType)]
+
+	// DNS-51: Authorization check for Sync/Notify/RFI/Status messages
+	// Check if sender is authorized for this zone (via config or HSYNC)
+	authorized, reason := tm.IsAgentAuthorized(senderID, zone)
+	if !authorized {
+		log.Printf("TransportManager: REJECTED DNS %s from %s for zone %s: %s", msgTypeStr, senderID, zone, reason)
+		log.Printf("TransportManager: Security: Unauthorized %s attempt from %s for zone %s", msgTypeStr, senderID, zone)
+		return
+	}
+	log.Printf("TransportManager: DNS %s from %s for zone %s authorized: %s", msgTypeStr, senderID, zone, reason)
+
+	// Update peer state on successful message
+	peer := tm.PeerRegistry.GetOrCreate(senderID)
+	peer.SetState(transport.PeerStateOperational, fmt.Sprintf("%s received from operational peer", msgTypeStr))
+
+	// Also update AgentRegistry if available
+	if tm.agentRegistry != nil {
+		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
+		if exists {
+			agent.DnsDetails.LastContactTime = time.Now()
+			tm.agentRegistry.S.Set(agent.Identity, agent)
+		}
+	}
+
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
-			MessageType: AgentMsgNotify,
-			MyIdentity:  AgentId(payload.SenderID),
-			Zone:        ZoneName(payload.Zone),
-			RRs:         payload.Records,
+			MessageType: messageType,
+			MyIdentity:  AgentId(senderID),
+			Zone:        ZoneName(zone),
+			RRs:         records,
 			Time:        time.Unix(payload.Timestamp, 0),
+			RfiType:     payload.RfiType, // Include RfiType for RFI messages
 		},
 	}
 
 	select {
 	case tm.agentQs.Msg <- msgPost:
-		log.Printf("TransportManager: Routed DNS sync from %s (zone: %s) to hsyncengine",
-			payload.SenderID, payload.Zone)
+		log.Printf("TransportManager: Routed DNS %s from %s (zone: %s) to hsyncengine",
+			msgTypeStr, senderID, zone)
 
 		// Send confirmation back via DNS
 		go tm.sendSyncConfirmation(msg, payload)
 	default:
-		log.Printf("TransportManager: Message channel full, dropping sync from %s", payload.SenderID)
+		log.Printf("TransportManager: Message channel full, dropping %s from %s", msgTypeStr, senderID)
 	}
 }
 
@@ -453,8 +627,9 @@ func (tm *TransportManager) agentStateToTransportState(state AgentState) transpo
 	}
 }
 
-// SendHelloWithFallback sends a Hello handshake to a peer with transport fallback.
-// Tries API first (if available), then DNS, with retry logic.
+// SendHelloWithFallback sends a Hello handshake to a peer with transport fallback (legacy name).
+// UPDATED: Now sends Hello on ALL supported transports independently when both are configured.
+// Returns success if ANY transport succeeds. Updates per-transport state in Agent struct.
 func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
 	peer := tm.SyncPeerFromAgent(agent)
 
@@ -465,42 +640,65 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		Timestamp:    time.Now(),
 	}
 
-	// Try primary transport (API first if available)
-	primary := tm.SelectTransport(peer)
-	if primary != nil {
-		resp, err := primary.Hello(ctx, peer, req)
-		if err == nil {
-			log.Printf("TransportManager: Hello to %s succeeded via %s", peer.ID, primary.Name())
-			return resp, nil
+	var apiResp *transport.HelloResponse
+	var dnsResp *transport.HelloResponse
+	var apiErr error
+	var dnsErr error
+
+	// Try API transport if supported
+	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") {
+		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
+		agent.mu.Lock()
+		if apiErr != nil {
+			log.Printf("TransportManager: API Hello to %s failed: %v", peer.ID, apiErr)
+			agent.ApiDetails.LatestError = apiErr.Error()
+			agent.ApiDetails.LatestErrorTime = time.Now()
+		} else if apiResp != nil && !apiResp.Accepted {
+			log.Printf("TransportManager: API Hello to %s not accepted: %s", peer.ID, apiResp.RejectReason)
+			agent.ApiDetails.LatestError = apiResp.RejectReason
+			agent.ApiDetails.LatestErrorTime = time.Now()
+		} else {
+			log.Printf("TransportManager: API Hello to %s succeeded", peer.ID)
+			agent.ApiDetails.State = AgentStateIntroduced
+			agent.ApiDetails.HelloTime = time.Now()
+			agent.ApiDetails.LastContactTime = time.Now()
+			agent.ApiDetails.LatestError = ""
 		}
-		log.Printf("TransportManager: Hello via %s failed for %s: %v", primary.Name(), peer.ID, err)
+		agent.mu.Unlock()
 	}
 
-	// Try fallback transport
-	var fallback transport.Transport
-	if primary == tm.APITransport && tm.DNSTransport != nil && agent.DnsMethod {
-		fallback = tm.DNSTransport
-	} else if primary == tm.DNSTransport && tm.APITransport != nil && agent.ApiMethod {
-		fallback = tm.APITransport
-	} else if primary == nil {
-		// No primary, try whatever is available
-		if tm.APITransport != nil && agent.ApiMethod {
-			fallback = tm.APITransport
-		} else if tm.DNSTransport != nil && agent.DnsMethod {
-			fallback = tm.DNSTransport
+	// Try DNS transport if supported
+	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
+		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
+		agent.mu.Lock()
+		if dnsErr != nil {
+			log.Printf("TransportManager: DNS Hello to %s failed: %v", peer.ID, dnsErr)
+			agent.DnsDetails.LatestError = dnsErr.Error()
+			agent.DnsDetails.LatestErrorTime = time.Now()
+		} else if dnsResp != nil && !dnsResp.Accepted {
+			log.Printf("TransportManager: DNS Hello to %s not accepted: %s", peer.ID, dnsResp.RejectReason)
+			agent.DnsDetails.LatestError = dnsResp.RejectReason
+			agent.DnsDetails.LatestErrorTime = time.Now()
+		} else {
+			log.Printf("TransportManager: DNS Hello to %s succeeded", peer.ID)
+			agent.DnsDetails.State = AgentStateIntroduced
+			agent.DnsDetails.HelloTime = time.Now()
+			agent.DnsDetails.LastContactTime = time.Now()
+			agent.DnsDetails.LatestError = ""
 		}
+		agent.mu.Unlock()
 	}
 
-	if fallback != nil {
-		log.Printf("TransportManager: Trying fallback transport %s for Hello to %s", fallback.Name(), peer.ID)
-		resp, err := fallback.Hello(ctx, peer, req)
-		if err == nil {
-			return resp, nil
-		}
-		log.Printf("TransportManager: Hello via fallback %s failed for %s: %v", fallback.Name(), peer.ID, err)
+	// Return success if ANY transport succeeded
+	if apiErr == nil && apiResp != nil && apiResp.Accepted {
+		return apiResp, nil
+	}
+	if dnsErr == nil && dnsResp != nil && dnsResp.Accepted {
+		return dnsResp, nil
 	}
 
-	return nil, fmt.Errorf("all transports failed for Hello to peer %s", peer.ID)
+	// Both failed
+	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
 // SendPing sends a CHUNK-based ping to a peer; prefers DNS transport (API does not implement ping).
@@ -521,6 +719,9 @@ func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) 
 }
 
 // SendBeatWithFallback sends a heartbeat to a peer with transport fallback.
+// SendBeatWithFallback sends a Beat heartbeat to a peer (legacy name).
+// UPDATED: Now sends Beat on ALL supported transports independently when both are configured.
+// Returns success if ANY transport succeeds. Updates per-transport LastContactTime in Agent struct.
 func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
 	peer := tm.SyncPeerFromAgent(agent)
 
@@ -531,30 +732,63 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 		State:     string(agent.State),
 	}
 
-	// Try primary transport
-	primary := tm.SelectTransport(peer)
-	if primary != nil {
-		resp, err := primary.Beat(ctx, peer, req)
-		if err == nil {
-			return resp, nil
+	var apiResp *transport.BeatResponse
+	var dnsResp *transport.BeatResponse
+	var apiErr error
+	var dnsErr error
+
+	// Try API transport if supported and OPERATIONAL
+	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") {
+		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced {
+			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
+			agent.mu.Lock()
+			if apiErr != nil {
+				log.Printf("TransportManager: API Beat to %s failed: %v", peer.ID, apiErr)
+				agent.ApiDetails.LatestError = apiErr.Error()
+				agent.ApiDetails.LatestErrorTime = time.Now()
+			} else {
+				log.Printf("TransportManager: API Beat to %s succeeded", peer.ID)
+				agent.ApiDetails.State = AgentStateOperational
+				agent.ApiDetails.LastContactTime = time.Now()
+				agent.ApiDetails.LatestRBeat = time.Now()
+				agent.ApiDetails.ReceivedBeats++
+				agent.ApiDetails.LatestError = ""
+			}
+			agent.mu.Unlock()
 		}
-		log.Printf("TransportManager: Beat via %s failed for %s: %v", primary.Name(), peer.ID, err)
 	}
 
-	// Try fallback transport
-	var fallback transport.Transport
-	if primary == tm.APITransport && tm.DNSTransport != nil && agent.DnsMethod {
-		fallback = tm.DNSTransport
-	} else if primary == tm.DNSTransport && tm.APITransport != nil && agent.ApiMethod {
-		fallback = tm.APITransport
+	// Try DNS transport if supported and OPERATIONAL
+	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
+		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced {
+			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
+			agent.mu.Lock()
+			if dnsErr != nil {
+				log.Printf("TransportManager: DNS Beat to %s failed: %v", peer.ID, dnsErr)
+				agent.DnsDetails.LatestError = dnsErr.Error()
+				agent.DnsDetails.LatestErrorTime = time.Now()
+			} else {
+				log.Printf("TransportManager: DNS Beat to %s succeeded", peer.ID)
+				agent.DnsDetails.State = AgentStateOperational
+				agent.DnsDetails.LastContactTime = time.Now()
+				agent.DnsDetails.LatestRBeat = time.Now()
+				agent.DnsDetails.ReceivedBeats++
+				agent.DnsDetails.LatestError = ""
+			}
+			agent.mu.Unlock()
+		}
 	}
 
-	if fallback != nil {
-		log.Printf("TransportManager: Trying fallback transport %s for Beat to %s", fallback.Name(), peer.ID)
-		return fallback.Beat(ctx, peer, req)
+	// Return success if ANY transport succeeded
+	if apiErr == nil && apiResp != nil {
+		return apiResp, nil
+	}
+	if dnsErr == nil && dnsResp != nil {
+		return dnsResp, nil
 	}
 
-	return nil, fmt.Errorf("all transports failed for Beat to peer %s", peer.ID)
+	// Both failed
+	return nil, fmt.Errorf("all transports failed for Beat to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
 // OnAgentDiscoveryComplete is called when agent discovery completes.

@@ -81,6 +81,11 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("Config \"%s\" agent.local.nameservers validation failed: %v", cfgfile, err)
 	}
 
+	// Validate agent.supported_mechanisms if agent is configured
+	if err := ValidateAgentSupportedMechanisms(&config); err != nil {
+		return fmt.Errorf("Config \"%s\" agent.supported_mechanisms validation failed: %v", cfgfile, err)
+	}
+
 	// Validate database file is set for apps that require it
 	if err := ValidateDatabaseFile(&config); err != nil {
 		return fmt.Errorf("Config \"%s\" database validation failed: %v", cfgfile, err)
@@ -228,6 +233,47 @@ func ValidateAgentNameservers(config *Config) error {
 		}
 		config.Agent.Local.Nameservers[i] = nsFqdn
 	}
+	return nil
+}
+
+// ValidateAgentSupportedMechanisms validates agent.supported_mechanisms configuration.
+// Requirements:
+// - Must be non-empty (agent needs at least one communication mechanism)
+// - Can only contain "api" and/or "dns" (case-insensitive)
+// - Default if omitted: ["api", "dns"]
+func ValidateAgentSupportedMechanisms(config *Config) error {
+	if config.Agent == nil {
+		return nil
+	}
+
+	mechanisms := config.Agent.SupportedMechanisms
+
+	// If empty, will default to both transports in NewTransportManager
+	// But we enforce explicit configuration - empty list is an error
+	if len(mechanisms) == 0 {
+		return fmt.Errorf("agent.supported_mechanisms cannot be empty - agent requires at least one transport mechanism (valid: \"api\", \"dns\")")
+	}
+
+	// Validate each mechanism and normalize to lowercase
+	validMechanisms := map[string]bool{"api": true, "dns": true}
+	seen := make(map[string]bool)
+
+	for i, m := range mechanisms {
+		m = strings.ToLower(strings.TrimSpace(m))
+		if m == "" {
+			return fmt.Errorf("agent.supported_mechanisms: empty entry at index %d", i)
+		}
+		if !validMechanisms[m] {
+			return fmt.Errorf("agent.supported_mechanisms: invalid value %q at index %d (valid: \"api\", \"dns\")", mechanisms[i], i)
+		}
+		if seen[m] {
+			return fmt.Errorf("agent.supported_mechanisms: duplicate value %q", m)
+		}
+		seen[m] = true
+		// Normalize to lowercase in place
+		config.Agent.SupportedMechanisms[i] = m
+	}
+
 	return nil
 }
 

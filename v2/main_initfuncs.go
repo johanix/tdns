@@ -26,7 +26,6 @@ import (
 	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
-	"github.com/miekg/dns"
 )
 
 var engineWg sync.WaitGroup
@@ -367,6 +366,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			ChunkQueryEndpointInNotify: chunkQueryEndpointInNotify,
 			PayloadCrypto:              payloadCrypto,
 			DistributionCache:          conf.Internal.DistributionCache,
+			SupportedMechanisms:        conf.Agent.SupportedMechanisms,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
@@ -617,33 +617,12 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 		}
 	}
 
-	// Load peer agent public keys if configured
-	if conf.Agent.Peers != nil {
-		for peerID, peerConf := range conf.Agent.Peers {
-			if strings.TrimSpace(peerConf.LongTermJosePubKey) != "" {
-				peerPubKeyPath := strings.TrimSpace(peerConf.LongTermJosePubKey)
-				peerPubKeyData, err := os.ReadFile(peerPubKeyPath)
-				if err != nil {
-					if os.IsNotExist(err) {
-						log.Printf("initPayloadCrypto: peer %s public key file not found %q: %v (peer encryption disabled)", peerID, peerPubKeyPath, err)
-					} else {
-						log.Printf("initPayloadCrypto: failed to read peer %s public key %q: %v (peer encryption disabled)", peerID, peerPubKeyPath, err)
-					}
-					continue
-				}
-				peerPubKeyData = StripKeyFileComments(peerPubKeyData)
-				peerPubKey, err := backend.ParsePublicKey(peerPubKeyData)
-				if err != nil {
-					log.Printf("initPayloadCrypto: failed to parse peer %s public key: %v (peer encryption disabled)", peerID, err)
-					continue
-				}
-				// Add peer agent for both encryption and verification; use FQDN so lookup by peer.ID (FQDN) finds the key
-				peerID = dns.Fqdn(peerID)
-				pc.AddPeerKey(peerID, peerPubKey)
-				pc.AddPeerVerificationKey(peerID, peerPubKey)
-				log.Printf("initPayloadCrypto: Loaded peer %s public key from %s", peerID, peerPubKeyPath)
-			}
-		}
+	// DNS-39: Peer keys come from DNS discovery, not config files
+	// Old agent.peers map with embedded keys is no longer supported
+	if len(conf.Agent.AuthorizedPeers) > 0 {
+		log.Printf("initPayloadCrypto: Using agent.authorized_peers - peer keys will be discovered via DNS")
+	} else {
+		log.Printf("initPayloadCrypto: No agent.authorized_peers configured - no peer crypto available")
 	}
 
 	return pc, nil
@@ -720,42 +699,19 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 }
 
 // registerPeerAgents registers peer agents from the static config into the TransportManager.
-// This allows agent-to-agent communication using the same transport infrastructure.
+//
+// DNS-39: Peer addresses come from DNS discovery, not static config.
+// The old agent.peers map with embedded addresses is no longer supported.
 func registerPeerAgents(conf *Config, tm *TransportManager) error {
-	if conf.Agent == nil || conf.Agent.Peers == nil {
-		return nil // No peers configured
+	if conf.Agent == nil {
+		return nil // No agent config
 	}
 
-	for peerID, peerConf := range conf.Agent.Peers {
-		// Parse address
-		if peerConf.Address == "" {
-			log.Printf("registerPeerAgents: Skipping peer %s (no address configured)", peerID)
-			continue
-		}
-
-		// Parse host:port
-		host, portStr, err := net.SplitHostPort(peerConf.Address)
-		if err != nil {
-			log.Printf("registerPeerAgents: Failed to parse address %s for peer %s: %v", peerConf.Address, peerID, err)
-			continue
-		}
-		port, err := strconv.ParseUint(portStr, 10, 16)
-		if err != nil {
-			log.Printf("registerPeerAgents: Invalid port %s for peer %s: %v", portStr, peerID, err)
-			continue
-		}
-
-		// Register peer under FQDN identity so "distrib peers" and "distrib op --to" use consistent FQDN
-		peerIDFqdn := dns.Fqdn(peerID)
-		peer := tm.PeerRegistry.GetOrCreate(peerIDFqdn)
-		addr := &transport.Address{
-			Host:      host,
-			Port:      uint16(port),
-			Transport: "udp", // DNS transport uses UDP by default
-		}
-		peer.SetDiscoveryAddress(addr)
-
-		log.Printf("registerPeerAgents: Registered peer %s with address %s", peerIDFqdn, peerConf.Address)
+	// DNS-39: All peer addresses come from DNS discovery
+	if len(conf.Agent.AuthorizedPeers) > 0 {
+		log.Printf("registerPeerAgents: Using agent.authorized_peers - peer addresses will be discovered via DNS")
+	} else {
+		log.Printf("registerPeerAgents: No agent.authorized_peers configured - no peers available")
 	}
 
 	return nil

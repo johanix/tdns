@@ -58,18 +58,28 @@ func (ar *AgentRegistry) HelloRetrier() {
 	}
 }
 
-// XXX: This is a modified version of HelloRetrier that uses a context to stop the retrier
-// (suggested by the coderabbit)when the agent is no longer in state KNOWN. Not sure if this is
-// what we want.
+// HelloRetrierNG manages Hello retries for an agent.
+// UPDATED: Now handles both API and DNS transports independently.
+// Continues retrying while EITHER transport is in KNOWN state.
 func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 	helloRetryInterval := configureInterval("syncengine.intervals.helloretry", 15, 1800)
 	go func(agent *Agent) {
 		ticker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
 		defer ticker.Stop()
-		if agent.ApiDetails.State != AgentStateKnown {
-			log.Printf("HelloRetrierNG: agent %q is not in state KNOWN, stopping", agent.Identity)
+
+		// Check if ANY transport needs Hello retries
+		apiNeedsRetry := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
+		dnsNeedsRetry := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
+
+		if !apiNeedsRetry && !dnsNeedsRetry {
+			log.Printf("HelloRetrierNG: agent %q has no transports in state KNOWN (API: %s, DNS: %s), stopping",
+				agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 			return
 		}
+
+		log.Printf("HelloRetrierNG: started for agent %q (API: %s, DNS: %s)",
+			agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -78,23 +88,29 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 			case <-ticker.C:
 			}
 
+			// Check current state of both transports
+			agent.mu.RLock()
+			apiState := agent.ApiDetails.State
+			dnsState := agent.DnsDetails.State
+			apiMethod := agent.ApiMethod
+			dnsMethod := agent.DnsMethod
+			agent.mu.RUnlock()
+
+			apiNeedsRetry = apiMethod && apiState == AgentStateKnown
+			dnsNeedsRetry = dnsMethod && dnsState == AgentStateKnown
+
+			if !apiNeedsRetry && !dnsNeedsRetry {
+				log.Printf("HelloRetrierNG: agent %q no longer in state KNOWN (API: %s, DNS: %s), stopping",
+					agent.Identity, AgentStateToString[apiState], AgentStateToString[dnsState])
+				return
+			}
+
 			log.Printf("HelloRetrierNG: with agent %q we share the zones: %v", agent.Identity, agent.Zones)
 			for zone := range agent.Zones {
-				log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q", agent.Identity, zone)
-				switch agent.ApiDetails.State {
-				case AgentStateKnown:
+				if apiNeedsRetry || dnsNeedsRetry {
+					log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q (API needs: %v, DNS needs: %v)",
+						agent.Identity, zone, apiNeedsRetry, dnsNeedsRetry)
 					ar.SingleHello(agent, zone)
-
-					// log.Printf("HsyncEngine: Retrying HELLO to %s (state %s)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-				default:
-					// log.Printf("HsyncEngine: Not retrying HELLO to %s (state %s != KNOWN)", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-					continue
-				}
-				if agent.ApiDetails.State != AgentStateKnown {
-					//					time.Sleep(time.Duration(helloRetryInterval) * time.Second)
-					//				} else {
-					log.Printf("HelloRetrierNG: agent %q no longer in state KNOWN (now %s), stopping", agent.Identity, AgentStateToString[agent.ApiDetails.State])
-					return
 				}
 			}
 		}
@@ -105,32 +121,24 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 	log.Printf("SingleHello: Sending HELLO to %s (zone %q)", agent.Identity, zone)
 
-	// Prefer TransportManager (API → DNS fallback) when available
+	// Use TransportManager for independent multi-transport handling
 	if ar.TransportManager != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		sharedZones := ar.sharedZonesForAgent(agent)
-		helloResp, err := ar.TransportManager.SendHelloWithFallback(ctx, agent, sharedZones)
-		agent.mu.Lock()
+		// SendHelloWithFallback now handles both transports independently
+		// and updates ApiDetails.State and DnsDetails.State separately
+		_, err := ar.TransportManager.SendHelloWithFallback(ctx, agent, sharedZones)
 		if err != nil {
-			log.Printf("SingleHello: TransportManager HELLO to %q failed: %v", agent.Identity, err)
-			agent.ApiDetails.LatestError = err.Error()
-			agent.ApiDetails.LatestErrorTime = time.Now()
-		} else if helloResp != nil && !helloResp.Accepted {
-			log.Printf("SingleHello: Our HELLO to %q was not accepted: %s", agent.Identity, helloResp.RejectReason)
-			agent.ApiDetails.LatestError = helloResp.RejectReason
-			agent.ApiDetails.LatestErrorTime = time.Now()
+			log.Printf("SingleHello: TransportManager HELLO to %q failed on all transports: %v", agent.Identity, err)
 		} else {
-			log.Printf("SingleHello: Our HELLO to %q accepted via transport fallback", agent.Identity)
-			agent.ApiDetails.State = AgentStateIntroduced
-			agent.ApiDetails.LatestError = ""
+			log.Printf("SingleHello: Our HELLO to %q accepted on at least one transport", agent.Identity)
 		}
 		ar.S.Set(agent.Identity, agent)
-		agent.mu.Unlock()
 		return
 	}
 
-	// Fallback: API-only
+	// Fallback: API-only (legacy mode without TransportManager)
 	ahr, err := agent.SendApiHello(&AgentHelloPost{
 		MessageType:  AgentMsgHello,
 		MyIdentity:   AgentId(ar.LocalAgent.Identity),

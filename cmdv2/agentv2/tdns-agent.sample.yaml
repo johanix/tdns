@@ -4,21 +4,19 @@ include:
 
 agent:
    identity:		agent.provider.
+   # Active transport mechanisms: "api" and/or "dns" (default: both if configured)
+   # Use ["api"] to disable DNS transport, ["dns"] to disable API, or ["api", "dns"] for both
+   supported_mechanisms:	[ api, dns ]
    # Secure CHUNK comms with combiner (no enrollment; configure keys and address)
    long_term_jose_priv_key:	/etc/tdns/agent.jose.private
    combiner:
       address:		1.2.3.4:5678
       long_term_jose_pub_key:	/etc/tdns/combiner.jose.pub
       # api_base_url:	https://1.2.3.4:8085/api/v1   # optional; for tdns-cli agent combiner ping --api
-   # Peer agents for agent-to-agent communication (optional; see AGENT-PEERS-CONFIG.md)
-   # peers:
-   #    agent2.example.com:
-   #       address:		2.3.4.5:5301
-   #       long_term_jose_pub_key:	/etc/tdns/agent2.jose.pub
-   #       identity:	agent2.example.com  # optional; for correlation ID extraction
-   #    agent3.example.com:
-   #       address:		3.4.5.6:5301
-   #       long_term_jose_pub_key:	/etc/tdns/agent3.jose.pub
+   # Authorized peer agents (identity-only list - addresses and keys discovered via DNS)
+   # authorized_peers:
+   #    - agent2.example.com
+   #    - agent3.example.com
    # --- agent autozone and secondaries (agent.local) ---
    local:
       # Secondaries to send NOTIFY to when the agent autozone changes

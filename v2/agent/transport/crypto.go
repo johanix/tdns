@@ -437,6 +437,10 @@ func (w *SecurePayloadWrapper) GetCrypto() *PayloadCrypto {
 // Use when the sender might be unknown; returns decrypted payload and the peer ID that worked.
 // If payload is not encrypted, returns (payload, "", nil). If decryption fails for all peers, returns (nil, "", err).
 // Individual peer failures are not logged (only final "decryption failed for all" is surfaced).
+//
+// DEPRECATED: This function is unsafe for DoS mitigation. An attacker can forge the QNAME to be an authorized
+// peer's identity, forcing expensive crypto operations with all peer keys. Use UnwrapIncomingFromPeer() instead
+// when you've already performed authorization checks.
 func (w *SecurePayloadWrapper) UnwrapIncomingTryAllPeers(payload []byte, senderHint string) (decrypted []byte, peerID string, err error) {
 	if w.crypto == nil || !w.crypto.Enabled {
 		return payload, "", nil
@@ -468,4 +472,46 @@ func (w *SecurePayloadWrapper) UnwrapIncomingTryAllPeers(payload []byte, senderH
 		return dec, id, nil
 	}
 	return nil, "", fmt.Errorf("decryption failed for all known peers")
+}
+
+// UnwrapIncomingFromPeer decrypts an incoming payload using ONLY the specified peer's verification key.
+// This is the secure version that prevents DoS attacks via QNAME forgery.
+//
+// Use this function when:
+// - You've already performed authorization checks (IsAgentAuthorized)
+// - The peerID comes from a trusted source (e.g., QNAME after authorization)
+// - You want to prevent attackers from forcing crypto operations with all peer keys
+//
+// If decryption fails with the specified peer's key, this function returns an error immediately
+// without trying other peers. This prevents DoS amplification where an attacker forges a QNAME
+// to be an authorized peer's identity.
+//
+// Parameters:
+//   - payload: The encrypted payload (base64-encoded JWS wrapping JWE)
+//   - requiredPeerID: The identity of the peer that MUST have signed this payload
+//
+// Returns:
+//   - decrypted: The decrypted plaintext payload
+//   - error: Non-nil if decryption fails or peer not found
+func (w *SecurePayloadWrapper) UnwrapIncomingFromPeer(payload []byte, requiredPeerID string) ([]byte, error) {
+	if w.crypto == nil || !w.crypto.Enabled {
+		return payload, nil
+	}
+	if !IsPayloadEncrypted(payload) {
+		return payload, nil
+	}
+
+	// Verify we have the peer's key
+	_, exists := w.crypto.PeerVerificationKeys[requiredPeerID]
+	if !exists {
+		return nil, fmt.Errorf("no verification key for required peer %s", requiredPeerID)
+	}
+
+	// Attempt decryption with ONLY the required peer's key
+	decrypted, err := w.crypto.DecryptAndVerifyPayload(requiredPeerID, payload)
+	if err != nil {
+		return nil, fmt.Errorf("decryption failed for required peer %s: %w", requiredPeerID, err)
+	}
+
+	return decrypted, nil
 }

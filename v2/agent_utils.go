@@ -551,11 +551,29 @@ func (ar *AgentRegistry) DiscoverAgentAsync(remoteid AgentId, zonename ZoneName,
 			ar.AddZoneToAgent(remoteid, zonename)
 		}
 
-		// Note: deferredTask execution is not yet implemented
-		// The original LocateAgent() also doesn't execute deferred tasks
-		// TODO: Implement deferred task execution when the agent becomes operational
+		// DNS-55: Start Hello retry loop for the discovered agent
+		// This progresses the agent from KNOWN → INTRODUCED → OPERATIONAL
+		agent, exists := ar.S.Get(remoteid)
+		if exists && agent != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			ar.mu.Lock()
+			ar.helloContexts[remoteid] = cancel
+			ar.mu.Unlock()
+			go ar.HelloRetrierNG(ctx, agent)
+			log.Printf("DiscoverAgentAsync: Started Hello retry loop for %s", remoteid)
+		} else {
+			log.Printf("DiscoverAgentAsync: WARNING: Agent %s not found in registry after discovery", remoteid)
+		}
+
+		// Note: deferredTask execution happens when agent becomes operational
+		// Store the task if provided
 		if deferredTask != nil {
-			log.Printf("DiscoverAgentAsync: deferred task provided for agent %s zone %s (not yet implemented)", remoteid, zonename)
+			agent, exists := ar.S.Get(remoteid)
+			if exists {
+				agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
+				ar.S.Set(remoteid, agent)
+				log.Printf("DiscoverAgentAsync: Added deferred task for agent %s zone %s", remoteid, zonename)
+			}
 		}
 
 		log.Printf("DiscoverAgentAsync: successfully discovered and registered agent %s", remoteid)

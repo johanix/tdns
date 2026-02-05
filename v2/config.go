@@ -140,7 +140,11 @@ type PeerConf struct {
 
 type LocalAgentConf struct {
 	Identity string `validate:"required,hostname"`
-	Local    struct {
+	// SupportedMechanisms: List of active transport mechanisms (default: ["api", "dns"] if both configured)
+	// Valid values: "api", "dns"
+	// Set to ["api"] to disable DNS transport, ["dns"] to disable API transport
+	SupportedMechanisms []string `yaml:"supported_mechanisms"`
+	Local               struct {
 		Notify      []string // secondaries to notify for an agent autozone
 		Nameservers []string `yaml:"nameservers,omitempty"` // authoritative NS hostnames for the agent autozone (FQDN, no glue; must be outside the autozone)
 	}
@@ -152,7 +156,9 @@ type LocalAgentConf struct {
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
 	Combiner *PeerConf `yaml:"combiner"`
-	// Peer agents (agent only): map of agent identities to their config for agent-to-agent communication
+	// AuthorizedPeers: List of agent identities authorized to communicate (identity-only, DNS provides contact info)
+	AuthorizedPeers []string `yaml:"authorized_peers"`
+	// Peers (DEPRECATED): Old format with embedded addresses/keys - use authorized_peers instead
 	Peers map[string]*PeerConf `yaml:"peers"`
 	// Our JOSE keypair for secure CHUNK (agent: path to private key; public derived or adjacent .pub)
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`

@@ -113,8 +113,45 @@ var agentLocalZoneDataRemoveRRsetCmd = &cobra.Command{
 	},
 }
 
+var agentDiscoverCmd = &cobra.Command{
+	Use:   "discover <agent-identity>",
+	Short: "Trigger DNS discovery for a remote agent",
+	Long: `Discover a remote agent by querying DNS for its URI, JWK, TLSA, and SVCB records.
+This triggers async discovery which will:
+1. Query DNS for agent metadata (URI, JWK, TLSA, SVCB)
+2. Register the agent in PeerRegistry
+3. Start Hello retry loop if authorized
+4. Progress agent through state machine to OPERATIONAL
+
+Example:
+  tdns-cli agent discover agent2.example.com`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		agentIdentity := args[0]
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "discover",
+			AgentId: tdns.AgentId(agentIdentity),
+		}, "local")
+
+		if err != nil {
+			fmt.Printf("Error sending discover command: %v\n", err)
+			os.Exit(1)
+		}
+
+		if amr.Error {
+			fmt.Printf("Error from agent %q: %s\n", amr.Identity, amr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%s\n", amr.Msg)
+		fmt.Printf("\nDiscovery is asynchronous. Use 'tdns-cli agent hsync agentstatus %s' to check status.\n", agentIdentity)
+	},
+}
+
 func init() {
 	AgentCmd.AddCommand(agentLocalCmd)
+	AgentCmd.AddCommand(agentDiscoverCmd)
 	agentLocalCmd.AddCommand(agentLocalConfigCmd)
 	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataAddRRCmd)

@@ -36,23 +36,19 @@ var AgentStateToString = map[AgentState]string{
 	AgentStateError:       "ERROR",
 }
 
-type AgentMsg uint8
+// AgentMsg and related constants are defined in core package to avoid circular dependencies
+type AgentMsg = core.AgentMsg
 
 const (
-	AgentMsgHello AgentMsg = iota + 1
-	AgentMsgBeat
-	AgentMsgNotify
-	AgentMsgRfi
-	AgentMsgStatus
+	AgentMsgHello  = core.AgentMsgHello
+	AgentMsgBeat   = core.AgentMsgBeat
+	AgentMsgNotify = core.AgentMsgNotify
+	AgentMsgRfi    = core.AgentMsgRfi
+	AgentMsgStatus = core.AgentMsgStatus
+	AgentMsgPing   = core.AgentMsgPing
 )
 
-var AgentMsgToString = map[AgentMsg]string{
-	AgentMsgHello:  "HELLO",
-	AgentMsgBeat:   "BEAT",
-	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
-	AgentMsgRfi:    "RFI",
-	AgentMsgStatus: "STATUS",
-}
+var AgentMsgToString = core.AgentMsgToString
 
 // Remote agent states: first occurence of a remote agent identity is when it appears in a
 // HSYNC record for a zone where we also appear in the HSYNC RRset (i.e. we are both part of it).
@@ -100,6 +96,7 @@ type AgentDetails struct {
 	LatestError     string
 	LatestErrorTime time.Time
 	HelloTime       time.Time
+	LastContactTime time.Time // Last contact of any type (Hello, Beat, Ping, Sync, etc.)
 	BeatInterval    uint32
 	SentBeats       uint32
 	ReceivedBeats   uint32
@@ -141,6 +138,8 @@ type AgentRegistry struct {
 	TransportManager *TransportManager // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 }
 
+// AgentBeatPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 type AgentBeatPost struct {
 	MessageType    AgentMsg
 	MyIdentity     AgentId
@@ -150,6 +149,8 @@ type AgentBeatPost struct {
 	Time           time.Time
 }
 
+// AgentBeatResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 type AgentBeatResponse struct {
 	Status       string // ok | error | ...
 	MyIdentity   AgentId
@@ -165,17 +166,22 @@ type AgentBeatReport struct {
 	Beat AgentBeatPost
 }
 
+// AgentHelloPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 type AgentHelloPost struct {
 	MessageType  AgentMsg
-	Name         string
+	Name         string     `json:"name,omitempty"`       // DEPRECATED: Unused field
 	MyIdentity   AgentId
 	YourIdentity AgentId
-	Addresses    []string
-	Port         uint16
-	TLSA         dns.TLSA
-	Zone         ZoneName // in the /hello we only send one zone, the one that triggered the /hello
+	Addresses    []string   `json:"addresses,omitempty"`  // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port         uint16     `json:"port,omitempty"`       // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA         dns.TLSA   `json:"tlsa,omitempty"`       // DEPRECATED: Use DNS discovery (TLSA query) instead
+	Zone         ZoneName   // in the /hello we only send one zone, the one that triggered the /hello
+	Time         time.Time  // message timestamp
 }
 
+// AgentHelloResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 type AgentHelloResponse struct {
 	Status       string // ok | error | ...
 	MyIdentity   AgentId
@@ -187,14 +193,16 @@ type AgentHelloResponse struct {
 	ErrorMsg string
 }
 
+// AgentMsgPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
 	MessageType  AgentMsg // "NOTIFY", ...
 	MyIdentity   AgentId
 	YourIdentity AgentId
-	Addresses    []string
-	Port         uint16
-	TLSA         dns.TLSA
+	Addresses    []string `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port         uint16   `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA         dns.TLSA `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
 	Zone         ZoneName // An AgentMsgPost should always only refer to one zone.
 	// Data	     map[AgentId]map[uint16]RRset
 	RRs []string // cannot send more structured format, as dns.RR cannot be json marshalled.
@@ -208,6 +216,8 @@ type AgentMsgPostPlus struct {
 	Response chan *AgentMsgResponse
 }
 
+// AgentMsgResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 type AgentMsgResponse struct {
 	Status string // ok | error | ...
 	Time   time.Time
@@ -220,6 +230,7 @@ type AgentMsgResponse struct {
 	ErrorMsg    string
 }
 
+// RfiData is defined in core package to avoid circular dependencies.
 type RfiData struct {
 	Status      string // ok | error | ...
 	Time        time.Time
@@ -229,6 +240,31 @@ type RfiData struct {
 	ZoneXfrSrcs []string
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
+}
+
+// AgentPingPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
+// AgentPingPost is used for ping operations (connectivity testing)
+type AgentPingPost struct {
+	MessageType  AgentMsg  // AgentMsgPing
+	MyIdentity   AgentId   // sender's identity
+	YourIdentity AgentId   // recipient's identity
+	Nonce        string    // for round-trip verification
+	Time         time.Time // message timestamp
+}
+
+// AgentPingResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
+// AgentPingResponse is the response to a ping operation
+type AgentPingResponse struct {
+	Status       string    // "ok" | "error"
+	MyIdentity   AgentId   // responder's identity
+	YourIdentity AgentId   // original sender
+	Nonce        string    // echo from request
+	Time         time.Time
+	Msg          string
+	Error        bool
+	ErrorMsg     string
 }
 
 // AgentMgmt{Post,Response} are used in the mgmt API
