@@ -132,7 +132,7 @@ Example:
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "discover",
 			AgentId: tdns.AgentId(agentIdentity),
-		}, "local")
+		}, "discover")
 
 		if err != nil {
 			fmt.Printf("Error sending discover command: %v\n", err)
@@ -149,9 +149,24 @@ Example:
 	},
 }
 
+var agentPeersCmd = &cobra.Command{
+	Use:   "peers",
+	Short: "List all known peer agents",
+	Long: `Show all peer agents that this agent has discovered and established communication with.
+Displays both API and DNS transports independently with their current state.
+
+This shows all peers regardless of transport type - both API (TLS) and DNS (JOSE) transports
+are displayed as separate entries to show their independent states.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Import the function from distrib_cmds.go
+		listDistribPeers(cmd, "agent")
+	},
+}
+
 func init() {
 	AgentCmd.AddCommand(agentLocalCmd)
 	AgentCmd.AddCommand(agentDiscoverCmd)
+	AgentCmd.AddCommand(agentPeersCmd)
 	agentLocalCmd.AddCommand(agentLocalConfigCmd)
 	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataAddRRCmd)
@@ -160,6 +175,7 @@ func init() {
 
 	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
 	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
+	agentPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 
 }
 

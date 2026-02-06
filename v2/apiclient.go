@@ -361,7 +361,8 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	if lastErr != nil {
 		var msg string
 		if strings.Contains(lastErr.Error(), "connection refused") {
-			msg = "Connection refused. Server process probably not running."
+			// Show which URLs were tried for better debugging
+			msg = fmt.Sprintf("Connection refused. Server process probably not running.\nTried addresses: %v\nBase URL: %s%s", addressesToTry, api.BaseUrl, endpoint)
 		} else {
 			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
 		}
@@ -513,7 +514,8 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	if lastErr != nil {
 		var msg string
 		if strings.Contains(lastErr.Error(), "connection refused") {
-			msg = "Connection refused. Server process probably not running."
+			// Show which URLs were tried for better debugging
+			msg = fmt.Sprintf("Connection refused. Server process probably not running.\nTried addresses: %v\nBase URL: %s%s", addressesToTry, api.BaseUrl, endpoint)
 		} else {
 			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
 		}

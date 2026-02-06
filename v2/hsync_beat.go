@@ -42,18 +42,27 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 func (ar *AgentRegistry) SendHeartbeats() {
 	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
-		switch a.ApiDetails.State {
-		case AgentStateIntroduced, AgentStateOperational:
+		// DNS-55: Check EITHER transport state (API or DNS)
+		// Send heartbeat if ANY transport is INTRODUCED or better
+		apiState := a.ApiDetails.State
+		dnsState := a.DnsDetails.State
+
+		apiReady := apiState == AgentStateIntroduced || apiState == AgentStateOperational ||
+			apiState == AgentStateDegraded || apiState == AgentStateInterrupted
+		dnsReady := dnsState == AgentStateIntroduced || dnsState == AgentStateOperational ||
+			dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
+
+		if !apiReady && !dnsReady {
 			if Globals.Debug {
-				log.Printf("HsyncEngine: Sending heartbeat to %s", a.Identity)
-			}
-		case AgentStateDegraded, AgentStateInterrupted:
-			log.Printf("HsyncEngine: Sending heartbeat to degraded/interrupted agent %s", a.Identity)
-		default:
-			if Globals.Debug {
-				log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.ApiDetails.State])
+				log.Printf("HsyncEngine: Not sending heartbeat to %s (API: %s, DNS: %s - both < INTRODUCED)",
+					a.Identity, AgentStateToString[apiState], AgentStateToString[dnsState])
 			}
 			continue
+		}
+
+		if Globals.Debug {
+			log.Printf("HsyncEngine: Sending heartbeat to %s (API: %s, DNS: %s)",
+				a.Identity, AgentStateToString[apiState], AgentStateToString[dnsState])
 		}
 
 		go func(a *Agent) {

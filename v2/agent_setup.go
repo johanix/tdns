@@ -318,8 +318,9 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 	}
 
-	// Setup API transport if configured
-	if len(conf.Agent.Api.Addresses.Publish) > 0 {
+	// Setup API transport if configured AND supported
+	apiSupported := slices.Contains(conf.Agent.SupportedMechanisms, "api")
+	if apiSupported && len(conf.Agent.Api.Addresses.Publish) > 0 {
 		// Load and verify API certificate
 		certFile := conf.Agent.Api.CertFile
 		keyFile := conf.Agent.Api.KeyFile
@@ -370,8 +371,9 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 	}
 
-	// Setup DNS transport if configured
-	if len(conf.Agent.Dns.Addresses.Publish) > 0 {
+	// Setup DNS transport if configured AND supported
+	dnsSupported := slices.Contains(conf.Agent.SupportedMechanisms, "dns")
+	if dnsSupported && len(conf.Agent.Dns.Addresses.Publish) > 0 {
 		err := conf.SetupDnsTransport()
 		if err != nil {
 			return fmt.Errorf("SetupAgent: failed to setup DNS transport: %v", err)

@@ -80,12 +80,18 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 		log.Printf("HelloRetrierNG: started for agent %q (API: %s, DNS: %s)",
 			agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 
+		// Send immediate Hello, then wait for ticker for retries
+		sendHello := true
+
 		for {
-			select {
-			case <-ctx.Done():
-				log.Printf("HelloRetrierNG: context done, stopping")
-				return
-			case <-ticker.C:
+			if !sendHello {
+				select {
+				case <-ctx.Done():
+					log.Printf("HelloRetrierNG: context done, stopping")
+					return
+				case <-ticker.C:
+					sendHello = true
+				}
 			}
 
 			// Check current state of both transports
@@ -106,13 +112,28 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 			}
 
 			log.Printf("HelloRetrierNG: with agent %q we share the zones: %v", agent.Identity, agent.Zones)
-			for zone := range agent.Zones {
+
+			// If agent has zones, send Hello for each zone
+			// If no zones (config-based agent), send Hello with empty zone
+			if len(agent.Zones) > 0 {
+				for zone := range agent.Zones {
+					if apiNeedsRetry || dnsNeedsRetry {
+						log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q (API needs: %v, DNS needs: %v)",
+							agent.Identity, zone, apiNeedsRetry, dnsNeedsRetry)
+						ar.SingleHello(agent, zone)
+					}
+				}
+			} else {
+				// Config-based agent with no shared zones - send Hello anyway
 				if apiNeedsRetry || dnsNeedsRetry {
-					log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q (API needs: %v, DNS needs: %v)",
-						agent.Identity, zone, apiNeedsRetry, dnsNeedsRetry)
-					ar.SingleHello(agent, zone)
+					log.Printf("HelloRetrierNG: trying HELLO with agent %q (no shared zones, config-based agent, API needs: %v, DNS needs: %v)",
+						agent.Identity, apiNeedsRetry, dnsNeedsRetry)
+					ar.SingleHello(agent, "")
 				}
 			}
+
+			// Reset flag to wait for next ticker
+			sendHello = false
 		}
 	}(agent)
 	log.Printf("HelloRetrierNG: started HelloRetrierNG for agent %q", agent.Identity)

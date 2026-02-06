@@ -225,8 +225,8 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 			fmt.Errorf("failed to marshal hello payload: %w", err), false)
 	}
 
-	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "hello", correlationID, payloadJSON)
+	// Create and send NOTIFY(CHUNK) - force endpoint for discovery (receiver may not know our address yet)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "hello", correlationID, payloadJSON, true)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}
 
 	// Create and send NOTIFY(CHUNK) - beats can be fire-and-forget
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", correlationID, payloadJSON)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", correlationID, payloadJSON, false)
 	if err != nil {
 		// For beats, we might want to be more lenient with errors
 		log.Printf("DNS Beat to %s failed: %v", peer.ID, err)
@@ -330,7 +330,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	}
 
 	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "sync", correlationID, payloadJSON)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "sync", correlationID, payloadJSON, false)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +376,7 @@ func (t *DNSTransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 	}
 
 	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "relocate", correlationID, payloadJSON)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "relocate", correlationID, payloadJSON, false)
 	if err != nil {
 		return nil, err
 	}
@@ -590,7 +590,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 }
 
 // sendNotifyWithPayload sends a NOTIFY(CHUNK) with payload and waits for confirmation.
-func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, correlationID string, payload []byte) (*operationResponse, error) {
+func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, correlationID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
 	addr := peer.CurrentAddress()
 
 	if t.distributionAdd != nil {
@@ -634,7 +634,8 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 				Data: finalPayload,
 			})
 		}
-	} else if t.chunkQueryEndpoint != "" && t.chunkQueryEndpointInNotify {
+	} else if t.chunkQueryEndpoint != "" && (t.chunkQueryEndpointInNotify || forceEndpoint) {
+		// Include endpoint if configured OR if forced (discovery messages need it)
 		m.SetEdns0(4096, true)
 		opt := m.IsEdns0()
 		if opt != nil {

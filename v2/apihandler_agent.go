@@ -262,6 +262,16 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
 
+			// Check authorization before discovery (DNS-38)
+			if conf.Internal.AgentRegistry.TransportManager != nil {
+				authorized, reason := conf.Internal.AgentRegistry.TransportManager.IsAgentAuthorized(string(amp.AgentId), string(amp.Zone))
+				if !authorized {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", amp.AgentId, reason)
+					return
+				}
+			}
+
 			// Trigger discovery (always starts fresh discovery)
 			conf.Internal.AgentRegistry.DiscoverAgentAsync(amp.AgentId, amp.Zone, nil)
 			resp.Msg = fmt.Sprintf("Discovery started for agent %s", amp.AgentId)

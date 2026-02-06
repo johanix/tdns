@@ -363,7 +363,12 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 }
 
 func listDistribPeers(cmd *cobra.Command, component string) {
-	prefixcmd, _ := getCommandContext("distrib")
+	// Try to get context from the actual command name (peers or distrib)
+	prefixcmd, _ := getCommandContext("peers")
+	if prefixcmd == "server" {
+		// Fallback to distrib if peers not found (backward compat)
+		prefixcmd, _ = getCommandContext("distrib")
+	}
 	api, err := getApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
@@ -424,7 +429,7 @@ func displayPeers(peers []interface{}, verbose bool) {
 
 	// Compact mode: use tabular format
 	var rows []string
-	rows = append(rows, "Identity | Type | Transport | Address | Crypto | # Distribs")
+	rows = append(rows, "Identity | Type | Transport | Address | Crypto | State")
 
 	for _, pRaw := range peers {
 		if p, ok := pRaw.(map[string]interface{}); ok {
@@ -453,12 +458,12 @@ func displayPeers(peers []interface{}, verbose bool) {
 				cryptoType = "-"
 			}
 
-			distribSent := 0
-			if ds, ok := p["distrib_sent"].(float64); ok {
-				distribSent = int(ds)
+			state := getStringValue(p, "state")
+			if state == "" {
+				state = "-"
 			}
 
-			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %d", peerID, peerType, transport, address, cryptoType, distribSent))
+			rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s", peerID, peerType, transport, address, cryptoType, state))
 		}
 	}
 

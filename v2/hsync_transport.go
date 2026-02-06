@@ -168,6 +168,20 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		tm.ChunkHandler.IsAgentAuthorized = func(senderID string, zone string) (bool, string) {
 			return tm.IsAgentAuthorized(senderID, zone)
 		}
+
+		// Trigger discovery when we receive messages from authorized but undiscovered peers
+		tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
+			log.Printf("TransportManager: Triggering discovery for peer %s (missing verification key)", peerID)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err := tm.DiscoverAndRegisterAgent(ctx, peerID)
+			if err != nil {
+				log.Printf("TransportManager: Discovery failed for peer %s: %v", peerID, err)
+			} else {
+				log.Printf("TransportManager: Successfully discovered peer %s, verification key now available", peerID)
+			}
+		}
+
 		log.Printf("TransportManager: DNS transport enabled")
 	} else if cfg.ControlZone == "" {
 		log.Printf("TransportManager: DNS transport not configured (no control zone)")
@@ -290,6 +304,28 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
+		} else {
+			// DNS-56: Agent not in registry but authorized - trigger discovery
+			// This ensures receiver can send beats back to sender
+			log.Printf("TransportManager: Authorized Hello from unknown agent %s - triggering discovery", senderID)
+			go func(peerID string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				err := tm.DiscoverAndRegisterAgent(ctx, peerID)
+				if err != nil {
+					log.Printf("TransportManager: Discovery failed for agent %s: %v", peerID, err)
+				} else {
+					log.Printf("TransportManager: Successfully discovered agent %s, now in registry", peerID)
+					// Update the newly discovered agent's DNS state to INTRODUCED
+					if discoveredAgent, ok := tm.agentRegistry.S.Get(AgentId(peerID)); ok {
+						discoveredAgent.DnsDetails.State = AgentStateIntroduced
+						discoveredAgent.DnsDetails.HelloTime = time.Now()
+						discoveredAgent.DnsDetails.LastContactTime = time.Now()
+						tm.agentRegistry.S.Set(discoveredAgent.Identity, discoveredAgent)
+						log.Printf("TransportManager: Updated discovered agent %s DNS state to INTRODUCED", peerID)
+					}
+				}
+			}(senderID)
 		}
 	}
 
@@ -301,9 +337,9 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	select {
 	case tm.agentQs.Hello <- report:
-		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING)", payload.SenderID)
+		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING)", senderID)
 	default:
-		log.Printf("TransportManager: Hello channel full, dropping message from %s", payload.SenderID)
+		log.Printf("TransportManager: Hello channel full, dropping message from %s", senderID)
 	}
 }
 

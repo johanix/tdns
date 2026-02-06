@@ -277,6 +277,19 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			agent.DnsDetails.BaseUri = result.DNSUri
 			agent.DnsDetails.ContactInfo = "complete"
 			agent.DnsDetails.State = AgentStateKnown
+
+			// Extract port from DNS URI for SyncPeerFromAgent
+			parsed, err := url.Parse(result.DNSUri)
+			if err == nil {
+				port := uint16(53) // default DNS port
+				if parsed.Port() != "" {
+					var p int
+					fmt.Sscanf(parsed.Port(), "%d", &p)
+					port = uint16(p)
+				}
+				agent.DnsDetails.Port = port
+			}
+
 			// Store JWK data if available (preferred)
 			if result.JWKData != "" {
 				agent.DnsDetails.JWKData = result.JWKData

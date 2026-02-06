@@ -52,6 +52,10 @@ type ChunkNotifyHandler struct {
 	// If nil, no authorization check is performed (not recommended for production).
 	IsAgentAuthorized func(senderID string, zone string) (authorized bool, reason string)
 
+	// OnPeerDiscoveryNeeded is called when we receive a message from an authorized peer
+	// but don't have their verification key yet. Handler should trigger discovery asynchronously.
+	OnPeerDiscoveryNeeded func(peerID string)
+
 	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
 	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
 	unsolicitedCount uint64
@@ -153,12 +157,24 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 		// Use strict decryption: ONLY the senderHint's key (prevents DoS via QNAME forgery)
 		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
 		if err != nil {
-			// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
-			count := atomic.AddUint64(&h.unsolicitedCount, 1)
-			log.Printf("ChunkNotifyHandler: FORGERY ATTEMPT detected from %s: QNAME claimed to be %s but crypto verification failed: %v [total rejected: %d]",
-				sourceAddr, senderHint, err, count)
-			// Silent drop - don't confirm we exist or give error details to attacker
-			return nil
+			// Check if error is due to missing verification key (peer not yet discovered)
+			if strings.Contains(err.Error(), "no verification key for") {
+				log.Printf("ChunkNotifyHandler: Missing verification key for authorized peer %s from %s - triggering discovery, sender should retry",
+					senderHint, sourceAddr)
+				// Trigger discovery asynchronously so we have the key for next retry
+				if h.OnPeerDiscoveryNeeded != nil {
+					go h.OnPeerDiscoveryNeeded(senderHint)
+				}
+				// Drop this message - sender will retry and we'll have the key by then
+				return nil
+			} else {
+				// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
+				count := atomic.AddUint64(&h.unsolicitedCount, 1)
+				log.Printf("ChunkNotifyHandler: FORGERY ATTEMPT detected from %s: QNAME claimed to be %s but crypto verification failed: %v [total rejected: %d]",
+					sourceAddr, senderHint, err, count)
+				// Silent drop - don't confirm we exist or give error details to attacker
+				return nil
+			}
 		}
 		payload = decrypted
 		log.Printf("ChunkNotifyHandler: Successfully decrypted payload from %s using key for %s", sourceAddr, senderHint)
@@ -304,26 +320,63 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, corr
 
 // parsePayload parses the JSON payload to determine message type and content.
 func (h *ChunkNotifyHandler) parsePayload(correlationID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
-	// Parse the type field first
-	var typeOnly struct {
-		Type string `json:"type"`
+	// Try parsing new unified format first (MessageType as int)
+	var unifiedFormat struct {
+		MessageType  int    `json:"MessageType"`  // New unified format
+		MyIdentity   string `json:"MyIdentity"`   // New unified format
+		Zone         string `json:"Zone"`         // New unified format
+		Type         string `json:"type"`         // Legacy format
+		SenderID     string `json:"sender_id"`    // Legacy format
+		LegacyZone   string `json:"zone"`         // Legacy format
 	}
-	if err := json.Unmarshal(payload, &typeOnly); err != nil {
-		return nil, fmt.Errorf("failed to parse message type: %w", err)
+	if err := json.Unmarshal(payload, &unifiedFormat); err != nil {
+		return nil, fmt.Errorf("failed to parse message: %w", err)
 	}
 
-	// Parse common fields
-	var common struct {
-		SenderID string `json:"sender_id"`
-		Zone     string `json:"zone"`
+	// Determine message type (prefer unified format)
+	var msgType string
+	if unifiedFormat.MessageType > 0 {
+		// New unified format: convert MessageType int to string
+		switch unifiedFormat.MessageType {
+		case 1:
+			msgType = "hello"
+		case 2:
+			msgType = "beat"
+		case 3:
+			msgType = "sync"
+		case 4:
+			msgType = "rfi"
+		case 5:
+			msgType = "status"
+		case 6:
+			msgType = "ping"
+		default:
+			msgType = fmt.Sprintf("unknown-%d", unifiedFormat.MessageType)
+		}
+	} else if unifiedFormat.Type != "" {
+		// Legacy format
+		msgType = unifiedFormat.Type
+	} else {
+		return nil, fmt.Errorf("no message type found in payload")
 	}
-	json.Unmarshal(payload, &common) // Ignore error, fields are optional
+
+	// Get sender ID (prefer unified format)
+	senderID := unifiedFormat.MyIdentity
+	if senderID == "" {
+		senderID = unifiedFormat.SenderID
+	}
+
+	// Get zone (prefer unified format)
+	zone := unifiedFormat.Zone
+	if zone == "" {
+		zone = unifiedFormat.LegacyZone
+	}
 
 	return &IncomingMessage{
-		Type:          typeOnly.Type,
+		Type:          msgType,
 		CorrelationID: correlationID,
-		SenderID:      common.SenderID,
-		Zone:          common.Zone,
+		SenderID:      senderID,
+		Zone:          zone,
 		Payload:       payload,
 		ReceivedAt:    time.Now(),
 		SourceAddr:    sourceAddr,

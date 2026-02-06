@@ -555,7 +555,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						Port:        agent.ApiDetails.Port,
 						Addresses:   agent.ApiDetails.Addrs,
 						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
-						State:       string(agent.State),
+						State:       AgentStateToString[agent.ApiDetails.State],
 						ContactInfo: agent.ApiDetails.ContactInfo,
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
@@ -584,7 +584,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						KeyAlgorithm: agent.DnsDetails.KeyAlgorithm,
 						HasJWK:       agent.DnsDetails.JWKData != "",
 						HasKEY:       agent.DnsDetails.KeyRR != nil,
-						State:        string(agent.State),
+						State:        AgentStateToString[agent.DnsDetails.State],
 						ContactInfo:  agent.DnsDetails.ContactInfo,
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {
@@ -592,6 +592,37 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					}
 					peers = append(peers, peerInfo)
 				}
+			}
+		}
+	}
+
+	// Add agents from authorized_peers that haven't been discovered yet
+	if conf.Agent != nil && len(conf.Agent.AuthorizedPeers) > 0 {
+		for _, peerID := range conf.Agent.AuthorizedPeers {
+			peerIDFqdn := dns.Fqdn(peerID)
+
+			// Check if already in peers list (discovered)
+			alreadyListed := false
+			for _, p := range peers {
+				if p.PeerID == peerIDFqdn {
+					alreadyListed = true
+					break
+				}
+			}
+
+			if !alreadyListed {
+				// Add config-only entry
+				peerInfo := PeerInfo{
+					PeerID:      peerIDFqdn,
+					PeerType:    "agent",
+					Transport:   "-",
+					Address:     "-",
+					CryptoType:  "-",
+					State:       "CONFIG",
+					ContactInfo: "config only",
+					DistribSent: 0,
+				}
+				peers = append(peers, peerInfo)
 			}
 		}
 	}
