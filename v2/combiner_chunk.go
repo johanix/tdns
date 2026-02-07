@@ -34,13 +34,13 @@ type CombinerSyncRequest struct {
 	SyncType      string    // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
 	Records       []string  // RR strings to apply
 	Serial        uint32    // Zone serial (optional)
-	CorrelationID string    // Correlation ID for tracking
+	DistributionID string    // Distribution ID for tracking
 	Timestamp     time.Time // When the request was created
 }
 
 // CombinerSyncResponse represents a confirmation from the combiner.
 type CombinerSyncResponse struct {
-	CorrelationID  string         // Echoed from request
+	DistributionID  string         // Echoed from request
 	Zone           string         // Zone that was updated
 	Status         string         // "ok", "partial", "error"
 	Message        string         // Human-readable message
@@ -100,20 +100,20 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 		return fmt.Errorf("nil request or message")
 	}
 
-	// Extract correlation ID and control zone from QNAME: {distid}.{controlzone}. (distid = first label, control zone = rest)
-	correlationID, controlZone, err := h.extractCorrelationIDAndControlZone(req.Qname)
+	// Extract distribution ID and control zone from QNAME: {distid}.{controlzone}. (distid = first label, control zone = rest)
+	distributionID, controlZone, err := h.extractDistributionIDAndControlZone(req.Qname)
 	if err != nil {
-		log.Printf("CombinerChunkHandler: Failed to extract correlation ID from %s: %v", req.Qname, err)
+		log.Printf("CombinerChunkHandler: Failed to extract distribution ID from %s: %v", req.Qname, err)
 		return ErrNotHandled // Let other handlers try
 	}
 
-	log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q correlation_id=%q control_zone=%q", req.Qname, correlationID, controlZone)
+	log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q distribution_id=%q control_zone=%q", req.Qname, distributionID, controlZone)
 
 	// Get CHUNK payload: from EDNS0 (edns0 mode) or via CHUNK query to NOTIFY source (query mode or fallback)
 	payload, err := h.getChunkPayload(ctx, req)
 	if err != nil {
 		log.Printf("CombinerChunkHandler: Failed to get CHUNK payload: %v", err)
-		return h.sendErrorResponse(req, correlationID, "failed to get payload")
+		return h.sendErrorResponse(req, distributionID, "failed to get payload")
 	}
 
 	// Decrypt payload if secure wrapper is configured
@@ -121,7 +121,7 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 		decrypted, err := h.SecureWrapper.UnwrapIncoming("agent", payload)
 		if err != nil {
 			log.Printf("CombinerChunkHandler: Failed to decrypt payload: %v", err)
-			return h.sendErrorResponse(req, correlationID, "failed to decrypt payload")
+			return h.sendErrorResponse(req, distributionID, "failed to decrypt payload")
 		}
 		payload = decrypted
 		log.Printf("CombinerChunkHandler: Decrypted payload (%d bytes)", len(payload))
@@ -132,14 +132,14 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(payload, &typeOnly); err == nil && typeOnly.Type == "ping" {
-		return h.handlePing(req, correlationID, payload)
+		return h.handlePing(req, distributionID, payload)
 	}
 
 	// Parse the sync payload
-	syncReq, err := h.parseSyncPayload(payload, correlationID)
+	syncReq, err := h.parseSyncPayload(payload, distributionID)
 	if err != nil {
 		log.Printf("CombinerChunkHandler: Failed to parse sync payload: %v", err)
-		return h.sendErrorResponse(req, correlationID, "failed to parse payload")
+		return h.sendErrorResponse(req, distributionID, "failed to parse payload")
 	}
 
 	// Process the sync request
@@ -149,26 +149,26 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 	return h.sendConfirmResponse(req, resp)
 }
 
-// extractCorrelationIDAndControlZone derives correlation ID and control zone from the QNAME.
-// QNAME format: {distid}.{controlzone}. — distid has no dots (single label), so correlation ID = first label, control zone = rest (qname minus leftmost label).
-func (h *CombinerChunkHandler) extractCorrelationIDAndControlZone(qname string) (correlationID, controlZone string, err error) {
+// extractDistributionIDAndControlZone derives distribution ID and control zone from the QNAME.
+// QNAME format: {distid}.{controlzone}. — distid has no dots (single label), so distribution ID = first label, control zone = rest (qname minus leftmost label).
+func (h *CombinerChunkHandler) extractDistributionIDAndControlZone(qname string) (distributionID, controlZone string, err error) {
 	qname = dns.Fqdn(qname)
 	labels := dns.SplitDomainName(qname)
 	if len(labels) == 0 {
 		return "", "", fmt.Errorf("qname %s has no labels", qname)
 	}
-	correlationID = labels[0]
+	distributionID = labels[0]
 	if len(labels) == 1 {
 		controlZone = ""
-		return correlationID, controlZone, nil
+		return distributionID, controlZone, nil
 	}
 	// Control zone = qname minus leftmost label (e.g. 65a1b2c3.agent.provider. -> agent.provider.)
 	controlZone = qname[len(labels[0])+1:] // +1 for the dot after first label
-	return correlationID, controlZone, nil
+	return distributionID, controlZone, nil
 }
 
 // handlePing responds to a ping with ping_confirm (echoed nonce); no zone state change.
-func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, correlationID string, payload []byte) error {
+func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, distributionID string, payload []byte) error {
 	var ping struct {
 		Type      string `json:"type"`
 		SenderID  string `json:"sender_id"`
@@ -177,31 +177,31 @@ func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, correlationID s
 	}
 	if err := json.Unmarshal(payload, &ping); err != nil {
 		log.Printf("CombinerChunkHandler: Failed to parse ping payload: %v", err)
-		return h.sendErrorResponse(req, correlationID, "invalid ping payload")
+		return h.sendErrorResponse(req, distributionID, "invalid ping payload")
 	}
 	if ping.Type != "ping" || ping.Nonce == "" {
 		log.Printf("CombinerChunkHandler: Invalid ping (type=%q nonce=%q)", ping.Type, ping.Nonce)
-		return h.sendErrorResponse(req, correlationID, "invalid ping")
+		return h.sendErrorResponse(req, distributionID, "invalid ping")
 	}
 
 	confirmPayload := struct {
 		Type          string `json:"type"`
 		SenderID      string `json:"sender_id"`
 		Nonce         string `json:"nonce"`
-		CorrelationID string `json:"correlation_id"`
+		DistributionID string `json:"distribution_id"`
 		Status        string `json:"status"`
 		Timestamp     int64  `json:"timestamp"`
 	}{
 		Type:          "ping_confirm",
 		SenderID:      "combiner",
 		Nonce:         ping.Nonce,
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		Status:        "ok",
 		Timestamp:     time.Now().Unix(),
 	}
 	payloadBytes, err := json.Marshal(confirmPayload)
 	if err != nil {
-		return h.sendErrorResponse(req, correlationID, "failed to build ping_confirm")
+		return h.sendErrorResponse(req, distributionID, "failed to build ping_confirm")
 	}
 
 	resp := new(dns.Msg)
@@ -319,7 +319,7 @@ func (h *CombinerChunkHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error)
 }
 
 // parseSyncPayload parses the JSON sync payload.
-func (h *CombinerChunkHandler) parseSyncPayload(data []byte, correlationID string) (*CombinerSyncRequest, error) {
+func (h *CombinerChunkHandler) parseSyncPayload(data []byte, distributionID string) (*CombinerSyncRequest, error) {
 	// The payload format matches DnsSyncPayload from transport package
 	var payload struct {
 		Type          string   `json:"type"`
@@ -328,7 +328,7 @@ func (h *CombinerChunkHandler) parseSyncPayload(data []byte, correlationID strin
 		SyncType      string   `json:"sync_type"`
 		Records       []string `json:"records"`
 		Serial        uint32   `json:"serial,omitempty"`
-		CorrelationID string   `json:"correlation_id,omitempty"`
+		DistributionID string   `json:"distribution_id,omitempty"`
 		Timestamp     int64    `json:"timestamp"`
 	}
 
@@ -340,10 +340,10 @@ func (h *CombinerChunkHandler) parseSyncPayload(data []byte, correlationID strin
 		return nil, fmt.Errorf("expected type 'sync', got '%s'", payload.Type)
 	}
 
-	// Use correlation ID from payload if present, otherwise from QNAME
-	corrID := payload.CorrelationID
+	// Use distribution ID from payload if present, otherwise from QNAME
+	corrID := payload.DistributionID
 	if corrID == "" {
-		corrID = correlationID
+		corrID = distributionID
 	}
 
 	return &CombinerSyncRequest{
@@ -352,7 +352,7 @@ func (h *CombinerChunkHandler) parseSyncPayload(data []byte, correlationID strin
 		SyncType:      payload.SyncType,
 		Records:       payload.Records,
 		Serial:        payload.Serial,
-		CorrelationID: corrID,
+		DistributionID: corrID,
 		Timestamp:     time.Unix(payload.Timestamp, 0),
 	}, nil
 }
@@ -364,7 +364,7 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 		req.SenderID, req.Zone, len(req.Records))
 
 	resp := &CombinerSyncResponse{
-		CorrelationID: req.CorrelationID,
+		DistributionID: req.DistributionID,
 		Zone:          req.Zone,
 		Timestamp:     time.Now(),
 	}
@@ -462,7 +462,7 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 	// Build confirmation payload
 	confirmPayload := struct {
 		Type          string `json:"type"`
-		CorrelationID string `json:"correlation_id"`
+		DistributionID string `json:"distribution_id"`
 		Zone          string `json:"zone"`
 		Status        string `json:"status"`
 		Message       string `json:"message"`
@@ -471,7 +471,7 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 		Timestamp     int64  `json:"timestamp"`
 	}{
 		Type:          "confirm",
-		CorrelationID: resp.CorrelationID,
+		DistributionID: resp.DistributionID,
 		Zone:          resp.Zone,
 		Status:        resp.Status,
 		Message:       resp.Message,
@@ -505,9 +505,9 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 }
 
 // sendErrorResponse sends a DNS error response.
-func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, correlationID, errMsg string) error {
+func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, distributionID, errMsg string) error {
 	resp := &CombinerSyncResponse{
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		Status:        "error",
 		Message:       errMsg,
 		Timestamp:     time.Now(),
@@ -536,7 +536,7 @@ func SendToCombiner(handler *CombinerChunkHandler, req *CombinerSyncRequest) *Co
 	if handler == nil {
 		log.Printf("SendToCombiner: handler is nil, cannot send update")
 		return &CombinerSyncResponse{
-			CorrelationID: req.CorrelationID,
+			DistributionID: req.DistributionID,
 			Zone:          req.Zone,
 			Status:        "error",
 			Message:       "combiner handler not initialized",
@@ -549,7 +549,7 @@ func SendToCombiner(handler *CombinerChunkHandler, req *CombinerSyncRequest) *Co
 }
 
 // ConvertZoneUpdateToSyncRequest converts a ZoneUpdate to a CombinerSyncRequest.
-func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, correlationID string) *CombinerSyncRequest {
+func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distributionID string) *CombinerSyncRequest {
 	var records []string
 
 	// First, add RRs if present (these are individual RRs to add)
@@ -572,7 +572,7 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, correla
 		Zone:          string(update.Zone),
 		SyncType:      syncType,
 		Records:       records,
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		Timestamp:     time.Now(),
 	}
 }

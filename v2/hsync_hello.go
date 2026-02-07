@@ -62,7 +62,7 @@ func (ar *AgentRegistry) HelloRetrier() {
 // UPDATED: Now handles both API and DNS transports independently.
 // Continues retrying while EITHER transport is in KNOWN state.
 func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
-	helloRetryInterval := configureInterval("syncengine.intervals.helloretry", 15, 1800)
+	helloRetryInterval := configureInterval("agent.syncengine.intervals.helloretry", 15, 1800)
 	go func(agent *Agent) {
 		ticker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
 		defer ticker.Stop()

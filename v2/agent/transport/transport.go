@@ -146,7 +146,7 @@ type SyncRequest struct {
 	Records       []string  // The actual RRs in presentation format
 	Timestamp     time.Time // When this data was generated
 	Serial        uint32    // Zone serial at time of sync
-	CorrelationID string    // For tracking confirmations
+	DistributionID string    // For tracking confirmations
 	Signature     []byte    // Optional signature over the request
 }
 
@@ -154,7 +154,7 @@ type SyncRequest struct {
 type SyncResponse struct {
 	ResponderID   string        // Identity of the responder
 	Zone          string        // Echoed zone name
-	CorrelationID string        // Echoed correlation ID
+	DistributionID string        // Echoed correlation ID
 	Status        ConfirmStatus // Result of processing
 	Message       string        // Optional status message
 	Timestamp     time.Time     // Response timestamp
@@ -198,7 +198,7 @@ type PingResponse struct {
 type ConfirmRequest struct {
 	SenderID      string        // Identity of the sender (who is confirming)
 	Zone          string        // The zone the sync was for
-	CorrelationID string        // The correlation ID from the sync
+	DistributionID string        // The correlation ID from the sync
 	Status        ConfirmStatus // Result of processing
 	Message       string        // Optional details
 	Timestamp     time.Time     // Confirmation timestamp

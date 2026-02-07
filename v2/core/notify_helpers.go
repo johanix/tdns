@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Generic NOTIFY pattern helpers for correlation ID handling
+ * Generic NOTIFY pattern helpers for distribution ID handling
  * Extracted from tdns-nm/tnm for shared use by KDC, KRS, and agents
  */
 
@@ -12,19 +12,19 @@ import (
 	"strings"
 )
 
-// BuildNotifyQNAME constructs a NOTIFY QNAME from a correlation ID and zone.
+// BuildNotifyQNAME constructs a NOTIFY QNAME from a distribution ID and zone.
 //
-// The correlation ID is prepended as a label to the zone, following the pattern:
-// <correlationID>.<zone>
+// The distribution ID is prepended as a label to the zone, following the pattern:
+// <distributionID>.<zone>
 //
 // This pattern is used by:
-//   - KDC: correlationID = distribution ID (e.g., "a1b2.kdc.example.com.")
-//   - Agents: correlationID = sync operation ID (e.g., "sync123.agent.example.com.")
+//   - KDC: distributionID = distribution ID (e.g., "a1b2.kdc.example.com.")
+//   - Agents: distributionID = sync operation ID (e.g., "sync123.agent.example.com.")
 //
 // The zone is ensured to be a fully-qualified domain name (FQDN) with trailing dot.
 //
 // Parameters:
-//   - correlationID: The unique identifier for this operation (distribution, sync, etc.)
+//   - distributionID: The unique identifier for this operation (distribution, sync, etc.)
 //   - zone: The base zone name (will be made FQDN if not already)
 //
 // Returns:
@@ -32,17 +32,17 @@ import (
 //
 // Example:
 //   BuildNotifyQNAME("a1b2", "kdc.example.com") -> "a1b2.kdc.example.com."
-func BuildNotifyQNAME(correlationID, zone string) string {
+func BuildNotifyQNAME(distributionID, zone string) string {
 	// Ensure zone is FQDN
 	zoneFQDN := zone
 	if !strings.HasSuffix(zoneFQDN, ".") {
 		zoneFQDN += "."
 	}
 
-	return correlationID + "." + zoneFQDN
+	return distributionID + "." + zoneFQDN
 }
 
-// ExtractCorrelationIDFromQNAME extracts a correlation ID from a NOTIFY QNAME.
+// ExtractDistributionIDFromQNAME extracts a distribution ID from a NOTIFY QNAME.
 //
 // Given a QNAME like "a1b2.kdc.example.com." and a zone "kdc.example.com.",
 // this function returns "a1b2".
@@ -55,14 +55,14 @@ func BuildNotifyQNAME(correlationID, zone string) string {
 //   - zone: The base zone name (will be made FQDN if not already)
 //
 // Returns:
-//   - The correlation ID (without trailing dots), or an error if:
+//   - The distribution ID (without trailing dots), or an error if:
 //     - QNAME doesn't end with zone
-//     - QNAME equals zone (no correlation ID present)
+//     - QNAME equals zone (no distribution ID present)
 //     - Zone is empty
 //
 // Example:
-//   ExtractCorrelationIDFromQNAME("a1b2.kdc.example.com.", "kdc.example.com.") -> "a1b2", nil
-func ExtractCorrelationIDFromQNAME(qname, zone string) (string, error) {
+//   ExtractDistributionIDFromQNAME("a1b2.kdc.example.com.", "kdc.example.com.") -> "a1b2", nil
+func ExtractDistributionIDFromQNAME(qname, zone string) (string, error) {
 	if zone == "" {
 		return "", fmt.Errorf("zone cannot be empty")
 	}
@@ -83,14 +83,14 @@ func ExtractCorrelationIDFromQNAME(qname, zone string) (string, error) {
 		return "", fmt.Errorf("QNAME %s does not end with zone %s", qnameFQDN, zoneFQDN)
 	}
 
-	// Check if QNAME equals zone (no correlation ID)
+	// Check if QNAME equals zone (no distribution ID)
 	if qnameFQDN == zoneFQDN {
-		return "", fmt.Errorf("QNAME equals zone (no correlation ID present)")
+		return "", fmt.Errorf("QNAME equals zone (no distribution ID present)")
 	}
 
-	// Extract correlation ID (everything before the zone)
-	correlationID := strings.TrimSuffix(qnameFQDN, zoneFQDN)
-	correlationID = strings.TrimSuffix(correlationID, ".") // Remove trailing dot
+	// Extract distribution ID (everything before the zone)
+	distributionID := strings.TrimSuffix(qnameFQDN, zoneFQDN)
+	distributionID = strings.TrimSuffix(distributionID, ".") // Remove trailing dot
 
-	return correlationID, nil
+	return distributionID, nil
 }

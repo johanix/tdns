@@ -21,13 +21,13 @@ import (
 // IncomingMessage represents a message received via DNS transport.
 // This is routed to the hsyncengine for processing.
 type IncomingMessage struct {
-	Type          string    // "hello", "beat", "sync", "relocate", "confirm"
-	CorrelationID string    // Correlation ID from QNAME
-	SenderID      string    // Sender identity
-	Zone          string    // Zone (for zone-scoped operations)
-	Payload       []byte    // Raw payload (JSON)
-	ReceivedAt    time.Time // When the message was received
-	SourceAddr    string    // Source address of the sender
+	Type           string    // "hello", "beat", "sync", "relocate", "confirm"
+	DistributionID string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
+	SenderID       string    // Sender identity
+	Zone           string    // Zone (for zone-scoped operations)
+	Payload        []byte    // Raw payload (JSON)
+	ReceivedAt     time.Time // When the message was received
+	SourceAddr     string    // Source address of the sender
 }
 
 // MessageHandler processes incoming DNS messages and routes them appropriately.
@@ -75,7 +75,7 @@ func (h *MessageHandler) HandleNotify(msg *dns.Msg, sourceAddr string) (*dns.Msg
 	}
 
 	// Extract correlation ID from QNAME
-	correlationID, err := h.extractCorrelationID(q.Name)
+	distributionID, err := h.extractDistributionID(q.Name)
 	if err != nil {
 		log.Printf("DNS Handler: Failed to extract correlation ID from %s: %v", q.Name, err)
 		return h.makeErrorResponse(msg, dns.RcodeFormatError), nil
@@ -89,7 +89,7 @@ func (h *MessageHandler) HandleNotify(msg *dns.Msg, sourceAddr string) (*dns.Msg
 	}
 
 	// Parse the payload to determine message type
-	incomingMsg, err := h.parsePayload(correlationID, payload, sourceAddr)
+	incomingMsg, err := h.parsePayload(distributionID, payload, sourceAddr)
 	if err != nil {
 		log.Printf("DNS Handler: Failed to parse payload: %v", err)
 		return h.makeErrorResponse(msg, dns.RcodeFormatError), nil
@@ -105,7 +105,7 @@ func (h *MessageHandler) HandleNotify(msg *dns.Msg, sourceAddr string) (*dns.Msg
 		select {
 		case h.IncomingChan <- incomingMsg:
 			log.Printf("DNS Handler: Routed %s message from %s (correlation: %s)",
-				incomingMsg.Type, incomingMsg.SenderID, incomingMsg.CorrelationID)
+				incomingMsg.Type, incomingMsg.SenderID, incomingMsg.DistributionID)
 		default:
 			log.Printf("DNS Handler: Incoming channel full, dropping %s message", incomingMsg.Type)
 		}
@@ -115,20 +115,20 @@ func (h *MessageHandler) HandleNotify(msg *dns.Msg, sourceAddr string) (*dns.Msg
 	return h.makeSuccessResponse(msg), nil
 }
 
-// extractCorrelationID extracts the correlation ID from a QNAME.
-// QNAME format: <correlationID>.<zone> — the first label is the correlation ID; the rest is the sender's
+// extractDistributionID extracts the correlation ID from a QNAME.
+// QNAME format: <distributionID>.<zone> — the first label is the correlation ID; the rest is the sender's
 // control zone. We do not require QNAME to end with our control zone: NOTIFY(CHUNK) can be agent-to-agent.
-func (h *MessageHandler) extractCorrelationID(qname string) (string, error) {
+func (h *MessageHandler) extractDistributionID(qname string) (string, error) {
 	qname = ensureFQDN(qname)
 	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
 	if len(labels) == 0 {
 		return "", fmt.Errorf("empty QNAME")
 	}
-	correlationID := labels[0]
-	if correlationID == "" {
+	distributionID := labels[0]
+	if distributionID == "" {
 		return "", fmt.Errorf("no correlation ID in QNAME %s", qname)
 	}
-	return correlationID, nil
+	return distributionID, nil
 }
 
 // extractChunkPayload extracts the CHUNK payload from the EDNS0 option.
@@ -150,7 +150,7 @@ func (h *MessageHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
-func (h *MessageHandler) parsePayload(correlationID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
+func (h *MessageHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
 	// First, parse just the type field
 	var typeOnly struct {
 		Type string `json:"type"`
@@ -168,7 +168,7 @@ func (h *MessageHandler) parsePayload(correlationID string, payload []byte, sour
 
 	return &IncomingMessage{
 		Type:          typeOnly.Type,
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		SenderID:      common.SenderID,
 		Zone:          common.Zone,
 		Payload:       payload,
@@ -191,7 +191,7 @@ func (h *MessageHandler) handleConfirmation(msg *IncomingMessage) {
 
 	// Route to transport's confirmation handler
 	h.Transport.HandleIncomingConfirmation(&IncomingConfirmation{
-		CorrelationID: confirm.CorrelationID,
+		DistributionID: confirm.DistributionID,
 		PeerID:        confirm.SenderID,
 		Status:        status,
 		Message:       confirm.Message,

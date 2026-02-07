@@ -59,9 +59,14 @@ func (tm *TransportManager) isInAuthorizedPeers(senderID string) bool {
 		return false
 	}
 
+	// Normalize senderID to FQDN for comparison
+	senderFQDN := dns.Fqdn(senderID)
+
 	// Check authorized_peers list
 	for _, authorizedID := range Conf.Agent.AuthorizedPeers {
-		if authorizedID == senderID {
+		// Normalize config entry to FQDN for comparison
+		authorizedFQDN := dns.Fqdn(authorizedID)
+		if authorizedFQDN == senderFQDN {
 			log.Printf("IsAgentAuthorized: Agent %s found in agent.authorized_peers config", senderID)
 			return true
 		}

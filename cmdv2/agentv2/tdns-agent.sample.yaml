@@ -54,6 +54,10 @@ agent:
       # chunk_mode:	query   # store payload by qname; send NOTIFY without payload; receiver fetches via CHUNK query (then chunk_query_endpoint is required)
       # chunk_query_endpoint:	include   # when chunk_mode=query: signal CHUNK query endpoint in NOTIFY (EDNS0 option 65005). Required when chunk_mode=query.
       # chunk_query_endpoint:	none      # when chunk_mode=query: do not add endpoint to NOTIFY; receiver uses agent_peer.address
+   # --- sync engine (agent.syncengine): always active, manages Hello retries and peer sync ---
+   syncengine:
+      intervals:
+         helloretry:	15    # seconds between Hello retries (range: 15-1800)
 
 service:
    name:		TDNS-AGENT

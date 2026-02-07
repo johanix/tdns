@@ -24,13 +24,16 @@ import (
 )
 
 // ChunkNotifyHandler handles incoming NOTIFY(CHUNK) messages for agent communication.
-// It extracts the correlation ID and payload, then routes to the appropriate handler.
+// It extracts the distribution ID and payload, then routes to the appropriate handler.
 type ChunkNotifyHandler struct {
-	// ControlZone is the zone suffix to strip from QNAMEs to get correlation ID
+	// ControlZone is the zone suffix to strip from QNAMEs to get distribution ID
 	ControlZone string
 
 	// Transport is the DNS transport for routing confirmations
 	Transport *DNSTransport
+
+	// Router handles message routing and middleware (optional, if nil uses legacy routing)
+	Router *DNSMessageRouter
 
 	// IncomingChan receives parsed messages for the hsyncengine
 	IncomingChan chan *IncomingMessage
@@ -94,7 +97,7 @@ type DnsNotifyRequest struct {
 // Usage: Register this with tdns.RegisterNotifyHandler(core.TypeCHUNK, handler.HandleChunkNotify)
 //
 // The handler:
-// 1. Extracts correlation ID from QNAME
+// 1. Extracts distribution ID from QNAME
 // 2. Extracts CHUNK payload from EDNS0 option
 // 3. Parses the payload to determine message type
 // 4. Routes to appropriate handler (confirmation vs incoming message)
@@ -107,10 +110,10 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 
 	log.Printf("ChunkNotifyHandler: Received NOTIFY(CHUNK) for %s from %s", qname, sourceAddr)
 
-	// Extract correlation ID from QNAME
-	correlationID, err := h.extractCorrelationID(qname)
+	// Extract distribution ID from QNAME
+	distributionID, err := h.extractDistributionID(qname)
 	if err != nil {
-		log.Printf("ChunkNotifyHandler: Failed to extract correlation ID from %s: %v", qname, err)
+		log.Printf("ChunkNotifyHandler: Failed to extract distribution ID from %s: %v", qname, err)
 		_ = h.sendResponse(w, msg, dns.RcodeFormatError)
 		return notifyerrors.ErrNotifyHandlerErrorResponse
 	}
@@ -141,7 +144,7 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 	payload, err := h.extractChunkPayload(msg)
 	if err != nil {
 		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
-		payload, err = h.fetchChunkViaQuery(ctx, qname, correlationID, msg, w)
+		payload, err = h.fetchChunkViaQuery(ctx, qname, distributionID, msg, w)
 		if err != nil {
 			log.Printf("ChunkNotifyHandler: Failed to get CHUNK payload (EDNS0 and query mode): %v", err)
 			_ = h.sendResponse(w, msg, dns.RcodeFormatError)
@@ -181,7 +184,7 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 	}
 
 	// Parse the payload
-	incomingMsg, err := h.parsePayload(correlationID, payload, sourceAddr)
+	incomingMsg, err := h.parsePayload(distributionID, payload, sourceAddr)
 	if err != nil {
 		log.Printf("ChunkNotifyHandler: Failed to parse payload: %v", err)
 		_ = h.sendResponse(w, msg, dns.RcodeFormatError)
@@ -196,13 +199,13 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 
 	case "ping":
 		// Ping: validate and send confirmation with echoed nonce in same response
-		return h.handlePing(w, msg, correlationID, payload)
+		return h.handlePing(w, msg, distributionID, payload)
 	default:
 		// All other messages (hello, beat, sync, relocate) go to hsyncengine
 		select {
 		case h.IncomingChan <- incomingMsg:
 			log.Printf("ChunkNotifyHandler: Routed %s message from %s (correlation: %s)",
-				incomingMsg.Type, incomingMsg.SenderID, incomingMsg.CorrelationID)
+				incomingMsg.Type, incomingMsg.SenderID, incomingMsg.DistributionID)
 		default:
 			log.Printf("ChunkNotifyHandler: Incoming channel full, dropping %s message", incomingMsg.Type)
 			_ = h.sendResponse(w, msg, dns.RcodeServerFailure)
@@ -214,25 +217,25 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 	return h.sendResponse(w, msg, dns.RcodeSuccess)
 }
 
-// extractCorrelationID extracts the correlation ID from a QNAME.
-// QNAME format: <correlationID>.<zone> — the first label is the correlation ID; the rest is the sender's
+// extractDistributionID extracts the distribution ID from a QNAME.
+// QNAME format: <distributionID>.<zone> — the first label is the distribution ID; the rest is the sender's
 // control zone (or any zone). We do not require QNAME to end with our control zone: NOTIFY(CHUNK)
 // can be sent agent-to-agent, so the sender uses its own control zone in the QNAME.
-func (h *ChunkNotifyHandler) extractCorrelationID(qname string) (string, error) {
+func (h *ChunkNotifyHandler) extractDistributionID(qname string) (string, error) {
 	qname = ensureFQDN(qname)
 	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
 	if len(labels) == 0 {
 		return "", fmt.Errorf("empty QNAME")
 	}
-	correlationID := labels[0]
-	if correlationID == "" {
-		return "", fmt.Errorf("no correlation ID in QNAME %s", qname)
+	distributionID := labels[0]
+	if distributionID == "" {
+		return "", fmt.Errorf("no distribution ID in QNAME %s", qname)
 	}
-	return correlationID, nil
+	return distributionID, nil
 }
 
 // extractSenderHintFromQname returns the sender identity hint from QNAME for decryption order.
-// QNAME format: <correlationID>.<senderZone> e.g. "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab."
+// QNAME format: <distributionID>.<senderZone> e.g. "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab."
 // Used to try the sender's key first when decrypting (avoids trying "combiner" first for agent-to-agent NOTIFYs).
 func extractSenderHintFromQname(qname string) string {
 	qname = ensureFQDN(qname)
@@ -287,7 +290,7 @@ func extractChunkQueryEndpointFromMsg(msg *dns.Msg) string {
 
 // fetchChunkViaQuery fetches the CHUNK payload via DNS CHUNK query when NOTIFY had no EDNS0 payload (chunk_mode=query).
 // Builds qname as {receiver}.{distid}.{sender} and queries the sender (from EDNS0 option 65005 or NOTIFY source).
-func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, correlationID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
+func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
 	if h.Transport == nil {
 		return nil, fmt.Errorf("no transport for CHUNK query")
 	}
@@ -296,7 +299,7 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, corr
 		return nil, fmt.Errorf("cannot derive sender from NOTIFY qname %q for query mode", qname)
 	}
 	// CHUNK query qname = {receiver}.{distid}.{sender}
-	chunkQueryQname := buildChunkQueryQname(h.LocalID, correlationID, senderFromQname)
+	chunkQueryQname := buildChunkQueryQname(h.LocalID, distributionID, senderFromQname)
 	queryTarget := extractChunkQueryEndpointFromMsg(msg)
 	if queryTarget == "" && h.GetPeerAddress != nil {
 		// Use configured peer address (e.g. from agent.peers) so we use correct host:port
@@ -319,7 +322,7 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, corr
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
-func (h *ChunkNotifyHandler) parsePayload(correlationID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
+func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
 	// Try parsing new unified format first (MessageType as int)
 	var unifiedFormat struct {
 		MessageType  int    `json:"MessageType"`  // New unified format
@@ -374,7 +377,7 @@ func (h *ChunkNotifyHandler) parsePayload(correlationID string, payload []byte, 
 
 	return &IncomingMessage{
 		Type:          msgType,
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		SenderID:      senderID,
 		Zone:          zone,
 		Payload:       payload,
@@ -384,7 +387,7 @@ func (h *ChunkNotifyHandler) parsePayload(correlationID string, payload []byte, 
 }
 
 // handlePing processes an incoming ping: parse payload, echo nonce in EDNS0 CHUNK response.
-func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, correlationID string, payload []byte) error {
+func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, distributionID string, payload []byte) error {
 	var ping DnsPingPayload
 	if err := json.Unmarshal(payload, &ping); err != nil {
 		log.Printf("ChunkNotifyHandler: Failed to parse ping payload: %v", err)
@@ -401,7 +404,7 @@ func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, corr
 		Type:          "ping_confirm",
 		SenderID:      h.LocalID,
 		Nonce:         ping.Nonce,
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		Status:        "ok",
 		Timestamp:     time.Now().Unix(),
 	}
@@ -441,7 +444,7 @@ func (h *ChunkNotifyHandler) handleConfirmation(msg *IncomingMessage) {
 
 	if h.Transport != nil {
 		h.Transport.HandleIncomingConfirmation(&IncomingConfirmation{
-			CorrelationID: confirm.CorrelationID,
+			DistributionID: confirm.DistributionID,
 			PeerID:        confirm.SenderID,
 			Status:        status,
 			Message:       confirm.Message,
@@ -488,4 +491,124 @@ func (h *ChunkNotifyHandler) CreateNotifyHandlerFunc() interface{} {
 // This counter is used for DoS attack monitoring and should be exported via metrics/monitoring.
 func (h *ChunkNotifyHandler) UnsolicitedMessageCount() uint64 {
 	return atomic.LoadUint64(&h.unsolicitedCount)
+}
+
+// RouteViaRouter routes a message through the DNS message router with middleware.
+// This is the new routing path that uses the modular router architecture.
+// Falls back to legacy HandleChunkNotify if Router is not configured.
+func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
+	// Fallback to legacy routing if no router configured
+	if h.Router == nil {
+		return h.HandleChunkNotify(ctx, qname, msg, w)
+	}
+
+	sourceAddr := ""
+	if w != nil {
+		sourceAddr = w.RemoteAddr().String()
+	}
+
+	log.Printf("RouteViaRouter: Received NOTIFY(CHUNK) for %s from %s", qname, sourceAddr)
+
+	// Extract distribution ID from QNAME
+	distributionID, err := h.extractDistributionID(qname)
+	if err != nil {
+		log.Printf("RouteViaRouter: Failed to extract distribution ID from %s: %v", qname, err)
+		return h.sendResponse(w, msg, dns.RcodeFormatError)
+	}
+
+	// Extract sender hint from QNAME
+	senderHint := extractSenderHintFromQname(qname)
+
+	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
+	payload, err := h.extractChunkPayload(msg)
+	if err != nil {
+		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
+		payload, err = h.fetchChunkViaQuery(ctx, qname, distributionID, msg, w)
+		if err != nil {
+			log.Printf("RouteViaRouter: Failed to get CHUNK payload (EDNS0 and query mode): %v", err)
+			return h.sendResponse(w, msg, dns.RcodeFormatError)
+		}
+	}
+
+	// Decrypt the payload if it is encrypted
+	// SECURITY: Use strict decryption - ONLY try the authorized peer's key to prevent DoS
+	if h.SecureWrapper != nil {
+		log.Printf("RouteViaRouter: Attempting to decrypt payload from %s using key for %s", sourceAddr, senderHint)
+
+		// Use strict decryption: ONLY the senderHint's key (prevents DoS via QNAME forgery)
+		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
+		if err != nil {
+			// Check if error is due to missing verification key (peer not yet discovered)
+			if strings.Contains(err.Error(), "no verification key for") {
+				log.Printf("RouteViaRouter: Missing verification key for authorized peer %s from %s - triggering discovery, sender should retry",
+					senderHint, sourceAddr)
+				// Trigger discovery asynchronously so we have the key for next retry
+				if h.OnPeerDiscoveryNeeded != nil {
+					go h.OnPeerDiscoveryNeeded(senderHint)
+				}
+				// Drop this message - sender will retry and we'll have the key by then
+				return nil
+			}
+
+			log.Printf("RouteViaRouter: Decryption failed with %s's key: %v", senderHint, err)
+
+			// Try decryption with combiner's key as fallback (for combiner-to-agent messages)
+			if senderHint != "combiner" {
+				decrypted, err = h.SecureWrapper.UnwrapIncomingFromPeer(payload, "combiner")
+				if err != nil {
+					// Check if combiner key is also missing
+					if strings.Contains(err.Error(), "no verification key for") {
+						log.Printf("RouteViaRouter: Missing verification key for combiner from %s", sourceAddr)
+						// Don't trigger discovery for combiner via this path
+						return nil
+					}
+					log.Printf("RouteViaRouter: Decryption failed with combiner's key: %v", err)
+					// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
+					log.Printf("RouteViaRouter: SECURITY: Decryption failed for NOTIFY from %s claiming to be %s", sourceAddr, senderHint)
+					return h.sendResponse(w, msg, dns.RcodeRefused)
+				}
+			} else {
+				return h.sendResponse(w, msg, dns.RcodeRefused)
+			}
+		}
+		payload = decrypted
+		log.Printf("RouteViaRouter: Successfully decrypted payload from %s using key for %s", sourceAddr, senderHint)
+	}
+
+	// Parse payload to normalize message format (converts numeric MessageType to string Type)
+	incomingMsg, err := h.parsePayload(distributionID, payload, sourceAddr)
+	if err != nil {
+		log.Printf("RouteViaRouter: Failed to parse payload: %v", err)
+		return h.sendResponse(w, msg, dns.RcodeFormatError)
+	}
+
+	msgType := MessageType(incomingMsg.Type)
+	log.Printf("RouteViaRouter: Message type: %s from %s", msgType, incomingMsg.SenderID)
+
+	// Create message context
+	msgCtx := NewMessageContext(msg, sourceAddr)
+	msgCtx.DistributionID = distributionID
+	msgCtx.PeerID = senderHint
+	msgCtx.ChunkPayload = payload
+	msgCtx.RemoteAddr = sourceAddr
+	// Mark that we've already handled decryption (payload is now plaintext)
+	msgCtx.ChunkCrypted = false
+	msgCtx.SignatureValid = true // We verified during decryption above
+	msgCtx.SignatureReason = "decrypted_by_router"
+	// Store the parsed message so handlers don't need to re-parse
+	msgCtx.Data["incoming_message"] = incomingMsg
+
+	// Route through router (middleware + handlers)
+	// The SendResponseMiddleware will send the DNS response
+	responseMiddleware := SendResponseMiddleware(w, msg)
+	err = responseMiddleware(msgCtx, func(ctx *MessageContext) error {
+		return h.Router.Route(ctx, msgType)
+	})
+
+	if err != nil {
+		log.Printf("RouteViaRouter: Routing failed: %v", err)
+		return h.sendResponse(w, msg, dns.RcodeServerFailure)
+	}
+
+	return nil
 }

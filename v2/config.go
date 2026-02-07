@@ -152,6 +152,11 @@ type LocalAgentConf struct {
 		LocateInterval int    // time in seconds
 		BeatInterval   uint32 // time between outgoing heartbeats to same destination
 	}
+	Syncengine struct {
+		Intervals struct {
+			HelloRetry int // seconds between Hello retries (range: 15-1800)
+		}
+	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
@@ -198,6 +203,63 @@ type LocalAgentDnsConf struct {
 	// Chunk config (same key names as combiner for consistency)
 	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agent.address
+	// Message retention times for CHUNK distributions (in seconds)
+	MessageRetention MessageRetentionConf `yaml:"message_retention" mapstructure:"message_retention"`
+}
+
+// MessageRetentionConf defines retention times for different message types in CHUNK distributions.
+// Times are in seconds. Beat and ping messages expire quickly to reduce clutter,
+// while other message types are kept longer for debugging purposes.
+type MessageRetentionConf struct {
+	Beat     int `yaml:"beat" mapstructure:"beat"`           // Beat message retention (default: 30s)
+	Ping     int `yaml:"ping" mapstructure:"ping"`           // Ping message retention (default: 30s)
+	Hello    int `yaml:"hello" mapstructure:"hello"`         // Hello message retention (default: 300s)
+	Sync     int `yaml:"sync" mapstructure:"sync"`           // Sync message retention (default: 300s)
+	Relocate int `yaml:"relocate" mapstructure:"relocate"`   // Relocate message retention (default: 300s)
+	Default  int `yaml:"default" mapstructure:"default"`     // Default retention for other types (default: 300s)
+}
+
+// GetRetentionForMessageType returns the retention time in seconds for a given message type.
+// Returns the configured value if set, otherwise returns the appropriate default.
+func (m *MessageRetentionConf) GetRetentionForMessageType(messageType string) int {
+	// Apply defaults if values are not set (0 or negative)
+	const (
+		defaultBeatPing = 30   // 30 seconds for beat and ping
+		defaultOther    = 300  // 5 minutes for other message types
+	)
+
+	switch messageType {
+	case "beat":
+		if m.Beat > 0 {
+			return m.Beat
+		}
+		return defaultBeatPing
+	case "ping":
+		if m.Ping > 0 {
+			return m.Ping
+		}
+		return defaultBeatPing
+	case "hello":
+		if m.Hello > 0 {
+			return m.Hello
+		}
+		return defaultOther
+	case "sync":
+		if m.Sync > 0 {
+			return m.Sync
+		}
+		return defaultOther
+	case "relocate":
+		if m.Relocate > 0 {
+			return m.Relocate
+		}
+		return defaultOther
+	default:
+		if m.Default > 0 {
+			return m.Default
+		}
+		return defaultOther
+	}
 }
 
 type DbConf struct {

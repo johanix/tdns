@@ -88,8 +88,34 @@ type Peer struct {
 	BeatSequence      uint64    // Current beat sequence number
 	ConsecutiveFails  int       // Consecutive communication failures
 
+	// Message statistics
+	Stats MessageStats // Detailed per-message-type counters
+
 	// Preferred transport
 	PreferredTransport string // "API" or "DNS"
+}
+
+// MessageStats tracks detailed statistics for messages exchanged with a peer.
+// Separate counters for sent/received and per message type.
+type MessageStats struct {
+	mu sync.RWMutex
+
+	// Last contact time (updated on any message sent or received)
+	LastUsed time.Time
+
+	// Per-message-type counters
+	HelloSent     uint64
+	HelloReceived uint64
+	BeatSent      uint64
+	BeatReceived  uint64
+	SyncSent      uint64
+	SyncReceived  uint64
+	PingSent      uint64
+	PingReceived  uint64
+
+	// Total distribution count (sum of all message types)
+	TotalSent     uint64
+	TotalReceived uint64
 }
 
 // ZoneRelation tracks the relationship for a specific zone.
@@ -120,6 +146,62 @@ func (p *Peer) SetState(state PeerState, reason string) {
 	p.State = state
 	p.StateReason = reason
 	p.StateChanged = time.Now()
+}
+
+// RecordMessageSent records statistics for an outgoing message.
+func (ms *MessageStats) RecordMessageSent(msgType string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	ms.LastUsed = time.Now()
+	ms.TotalSent++
+
+	switch msgType {
+	case "hello":
+		ms.HelloSent++
+	case "beat":
+		ms.BeatSent++
+	case "sync":
+		ms.SyncSent++
+	case "ping":
+		ms.PingSent++
+	}
+}
+
+// RecordMessageReceived records statistics for an incoming message.
+func (ms *MessageStats) RecordMessageReceived(msgType string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	ms.LastUsed = time.Now()
+	ms.TotalReceived++
+
+	switch msgType {
+	case "hello":
+		ms.HelloReceived++
+	case "beat":
+		ms.BeatReceived++
+	case "sync":
+		ms.SyncReceived++
+	case "ping":
+		ms.PingReceived++
+	}
+}
+
+// GetStats returns a snapshot of current statistics (thread-safe).
+func (ms *MessageStats) GetStats() (lastUsed time.Time, sent, received uint64) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return ms.LastUsed, ms.TotalSent, ms.TotalReceived
+}
+
+// GetDetailedStats returns all per-message-type statistics.
+func (ms *MessageStats) GetDetailedStats() (lastUsed time.Time, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv uint64) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return ms.LastUsed, ms.HelloSent, ms.HelloReceived, ms.BeatSent, ms.BeatReceived,
+		ms.SyncSent, ms.SyncReceived, ms.PingSent, ms.PingReceived,
+		ms.TotalSent, ms.TotalReceived
 }
 
 // GetState returns the peer's current state.

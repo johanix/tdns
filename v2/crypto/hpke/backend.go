@@ -530,6 +530,29 @@ func (b *Backend) DecryptAndVerify(privKey crypto.PrivateKey, verificationKey cr
 	return plaintext, nil
 }
 
+// PublicKeyFromStdlib wraps a stdlib crypto.PublicKey in an HPKE backend wrapper.
+// This allows converting discovered keys (from JWK records, etc.) to HPKE verifyKey type.
+// Supports ECDSA P-256 public keys from stdlib (for signature verification).
+//
+// Note: For HPKE encryption keys (X25519), use ParsePublicKey with raw bytes instead.
+// This method is specifically for signature verification keys.
+func (b *Backend) PublicKeyFromStdlib(stdlibKey interface{}) (crypto.PublicKey, error) {
+	// Type assert to ECDSA public key (for signature verification)
+	ecdsaKey, ok := stdlibKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, crypto.NewBackendError("hpke", "public_key_from_stdlib",
+			fmt.Errorf("unsupported stdlib key type: expected *ecdsa.PublicKey, got %T", stdlibKey))
+	}
+
+	// Verify it's P-256 (required for ES256 signatures)
+	if ecdsaKey.Curve != elliptic.P256() {
+		return nil, crypto.NewBackendError("hpke", "public_key_from_stdlib",
+			fmt.Errorf("expected P-256 curve, got %s", ecdsaKey.Curve.Params().Name))
+	}
+
+	return &verifyKey{key: ecdsaKey}, nil
+}
+
 // Auto-register backend on package import
 func init() {
 	crypto.RegisterBackend(NewBackend())

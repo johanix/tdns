@@ -201,11 +201,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 
 						// Send update to combiner via CHUNK handler
 						if conf.Internal.CombinerHandler != nil && synchedDataUpdate.Update != nil {
-							correlationID := fmt.Sprintf("local-%d", time.Now().UnixNano())
+							distributionID := fmt.Sprintf("local-%d", time.Now().UnixNano())
 							combinerReq := ConvertZoneUpdateToSyncRequest(
 								synchedDataUpdate.Update,
 								string(synchedDataUpdate.AgentId),
-								correlationID,
+								distributionID,
 							)
 							combinerResp := SendToCombiner(conf.Internal.CombinerHandler, combinerReq)
 							if combinerResp.Status != "ok" {
@@ -313,11 +313,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 
 						// 4. Send the update to the combiner via CHUNK handler
 						if conf.Internal.CombinerHandler != nil && synchedDataUpdate.Update != nil {
-							correlationID := fmt.Sprintf("remote-%d", time.Now().UnixNano())
+							distributionID := fmt.Sprintf("remote-%d", time.Now().UnixNano())
 							combinerReq := ConvertZoneUpdateToSyncRequest(
 								synchedDataUpdate.Update,
 								string(synchedDataUpdate.AgentId),
-								correlationID,
+								distributionID,
 							)
 							combinerResp := SendToCombiner(conf.Internal.CombinerHandler, combinerReq)
 							if combinerResp.Status != "ok" {

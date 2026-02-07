@@ -158,6 +158,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		noZoneCommands := map[string]bool{
 			"config": true, "hsync-agentstatus": true, "combiner-dnsping": true, "combiner-apiping": true,
 			"discover": true, "hsync-locate": true,
+			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -409,6 +410,57 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			//		case "list-known-agents":
 			//			resp.Agents, err = conf.Internal.Registry.GetRemoteAgents(cp.Zone)
 
+		// Router introspection commands
+		case "router-list":
+			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
+				resp.Error = true
+				resp.ErrorMsg = "Router not available (DNS transport not configured)"
+				return
+			}
+			routerResp := handleRouterList(conf.Internal.TransportManager.Router)
+			resp = *routerResp
+			resp.Identity = AgentId(conf.Agent.Identity)
+
+		case "router-describe":
+			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
+				resp.Error = true
+				resp.ErrorMsg = "Router not available (DNS transport not configured)"
+				return
+			}
+			routerResp := handleRouterDescribe(conf.Internal.TransportManager.Router)
+			resp = *routerResp
+			resp.Identity = AgentId(conf.Agent.Identity)
+
+		case "router-metrics":
+			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
+				resp.Error = true
+				resp.ErrorMsg = "Router not available (DNS transport not configured)"
+				return
+			}
+			routerResp := handleRouterMetrics(conf.Internal.TransportManager.Router)
+			resp = *routerResp
+			resp.Identity = AgentId(conf.Agent.Identity)
+
+		case "router-walk":
+			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
+				resp.Error = true
+				resp.ErrorMsg = "Router not available (DNS transport not configured)"
+				return
+			}
+			routerResp := handleRouterWalk(conf.Internal.TransportManager.Router)
+			resp = *routerResp
+			resp.Identity = AgentId(conf.Agent.Identity)
+
+		case "router-reset":
+			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
+				resp.Error = true
+				resp.ErrorMsg = "Router not available (DNS transport not configured)"
+				return
+			}
+			routerResp := handleRouterReset(conf.Internal.TransportManager.Router)
+			resp = *routerResp
+			resp.Identity = AgentId(conf.Agent.Identity)
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
 			resp.Error = true
@@ -651,6 +703,347 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
 				resp.Status = "timeout"
 			}
+
+		case "hsync-force-sync":
+			// Force sync with a specific peer
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "peer agent ID is required"
+				return
+			}
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+
+			// Check if TransportManager is available
+			if conf.Internal.TransportManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
+				return
+			}
+
+			// Get peer from agent registry
+			agent, exists := conf.Internal.AgentRegistry.S.Get(amp.AgentId)
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("peer agent %q not found in registry", amp.AgentId)
+				return
+			}
+
+			// Convert agent to transport peer
+			peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
+
+			// Create sync request with provided RRs (or empty for test sync)
+			// RRs are already strings in amp.RRs, just validate they parse
+			for _, rrStr := range amp.RRs {
+				_, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+			}
+
+			syncReq := &transport.SyncRequest{
+				Zone:          string(amp.Zone),
+				Records:       amp.RRs, // Use strings directly
+				DistributionID: fmt.Sprintf("debug-force-sync-%d", time.Now().Unix()),
+			}
+
+			log.Printf("hsync-force-sync: Forcing sync to peer %q for zone %q", amp.AgentId, amp.Zone)
+
+			// Send sync with fallback
+			ctx := context.Background()
+			syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("sync failed: %v", err)
+			} else {
+				resp.Msg = fmt.Sprintf("Sync sent successfully to %q (distribution: %s)", amp.AgentId, syncReq.DistributionID)
+				resp.Data = map[string]interface{}{
+					"distribution_id": syncReq.DistributionID,
+					"peer_id":        amp.AgentId,
+					"zone":           amp.Zone,
+					"status":         syncResp.Status,
+					"message":        syncResp.Message,
+				}
+			}
+			resp.Status = "ok"
+
+		case "hsync-sync-state":
+			// Show sync state for a zone
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+
+			// Get sync state from ZoneDataRepo via SynchedDataCmd
+			sdcmd := &SynchedDataCmd{
+				Cmd:      "get-zone-state",
+				Zone:     amp.Zone,
+				Response: make(chan *SynchedDataCmdResponse, 1),
+			}
+			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+
+			select {
+			case response := <-sdcmd.Response:
+				if response.Error {
+					resp.Error = true
+					resp.ErrorMsg = response.ErrorMsg
+				} else {
+					resp.Msg = fmt.Sprintf("Sync state for zone %q", amp.Zone)
+					resp.Data = map[string]interface{}{
+						"zone":           amp.Zone,
+						"zone_data_repo": response.ZDR,
+						"message":        response.Msg,
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(2 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for sync state response"
+				resp.Status = "timeout"
+			}
+
+		case "hsync-send-to-combiner":
+			// Send test data to combiner (via SynchedDataUpdate)
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			if amp.AgentId == "" {
+				// Default to local agent
+				amp.AgentId = AgentId(conf.Agent.Identity)
+			}
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+
+			// Parse the RRs
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// Create ZoneUpdate
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: amp.AgentId,
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			// Populate RRsets
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+			}
+
+			log.Printf("hsync-send-to-combiner: Sending %d RRs from %q for zone %q to combiner", len(parsedRRs), amp.AgentId, amp.Zone)
+
+			// Create response channel
+			cresp := make(chan *AgentMsgResponse, 1)
+
+			// Send to SynchedDataEngine (which forwards to combiner)
+			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    amp.AgentId,
+				UpdateType: "local", // "local" means from this agent to combiner
+				Update:     zu,
+				Response:   cresp,
+			}
+
+			// Wait for response
+			select {
+			case r := <-cresp:
+				if r.Error {
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
+					resp.Msg = fmt.Sprintf("Send to combiner failed: %s", r.ErrorMsg)
+				} else {
+					resp.Msg = fmt.Sprintf("Data sent to combiner successfully: %d RRs from %q", len(parsedRRs), amp.AgentId)
+					if r.Msg != "" {
+						resp.Msg += " - " + r.Msg
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for combiner response"
+				resp.Status = "timeout"
+			}
+
+		case "hsync-test-chain":
+			// Run full end-to-end test chain
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required for test"
+				return
+			}
+
+			scenario := "add" // default scenario
+			if amp.Data != nil {
+				if s, ok := amp.Data["scenario"].(string); ok {
+					scenario = s
+				}
+			}
+
+			log.Printf("hsync-test-chain: Running %q scenario for zone %q", scenario, amp.Zone)
+
+			// Parse the RRs
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// Step 1: Create local zone update
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: AgentId(conf.Agent.Identity),
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+			}
+
+			testResults := make(map[string]interface{})
+			testResults["scenario"] = scenario
+			testResults["zone"] = amp.Zone
+			testResults["rrs_count"] = len(parsedRRs)
+
+			// Step 2: Send to local SynchedDataEngine
+			cresp := make(chan *AgentMsgResponse, 1)
+			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    AgentId(conf.Agent.Identity),
+				UpdateType: "local",
+				Update:     zu,
+				Response:   cresp,
+			}
+
+			select {
+			case r := <-cresp:
+				if r.Error {
+					testResults["step1_local_update"] = map[string]interface{}{
+						"success": false,
+						"error":   r.ErrorMsg,
+					}
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Step 1 (local update) failed: %s", r.ErrorMsg)
+					resp.Data = testResults
+					return
+				}
+				testResults["step1_local_update"] = map[string]interface{}{
+					"success": true,
+					"message": r.Msg,
+				}
+			case <-time.After(5 * time.Second):
+				testResults["step1_local_update"] = map[string]interface{}{
+					"success": false,
+					"error":   "timeout",
+				}
+				resp.Error = true
+				resp.ErrorMsg = "Step 1 (local update) timed out"
+				resp.Data = testResults
+				return
+			}
+
+			// Step 3: Sync to remote peers (if TransportManager available)
+			if conf.Internal.TransportManager != nil && conf.Internal.AgentRegistry != nil {
+				peerCount := 0
+				syncResults := make(map[string]interface{})
+
+				// Get all remote agents
+				keys := conf.Internal.AgentRegistry.S.Keys()
+				for _, key := range keys {
+					if agent, exists := conf.Internal.AgentRegistry.S.Get(key); exists {
+						if agent.Identity == AgentId(conf.Agent.Identity) {
+							continue // Skip self
+						}
+
+						peerCount++
+						peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
+						syncReq := &transport.SyncRequest{
+							Zone:          string(amp.Zone),
+							Records:       amp.RRs, // Use string records directly
+							DistributionID: fmt.Sprintf("test-chain-%d-%s", time.Now().Unix(), agent.Identity),
+						}
+
+						ctx := context.Background()
+						syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+						if err != nil {
+							syncResults[string(agent.Identity)] = map[string]interface{}{
+								"success": false,
+								"error":   err.Error(),
+							}
+						} else {
+							syncResults[string(agent.Identity)] = map[string]interface{}{
+								"success":        syncResp.Status == transport.ConfirmSuccess,
+								"message":        syncResp.Message,
+								"distribution_id": syncReq.DistributionID,
+							}
+						}
+					}
+				}
+
+				testResults["step2_peer_sync"] = map[string]interface{}{
+					"peers_synced": peerCount,
+					"results":      syncResults,
+				}
+			} else {
+				testResults["step2_peer_sync"] = map[string]interface{}{
+					"skipped": true,
+					"reason":  "TransportManager not available",
+				}
+			}
+
+			resp.Msg = fmt.Sprintf("Test chain completed for zone %q (scenario: %s)", amp.Zone, scenario)
+			resp.Data = testResults
+			resp.Status = "ok"
 
 		default:
 			resp.Error = true

@@ -28,7 +28,8 @@ type DistributionInfo struct {
 	State          string
 	CreatedAt      time.Time
 	CompletedAt    *time.Time
-	QNAME          string // The DNS QNAME used to retrieve this distribution
+	ExpiresAt      *time.Time // When this distribution should be cleaned up (nil = no expiration)
+	QNAME          string     // The DNS QNAME used to retrieve this distribution
 }
 
 // PeerInfo holds information about a peer agent with established keys
@@ -38,7 +39,7 @@ type PeerInfo struct {
 	Transport    string // "API" or "DNS"
 	Address      string
 	CryptoType   string    // "JOSE" or "HPKE" (for DNS), "TLS" (for API), or "-"
-	DistribSent  int       // Number of distributions sent to this peer
+	DistribSent  int       // Number of distributions sent to this peer (deprecated - use TotalReceived)
 	LastUsed     time.Time // Last time this peer was used
 	Addresses    []string  // IP addresses from discovery
 	Port         uint16    // Port number
@@ -52,6 +53,18 @@ type PeerInfo struct {
 	Partial      bool      // Whether discovery was partial
 	State        string    // Agent state
 	ContactInfo  string    // Contact info status
+
+	// Per-message-type statistics
+	HelloSent     uint64
+	HelloReceived uint64
+	BeatSent      uint64
+	BeatReceived  uint64
+	SyncSent      uint64
+	SyncReceived  uint64
+	PingSent      uint64
+	PingReceived  uint64
+	TotalSent     uint64
+	TotalReceived uint64
 }
 
 // DistributionCache is an in-memory cache of distributions keyed by QNAME
@@ -121,6 +134,47 @@ func (dc *DistributionCache) PurgeAll() int {
 	count := dc.dists.Count()
 	dc.dists.Clear()
 	return count
+}
+
+// PurgeExpired removes distributions that have passed their ExpiresAt time.
+// This implements fast expiration for beat/ping messages to reduce clutter.
+// Returns the number of distributions removed.
+func (dc *DistributionCache) PurgeExpired() int {
+	count := 0
+	now := time.Now()
+
+	for tuple := range dc.dists.IterBuffered() {
+		qname := tuple.Key
+		info := tuple.Val
+		if info.ExpiresAt != nil && info.ExpiresAt.Before(now) {
+			dc.dists.Remove(qname)
+			count++
+		}
+	}
+	return count
+}
+
+// StartCleanupGoroutine starts a background goroutine that periodically removes expired distributions.
+// The cleanup runs every minute to keep the distribution list clean without excessive overhead.
+func (dc *DistributionCache) StartCleanupGoroutine(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("DistributionCache: Cleanup goroutine stopping")
+				return
+			case <-ticker.C:
+				removed := dc.PurgeExpired()
+				if removed > 0 {
+					log.Printf("DistributionCache: Purged %d expired distributions", removed)
+				}
+			}
+		}
+	}()
+	log.Printf("DistributionCache: Cleanup goroutine started (checks every 1 minute)")
 }
 
 // AgentDistribPost represents a request to the agent distrib API
@@ -472,15 +526,22 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 	}
 }
 
-// StartDistributionGC starts a background goroutine that periodically purges completed distributions
-// older than 5 minutes. Incomplete distributions are never purged by GC (only "purge --force" removes them).
+// StartDistributionGC starts a background goroutine that periodically purges:
+// 1. Completed distributions older than 5 minutes
+// 2. Expired distributions past their ExpiresAt time (based on message type retention)
+// Incomplete distributions are never purged by GC (only "purge --force" removes them).
 func StartDistributionGC(cache *DistributionCache, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for range ticker.C {
-			count := cache.PurgeCompleted(5 * time.Minute)
-			if count > 0 {
-				log.Printf("Distribution GC: purged %d completed distributions (kept ≥5m after completion)", count)
+			completedCount := cache.PurgeCompleted(5 * time.Minute)
+			if completedCount > 0 {
+				log.Printf("Distribution GC: purged %d completed distributions (kept ≥5m after completion)", completedCount)
+			}
+
+			expiredCount := cache.PurgeExpired()
+			if expiredCount > 0 {
+				log.Printf("Distribution GC: purged %d expired distributions (past retention time)", expiredCount)
 			}
 		}
 	}()
@@ -550,7 +611,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						Transport:   "API",
 						Address:     agent.ApiDetails.BaseUri,
 						CryptoType:  "TLS",
-						DistribSent: 0, // TODO: track actual count per transport
+						DistribSent: 0, // Will be updated from PeerRegistry below
 						APIUri:      agent.ApiDetails.BaseUri,
 						Port:        agent.ApiDetails.Port,
 						Addresses:   agent.ApiDetails.Addrs,
@@ -560,6 +621,30 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.ApiDetails.HelloTime
+					}
+					// Get statistics from PeerRegistry if available
+					if conf.Internal.TransportManager != nil {
+						if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
+							peerInfo.HelloSent = helloSent
+							peerInfo.HelloReceived = helloRecv
+							peerInfo.BeatSent = beatSent
+							peerInfo.BeatReceived = beatRecv
+							peerInfo.SyncSent = syncSent
+							peerInfo.SyncReceived = syncRecv
+							peerInfo.PingSent = pingSent
+							peerInfo.PingReceived = pingRecv
+							peerInfo.TotalSent = totalSent
+							peerInfo.TotalReceived = totalRecv
+							peerInfo.DistribSent = int(totalRecv) // Backward compat
+							if !lastUsed.IsZero() {
+								peerInfo.LastUsed = lastUsed
+							}
+							log.Printf("listKnownPeers: Peer %s stats: lastUsed=%s, sent=%d, received=%d",
+								agentIDFqdn, lastUsed.Format("15:04:05"), totalSent, totalRecv)
+						} else {
+							log.Printf("listKnownPeers: Peer %s not found in PeerRegistry", agentIDFqdn)
+						}
 					}
 					peers = append(peers, peerInfo)
 				}
@@ -576,7 +661,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						Transport:    "DNS",
 						Address:      agent.DnsDetails.BaseUri,
 						CryptoType:   "JOSE",
-						DistribSent:  0, // TODO: track actual count per transport
+						DistribSent:  0, // Will be updated from PeerRegistry below
 						DNSUri:       agent.DnsDetails.BaseUri,
 						Port:         agent.DnsDetails.Port,
 						Addresses:    agent.DnsDetails.Addrs,
@@ -589,6 +674,30 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {
 						peerInfo.LastUsed = agent.DnsDetails.HelloTime
+					}
+					// Get statistics from PeerRegistry if available
+					if conf.Internal.TransportManager != nil {
+						if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+							lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
+							peerInfo.HelloSent = helloSent
+							peerInfo.HelloReceived = helloRecv
+							peerInfo.BeatSent = beatSent
+							peerInfo.BeatReceived = beatRecv
+							peerInfo.SyncSent = syncSent
+							peerInfo.SyncReceived = syncRecv
+							peerInfo.PingSent = pingSent
+							peerInfo.PingReceived = pingRecv
+							peerInfo.TotalSent = totalSent
+							peerInfo.TotalReceived = totalRecv
+							peerInfo.DistribSent = int(totalRecv) // Backward compat
+							if !lastUsed.IsZero() {
+								peerInfo.LastUsed = lastUsed
+							}
+							log.Printf("listKnownPeers: Peer %s stats: lastUsed=%s, sent=%d, received=%d",
+								agentIDFqdn, lastUsed.Format("15:04:05"), totalSent, totalRecv)
+						} else {
+							log.Printf("listKnownPeers: Peer %s not found in PeerRegistry", agentIDFqdn)
+						}
 					}
 					peers = append(peers, peerInfo)
 				}
@@ -620,7 +729,29 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					CryptoType:  "-",
 					State:       "CONFIG",
 					ContactInfo: "config only",
-					DistribSent: 0,
+					DistribSent: 0, // Will be updated from PeerRegistry if peer exists
+				}
+				// Get statistics from PeerRegistry if available (peer may be known but not fully discovered)
+				if conf.Internal.TransportManager != nil {
+					if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(peerIDFqdn); ok {
+						lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
+						peerInfo.HelloSent = helloSent
+						peerInfo.HelloReceived = helloRecv
+						peerInfo.BeatSent = beatSent
+						peerInfo.BeatReceived = beatRecv
+						peerInfo.SyncSent = syncSent
+						peerInfo.SyncReceived = syncRecv
+						peerInfo.PingSent = pingSent
+						peerInfo.PingReceived = pingRecv
+						peerInfo.TotalSent = totalSent
+						peerInfo.TotalReceived = totalRecv
+						peerInfo.DistribSent = int(totalRecv) // Backward compat
+						if !lastUsed.IsZero() {
+							peerInfo.LastUsed = lastUsed
+						}
+						log.Printf("listKnownPeers: Config-only peer %s stats: lastUsed=%s, sent=%d, received=%d",
+							peerIDFqdn, lastUsed.Format("15:04:05"), totalSent, totalRecv)
+					}
 				}
 				peers = append(peers, peerInfo)
 			}

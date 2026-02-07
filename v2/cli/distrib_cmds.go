@@ -555,10 +555,39 @@ func displayPeerVerbose(p map[string]interface{}) {
 		fmt.Printf("  ⚠ Discovery:    Partial (some records missing)\n")
 	}
 
-	// Usage statistics
-	if distribSent, ok := p["distrib_sent"].(float64); ok {
-		fmt.Printf("  Distributions:  %d sent\n", int(distribSent))
+	// Usage statistics - show detailed per-message-type breakdown
+	fmt.Println()
+	totalSent := getUint64Value(p, "total_sent")
+	totalRecv := getUint64Value(p, "total_received")
+
+	if totalSent > 0 || totalRecv > 0 {
+		fmt.Printf("  Message Statistics:\n")
+		fmt.Printf("    Total:        %d sent, %d received\n", totalSent, totalRecv)
+
+		// Show per-message-type breakdown if any non-zero
+		helloSent := getUint64Value(p, "hello_sent")
+		helloRecv := getUint64Value(p, "hello_received")
+		beatSent := getUint64Value(p, "beat_sent")
+		beatRecv := getUint64Value(p, "beat_received")
+		syncSent := getUint64Value(p, "sync_sent")
+		syncRecv := getUint64Value(p, "sync_received")
+		pingSent := getUint64Value(p, "ping_sent")
+		pingRecv := getUint64Value(p, "ping_received")
+
+		if helloSent > 0 || helloRecv > 0 {
+			fmt.Printf("    Hello:        %d sent, %d received\n", helloSent, helloRecv)
+		}
+		if beatSent > 0 || beatRecv > 0 {
+			fmt.Printf("    Beat:         %d sent, %d received\n", beatSent, beatRecv)
+		}
+		if syncSent > 0 || syncRecv > 0 {
+			fmt.Printf("    Sync:         %d sent, %d received\n", syncSent, syncRecv)
+		}
+		if pingSent > 0 || pingRecv > 0 {
+			fmt.Printf("    Ping:         %d sent, %d received\n", pingSent, pingRecv)
+		}
 	}
+
 	if lastUsedStr := getStringValue(p, "last_used"); lastUsedStr != "" && lastUsedStr != "0001-01-01T00:00:00Z" {
 		fmt.Printf("  Last Used:      %s\n", lastUsedStr)
 	}
@@ -572,6 +601,23 @@ func getStringValue(m map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// Helper function for extracting uint64 values from JSON maps
+func getUint64Value(m map[string]interface{}, key string) uint64 {
+	if v, ok := m[key]; ok && v != nil {
+		switch val := v.(type) {
+		case float64:
+			return uint64(val)
+		case int:
+			return uint64(val)
+		case int64:
+			return uint64(val)
+		case uint64:
+			return val
+		}
+	}
+	return 0
 }
 
 // agentDistribDiscoverCmd performs DNS-based discovery of an agent's contact information

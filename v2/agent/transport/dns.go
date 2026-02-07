@@ -25,7 +25,7 @@ import (
 
 // DNSTransport implements the Transport interface using DNS NOTIFY and queries.
 // Communication pattern:
-// - Outbound: Send NOTIFY(CHUNK) with correlation ID in QNAME
+// - Outbound: Send NOTIFY(CHUNK) with distribution ID in QNAME
 // - Inbound: Receive queries for CHUNK RRtype, respond with data
 // - Confirmation: Send NOTIFY(CHUNK) back with status in EDNS0
 type DNSTransport struct {
@@ -63,13 +63,13 @@ type DNSTransport struct {
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
 	chunkQueryEndpointInNotify bool
 
-	distributionAdd           func(qname string, senderID string, receiverID string, operation string, correlationID string)
+	distributionAdd           func(qname string, senderID string, receiverID string, operation string, distributionID string)
 	distributionMarkCompleted func(qname string)
 }
 
 // pendingOperation tracks an operation awaiting confirmation
 type pendingOperation struct {
-	CorrelationID string
+	DistributionID string
 	PeerID        string
 	OperationType string // "hello", "beat", "sync", "relocate"
 	SentAt        time.Time
@@ -85,7 +85,7 @@ type operationResponse struct {
 
 // IncomingConfirmation represents a confirmation received via DNS
 type IncomingConfirmation struct {
-	CorrelationID string
+	DistributionID string
 	PeerID        string
 	Status        ConfirmStatus
 	Message       string
@@ -114,7 +114,7 @@ type DNSTransportConfig struct {
 	ChunkQueryEndpointInNotify bool
 
 	// Optional: register distributions for "agent distrib list". Called when sending; MarkCompleted when response is success.
-	DistributionAdd           func(qname string, senderID string, receiverID string, operation string, correlationID string)
+	DistributionAdd           func(qname string, senderID string, receiverID string, operation string, distributionID string)
 	DistributionMarkCompleted func(qname string)
 }
 
@@ -155,18 +155,18 @@ func (t *DNSTransport) Name() string {
 	return "DNS"
 }
 
-// Correlation ID: 8 hex chars = epoch (when transport first used) + per-operation counter (tdns-kdc style).
+// Distribution ID: 8 hex chars = epoch (when transport first used) + per-operation counter (tdns-kdc style).
 var (
-	correlationEpochOnce sync.Once
-	correlationEpoch     int64
-	correlationCounter   uint64
+	distributionEpochOnce sync.Once
+	distributionEpoch     int64
+	distributionCounter   uint64
 )
 
-// generateCorrelationID returns a unique 8-character (hex) ID: base = unix epoch when first used, then +1 per call.
-func generateCorrelationID() string {
-	correlationEpochOnce.Do(func() { correlationEpoch = time.Now().Unix() })
-	n := atomic.AddUint64(&correlationCounter, 1)
-	return fmt.Sprintf("%08x", uint32(correlationEpoch+int64(n-1)))
+// generateDistributionID returns a unique 8-character (hex) ID: base = unix epoch when first used, then +1 per call.
+func generateDistributionID() string {
+	distributionEpochOnce.Do(func() { distributionEpoch = time.Now().Unix() })
+	n := atomic.AddUint64(&distributionCounter, 1)
+	return fmt.Sprintf("%08x", uint32(distributionEpoch+int64(n-1)))
 }
 
 // ensureFQDN ensures a domain name ends with a dot.
@@ -180,10 +180,10 @@ func ensureFQDN(name string) string {
 	return name
 }
 
-// buildNotifyQNAME constructs a NOTIFY QNAME from correlation ID and control zone.
+// buildNotifyQNAME constructs a NOTIFY QNAME from distribution ID and control zone.
 // NOTIFY qname = {distid}.{sender} e.g. "69812b15.agent.alpha.dnslab."
-func (t *DNSTransport) buildNotifyQNAME(correlationID string) string {
-	return correlationID + "." + t.ControlZone
+func (t *DNSTransport) buildNotifyQNAME(distributionID string) string {
+	return distributionID + "." + t.ControlZone
 }
 
 // buildChunkQueryQname constructs the CHUNK query/store qname: {receiver}.{distid}.{sender}.
@@ -201,8 +201,8 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 		return nil, NewTransportError("DNS", "Hello", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	correlationID := generateCorrelationID()
-	qname := t.buildNotifyQNAME(correlationID)
+	distributionID := generateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create hello payload using typed struct from core package
 	var zone string
@@ -226,7 +226,7 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 	}
 
 	// Create and send NOTIFY(CHUNK) - force endpoint for discovery (receiver may not know our address yet)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "hello", correlationID, payloadJSON, true)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "hello", distributionID, payloadJSON, true)
 	if err != nil {
 		return nil, err
 	}
@@ -256,8 +256,8 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		return nil, NewTransportError("DNS", "Beat", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	correlationID := generateCorrelationID()
-	qname := t.buildNotifyQNAME(correlationID)
+	distributionID := generateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create beat payload using typed struct from core package
 	payload := &core.AgentBeatPost{
@@ -276,7 +276,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}
 
 	// Create and send NOTIFY(CHUNK) - beats can be fire-and-forget
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", correlationID, payloadJSON, false)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", distributionID, payloadJSON, false)
 	if err != nil {
 		// For beats, we might want to be more lenient with errors
 		log.Printf("DNS Beat to %s failed: %v", peer.ID, err)
@@ -305,11 +305,11 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		return nil, NewTransportError("DNS", "Sync", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	correlationID := req.CorrelationID
-	if correlationID == "" {
-		correlationID = generateCorrelationID()
+	distributionID := req.DistributionID
+	if distributionID == "" {
+		distributionID = generateDistributionID()
 	}
-	qname := t.buildNotifyQNAME(correlationID)
+	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create sync payload using typed struct from core package
 	// All sync operations use AgentMsgNotify as they notify about zone data changes
@@ -330,7 +330,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	}
 
 	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "sync", correlationID, payloadJSON, false)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "sync", distributionID, payloadJSON, false)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +338,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	return &SyncResponse{
 		ResponderID:   peer.ID,
 		Zone:          req.Zone,
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		Status:        resp.Status,
 		Message:       resp.Message,
 		Timestamp:     time.Now(),
@@ -352,8 +352,8 @@ func (t *DNSTransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 		return nil, NewTransportError("DNS", "Relocate", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	correlationID := generateCorrelationID()
-	qname := t.buildNotifyQNAME(correlationID)
+	distributionID := generateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create relocate payload
 	payload := &DnsRelocatePayload{
@@ -376,7 +376,7 @@ func (t *DNSTransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 	}
 
 	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "relocate", correlationID, payloadJSON, false)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "relocate", distributionID, payloadJSON, false)
 	if err != nil {
 		return nil, err
 	}
@@ -396,11 +396,11 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		return nil, NewTransportError("DNS", "Ping", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	correlationID := generateCorrelationID()
-	qname := t.buildNotifyQNAME(correlationID)
+	distributionID := generateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
 
 	if t.distributionAdd != nil {
-		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", correlationID)
+		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", distributionID)
 	}
 
 	// Create ping payload using typed struct from core package
@@ -433,7 +433,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
 	if useQueryMode {
 		// Store under CHUNK query qname so receiver can fetch: {receiver}.{distid}.{sender}
-		chunkQueryQname := buildChunkQueryQname(peer.ID, correlationID, t.ControlZone)
+		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
 		t.chunkSet(chunkQueryQname, finalPayload, payloadFormat)
 	}
 
@@ -529,15 +529,15 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		return NewTransportError("DNS", "Confirm", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	// Use the correlation ID from the original request
-	qname := t.buildNotifyQNAME(req.CorrelationID)
+	// Use the distribution ID from the original request
+	qname := t.buildNotifyQNAME(req.DistributionID)
 
 	// Create confirmation payload
 	payload := &DnsConfirmPayload{
 		Type:          "confirm",
 		SenderID:      req.SenderID,
 		Zone:          req.Zone,
-		CorrelationID: req.CorrelationID,
+		DistributionID: req.DistributionID,
 		Status:        req.Status.String(),
 		Message:       req.Message,
 		Timestamp:     req.Timestamp.Unix(),
@@ -590,11 +590,11 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 }
 
 // sendNotifyWithPayload sends a NOTIFY(CHUNK) with payload and waits for confirmation.
-func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, correlationID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
+func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, distributionID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
 	addr := peer.CurrentAddress()
 
 	if t.distributionAdd != nil {
-		t.distributionAdd(qname, t.LocalID, peer.ID, opType, correlationID)
+		t.distributionAdd(qname, t.LocalID, peer.ID, opType, distributionID)
 	}
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
@@ -613,7 +613,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
 	if useQueryMode {
 		// Store under CHUNK query qname: {receiver}.{distid}.{sender}
-		chunkQueryQname := buildChunkQueryQname(peer.ID, correlationID, t.ControlZone)
+		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
 		t.chunkSet(chunkQueryQname, finalPayload, payloadFormat)
 	}
 
@@ -649,7 +649,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// Register pending operation
 	responseChan := make(chan *operationResponse, 1)
 	pending := &pendingOperation{
-		CorrelationID: correlationID,
+		DistributionID: distributionID,
 		PeerID:        peer.ID,
 		OperationType: opType,
 		SentAt:        time.Now(),
@@ -657,12 +657,12 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	}
 
 	t.pendingMu.Lock()
-	t.pendingConfirmations[correlationID] = pending
+	t.pendingConfirmations[distributionID] = pending
 	t.pendingMu.Unlock()
 
 	defer func() {
 		t.pendingMu.Lock()
-		delete(t.pendingConfirmations, correlationID)
+		delete(t.pendingConfirmations, distributionID)
 		t.pendingMu.Unlock()
 	}()
 
@@ -698,11 +698,11 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 // This should be called by the DNS message handler when a confirmation NOTIFY is received.
 func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation) {
 	t.pendingMu.RLock()
-	pending, exists := t.pendingConfirmations[confirm.CorrelationID]
+	pending, exists := t.pendingConfirmations[confirm.DistributionID]
 	t.pendingMu.RUnlock()
 
 	if !exists {
-		log.Printf("DNS: Received confirmation for unknown correlation ID: %s", confirm.CorrelationID)
+		log.Printf("DNS: Received confirmation for unknown distribution ID: %s", confirm.DistributionID)
 		return
 	}
 
@@ -713,7 +713,7 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 		Message: confirm.Message,
 	}:
 	default:
-		log.Printf("DNS: Response channel full for correlation ID: %s", confirm.CorrelationID)
+		log.Printf("DNS: Response channel full for distribution ID: %s", confirm.DistributionID)
 	}
 }
 
@@ -792,7 +792,7 @@ type DnsSyncPayload struct {
 	SyncType      string   `json:"sync_type"`
 	Records       []string `json:"records"` // Old format: records
 	Serial        uint32   `json:"serial"`
-	CorrelationID string   `json:"correlation_id"`
+	DistributionID string   `json:"correlation_id"`
 	Timestamp     int64    `json:"timestamp"`
 
 	// New unified format fields (AgentMsgPost compatible)
@@ -826,7 +826,7 @@ type DnsConfirmPayload struct {
 	Type          string `json:"type"`
 	SenderID      string `json:"sender_id"`
 	Zone          string `json:"zone"`
-	CorrelationID string `json:"correlation_id"`
+	DistributionID string `json:"correlation_id"`
 	Status        string `json:"status"`
 	Message       string `json:"message,omitempty"`
 	Timestamp     int64  `json:"timestamp"`
@@ -877,7 +877,7 @@ type DnsPingConfirmPayload struct {
 	Type          string `json:"type"`
 	SenderID      string `json:"sender_id"`
 	Nonce         string `json:"nonce"`
-	CorrelationID string `json:"correlation_id"`
+	DistributionID string `json:"correlation_id"`
 	Status        string `json:"status"`
 	Timestamp     int64  `json:"timestamp"`
 }

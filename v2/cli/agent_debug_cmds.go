@@ -241,6 +241,248 @@ var DebugAgentRegistryCmd = &cobra.Command{
 	},
 }
 
+var DebugAgentTriggerSyncCmd = &cobra.Command{
+	Use:   "trigger-sync",
+	Short: "Trigger a sync operation for testing",
+	Long: `Simulate a zone change and trigger sync to peers.
+This is equivalent to hsync-inject-sync API endpoint.
+
+Example:
+  tdns-cliv2 debug agent trigger-sync --zone example.com --from agent.alpha --rr "test A 1.2.3.4"`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		fromAgent, _ := cmd.Flags().GetString("from")
+		if fromAgent == "" {
+			log.Fatalf("Error: --from agent ID is required")
+		}
+
+		rr, _ := cmd.Flags().GetString("rr")
+		if rr == "" {
+			log.Fatalf("Error: --rr is required")
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "hsync-inject-sync",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			AgentId: tdns.AgentId(fromAgent),
+			RRs:     []string{rr},
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Sync triggered successfully:\n%s\n", amr.Msg)
+	},
+}
+
+var DebugAgentForceSyncCmd = &cobra.Command{
+	Use:   "force-sync",
+	Short: "Force sync with a specific peer",
+	Long: `Force synchronization with a specific peer agent.
+
+Example:
+  tdns-cliv2 debug agent force-sync --zone example.com --peer agent.bravo --rr "test A 1.2.3.4"`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		peerID, _ := cmd.Flags().GetString("peer")
+		if peerID == "" {
+			log.Fatalf("Error: --peer agent ID is required")
+		}
+
+		rr, _ := cmd.Flags().GetString("rr")
+		var rrs []string
+		if rr != "" {
+			rrs = []string{rr}
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "hsync-force-sync",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			AgentId: tdns.AgentId(peerID),
+			RRs:     rrs,
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Force sync completed:\n%s\n", amr.Msg)
+		if amr.Data != nil {
+			if corrID, ok := amr.Data.(map[string]interface{})["correlation_id"]; ok {
+				fmt.Printf("Correlation ID: %v\n", corrID)
+			}
+		}
+	},
+}
+
+var DebugAgentSyncStateCmd = &cobra.Command{
+	Use:   "sync-state",
+	Short: "Show sync state for a zone",
+	Long: `Display the current synchronization state for a zone.
+
+Example:
+  tdns-cliv2 debug agent sync-state --zone example.com`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		req := tdns.AgentMgmtPost{
+			Command: "hsync-sync-state",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Sync State for zone %s:\n", tdns.Globals.Zonename)
+		fmt.Printf("%s\n", amr.Msg)
+
+		if amr.Data != nil {
+			if dataMap, ok := amr.Data.(map[string]interface{}); ok {
+				if zdr, ok := dataMap["zone_data_repo"]; ok {
+					dump.P(zdr)
+				}
+			}
+		}
+	},
+}
+
+var DebugAgentSendToCombinerCmd = &cobra.Command{
+	Use:   "send-to-combiner",
+	Short: "Send test data to combiner",
+	Long: `Send test zone data to the combiner for processing.
+
+Example:
+  tdns-cliv2 debug agent send-to-combiner --zone example.com --rr "test A 1.2.3.4"`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		rr, _ := cmd.Flags().GetString("rr")
+		if rr == "" {
+			log.Fatalf("Error: --rr is required")
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "hsync-send-to-combiner",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			RRs:     []string{rr},
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Data sent to combiner:\n%s\n", amr.Msg)
+	},
+}
+
+var DebugAgentTestChainCmd = &cobra.Command{
+	Use:   "test-chain",
+	Short: "Run full end-to-end test chain",
+	Long: `Execute a full end-to-end test including:
+1. Local zone update
+2. Sync to remote peers
+3. Combiner processing
+
+Example:
+  tdns-cliv2 debug agent test-chain --zone example.com --scenario add --rr "test A 1.2.3.4"`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		scenario, _ := cmd.Flags().GetString("scenario")
+		if scenario == "" {
+			scenario = "add"
+		}
+
+		rr, _ := cmd.Flags().GetString("rr")
+		if rr == "" {
+			log.Fatalf("Error: --rr is required")
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "hsync-test-chain",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			RRs:     []string{rr},
+			Data: map[string]interface{}{
+				"scenario": scenario,
+			},
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Test Chain Results:\n")
+		fmt.Printf("===================\n\n")
+		fmt.Printf("%s\n\n", amr.Msg)
+
+		if amr.Data != nil {
+			if dataMap, ok := amr.Data.(map[string]interface{}); ok {
+				fmt.Printf("Scenario: %v\n", dataMap["scenario"])
+				fmt.Printf("Zone: %v\n", dataMap["zone"])
+				fmt.Printf("RRs Count: %v\n\n", dataMap["rrs_count"])
+
+				if step1, ok := dataMap["step1_local_update"].(map[string]interface{}); ok {
+					fmt.Printf("Step 1 (Local Update):\n")
+					if success, ok := step1["success"].(bool); ok && success {
+						fmt.Printf("  ✓ Success: %v\n", step1["message"])
+					} else {
+						fmt.Printf("  ✗ Failed: %v\n", step1["error"])
+					}
+				}
+
+				if step2, ok := dataMap["step2_peer_sync"].(map[string]interface{}); ok {
+					fmt.Printf("\nStep 2 (Peer Sync):\n")
+					if skipped, ok := step2["skipped"].(bool); ok && skipped {
+						fmt.Printf("  ⊘ Skipped: %v\n", step2["reason"])
+					} else {
+						fmt.Printf("  Peers synced: %v\n", step2["peers_synced"])
+						if results, ok := step2["results"].(map[string]interface{}); ok {
+							for peer, result := range results {
+								if peerResult, ok := result.(map[string]interface{}); ok {
+									if success, ok := peerResult["success"].(bool); ok && success {
+										fmt.Printf("    ✓ %s: %v\n", peer, peerResult["message"])
+									} else {
+										fmt.Printf("    ✗ %s: %v\n", peer, peerResult["error"])
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	},
+}
+
 func init() {
 	DebugCmd.AddCommand(DebugAgentCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
@@ -248,10 +490,26 @@ func init() {
 	DebugAgentCmd.AddCommand(DebugAgentDumpAgentRegistryCmd)
 	DebugAgentCmd.AddCommand(DebugAgentDumpZoneDataRepoCmd)
 	DebugAgentCmd.AddCommand(DebugAgentRegistryCmd)
+	DebugAgentCmd.AddCommand(DebugAgentTriggerSyncCmd)
+	DebugAgentCmd.AddCommand(DebugAgentForceSyncCmd)
+	DebugAgentCmd.AddCommand(DebugAgentSyncStateCmd)
+	DebugAgentCmd.AddCommand(DebugAgentSendToCombinerCmd)
+	DebugAgentCmd.AddCommand(DebugAgentTestChainCmd)
+
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
 	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM)")
+
+	// New command flags
+	DebugAgentTriggerSyncCmd.Flags().String("from", "", "Source agent ID")
+	DebugAgentTriggerSyncCmd.Flags().String("rr", "", "DNS record to sync")
+	DebugAgentForceSyncCmd.Flags().String("peer", "", "Target peer agent ID")
+	DebugAgentForceSyncCmd.Flags().String("rr", "", "DNS record to sync (optional)")
+	DebugAgentSendToCombinerCmd.Flags().String("rr", "", "DNS record to send")
+	DebugAgentTestChainCmd.Flags().String("scenario", "add", "Test scenario (add|update|delete)")
+	DebugAgentTestChainCmd.Flags().String("rr", "", "DNS record for test")
+
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")
 }

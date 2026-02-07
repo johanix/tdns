@@ -54,7 +54,7 @@ type PeerRecord struct {
 // SyncOperationRecord represents a row in the SyncOperations table.
 type SyncOperationRecord struct {
 	ID            int64
-	CorrelationID string
+	DistributionID string
 	ZoneName      string
 	SyncType      string
 	Direction     string
@@ -79,7 +79,7 @@ type SyncOperationRecord struct {
 // SyncConfirmationRecord represents a row in the SyncConfirmations table.
 type SyncConfirmationRecord struct {
 	ID                 int64
-	CorrelationID      string
+	DistributionID      string
 	ConfirmerID        string
 	Status             string
 	Message            string
@@ -330,14 +330,14 @@ func (kdb *KeyDB) SaveSyncOperation(op *SyncOperationRecord) error {
 
 	_, err = kdb.DB.Exec(`
 		INSERT INTO SyncOperations (
-			correlation_id, zone_name, sync_type, direction,
+			distribution_id, zone_name, sync_type, direction,
 			sender_id, receiver_id, records, serial,
 			transport, encrypted, status, status_message,
 			created_at, sent_at, received_at, confirmed_at, expires_at,
 			retry_count, last_error, last_error_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		op.CorrelationID, op.ZoneName, op.SyncType, op.Direction,
+		op.DistributionID, op.ZoneName, op.SyncType, op.Direction,
 		op.SenderID, op.ReceiverID, string(recordsJSON), op.Serial,
 		op.Transport, boolToInt(op.Encrypted), op.Status, op.StatusMessage,
 		op.CreatedAt.Unix(), nullableUnix(op.SentAt), nullableUnix(op.ReceivedAt),
@@ -348,27 +348,27 @@ func (kdb *KeyDB) SaveSyncOperation(op *SyncOperationRecord) error {
 }
 
 // UpdateSyncOperationStatus updates the status of a sync operation.
-func (kdb *KeyDB) UpdateSyncOperationStatus(correlationID, status, message string) error {
+func (kdb *KeyDB) UpdateSyncOperationStatus(distributionID, status, message string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
 	_, err := kdb.DB.Exec(`
 		UPDATE SyncOperations SET status = ?, status_message = ?
-		WHERE correlation_id = ?
-	`, status, message, correlationID)
+		WHERE distribution_id = ?
+	`, status, message, distributionID)
 	return err
 }
 
 // MarkSyncOperationConfirmed marks a sync operation as confirmed.
-func (kdb *KeyDB) MarkSyncOperationConfirmed(correlationID string) error {
+func (kdb *KeyDB) MarkSyncOperationConfirmed(distributionID string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
 	now := time.Now().Unix()
 	_, err := kdb.DB.Exec(`
 		UPDATE SyncOperations SET status = 'confirmed', confirmed_at = ?
-		WHERE correlation_id = ?
-	`, now, correlationID)
+		WHERE distribution_id = ?
+	`, now, distributionID)
 	return err
 }
 
@@ -384,31 +384,31 @@ func (kdb *KeyDB) SaveSyncConfirmation(conf *SyncConfirmationRecord) error {
 
 	_, err = kdb.DB.Exec(`
 		INSERT INTO SyncConfirmations (
-			correlation_id, confirmer_id, status, message,
+			distribution_id, confirmer_id, status, message,
 			items_processed, signed_proof, confirmer_signature,
 			confirmed_at, received_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		conf.CorrelationID, conf.ConfirmerID, conf.Status, conf.Message,
+		conf.DistributionID, conf.ConfirmerID, conf.Status, conf.Message,
 		string(itemsJSON), conf.SignedProof, conf.ConfirmerSignature,
 		conf.ConfirmedAt.Unix(), conf.ReceivedAt.Unix(),
 	)
 	return err
 }
 
-// GetSyncOperation retrieves a sync operation by correlation ID.
-func (kdb *KeyDB) GetSyncOperation(correlationID string) (*SyncOperationRecord, error) {
+// GetSyncOperation retrieves a sync operation by distribution ID.
+func (kdb *KeyDB) GetSyncOperation(distributionID string) (*SyncOperationRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
 	row := kdb.DB.QueryRow(`
-		SELECT id, correlation_id, zone_name, sync_type, direction,
+		SELECT id, distribution_id, zone_name, sync_type, direction,
 			sender_id, receiver_id, records, serial,
 			transport, encrypted, status, status_message,
 			created_at, sent_at, received_at, confirmed_at, expires_at,
 			retry_count, last_error, last_error_at
-		FROM SyncOperations WHERE correlation_id = ?
-	`, correlationID)
+		FROM SyncOperations WHERE distribution_id = ?
+	`, distributionID)
 
 	op := &SyncOperationRecord{}
 	var recordsJSON string
@@ -416,7 +416,7 @@ func (kdb *KeyDB) GetSyncOperation(correlationID string) (*SyncOperationRecord, 
 	var createdAt, sentAt, receivedAt, confirmedAt, expiresAt, lastErrorAt sql.NullInt64
 
 	err := row.Scan(
-		&op.ID, &op.CorrelationID, &op.ZoneName, &op.SyncType, &op.Direction,
+		&op.ID, &op.DistributionID, &op.ZoneName, &op.SyncType, &op.Direction,
 		&op.SenderID, &op.ReceiverID, &recordsJSON, &op.Serial,
 		&op.Transport, &encrypted, &op.Status, &op.StatusMessage,
 		&createdAt, &sentAt, &receivedAt, &confirmedAt, &expiresAt,
@@ -654,7 +654,7 @@ func PeerRecordToInfo(peer *PeerRecord) *HsyncPeerInfo {
 // SyncOpRecordToInfo converts a SyncOperationRecord to HsyncSyncOpInfo for CLI display.
 func SyncOpRecordToInfo(op *SyncOperationRecord) *HsyncSyncOpInfo {
 	return &HsyncSyncOpInfo{
-		CorrelationID: op.CorrelationID,
+		DistributionID: op.DistributionID,
 		ZoneName:      op.ZoneName,
 		SyncType:      op.SyncType,
 		Direction:     op.Direction,
@@ -674,7 +674,7 @@ func SyncOpRecordToInfo(op *SyncOperationRecord) *HsyncSyncOpInfo {
 // ConfirmRecordToInfo converts a SyncConfirmationRecord to HsyncConfirmationInfo for CLI display.
 func ConfirmRecordToInfo(conf *SyncConfirmationRecord) *HsyncConfirmationInfo {
 	return &HsyncConfirmationInfo{
-		CorrelationID: conf.CorrelationID,
+		DistributionID: conf.DistributionID,
 		ConfirmerID:   conf.ConfirmerID,
 		Status:        conf.Status,
 		Message:       conf.Message,
@@ -689,7 +689,7 @@ func (kdb *KeyDB) ListSyncOperations(zoneName string, limit int) ([]*SyncOperati
 	defer kdb.mu.Unlock()
 
 	query := `
-		SELECT id, correlation_id, zone_name, sync_type, direction,
+		SELECT id, distribution_id, zone_name, sync_type, direction,
 			sender_id, receiver_id, records, serial,
 			transport, encrypted, status, status_message,
 			created_at, sent_at, received_at, confirmed_at, expires_at,
@@ -720,7 +720,7 @@ func (kdb *KeyDB) ListSyncOperations(zoneName string, limit int) ([]*SyncOperati
 		var createdAt, sentAt, receivedAt, confirmedAt, expiresAt, lastErrorAt sql.NullInt64
 
 		err := rows.Scan(
-			&op.ID, &op.CorrelationID, &op.ZoneName, &op.SyncType, &op.Direction,
+			&op.ID, &op.DistributionID, &op.ZoneName, &op.SyncType, &op.Direction,
 			&op.SenderID, &op.ReceiverID, &recordsJSON, &op.Serial,
 			&op.Transport, &encrypted, &op.Status, &op.StatusMessage,
 			&createdAt, &sentAt, &receivedAt, &confirmedAt, &expiresAt,
@@ -748,21 +748,21 @@ func (kdb *KeyDB) ListSyncOperations(zoneName string, limit int) ([]*SyncOperati
 	return ops, nil
 }
 
-// ListSyncConfirmations retrieves confirmations, optionally filtered by correlation ID.
-func (kdb *KeyDB) ListSyncConfirmations(correlationID string, limit int) ([]*SyncConfirmationRecord, error) {
+// ListSyncConfirmations retrieves confirmations, optionally filtered by distribution ID.
+func (kdb *KeyDB) ListSyncConfirmations(distributionID string, limit int) ([]*SyncConfirmationRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
 	query := `
-		SELECT id, correlation_id, confirmer_id, status, message,
+		SELECT id, distribution_id, confirmer_id, status, message,
 			items_processed, signed_proof, confirmer_signature,
 			confirmed_at, received_at
 		FROM SyncConfirmations
 	`
 	var args []interface{}
-	if correlationID != "" {
-		query += " WHERE correlation_id = ?"
-		args = append(args, correlationID)
+	if distributionID != "" {
+		query += " WHERE distribution_id = ?"
+		args = append(args, distributionID)
 	}
 	query += " ORDER BY confirmed_at DESC"
 	if limit > 0 {
@@ -782,7 +782,7 @@ func (kdb *KeyDB) ListSyncConfirmations(correlationID string, limit int) ([]*Syn
 		var confirmedAt, receivedAt sql.NullInt64
 
 		err := rows.Scan(
-			&conf.ID, &conf.CorrelationID, &conf.ConfirmerID, &conf.Status, &conf.Message,
+			&conf.ID, &conf.DistributionID, &conf.ConfirmerID, &conf.Status, &conf.Message,
 			&itemsJSON, &conf.SignedProof, &conf.ConfirmerSignature,
 			&confirmedAt, &receivedAt,
 		)

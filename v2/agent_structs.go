@@ -269,18 +269,19 @@ type AgentPingResponse struct {
 
 // AgentMgmt{Post,Response} are used in the mgmt API
 type AgentMgmtPost struct {
-	Command     string `json:"command"`
+	Command     string                 `json:"command"`
 	MessageType AgentMsg
-	Zone        ZoneName `json:"zone"`
-	AgentId     AgentId  `json:"agent_id"`
+	Zone        ZoneName               `json:"zone"`
+	AgentId     AgentId                `json:"agent_id"`
 	RRType      uint16
 	RR          string
 	RRs         []string
-	AddedRRs    []string // for update-local-zonedata
-	RemovedRRs  []string // for update-local-zonedata
+	AddedRRs    []string               // for update-local-zonedata
+	RemovedRRs  []string               // for update-local-zonedata
 	Upstream    AgentId
 	Downstream  AgentId
 	RfiType     string
+	Data        map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
 	// Response    chan *AgentMgmtResponse
 }
 
@@ -311,6 +312,7 @@ type AgentMgmtResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+	Data         interface{} `json:"data,omitempty"` // Generic data field for custom responses
 
 	// HSYNC debug data (Phase 5)
 	HsyncPeers         []*HsyncPeerInfo         `json:"hsync_peers,omitempty"`
@@ -345,7 +347,7 @@ type HsyncPeerInfo struct {
 
 // HsyncSyncOpInfo contains sync operation information for CLI display
 type HsyncSyncOpInfo struct {
-	CorrelationID string    `json:"correlation_id"`
+	DistributionID string    `json:"distribution_id"`
 	ZoneName      string    `json:"zone_name"`
 	SyncType      string    `json:"sync_type"`
 	Direction     string    `json:"direction"`
@@ -363,7 +365,7 @@ type HsyncSyncOpInfo struct {
 
 // HsyncConfirmationInfo contains confirmation information for CLI display
 type HsyncConfirmationInfo struct {
-	CorrelationID string    `json:"correlation_id"`
+	DistributionID string    `json:"distribution_id"`
 	ConfirmerID   string    `json:"confirmer_id"`
 	Status        string    `json:"status"`
 	Message       string    `json:"message,omitempty"`

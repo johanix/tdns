@@ -20,7 +20,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var hsyncPeerID, hsyncCorrelationID, hsyncSyncType string
+var hsyncPeerID, hsyncDistributionID, hsyncSyncType string
 var hsyncLimit int
 var hsyncResolver string // resolver address for hsync query (--imr); Globals.IMR was removed
 
@@ -50,12 +50,12 @@ func init() {
 	hsyncPeerStatusCmd.Flags().StringVarP(&syncTransport, "state", "s", "", "Filter by state (needed, known, operational, etc.)")
 
 	// Flags for sync operations
-	hsyncSyncOpsCmd.Flags().StringVarP(&hsyncCorrelationID, "correlation", "c", "", "Filter by correlation ID")
+	hsyncSyncOpsCmd.Flags().StringVarP(&hsyncDistributionID, "correlation", "c", "", "Filter by distribution ID")
 	hsyncSyncOpsCmd.Flags().StringVarP(&hsyncSyncType, "type", "t", "", "Filter by sync type (NS, DNSKEY, GLUE, CDS, CSYNC)")
 	hsyncSyncOpsCmd.Flags().IntVarP(&hsyncLimit, "limit", "n", 50, "Maximum number of operations to show")
 
 	// Flags for confirm query
-	hsyncConfirmQueryCmd.Flags().StringVarP(&hsyncCorrelationID, "correlation", "c", "", "Filter by correlation ID")
+	hsyncConfirmQueryCmd.Flags().StringVarP(&hsyncDistributionID, "correlation", "c", "", "Filter by distribution ID")
 
 	// Flags for transport events
 	hsyncTransportEventsCmd.Flags().StringVarP(&hsyncPeerID, "peer", "p", "", "Filter by peer ID")
@@ -274,11 +274,11 @@ Shows operation details, status, and timestamps.`,
 
 		var lines []string
 		if tdns.Globals.ShowHeaders {
-			lines = append(lines, "Correlation ID|Zone|Type|Direction|Status|Created|Sender|Receiver")
+			lines = append(lines, "Distribution ID|Zone|Type|Direction|Status|Created|Sender|Receiver")
 		}
 		for _, op := range resp.HsyncSyncOps {
-			// Truncate correlation ID for display
-			corrID := op.CorrelationID
+			// Truncate distribution ID for display
+			corrID := op.DistributionID
 			if len(corrID) > 16 {
 				corrID = corrID[:16] + "..."
 			}
@@ -336,10 +336,10 @@ var hsyncConfirmQueryCmd = &cobra.Command{
 
 		var lines []string
 		if tdns.Globals.ShowHeaders {
-			lines = append(lines, "Correlation ID|Confirmer|Status|Message|Confirmed At")
+			lines = append(lines, "Distribution ID|Confirmer|Status|Message|Confirmed At")
 		}
 		for _, conf := range resp.HsyncConfirmations {
-			corrID := conf.CorrelationID
+			corrID := conf.DistributionID
 			if len(corrID) > 16 {
 				corrID = corrID[:16] + "..."
 			}
@@ -526,7 +526,7 @@ This is useful for testing DNS transport without full sync operations.`,
 		}
 
 		fmt.Printf("CHUNK sent successfully to peer %s\n", hsyncPeerID)
-		fmt.Printf("Correlation ID: %s\n", resp.Msg)
+		fmt.Printf("Distribution ID: %s\n", resp.Msg)
 	},
 }
 

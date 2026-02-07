@@ -167,7 +167,7 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		SyncType:      req.SyncType.String(),
 		Records:       req.Records,
 		Serial:        req.Serial,
-		CorrelationID: req.CorrelationID,
+		DistributionID: req.DistributionID,
 		Timestamp:     req.Timestamp.Unix(),
 	}
 
@@ -191,7 +191,7 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	return &SyncResponse{
 		ResponderID:   apiResp.Identity,
 		Zone:          req.Zone,
-		CorrelationID: req.CorrelationID,
+		DistributionID: req.DistributionID,
 		Status:        status,
 		Message:       apiResp.Msg,
 		Timestamp:     time.Now(),
@@ -255,7 +255,7 @@ func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		MessageType:   "CONFIRM",
 		MyIdentity:    req.SenderID,
 		Zone:          req.Zone,
-		CorrelationID: req.CorrelationID,
+		DistributionID: req.DistributionID,
 		Status:        req.Status.String(),
 		Message:       req.Message,
 		Timestamp:     req.Timestamp.Unix(),
@@ -363,13 +363,13 @@ type apiSyncRequest struct {
 	SyncType      string   `json:"sync_type"`
 	Records       []string `json:"records"`
 	Serial        uint32   `json:"serial"`
-	CorrelationID string   `json:"correlation_id"`
+	DistributionID string   `json:"distribution_id"`
 	Timestamp     int64    `json:"timestamp"`
 }
 
 type apiSyncResponse struct {
 	Identity      string `json:"identity,omitempty"`
-	CorrelationID string `json:"correlation_id,omitempty"`
+	DistributionID string `json:"distribution_id,omitempty"`
 	Msg           string `json:"msg,omitempty"`
 	Error         bool   `json:"error"`
 	ErrorMsg      string `json:"error_msg,omitempty"`
@@ -402,7 +402,7 @@ type apiConfirmRequest struct {
 	MessageType   string `json:"message_type"`
 	MyIdentity    string `json:"my_identity"`
 	Zone          string `json:"zone"`
-	CorrelationID string `json:"correlation_id"`
+	DistributionID string `json:"distribution_id"`
 	Status        string `json:"status"`
 	Message       string `json:"message,omitempty"`
 	Timestamp     int64  `json:"timestamp"`

@@ -37,6 +37,9 @@ type TransportManager struct {
 	// ChunkHandler handles incoming NOTIFY(CHUNK) messages
 	ChunkHandler *transport.ChunkNotifyHandler
 
+	// Router handles DNS message routing and middleware
+	Router *transport.DNSMessageRouter
+
 	// PeerRegistry tracks all known peers
 	PeerRegistry *transport.PeerRegistry
 
@@ -97,6 +100,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		LocalID:             cfg.LocalID,
 		ControlZone:         cfg.ControlZone,
 		PeerRegistry:        transport.NewPeerRegistry(),
+		Router:              transport.NewDNSMessageRouter(),
 		agentRegistry:       cfg.AgentRegistry,
 		agentQs:             cfg.AgentQs,
 		SupportedMechanisms: supportedMechanisms,
@@ -131,16 +135,24 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		}
 		if cfg.DistributionCache != nil {
 			cache := cfg.DistributionCache
-			dnsCfg.DistributionAdd = func(qname string, senderID string, receiverID string, operation string, correlationID string) {
+			dnsCfg.DistributionAdd = func(qname string, senderID string, receiverID string, operation string, distributionID string) {
+				now := time.Now()
+
+				// Calculate expiration time based on message type (operation)
+				// Use config retention times with sensible defaults
+				retentionSecs := Conf.Agent.Dns.MessageRetention.GetRetentionForMessageType(operation)
+				expiresAt := now.Add(time.Duration(retentionSecs) * time.Second)
+
 				cache.Add(qname, &DistributionInfo{
-					DistributionID: correlationID,
+					DistributionID: distributionID,
 					SenderID:       senderID,
 					ReceiverID:     receiverID,
 					Operation:      operation,
 					ContentType:    "",
 					State:          "pending",
-					CreatedAt:      time.Now(),
+					CreatedAt:      now,
 					CompletedAt:    nil,
+					ExpiresAt:      &expiresAt,
 					QNAME:          qname,
 				})
 			}
@@ -154,6 +166,9 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			cfg.LocalID,
 			tm.DNSTransport,
 		)
+		// Attach router to handler for new routing path
+		tm.ChunkHandler.Router = tm.Router
+
 		// In chunk_mode=query without EDNS0 CHUNK_QUERY_ENDPOINT, use configured peer address (e.g. agent.peers)
 		tm.ChunkHandler.GetPeerAddress = func(senderID string) (string, bool) {
 			peer, ok := tm.PeerRegistry.Get(senderID)
@@ -180,6 +195,22 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			} else {
 				log.Printf("TransportManager: Successfully discovered peer %s, verification key now available", peerID)
 			}
+		}
+
+		// Initialize router with handlers and middleware
+		routerCfg := &transport.RouterConfig{
+			TransportManager:             tm,
+			PeerRegistry:                 tm.PeerRegistry,
+			PayloadCrypto:                cfg.PayloadCrypto,
+			IncomingChan:                 tm.ChunkHandler.IncomingChan,
+			TriggerDiscoveryOnMissingKey: true,
+			AllowUnencrypted:             false,
+			VerboseStats:                 false, // Set to true for verbose statistics logging
+		}
+		log.Printf("InitializeTransport: RouterConfig.PeerRegistry = %v (nil=%t)",
+			routerCfg.PeerRegistry, routerCfg.PeerRegistry == nil)
+		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
+			log.Printf("TransportManager: Warning - router initialization failed: %v", err)
 		}
 
 		log.Printf("TransportManager: DNS transport enabled")
@@ -213,8 +244,9 @@ func (tm *TransportManager) RegisterChunkNotifyHandler() error {
 	}
 
 	// Register the handler for CHUNK type NOTIFYs
+	// Use RouteViaRouter for new routing path (falls back to HandleChunkNotify if Router is nil)
 	err := RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *DnsNotifyRequest) error {
-		return tm.ChunkHandler.HandleChunkNotify(ctx, req.Qname, req.Msg, req.ResponseWriter)
+		return tm.ChunkHandler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %w", err)
@@ -539,16 +571,16 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
 		SenderID:      tm.LocalID,
 		Zone:          payload.Zone,
-		CorrelationID: payload.CorrelationID,
+		DistributionID: payload.DistributionID,
 		Status:        transport.ConfirmSuccess,
 		Message:       "Sync received and processed",
 		Timestamp:     time.Now(),
 	})
 
 	if err != nil {
-		log.Printf("TransportManager: Failed to send confirmation for %s: %v", payload.CorrelationID, err)
+		log.Printf("TransportManager: Failed to send confirmation for %s: %v", payload.DistributionID, err)
 	} else {
-		log.Printf("TransportManager: Sent confirmation for sync %s", payload.CorrelationID)
+		log.Printf("TransportManager: Sent confirmation for sync %s", payload.DistributionID)
 	}
 }
 
