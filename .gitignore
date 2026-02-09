@@ -34,6 +34,13 @@ msa/tdns-msa
 
 */version.go
 
+docs/*.aux
+docs/*.log
+docs/*.nav
+docs/*.snm
+docs/*.toc
+docs/*.vrb
+
 *~
 */*~
 */*/*~

@@ -165,19 +165,29 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 	},
 }
 
-var DebugAgentDumpZoneDataRepoCmd = &cobra.Command{
-	Use:   "dump-zonedatarepo",
-	Short: "Dump the zone data repo",
+var DebugAgentShowSyncedDataCmd = &cobra.Command{
+	Use:   "show-synced-data",
+	Short: "Show synchronized data from peer agents (formatted)",
+	Long: `Display the agent's ZoneDataRepo showing contributions from all peer agents.
+Data is sorted by: zone → source agent → RRtype → RRs
+
+Example:
+  tdns-cliv2 debug agent show-synced-data
+  tdns-cliv2 debug agent show-synced-data --zone example.com`,
 	Run: func(cmd *cobra.Command, args []string) {
+		zone, _ := cmd.Flags().GetString("zone")
+
 		req := tdns.AgentMgmtPost{
 			Command: "dump-zonedatarepo",
+		}
+		if zone != "" {
+			req.Zone = tdns.ZoneName(zone)
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		// dump.P(amr)
 
 		if amr.Error {
 			log.Fatalf("Error: %s", amr.ErrorMsg)
@@ -187,25 +197,56 @@ var DebugAgentDumpZoneDataRepoCmd = &cobra.Command{
 			dump.P(amr.ZoneDataRepo)
 		}
 
-		if len(amr.ZoneDataRepo) > 0 {
-			for zone, agentRepo := range amr.ZoneDataRepo {
-				fmt.Printf("*** Zone: %s\n", zone)
-				for agentId, data := range agentRepo {
-					fmt.Printf("*** Data from agent %s:\n", agentId)
-					// dump.P(data)
-					for rrtype, rrset := range data {
-						fmt.Printf("*** RRType: %s\n", dns.TypeToString[rrtype])
-						// dump.P(rrset)
-						for _, rr := range rrset {
-							fmt.Printf("*** RR: %s\n", rr)
-						}
+		if len(amr.ZoneDataRepo) == 0 {
+			fmt.Printf("No synchronized data stored in agent %q\n", amr.Identity)
+			return
+		}
+
+		// Sort and display by zone → agent → RRtype
+		fmt.Printf("Synchronized Data from Peer Agents\n")
+		fmt.Printf("===================================\n\n")
+
+		for zoneName, agentRepo := range amr.ZoneDataRepo {
+			fmt.Printf("Zone: %s\n", zoneName)
+			fmt.Printf("────────────────────────────────────────\n")
+
+			if len(agentRepo) == 0 {
+				fmt.Printf("  (no peer contributions)\n\n")
+				continue
+			}
+
+			for agentID, rrTypeMap := range agentRepo {
+				fmt.Printf("  Source: %s\n", agentID)
+
+				if len(rrTypeMap) == 0 {
+					fmt.Printf("    (no RRsets)\n")
+					continue
+				}
+
+				// Sort RRtypes for consistent output
+				for rrtype, rrStrings := range rrTypeMap {
+					rrTypeName := dns.TypeToString[rrtype]
+					if rrTypeName == "" {
+						rrTypeName = fmt.Sprintf("TYPE%d", rrtype)
+					}
+
+					fmt.Printf("    %s (%d records):\n", rrTypeName, len(rrStrings))
+					for _, rrStr := range rrStrings {
+						fmt.Printf("      %s\n", rrStr)
 					}
 				}
+				fmt.Printf("\n")
 			}
-		} else {
-			fmt.Printf("No ZoneDataRepo data in response from agent %q", amr.Identity)
 		}
 	},
+}
+
+// Keep the old command name as alias for compatibility
+var DebugAgentDumpZoneDataRepoCmd = &cobra.Command{
+	Use:    "dump-zonedatarepo",
+	Short:  "Dump the zone data repo (deprecated: use show-synced-data)",
+	Hidden: true,
+	Run:    DebugAgentShowSyncedDataCmd.Run,
 }
 
 var DebugAgentRegistryCmd = &cobra.Command{
@@ -483,12 +524,232 @@ Example:
 	},
 }
 
+var DebugAgentShowCombinerDataCmd = &cobra.Command{
+	Use:   "show-combiner-data",
+	Short: "Show combiner's local modifications store",
+	Long: `Display the combiner's stored local modifications that are applied to zones.
+Data is sorted by: zone → RRtype → RRs
+
+Example:
+  tdns-cliv2 debug agent show-combiner-data
+  tdns-cliv2 debug agent show-combiner-data --zone example.com`,
+	Run: func(cmd *cobra.Command, args []string) {
+		zone, _ := cmd.Flags().GetString("zone")
+
+		req := tdns.AgentMgmtPost{
+			Command: "show-combiner-data",
+		}
+		if zone != "" {
+			req.Zone = tdns.ZoneName(zone)
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		if amr.Data == nil {
+			fmt.Printf("No combiner data available\n")
+			return
+		}
+
+		dataMap, ok := amr.Data.(map[string]interface{})
+		if !ok {
+			fmt.Printf("Invalid combiner data format\n")
+			return
+		}
+
+		combinerData, ok := dataMap["combiner_data"].(map[string]interface{})
+		if !ok || len(combinerData) == 0 {
+			fmt.Printf("No local modifications stored in combiner\n")
+			return
+		}
+
+		fmt.Printf("Combiner Local Modifications\n")
+		fmt.Printf("=============================\n\n")
+
+		for zoneName, ownerMapInterface := range combinerData {
+			fmt.Printf("Zone: %s\n", zoneName)
+			fmt.Printf("────────────────────────────────────────\n")
+
+			ownerMap, ok := ownerMapInterface.(map[string]interface{})
+			if !ok || len(ownerMap) == 0 {
+				fmt.Printf("  (no modifications)\n\n")
+				continue
+			}
+
+			for ownerName, rrTypeMapInterface := range ownerMap {
+				fmt.Printf("  Owner: %s\n", ownerName)
+
+				rrTypeMap, ok := rrTypeMapInterface.(map[string]interface{})
+				if !ok || len(rrTypeMap) == 0 {
+					fmt.Printf("    (no RRsets)\n")
+					continue
+				}
+
+				for rrTypeStr, rrStringsInterface := range rrTypeMap {
+					rrStrings, ok := rrStringsInterface.([]interface{})
+					if !ok {
+						continue
+					}
+
+					fmt.Printf("    %s (%d records):\n", rrTypeStr, len(rrStrings))
+					for _, rrInterface := range rrStrings {
+						if rrStr, ok := rrInterface.(string); ok {
+							fmt.Printf("      %s\n", rrStr)
+						}
+					}
+				}
+				fmt.Printf("\n")
+			}
+		}
+	},
+}
+
+var DebugAgentFakeSyncFromCmd = &cobra.Command{
+	Use:   "fake-sync-from <RR> [<RR>...]",
+	Short: "Inject a fake SYNC message from a remote agent (for testing)",
+	Long: `Simulate receiving a SYNC message from a remote agent.
+This injects data into the local ZoneDataRepo as if it came from a peer.
+Goes through normal authorization and processing.
+
+Example:
+  tdns-cliv2 debug agent fake-sync-from \
+    --from agent.provider-b.example.com. \
+    --zone example.com. \
+    "example.com. 3600 IN NS ns1.provider-b.example.com." \
+    "example.com. 3600 IN NS ns2.provider-b.example.com."`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		fromAgent, _ := cmd.Flags().GetString("from")
+		if fromAgent == "" {
+			log.Fatalf("Error: --from agent ID is required")
+		}
+
+		zone, _ := cmd.Flags().GetString("zone")
+		if zone == "" {
+			log.Fatalf("Error: --zone is required")
+		}
+
+		// Validate all RRs by parsing them
+		var validRRs []string
+		for _, rrStr := range args {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				log.Fatalf("Error: Invalid DNS record %q: %v", rrStr, err)
+			}
+			validRRs = append(validRRs, rr.String())
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "fake-sync-from",
+			Zone:    tdns.ZoneName(zone),
+			AgentId: tdns.AgentId(fromAgent),
+			RRs:     validRRs,
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Fake SYNC injected successfully:\n")
+		fmt.Printf("  From: %s\n", fromAgent)
+		fmt.Printf("  Zone: %s\n", zone)
+		fmt.Printf("  Records: %d\n", len(validRRs))
+		fmt.Printf("\n%s\n", amr.Msg)
+	},
+}
+
+var DebugAgentSendSyncToCmd = &cobra.Command{
+	Use:   "send-sync-to <RR> [<RR>...]",
+	Short: "Send a SYNC message to a remote agent (real transport)",
+	Long: `Create and send a real SYNC message to a specified remote agent.
+Uses the actual transport (CHUNK NOTIFY + fallback).
+RRs are validated before sending.
+
+Example:
+  tdns-cliv2 debug agent send-sync-to \
+    --to agent.provider-b.example.com. \
+    --zone example.com. \
+    "example.com. 3600 IN NS ns1.provider-a.example.com." \
+    "example.com. 3600 IN NS ns2.provider-a.example.com."`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		toAgent, _ := cmd.Flags().GetString("to")
+		if toAgent == "" {
+			log.Fatalf("Error: --to agent ID is required")
+		}
+
+		zone, _ := cmd.Flags().GetString("zone")
+		if zone == "" {
+			log.Fatalf("Error: --zone is required")
+		}
+
+		// Validate all RRs by parsing them
+		var validRRs []string
+		for _, rrStr := range args {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				log.Fatalf("Error: Invalid DNS record %q: %v", rrStr, err)
+			}
+			validRRs = append(validRRs, rr.String())
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "send-sync-to",
+			Zone:    tdns.ZoneName(zone),
+			AgentId: tdns.AgentId(toAgent),
+			RRs:     validRRs,
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("SYNC sent successfully:\n")
+		fmt.Printf("  To: %s\n", toAgent)
+		fmt.Printf("  Zone: %s\n", zone)
+		fmt.Printf("  Records: %d\n", len(validRRs))
+		fmt.Printf("\n%s\n", amr.Msg)
+
+		// Show additional details if available
+		if amr.Data != nil {
+			if dataMap, ok := amr.Data.(map[string]interface{}); ok {
+				if corrID, ok := dataMap["distribution_id"]; ok {
+					fmt.Printf("  Distribution ID: %v\n", corrID)
+				}
+				if status, ok := dataMap["status"]; ok {
+					fmt.Printf("  Status: %v\n", status)
+				}
+			}
+		}
+	},
+}
+
 func init() {
 	DebugCmd.AddCommand(DebugAgentCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendRfiCmd)
 	DebugAgentCmd.AddCommand(DebugAgentDumpAgentRegistryCmd)
 	DebugAgentCmd.AddCommand(DebugAgentDumpZoneDataRepoCmd)
+	DebugAgentCmd.AddCommand(DebugAgentShowSyncedDataCmd)
+	DebugAgentCmd.AddCommand(DebugAgentShowCombinerDataCmd)
+	DebugAgentCmd.AddCommand(DebugAgentFakeSyncFromCmd)
+	DebugAgentCmd.AddCommand(DebugAgentSendSyncToCmd)
 	DebugAgentCmd.AddCommand(DebugAgentRegistryCmd)
 	DebugAgentCmd.AddCommand(DebugAgentTriggerSyncCmd)
 	DebugAgentCmd.AddCommand(DebugAgentForceSyncCmd)
@@ -502,6 +763,13 @@ func init() {
 	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM)")
 
 	// New command flags
+	DebugAgentShowSyncedDataCmd.Flags().String("zone", "", "Filter by specific zone")
+	DebugAgentShowCombinerDataCmd.Flags().String("zone", "", "Filter by specific zone")
+	DebugAgentFakeSyncFromCmd.Flags().String("from", "", "Source agent ID")
+	DebugAgentFakeSyncFromCmd.Flags().String("zone", "", "Zone name")
+	DebugAgentSendSyncToCmd.Flags().String("to", "", "Target agent ID")
+	DebugAgentSendSyncToCmd.Flags().String("zone", "", "Zone name")
+
 	DebugAgentTriggerSyncCmd.Flags().String("from", "", "Source agent ID")
 	DebugAgentTriggerSyncCmd.Flags().String("rr", "", "DNS record to sync")
 	DebugAgentForceSyncCmd.Flags().String("peer", "", "Target peer agent ID")

@@ -1045,6 +1045,225 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Data = testResults
 			resp.Status = "ok"
 
+		case "show-combiner-data":
+			// Show combiner's local modifications store
+			zone := amp.Zone
+			combinerData := make(map[string]map[string]map[string][]string)
+
+			if zone != "" {
+				// Single zone
+				zd, exists := Zones.Get(string(zone))
+				if !exists {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
+					return
+				}
+				if zd.CombinerData != nil {
+					zoneData := make(map[string]map[string][]string)
+					for item := range zd.CombinerData.IterBuffered() {
+						ownerName := item.Key
+						ownerData := item.Val
+						rrTypeData := make(map[string][]string)
+						for _, rrtype := range ownerData.RRtypes.Keys() {
+							rrset, _ := ownerData.RRtypes.Get(rrtype)
+							var rrs []string
+							for _, rr := range rrset.RRs {
+								rrs = append(rrs, rr.String())
+							}
+							rrTypeData[dns.TypeToString[rrtype]] = rrs
+						}
+						zoneData[ownerName] = rrTypeData
+					}
+					combinerData[string(zone)] = zoneData
+				}
+			} else {
+				// All zones
+				for _, zd := range Zones.Items() {
+					if zd.CombinerData != nil {
+						zoneData := make(map[string]map[string][]string)
+						for item := range zd.CombinerData.IterBuffered() {
+							ownerName := item.Key
+							ownerData := item.Val
+							rrTypeData := make(map[string][]string)
+							for _, rrtype := range ownerData.RRtypes.Keys() {
+								rrset, _ := ownerData.RRtypes.Get(rrtype)
+								var rrs []string
+								for _, rr := range rrset.RRs {
+									rrs = append(rrs, rr.String())
+								}
+								rrTypeData[dns.TypeToString[rrtype]] = rrs
+							}
+							zoneData[ownerName] = rrTypeData
+						}
+						combinerData[zd.ZoneName] = zoneData
+					}
+				}
+			}
+
+			resp.Data = map[string]interface{}{
+				"combiner_data": combinerData,
+			}
+			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
+			resp.Status = "ok"
+
+		case "fake-sync-from":
+			// Inject a fake SYNC from a remote agent (same as hsync-inject-sync)
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "source agent ID (--from) is required"
+				return
+			}
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+
+			// Parse the RRs
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// Create the ZoneUpdate with RRs
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: amp.AgentId,
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			// Also populate RRsets
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+			}
+
+			log.Printf("fake-sync-from: Injecting %d RRs from %q for zone %q", len(parsedRRs), amp.AgentId, amp.Zone)
+
+			// Create response channel
+			cresp := make(chan *AgentMsgResponse, 1)
+
+			// Send to SynchedDataEngine
+			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    amp.AgentId,
+				UpdateType: "remote",
+				Update:     zu,
+				Response:   cresp,
+			}
+
+			// Wait for response
+			select {
+			case r := <-cresp:
+				if r.Error {
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
+					resp.Msg = fmt.Sprintf("Fake sync injection failed: %s", r.ErrorMsg)
+				} else {
+					resp.Msg = fmt.Sprintf("Fake sync injected successfully: %d RRs processed from %q", len(parsedRRs), amp.AgentId)
+					if r.Msg != "" {
+						resp.Msg += " - " + r.Msg
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
+				resp.Status = "timeout"
+			}
+
+		case "send-sync-to":
+			// Send a real SYNC to a remote agent
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "target agent ID (--to) is required"
+				return
+			}
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+
+			// Check if TransportManager is available
+			if conf.Internal.TransportManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
+				return
+			}
+
+			// Get peer from agent registry
+			agent, exists := conf.Internal.AgentRegistry.S.Get(amp.AgentId)
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("target agent %q not found in registry", amp.AgentId)
+				return
+			}
+
+			// Validate RRs
+			for _, rrStr := range amp.RRs {
+				_, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+			}
+
+			// Convert agent to transport peer
+			peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
+
+			// Create sync request
+			syncReq := &transport.SyncRequest{
+				SenderID:      conf.Agent.Identity,
+				Zone:          string(amp.Zone),
+				SyncType:      transport.SyncTypeNS, // Default to NS, could be detected from RRs
+				Records:       amp.RRs,
+				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
+			}
+
+			log.Printf("send-sync-to: Sending sync to agent %q for zone %q (%d RRs)", amp.AgentId, amp.Zone, len(amp.RRs))
+
+			// Send sync with fallback
+			ctx := context.Background()
+			syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("sync failed: %v", err)
+			} else {
+				resp.Msg = fmt.Sprintf("SYNC sent successfully to %q (distribution: %s)", amp.AgentId, syncReq.DistributionID)
+				resp.Data = map[string]interface{}{
+					"distribution_id": syncReq.DistributionID,
+					"target":         amp.AgentId,
+					"zone":           amp.Zone,
+					"rr_count":       len(amp.RRs),
+					"status":         syncResp.Status,
+					"message":        syncResp.Message,
+				}
+			}
+			resp.Status = "ok"
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)
