@@ -855,22 +855,24 @@ func listPeerSharedZones(conf *Config) []interface{} {
 		return data
 	}
 
-	// Iterate through all known agents
-	for _, agent := range conf.Internal.AgentRegistry.S.Items() {
+	// Use callback-based iterator to avoid holding shard locks during processing
+	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.mu.RLock()
 		zones := make([]string, 0, len(agent.Zones))
 		for zone := range agent.Zones {
 			zones = append(zones, string(zone))
 		}
+		identity := agent.Identity
+		state := agent.State
 		agent.mu.RUnlock()
 
 		entry := map[string]interface{}{
-			"peer_id": string(agent.Identity),
+			"peer_id": string(identity),
 			"zones":   zones,
-			"state":   AgentStateToString[agent.State],
+			"state":   AgentStateToString[state],
 		}
 		data = append(data, entry)
-	}
+	})
 
 	return data
 }
@@ -883,16 +885,17 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		return agents
 	}
 
-	// Iterate through all known agents and check if they have this zone
-	for _, agent := range conf.Internal.AgentRegistry.S.Items() {
+	// Use callback-based iterator to avoid holding shard locks during processing
+	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.mu.RLock()
 		hasZone := agent.Zones[ZoneName(zoneName)]
+		identity := agent.Identity
 		agent.mu.RUnlock()
 
 		if hasZone {
-			agents = append(agents, string(agent.Identity))
+			agents = append(agents, string(identity))
 		}
-	}
+	})
 
 	return agents
 }

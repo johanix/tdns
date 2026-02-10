@@ -179,10 +179,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 										log.Printf("RefreshEngine: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
 									}
 								}
+							}
 
-								// Send NOTIFY to downstreams after successful zone update
+							// Send NOTIFY to downstreams after successful refresh (updated OR forced)
+							// Force typically means "config reload-zones", so we want to notify even if unchanged
+							if updated || force {
 								if len(zd.Downstreams) > 0 {
-									log.Printf("RefreshEngine: Zone %s was updated, sending NOTIFY to %d downstreams", zd.ZoneName, len(zd.Downstreams))
+									log.Printf("RefreshEngine: Zone %s refreshed (updated=%v, forced=%v), sending NOTIFY to %d downstreams",
+										zd.ZoneName, updated, force, len(zd.Downstreams))
 									conf.Internal.NotifyQ <- NotifyRequest{
 										ZoneName: zd.ZoneName,
 										ZoneData: zd,
