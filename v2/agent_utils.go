@@ -614,6 +614,14 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr) {
 	log.Printf("attemptDiscovery: Successfully discovered %s, now in state KNOWN", agent.Identity)
 
 	// Start Hello retry loop (existing mechanism)
+	// Cancel any existing HelloRetrierNG for this agent first
+	ar.mu.Lock()
+	if existingCancel, exists := ar.helloContexts[agent.Identity]; exists {
+		log.Printf("attemptDiscovery: Cancelling existing Hello retry loop for %s", agent.Identity)
+		existingCancel()
+	}
+	ar.mu.Unlock()
+
 	helloCtx, helloCancel := context.WithCancel(context.Background())
 	ar.mu.Lock()
 	ar.helloContexts[agent.Identity] = helloCancel
@@ -825,6 +833,25 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 
 	var updatedIdentities = map[AgentId]bool{} // Tracks modified agents (both add and remove)
 	var affectedIdentities = map[AgentId]bool{} // Tracks ALL agents that need zone recomputation
+
+	// First pass: Check if WE are in this zone's HSYNC RRset
+	// Only process remote agents if we're also involved in this zone
+	weAreInHSYNC := false
+	for _, rr := range req.SyncStatus.HsyncAdds {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
+				if AgentId(hsync.Identity) == ourId || AgentId(hsync.Upstream) == ourId {
+					weAreInHSYNC = true
+					break
+				}
+			}
+		}
+	}
+
+	if !weAreInHSYNC {
+		log.Printf("UpdateAgents: Zone %s: we are not in HSYNC RRset, ignoring remote agents", zonename)
+		return nil
+	}
 
 	// Handle new HSYNC records
 	for _, rr := range req.SyncStatus.HsyncAdds {

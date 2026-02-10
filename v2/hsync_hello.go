@@ -113,19 +113,22 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 
 			log.Printf("HelloRetrierNG: with agent %q we share the zones: %v", agent.Identity, agent.Zones)
 
-			// If agent has zones, send Hello for each zone
-			// If no zones (config-based agent), send Hello with empty zone
-			if len(agent.Zones) > 0 {
-				for zone := range agent.Zones {
-					if apiNeedsRetry || dnsNeedsRetry {
-						log.Printf("HelloRetrierNG: trying HELLO with agent %q with zone: %q (API needs: %v, DNS needs: %v)",
-							agent.Identity, zone, apiNeedsRetry, dnsNeedsRetry)
-						ar.SingleHello(agent, zone)
+			// Send ONE Hello per retry interval with all shared zones
+			// Old behavior sent one Hello PER ZONE which caused message bursts
+			if apiNeedsRetry || dnsNeedsRetry {
+				if len(agent.Zones) > 0 {
+					// Pick first zone for the Hello message zone field (for backward compat with receivers)
+					// But SendHelloWithFallback uses sharedZonesForAgent() which includes ALL zones
+					var firstZone ZoneName
+					for zone := range agent.Zones {
+						firstZone = zone
+						break
 					}
-				}
-			} else {
-				// Config-based agent with no shared zones - send Hello anyway
-				if apiNeedsRetry || dnsNeedsRetry {
+					log.Printf("HelloRetrierNG: trying HELLO with agent %q with %d shared zone(s), using %q as primary zone (API needs: %v, DNS needs: %v)",
+						agent.Identity, len(agent.Zones), firstZone, apiNeedsRetry, dnsNeedsRetry)
+					ar.SingleHello(agent, firstZone)
+				} else {
+					// Config-based agent with no shared zones - send Hello anyway
 					log.Printf("HelloRetrierNG: trying HELLO with agent %q (no shared zones, config-based agent, API needs: %v, DNS needs: %v)",
 						agent.Identity, apiNeedsRetry, dnsNeedsRetry)
 					ar.SingleHello(agent, "")
