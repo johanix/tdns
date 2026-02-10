@@ -173,16 +173,9 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 	} else if timeSinceLastReceivedBeat > 2*remoteBeatInterval || timeSinceLastSentBeat > 2*localBeatInterval {
 		agent.ApiDetails.State = AgentStateDegraded
 	} else {
-		// Beats healthy - restore to zone-appropriate state
-		agent.mu.RLock()
-		zoneCount := len(agent.Zones)
-		agent.mu.RUnlock()
-
-		if zoneCount == 0 {
-			agent.ApiDetails.State = AgentStateLegacy
-		} else {
-			agent.ApiDetails.State = AgentStateOperational
-		}
+		// Beats healthy - sync transport state to top-level state
+		// Top-level agent.State is managed by RecomputeSharedZonesAndSyncState() based on zone count
+		agent.ApiDetails.State = agent.State
 	}
 }
 

@@ -406,10 +406,8 @@ func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]
 
 	// Check if payload is encrypted
 	if !IsPayloadEncrypted(payload) {
-		log.Printf("SecurePayloadWrapper: Received unencrypted payload from peer %s when encryption is enabled", peerID)
-		// For backward compatibility, we might accept unencrypted payloads
-		// but this should be configurable
-		return payload, nil
+		log.Printf("SecurePayloadWrapper: Received unencrypted payload from peer %s when encryption is enabled - REJECTING", peerID)
+		return nil, fmt.Errorf("received unencrypted payload from peer %s when encryption is mandatory", peerID)
 	}
 
 	decrypted, err := w.crypto.DecryptAndVerifyPayload(peerID, payload)

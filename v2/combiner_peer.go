@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"time"
 
@@ -74,6 +75,38 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	// Register in AgentRegistry with configured identity
 	ar.S.Set(combinerID, combinerAgent)
 	log.Printf("InitializeCombinerAsPeer: Registered combiner %s at %s as virtual peer for heartbeat monitoring", combinerID, conf.Agent.Combiner.Address)
+
+	// Load and register combiner's public key for encrypted communication
+	// If combiner is configured, encryption is MANDATORY
+	if conf.Agent.Combiner.LongTermJosePubKey == "" {
+		return fmt.Errorf("combiner configured but agent.combiner.long_term_jose_pub_key is not set - encrypted communication to combiner is mandatory")
+	}
+
+	if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.DNSTransport == nil || conf.Internal.TransportManager.DNSTransport.SecureWrapper == nil {
+		return fmt.Errorf("TransportManager or DNSTransport or SecureWrapper not initialized - cannot load combiner public key")
+	}
+
+	// Load combiner's public key from file
+	payloadCrypto := conf.Internal.TransportManager.DNSTransport.SecureWrapper.GetCrypto()
+	if payloadCrypto == nil || payloadCrypto.Backend == nil {
+		return fmt.Errorf("PayloadCrypto or Backend not initialized - cannot load combiner public key")
+	}
+
+	combinerPubKeyData, err := os.ReadFile(conf.Agent.Combiner.LongTermJosePubKey)
+	if err != nil {
+		return fmt.Errorf("failed to read combiner public key from %s: %w", conf.Agent.Combiner.LongTermJosePubKey, err)
+	}
+
+	combinerPubKey, err := payloadCrypto.Backend.ParsePublicKey(combinerPubKeyData)
+	if err != nil {
+		return fmt.Errorf("failed to parse combiner public key from %s: %w", conf.Agent.Combiner.LongTermJosePubKey, err)
+	}
+
+	// Register combiner's public key for encryption
+	payloadCrypto.AddPeerKey(string(combinerID), combinerPubKey)
+	payloadCrypto.PeerVerificationKeys[string(combinerID)] = combinerPubKey // Also add for signature verification
+
+	log.Printf("InitializeCombinerAsPeer: Loaded combiner public key from %s", conf.Agent.Combiner.LongTermJosePubKey)
 
 	// Perform initial connectivity check
 	if err := performCombinerConnectivityCheck(conf); err != nil {
