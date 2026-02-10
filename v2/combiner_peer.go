@@ -40,9 +40,18 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		return fmt.Errorf("invalid port in combiner address %q", conf.Agent.Combiner.Address)
 	}
 
+	// Use configured combiner identity, or default to "combiner" for backwards compatibility
+	combinerID := AgentId("combiner")
+	if conf.Agent.Combiner.Identity != "" {
+		combinerID = AgentId(conf.Agent.Combiner.Identity)
+		log.Printf("InitializeCombinerAsPeer: Using configured combiner identity: %s", combinerID)
+	} else {
+		log.Printf("InitializeCombinerAsPeer: WARNING: No combiner identity configured, using default 'combiner' (agents with chunk_mode=query will fail)")
+	}
+
 	// Create an agent entry for the combiner
 	combinerAgent := &Agent{
-		Identity:   "combiner",
+		Identity:   combinerID,
 		DnsMethod:  true,  // Combiner only supports DNS transport (CHUNK)
 		ApiMethod:  false, // Combiner doesn't support API transport for Beat
 		DnsDetails: &AgentDetails{
@@ -62,9 +71,9 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		LastState: time.Now(),
 	}
 
-	// Register in AgentRegistry
-	ar.S.Set("combiner", combinerAgent)
-	log.Printf("InitializeCombinerAsPeer: Registered combiner at %s as virtual peer for heartbeat monitoring", conf.Agent.Combiner.Address)
+	// Register in AgentRegistry with configured identity
+	ar.S.Set(combinerID, combinerAgent)
+	log.Printf("InitializeCombinerAsPeer: Registered combiner %s at %s as virtual peer for heartbeat monitoring", combinerID, conf.Agent.Combiner.Address)
 
 	// Perform initial connectivity check
 	if err := performCombinerConnectivityCheck(conf); err != nil {

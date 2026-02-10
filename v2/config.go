@@ -42,6 +42,9 @@ type Config struct {
 
 // LocalCombinerConf holds combiner-specific config (symmetric to LocalAgentConf).
 type LocalCombinerConf struct {
+	// Identity: combiner's identity (FQDN) for agent protocol communication
+	// Required when agents use chunk_mode=query (needed to construct CHUNK query qnames)
+	Identity string `yaml:"identity" validate:"required,fqdn"`
 	// LongTermJosePrivKey: path to our JOSE private key for secure CHUNK
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	// Chunk config (same key names as agent.dns for consistency)

@@ -26,6 +26,16 @@ import (
 	"github.com/miekg/dns"
 )
 
+// buildChunkQueryQname constructs the CHUNK query qname: {receiver}.{distid}.{sender}.
+// Used when chunk_mode=query: sender stores under this key; receiver fetches with this qname.
+// Example: buildChunkQueryQname("combiner.alpha.dnslab", "698b1b0b", "agent.alpha.dnslab")
+// Returns: "combiner.alpha.dnslab.698b1b0b.agent.alpha.dnslab."
+func buildChunkQueryQname(receiverID, distID, senderID string) string {
+	r := strings.TrimSuffix(dns.Fqdn(receiverID), ".")
+	s := strings.TrimSuffix(dns.Fqdn(senderID), ".")
+	return dns.Fqdn(r + "." + distID + "." + s)
+}
+
 // CombinerSyncRequest represents a sync request to the combiner.
 // This mirrors the DnsSyncPayload structure for consistency.
 type CombinerSyncRequest struct {
@@ -65,6 +75,10 @@ type CombinerChunkHandler struct {
 	// Debug enables verbose logging
 	Debug bool
 
+	// LocalID is the combiner's identity (FQDN), used to construct CHUNK query qnames
+	// when agents use chunk_mode=query. Format: {combiner-id}.{distid}.{sender-id}
+	LocalID string
+
 	// SecureWrapper handles decryption of incoming JWS/JWE payloads from the agent.
 	// Uses the generic transport crypto infrastructure.
 	// If nil, payloads are expected to be plaintext JSON.
@@ -79,9 +93,11 @@ type CombinerSyncRequestPlus struct {
 
 // NewCombinerChunkHandler creates a new combiner CHUNK handler.
 // Control zone is derived dynamically from each NOTIFY qname as qname minus the leftmost label (no static config).
-func NewCombinerChunkHandler() *CombinerChunkHandler {
+// localID is the combiner's identity (FQDN), required for constructing CHUNK query qnames when agents use chunk_mode=query.
+func NewCombinerChunkHandler(localID string) *CombinerChunkHandler {
 	return &CombinerChunkHandler{
 		RequestChan: make(chan *CombinerSyncRequestPlus, 100),
+		LocalID:     localID,
 	}
 }
 
@@ -314,7 +330,18 @@ func (h *CombinerChunkHandler) getChunkPayload(ctx context.Context, req *DnsNoti
 		return payload, nil
 	}
 
-	// No EDNS0 payload: fetch via CHUNK query. Use CHUNK_QUERY_ENDPOINT from NOTIFY if present, else static config (combiner.agent.address).
+	// No EDNS0 payload: fetch via CHUNK query
+	// NOTIFY qname format: {distid}.{sender-controlzone} e.g. "698b1b0b.agent.alpha.dnslab."
+	// CHUNK query qname format: {receiver}.{distid}.{sender-controlzone} e.g. "combiner.alpha.dnslab.698b1b0b.agent.alpha.dnslab."
+	// Build proper CHUNK query qname using combiner's identity
+	distributionID, senderControlZone, err := h.extractDistributionIDAndControlZone(req.Qname)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract distribution ID from NOTIFY qname %q: %w", req.Qname, err)
+	}
+
+	chunkQueryQname := buildChunkQueryQname(h.LocalID, distributionID, senderControlZone)
+
+	// Use CHUNK_QUERY_ENDPOINT from NOTIFY if present, else static config (combiner.agent.address).
 	queryTarget := extractChunkQueryEndpoint(req.Msg)
 	if queryTarget == "" && Conf.Combiner != nil && Conf.Combiner.Agent != nil && Conf.Combiner.Agent.Address != "" {
 		queryTarget = strings.TrimSpace(Conf.Combiner.Agent.Address)
@@ -322,7 +349,7 @@ func (h *CombinerChunkHandler) getChunkPayload(ctx context.Context, req *DnsNoti
 	if queryTarget == "" {
 		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option, no combiner.agent.address)")
 	}
-	return fetchChunkPayloadViaQuery(ctx, queryTarget, req.Qname)
+	return fetchChunkPayloadViaQuery(ctx, queryTarget, chunkQueryQname)
 }
 
 // extractChunkQueryEndpoint returns the sender's CHUNK query endpoint (host:port) from the NOTIFY EDNS0 option (code 65005), or "" if absent.
@@ -600,14 +627,15 @@ func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, distribu
 
 // RegisterCombinerChunkHandler registers the combiner's CHUNK handler.
 // Control zone is derived per NOTIFY from qname (qname minus leftmost label); no static config.
+// localID is the combiner's identity (FQDN), required for constructing CHUNK query qnames.
 // If secureWrapper is provided, the handler will decrypt incoming JWT payloads from the agent.
-func RegisterCombinerChunkHandler(secureWrapper *transport.SecurePayloadWrapper) error {
-	handler := NewCombinerChunkHandler()
+func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.SecurePayloadWrapper) error {
+	handler := NewCombinerChunkHandler(localID)
 	handler.SecureWrapper = secureWrapper
 	if secureWrapper != nil && secureWrapper.IsEnabled() {
-		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler with crypto enabled")
+		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for %s with crypto enabled", localID)
 	} else {
-		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler (control zone derived from qname)")
+		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for %s (control zone derived from qname)", localID)
 	}
 	return RegisterNotifyHandler(core.TypeCHUNK, handler.CreateNotifyHandlerFunc())
 }

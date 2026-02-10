@@ -871,9 +871,16 @@ func listPeerSharedZones(conf *Config) []interface{} {
 		state := agent.State
 
 		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
-		if identity == "combiner" {
-			agent.mu.RUnlock()
-			return
+		// Check against configured combiner identity (may be "combiner" or a specific FQDN)
+		if conf.Agent != nil && conf.Agent.Combiner != nil {
+			combinerID := conf.Agent.Combiner.Identity
+			if combinerID == "" {
+				combinerID = "combiner" // Default identity
+			}
+			if identity == AgentId(combinerID) {
+				agent.mu.RUnlock()
+				return
+			}
 		}
 
 		// Copy zone names while holding lock
@@ -927,8 +934,15 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		agent.mu.RUnlock()
 
 		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
-		if identity == "combiner" {
-			return
+		// Check against configured combiner identity (may be "combiner" or a specific FQDN)
+		if conf.Agent != nil && conf.Agent.Combiner != nil {
+			combinerID := conf.Agent.Combiner.Identity
+			if combinerID == "" {
+				combinerID = "combiner" // Default identity
+			}
+			if identity == AgentId(combinerID) {
+				return
+			}
 		}
 
 		if hasZone {

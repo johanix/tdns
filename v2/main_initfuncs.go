@@ -290,7 +290,12 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Initialize AgentRegistry for agent mode only
 		conf.Internal.AgentRegistry = conf.NewAgentRegistry()
 		// Initialize CombinerChunkHandler for CHUNK-based combiner updates (in-process)
-		conf.Internal.CombinerHandler = NewCombinerChunkHandler()
+		// Use combiner identity from config, or default to "combiner" for backwards compatibility
+		combinerID := "combiner"
+		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
+			combinerID = conf.Agent.Combiner.Identity
+		}
+		conf.Internal.CombinerHandler = NewCombinerChunkHandler(combinerID)
 
 		// Initialize HSYNC database tables (peer state, sync operations, confirmations)
 		if conf.Internal.KeyDB != nil {
@@ -402,10 +407,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			} else {
 				log.Printf("MainInit: Combiner crypto not configured - encrypted payloads will be rejected")
 			}
-			if err := RegisterCombinerChunkHandler(secureWrapper); err != nil {
+			// Register CHUNK handler with combiner's identity from config
+			if conf.Combiner.Identity == "" {
+				return fmt.Errorf("combiner.identity is required in config")
+			}
+			if err := RegisterCombinerChunkHandler(conf.Combiner.Identity, secureWrapper); err != nil {
 				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
 			}
-			log.Printf("MainInit: Combiner CHUNK handler registered")
+			log.Printf("MainInit: Combiner CHUNK handler registered for identity %s", conf.Combiner.Identity)
 		}
 	default:
 		// ... existing auth/agent/combiner setup ...
