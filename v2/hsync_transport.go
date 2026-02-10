@@ -805,9 +805,9 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if supported, has valid endpoint, and OPERATIONAL
+	// Try API transport if supported, has valid endpoint, and OPERATIONAL/LEGACY
 	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
-		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced {
+		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
 			if apiErr != nil {
@@ -826,9 +826,9 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 		}
 	}
 
-	// Try DNS transport if supported and OPERATIONAL
+	// Try DNS transport if supported and OPERATIONAL/LEGACY
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
-		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced {
+		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy {
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
 			if dnsErr != nil {

@@ -241,6 +241,29 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			}
 		}()
 
+		switch req.Command {
+		case "peer-zones":
+			// List shared zones for each peer agent (doesn't need cache)
+			data := listPeerSharedZones(conf)
+			resp.Msg = fmt.Sprintf("Found %d peer(s)", len(data))
+			resp.Data = data
+			return
+
+		case "zone-agents":
+			// List agents for a specific zone (doesn't need cache)
+			zoneName := req.Zone
+			if zoneName == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone parameter is required"
+				return
+			}
+			agents := listAgentsForZone(conf, zoneName)
+			resp.Msg = fmt.Sprintf("Found %d agent(s) for zone %q", len(agents), zoneName)
+			resp.Agents = agents
+			return
+		}
+
+		// Commands below this point require cache
 		if cache == nil {
 			resp.Error = true
 			resp.ErrorMsg = "Distribution cache not configured"
@@ -521,24 +544,6 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			handledManually = true
 			json.NewEncoder(w).Encode(fullResp)
 			return
-
-		case "peer-zones":
-			// List shared zones for each peer agent
-			data := listPeerSharedZones(conf)
-			resp.Msg = fmt.Sprintf("Found %d peer(s)", len(data))
-			resp.Data = data
-
-		case "zone-agents":
-			// List agents for a specific zone
-			zoneName := req.Zone
-			if zoneName == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone parameter is required"
-				break
-			}
-			agents := listAgentsForZone(conf, zoneName)
-			resp.Msg = fmt.Sprintf("Found %d agent(s) for zone %q", len(agents), zoneName)
-			resp.Agents = agents
 
 		default:
 			resp.Error = true
