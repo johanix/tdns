@@ -339,7 +339,9 @@ func listPeerZones(cmd *cobra.Command, component string) {
 						if zoneInfo, ok := z.(map[string]interface{}); ok {
 							zoneName := zoneInfo["name"].(string)
 							if serial, hasSerial := zoneInfo["serial"]; hasSerial {
-								zoneStrs[i] = fmt.Sprintf("%s (serial: %v)", zoneName, serial)
+								// Convert serial to uint32 (JSON unmarshals numbers as float64)
+								serialUint := uint32(serial.(float64))
+								zoneStrs[i] = fmt.Sprintf("%s (serial: %d)", zoneName, serialUint)
 							} else {
 								zoneStrs[i] = zoneName
 							}

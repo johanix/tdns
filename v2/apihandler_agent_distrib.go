@@ -876,14 +876,21 @@ func listPeerSharedZones(conf *Config) []interface{} {
 			return
 		}
 
-		// Build zone list with SOA serials
-		zoneDetails := make([]map[string]interface{}, 0, len(agent.Zones))
+		// Copy zone names while holding lock
+		zoneNames := make([]ZoneName, 0, len(agent.Zones))
 		for zoneName := range agent.Zones {
+			zoneNames = append(zoneNames, zoneName)
+		}
+		agent.mu.RUnlock()
+
+		// Build zone list with SOA serials (AFTER releasing lock)
+		zoneDetails := make([]map[string]interface{}, 0, len(zoneNames))
+		for _, zoneName := range zoneNames {
 			zoneInfo := map[string]interface{}{
 				"name": string(zoneName),
 			}
 
-			// Try to get SOA serial for this zone
+			// Try to get SOA serial for this zone (without holding agent lock)
 			if zd, exists := Zones.Get(string(zoneName)); exists {
 				if soa, err := zd.GetSOA(); err == nil {
 					zoneInfo["serial"] = soa.Serial
@@ -892,7 +899,6 @@ func listPeerSharedZones(conf *Config) []interface{} {
 
 			zoneDetails = append(zoneDetails, zoneInfo)
 		}
-		agent.mu.RUnlock()
 
 		entry := map[string]interface{}{
 			"peer_id": string(identity),
