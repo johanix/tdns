@@ -713,8 +713,8 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if supported
-	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") {
+	// Try API transport if supported and has valid endpoint
+	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if apiErr != nil {
@@ -805,8 +805,8 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if supported and OPERATIONAL
-	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") {
+	// Try API transport if supported, has valid endpoint, and OPERATIONAL
+	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()

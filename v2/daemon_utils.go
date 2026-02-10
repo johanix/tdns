@@ -67,13 +67,14 @@ func (api *ApiClient) StopDaemon() {
 // for errors.
 // command is an optional parameter specifying the daemon binary path.
 // If empty, it falls back to viper.GetString("common.command") for backward compatibility.
-func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
+// daemonFlags are additional command-line flags to pass to the daemon (e.g., --config, --debug, -v)
+func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemonFlags []string) {
 	if maxwait == 0 {
 		maxwait = 5
 	}
 
 	if Globals.Debug {
-		fmt.Printf("StartDaemon: maxwait: %d, slurp: %t, command: %q\n", maxwait, slurp, command)
+		fmt.Printf("StartDaemon: maxwait: %d, slurp: %t, command: %q, flags: %v\n", maxwait, slurp, command, daemonFlags)
 	}
 
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
@@ -99,7 +100,12 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
 			var stderr, stdout io.Reader
 			age := time.Since(fi.ModTime()).Round(time.Second)
 			fmt.Printf("Daemon binary %q found (%v old)\n", daemonbinary, age)
-			cmd := exec.Command(daemonbinary)
+
+			// Build command with flags
+			if len(daemonFlags) > 0 {
+				fmt.Printf("Passing flags to daemon: %v\n", daemonFlags)
+			}
+			cmd := exec.Command(daemonbinary, daemonFlags...)
 
 			if slurp {
 				stderr, err = cmd.StderrPipe()
@@ -358,6 +364,11 @@ func CopyFile(src, dst string) (int64, error) {
 	err = os.Rename(dst+".tmp", dst)
 	if err != nil {
 		return 0, err
+	}
+
+	// Preserve the source file's permissions (especially execute bit for binaries)
+	if err := os.Chmod(dst, sourceFileStat.Mode()); err != nil {
+		return nBytes, fmt.Errorf("copied file but failed to set permissions: %w", err)
 	}
 
 	return nBytes, err

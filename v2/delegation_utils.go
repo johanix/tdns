@@ -380,6 +380,22 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 		return false, err
 	}
 
+	// Handle case where zone has no DNSKEY records (unsigned zone)
+	if oldkeys == nil && newkeys == nil {
+		// No DNSKEYs in either version - no change
+		return false, nil
+	}
+	if oldkeys == nil && newkeys != nil {
+		// DNSKEYs added (zone became signed)
+		log.Printf("DnskeysChanged: Zone %s: DNSKEYs added (%d keys)", zd.ZoneName, len(newkeys.RRs))
+		return true, nil
+	}
+	if oldkeys != nil && newkeys == nil {
+		// DNSKEYs removed (zone became unsigned)
+		log.Printf("DnskeysChanged: Zone %s: DNSKEYs removed (%d keys)", zd.ZoneName, len(oldkeys.RRs))
+		return true, nil
+	}
+
 	log.Printf("DnskeysChanged: newkeys: %+v oldkeys: %+v", newkeys.RRs, oldkeys.RRs)
 	differ, _, _ = core.RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ, nil

@@ -897,8 +897,18 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
-		owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
-		dsync_rrset, exist := owner.RRtypes.Get(core.TypeDSYNC)
+		owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+		if err != nil {
+			zd.Logger.Printf("SetupZoneSync: zone %s: error getting _dsync owner: %v", zd.ZoneName, err)
+			return err
+		}
+
+		var dsync_rrset core.RRset
+		var exist bool
+		if owner != nil {
+			dsync_rrset, exist = owner.RRtypes.Get(core.TypeDSYNC)
+		}
+
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
 			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)

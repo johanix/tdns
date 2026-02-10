@@ -9,6 +9,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -136,8 +137,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							Name:        zone,
 							SOARefresh:  refresh,
 							CurRefresh:  1, // force immediate refresh
-							Upstream:    zr.Primary,
-							Downstreams: zr.Notify,
+							Upstream:    NormalizeAddress(zr.Primary),
+							Downstreams: NormalizeAddresses(zr.Notify),
 							Zonefile:    zr.Zonefile,
 						})
 					}
@@ -176,6 +177,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									_, err := zd.WriteFile(zd.Zonefile)
 									if err != nil {
 										log.Printf("RefreshEngine: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+									}
+								}
+
+								// Send NOTIFY to downstreams after successful zone update
+								if len(zd.Downstreams) > 0 {
+									log.Printf("RefreshEngine: Zone %s was updated, sending NOTIFY to %d downstreams", zd.ZoneName, len(zd.Downstreams))
+									conf.Internal.NotifyQ <- NotifyRequest{
+										ZoneName: zd.ZoneName,
+										ZoneData: zd,
+										RRtype:   dns.TypeSOA,
+										Targets:  zd.Downstreams,
+										Urgent:   false,
 									}
 								}
 							}
@@ -225,8 +238,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						ZoneName:        zone,
 						ZoneStore:       zr.ZoneStore,
 						Logger:          log.Default(),
-						Upstream:        zr.Primary,
-						Downstreams:     zr.Notify,
+						Upstream:        NormalizeAddress(zr.Primary),
+						Downstreams:     NormalizeAddresses(zr.Notify),
 						Zonefile:        zr.Zonefile,
 						ZoneType:        zr.ZoneType,
 						Options:         zr.Options,

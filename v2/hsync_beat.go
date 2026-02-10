@@ -43,14 +43,14 @@ func (ar *AgentRegistry) SendHeartbeats() {
 	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
 		// DNS-55: Check EITHER transport state (API or DNS)
-		// Send heartbeat if ANY transport is INTRODUCED or better
+		// Send heartbeat if ANY transport is INTRODUCED or better (including LEGACY)
 		apiState := a.ApiDetails.State
 		dnsState := a.DnsDetails.State
 
 		apiReady := apiState == AgentStateIntroduced || apiState == AgentStateOperational ||
-			apiState == AgentStateDegraded || apiState == AgentStateInterrupted
+			apiState == AgentStateLegacy || apiState == AgentStateDegraded || apiState == AgentStateInterrupted
 		dnsReady := dnsState == AgentStateIntroduced || dnsState == AgentStateOperational ||
-			dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
+			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
 
 		if !apiReady && !dnsReady {
 			if Globals.Debug {
@@ -159,18 +159,30 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 	}
 
 	switch agent.ApiDetails.State {
-	case AgentStateOperational, AgentStateDegraded, AgentStateInterrupted:
-		// proceed
+	case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
+		// proceed with beat health checking
 	default:
 		return
 	}
 
+	// Check beat health and set DEGRADED/INTERRUPTED when beats are failing
+	// NOTE: OPERATIONAL vs LEGACY is determined by zone count (see RecomputeSharedZonesAndSyncState)
+	// This function only handles beat health degradation, not zone-based state transitions
 	if timeSinceLastReceivedBeat > 10*remoteBeatInterval || timeSinceLastSentBeat > 10*localBeatInterval {
 		agent.ApiDetails.State = AgentStateInterrupted
 	} else if timeSinceLastReceivedBeat > 2*remoteBeatInterval || timeSinceLastSentBeat > 2*localBeatInterval {
 		agent.ApiDetails.State = AgentStateDegraded
 	} else {
-		agent.ApiDetails.State = AgentStateOperational
+		// Beats healthy - restore to zone-appropriate state
+		agent.mu.RLock()
+		zoneCount := len(agent.Zones)
+		agent.mu.RUnlock()
+
+		if zoneCount == 0 {
+			agent.ApiDetails.State = AgentStateLegacy
+		} else {
+			agent.ApiDetails.State = AgentStateOperational
+		}
 	}
 }
 

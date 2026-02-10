@@ -36,8 +36,9 @@ install: check-root install-dirs
 
 TAR_VERSION:=v2
 TARFILE:=/tmp/usr.local.tdns.$(TAR_VERSION).tar.gz
-TAR_CONTENTS:=bin/tdns-cliv2 bin/tdns-imrv2 bin/dogv2 \
-	libexec/tdns-authv2 libexec/tdns-agentv2 libexec/tdns-combinerv2
+TAR_CONTENTS:=bin/tdns-cliv2 bin/dogv2 \
+	libexec/tdns-imrv2 libexec/tdns-authv2 \
+	libexec/tdns-agentv2 libexec/tdns-combinerv2
 
 tarball: install
 	cd /usr/local && tar -czf $(TARFILE) $(TAR_CONTENTS)

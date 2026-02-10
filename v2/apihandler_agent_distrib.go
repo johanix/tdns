@@ -179,12 +179,13 @@ func (dc *DistributionCache) StartCleanupGoroutine(ctx context.Context) {
 
 // AgentDistribPost represents a request to the agent distrib API
 type AgentDistribPost struct {
-	Command       string `json:"command"`                  // "list", "purge", "peers", "op", "discover"
+	Command       string `json:"command"`                  // "list", "purge", "peers", "peer-zones", "zone-agents", "op", "discover"
 	Force         bool   `json:"force,omitempty"`          // for purge
 	Op            string `json:"op,omitempty"`             // for op: operation name (e.g. "ping")
 	To            string `json:"to,omitempty"`             // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
 	PingTransport string `json:"ping_transport,omitempty"` // for op ping: "dns" (default) or "api"
 	AgentId       string `json:"agent_id,omitempty"`       // for discover: agent identity to discover
+	Zone          string `json:"zone,omitempty"`           // for zone-agents: zone name to list agents for
 }
 
 // DistributionSummary contains summary information about a distribution
@@ -207,6 +208,8 @@ type AgentDistribResponse struct {
 	Msg           string                 `json:"msg,omitempty"`
 	Summaries     []*DistributionSummary `json:"summaries,omitempty"`
 	Distributions []string               `json:"distributions,omitempty"` // For backward compatibility
+	Data          []interface{}          `json:"data,omitempty"`          // For peer-zones command
+	Agents        []string               `json:"agents,omitempty"`        // For zone-agents command
 }
 
 func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.ResponseWriter, r *http.Request) {
@@ -519,6 +522,24 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			json.NewEncoder(w).Encode(fullResp)
 			return
 
+		case "peer-zones":
+			// List shared zones for each peer agent
+			data := listPeerSharedZones(conf)
+			resp.Msg = fmt.Sprintf("Found %d peer(s)", len(data))
+			resp.Data = data
+
+		case "zone-agents":
+			// List agents for a specific zone
+			zoneName := req.Zone
+			if zoneName == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone parameter is required"
+				break
+			}
+			agents := listAgentsForZone(conf, zoneName)
+			resp.Msg = fmt.Sprintf("Found %d agent(s) for zone %q", len(agents), zoneName)
+			resp.Agents = agents
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", req.Command)
@@ -571,23 +592,11 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		return peers
 	}
 
-	// For agents: list the combiner (if configured) and remote agents
+	// For agents: list remote agents from AgentRegistry
+	// Note: The combiner is automatically included as it's registered as a virtual peer
+	// during agent initialization (see InitializeCombinerAsPeer)
 
-	// 1. Check if we have a combiner configured (identity is always "combiner" for CLI --to)
-	if conf.Agent != nil && conf.Agent.Combiner != nil {
-		combiner := conf.Agent.Combiner
-		peerInfo := PeerInfo{
-			PeerID:      "combiner",
-			PeerType:    "combiner",
-			Transport:   "DNS",
-			Address:     combiner.Address,
-			CryptoType:  "JOSE",
-			DistribSent: 0, // TODO: track actual count
-		}
-		peers = append(peers, peerInfo)
-	}
-
-	// 2. Add remote agents from AgentRegistry (discovered via DNS); use FQDN
+	// Add remote agents from AgentRegistry (discovered via DNS); use FQDN
 	// Create separate entries for API and DNS transports
 	seen := make(map[string]bool) // key: peerID+transport
 	for _, p := range peers {
@@ -600,6 +609,14 @@ func listKnownPeers(conf *Config) []PeerInfo {
 			agent := tuple.Val
 			agentIDFqdn := dns.Fqdn(string(agent.Identity))
 
+			// Special handling for combiner virtual peer
+			isCombiner := agent.Identity == "combiner"
+			peerType := "agent"
+			if isCombiner {
+				agentIDFqdn = "combiner" // Don't add trailing dot for combiner
+				peerType = "combiner"
+			}
+
 			// Add API transport entry if available
 			if agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 				key := agentIDFqdn + ":API"
@@ -607,7 +624,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
-						PeerType:    "agent",
+						PeerType:    peerType,
 						Transport:   "API",
 						Address:     agent.ApiDetails.BaseUri,
 						CryptoType:  "TLS",
@@ -657,7 +674,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
-						PeerType:     "agent",
+						PeerType:     peerType,
 						Transport:    "DNS",
 						Address:      agent.DnsDetails.BaseUri,
 						CryptoType:   "JOSE",
@@ -758,5 +775,119 @@ func listKnownPeers(conf *Config) []PeerInfo {
 		}
 	}
 
+	// Add all peers from PeerRegistry that we haven't listed yet
+	// This includes peers that sent unsolicited Hello messages or were contacted but not in AgentRegistry
+	if conf.Internal.TransportManager != nil {
+		allPeersFromRegistry := conf.Internal.TransportManager.PeerRegistry.All()
+		for _, peer := range allPeersFromRegistry {
+			peerID := peer.ID
+
+			// Check if already in peers list
+			alreadyListed := false
+			for _, p := range peers {
+				if p.PeerID == peerID {
+					alreadyListed = true
+					break
+				}
+			}
+
+			if !alreadyListed {
+				// Get detailed stats
+				lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
+
+				// Determine state from statistics
+				state := "UNKNOWN"
+				if totalRecv > 0 || totalSent > 0 {
+					// If we have any communication, it's at least contacted
+					if beatRecv > 0 || beatSent > 0 {
+						state = "CONTACTED" // Has exchanged heartbeats
+					} else if helloRecv > 0 || helloSent > 0 {
+						state = "HELLO" // Has exchanged hello messages
+					} else {
+						state = "CONTACTED" // Other communication
+					}
+				}
+
+				peerInfo := PeerInfo{
+					PeerID:        peerID,
+					PeerType:      "agent",
+					Transport:     "-", // Unknown transport
+					Address:       "-",
+					CryptoType:    "-",
+					State:         state,
+					ContactInfo:   "peer registry only",
+					HelloSent:     helloSent,
+					HelloReceived: helloRecv,
+					BeatSent:      beatSent,
+					BeatReceived:  beatRecv,
+					SyncSent:      syncSent,
+					SyncReceived:  syncRecv,
+					PingSent:      pingSent,
+					PingReceived:  pingRecv,
+					TotalSent:     totalSent,
+					TotalReceived: totalRecv,
+					DistribSent:   int(totalRecv), // Backward compat
+				}
+				if !lastUsed.IsZero() {
+					peerInfo.LastUsed = lastUsed
+				}
+
+				peers = append(peers, peerInfo)
+				log.Printf("listKnownPeers: Added peer from PeerRegistry only: %s, state=%s, sent=%d, received=%d",
+					peerID, state, totalSent, totalRecv)
+			}
+		}
+	}
+
 	return peers
+}
+
+// listPeerSharedZones returns shared zones for each peer agent
+func listPeerSharedZones(conf *Config) []interface{} {
+	data := make([]interface{}, 0)
+
+	if conf.Internal.AgentRegistry == nil {
+		return data
+	}
+
+	// Iterate through all known agents
+	for _, agent := range conf.Internal.AgentRegistry.S.Items() {
+		agent.mu.RLock()
+		zones := make([]string, 0, len(agent.Zones))
+		for zone := range agent.Zones {
+			zones = append(zones, string(zone))
+		}
+		agent.mu.RUnlock()
+
+		entry := map[string]interface{}{
+			"peer_id": string(agent.Identity),
+			"zones":   zones,
+			"state":   AgentStateToString[agent.State],
+		}
+		data = append(data, entry)
+	}
+
+	return data
+}
+
+// listAgentsForZone returns peer agents that share a specific zone
+func listAgentsForZone(conf *Config, zoneName string) []string {
+	agents := make([]string, 0)
+
+	if conf.Internal.AgentRegistry == nil {
+		return agents
+	}
+
+	// Iterate through all known agents and check if they have this zone
+	for _, agent := range conf.Internal.AgentRegistry.S.Items() {
+		agent.mu.RLock()
+		hasZone := agent.Zones[ZoneName(zoneName)]
+		agent.mu.RUnlock()
+
+		if hasZone {
+			agents = append(agents, string(agent.Identity))
+		}
+	}
+
+	return agents
 }

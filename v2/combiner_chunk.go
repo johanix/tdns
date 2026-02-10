@@ -124,15 +124,41 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 			return h.sendErrorResponse(req, distributionID, "failed to decrypt payload")
 		}
 		payload = decrypted
-		log.Printf("CombinerChunkHandler: Decrypted payload (%d bytes)", len(payload))
+		previewLen := len(payload)
+		if previewLen > 100 {
+			previewLen = 100
+		}
+		log.Printf("CombinerChunkHandler: Decrypted payload (%d bytes): %s", len(payload), string(payload[:previewLen]))
 	}
 
-	// Parse type first to handle ping without altering zone state
+	// Parse type first to handle ping and beat without altering zone state
+	// Try string "type" field first (used by ping/sync messages)
 	var typeOnly struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(payload, &typeOnly); err == nil && typeOnly.Type == "ping" {
-		return h.handlePing(req, distributionID, payload)
+	if err := json.Unmarshal(payload, &typeOnly); err == nil && typeOnly.Type != "" {
+		log.Printf("CombinerChunkHandler: Detected message type (string): %q", typeOnly.Type)
+		if typeOnly.Type == "ping" {
+			return h.handlePing(req, distributionID, payload)
+		}
+		if typeOnly.Type == "beat" {
+			return h.handleBeat(req, distributionID, payload)
+		}
+	}
+
+	// Try numeric "MessageType" field (used by AgentBeatPost and other agent messages)
+	var msgTypeOnly struct {
+		MessageType uint8 `json:"MessageType"`
+	}
+	if err := json.Unmarshal(payload, &msgTypeOnly); err == nil && msgTypeOnly.MessageType > 0 {
+		log.Printf("CombinerChunkHandler: Detected MessageType (enum): %d", msgTypeOnly.MessageType)
+		// MessageType values: 1=hello, 2=beat, 3=notify(sync), 4=rfi, 5=status, 6=ping
+		if msgTypeOnly.MessageType == 2 { // AgentMsgBeat
+			return h.handleBeat(req, distributionID, payload)
+		}
+		if msgTypeOnly.MessageType == 6 { // AgentMsgPing
+			return h.handlePing(req, distributionID, payload)
+		}
 	}
 
 	// Parse the sync payload
@@ -202,6 +228,63 @@ func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, distributionID 
 	payloadBytes, err := json.Marshal(confirmPayload)
 	if err != nil {
 		return h.sendErrorResponse(req, distributionID, "failed to build ping_confirm")
+	}
+
+	resp := new(dns.Msg)
+	resp.SetReply(req.Msg)
+	resp.Authoritative = true
+	resp.Rcode = dns.RcodeSuccess
+	resp.SetEdns0(4096, true)
+	opt := resp.IsEdns0()
+	if opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+			Data: payloadBytes,
+		})
+	}
+	if req.ResponseWriter != nil {
+		return req.ResponseWriter.WriteMsg(resp)
+	}
+	return nil
+}
+
+// handleBeat responds to a heartbeat with beat_confirm; no zone state change.
+func (h *CombinerChunkHandler) handleBeat(req *DnsNotifyRequest, distributionID string, payload []byte) error {
+	// Beat messages use AgentBeatPost format with MessageType enum
+	var beat struct {
+		MessageType  uint8     `json:"MessageType"`  // Should be 2 for beat
+		MyIdentity   string    `json:"MyIdentity"`   // Sender's identity
+		YourIdentity string    `json:"YourIdentity"` // Should be "combiner"
+		Time         time.Time `json:"Time"`
+	}
+	if err := json.Unmarshal(payload, &beat); err != nil {
+		log.Printf("CombinerChunkHandler: Failed to parse beat payload: %v", err)
+		return h.sendErrorResponse(req, distributionID, "invalid beat payload")
+	}
+	if beat.MessageType != 2 { // AgentMsgBeat = 2
+		log.Printf("CombinerChunkHandler: Invalid beat (MessageType=%d, expected 2)", beat.MessageType)
+		return h.sendErrorResponse(req, distributionID, "invalid beat")
+	}
+
+	log.Printf("CombinerChunkHandler: Received heartbeat from %s", beat.MyIdentity)
+
+	// Send simple "confirm" response (same as sync confirms)
+	confirmPayload := struct {
+		Type          string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status        string `json:"status"`
+		Message       string `json:"message"`
+		Timestamp     int64  `json:"timestamp"`
+	}{
+		Type:          "confirm",
+		DistributionID: distributionID,
+		Status:        "ok",
+		Message:       "beat acknowledged",
+		Timestamp:     time.Now().Unix(),
+	}
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return h.sendErrorResponse(req, distributionID, "failed to build beat_confirm")
 	}
 
 	resp := new(dns.Msg)

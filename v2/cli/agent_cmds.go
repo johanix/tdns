@@ -163,10 +163,39 @@ are displayed as separate entries to show their independent states.`,
 	},
 }
 
+var agentPeersZonesCmd = &cobra.Command{
+	Use:   "zones",
+	Short: "List shared zones for each peer agent",
+	Long: `Show which zones are shared with each peer agent.
+Displays agent identity and their shared zones in a compact format.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		listPeerZones(cmd, "agent")
+	},
+}
+
+var agentPeersZoneCmd = &cobra.Command{
+	Use:   "zone --zone <zonename>",
+	Short: "List peer agents for a specific zone",
+	Long: `Show which peer agents share a specific zone with us.
+Displays all agents that have the specified zone in their shared zones list.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		zoneName, _ := cmd.Flags().GetString("zone")
+		if zoneName == "" {
+			log.Fatal("--zone flag is required")
+		}
+		listAgentsForZone(cmd, "agent", zoneName)
+	},
+}
+
 func init() {
 	AgentCmd.AddCommand(agentLocalCmd)
 	AgentCmd.AddCommand(agentDiscoverCmd)
 	AgentCmd.AddCommand(agentPeersCmd)
+
+	// Add subcommands under "agent peers"
+	agentPeersCmd.AddCommand(agentPeersZonesCmd)
+	agentPeersCmd.AddCommand(agentPeersZoneCmd)
+
 	agentLocalCmd.AddCommand(agentLocalConfigCmd)
 	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataAddRRCmd)
@@ -176,6 +205,7 @@ func init() {
 	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
 	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
 	agentPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	agentPeersZoneCmd.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
 
 }
 
@@ -262,4 +292,98 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 	fmt.Printf("Agent management command sent successfully. Response: %s\n", amr.Msg)
 	return nil
+}
+
+// listPeerZones shows shared zones for each peer agent
+func listPeerZones(cmd *cobra.Command, component string) {
+	prefixcmd, _ := getCommandContext("peers")
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error getting API client: %v", err)
+	}
+
+	endpoint := fmt.Sprintf("/%s/distrib", component)
+	req := map[string]interface{}{
+		"command": "peer-zones",
+	}
+
+	_, buf, err := api.RequestNG("POST", endpoint, req, true)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if resp["error"] == true {
+		log.Fatalf("Error: %v", resp["error_msg"])
+	}
+
+	// Display results
+	if data, ok := resp["data"].([]interface{}); ok && len(data) > 0 {
+		fmt.Println("Peer Agent Shared Zones:")
+		fmt.Println("========================")
+		for _, item := range data {
+			if entry, ok := item.(map[string]interface{}); ok {
+				peerID := entry["peer_id"].(string)
+				zones := entry["zones"].([]interface{})
+
+				if len(zones) == 0 {
+					fmt.Printf("%-40s  (LEGACY - no shared zones)\n", peerID)
+				} else {
+					zoneNames := make([]string, len(zones))
+					for i, z := range zones {
+						zoneNames[i] = z.(string)
+					}
+					fmt.Printf("%-40s  %s\n", peerID, strings.Join(zoneNames, ", "))
+				}
+			}
+		}
+	} else {
+		fmt.Println("No peers found")
+	}
+}
+
+// listAgentsForZone shows which peer agents share a specific zone
+func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
+	prefixcmd, _ := getCommandContext("peers")
+	api, err := getApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error getting API client: %v", err)
+	}
+
+	endpoint := fmt.Sprintf("/%s/distrib", component)
+	req := map[string]interface{}{
+		"command": "zone-agents",
+		"zone":    zoneName,
+	}
+
+	_, buf, err := api.RequestNG("POST", endpoint, req, true)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if resp["error"] == true {
+		log.Fatalf("Error: %v", resp["error_msg"])
+	}
+
+	// Display results
+	if agents, ok := resp["agents"].([]interface{}); ok && len(agents) > 0 {
+		fmt.Printf("Peer agents sharing zone %q:\n", zoneName)
+		fmt.Println("================================")
+		for _, agent := range agents {
+			if agentID, ok := agent.(string); ok {
+				fmt.Printf("  %s\n", agentID)
+			}
+		}
+	} else {
+		fmt.Printf("No peer agents found for zone %q\n", zoneName)
+	}
 }

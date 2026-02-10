@@ -23,6 +23,32 @@ var ServerName string = "PLACEHOLDER"
 
 var updateBinary bool
 
+// extractDaemonFlags collects flags from the CLI command that should be
+// passed through to the daemon when it starts (e.g., --config, --debug, -v)
+func extractDaemonFlags(cmd *cobra.Command) []string {
+	var flags []string
+
+	// Walk up to root command to collect all flags
+	root := cmd.Root()
+
+	// Check for --config flag
+	if configFlag := root.Flag("config"); configFlag != nil && configFlag.Changed {
+		flags = append(flags, "--config", configFlag.Value.String())
+	}
+
+	// Check for --debug flag
+	if debugFlag := root.Flag("debug"); debugFlag != nil && debugFlag.Changed {
+		flags = append(flags, "--debug")
+	}
+
+	// Check for -v/--verbose flag
+	if verboseFlag := root.Flag("verbose"); verboseFlag != nil && verboseFlag.Changed {
+		flags = append(flags, "-v")
+	}
+
+	return flags
+}
+
 var DaemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Only useful via sub-commands",
@@ -84,7 +110,10 @@ var DaemonStartCmd = &cobra.Command{
 			}
 		}
 
-		api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand)
+		// Extract flags to pass to daemon (--config, --debug, -v, etc.)
+		daemonFlags := extractDaemonFlags(cmd)
+
+		api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand, daemonFlags)
 	},
 }
 
@@ -169,7 +198,11 @@ var DaemonRestartCmd = &cobra.Command{
 				fmt.Printf("%s is not newer than %s. No update.\n", srcbin, dstbin)
 			}
 		}
-		tdns.Globals.Api.StartDaemon(maxwait, false, daemonCommand) // no slurping on restart
+
+		// Extract flags to pass to daemon (--config, --debug, -v, etc.)
+		daemonFlags := extractDaemonFlags(cmd)
+
+		tdns.Globals.Api.StartDaemon(maxwait, false, daemonCommand, daemonFlags) // no slurping on restart
 	},
 }
 

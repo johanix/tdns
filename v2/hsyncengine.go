@@ -112,6 +112,61 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
 	}
 }
 
+// DiscoveryRetrierNG continuously attempts to discover agents in NEEDED state.
+// It runs in its own goroutine with a configurable retry interval and only
+// attempts discovery when the IMR engine is available.
+func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
+	discoveryRetryInterval := configureInterval("agent.syncengine.intervals.discoveryretry", 15, 1800)
+	log.Printf("DiscoveryRetrierNG: Starting discovery retry loop (interval: %d seconds)", discoveryRetryInterval)
+
+	ticker := time.NewTicker(time.Duration(discoveryRetryInterval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("DiscoveryRetrierNG: context cancelled, stopping")
+			return
+		case <-ticker.C:
+			ar.retryPendingDiscoveries()
+		}
+	}
+}
+
+// retryPendingDiscoveries attempts discovery for all agents in NEEDED state.
+// Skips the iteration if IMR engine is not yet available (will retry next tick).
+func (ar *AgentRegistry) retryPendingDiscoveries() {
+	// Get IMR engine - skip iteration if not ready yet (will retry next tick)
+	imr := Conf.Internal.ImrEngine
+	if imr == nil {
+		if Globals.Debug {
+			log.Printf("DiscoveryRetrierNG: IMR engine not ready, will retry next interval")
+		}
+		return
+	}
+
+	// Find all agents in NEEDED state
+	neededCount := 0
+	for _, agent := range ar.S.Items() {
+		agent.mu.RLock()
+		apiNeeded := agent.ApiMethod && agent.ApiDetails.State == AgentStateNeeded
+		dnsNeeded := agent.DnsMethod && agent.DnsDetails.State == AgentStateNeeded
+		agent.mu.RUnlock()
+
+		if !apiNeeded && !dnsNeeded {
+			continue
+		}
+
+		neededCount++
+		// Spawn async discovery attempt (non-blocking)
+		go ar.attemptDiscovery(agent, imr)
+	}
+
+	if neededCount > 0 {
+		log.Printf("DiscoveryRetrierNG: Attempting discovery for %d agents in NEEDED state", neededCount)
+	}
+}
+
 func configureInterval(key string, min, max int) int {
 	interval := viper.GetInt(key)
 	if interval > max {

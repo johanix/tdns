@@ -145,6 +145,14 @@ func HandleSync(ctx *MessageContext) error {
 	log.Printf("HandleSync: Processing sync from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
 
+	// Check if sender has zero shared zones (LEGACY state)
+	// LEGACY agents should not send sync messages (only beats)
+	if ctx.Peer != nil && len(ctx.Peer.GetSharedZones()) == 0 {
+		// Agent is LEGACY (zero shared zones) - reject sync
+		log.Printf("HandleSync: Rejecting sync from LEGACY agent %s (zero shared zones)", ctx.PeerID)
+		return fmt.Errorf("LEGACY agent %s cannot send sync messages (zero shared zones)", ctx.PeerID)
+	}
+
 	// Get the pre-parsed message from context (set by RouteViaRouter)
 	syncMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if !ok {

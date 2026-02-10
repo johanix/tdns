@@ -21,6 +21,7 @@ const (
 	AgentStateKnown                             // We have complete information but haven't established communication
 	AgentStateIntroduced                        // We got a nice reply to our HELLO
 	AgentStateOperational                       // We got a nice reply to our (secure) BEAT
+	AgentStateLegacy                            // Established relationship but no shared zones (previously OPERATIONAL)
 	AgentStateDegraded                          // Last successful heartbeat (in either direction) was more than 2x normal interval ago
 	AgentStateInterrupted                       // Last successful heartbeat (in either direction) was more than 10x normal interval ago
 	AgentStateError                             // We have tried to establish communication but failed
@@ -31,6 +32,7 @@ var AgentStateToString = map[AgentState]string{
 	AgentStateKnown:       "KNOWN",
 	AgentStateIntroduced:  "INTRODUCED",
 	AgentStateOperational: "OPERATIONAL",
+	AgentStateLegacy:      "LEGACY",
 	AgentStateDegraded:    "DEGRADED",
 	AgentStateInterrupted: "INTERRUPTED",
 	AgentStateError:       "ERROR",

@@ -67,7 +67,7 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 
 	// Check for local notify configuration and set downstream targets
 	if len(conf.Agent.Local.Notify) > 0 {
-		zd.Downstreams = conf.Agent.Local.Notify
+		zd.Downstreams = NormalizeAddresses(conf.Agent.Local.Notify)
 		if Globals.Debug {
 			log.Printf("SetupAgentAutoZone: Setting downstream notify targets for zone %s: %v", zonename, zd.Downstreams)
 		}

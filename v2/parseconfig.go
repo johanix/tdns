@@ -529,11 +529,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				continue
 			}
 
-			// Check if primary has port specified
-			_, _, err := net.SplitHostPort(zconf.Primary)
-			if err != nil {
-				log.Printf("Warning: Zone %q: primary %q has no port specified, using default port :53", zname, zconf.Primary)
-				zconf.Primary = net.JoinHostPort(zconf.Primary, "53")
+			// Normalize primary address to include port if not specified
+			origPrimary := zconf.Primary
+			zconf.Primary = NormalizeAddress(zconf.Primary)
+			if origPrimary != zconf.Primary {
+				log.Printf("Warning: Zone %q: primary %q has no port specified, using default port :53", zname, origPrimary)
 			}
 
 		default:
@@ -859,6 +859,41 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 		Lifetime:    uint32(lifetime_secs.Seconds()),
 		SigValidity: uint32(sigvalidity_secs.Seconds()),
 	}
+}
+
+// NormalizeAddress ensures an address has a port number.
+// If the address doesn't have a port, ":53" is appended.
+// This allows users to specify addresses as either "IP" or "IP:port" in config.
+// Returns empty string if input is empty.
+func NormalizeAddress(addr string) string {
+	if addr == "" {
+		return ""
+	}
+
+	// Try to split host and port
+	_, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// If SplitHostPort fails, it means no port is present
+		// Add default DNS port :53
+		return net.JoinHostPort(addr, "53")
+	}
+	// Address already has a port, use as-is
+	return addr
+}
+
+// NormalizeAddresses ensures all addresses have a port number.
+// If an address doesn't have a port, ":53" is appended.
+// This allows users to specify addresses as either "IP" or "IP:port" in config.
+func NormalizeAddresses(addresses []string) []string {
+	if len(addresses) == 0 {
+		return addresses
+	}
+
+	normalized := make([]string, 0, len(addresses))
+	for _, addr := range addresses {
+		normalized = append(normalized, NormalizeAddress(addr))
+	}
+	return normalized
 }
 
 // setDynamicZonesDefaults sets default values for DynamicZonesConf if not configured

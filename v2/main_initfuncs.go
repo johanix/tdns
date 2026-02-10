@@ -500,9 +500,18 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		}
 	}
 
+	// Initialize combiner as a virtual peer so HsyncEngine can manage heartbeats
+	if err := conf.Internal.AgentRegistry.InitializeCombinerAsPeer(conf); err != nil {
+		log.Printf("StartAgent: WARNING: Failed to initialize combiner as peer: %v", err)
+		log.Printf("StartAgent: Continuing without combiner heartbeat monitoring")
+	}
+
 	// Agent-specific
 	//log.Printf("TDNS %s (%s): starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	startEngineNoError(&Globals.App, "HsyncEngine", func() { HsyncEngine(ctx, conf, conf.Internal.AgentQs) })
+	startEngineNoError(&Globals.App, "DiscoveryRetrierNG", func() {
+		conf.Internal.AgentRegistry.DiscoveryRetrierNG(ctx)
+	})
 	startEngineNoError(&Globals.App, "SynchedDataEngine", func() { conf.SynchedDataEngine(ctx, conf.Internal.AgentQs) })
 
 	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
@@ -530,6 +539,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 
 func Shutdowner(conf *Config, msg string) {
 	log.Printf("%s: shutting down: %s", Globals.App.Name, msg)
+	fmt.Printf("%s: shutting down: %s\n", Globals.App.Name, msg)
 	// Prefer closing APIStopCh once as a broadcast to MainLoop and all listeners
 	if conf.Internal.APIStopCh != nil {
 		conf.Internal.StopOnce.Do(func() {

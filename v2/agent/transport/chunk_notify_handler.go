@@ -597,6 +597,22 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	msgCtx.SignatureReason = "decrypted_by_router"
 	// Store the parsed message so handlers don't need to re-parse
 	msgCtx.Data["incoming_message"] = incomingMsg
+	// Extract zone for authorization middleware (HSYNC check)
+	if incomingMsg.Zone != "" {
+		msgCtx.Data["zone"] = incomingMsg.Zone
+		log.Printf("RouteViaRouter: Extracted zone %q for authorization check", incomingMsg.Zone)
+	} else if msgType == MessageType("beat") {
+		// For beat messages, extract zones from the Zones array
+		// Parse the raw payload to get the Zones field from AgentBeatPost
+		var beatPayload struct {
+			Zones []string `json:"Zones"`
+		}
+		if err := json.Unmarshal(payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
+			// Use first shared zone for authorization
+			msgCtx.Data["zone"] = beatPayload.Zones[0]
+			log.Printf("RouteViaRouter: Extracted zone %q from beat message for authorization check", beatPayload.Zones[0])
+		}
+	}
 
 	// Route through router (middleware + handlers)
 	// The SendResponseMiddleware will send the DNS response

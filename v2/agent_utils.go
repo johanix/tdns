@@ -14,6 +14,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -48,6 +49,47 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 		agent.mu.RUnlock()
 	}
 	return agents
+}
+
+// RecomputeSharedZonesAndSyncState updates an agent's shared zones and transitions between
+// OPERATIONAL and LEGACY states based on zone count.
+// This should be called after HSYNC changes to keep agent state synchronized with zone membership.
+func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	zoneCount := len(agent.Zones)
+	oldState := agent.State
+
+	// State transitions based on zone count
+	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
+		// Transition to LEGACY when zones go to zero
+		agent.State = AgentStateLegacy
+		agent.LastState = time.Now()
+		log.Printf("RecomputeSharedZones: Agent %s transitioned %s → LEGACY (no shared zones)",
+			agent.Identity, AgentStateToString[oldState])
+	} else if zoneCount > 0 && oldState == AgentStateLegacy {
+		// Transition back to OPERATIONAL when zones are re-added
+		agent.State = AgentStateOperational
+		agent.LastState = time.Now()
+		log.Printf("RecomputeSharedZones: Agent %s transitioned LEGACY → OPERATIONAL (%d shared zone(s))",
+			agent.Identity, zoneCount)
+	}
+
+	// Sync zones to peer in PeerRegistry (updates cached SharedZones)
+	if ar.TransportManager != nil {
+		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(agent.Identity))
+
+		// Clear existing shared zones
+		peer.SharedZones = make(map[string]*transport.ZoneRelation)
+
+		// Re-add all zones from agent
+		for zone := range agent.Zones {
+			peer.AddSharedZone(string(zone), "", "")
+		}
+
+		log.Printf("RecomputeSharedZones: Synced %d zone(s) to peer %s", zoneCount, agent.Identity)
+	}
 }
 
 func (conf *Config) NewAgentRegistry() *AgentRegistry {
@@ -480,19 +522,123 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 	return svcbrr, addrs, port, targetName, nil
 }
 
-// DiscoverAgentAsync performs agent discovery and registration asynchronously using the new discovery path.
-// This is the recommended replacement for the deprecated LocateAgent() function.
-// It uses DiscoverAgent() + RegisterDiscoveredAgent() from agent_discovery.go.
+// MarkAgentAsNeeded creates a placeholder agent in NEEDED state.
+// The agent will be discovered asynchronously by DiscoveryRetrierNG in HsyncEngine.
+// This is the new recommended pattern for agent discovery triggered by HSYNC updates.
+//
+// Parameters:
+//   - remoteid: The agent identity to mark as needed
+//   - zonename: Optional zone name to associate with the agent
+//   - deferredTask: Optional task to execute when agent becomes OPERATIONAL
+func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
+	// Skip self-identification
+	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
+		log.Printf("MarkAgentAsNeeded: skipping self-identification for %s", remoteid)
+		return
+	}
+
+	// Check if agent already exists
+	agent, exists := ar.S.Get(remoteid)
+	if exists {
+		// Already discovered - just associate zone
+		if zonename != "" {
+			ar.AddZoneToAgent(remoteid, zonename)
+		}
+		log.Printf("MarkAgentAsNeeded: agent %s already exists (state: API=%s, DNS=%s)",
+			remoteid, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+		return
+	}
+
+	// Create placeholder agent in NEEDED state
+	agent = &Agent{
+		Identity:   remoteid,
+		ApiDetails: &AgentDetails{State: AgentStateNeeded},
+		DnsDetails: &AgentDetails{State: AgentStateNeeded},
+		Zones:      make(map[ZoneName]bool),
+		State:      AgentStateNeeded,
+		LastState:  time.Now(),
+	}
+
+	// Mark both transports as needing discovery (will be refined during discovery)
+	agent.ApiMethod = true
+	agent.DnsMethod = true
+
+	if zonename != "" {
+		agent.Zones[zonename] = true
+	}
+
+	if deferredTask != nil {
+		agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
+	}
+
+	ar.S.Set(remoteid, agent)
+	log.Printf("MarkAgentAsNeeded: Marked %s as NEEDED for zone %s (will be discovered by DiscoveryRetrierNG)", remoteid, zonename)
+}
+
+// attemptDiscovery performs a single discovery attempt for an agent.
+// Called by DiscoveryRetrierNG for agents in NEEDED state.
+// On success, transitions agent from NEEDED → KNOWN and starts HelloRetrierNG.
+// On failure, agent remains in NEEDED state for retry next interval.
+func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	log.Printf("attemptDiscovery: Attempting discovery for %s", agent.Identity)
+
+	result := DiscoverAgent(ctx, imr, string(agent.Identity))
+
+	if result.Error != nil {
+		agent.mu.Lock()
+		agent.ApiDetails.LatestError = result.Error.Error()
+		agent.ApiDetails.LatestErrorTime = time.Now()
+		agent.mu.Unlock()
+		log.Printf("attemptDiscovery: Discovery failed for %s (will retry next interval): %v", agent.Identity, result.Error)
+		return
+	}
+
+	// Register discovered agent
+	if ar.TransportManager != nil {
+		err := ar.TransportManager.RegisterDiscoveredAgent(result)
+		if err != nil {
+			agent.mu.Lock()
+			agent.ApiDetails.LatestError = err.Error()
+			agent.ApiDetails.LatestErrorTime = time.Now()
+			agent.mu.Unlock()
+			log.Printf("attemptDiscovery: Registration failed for %s (will retry next interval): %v", agent.Identity, err)
+			return
+		}
+	}
+
+	// SUCCESS: Agent transitioned from NEEDED → KNOWN
+	// (RegisterDiscoveredAgent sets state to KNOWN)
+	log.Printf("attemptDiscovery: Successfully discovered %s, now in state KNOWN", agent.Identity)
+
+	// Start Hello retry loop (existing mechanism)
+	helloCtx, helloCancel := context.WithCancel(context.Background())
+	ar.mu.Lock()
+	ar.helloContexts[agent.Identity] = helloCancel
+	ar.mu.Unlock()
+	go ar.HelloRetrierNG(helloCtx, agent)
+	log.Printf("attemptDiscovery: Started Hello retry loop for %s", agent.Identity)
+}
+
+// DiscoverAgentAsync marks an agent as NEEDED for discovery by DiscoveryRetrierNG.
+//
+// DEPRECATED: This function is now a thin wrapper around MarkAgentAsNeeded() for backward compatibility.
+// New code should call MarkAgentAsNeeded() directly instead.
+//
+// The old immediate discovery behavior has been replaced with a retry-based approach:
+// - Agents are marked as NEEDED
+// - DiscoveryRetrierNG continuously retries discovery until success
+// - Eliminates IMR race conditions and handles transient failures
+// - Provides infinite retry with backoff (consistent with Hello/Beat mechanisms)
 //
 // Parameters:
 //   - remoteid: The agent identity to discover
 //   - zonename: Optional zone name to associate with the agent
-//   - deferredTask: Optional task to execute when discovery completes
-//
-// The function is completely asynchronous with no return values.
-// Discovery results are logged and registered in both PeerRegistry and AgentRegistry.
+//   - deferredTask: Optional task to execute when agent becomes operational
 func (ar *AgentRegistry) DiscoverAgentAsync(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
-	log.Printf("DiscoverAgentAsync: looking up agent %s", remoteid)
+	log.Printf("DiscoverAgentAsync: (deprecated wrapper) marking agent %s as NEEDED", remoteid)
 
 	// Skip if this is our own identity
 	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
@@ -500,84 +646,8 @@ func (ar *AgentRegistry) DiscoverAgentAsync(remoteid AgentId, zonename ZoneName,
 		return
 	}
 
-	// Check if we already know this agent
-	agent, exists := ar.S.Get(remoteid)
-	if exists {
-		if zonename != "" {
-			ar.AddZoneToAgent(remoteid, zonename)
-		}
-
-		// If the agent exists in the registry, then it is at least in the state "needed".
-		// That implies that either there is already a discovery running, or one has
-		// already completed. In neither case do we need a new discovery, so we just return.
-		log.Printf("DiscoverAgentAsync: agent %s already exists in state %d", remoteid, agent.State)
-		return
-	}
-
-	// Check if we have TransportManager available
-	if ar.TransportManager == nil {
-		log.Printf("DiscoverAgentAsync: ERROR: No TransportManager available, falling back to deprecated LocateAgent")
-		ar.LocateAgent(remoteid, zonename, deferredTask)
-		return
-	}
-
-	// Spawn async goroutine for discovery using the new path
-	go func() {
-		ctx := context.Background()
-
-		// Get IMR engine from global config
-		imr := Conf.Internal.ImrEngine
-		if imr == nil {
-			log.Printf("DiscoverAgentAsync: ERROR: IMR engine not available")
-			return
-		}
-
-		result := DiscoverAgent(ctx, imr, string(remoteid))
-
-		if result.Error != nil {
-			log.Printf("DiscoverAgentAsync: discovery failed for %s: %v", remoteid, result.Error)
-			return
-		}
-
-		// Register the discovered agent
-		err := ar.TransportManager.RegisterDiscoveredAgent(result)
-		if err != nil {
-			log.Printf("DiscoverAgentAsync: registration failed for %s: %v", remoteid, err)
-			return
-		}
-
-		// Associate zone if provided
-		if zonename != "" {
-			ar.AddZoneToAgent(remoteid, zonename)
-		}
-
-		// DNS-55: Start Hello retry loop for the discovered agent
-		// This progresses the agent from KNOWN → INTRODUCED → OPERATIONAL
-		agent, exists := ar.S.Get(remoteid)
-		if exists && agent != nil {
-			ctx, cancel := context.WithCancel(context.Background())
-			ar.mu.Lock()
-			ar.helloContexts[remoteid] = cancel
-			ar.mu.Unlock()
-			go ar.HelloRetrierNG(ctx, agent)
-			log.Printf("DiscoverAgentAsync: Started Hello retry loop for %s", remoteid)
-		} else {
-			log.Printf("DiscoverAgentAsync: WARNING: Agent %s not found in registry after discovery", remoteid)
-		}
-
-		// Note: deferredTask execution happens when agent becomes operational
-		// Store the task if provided
-		if deferredTask != nil {
-			agent, exists := ar.S.Get(remoteid)
-			if exists {
-				agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
-				ar.S.Set(remoteid, agent)
-				log.Printf("DiscoverAgentAsync: Added deferred task for agent %s zone %s", remoteid, zonename)
-			}
-		}
-
-		log.Printf("DiscoverAgentAsync: successfully discovered and registered agent %s", remoteid)
-	}()
+	// Delegate to new unified discovery path
+	ar.MarkAgentAsNeeded(remoteid, zonename, deferredTask)
 }
 
 // Create a new synchronous function for code that needs immediate results
@@ -753,7 +823,9 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 // "change" (i.e. the same identity, but now roles). ADD+REMOVE doesn't deal with that.
 func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate) error {
 
-	var updatedIdentities = map[AgentId]bool{}
+	var updatedIdentities = map[AgentId]bool{} // Tracks modified agents (both add and remove)
+	var affectedIdentities = map[AgentId]bool{} // Tracks ALL agents that need zone recomputation
+
 	// Handle new HSYNC records
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
@@ -761,6 +833,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 				log.Printf("UpdateAgents: Zone %s: analysing HSYNC: %q", zonename, hsync.String())
 
 				updatedIdentities[AgentId(hsync.Identity)] = true
+				affectedIdentities[AgentId(hsync.Identity)] = true
 				if AgentId(hsync.Identity) == ourId {
 					// We're the Target
 					if hsync.Upstream == "." {
@@ -769,8 +842,8 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 						continue
 					}
 
-					// Need to sync with Upstream - do this asynchronously
-					ar.DiscoverAgentAsync(AgentId(hsync.Upstream), zonename,
+					// Need to sync with Upstream - mark as needed for discovery
+					ar.MarkAgentAsNeeded(AgentId(hsync.Upstream), zonename,
 						&DeferredAgentTask{
 							Precondition: func() bool {
 								if agent, exists := ar.S.Get(AgentId(hsync.Upstream)); exists {
@@ -793,8 +866,8 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync.Upstream),
 						})
 				} else if AgentId(hsync.Upstream) == ourId {
-					// Need to sync with Upstream - do this asynchronously
-					ar.DiscoverAgentAsync(AgentId(hsync.Identity), zonename,
+					// Need to sync with downstream agents - mark as needed for discovery
+					ar.MarkAgentAsNeeded(AgentId(hsync.Identity), zonename,
 						&DeferredAgentTask{
 							// XXX: This is not complete, as there is no check for the Precondition
 							// XXX: some sort of periodic check is needed to ensure that the agent is still
@@ -822,8 +895,8 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 
 				} else {
 					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Identity)
-					// Not our target, locate agent asynchronously
-					ar.DiscoverAgentAsync(AgentId(hsync.Identity), zonename, nil)
+					// Not our target, mark as needed for discovery
+					ar.MarkAgentAsNeeded(AgentId(hsync.Identity), zonename, nil)
 				}
 			}
 		}
@@ -833,6 +906,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	for _, rr := range req.SyncStatus.HsyncRemoves {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*core.HSYNC); ok {
+				affectedIdentities[AgentId(hsync.Identity)] = true
 				if updatedIdentities[AgentId(hsync.Identity)] {
 					// Don't remove an agent that's still in the HSYNC RRset; it has only changed
 					log.Printf("UpdateAgents: Zone %q: not removing agent %q, HSYNC RR changed", zonename, hsync.Identity)
@@ -846,11 +920,20 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					// Remote agent was removed, update registry
 					log.Printf("UpdateAgents: Zone %q: agent %q is no longer part of HSYNC RRset, cleaning up", zonename, hsync.Identity)
 					if agent, exists := ar.S.Get(AgentId(hsync.Identity)); exists {
+						agent.mu.Lock()
 						delete(agent.Zones, zonename)
+						agent.mu.Unlock()
 						ar.RemoveRemoteAgent(zonename, AgentId(hsync.Identity))
 					}
 				}
 			}
+		}
+	}
+
+	// Recompute shared zones for all affected agents and handle OPERATIONAL ↔ LEGACY transitions
+	for identity := range affectedIdentities {
+		if agent, exists := ar.S.Get(identity); exists && identity != ourId {
+			ar.RecomputeSharedZonesAndSyncState(agent)
 		}
 	}
 

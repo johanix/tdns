@@ -260,13 +260,21 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create beat payload using typed struct from core package
+	// Get shared zones from peer
+	sharedZones := peer.GetSharedZones()
+
+	if len(sharedZones) == 0 {
+		log.Printf("DNS Beat: WARNING: No shared zones found for peer %s", peer.ID)
+	} else {
+		log.Printf("DNS Beat: Including %d shared zone(s) for peer %s: %v", len(sharedZones), peer.ID, sharedZones)
+	}
+
 	payload := &core.AgentBeatPost{
 		MessageType:  core.AgentMsgBeat,
 		MyIdentity:   req.SenderID,
 		YourIdentity: peer.ID,
 		Time:         req.Timestamp,
-		// Note: BeatRequest doesn't include BeatInterval or Zones fields
-		// Those are managed at a higher level in AgentMsgReport
+		Zones:        sharedZones, // Include shared zones for authorization
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -512,8 +520,9 @@ func extractPingConfirmFromResponse(res *dns.Msg) (*DnsPingConfirmPayload, error
 			if err := json.Unmarshal(local.Data, &confirm); err != nil {
 				return nil, err
 			}
-			if confirm.Type != "ping_confirm" {
-				return nil, fmt.Errorf("expected ping_confirm, got %s", confirm.Type)
+			// Accept both "ping_confirm" (new format) and "confirm" (legacy format from older combiners)
+			if confirm.Type != "ping_confirm" && confirm.Type != "confirm" {
+				return nil, fmt.Errorf("expected ping_confirm or confirm, got %s", confirm.Type)
 			}
 			return &confirm, nil
 		}

@@ -369,7 +369,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			ZoneName:      zoneName,
 			ZoneType:      Secondary,
 			ZoneStore:     parseZoneStore(storeValue),
-			Upstream:      configGroupConfig.Upstream,
+			Upstream:      NormalizeAddress(configGroupConfig.Upstream),
 			Logger:        log.Default(),
 			SourceCatalog: update.CatalogZone,
 			Options: map[ZoneOption]bool{
@@ -416,7 +416,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
-			Primary:   configGroupConfig.Upstream,
+			Primary:   NormalizeAddress(configGroupConfig.Upstream),
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}
