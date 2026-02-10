@@ -258,7 +258,16 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				return
 			}
 			agents := listAgentsForZone(conf, zoneName)
-			resp.Msg = fmt.Sprintf("Found %d agent(s) for zone %q", len(agents), zoneName)
+
+			// Get SOA serial for the zone if available
+			var zoneSerial uint32
+			if zd, exists := Zones.Get(zoneName); exists {
+				if soa, err := zd.GetSOA(); err == nil {
+					zoneSerial = soa.Serial
+				}
+			}
+
+			resp.Msg = fmt.Sprintf("Found %d agent(s) for zone %q (serial: %d)", len(agents), zoneName, zoneSerial)
 			resp.Agents = agents
 			return
 		}
@@ -610,8 +619,8 @@ func listKnownPeers(conf *Config) []PeerInfo {
 	if conf.Internal.AgentRegistry != nil {
 		ar := conf.Internal.AgentRegistry
 
-		for tuple := range ar.S.IterBuffered() {
-			agent := tuple.Val
+		// Use callback-based iterator to avoid channel/deadlock issues
+		ar.S.IterCb(func(agentID AgentId, agent *Agent) {
 			agentIDFqdn := dns.Fqdn(string(agent.Identity))
 
 			// Special handling for combiner virtual peer
@@ -724,7 +733,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					peers = append(peers, peerInfo)
 				}
 			}
-		}
+		})
 	}
 
 	// Add agents from authorized_peers that haven't been discovered yet
@@ -858,17 +867,36 @@ func listPeerSharedZones(conf *Config) []interface{} {
 	// Use callback-based iterator to avoid holding shard locks during processing
 	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.mu.RLock()
-		zones := make([]string, 0, len(agent.Zones))
-		for zone := range agent.Zones {
-			zones = append(zones, string(zone))
-		}
 		identity := agent.Identity
 		state := agent.State
+
+		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
+		if identity == "combiner" {
+			agent.mu.RUnlock()
+			return
+		}
+
+		// Build zone list with SOA serials
+		zoneDetails := make([]map[string]interface{}, 0, len(agent.Zones))
+		for zoneName := range agent.Zones {
+			zoneInfo := map[string]interface{}{
+				"name": string(zoneName),
+			}
+
+			// Try to get SOA serial for this zone
+			if zd, exists := Zones.Get(string(zoneName)); exists {
+				if soa, err := zd.GetSOA(); err == nil {
+					zoneInfo["serial"] = soa.Serial
+				}
+			}
+
+			zoneDetails = append(zoneDetails, zoneInfo)
+		}
 		agent.mu.RUnlock()
 
 		entry := map[string]interface{}{
 			"peer_id": string(identity),
-			"zones":   zones,
+			"zones":   zoneDetails,
 			"state":   AgentStateToString[state],
 		}
 		data = append(data, entry)
@@ -891,6 +919,11 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		hasZone := agent.Zones[ZoneName(zoneName)]
 		identity := agent.Identity
 		agent.mu.RUnlock()
+
+		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
+		if identity == "combiner" {
+			return
+		}
 
 		if hasZone {
 			agents = append(agents, string(identity))

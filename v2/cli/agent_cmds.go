@@ -333,11 +333,22 @@ func listPeerZones(cmd *cobra.Command, component string) {
 				if len(zones) == 0 {
 					fmt.Printf("%-40s  (LEGACY - no shared zones)\n", peerID)
 				} else {
-					zoneNames := make([]string, len(zones))
+					// Build zone display with serials
+					zoneStrs := make([]string, len(zones))
 					for i, z := range zones {
-						zoneNames[i] = z.(string)
+						if zoneInfo, ok := z.(map[string]interface{}); ok {
+							zoneName := zoneInfo["name"].(string)
+							if serial, hasSerial := zoneInfo["serial"]; hasSerial {
+								zoneStrs[i] = fmt.Sprintf("%s (serial: %v)", zoneName, serial)
+							} else {
+								zoneStrs[i] = zoneName
+							}
+						} else {
+							// Fallback for old format (plain string)
+							zoneStrs[i] = z.(string)
+						}
 					}
-					fmt.Printf("%-40s  %s\n", peerID, strings.Join(zoneNames, ", "))
+					fmt.Printf("%-40s  %s\n", peerID, strings.Join(zoneStrs, ", "))
 				}
 			}
 		}
@@ -353,6 +364,9 @@ func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
+
+	// Normalize zone name to FQDN
+	zoneName = dns.Fqdn(zoneName)
 
 	endpoint := fmt.Sprintf("/%s/distrib", component)
 	req := map[string]interface{}{
