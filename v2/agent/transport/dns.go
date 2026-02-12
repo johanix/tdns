@@ -78,18 +78,25 @@ type pendingOperation struct {
 
 // operationResponse represents a response to a pending operation
 type operationResponse struct {
-	Status  ConfirmStatus
-	Message string
-	Error   error
+	Status         ConfirmStatus
+	Message        string
+	Error          error
+	AppliedRecords []string
+	RejectedItems  []RejectedItemDTO
+	Truncated      bool
 }
 
 // IncomingConfirmation represents a confirmation received via DNS
 type IncomingConfirmation struct {
 	DistributionID string
-	PeerID        string
-	Status        ConfirmStatus
-	Message       string
-	Timestamp     time.Time
+	PeerID         string
+	Status         ConfirmStatus
+	Message        string
+	Timestamp      time.Time
+	Zone           string
+	AppliedRecords []string
+	RejectedItems  []RejectedItemDTO
+	Truncated      bool
 }
 
 // DNSTransportConfig holds configuration for creating a DNSTransport.
@@ -348,6 +355,9 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		Status:         resp.Status,
 		Message:        resp.Message,
 		Timestamp:      time.Now(),
+		AppliedRecords: resp.AppliedRecords,
+		RejectedItems:  resp.RejectedItems,
+		Truncated:      resp.Truncated,
 	}
 
 	// A non-ok confirmation is an application-level rejection — return as error
@@ -703,15 +713,16 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// Try to extract application-level confirmation from the DNS response EDNS0.
 	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
 	if confirm := extractConfirmFromResponse(res); confirm != nil {
-		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q",
-			opType, distributionID, peer.ID, confirm.Status, confirm.Message)
-		status := ConfirmSuccess
-		if confirm.Status != "ok" {
-			status = ConfirmFailed
-		}
+		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q applied=%d rejected=%d",
+			opType, distributionID, peer.ID, confirm.Status, confirm.Message,
+			len(confirm.AppliedRecords), len(confirm.RejectedItems))
+		status := parseConfirmStatus(confirm.Status)
 		return &operationResponse{
-			Status:  status,
-			Message: confirm.Message,
+			Status:         status,
+			Message:        confirm.Message,
+			AppliedRecords: confirm.AppliedRecords,
+			RejectedItems:  confirm.RejectedItems,
+			Truncated:      confirm.Truncated,
 		}, nil
 	}
 
@@ -724,26 +735,30 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		fmt.Errorf("no EDNS0 confirmation in response (DNS-level ACK only)"), true)
 }
 
+// inlineConfirm holds the parsed confirmation from an EDNS0 CHUNK response.
+type inlineConfirm struct {
+	Type           string            `json:"type"`
+	Status         string            `json:"status"`
+	Message        string            `json:"message"`
+	DistributionID string            `json:"distribution_id"`
+	Zone           string            `json:"zone"`
+	AppliedCount   int               `json:"applied_count,omitempty"`
+	RejectedCount  int               `json:"rejected_count,omitempty"`
+	AppliedRecords []string          `json:"applied_records,omitempty"`
+	RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
+	Truncated      bool              `json:"truncated,omitempty"`
+}
+
 // extractConfirmFromResponse extracts a JSON confirmation from the EDNS0 CHUNK option in a DNS response.
 // Returns nil if no confirmation is present.
-func extractConfirmFromResponse(res *dns.Msg) *struct {
-	Type          string `json:"type"`
-	Status        string `json:"status"`
-	Message       string `json:"message"`
-	DistributionID string `json:"distribution_id"`
-} {
+func extractConfirmFromResponse(res *dns.Msg) *inlineConfirm {
 	opt := res.IsEdns0()
 	if opt == nil {
 		return nil
 	}
 	for _, o := range opt.Option {
 		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
-			var confirm struct {
-				Type          string `json:"type"`
-				Status        string `json:"status"`
-				Message       string `json:"message"`
-				DistributionID string `json:"distribution_id"`
-			}
+			var confirm inlineConfirm
 			if err := json.Unmarshal(local.Data, &confirm); err == nil && confirm.Type == "confirm" {
 				return &confirm
 			}
@@ -850,7 +865,7 @@ type DnsSyncPayload struct {
 	Time           string              `json:"Time"`       // RFC3339 timestamp
 	RfiType        string              `json:"RfiType"`
 	Timestamp      int64               `json:"timestamp"`  // Unix timestamp (legacy compat)
-	DistributionID string              `json:"correlation_id"`
+	DistributionID string              `json:"distribution_id"`
 }
 
 // DnsAddress represents an address in DNS payloads.
@@ -870,15 +885,26 @@ type DnsRelocatePayload struct {
 	ValidUntil int64      `json:"valid_until"`
 }
 
+// RejectedItemDTO describes an RR that was rejected by the combiner and why.
+type RejectedItemDTO struct {
+	Record string `json:"record"`
+	Reason string `json:"reason"`
+}
+
 // DnsConfirmPayload represents a confirmation message payload.
 type DnsConfirmPayload struct {
-	Type          string `json:"type"`
-	SenderID      string `json:"sender_id"`
-	Zone          string `json:"zone"`
-	DistributionID string `json:"correlation_id"`
-	Status        string `json:"status"`
-	Message       string `json:"message,omitempty"`
-	Timestamp     int64  `json:"timestamp"`
+	Type           string             `json:"type"`
+	SenderID       string             `json:"sender_id"`
+	Zone           string             `json:"zone"`
+	DistributionID string             `json:"distribution_id"`
+	Status         string             `json:"status"`
+	Message        string             `json:"message,omitempty"`
+	AppliedCount   int                `json:"applied_count,omitempty"`
+	RejectedCount  int                `json:"rejected_count,omitempty"`
+	AppliedRecords []string           `json:"applied_records,omitempty"`
+	RejectedItems  []RejectedItemDTO  `json:"rejected_items,omitempty"`
+	Truncated      bool               `json:"truncated,omitempty"`
+	Timestamp      int64              `json:"timestamp"`
 }
 
 // GetSenderID returns the sender ID.
@@ -917,12 +943,12 @@ func (d *DnsPingPayload) GetSenderID() string {
 
 // DnsPingConfirmPayload is the response to a ping; echoes the nonce.
 type DnsPingConfirmPayload struct {
-	Type          string `json:"type"`
-	SenderID      string `json:"sender_id"`
-	Nonce         string `json:"nonce"`
-	DistributionID string `json:"correlation_id"`
-	Status        string `json:"status"`
-	Timestamp     int64  `json:"timestamp"`
+	Type           string `json:"type"`
+	SenderID       string `json:"sender_id"`
+	Nonce          string `json:"nonce"`
+	DistributionID string `json:"distribution_id"`
+	Status         string `json:"status"`
+	Timestamp      int64  `json:"timestamp"`
 }
 
 // FetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.

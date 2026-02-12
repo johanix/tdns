@@ -200,13 +200,15 @@ func (h *MessageHandler) handleConfirmation(msg *IncomingMessage) {
 }
 
 // parseConfirmStatus converts a status string to ConfirmStatus.
+// Accepts both the legacy agent format (SUCCESS/PARTIAL/FAILED) and
+// the combiner format (ok/partial/error).
 func parseConfirmStatus(s string) ConfirmStatus {
 	switch strings.ToUpper(s) {
-	case "SUCCESS":
+	case "SUCCESS", "OK":
 		return ConfirmSuccess
 	case "PARTIAL":
 		return ConfirmPartial
-	case "FAILED":
+	case "FAILED", "ERROR":
 		return ConfirmFailed
 	case "REJECTED":
 		return ConfirmRejected

@@ -392,11 +392,12 @@ type AgentQs struct {
 	Hello chan *AgentMsgReport // incoming /hello from other agents
 	Beat  chan *AgentMsgReport // incoming /beat from other agents
 	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
-	Msg               chan *AgentMsgPostPlus  // incoming /msg from other agents
-	Command           chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
-	DebugCommand      chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
-	SynchedDataUpdate chan *SynchedDataUpdate // incoming combiner updates
-	SynchedDataCmd    chan *SynchedDataCmd    // local commands TO the combiner
+	Msg               chan *AgentMsgPostPlus    // incoming /msg from other agents
+	Command           chan *AgentMgmtPostPlus   // local commands TO the agent, usually for passing on to other agents
+	DebugCommand      chan *AgentMgmtPostPlus   // local commands TO the agent, usually for passing on to other agents
+	SynchedDataUpdate chan *SynchedDataUpdate   // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd      // local commands TO the combiner
+	Confirmation      chan *ConfirmationDetail  // combiner confirmation feedback
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

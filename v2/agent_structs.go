@@ -306,9 +306,7 @@ type AgentMgmtResponse struct {
 	RfiType       string
 	RfiResponse   map[AgentId]*RfiData
 	AgentRegistry *AgentRegistry
-	// ZoneDataRepo  *ZoneDataRepo
-	// ZoneDataRepo map[ZoneName]map[AgentId]*OwnerData
-	ZoneDataRepo map[ZoneName]map[AgentId]map[uint16][]string
+	ZoneDataRepo map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
 	Msg          string
 	Error        bool
 	ErrorMsg     string

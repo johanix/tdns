@@ -201,10 +201,32 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			return tm.IsAgentAuthorized(senderID, zone)
 		}
 
-		// Wire confirmation callback for reliable message queue
-		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string) {
-			if tm.reliableQueue != nil {
+		// Wire confirmation callback for reliable message queue and per-RR tracking
+		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, status transport.ConfirmStatus,
+			zone string, applied []string, rejected []transport.RejectedItemDTO, truncated bool) {
+			if tm.reliableQueue != nil && status == transport.ConfirmSuccess {
 				tm.reliableQueue.MarkConfirmed(distributionID)
+			}
+			// Forward per-RR detail to SynchedDataEngine
+			if tm.agentQs != nil && tm.agentQs.Confirmation != nil {
+				var rejItems []RejectedItemInfo
+				for _, ri := range rejected {
+					rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
+				}
+				detail := &ConfirmationDetail{
+					DistributionID: distributionID,
+					Zone:           ZoneName(zone),
+					Status:         status.String(),
+					AppliedRecords: applied,
+					RejectedItems:  rejItems,
+					Truncated:      truncated,
+					Timestamp:      time.Now(),
+				}
+				select {
+				case tm.agentQs.Confirmation <- detail:
+				default:
+					log.Printf("TransportManager: Confirmation channel full, dropping detail for %s", distributionID)
+				}
 			}
 		}
 
@@ -973,6 +995,7 @@ func (tm *TransportManager) deliverMessage(ctx context.Context, msg *OutgoingMes
 }
 
 // deliverToCombiner sends a sync message to the combiner via the transport layer.
+// On success, forwards per-RR confirmation detail to the SynchedDataEngine.
 func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *OutgoingMessage) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
@@ -997,7 +1020,31 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		DistributionID: msg.DistributionID,
 	}
 
-	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+
+	// Forward per-RR detail from inline confirmation to SynchedDataEngine
+	if syncResp != nil && tm.agentQs != nil && tm.agentQs.Confirmation != nil {
+		var rejItems []RejectedItemInfo
+		for _, ri := range syncResp.RejectedItems {
+			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
+		}
+		detail := &ConfirmationDetail{
+			DistributionID: msg.DistributionID,
+			Zone:           msg.Zone,
+			Status:         syncResp.Status.String(),
+			Message:        syncResp.Message,
+			AppliedRecords: syncResp.AppliedRecords,
+			RejectedItems:  rejItems,
+			Truncated:      syncResp.Truncated,
+			Timestamp:      time.Now(),
+		}
+		select {
+		case tm.agentQs.Confirmation <- detail:
+		default:
+			log.Printf("TransportManager: Confirmation channel full, dropping inline detail for %s", msg.DistributionID)
+		}
+	}
+
 	return err
 }
 
@@ -1031,14 +1078,16 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 
 // EnqueueForCombiner enqueues a zone update for reliable delivery to the combiner.
 // Called by SynchedDataEngine when a zone update needs to reach the combiner.
-func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate) error {
+// Returns the distributionID for tracking and any error.
+func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate) (string, error) {
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
-		return fmt.Errorf("EnqueueForCombiner: %w", err)
+		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
 	}
 
+	distID := GenerateQueueDistributionID()
 	msg := &OutgoingMessage{
-		DistributionID: GenerateQueueDistributionID(),
+		DistributionID: distID,
 		RecipientID:    combinerID,
 		RecipientType:  "combiner",
 		Zone:           zone,
@@ -1048,7 +1097,7 @@ func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate
 		ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
 	}
 
-	return tm.reliableQueue.Enqueue(msg)
+	return distID, tm.reliableQueue.Enqueue(msg)
 }
 
 // EnqueueForZoneAgents enqueues a zone update for reliable delivery to all

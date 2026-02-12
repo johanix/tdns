@@ -1,0 +1,55 @@
+# CodeRabbit Configuration
+# This file configures which files CodeRabbit should ignore during code reviews
+
+# Ignore specific file patterns
+ignore:
+  # Dependency files
+  - "**/*.mod"
+  - "**/*.sum"
+  - "**/go.mod"
+  - "**/go.sum"
+  
+  # Documentation files
+  - "**/*.md"
+  - "**/*.txt"
+  - "**/*.rst"
+  
+  # Build artifacts and generated files
+  - "**/*.o"
+  - "**/*.a"
+  - "**/*.so"
+  - "**/*.dylib"
+  - "**/Makefile"
+  - "**/Makefile~"
+  
+  # Configuration files (unless you want them reviewed)
+  - "**/.gitignore"
+  - "**/.gitattributes"
+  
+  # Test data and fixtures
+  - "**/testdata/**"
+  - "**/fixtures/**"
+  
+  # Vendor directories
+  - "**/vendor/**"
+  
+# Paths to exclude from review
+paths:
+  ignore:
+    - "**/*.mod"
+    - "**/*.sum"
+    - "**/*.md"
+    - "**/*.txt"
+    - "knot-dns-v3.5.2/**"
+    - "labconfig/**"
+    - "**/vendor/**"
+
+# Review settings
+review:
+  # Only review Go files under tdns/v2 and tdns/cmdv2 (recursively)
+  include:
+    - "v2/**/*.go"
+    - "cmdv2/**/*.go"
+  
+  # Maximum number of files to review per PR (optional)
+  # max_files: 150

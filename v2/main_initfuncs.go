@@ -241,6 +241,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
 		SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
+		Confirmation:      make(chan *ConfirmationDetail, 100),
 	}
 
 	// Create KeyDB channels if KeyDB exists

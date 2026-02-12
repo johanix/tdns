@@ -152,12 +152,15 @@ type SyncRequest struct {
 
 // SyncResponse represents a synchronization response.
 type SyncResponse struct {
-	ResponderID   string        // Identity of the responder
-	Zone          string        // Echoed zone name
-	DistributionID string        // Echoed correlation ID
-	Status        ConfirmStatus // Result of processing
-	Message       string        // Optional status message
-	Timestamp     time.Time     // Response timestamp
+	ResponderID    string            // Identity of the responder
+	Zone           string            // Echoed zone name
+	DistributionID string            // Echoed correlation ID
+	Status         ConfirmStatus     // Result of processing
+	Message        string            // Optional status message
+	Timestamp      time.Time         // Response timestamp
+	AppliedRecords []string          // RRs accepted by recipient
+	RejectedItems  []RejectedItemDTO // RRs rejected with reasons
+	Truncated      bool              // True if applied_records was dropped for size
 }
 
 // RelocateRequest asks a peer to use a different address.

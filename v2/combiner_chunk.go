@@ -612,28 +612,54 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 	log.Printf("CombinerChunkHandler: Sending confirmation for distribution %s zone %q status=%s applied=%d rejected=%d",
 		resp.DistributionID, resp.Zone, resp.Status, len(resp.AppliedRecords), len(resp.RejectedItems))
 
-	// Build confirmation payload
+	// Build per-RR rejected items for the payload
+	type rejectedItemJSON struct {
+		Record string `json:"record"`
+		Reason string `json:"reason"`
+	}
+	var rejItems []rejectedItemJSON
+	for _, ri := range resp.RejectedItems {
+		rejItems = append(rejItems, rejectedItemJSON{Record: ri.Record, Reason: ri.Reason})
+	}
+
+	// Build confirmation payload with full per-RR detail
 	confirmPayload := struct {
-		Type          string `json:"type"`
-		DistributionID string `json:"distribution_id"`
-		Zone          string `json:"zone"`
-		Status        string `json:"status"`
-		Message       string `json:"message"`
-		AppliedCount  int    `json:"applied_count"`
-		RejectedCount int    `json:"rejected_count"`
-		Timestamp     int64  `json:"timestamp"`
+		Type           string             `json:"type"`
+		DistributionID string             `json:"distribution_id"`
+		Zone           string             `json:"zone"`
+		Status         string             `json:"status"`
+		Message        string             `json:"message"`
+		AppliedCount   int                `json:"applied_count"`
+		RejectedCount  int                `json:"rejected_count"`
+		AppliedRecords []string           `json:"applied_records,omitempty"`
+		RejectedItems  []rejectedItemJSON `json:"rejected_items,omitempty"`
+		Truncated      bool               `json:"truncated,omitempty"`
+		Timestamp      int64              `json:"timestamp"`
 	}{
-		Type:          "confirm",
+		Type:           "confirm",
 		DistributionID: resp.DistributionID,
-		Zone:          resp.Zone,
-		Status:        resp.Status,
-		Message:       resp.Message,
-		AppliedCount:  len(resp.AppliedRecords),
-		RejectedCount: len(resp.RejectedItems),
-		Timestamp:     resp.Timestamp.Unix(),
+		Zone:           resp.Zone,
+		Status:         resp.Status,
+		Message:        resp.Message,
+		AppliedCount:   len(resp.AppliedRecords),
+		RejectedCount:  len(resp.RejectedItems),
+		AppliedRecords: resp.AppliedRecords,
+		RejectedItems:  rejItems,
+		Timestamp:      resp.Timestamp.Unix(),
 	}
 
 	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal confirm payload: %w", err)
+	}
+
+	// Size guard: EDNS0 payload must fit in UDP. If too large, drop applied_records
+	// (the actionable data is in rejected_items) and set Truncated.
+	if len(payloadBytes) > 3500 {
+		confirmPayload.AppliedRecords = nil
+		confirmPayload.Truncated = true
+		payloadBytes, err = json.Marshal(confirmPayload)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to marshal confirm payload: %w", err)
 	}

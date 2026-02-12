@@ -59,9 +59,11 @@ type ChunkNotifyHandler struct {
 	// but don't have their verification key yet. Handler should trigger discovery asynchronously.
 	OnPeerDiscoveryNeeded func(peerID string)
 
-	// OnConfirmationReceived is called when an async confirmation is received for a distribution ID.
-	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue.
-	OnConfirmationReceived func(distributionID string)
+	// OnConfirmationReceived is called when a confirmation is received for a distribution ID.
+	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue
+	// and to forward per-RR detail to the SynchedDataEngine.
+	OnConfirmationReceived func(distributionID string, status ConfirmStatus,
+		zone string, applied []string, rejected []RejectedItemDTO, truncated bool)
 
 	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
 	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
@@ -430,16 +432,21 @@ func (h *ChunkNotifyHandler) handleConfirmation(msg *IncomingMessage) {
 	if h.Transport != nil {
 		h.Transport.HandleIncomingConfirmation(&IncomingConfirmation{
 			DistributionID: confirm.DistributionID,
-			PeerID:        confirm.SenderID,
-			Status:        status,
-			Message:       confirm.Message,
-			Timestamp:     time.Unix(confirm.Timestamp, 0),
+			PeerID:         confirm.SenderID,
+			Status:         status,
+			Message:        confirm.Message,
+			Timestamp:      time.Unix(confirm.Timestamp, 0),
+			Zone:           confirm.Zone,
+			AppliedRecords: confirm.AppliedRecords,
+			RejectedItems:  confirm.RejectedItems,
+			Truncated:      confirm.Truncated,
 		})
 	}
 
-	// Notify the reliable message queue that this distribution was confirmed
-	if h.OnConfirmationReceived != nil && confirm.DistributionID != "" && status == ConfirmSuccess {
-		h.OnConfirmationReceived(confirm.DistributionID)
+	// Forward confirmation detail (all statuses carry useful information)
+	if h.OnConfirmationReceived != nil && confirm.DistributionID != "" {
+		h.OnConfirmationReceived(confirm.DistributionID, status,
+			confirm.Zone, confirm.AppliedRecords, confirm.RejectedItems, confirm.Truncated)
 	}
 }
 

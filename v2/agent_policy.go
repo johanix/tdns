@@ -112,6 +112,8 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
 						nod.RRtypes.Delete(rrtype)
+						// Remove tracking for this entire RRtype
+						zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
 						changed = true
 					}
 				case dns.ClassNONE:
@@ -126,6 +128,8 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						log.Printf("SynchedDataEngine: %s", msg)
 						rr.Header().Class = dns.ClassINET
 						cur_rrset.Delete(rr)
+						// Remove tracking for this specific RR
+						zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String())
 						changed = true
 					}
 					nod.RRtypes.Set(rrtype, cur_rrset)

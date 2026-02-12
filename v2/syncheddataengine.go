@@ -46,8 +46,7 @@ type SynchedDataCmdResponse struct {
 	Error    bool
 	ErrorMsg string
 	Zone     ZoneName
-	// ZDR      map[ZoneName]map[AgentId]*OwnerData
-	ZDR map[ZoneName]map[AgentId]map[uint16][]string
+	ZDR      map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
 }
 
 type ZoneUpdate struct {
@@ -72,6 +71,11 @@ func (name ZoneName) String() string {
 type ZoneDataRepo struct {
 	// Repo map[ZoneName]ZoneRepo // map[zonename]ZoneRepo
 	Repo core.ConcurrentMap[ZoneName, *AgentRepo] // map[zonename]ZoneRepo
+
+	// Tracking stores per-RR lifecycle state parallel to Repo.
+	// Accessed only from the SynchedDataEngine goroutine.
+	// Structure: zone → agentId → rrtype → TrackedRRset
+	Tracking map[ZoneName]map[AgentId]map[uint16]*TrackedRRset
 }
 type AgentRepo struct {
 	// Data map[AgentId]OwnerData // map[agentid]data
@@ -95,7 +99,8 @@ func NewAgentRepo() (*AgentRepo, error) {
 
 func NewZoneDataRepo() (*ZoneDataRepo, error) {
 	return &ZoneDataRepo{
-		Repo: core.NewStringer[ZoneName, *AgentRepo](),
+		Repo:     core.NewStringer[ZoneName, *AgentRepo](),
+		Tracking: make(map[ZoneName]map[AgentId]map[uint16]*TrackedRRset),
 	}, nil
 }
 
@@ -105,6 +110,70 @@ func (zdr *ZoneDataRepo) Get(zone ZoneName) (*AgentRepo, bool) {
 
 func (zdr *ZoneDataRepo) Set(zone ZoneName, agentRepo *AgentRepo) {
 	zdr.Repo.Set(zone, agentRepo)
+}
+
+// RRState represents the lifecycle state of a tracked RR.
+type RRState uint8
+
+const (
+	RRStatePending  RRState = iota // Sent to combiner, awaiting confirmation
+	RRStateAccepted                // Combiner accepted
+	RRStateRejected                // Combiner rejected (see Reason)
+)
+
+func (s RRState) String() string {
+	switch s {
+	case RRStatePending:
+		return "pending"
+	case RRStateAccepted:
+		return "accepted"
+	case RRStateRejected:
+		return "rejected"
+	default:
+		return "unknown"
+	}
+}
+
+// TrackedRR wraps a dns.RR with lifecycle state for combiner confirmation tracking.
+type TrackedRR struct {
+	RR             dns.RR
+	State          RRState
+	Reason         string // Rejection reason (empty unless rejected)
+	DistributionID string // Last distribution this RR was part of
+	UpdatedAt      time.Time
+}
+
+// TrackedRRset holds a set of tracked RRs for a single RRtype.
+type TrackedRRset struct {
+	Tracked []TrackedRR
+}
+
+// ConfirmationDetail carries per-RR confirmation feedback from the combiner
+// through to the SynchedDataEngine.
+type ConfirmationDetail struct {
+	DistributionID string
+	Zone           ZoneName
+	Status         string // "ok", "partial", "error"
+	Message        string
+	AppliedRecords []string
+	RejectedItems  []RejectedItemInfo
+	Truncated      bool
+	Timestamp      time.Time
+}
+
+// RejectedItemInfo describes an RR rejected by the combiner.
+type RejectedItemInfo struct {
+	Record string
+	Reason string
+}
+
+// TrackedRRInfo is the JSON-serializable form for dump output.
+type TrackedRRInfo struct {
+	RR             string `json:"rr"`
+	State          string `json:"state"`
+	Reason         string `json:"reason,omitempty"`
+	DistributionID string `json:"distribution_id"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 // SynchedDataEngine is a component that updates the combiner with new information
@@ -207,10 +276,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 						tm := conf.Internal.TransportManager
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Enqueue for combiner (reliable delivery with retry)
-							if err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update); err != nil {
+							distID, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update)
+							if err != nil {
 								log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
+							} else {
+								// Mark all RRs in this update as pending with the distribution ID
+								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
 							}
 
 							// Enqueue for all remote agents in this zone (reliable delivery with retry)
@@ -284,11 +357,13 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 						tm := conf.Internal.TransportManager
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Remote update: only enqueue for combiner (not back to agents)
-							if err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update); err != nil {
+							distID, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update)
+							if err != nil {
 								log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
 							} else {
+								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
 								resp.Msg = "Remote update applied, sync enqueued for combiner"
 							}
 						} else if tm == nil {
@@ -318,39 +393,52 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 				}
 				log.Printf("SynchedDataEngine: Dumping zone data repo")
 
-				// (1) Create a map[ZoneName]map[AgentId]map[uint16][]string
-				dumpData := make(map[ZoneName]map[AgentId]map[uint16][]string)
+				dumpData := make(map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo)
 
-				// (2) Traverse the ZoneDataRepo and copy all data from the concurrent maps to the (normal) map
+				// dumpZoneAgent extracts RRs and their tracking state for a zone/agent
+				dumpZoneAgent := func(zone ZoneName, agentId AgentId, ownerData *OwnerData) map[uint16][]TrackedRRInfo {
+					rrsetData := make(map[uint16][]TrackedRRInfo)
+					for rrtype, rrset := range ownerData.RRtypes.data.Items() {
+						var infos []TrackedRRInfo
+						for _, rr := range rrset.RRs {
+							info := TrackedRRInfo{
+								RR:    rr.String(),
+								State: "unknown",
+							}
+							// Look up tracking state
+							if zdr.Tracking[zone] != nil &&
+								zdr.Tracking[zone][agentId] != nil &&
+								zdr.Tracking[zone][agentId][rrtype] != nil {
+								for _, tr := range zdr.Tracking[zone][agentId][rrtype].Tracked {
+									if tr.RR.String() == info.RR {
+										info.State = tr.State.String()
+										info.Reason = tr.Reason
+										info.DistributionID = tr.DistributionID
+										info.UpdatedAt = tr.UpdatedAt.Format(time.RFC3339)
+										break
+									}
+								}
+							}
+							infos = append(infos, info)
+						}
+						rrsetData[rrtype] = infos
+					}
+					return rrsetData
+				}
+
 				if sdcmd.Zone != "" {
 					if agentRepo, ok := zdr.Repo.Get(sdcmd.Zone); ok {
-						agentData := make(map[AgentId]map[uint16][]string)
+						agentData := make(map[AgentId]map[uint16][]TrackedRRInfo)
 						for agentId, ownerData := range agentRepo.Data.Items() {
-							rrsetData := make(map[uint16][]string)
-							for rrtype, rrset := range ownerData.RRtypes.data.Items() {
-								var rrs []string
-								for _, rr := range rrset.RRs {
-									rrs = append(rrs, rr.String())
-								}
-								rrsetData[rrtype] = rrs
-							}
-							agentData[agentId] = rrsetData
+							agentData[agentId] = dumpZoneAgent(sdcmd.Zone, agentId, ownerData)
 						}
 						dumpData[sdcmd.Zone] = agentData
 					}
 				} else {
 					for zone, agentRepo := range zdr.Repo.Items() {
-						agentData := make(map[AgentId]map[uint16][]string)
+						agentData := make(map[AgentId]map[uint16][]TrackedRRInfo)
 						for agentId, ownerData := range agentRepo.Data.Items() {
-							rrsetData := make(map[uint16][]string)
-							for rrtype, rrset := range ownerData.RRtypes.data.Items() {
-								var rrs []string
-								for _, rr := range rrset.RRs {
-									rrs = append(rrs, rr.String())
-								}
-								rrsetData[rrtype] = rrs
-							}
-							agentData[agentId] = rrsetData
+							agentData[agentId] = dumpZoneAgent(zone, agentId, ownerData)
 						}
 						dumpData[zone] = agentData
 					}
@@ -363,10 +451,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 					Error:    false,
 					ErrorMsg: "",
 				}
-
-				// Use dump.P to print the JSON serializable structure
-				// dump.P(dumpData)
 			}
+
+		case detail := <-agentQs.Confirmation:
+			log.Printf("SynchedDataEngine: Received confirmation for distribution %s zone %s status=%s applied=%d rejected=%d truncated=%v",
+				detail.DistributionID, detail.Zone, detail.Status, len(detail.AppliedRecords), len(detail.RejectedItems), detail.Truncated)
+			zdr.ProcessConfirmation(detail)
 		}
 	}
 }
@@ -375,4 +465,163 @@ func (zdr *ZoneDataRepo) SendUpdate(update *SynchedDataUpdate) error {
 	// 1. Send the update to the combiner.
 	log.Printf("SynchedDataEngine: Sending update to combiner (NYI)")
 	return nil
+}
+
+// getOrCreateTracking returns (or creates) the TrackedRRset for the given zone/agent/rrtype.
+func (zdr *ZoneDataRepo) getOrCreateTracking(zone ZoneName, agent AgentId, rrtype uint16) *TrackedRRset {
+	if zdr.Tracking[zone] == nil {
+		zdr.Tracking[zone] = make(map[AgentId]map[uint16]*TrackedRRset)
+	}
+	if zdr.Tracking[zone][agent] == nil {
+		zdr.Tracking[zone][agent] = make(map[uint16]*TrackedRRset)
+	}
+	if zdr.Tracking[zone][agent][rrtype] == nil {
+		zdr.Tracking[zone][agent][rrtype] = &TrackedRRset{}
+	}
+	return zdr.Tracking[zone][agent][rrtype]
+}
+
+// removeTracking removes all tracking for a zone/agent/rrtype (used on ClassANY deletion).
+func (zdr *ZoneDataRepo) removeTracking(zone ZoneName, agent AgentId, rrtype uint16) {
+	if zdr.Tracking[zone] != nil && zdr.Tracking[zone][agent] != nil {
+		delete(zdr.Tracking[zone][agent], rrtype)
+	}
+}
+
+// removeTrackedRR removes a specific tracked RR by its string representation (used on ClassNONE deletion).
+func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype uint16, rrStr string) {
+	if zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
+		return
+	}
+	tracked := zdr.Tracking[zone][agent][rrtype]
+	if tracked == nil {
+		return
+	}
+	for i := range tracked.Tracked {
+		if tracked.Tracked[i].RR.String() == rrStr {
+			tracked.Tracked = append(tracked.Tracked[:i], tracked.Tracked[i+1:]...)
+			return
+		}
+	}
+}
+
+// MarkRRsPending marks all RRs in a ZoneUpdate as pending with the given distribution ID.
+// Called after successful enqueue for combiner delivery.
+func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *ZoneUpdate, distID string) {
+	now := time.Now()
+
+	// Handle RRsets (remote updates)
+	for rrtype, rrset := range update.RRsets {
+		tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
+		for _, rr := range rrset.RRs {
+			if rr.Header().Class != dns.ClassINET {
+				continue // Only track additions
+			}
+			rrStr := rr.String()
+			// Check if this RR is already tracked; if so, update it
+			found := false
+			for i := range tracked.Tracked {
+				if tracked.Tracked[i].RR.String() == rrStr {
+					tracked.Tracked[i].State = RRStatePending
+					tracked.Tracked[i].Reason = ""
+					tracked.Tracked[i].DistributionID = distID
+					tracked.Tracked[i].UpdatedAt = now
+					found = true
+					break
+				}
+			}
+			if !found {
+				tracked.Tracked = append(tracked.Tracked, TrackedRR{
+					RR:             rr,
+					State:          RRStatePending,
+					DistributionID: distID,
+					UpdatedAt:      now,
+				})
+			}
+		}
+	}
+
+	// Handle individual RRs (local updates)
+	for _, rr := range update.RRs {
+		if rr.Header().Class != dns.ClassINET {
+			continue // Only track additions
+		}
+		rrtype := rr.Header().Rrtype
+		tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
+		rrStr := rr.String()
+		found := false
+		for i := range tracked.Tracked {
+			if tracked.Tracked[i].RR.String() == rrStr {
+				tracked.Tracked[i].State = RRStatePending
+				tracked.Tracked[i].Reason = ""
+				tracked.Tracked[i].DistributionID = distID
+				tracked.Tracked[i].UpdatedAt = now
+				found = true
+				break
+			}
+		}
+		if !found {
+			tracked.Tracked = append(tracked.Tracked, TrackedRR{
+				RR:             rr,
+				State:          RRStatePending,
+				DistributionID: distID,
+				UpdatedAt:      now,
+			})
+		}
+	}
+}
+
+// ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
+func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail) {
+	now := time.Now()
+
+	// Build a set of applied RR strings for fast lookup
+	appliedSet := make(map[string]bool, len(detail.AppliedRecords))
+	for _, rr := range detail.AppliedRecords {
+		appliedSet[rr] = true
+	}
+
+	// Build a map of rejected RR strings → reason
+	rejectedMap := make(map[string]string, len(detail.RejectedItems))
+	for _, ri := range detail.RejectedItems {
+		rejectedMap[ri.Record] = ri.Reason
+	}
+
+	// Walk all tracked RRs for this zone and match by distribution ID + RR string
+	zoneTracking := zdr.Tracking[detail.Zone]
+	if zoneTracking == nil {
+		log.Printf("SynchedDataEngine: ProcessConfirmation: no tracking data for zone %s", detail.Zone)
+		return
+	}
+
+	matched := 0
+	for _, agentTracking := range zoneTracking {
+		for _, trackedRRset := range agentTracking {
+			for i := range trackedRRset.Tracked {
+				tr := &trackedRRset.Tracked[i]
+				if tr.State != RRStatePending {
+					continue // Only update pending RRs
+				}
+				if tr.DistributionID != detail.DistributionID {
+					continue // Wrong distribution
+				}
+				rrStr := tr.RR.String()
+				if appliedSet[rrStr] {
+					tr.State = RRStateAccepted
+					tr.Reason = ""
+					tr.UpdatedAt = now
+					matched++
+				} else if reason, rejected := rejectedMap[rrStr]; rejected {
+					tr.State = RRStateRejected
+					tr.Reason = reason
+					tr.UpdatedAt = now
+					matched++
+				}
+				// If truncated and RR not in either list, leave as pending
+			}
+		}
+	}
+
+	log.Printf("SynchedDataEngine: ProcessConfirmation: distribution %s zone %s: matched %d RRs (applied=%d rejected=%d truncated=%v)",
+		detail.DistributionID, detail.Zone, matched, len(detail.AppliedRecords), len(detail.RejectedItems), detail.Truncated)
 }
