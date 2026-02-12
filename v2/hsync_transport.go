@@ -1012,8 +1012,15 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	// Convert ZoneUpdate to flat record list for transport
 	records := zoneUpdateToGroupedRecords(msg.Update)
 
+	// Use the original source agent ID so the combiner can attribute records correctly.
+	// This preserves per-agent isolation in the combiner's AgentContributions.
+	senderID := tm.LocalID
+	if msg.Update != nil && msg.Update.AgentId != "" {
+		senderID = string(msg.Update.AgentId)
+	}
+
 	syncReq := &transport.SyncRequest{
-		SenderID:       tm.LocalID,
+		SenderID:       senderID,
 		Zone:           string(msg.Zone),
 		Records:        records,
 		Timestamp:      msg.CreatedAt,

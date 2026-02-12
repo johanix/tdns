@@ -269,8 +269,9 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		//	log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
 
 		var zu = &ZoneUpdate{
-			Zone:   ampp.Zone,
-			RRsets: map[uint16]core.RRset{},
+			Zone:    ampp.Zone,
+			AgentId: ampp.MyIdentity,
+			RRsets:  map[uint16]core.RRset{},
 		}
 		for _, rrStrs := range ampp.Records {
 			for _, rrstr := range rrStrs {
@@ -639,8 +640,9 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 	case "update-local-zonedata":
 		// Update the local zone data for the zone
 		var zu = &ZoneUpdate{
-			Zone:   msg.Zone,
-			RRsets: map[uint16]core.RRset{},
+			Zone:    msg.Zone,
+			AgentId: AgentId(ar.LocalAgent.Identity),
+			RRsets:  map[uint16]core.RRset{},
 		}
 		for _, rrstr := range msg.RRs {
 			rr, err := dns.NewRR(rrstr)

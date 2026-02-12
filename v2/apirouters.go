@@ -104,6 +104,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 		sr.HandleFunc("/combiner/distrib", conf.APIcombinerDistrib(conf.Internal.DistributionCache)).Methods("POST")
+		sr.HandleFunc("/combiner/debug", APIcombinerDebug()).Methods("POST")
 	}
 
 	if Globals.App.Type == AppTypeKdc {

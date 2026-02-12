@@ -474,6 +474,22 @@ type CombinerResponse struct {
 	Data     map[string][]RRsetString `json:"data,omitempty"`
 }
 
+type CombinerDebugPost struct {
+	Command string `json:"command"`
+	Zone    string `json:"zone,omitempty"`
+}
+
+// CombinerDebugResponse returns both the merged CombinerData and the per-agent
+// AgentContributions breakdown.
+type CombinerDebugResponse struct {
+	Time               time.Time                                      `json:"time"`
+	Error              bool                                           `json:"error"`
+	ErrorMsg           string                                         `json:"error_msg,omitempty"`
+	Msg                string                                         `json:"msg,omitempty"`
+	CombinerData       map[string]map[string]map[string][]string      `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
+	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
+}
+
 // type AgentPost struct {
 //	Command string `json:"command"`
 //	Zone    string `json:"zone"`

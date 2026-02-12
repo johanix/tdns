@@ -109,7 +109,9 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 		zd.AgentContributions[senderID] = make(map[string]map[uint16]core.RRset)
 	}
 
-	// Store this agent's contributions (replaces previous contribution from same agent)
+	// Merge this agent's contributions into existing data (accumulate, don't replace).
+	// Each sync may carry only a delta, so we must add new RRs to any existing
+	// contribution from the same agent rather than overwriting.
 	for owner, rrsets := range data {
 		if zd.AgentContributions[senderID][owner] == nil {
 			zd.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
@@ -119,7 +121,17 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 				continue
 			}
 			rrtype := rrset.RRs[0].Header().Rrtype
-			zd.AgentContributions[senderID][owner][rrtype] = rrset
+			existing, ok := zd.AgentContributions[senderID][owner][rrtype]
+			if !ok {
+				// First contribution for this agent/owner/rrtype
+				zd.AgentContributions[senderID][owner][rrtype] = rrset
+			} else {
+				// Merge: add new RRs (deduplicated) into the existing contribution
+				for _, rr := range rrset.RRs {
+					existing.Add(rr)
+				}
+				zd.AgentContributions[senderID][owner][rrtype] = existing
+			}
 		}
 	}
 
