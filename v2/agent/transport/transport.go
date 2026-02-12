@@ -158,9 +158,10 @@ type SyncResponse struct {
 	Status         ConfirmStatus     // Result of processing
 	Message        string            // Optional status message
 	Timestamp      time.Time         // Response timestamp
-	AppliedRecords []string          // RRs accepted by recipient
+	AppliedRecords []string          // RRs accepted by recipient (additions)
+	RemovedRecords []string          // RRs confirmed removed by recipient (deletions)
 	RejectedItems  []RejectedItemDTO // RRs rejected with reasons
-	Truncated      bool              // True if applied_records was dropped for size
+	Truncated      bool              // True if applied/removed_records was dropped for size
 }
 
 // RelocateRequest asks a peer to use a different address.

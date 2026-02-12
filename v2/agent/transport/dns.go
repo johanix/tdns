@@ -82,6 +82,7 @@ type operationResponse struct {
 	Message        string
 	Error          error
 	AppliedRecords []string
+	RemovedRecords []string
 	RejectedItems  []RejectedItemDTO
 	Truncated      bool
 }
@@ -356,6 +357,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		Message:        resp.Message,
 		Timestamp:      time.Now(),
 		AppliedRecords: resp.AppliedRecords,
+		RemovedRecords: resp.RemovedRecords,
 		RejectedItems:  resp.RejectedItems,
 		Truncated:      resp.Truncated,
 	}
@@ -713,14 +715,15 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// Try to extract application-level confirmation from the DNS response EDNS0.
 	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
 	if confirm := extractConfirmFromResponse(res); confirm != nil {
-		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q applied=%d rejected=%d",
+		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q applied=%d removed=%d rejected=%d",
 			opType, distributionID, peer.ID, confirm.Status, confirm.Message,
-			len(confirm.AppliedRecords), len(confirm.RejectedItems))
+			len(confirm.AppliedRecords), len(confirm.RemovedRecords), len(confirm.RejectedItems))
 		status := parseConfirmStatus(confirm.Status)
 		return &operationResponse{
 			Status:         status,
 			Message:        confirm.Message,
 			AppliedRecords: confirm.AppliedRecords,
+			RemovedRecords: confirm.RemovedRecords,
 			RejectedItems:  confirm.RejectedItems,
 			Truncated:      confirm.Truncated,
 		}, nil
@@ -743,8 +746,10 @@ type inlineConfirm struct {
 	DistributionID string            `json:"distribution_id"`
 	Zone           string            `json:"zone"`
 	AppliedCount   int               `json:"applied_count,omitempty"`
+	RemovedCount   int               `json:"removed_count,omitempty"`
 	RejectedCount  int               `json:"rejected_count,omitempty"`
 	AppliedRecords []string          `json:"applied_records,omitempty"`
+	RemovedRecords []string          `json:"removed_records,omitempty"`
 	RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
 	Truncated      bool              `json:"truncated,omitempty"`
 }
@@ -900,8 +905,10 @@ type DnsConfirmPayload struct {
 	Status         string             `json:"status"`
 	Message        string             `json:"message,omitempty"`
 	AppliedCount   int                `json:"applied_count,omitempty"`
+	RemovedCount   int                `json:"removed_count,omitempty"`
 	RejectedCount  int                `json:"rejected_count,omitempty"`
 	AppliedRecords []string           `json:"applied_records,omitempty"`
+	RemovedRecords []string           `json:"removed_records,omitempty"`
 	RejectedItems  []RejectedItemDTO  `json:"rejected_items,omitempty"`
 	Truncated      bool               `json:"truncated,omitempty"`
 	Timestamp      int64              `json:"timestamp"`

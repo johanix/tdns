@@ -338,6 +338,161 @@ func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
 	return responseData
 }
 
+// RemoveCombinerDataNG removes specific RRs from the agent's contributions.
+// Input: senderID identifies the agent, data maps owner → RR strings (ClassINET format).
+// Returns the list of RR strings that were actually removed (idempotent: if an RR
+// was already absent, it is still reported as "removed").
+func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]string) ([]string, error) {
+	if zd.AgentContributions == nil {
+		// Nothing to remove — but report success (idempotent)
+		var removed []string
+		for _, rrStrings := range data {
+			removed = append(removed, rrStrings...)
+		}
+		return removed, nil
+	}
+
+	if senderID == "" {
+		senderID = "local"
+	}
+
+	agentData, ok := zd.AgentContributions[senderID]
+	if !ok {
+		// Agent has no contributions — idempotent success
+		var removed []string
+		for _, rrStrings := range data {
+			removed = append(removed, rrStrings...)
+		}
+		return removed, nil
+	}
+
+	var removedRecords []string
+
+	for owner, rrStrings := range data {
+		ownerMap, ok := agentData[owner]
+		if !ok {
+			// Owner has no contributions — idempotent success
+			removedRecords = append(removedRecords, rrStrings...)
+			continue
+		}
+
+		for _, rrStr := range rrStrings {
+			// Parse to get the rrtype
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				zd.Logger.Printf("RemoveCombinerDataNG: Zone %s: Failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
+				continue
+			}
+			rrtype := rr.Header().Rrtype
+			existing, ok := ownerMap[rrtype]
+			if !ok {
+				// RRtype has no contributions — idempotent success
+				removedRecords = append(removedRecords, rrStr)
+				continue
+			}
+
+			// Remove the specific RR by string match
+			var kept []dns.RR
+			found := false
+			for _, existingRR := range existing.RRs {
+				if existingRR.String() == rrStr {
+					found = true
+					continue // Skip (remove) this one
+				}
+				kept = append(kept, existingRR)
+			}
+
+			if found || !found {
+				// Idempotent: report as removed even if not found
+				removedRecords = append(removedRecords, rrStr)
+			}
+
+			if len(kept) == 0 {
+				delete(ownerMap, rrtype)
+			} else {
+				existing.RRs = kept
+				ownerMap[rrtype] = existing
+			}
+		}
+
+		// Clean up empty owner maps
+		if len(ownerMap) == 0 {
+			delete(agentData, owner)
+		}
+	}
+
+	// Rebuild merged CombinerData and apply to zone
+	zd.rebuildCombinerData()
+	modified, err := zd.CombineWithLocalChanges()
+	if err != nil {
+		return removedRecords, err
+	}
+	if modified {
+		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+	}
+	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", zd.ZoneName)
+	}
+
+	return removedRecords, nil
+}
+
+// RemoveCombinerDataByRRtype removes all RRs of a given type from an agent's contributions
+// for a specific owner. Used for ClassANY delete semantics.
+// Returns the list of RR strings that were removed.
+func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rrtype uint16) ([]string, error) {
+	if senderID == "" {
+		senderID = "local"
+	}
+
+	var removedRecords []string
+
+	if zd.AgentContributions == nil {
+		return removedRecords, nil
+	}
+
+	agentData, ok := zd.AgentContributions[senderID]
+	if !ok {
+		return removedRecords, nil
+	}
+
+	ownerMap, ok := agentData[owner]
+	if !ok {
+		return removedRecords, nil
+	}
+
+	existing, ok := ownerMap[rrtype]
+	if !ok {
+		return removedRecords, nil
+	}
+
+	// Collect all RRs being removed
+	for _, rr := range existing.RRs {
+		removedRecords = append(removedRecords, rr.String())
+	}
+
+	// Remove the entire RRtype entry
+	delete(ownerMap, rrtype)
+	if len(ownerMap) == 0 {
+		delete(agentData, owner)
+	}
+
+	// Rebuild merged CombinerData and apply to zone
+	zd.rebuildCombinerData()
+	modified, err := zd.CombineWithLocalChanges()
+	if err != nil {
+		return removedRecords, err
+	}
+	if modified {
+		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
+	}
+	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
+	}
+
+	return removedRecords, nil
+}
+
 // InjectSignatureTXT adds a combiner signature TXT record to the zone data.
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.

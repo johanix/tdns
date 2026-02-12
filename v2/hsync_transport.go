@@ -1038,9 +1038,11 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		detail := &ConfirmationDetail{
 			DistributionID: msg.DistributionID,
 			Zone:           msg.Zone,
+			Source:         string(msg.RecipientID),
 			Status:         syncResp.Status.String(),
 			Message:        syncResp.Message,
 			AppliedRecords: syncResp.AppliedRecords,
+			RemovedRecords: syncResp.RemovedRecords,
 			RejectedItems:  rejItems,
 			Truncated:      syncResp.Truncated,
 			Timestamp:      time.Now(),

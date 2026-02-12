@@ -90,6 +90,8 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 		nar.Set(synchedDataUpdate.AgentId, nod)
 	}
 
+	isLocal := synchedDataUpdate.UpdateType == "local"
+
 	// Iterate through RRsets in the update and only replace those with data
 	log.Printf("SynchedDataEngine: Iterating through RRsets in the update")
 	for rrtype, rrset := range synchedDataUpdate.Update.RRsets {
@@ -107,7 +109,17 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						msg = fmt.Sprintf("Removing %s %s RRset from agent %q: RRset does not exist",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
+					} else if isLocal {
+						// Local delete: don't remove yet — mark as changed so the
+						// delete is sent to combiner/agents. The actual removal
+						// happens when the combiner confirms.
+						msg = fmt.Sprintf("Requesting removal of %s %s RRset from agent %q (pending combiner confirmation)",
+							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
+						log.Printf("SynchedDataEngine: %s", msg)
+						changed = true
 					} else {
+						// Remote delete: apply immediately (remote agent mirrors
+						// originating agent's intent, doesn't own lifecycle).
 						msg = fmt.Sprintf("Removing %s %s RRset from agent %q",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
@@ -122,17 +134,29 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						msg = fmt.Sprintf("Removing %s RR %q from agent %q: RRset does not exist",
 							synchedDataUpdate.Zone, rr.String(), synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
-					} else {
-						msg = fmt.Sprintf("Removing %s RR %q from agent %q",
-							synchedDataUpdate.Zone, rr.String(), synchedDataUpdate.AgentId)
+					} else if isLocal {
+						// Local delete: don't remove from repo yet. Keep the RR
+						// with ClassNONE intact in the ZoneUpdate so transport
+						// sends the delete intent to combiner/agents. The actual
+						// removal from the repo happens on combiner confirmation.
+						msg = fmt.Sprintf("Requesting removal of %s RR from agent %q (pending combiner confirmation)",
+							synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
 						log.Printf("SynchedDataEngine: %s", msg)
-						rr.Header().Class = dns.ClassINET
-						cur_rrset.Delete(rr)
-						// Remove tracking for this specific RR
-						zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String())
+						changed = true
+					} else {
+						// Remote delete: copy the RR before mutating class for
+						// local Delete(). The original RR keeps ClassNONE for
+						// forwarding to this agent's combiner.
+						msg = fmt.Sprintf("Removing %s RR from agent %q (remote)",
+							synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+						log.Printf("SynchedDataEngine: %s", msg)
+						delRR := dns.Copy(rr)
+						delRR.Header().Class = dns.ClassINET
+						cur_rrset.Delete(delRR)
+						zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, delRR.String())
+						nod.RRtypes.Set(rrtype, cur_rrset)
 						changed = true
 					}
-					nod.RRtypes.Set(rrtype, cur_rrset)
 				case dns.ClassINET:
 					// IN = add this RR to the RRset
 					if !ok {

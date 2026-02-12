@@ -116,9 +116,11 @@ func (zdr *ZoneDataRepo) Set(zone ZoneName, agentRepo *AgentRepo) {
 type RRState uint8
 
 const (
-	RRStatePending  RRState = iota // Sent to combiner, awaiting confirmation
-	RRStateAccepted                // Combiner accepted
-	RRStateRejected                // Combiner rejected (see Reason)
+	RRStatePending        RRState = iota // Sent to combiner, awaiting confirmation
+	RRStateAccepted                      // Combiner accepted
+	RRStateRejected                      // Combiner rejected (see Reason)
+	RRStatePendingRemoval                // Delete sent to combiner, awaiting confirmation
+	RRStateRemoved                       // Combiner confirmed removal (audit trail)
 )
 
 func (s RRState) String() string {
@@ -129,6 +131,10 @@ func (s RRState) String() string {
 		return "accepted"
 	case RRStateRejected:
 		return "rejected"
+	case RRStatePendingRemoval:
+		return "pending-removal"
+	case RRStateRemoved:
+		return "removed"
 	default:
 		return "unknown"
 	}
@@ -153,9 +159,11 @@ type TrackedRRset struct {
 type ConfirmationDetail struct {
 	DistributionID string
 	Zone           ZoneName
+	Source         string // Identifies the confirming peer (combiner ID or agent ID)
 	Status         string // "ok", "partial", "error"
 	Message        string
 	AppliedRecords []string
+	RemovedRecords []string // RR strings confirmed as removed by combiner
 	RejectedItems  []RejectedItemInfo
 	Truncated      bool
 	Timestamp      time.Time
@@ -395,14 +403,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 
 				dumpData := make(map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo)
 
-				// dumpZoneAgent extracts RRs and their tracking state for a zone/agent
+				// dumpZoneAgent extracts RRs and their tracking state for a zone/agent.
+				// Includes both active RRs from the repo and tracking-only entries
+				// (e.g. Removed RRs that are no longer in the active repo but kept for audit).
 				dumpZoneAgent := func(zone ZoneName, agentId AgentId, ownerData *OwnerData) map[uint16][]TrackedRRInfo {
 					rrsetData := make(map[uint16][]TrackedRRInfo)
+
+					// Collect active RRs from the repo with their tracking state
 					for rrtype, rrset := range ownerData.RRtypes.data.Items() {
 						var infos []TrackedRRInfo
+						activeRRs := make(map[string]bool)
 						for _, rr := range rrset.RRs {
+							rrStr := rr.String()
+							activeRRs[rrStr] = true
 							info := TrackedRRInfo{
-								RR:    rr.String(),
+								RR:    rrStr,
 								State: "unknown",
 							}
 							// Look up tracking state
@@ -410,7 +425,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 								zdr.Tracking[zone][agentId] != nil &&
 								zdr.Tracking[zone][agentId][rrtype] != nil {
 								for _, tr := range zdr.Tracking[zone][agentId][rrtype].Tracked {
-									if tr.RR.String() == info.RR {
+									if tr.RR.String() == rrStr {
 										info.State = tr.State.String()
 										info.Reason = tr.Reason
 										info.DistributionID = tr.DistributionID
@@ -421,7 +436,48 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 							}
 							infos = append(infos, info)
 						}
+
+						// Add tracking-only entries (e.g. Removed, PendingRemoval)
+						// that are no longer in the active repo
+						if zdr.Tracking[zone] != nil &&
+							zdr.Tracking[zone][agentId] != nil &&
+							zdr.Tracking[zone][agentId][rrtype] != nil {
+							for _, tr := range zdr.Tracking[zone][agentId][rrtype].Tracked {
+								trStr := tr.RR.String()
+								if !activeRRs[trStr] {
+									infos = append(infos, TrackedRRInfo{
+										RR:             trStr,
+										State:          tr.State.String(),
+										Reason:         tr.Reason,
+										DistributionID: tr.DistributionID,
+										UpdatedAt:      tr.UpdatedAt.Format(time.RFC3339),
+									})
+								}
+							}
+						}
 						rrsetData[rrtype] = infos
+					}
+
+					// Also include rrtypes that exist only in tracking (no active RRs remain)
+					if zdr.Tracking[zone] != nil && zdr.Tracking[zone][agentId] != nil {
+						for rrtype, trackedRRset := range zdr.Tracking[zone][agentId] {
+							if _, exists := rrsetData[rrtype]; exists {
+								continue // Already handled above
+							}
+							var infos []TrackedRRInfo
+							for _, tr := range trackedRRset.Tracked {
+								infos = append(infos, TrackedRRInfo{
+									RR:             tr.RR.String(),
+									State:          tr.State.String(),
+									Reason:         tr.Reason,
+									DistributionID: tr.DistributionID,
+									UpdatedAt:      tr.UpdatedAt.Format(time.RFC3339),
+								})
+							}
+							if len(infos) > 0 {
+								rrsetData[rrtype] = infos
+							}
+						}
 					}
 					return rrsetData
 				}
@@ -454,8 +510,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 			}
 
 		case detail := <-agentQs.Confirmation:
-			log.Printf("SynchedDataEngine: Received confirmation for distribution %s zone %s status=%s applied=%d rejected=%d truncated=%v",
-				detail.DistributionID, detail.Zone, detail.Status, len(detail.AppliedRecords), len(detail.RejectedItems), detail.Truncated)
+			log.Printf("SynchedDataEngine: Received confirmation from %s for distribution %s zone %s status=%s applied=%d removed=%d rejected=%d truncated=%v",
+				detail.Source, detail.DistributionID, detail.Zone, detail.Status,
+				len(detail.AppliedRecords), len(detail.RemovedRecords), len(detail.RejectedItems), detail.Truncated)
 			zdr.ProcessConfirmation(detail)
 		}
 	}
@@ -507,6 +564,10 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 
 // MarkRRsPending marks all RRs in a ZoneUpdate as pending with the given distribution ID.
 // Called after successful enqueue for combiner delivery.
+//
+// For ClassINET RRs: marks as RRStatePending (addition awaiting confirmation).
+// For ClassNONE RRs: finds the matching existing tracked RR and marks it as RRStatePendingRemoval.
+// For ClassANY RRs: marks all tracked RRs for the rrtype as RRStatePendingRemoval.
 func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *ZoneUpdate, distID string) {
 	now := time.Now()
 
@@ -514,71 +575,107 @@ func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *Zo
 	for rrtype, rrset := range update.RRsets {
 		tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
 		for _, rr := range rrset.RRs {
-			if rr.Header().Class != dns.ClassINET {
-				continue // Only track additions
-			}
-			rrStr := rr.String()
-			// Check if this RR is already tracked; if so, update it
-			found := false
-			for i := range tracked.Tracked {
-				if tracked.Tracked[i].RR.String() == rrStr {
-					tracked.Tracked[i].State = RRStatePending
-					tracked.Tracked[i].Reason = ""
-					tracked.Tracked[i].DistributionID = distID
-					tracked.Tracked[i].UpdatedAt = now
-					found = true
-					break
-				}
-			}
-			if !found {
-				tracked.Tracked = append(tracked.Tracked, TrackedRR{
-					RR:             rr,
-					State:          RRStatePending,
-					DistributionID: distID,
-					UpdatedAt:      now,
-				})
+			switch rr.Header().Class {
+			case dns.ClassINET:
+				zdr.markAddPending(tracked, rr, distID, now)
+			case dns.ClassNONE:
+				zdr.markDeletePending(tracked, rr, distID, now)
+			case dns.ClassANY:
+				zdr.markAllDeletePending(tracked, distID, now)
 			}
 		}
 	}
 
 	// Handle individual RRs (local updates)
 	for _, rr := range update.RRs {
-		if rr.Header().Class != dns.ClassINET {
-			continue // Only track additions
-		}
 		rrtype := rr.Header().Rrtype
 		tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
-		rrStr := rr.String()
-		found := false
-		for i := range tracked.Tracked {
-			if tracked.Tracked[i].RR.String() == rrStr {
-				tracked.Tracked[i].State = RRStatePending
-				tracked.Tracked[i].Reason = ""
-				tracked.Tracked[i].DistributionID = distID
-				tracked.Tracked[i].UpdatedAt = now
-				found = true
-				break
-			}
+		switch rr.Header().Class {
+		case dns.ClassINET:
+			zdr.markAddPending(tracked, rr, distID, now)
+		case dns.ClassNONE:
+			zdr.markDeletePending(tracked, rr, distID, now)
+		case dns.ClassANY:
+			zdr.markAllDeletePending(tracked, distID, now)
 		}
-		if !found {
-			tracked.Tracked = append(tracked.Tracked, TrackedRR{
-				RR:             rr,
-				State:          RRStatePending,
-				DistributionID: distID,
-				UpdatedAt:      now,
-			})
+	}
+}
+
+// markAddPending marks a ClassINET RR as pending (addition awaiting confirmation).
+func (zdr *ZoneDataRepo) markAddPending(tracked *TrackedRRset, rr dns.RR, distID string, now time.Time) {
+	rrStr := rr.String()
+	for i := range tracked.Tracked {
+		if tracked.Tracked[i].RR.String() == rrStr {
+			tracked.Tracked[i].State = RRStatePending
+			tracked.Tracked[i].Reason = ""
+			tracked.Tracked[i].DistributionID = distID
+			tracked.Tracked[i].UpdatedAt = now
+			return
+		}
+	}
+	tracked.Tracked = append(tracked.Tracked, TrackedRR{
+		RR:             rr,
+		State:          RRStatePending,
+		DistributionID: distID,
+		UpdatedAt:      now,
+	})
+}
+
+// markDeletePending finds the existing tracked RR matching the ClassNONE RR and
+// transitions it to RRStatePendingRemoval. Matching is done by comparing the RR
+// string with class normalized to ClassINET, since tracked RRs were stored with ClassINET.
+func (zdr *ZoneDataRepo) markDeletePending(tracked *TrackedRRset, rr dns.RR, distID string, now time.Time) {
+	// Create a ClassINET copy for matching against tracked RRs
+	matchRR := dns.Copy(rr)
+	matchRR.Header().Class = dns.ClassINET
+	matchStr := matchRR.String()
+
+	for i := range tracked.Tracked {
+		if tracked.Tracked[i].RR.String() == matchStr {
+			tracked.Tracked[i].State = RRStatePendingRemoval
+			tracked.Tracked[i].Reason = ""
+			tracked.Tracked[i].DistributionID = distID
+			tracked.Tracked[i].UpdatedAt = now
+			log.Printf("SynchedDataEngine: Marked RR as pending-removal: %s (dist=%s)", matchStr, distID)
+			return
+		}
+	}
+	log.Printf("SynchedDataEngine: markDeletePending: no matching tracked RR found for %s", matchStr)
+}
+
+// markAllDeletePending marks all tracked RRs in the RRset as RRStatePendingRemoval (ClassANY delete).
+func (zdr *ZoneDataRepo) markAllDeletePending(tracked *TrackedRRset, distID string, now time.Time) {
+	for i := range tracked.Tracked {
+		if tracked.Tracked[i].State == RRStateAccepted || tracked.Tracked[i].State == RRStatePending {
+			tracked.Tracked[i].State = RRStatePendingRemoval
+			tracked.Tracked[i].Reason = ""
+			tracked.Tracked[i].DistributionID = distID
+			tracked.Tracked[i].UpdatedAt = now
 		}
 	}
 }
 
 // ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
+// For additions: Pending → Accepted or Rejected.
+// For deletions: PendingRemoval → Removed (and the RR is actually deleted from the ZoneDataRepo).
+// If a PendingRemoval RR appears in the rejected list, it transitions back to Accepted.
 func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail) {
 	now := time.Now()
+	source := detail.Source
+	if source == "" {
+		source = "unknown"
+	}
 
 	// Build a set of applied RR strings for fast lookup
 	appliedSet := make(map[string]bool, len(detail.AppliedRecords))
 	for _, rr := range detail.AppliedRecords {
 		appliedSet[rr] = true
+	}
+
+	// Build a set of removed RR strings for fast lookup
+	removedSet := make(map[string]bool, len(detail.RemovedRecords))
+	for _, rr := range detail.RemovedRecords {
+		removedSet[rr] = true
 	}
 
 	// Build a map of rejected RR strings → reason
@@ -590,38 +687,83 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail) {
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
-		log.Printf("SynchedDataEngine: ProcessConfirmation: no tracking data for zone %s", detail.Zone)
+		log.Printf("SynchedDataEngine: ProcessConfirmation(%s): no tracking data for zone %s", source, detail.Zone)
 		return
 	}
 
 	matched := 0
-	for _, agentTracking := range zoneTracking {
-		for _, trackedRRset := range agentTracking {
+	removed := 0
+	for agentId, agentTracking := range zoneTracking {
+		for rrtype, trackedRRset := range agentTracking {
 			for i := range trackedRRset.Tracked {
 				tr := &trackedRRset.Tracked[i]
-				if tr.State != RRStatePending {
-					continue // Only update pending RRs
-				}
 				if tr.DistributionID != detail.DistributionID {
 					continue // Wrong distribution
 				}
 				rrStr := tr.RR.String()
-				if appliedSet[rrStr] {
-					tr.State = RRStateAccepted
-					tr.Reason = ""
-					tr.UpdatedAt = now
-					matched++
-				} else if reason, rejected := rejectedMap[rrStr]; rejected {
-					tr.State = RRStateRejected
-					tr.Reason = reason
-					tr.UpdatedAt = now
-					matched++
+
+				switch tr.State {
+				case RRStatePending:
+					// Addition confirmation
+					if appliedSet[rrStr] {
+						tr.State = RRStateAccepted
+						tr.Reason = ""
+						tr.UpdatedAt = now
+						matched++
+					} else if reason, rejected := rejectedMap[rrStr]; rejected {
+						tr.State = RRStateRejected
+						tr.Reason = reason
+						tr.UpdatedAt = now
+						matched++
+					}
+					// If truncated and RR not in either list, leave as pending
+
+				case RRStatePendingRemoval:
+					if removedSet[rrStr] {
+						// Combiner confirmed removal — transition to Removed and
+						// actually delete the RR from the active ZoneDataRepo.
+						tr.State = RRStateRemoved
+						tr.Reason = ""
+						tr.UpdatedAt = now
+						matched++
+						removed++
+
+						// Delete from the active repo
+						zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
+						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): RR removed (confirmed): %s", source, rrStr)
+					} else if reason, rejected := rejectedMap[rrStr]; rejected {
+						// Combiner rejected the delete — RR is still live, revert to Accepted
+						tr.State = RRStateAccepted
+						tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
+						tr.UpdatedAt = now
+						matched++
+						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): delete rejected for RR: %s reason: %s", source, rrStr, reason)
+					}
+					// If truncated and RR not in either list, leave as pending-removal
 				}
-				// If truncated and RR not in either list, leave as pending
 			}
 		}
 	}
 
-	log.Printf("SynchedDataEngine: ProcessConfirmation: distribution %s zone %s: matched %d RRs (applied=%d rejected=%d truncated=%v)",
-		detail.DistributionID, detail.Zone, matched, len(detail.AppliedRecords), len(detail.RejectedItems), detail.Truncated)
+	log.Printf("SynchedDataEngine: ProcessConfirmation(%s): distribution %s zone %s: matched %d RRs (applied=%d removed=%d rejected=%d truncated=%v)",
+		source, detail.DistributionID, detail.Zone, matched, len(detail.AppliedRecords), removed, len(detail.RejectedItems), detail.Truncated)
+}
+
+// deleteRRFromRepo deletes a specific RR from the active ZoneDataRepo.
+// Called when a PendingRemoval RR is confirmed as removed by the combiner.
+func (zdr *ZoneDataRepo) deleteRRFromRepo(zone ZoneName, agent AgentId, rrtype uint16, rr dns.RR) {
+	nar, ok := zdr.Repo.Get(zone)
+	if !ok {
+		return
+	}
+	nod, ok := nar.Get(agent)
+	if !ok {
+		return
+	}
+	curRRset, ok := nod.RRtypes.Get(rrtype)
+	if !ok {
+		return
+	}
+	curRRset.Delete(rr)
+	nod.RRtypes.Set(rrtype, curRRset)
 }

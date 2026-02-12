@@ -54,7 +54,8 @@ type CombinerSyncResponse struct {
 	Zone           string         // Zone that was updated
 	Status         string         // "ok", "partial", "error"
 	Message        string         // Human-readable message
-	AppliedRecords []string       // RRs that were successfully applied
+	AppliedRecords []string       // RRs that were successfully applied (additions)
+	RemovedRecords []string       // RRs that were successfully removed (deletions)
 	RejectedItems  []RejectedItem // Items that were rejected with reasons
 	Timestamp      time.Time      // When the response was created
 }
@@ -502,6 +503,11 @@ func (h *CombinerChunkHandler) parseAgentMsgNotify(data []byte, distributionID s
 // ProcessUpdate handles a sync request and returns a response.
 // This is the main entry point for CHUNK-based and API-based updates to the combiner.
 // Both transports use the same data structure (map[string][]string) for transport neutrality.
+//
+// RR class determines the operation:
+//   - ClassINET: add/update the RR (existing behavior)
+//   - ClassNONE: delete this specific RR from the agent's contributions
+//   - ClassANY:  delete the entire RRset for the RR's type from the agent's contributions
 func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *CombinerSyncResponse {
 	// Count total records for logging
 	totalRecords := 0
@@ -526,9 +532,13 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 		return resp
 	}
 
-	// Validate and filter records (already grouped by owner in req.Records)
-	validOwnerRRs := make(map[string][]string)
+	// Separate records into adds, deletes (ClassNONE), and bulk deletes (ClassANY)
+	addOwnerRRs := make(map[string][]string)    // ClassINET: owner → RR strings
+	deleteOwnerRRs := make(map[string][]string)  // ClassNONE: owner → RR strings (with ClassINET for removal matching)
+	bulkDeleteOwner := make(map[string][]uint16)  // ClassANY: owner → rrtypes to delete entirely
+
 	var appliedRecords []string
+	var removedRecords []string
 	var rejectedItems []RejectedItem
 
 	for owner, rrStrings := range req.Records {
@@ -555,8 +565,6 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 
 			// Check if owner is at zone apex (combiner only accepts apex updates)
 			if owner != zonename {
-				// For glue records, we might accept them - but current policy is apex only
-				// This could be extended later
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("owner %q is not at zone apex %q", owner, zonename),
@@ -564,33 +572,77 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 				continue
 			}
 
-			// Valid record - keep the grouping from input
-			validOwnerRRs[owner] = append(validOwnerRRs[owner], rrStr)
-			appliedRecords = append(appliedRecords, rrStr)
+			// Route by class
+			switch rr.Header().Class {
+			case dns.ClassINET:
+				addOwnerRRs[owner] = append(addOwnerRRs[owner], rrStr)
+				appliedRecords = append(appliedRecords, rrStr)
+
+			case dns.ClassNONE:
+				// Convert to ClassINET string for removal matching in AgentContributions.
+				// The stored contributions use ClassINET strings.
+				delRR := dns.Copy(rr)
+				delRR.Header().Class = dns.ClassINET
+				deleteOwnerRRs[owner] = append(deleteOwnerRRs[owner], delRR.String())
+
+			case dns.ClassANY:
+				bulkDeleteOwner[owner] = append(bulkDeleteOwner[owner], rrtype)
+
+			default:
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("unsupported class %d", rr.Header().Class),
+				})
+			}
 		}
 	}
 
-	// Apply the updates if we have any valid records
-	if len(validOwnerRRs) > 0 {
-		err := zd.AddCombinerDataNG(req.SenderID, validOwnerRRs)
+	// Apply additions
+	if len(addOwnerRRs) > 0 {
+		err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
 		if err != nil {
 			resp.Status = "error"
-			resp.Message = fmt.Sprintf("failed to apply updates: %v", err)
+			resp.Message = fmt.Sprintf("failed to apply add updates: %v", err)
 			return resp
+		}
+	}
+
+	// Apply ClassNONE deletes (specific RR removal)
+	if len(deleteOwnerRRs) > 0 {
+		removed, err := zd.RemoveCombinerDataNG(req.SenderID, deleteOwnerRRs)
+		if err != nil {
+			log.Printf("CombinerChunkHandler: Error removing records: %v", err)
+			// Don't fail the whole request — report partial success
+		}
+		removedRecords = append(removedRecords, removed...)
+	}
+
+	// Apply ClassANY deletes (entire RRset removal by type)
+	for owner, rrtypes := range bulkDeleteOwner {
+		for _, rrtype := range rrtypes {
+			removed, err := zd.RemoveCombinerDataByRRtype(req.SenderID, owner, rrtype)
+			if err != nil {
+				log.Printf("CombinerChunkHandler: Error removing RRset %s for owner %s: %v",
+					dns.TypeToString[rrtype], owner, err)
+			}
+			removedRecords = append(removedRecords, removed...)
 		}
 	}
 
 	// Build response
 	resp.AppliedRecords = appliedRecords
+	resp.RemovedRecords = removedRecords
 	resp.RejectedItems = rejectedItems
 
+	totalActions := len(appliedRecords) + len(removedRecords)
 	if len(rejectedItems) == 0 {
 		resp.Status = "ok"
-		resp.Message = fmt.Sprintf("applied %d records to zone %q", len(appliedRecords), req.Zone)
-	} else if len(appliedRecords) > 0 {
+		resp.Message = fmt.Sprintf("applied %d added %d removed for zone %q",
+			len(appliedRecords), len(removedRecords), req.Zone)
+	} else if totalActions > 0 {
 		resp.Status = "partial"
-		resp.Message = fmt.Sprintf("applied %d records, rejected %d records for zone %q",
-			len(appliedRecords), len(rejectedItems), req.Zone)
+		resp.Message = fmt.Sprintf("applied %d added %d removed %d rejected for zone %q",
+			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)
 	} else {
 		resp.Status = "error"
 		resp.Message = fmt.Sprintf("all %d records were rejected for zone %q",
@@ -609,8 +661,8 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 		return nil
 	}
 
-	log.Printf("CombinerChunkHandler: Sending confirmation for distribution %s zone %q status=%s applied=%d rejected=%d",
-		resp.DistributionID, resp.Zone, resp.Status, len(resp.AppliedRecords), len(resp.RejectedItems))
+	log.Printf("CombinerChunkHandler: Sending confirmation for distribution %s zone %q status=%s applied=%d removed=%d rejected=%d",
+		resp.DistributionID, resp.Zone, resp.Status, len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
 
 	// Build per-RR rejected items for the payload
 	type rejectedItemJSON struct {
@@ -630,8 +682,10 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 		Status         string             `json:"status"`
 		Message        string             `json:"message"`
 		AppliedCount   int                `json:"applied_count"`
+		RemovedCount   int                `json:"removed_count"`
 		RejectedCount  int                `json:"rejected_count"`
 		AppliedRecords []string           `json:"applied_records,omitempty"`
+		RemovedRecords []string           `json:"removed_records,omitempty"`
 		RejectedItems  []rejectedItemJSON `json:"rejected_items,omitempty"`
 		Truncated      bool               `json:"truncated,omitempty"`
 		Timestamp      int64              `json:"timestamp"`
@@ -642,8 +696,10 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 		Status:         resp.Status,
 		Message:        resp.Message,
 		AppliedCount:   len(resp.AppliedRecords),
+		RemovedCount:   len(resp.RemovedRecords),
 		RejectedCount:  len(resp.RejectedItems),
 		AppliedRecords: resp.AppliedRecords,
+		RemovedRecords: resp.RemovedRecords,
 		RejectedItems:  rejItems,
 		Timestamp:      resp.Timestamp.Unix(),
 	}
@@ -654,9 +710,10 @@ func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *
 	}
 
 	// Size guard: EDNS0 payload must fit in UDP. If too large, drop applied_records
-	// (the actionable data is in rejected_items) and set Truncated.
+	// and removed_records (the actionable data is in rejected_items) and set Truncated.
 	if len(payloadBytes) > 3500 {
 		confirmPayload.AppliedRecords = nil
+		confirmPayload.RemovedRecords = nil
 		confirmPayload.Truncated = true
 		payloadBytes, err = json.Marshal(confirmPayload)
 	}
