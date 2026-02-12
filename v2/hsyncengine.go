@@ -272,23 +272,25 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			Zone:   ampp.Zone,
 			RRsets: map[uint16]core.RRset{},
 		}
-		for _, rrstr := range ampp.RRs {
-			rr, err := dns.NewRR(rrstr)
-			if err != nil {
-				log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
-				return
+		for _, rrStrs := range ampp.Records {
+			for _, rrstr := range rrStrs {
+				rr, err := dns.NewRR(rrstr)
+				if err != nil {
+					log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
+					return
+				}
+				var rrset core.RRset
+				var ok bool
+				rrtype := rr.Header().Rrtype
+				if rrset, ok = zu.RRsets[rrtype]; !ok {
+					rrset = core.RRset{}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+				log.Printf("MsgHandler: RR: %s", rr)
 			}
-			var rrset core.RRset
-			var ok bool
-			rrtype := rr.Header().Rrtype
-			if rrset, ok = zu.RRsets[rrtype]; !ok {
-				rrset = core.RRset{}
-			}
-			rrset.RRs = append(rrset.RRs, rr)
-			zu.RRsets[rrtype] = rrset
-			log.Printf("MsgHandler: RR: %s", rr)
 		}
 
 		// var cresp = make(chan *SynchedDataResponse, 1)
@@ -448,21 +450,12 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 	// 	return
 	// }
 
-	// XXX: This is not quite clear: if one remote agent is unavailable for some reason,
-	//      should we skip the command or not? Or should we send the command to the other agents?
-	//      In most cases all agents must be operational, but for cases like UPSTREAM-RFI
-	//      only the upstream agent has to be operational.
-	// var notOperationalAgents = map[AgentId]bool{}
-	// for _, agent := range zad.Agents {
-	// 	if agent.ApiDetails.State != AgentStateOperational {
-	// 		notOperationalAgents[agent.Identity] = true
-	// 	}
-	// }
-
-	zad, notOperationalAgents, err := ar.RemoteOperationalAgents(msg.Zone)
+	// Get all remote agents for this zone (no operational state filtering).
+	// The ReliableMessageQueue handles delivery deferral for non-operational agents.
+	zad, err := ar.GetZoneAgentData(msg.Zone)
 	if err != nil {
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("Error getting remote operational agents for zone %s: %v", msg.Zone, err)
+		resp.ErrorMsg = fmt.Sprintf("Error getting remote agents for zone %s: %v", msg.Zone, err)
 		return
 	}
 
@@ -472,13 +465,6 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 	case "send-notify":
 		log.Printf("CommandHandler: Sending %q message to %d agents", AgentMsgToString[msg.MessageType], len(zad.Agents))
-		// If any remote agent is not operational, we can't send the message
-		if len(notOperationalAgents) > 0 {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Agents %v are not operational, ignoring command for now", notOperationalAgents)
-			// log.Printf("CommandHandler: %s", resp.ErrorMsg)
-			return
-		}
 
 		// Send message to each agent (use TransportManager fallback when available)
 		for _, agent := range zad.Agents {
@@ -493,7 +479,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					SenderID:  ar.LocalAgent.Identity,
 					Zone:      string(msg.Zone),
 					SyncType:  agenttransport.SyncTypeNS,
-					Records:   msg.RRs,
+					Records:   groupRRStringsByOwner(msg.RRs),
 					Timestamp: time.Now(),
 				}
 				syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
@@ -514,7 +500,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					MyIdentity:   AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
-					RRs:          msg.RRs,
+					Records:      groupRRStringsByOwner(msg.RRs),
 					Time:         time.Now(),
 				})
 				if err != nil {
@@ -550,18 +536,17 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		log.Printf("CommandHandler: Sending %s RFI message to %d agents", msg.RfiType, len(zad.Agents))
 		switch msg.RfiType {
 		case "UPSTREAM":
-			if notOperationalAgents[zad.MyUpstream] {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %q: Upstream agent %s is not operational, ignoring command for now", msg.Zone, zad.MyUpstream)
-				// log.Printf("CommandHandler: %s", resp.ErrorMsg)
-				return
-			}
-
 			agent, exists := ar.S.Get(zad.MyUpstream)
 			if !exists {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("zone %q: %s agent %q not found", msg.Zone, msg.RfiType, zad.MyUpstream)
-				// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+				return
+			}
+
+			// RFI is a synchronous request-response, so the agent must be operational
+			if agent.State != AgentStateOperational {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %q: Upstream agent %s is not operational (state: %s), ignoring command for now", msg.Zone, zad.MyUpstream, AgentStateToString[agent.State])
 				return
 			}
 
@@ -596,27 +581,24 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 		case "DOWNSTREAM":
 			for _, aid := range zad.MyDownstreams {
-				// Send the RFI to the upstream agent
 				log.Printf("CommandHandler: Sending DOWNSTREAM RFI message to agent %q", aid)
-				if notOperationalAgents[aid] {
-					resp.RfiResponse[aid] = &RfiData{
-						Status:   "error",
-						Error:    true,
-						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational, ignoring command for now", msg.Zone, aid),
-					}
-					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
-					continue
-				}
 
 				agent, exists := ar.S.Get(aid)
 				if !exists {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("zone %q: DOWNSTREAM RFI message to agent %q: Agent not found", msg.Zone, aid)
-					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
 					resp.RfiResponse[aid] = &RfiData{
 						Status:   "error",
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q not found, ignoring command for now", msg.Zone, aid),
+						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q not found", msg.Zone, aid),
+					}
+					continue
+				}
+
+				// RFI is synchronous request-response, agent must be operational
+				if agent.State != AgentStateOperational {
+					resp.RfiResponse[aid] = &RfiData{
+						Status:   "error",
+						Error:    true,
+						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational (state: %s)", msg.Zone, aid, AgentStateToString[agent.State]),
 					}
 					continue
 				}
@@ -704,38 +686,6 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("Unknown message type: %+v", msg.MessageType)
 	}
-}
-
-func (ar *AgentRegistry) RemoteOperationalAgents(zone ZoneName) (*ZoneAgentData, map[AgentId]bool, error) {
-	// Find remote agents for this zone
-	zad, err := ar.GetZoneAgentData(zone)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error getting zone agent data for zone %s: %v", zone, err)
-	}
-	if len(zad.Agents) == 0 {
-		return nil, nil, fmt.Errorf("no remote agents found for zone %s", zone)
-	}
-
-	// XXX: This is not quite clear: if one remote agent is unavailable for some reason,
-	// should we skip the command or not? Or should we send the command to the other agents?
-	// In most cases all agents must be operational, but for cases like UPSTREAM-RFI
-	// only the upstream agent has to be operational.
-	//
-	// The question is what to do if one or more agents are not operational. One alternative is
-	// to queue the update and resend when all remote agents are back. Another alternative is
-	// put a "dirty" flag on the local data for the tuple <zone, agent> and send the update
-	// when the agent comes back online.
-	//
-	// The second alternative seems more attractive.
-	//
-	// We return the ZAD struct including the list of all remote agents and a map of non-operational agents.
-	var notOperationalAgents = map[AgentId]bool{}
-	for _, agent := range zad.Agents {
-		if agent.ApiDetails.State != AgentStateOperational {
-			notOperationalAgents[agent.Identity] = true
-		}
-	}
-	return zad, notOperationalAgents, nil
 }
 
 // XXX: Not used at the moment.

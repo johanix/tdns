@@ -748,7 +748,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			syncReq := &transport.SyncRequest{
 				Zone:          string(amp.Zone),
-				Records:       amp.RRs, // Use strings directly
+				Records:       groupRRStringsByOwner(amp.RRs),
 				DistributionID: fmt.Sprintf("debug-force-sync-%d", time.Now().Unix()),
 			}
 
@@ -1009,7 +1009,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 						peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
 						syncReq := &transport.SyncRequest{
 							Zone:          string(amp.Zone),
-							Records:       amp.RRs, // Use string records directly
+							Records:       groupRRStringsByOwner(amp.RRs),
 							DistributionID: fmt.Sprintf("test-chain-%d-%s", time.Now().Unix(), agent.Identity),
 						}
 
@@ -1193,6 +1193,104 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.Status = "timeout"
 			}
 
+		case "add-ns", "del-ns":
+			// Add or delete an NS record: store locally + sync to peers + send to combiner
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+
+			isAdd := amp.Command == "add-ns"
+
+			// Parse and validate the RRs (must be NS records at the zone apex)
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				if rr.Header().Rrtype != dns.TypeNS {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("record must be an NS record (got %s)", dns.TypeToString[rr.Header().Rrtype])
+					return
+				}
+				if isAdd {
+					rr.Header().Class = dns.ClassINET
+				} else {
+					rr.Header().Class = dns.ClassNONE
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// Create the ZoneUpdate with RRs and RRsets
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: AgentId(conf.Agent.Identity),
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			// Populate RRsets (needed by ProcessUpdate)
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+			}
+
+			action := "Adding"
+			if !isAdd {
+				action = "Removing"
+			}
+			log.Printf("%s: %s %d NS RRs for zone %q", amp.Command, action, len(parsedRRs), amp.Zone)
+
+			// Send as a "local" update to SynchedDataEngine, which will:
+			// (a) store in local ZoneDataRepo
+			// (b) send to combiner
+			// (c) send NOTIFY to remote agents
+			cresp := make(chan *AgentMsgResponse, 1)
+			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    AgentId(conf.Agent.Identity),
+				UpdateType: "local",
+				Update:     zu,
+				Response:   cresp,
+			}
+
+			select {
+			case r := <-cresp:
+				if r.Error {
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
+					resp.Msg = fmt.Sprintf("%s NS record failed: %s", amp.Command, r.ErrorMsg)
+				} else {
+					resp.Msg = fmt.Sprintf("%s %d NS record(s) for zone %q", action, len(parsedRRs), amp.Zone)
+					if r.Msg != "" {
+						resp.Msg += " - " + r.Msg
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
+				resp.Status = "timeout"
+			}
+
 		case "send-sync-to":
 			// Send a real SYNC to a remote agent
 			if amp.AgentId == "" {
@@ -1239,7 +1337,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				SenderID:      conf.Agent.Identity,
 				Zone:          string(amp.Zone),
 				SyncType:      transport.SyncTypeNS, // Default to NS, could be detected from RRs
-				Records:       amp.RRs,
+				Records:       groupRRStringsByOwner(amp.RRs),
 				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
 			}
 
@@ -1262,6 +1360,25 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 					"message":        syncResp.Message,
 				}
 			}
+			resp.Status = "ok"
+
+		case "queue-status":
+			// Show reliable message queue status and pending messages
+			if conf.Internal.TransportManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available"
+				return
+			}
+
+			stats := conf.Internal.TransportManager.GetQueueStats()
+			pending := conf.Internal.TransportManager.GetQueuePendingMessages()
+
+			resp.Data = map[string]interface{}{
+				"stats":    stats,
+				"messages": pending,
+			}
+			resp.Msg = fmt.Sprintf("Queue: %d pending, %d delivered, %d failed, %d expired",
+				stats.TotalPending, stats.TotalDelivered, stats.TotalFailed, stats.TotalExpired)
 			resp.Status = "ok"
 
 		default:

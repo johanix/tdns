@@ -21,7 +21,7 @@ import (
 var myIdentity, notifyRRtype, rfitype string
 
 var DebugAgentCmd = &cobra.Command{
-	Use:   "agent",
+	Use:   "debug",
 	Short: "TDNS-AGENT debugging commands",
 }
 
@@ -740,6 +740,267 @@ Example:
 	},
 }
 
+var DebugAgentAddNsCmd = &cobra.Command{
+	Use:   "add-ns",
+	Short: "Add an NS record to a zone and sync with peers and combiner",
+	Long: `Add an NS record to the specified zone. This will:
+- Add the NS record to the local synced data store
+- Send sync operations to all remote agents for this zone
+- Send the update to the combiner
+
+Example:
+  tdns-cliv2 agent debug add-ns --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		if dnsRecord == "" {
+			log.Fatalf("Error: --rr flag is required")
+		}
+
+		// Parse and validate the RR
+		rr, err := dns.NewRR(dnsRecord)
+		if err != nil {
+			log.Fatalf("Error: Invalid DNS record: %v", err)
+		}
+
+		// Ensure it's an NS record
+		if rr.Header().Rrtype != dns.TypeNS {
+			log.Fatalf("Error: Record must be an NS record (got %s)", dns.TypeToString[rr.Header().Rrtype])
+		}
+
+		// Ensure the owner matches the zone
+		if dns.Fqdn(rr.Header().Name) != dns.Fqdn(tdns.Globals.Zonename) {
+			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "add-ns",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			RRs:     []string{rr.String()},
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Successfully added NS record to zone %s\n", tdns.Globals.Zonename)
+		fmt.Printf("  Record: %s\n", rr.String())
+		if amr.Msg != "" {
+			fmt.Printf("  %s\n", amr.Msg)
+		}
+	},
+}
+
+var DebugAgentDelNsCmd = &cobra.Command{
+	Use:   "del-ns",
+	Short: "Delete an NS record from a zone and sync with peers and combiner",
+	Long: `Delete an NS record from the specified zone. This will:
+- Remove the NS record from the local synced data store
+- Send sync operations to all remote agents for this zone
+- Send the update to the combiner
+
+Example:
+  tdns-cliv2 agent debug del-ns --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		if dnsRecord == "" {
+			log.Fatalf("Error: --rr flag is required")
+		}
+
+		// Parse and validate the RR
+		rr, err := dns.NewRR(dnsRecord)
+		if err != nil {
+			log.Fatalf("Error: Invalid DNS record: %v", err)
+		}
+
+		// Ensure it's an NS record
+		if rr.Header().Rrtype != dns.TypeNS {
+			log.Fatalf("Error: Record must be an NS record (got %s)", dns.TypeToString[rr.Header().Rrtype])
+		}
+
+		// Ensure the owner matches the zone
+		if dns.Fqdn(rr.Header().Name) != dns.Fqdn(tdns.Globals.Zonename) {
+			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
+		}
+
+		req := tdns.AgentMgmtPost{
+			Command: "del-ns",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+			RRs:     []string{rr.String()},
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Successfully removed NS record from zone %s\n", tdns.Globals.Zonename)
+		fmt.Printf("  Record: %s\n", rr.String())
+		if amr.Msg != "" {
+			fmt.Printf("  %s\n", amr.Msg)
+		}
+	},
+}
+
+var DebugAgentQueueStatusCmd = &cobra.Command{
+	Use:   "queue-status",
+	Short: "Show reliable message queue status and pending messages",
+	Run: func(cmd *cobra.Command, args []string) {
+		req := tdns.AgentMgmtPost{
+			Command: "queue-status",
+		}
+
+		_, buf, err := func() (*tdns.AgentMgmtResponse, []byte, error) {
+			prefixcmd, _ := getCommandContext("debug")
+			api, err := getApiClient(prefixcmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
+			_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
+			return nil, buf, err
+		}()
+		if err != nil {
+			log.Fatalf("API request failed: %v", err)
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(buf, &resp); err != nil {
+			log.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if errVal, ok := resp["error"].(bool); ok && errVal {
+			if errMsg, ok := resp["error_msg"].(string); ok {
+				log.Fatalf("Error: %s", errMsg)
+			}
+			log.Fatalf("Error in response")
+		}
+
+		if msg, ok := resp["msg"].(string); ok && msg != "" {
+			fmt.Println(msg)
+		}
+
+		data, ok := resp["data"].(map[string]interface{})
+		if !ok {
+			fmt.Println("No queue data available")
+			return
+		}
+
+		// Display stats summary
+		if stats, ok := data["stats"].(map[string]interface{}); ok {
+			fmt.Println("\nQueue Statistics:")
+			if v, ok := stats["total_pending"].(float64); ok {
+				fmt.Printf("  Pending:   %d\n", int(v))
+			}
+			if v, ok := stats["total_delivered"].(float64); ok {
+				fmt.Printf("  Delivered: %d\n", int(v))
+			}
+			if v, ok := stats["total_failed"].(float64); ok {
+				fmt.Printf("  Failed:    %d\n", int(v))
+			}
+			if v, ok := stats["total_expired"].(float64); ok {
+				fmt.Printf("  Expired:   %d\n", int(v))
+			}
+			if byState, ok := stats["by_state"].(map[string]interface{}); ok && len(byState) > 0 {
+				fmt.Printf("  By state:  ")
+				first := true
+				for state, count := range byState {
+					if !first {
+						fmt.Printf(", ")
+					}
+					fmt.Printf("%s=%d", state, int(count.(float64)))
+					first = false
+				}
+				fmt.Println()
+			}
+		}
+
+		// Display pending messages
+		messages, ok := data["messages"].([]interface{})
+		if !ok || len(messages) == 0 {
+			fmt.Println("\nNo pending messages")
+			return
+		}
+
+		fmt.Printf("\nPending Messages (%d):\n", len(messages))
+
+		verbose := false
+		if v, err := cmd.Flags().GetBool("verbose"); err == nil {
+			verbose = v
+		}
+
+		if verbose {
+			for _, mRaw := range messages {
+				m, ok := mRaw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				fmt.Println()
+				fmt.Printf("  Distribution ID: %s\n", getStringValue(m, "distribution_id"))
+				fmt.Printf("  Recipient:       %s (%s)\n", getStringValue(m, "recipient_id"), getStringValue(m, "recipient_type"))
+				fmt.Printf("  Zone:            %s\n", getStringValue(m, "zone"))
+				fmt.Printf("  State:           %s\n", getStringValue(m, "state"))
+				fmt.Printf("  Priority:        %s\n", getStringValue(m, "priority"))
+				fmt.Printf("  Attempts:        %s\n", getStringValue(m, "attempt_count"))
+				fmt.Printf("  Age:             %s\n", getStringValue(m, "age"))
+				fmt.Printf("  Created:         %s\n", getStringValue(m, "created_at"))
+				fmt.Printf("  Expires:         %s\n", getStringValue(m, "expires_at"))
+				fmt.Printf("  Next attempt:    %s\n", getStringValue(m, "next_attempt"))
+				if lastAttempt := getStringValue(m, "last_attempt"); lastAttempt != "" {
+					fmt.Printf("  Last attempt:    %s\n", lastAttempt)
+				}
+				if lastErr := getStringValue(m, "last_error"); lastErr != "" {
+					fmt.Printf("  Last error:      %s\n", lastErr)
+				}
+			}
+		} else {
+			var rows []string
+			rows = append(rows, "DistID | Recipient | Type | Zone | State | Attempts | Age | Error")
+			for _, mRaw := range messages {
+				m, ok := mRaw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				distID := getStringValue(m, "distribution_id")
+				if len(distID) > 16 {
+					distID = distID[:16] + "..."
+				}
+				lastErr := getStringValue(m, "last_error")
+				if len(lastErr) > 30 {
+					lastErr = lastErr[:30] + "..."
+				}
+				attempts := "0"
+				if v, ok := m["attempt_count"].(float64); ok {
+					attempts = fmt.Sprintf("%d", int(v))
+				}
+				rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s | %s",
+					distID,
+					getStringValue(m, "recipient_id"),
+					getStringValue(m, "recipient_type"),
+					getStringValue(m, "zone"),
+					getStringValue(m, "state"),
+					attempts,
+					getStringValue(m, "age"),
+					lastErr,
+				))
+			}
+			if len(rows) > 1 {
+				output := columnize.SimpleFormat(rows)
+				fmt.Println(output)
+			}
+		}
+	},
+}
+
 func init() {
 	DebugCmd.AddCommand(DebugAgentCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendNotifyCmd)
@@ -756,6 +1017,11 @@ func init() {
 	DebugAgentCmd.AddCommand(DebugAgentSyncStateCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendToCombinerCmd)
 	DebugAgentCmd.AddCommand(DebugAgentTestChainCmd)
+	DebugAgentCmd.AddCommand(DebugAgentAddNsCmd)
+	DebugAgentCmd.AddCommand(DebugAgentDelNsCmd)
+	DebugAgentCmd.AddCommand(DebugAgentQueueStatusCmd)
+
+	DebugAgentQueueStatusCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details for each message)")
 
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
@@ -777,6 +1043,8 @@ func init() {
 	DebugAgentSendToCombinerCmd.Flags().String("rr", "", "DNS record to send")
 	DebugAgentTestChainCmd.Flags().String("scenario", "add", "Test scenario (add|update|delete)")
 	DebugAgentTestChainCmd.Flags().String("rr", "", "DNS record for test")
+	DebugAgentAddNsCmd.Flags().StringVarP(&dnsRecord, "rr", "", "", "NS record to add")
+	DebugAgentDelNsCmd.Flags().StringVarP(&dnsRecord, "rr", "", "", "NS record to delete")
 
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")

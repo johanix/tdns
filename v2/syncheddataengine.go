@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -129,8 +128,16 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 					log.Printf("SynchedDataEngine: synchedDataUpdate channel closed")
 					return
 				}
+				log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
+				// Send error response back to avoid timeout
+				if synchedDataUpdate.Response != nil {
+					synchedDataUpdate.Response <- &AgentMsgResponse{
+						Error:    true,
+						ErrorMsg: "SynchedDataEngine is not active",
+						Msg:      "syncheddataengine.active is set to false in configuration",
+					}
+				}
 			}
-			log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
 			continue
 		}
 	} else {
@@ -195,72 +202,35 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 						resp.Msg = msg
 					}
 					if change {
-						var errstrs []string
-						ar := conf.Internal.AgentRegistry
-						log.Printf("SynchedDataEngine: Update applied, local data has changed, need to send update both to combiner and remote agents")
+						log.Printf("SynchedDataEngine: Update applied, local data has changed, enqueuing for combiner and remote agents")
 
-						// Send update to combiner via CHUNK handler
-						if conf.Internal.CombinerHandler != nil && synchedDataUpdate.Update != nil {
-							distributionID := fmt.Sprintf("local-%d", time.Now().UnixNano())
-							combinerReq := ConvertZoneUpdateToSyncRequest(
-								synchedDataUpdate.Update,
-								string(synchedDataUpdate.AgentId),
-								distributionID,
-							)
-							combinerResp := SendToCombiner(conf.Internal.CombinerHandler, combinerReq)
-							if combinerResp.Status != "ok" {
-								log.Printf("SynchedDataEngine: Combiner update %s: %s", combinerResp.Status, combinerResp.Message)
-								if combinerResp.Status == "error" {
-									errstrs = append(errstrs, fmt.Sprintf("Combiner error: %s", combinerResp.Message))
-								}
-							} else {
-								log.Printf("SynchedDataEngine: Combiner update successful: %s", combinerResp.Message)
-							}
-						}
-
-						// Send update to remote agents
-						// Find remote agents for this zone
-						zad, notOperationalAgents, err := ar.RemoteOperationalAgents(synchedDataUpdate.Zone)
-						if err != nil {
-							resp.Error = true
-							resp.ErrorMsg = fmt.Sprintf("Error getting zone agent data for zone %s: %v", synchedDataUpdate.Zone, err)
-						}
-
-						log.Printf("SynchedDataEngine: Sending NOTIFY message to %d agents", len(zad.Agents))
-
-						// If any remote agent is not operational, we can't send the message
-						if len(notOperationalAgents) > 0 {
-							resp.Error = true
-							resp.ErrorMsg = fmt.Sprintf("Agents %v are not operational, ignoring command for now", notOperationalAgents)
-							log.Printf("SynchedDataEngine: %s", resp.ErrorMsg)
-							// XXX: Mark this zone as "dirty", i.e. not yet sent to the remote agents
-							continue
-						} else {
-							// Send message to each agent
-							for _, agent := range zad.Agents {
-								amr, err := agent.SendApiMsg(&AgentMsgPost{
-									MessageType:  AgentMsgNotify,
-									MyIdentity:   AgentId(ar.LocalAgent.Identity),
-									YourIdentity: agent.Identity,
-									Zone:         synchedDataUpdate.Zone,
-									// RRs:          // XXX: here we need to send complete RRsets
-									Time: time.Now(),
-								})
-
-								if err != nil {
-									log.Printf("SynchedDataEngine: Error sending message to agent %s: %v", agent.Identity, err)
-									errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.Identity, err))
-									continue
-								}
-
-								resp.Msg = amr.Msg
-								resp.Error = amr.Error
-								resp.ErrorMsg = amr.ErrorMsg
-							}
-							if len(errstrs) > 0 {
+						tm := conf.Internal.TransportManager
+						if tm != nil && synchedDataUpdate.Update != nil {
+							// Enqueue for combiner (reliable delivery with retry)
+							if err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update); err != nil {
+								log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
 								resp.Error = true
-								resp.ErrorMsg = strings.Join(errstrs, "\n")
+								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
 							}
+
+							// Enqueue for all remote agents in this zone (reliable delivery with retry)
+							if err := tm.EnqueueForZoneAgents(synchedDataUpdate.Zone, synchedDataUpdate.Update); err != nil {
+								log.Printf("SynchedDataEngine: Failed to enqueue for zone agents: %v", err)
+								if resp.ErrorMsg != "" {
+									resp.ErrorMsg += "; " + fmt.Sprintf("Agent enqueue error: %v", err)
+								} else {
+									resp.Error = true
+									resp.ErrorMsg = fmt.Sprintf("Agent enqueue error: %v", err)
+								}
+							}
+
+							if !resp.Error {
+								resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
+							}
+						} else if tm == nil {
+							log.Printf("SynchedDataEngine: TransportManager not available, cannot enqueue sync messages")
+							resp.Error = true
+							resp.ErrorMsg = "TransportManager not available"
 						}
 					}
 				}
@@ -309,26 +279,22 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 					}
 					resp.Msg = msg
 					if change {
-						log.Printf("SynchedDataEngine: Update applied, remote data has changed, need to send update to combiner")
+						log.Printf("SynchedDataEngine: Update applied, remote data has changed, enqueuing for combiner")
 
-						// 4. Send the update to the combiner via CHUNK handler
-						if conf.Internal.CombinerHandler != nil && synchedDataUpdate.Update != nil {
-							distributionID := fmt.Sprintf("remote-%d", time.Now().UnixNano())
-							combinerReq := ConvertZoneUpdateToSyncRequest(
-								synchedDataUpdate.Update,
-								string(synchedDataUpdate.AgentId),
-								distributionID,
-							)
-							combinerResp := SendToCombiner(conf.Internal.CombinerHandler, combinerReq)
-							if combinerResp.Status != "ok" {
-								log.Printf("SynchedDataEngine: Combiner update %s: %s", combinerResp.Status, combinerResp.Message)
-								if combinerResp.Status == "error" {
-									resp.Error = true
-									resp.ErrorMsg = fmt.Sprintf("Combiner error: %s", combinerResp.Message)
-								}
+						tm := conf.Internal.TransportManager
+						if tm != nil && synchedDataUpdate.Update != nil {
+							// Remote update: only enqueue for combiner (not back to agents)
+							if err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update); err != nil {
+								log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
+								resp.Error = true
+								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
 							} else {
-								log.Printf("SynchedDataEngine: Combiner update successful: %s", combinerResp.Message)
+								resp.Msg = "Remote update applied, sync enqueued for combiner"
 							}
+						} else if tm == nil {
+							log.Printf("SynchedDataEngine: TransportManager not available, cannot enqueue sync messages")
+							resp.Error = true
+							resp.ErrorMsg = "TransportManager not available"
 						}
 					}
 				}

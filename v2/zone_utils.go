@@ -423,6 +423,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		} else {
 			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have not been applied. Not sending to downstreams.", zd.ZoneName)
 		}
+
+		// Inject combiner signature TXT if configured
+		if zd.InjectSignatureTXT(Globals.CombinerConf) {
+			zd.Logger.Printf("FetchFromUpstream: Zone %q: Signature TXT injected", zd.ZoneName)
+		}
 	}
 
 	if viper.GetBool("service.debug") {

@@ -7,21 +7,22 @@ import (
 )
 
 // AgentMsg identifies the type of agent message.
-type AgentMsg uint8
+// String type for human-readable JSON and easy extensibility.
+type AgentMsg string
 
 const (
-	AgentMsgHello AgentMsg = iota + 1
-	AgentMsgBeat
-	AgentMsgNotify
-	AgentMsgRfi
-	AgentMsgStatus
-	AgentMsgPing // ping operation for connectivity testing
+	AgentMsgHello  AgentMsg = "hello"
+	AgentMsgBeat   AgentMsg = "beat"
+	AgentMsgNotify AgentMsg = "sync" // sync/notify: agent notifies about a change in zone data
+	AgentMsgRfi    AgentMsg = "rfi"
+	AgentMsgStatus AgentMsg = "status"
+	AgentMsgPing   AgentMsg = "ping"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
 	AgentMsgHello:  "HELLO",
 	AgentMsgBeat:   "BEAT",
-	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
+	AgentMsgNotify: "SYNC",
 	AgentMsgRfi:    "RFI",
 	AgentMsgStatus: "STATUS",
 	AgentMsgPing:   "PING",
@@ -75,19 +76,19 @@ type AgentBeatResponse struct {
 	ErrorMsg     string
 }
 
-// AgentMsgPost represents a generic agent-to-agent message (NOTIFY, RFI, STATUS).
+// AgentMsgPost represents a generic agent-to-agent message (sync, rfi, status).
 // Used by both API and DNS transports.
 type AgentMsgPost struct {
-	MessageType  AgentMsg  // NOTIFY, RFI, STATUS
-	MyIdentity   string    // Sender's identity
-	YourIdentity string    // Recipient's identity
-	Addresses    []string  `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
-	Port         uint16    `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
-	TLSA         dns.TLSA  `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
-	Zone         string    // Zone this message refers to (only one zone per message)
-	RRs          []string  // Resource records in presentation format (dns.RR cannot be JSON marshaled)
-	Time         time.Time // Message timestamp
-	RfiType      string    // Type of RFI request if MessageType is RFI
+	MessageType  AgentMsg            // "sync", "rfi", "status"
+	MyIdentity   string              // Sender's identity
+	YourIdentity string              // Recipient's identity
+	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA         dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
+	Zone         string              // Zone this message refers to (only one zone per message)
+	Records      map[string][]string // Resource records grouped by owner name (owner → []RR strings)
+	Time         time.Time           // Message timestamp
+	RfiType      string              // Type of RFI request if MessageType is RFI
 }
 
 // AgentMsgResponse represents the response to an AgentMsgPost.

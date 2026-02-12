@@ -52,6 +52,10 @@ type LocalCombinerConf struct {
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
 	// Agent (combiner only): the agent we talk to; symmetric to agent.combiner
 	Agent *PeerConf `yaml:"agent"`
+	// Signature: template string for a TXT record injected into combined zones (demo feature).
+	// Supports {identity} and {zone} placeholders.
+	Signature    string `yaml:"signature"`
+	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"`
 }
 
 type AppDetails struct {

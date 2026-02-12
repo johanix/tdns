@@ -320,15 +320,13 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create sync payload using typed struct from core package
-	// All sync operations use AgentMsgNotify as they notify about zone data changes
 	payload := &core.AgentMsgPost{
 		MessageType:  core.AgentMsgNotify,
 		MyIdentity:   req.SenderID,
 		YourIdentity: peer.ID,
 		Zone:         req.Zone,
-		RRs:          req.Records,
+		Records:      req.Records,
 		Time:         req.Timestamp,
-		// Deprecated fields not set (omitempty)
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -343,14 +341,23 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		return nil, err
 	}
 
-	return &SyncResponse{
-		ResponderID:   peer.ID,
-		Zone:          req.Zone,
+	syncResp := &SyncResponse{
+		ResponderID:    peer.ID,
+		Zone:           req.Zone,
 		DistributionID: distributionID,
-		Status:        resp.Status,
-		Message:       resp.Message,
-		Timestamp:     time.Now(),
-	}, nil
+		Status:         resp.Status,
+		Message:        resp.Message,
+		Timestamp:      time.Now(),
+	}
+
+	// A non-ok confirmation is an application-level rejection — return as error
+	// so the queue knows to retry.
+	if resp.Status == ConfirmFailed {
+		return syncResp, NewTransportError("DNS", "Sync", peer.ID,
+			fmt.Errorf("recipient rejected sync: %s", resp.Message), true)
+	}
+
+	return syncResp, nil
 }
 
 // Relocate requests a peer to use a different address via DNS.
@@ -693,14 +700,56 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		t.distributionMarkCompleted(qname)
 	}
 
-	// For confirmation-based operations, wait for async confirmation
-	// For now, treat NOTIFY ACK as success
-	// TODO: Implement async confirmation waiting when needed
-	return &operationResponse{
-		Status:  ConfirmSuccess,
-		Message: "NOTIFY acknowledged",
-		Error:   nil,
-	}, nil
+	// Try to extract application-level confirmation from the DNS response EDNS0.
+	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
+	if confirm := extractConfirmFromResponse(res); confirm != nil {
+		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q",
+			opType, distributionID, peer.ID, confirm.Status, confirm.Message)
+		status := ConfirmSuccess
+		if confirm.Status != "ok" {
+			status = ConfirmFailed
+		}
+		return &operationResponse{
+			Status:  status,
+			Message: confirm.Message,
+		}, nil
+	}
+
+	// No EDNS0 confirmation payload — DNS-level ACK (NOERROR) is NOT sufficient.
+	// The recipient must include an explicit EDNS0 CHUNK confirmation to prove
+	// it received and processed the message.
+	log.Printf("DNS: NOTIFY %s %s to %s: DNS ACK received but no EDNS0 confirmation payload — treating as unconfirmed",
+		opType, distributionID, peer.ID)
+	return nil, NewTransportError("DNS", opType, peer.ID,
+		fmt.Errorf("no EDNS0 confirmation in response (DNS-level ACK only)"), true)
+}
+
+// extractConfirmFromResponse extracts a JSON confirmation from the EDNS0 CHUNK option in a DNS response.
+// Returns nil if no confirmation is present.
+func extractConfirmFromResponse(res *dns.Msg) *struct {
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+	DistributionID string `json:"distribution_id"`
+} {
+	opt := res.IsEdns0()
+	if opt == nil {
+		return nil
+	}
+	for _, o := range opt.Option {
+		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			var confirm struct {
+				Type          string `json:"type"`
+				Status        string `json:"status"`
+				Message       string `json:"message"`
+				DistributionID string `json:"distribution_id"`
+			}
+			if err := json.Unmarshal(local.Data, &confirm); err == nil && confirm.Type == "confirm" {
+				return &confirm
+			}
+		}
+	}
+	return nil
 }
 
 // HandleIncomingConfirmation processes an incoming confirmation from the DNS responder.
@@ -730,22 +779,22 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 // These are exported so hsync_transport.go can access parsed payload fields.
 
 // DnsHelloPayload represents a hello message payload.
-// This struct can parse both old DNS-specific format and new unified format.
+// Parses both standard (MessageType/MyIdentity) and legacy (type/sender_id) fields.
 type DnsHelloPayload struct {
-	// Old format fields
+	// Legacy fields (fallback)
 	Type         string   `json:"type"`
-	SenderID     string   `json:"sender_id"`    // Old format: sender_id
+	SenderID     string   `json:"sender_id"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	SharedZones  []string `json:"shared_zones,omitempty"` // Old format: shared_zones (array)
+	SharedZones  []string `json:"shared_zones,omitempty"`
 	Timestamp    int64    `json:"timestamp"`
 	Nonce        string   `json:"nonce,omitempty"`
 
-	// New unified format fields (AgentHelloPost compatible)
-	MessageType  int    `json:"MessageType"`   // New format: MessageType (1 = Hello)
-	MyIdentity   string `json:"MyIdentity"`    // New format: MyIdentity
-	YourIdentity string `json:"YourIdentity"`  // New format: YourIdentity
-	Zone         string `json:"Zone"`          // New format: Zone (single zone)
-	Time         string `json:"Time"`          // New format: Time (RFC3339 timestamp)
+	// Standard fields
+	MessageType  string `json:"MessageType"`   // "hello"
+	MyIdentity   string `json:"MyIdentity"`
+	YourIdentity string `json:"YourIdentity"`
+	Zone         string `json:"Zone"`
+	Time         string `json:"Time"` // RFC3339 timestamp
 }
 
 // GetSenderID returns the sender ID from either old or new format.
@@ -765,22 +814,22 @@ func (d *DnsHelloPayload) GetSharedZones() []string {
 }
 
 // DnsBeatPayload represents a beat/heartbeat message payload.
-// This struct can parse both old DNS-specific format and new unified format.
+// Parses both standard (MessageType/MyIdentity) and legacy (type/sender_id) fields.
 type DnsBeatPayload struct {
-	// Old format fields
+	// Legacy fields (fallback)
 	Type      string `json:"type"`
 	SenderID  string `json:"sender_id"`
 	Timestamp int64  `json:"timestamp"`
 	Sequence  uint64 `json:"sequence"`
 	State     string `json:"state,omitempty"`
 
-	// New unified format fields (AgentBeatPost compatible)
-	MessageType    int      `json:"MessageType"`    // New format: MessageType (2 = Beat)
-	MyIdentity     string   `json:"MyIdentity"`     // New format: MyIdentity
-	YourIdentity   string   `json:"YourIdentity"`   // New format: YourIdentity
-	MyBeatInterval uint32   `json:"MyBeatInterval"` // New format: MyBeatInterval
-	Zones          []string `json:"Zones"`          // New format: Zones
-	Time           string   `json:"Time"`           // New format: Time (RFC3339)
+	// Standard fields
+	MessageType    string   `json:"MessageType"` // "beat"
+	MyIdentity     string   `json:"MyIdentity"`
+	YourIdentity   string   `json:"YourIdentity"`
+	MyBeatInterval uint32   `json:"MyBeatInterval"`
+	Zones          []string `json:"Zones"`
+	Time           string   `json:"Time"` // RFC3339
 }
 
 // GetSenderID returns the sender ID from either old or new format.
@@ -792,25 +841,16 @@ func (d *DnsBeatPayload) GetSenderID() string {
 }
 
 // DnsSyncPayload represents a sync message payload.
-// This struct can parse both old DNS-specific format and new unified format.
 type DnsSyncPayload struct {
-	// Old format fields
-	Type          string   `json:"type"`
-	SenderID      string   `json:"sender_id"`
-	Zone          string   `json:"zone"` // Common to both formats
-	SyncType      string   `json:"sync_type"`
-	Records       []string `json:"records"` // Old format: records
-	Serial        uint32   `json:"serial"`
-	DistributionID string   `json:"correlation_id"`
-	Timestamp     int64    `json:"timestamp"`
-
-	// New unified format fields (AgentMsgPost compatible)
-	MessageType  int      `json:"MessageType"`  // New format: MessageType (3-5)
-	MyIdentity   string   `json:"MyIdentity"`   // New format: MyIdentity
-	YourIdentity string   `json:"YourIdentity"` // New format: YourIdentity
-	RRs          []string `json:"RRs"`          // New format: RRs
-	Time         string   `json:"Time"`         // New format: Time (RFC3339)
-	RfiType      string   `json:"RfiType"`      // New format: RfiType
+	MessageType    string              `json:"MessageType"`
+	MyIdentity     string              `json:"MyIdentity"`
+	YourIdentity   string              `json:"YourIdentity"`
+	Zone           string              `json:"Zone"`
+	Records        map[string][]string `json:"Records"`    // RRs grouped by owner name
+	Time           string              `json:"Time"`       // RFC3339 timestamp
+	RfiType        string              `json:"RfiType"`
+	Timestamp      int64               `json:"timestamp"`  // Unix timestamp (legacy compat)
+	DistributionID string              `json:"correlation_id"`
 }
 
 // DnsAddress represents an address in DNS payloads.
@@ -841,36 +881,30 @@ type DnsConfirmPayload struct {
 	Timestamp     int64  `json:"timestamp"`
 }
 
-// GetSenderID returns the sender ID from either old or new format.
+// GetSenderID returns the sender ID.
 func (d *DnsSyncPayload) GetSenderID() string {
-	if d.MyIdentity != "" {
-		return d.MyIdentity // New format
-	}
-	return d.SenderID // Old format
+	return d.MyIdentity
 }
 
-// GetRecords returns records from either old or new format.
-func (d *DnsSyncPayload) GetRecords() []string {
-	if len(d.RRs) > 0 {
-		return d.RRs // New format
-	}
-	return d.Records // Old format
+// GetRecords returns records grouped by owner name.
+func (d *DnsSyncPayload) GetRecords() map[string][]string {
+	return d.Records
 }
 
 // DnsPingPayload represents a ping (liveness) message payload.
-// This struct can parse both old DNS-specific format and new unified format.
+// Parses both standard (MessageType/MyIdentity) and legacy (type/sender_id) fields.
 type DnsPingPayload struct {
-	// Old format fields
+	// Legacy fields (fallback)
 	Type      string `json:"type"`
 	SenderID  string `json:"sender_id"`
 	Nonce     string `json:"nonce"` // Common to both formats
 	Timestamp int64  `json:"timestamp"`
 
-	// New unified format fields (AgentPingPost compatible)
-	MessageType  int    `json:"MessageType"`  // New format: MessageType (6 = Ping)
-	MyIdentity   string `json:"MyIdentity"`   // New format: MyIdentity
-	YourIdentity string `json:"YourIdentity"` // New format: YourIdentity
-	Time         string `json:"Time"`         // New format: Time (RFC3339)
+	// Standard fields
+	MessageType  string `json:"MessageType"` // "ping"
+	MyIdentity   string `json:"MyIdentity"`
+	YourIdentity string `json:"YourIdentity"`
+	Time         string `json:"Time"` // RFC3339
 }
 
 // GetSenderID returns the sender ID from either old or new format.

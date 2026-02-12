@@ -64,6 +64,11 @@ type ZoneData struct {
 	//	RRs            RRArray
 	Data         cmap.ConcurrentMap[string, OwnerData]
 	CombinerData *cmap.ConcurrentMap[string, OwnerData]
+	// AgentContributions stores per-agent contributions for the combiner.
+	// Key: agentID (e.g. "agent.alpha.dnslab."), Value: map[owner]map[rrtype]core.RRset
+	// When merging, all agents' contributions for the same owner/rrtype are combined
+	// into a single RRset in CombinerData.
+	AgentContributions map[string]map[string]map[uint16]core.RRset
 	Ready        bool   // true if zd.Data has been populated (from file or upstream)
 	XfrType      string // axfr | ixfr
 	Logger       *log.Logger

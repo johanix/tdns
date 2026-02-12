@@ -624,10 +624,18 @@ func listKnownPeers(conf *Config) []PeerInfo {
 			agentIDFqdn := dns.Fqdn(string(agent.Identity))
 
 			// Special handling for combiner virtual peer
-			isCombiner := agent.Identity == "combiner"
+			// Check if this agent is the configured combiner (by identity)
+			isCombiner := false
+			if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
+				isCombiner = string(agent.Identity) == conf.Agent.Combiner.Identity ||
+					         dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Combiner.Identity)
+			} else {
+				// Fallback to old hardcoded "combiner" for backward compatibility
+				isCombiner = agent.Identity == "combiner"
+			}
+
 			peerType := "agent"
 			if isCombiner {
-				agentIDFqdn = "combiner" // Don't add trailing dot for combiner
 				peerType = "combiner"
 			}
 
@@ -636,6 +644,14 @@ func listKnownPeers(conf *Config) []PeerInfo {
 				key := agentIDFqdn + ":API"
 				if !seen[key] {
 					seen[key] = true
+
+					// Compute effective state: if agent has established relationship but no shared zones, show LEGACY
+					// (but not for combiner, which doesn't have shared zones by design)
+					effectiveState := agent.ApiDetails.State
+					if !isCombiner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+						effectiveState = AgentStateLegacy
+					}
+
 					peerInfo := PeerInfo{
 						PeerID:      agentIDFqdn,
 						PeerType:    peerType,
@@ -647,7 +663,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						Port:        agent.ApiDetails.Port,
 						Addresses:   agent.ApiDetails.Addrs,
 						HasTLSA:     agent.ApiDetails.TlsaRR != nil,
-						State:       AgentStateToString[agent.ApiDetails.State],
+						State:       AgentStateToString[effectiveState],
 						ContactInfo: agent.ApiDetails.ContactInfo,
 					}
 					if !agent.ApiDetails.HelloTime.IsZero() {
@@ -686,6 +702,14 @@ func listKnownPeers(conf *Config) []PeerInfo {
 				key := agentIDFqdn + ":DNS"
 				if !seen[key] {
 					seen[key] = true
+
+					// Compute effective state: if agent has established relationship but no shared zones, show LEGACY
+					// (but not for combiner, which doesn't have shared zones by design)
+					effectiveState := agent.DnsDetails.State
+					if !isCombiner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+						effectiveState = AgentStateLegacy
+					}
+
 					peerInfo := PeerInfo{
 						PeerID:       agentIDFqdn,
 						PeerType:     peerType,
@@ -700,7 +724,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						KeyAlgorithm: agent.DnsDetails.KeyAlgorithm,
 						HasJWK:       agent.DnsDetails.JWKData != "",
 						HasKEY:       agent.DnsDetails.KeyRR != nil,
-						State:        AgentStateToString[agent.DnsDetails.State],
+						State:        AgentStateToString[effectiveState],
 						ContactInfo:  agent.DnsDetails.ContactInfo,
 					}
 					if !agent.DnsDetails.HelloTime.IsZero() {

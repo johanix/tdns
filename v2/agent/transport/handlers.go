@@ -172,13 +172,12 @@ func HandleSync(ctx *MessageContext) error {
 	ctx.Data["message_type"] = "sync"
 	ctx.Data["incoming_message"] = syncMsg
 
-	// Create sync acknowledgment response
+	// Create sync acknowledgment response — format must match extractConfirmFromResponse
 	ack := map[string]interface{}{
-		"type":        "confirm",
-		"ok":          true,
-		"original_id": ctx.DistributionID,
-		"message_type": "sync",
-		"sender_id":   ctx.PeerID,
+		"type":            "confirm",
+		"status":          "ok",
+		"distribution_id": ctx.DistributionID,
+		"message":         fmt.Sprintf("sync received from %s", ctx.PeerID),
 	}
 
 	ackPayload, err := json.Marshal(ack)

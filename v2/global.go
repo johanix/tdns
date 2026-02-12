@@ -31,9 +31,10 @@ type GlobalStuff struct {
 	BaseUri     string
 	Port        uint16
 	Address     string
-	App         AppDetails
-	ServerSVCB  *dns.SVCB // ALPN for DoH/DoQ
-	TsigKeys    map[string]*TsigDetails
+	App          AppDetails
+	ServerSVCB   *dns.SVCB // ALPN for DoH/DoQ
+	TsigKeys     map[string]*TsigDetails
+	CombinerConf *LocalCombinerConf // Set during init for combiner apps
 }
 
 var Globals = GlobalStuff{

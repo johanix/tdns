@@ -59,6 +59,10 @@ type ChunkNotifyHandler struct {
 	// but don't have their verification key yet. Handler should trigger discovery asynchronously.
 	OnPeerDiscoveryNeeded func(peerID string)
 
+	// OnConfirmationReceived is called when an async confirmation is received for a distribution ID.
+	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue.
+	OnConfirmationReceived func(distributionID string)
+
 	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
 	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
 	unsolicitedCount uint64
@@ -323,56 +327,37 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, dist
 
 // parsePayload parses the JSON payload to determine message type and content.
 func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
-	// Try parsing new unified format first (MessageType as int)
-	var unifiedFormat struct {
-		MessageType  int    `json:"MessageType"`  // New unified format
-		MyIdentity   string `json:"MyIdentity"`   // New unified format
-		Zone         string `json:"Zone"`         // New unified format
-		Type         string `json:"type"`         // Legacy format
-		SenderID     string `json:"sender_id"`    // Legacy format
-		LegacyZone   string `json:"zone"`         // Legacy format
+	var fields struct {
+		MessageType string `json:"MessageType"` // Standard format (string: "sync", "beat", etc.)
+		Type        string `json:"type"`        // Legacy format (fallback)
+		MyIdentity  string `json:"MyIdentity"`
+		SenderID    string `json:"sender_id"` // Legacy
+		Zone        string `json:"Zone"`
+		LegacyZone  string `json:"zone"` // Legacy
 	}
-	if err := json.Unmarshal(payload, &unifiedFormat); err != nil {
+	if err := json.Unmarshal(payload, &fields); err != nil {
 		return nil, fmt.Errorf("failed to parse message: %w", err)
 	}
 
-	// Determine message type (prefer unified format)
-	var msgType string
-	if unifiedFormat.MessageType > 0 {
-		// New unified format: convert MessageType int to string
-		switch unifiedFormat.MessageType {
-		case 1:
-			msgType = "hello"
-		case 2:
-			msgType = "beat"
-		case 3:
-			msgType = "sync"
-		case 4:
-			msgType = "rfi"
-		case 5:
-			msgType = "status"
-		case 6:
-			msgType = "ping"
-		default:
-			msgType = fmt.Sprintf("unknown-%d", unifiedFormat.MessageType)
-		}
-	} else if unifiedFormat.Type != "" {
-		// Legacy format
-		msgType = unifiedFormat.Type
-	} else {
+	// Determine message type: prefer MessageType, fall back to legacy "type"
+	msgType := fields.MessageType
+	if msgType == "" {
+		msgType = fields.Type
+	}
+	if msgType == "" {
 		return nil, fmt.Errorf("no message type found in payload")
 	}
 
-	// Get sender ID (prefer unified format)
-	senderID := unifiedFormat.MyIdentity
+	// Get sender ID: prefer MyIdentity, fall back to legacy sender_id
+	senderID := fields.MyIdentity
 	if senderID == "" {
-		senderID = unifiedFormat.SenderID
+		senderID = fields.SenderID
 	}
 
-	// Get zone (prefer unified format)
-	zone := unifiedFormat.Zone
+	// Get zone: prefer Zone, fall back to legacy zone
+	zone := fields.Zone
 	if zone == "" {
-		zone = unifiedFormat.LegacyZone
+		zone = fields.LegacyZone
 	}
 
 	return &IncomingMessage{
@@ -450,6 +435,11 @@ func (h *ChunkNotifyHandler) handleConfirmation(msg *IncomingMessage) {
 			Message:       confirm.Message,
 			Timestamp:     time.Unix(confirm.Timestamp, 0),
 		})
+	}
+
+	// Notify the reliable message queue that this distribution was confirmed
+	if h.OnConfirmationReceived != nil && confirm.DistributionID != "" && status == ConfirmSuccess {
+		h.OnConfirmationReceived(confirm.DistributionID)
 	}
 }
 

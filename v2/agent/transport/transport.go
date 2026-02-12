@@ -140,14 +140,14 @@ type BeatResponse struct {
 // Important: All sync operations are zone-specific. An agent can only
 // make statements about zones and data under its own control.
 type SyncRequest struct {
-	SenderID      string    // Identity of the sender
-	Zone          string    // The zone this sync applies to (FQDN)
-	SyncType      SyncType  // What type of data is being synced
-	Records       []string  // The actual RRs in presentation format
-	Timestamp     time.Time // When this data was generated
-	Serial        uint32    // Zone serial at time of sync
-	DistributionID string    // For tracking confirmations
-	Signature     []byte    // Optional signature over the request
+	SenderID       string              // Identity of the sender
+	Zone           string              // The zone this sync applies to (FQDN)
+	SyncType       SyncType            // What type of data is being synced
+	Records        map[string][]string // RRs grouped by owner name (owner → []RR strings)
+	Timestamp      time.Time           // When this data was generated
+	Serial         uint32              // Zone serial at time of sync
+	DistributionID string              // For tracking confirmations
+	Signature      []byte              // Optional signature over the request
 }
 
 // SyncResponse represents a synchronization response.

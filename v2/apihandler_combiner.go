@@ -47,7 +47,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 
 		switch cp.Command {
 		case "add":
-			err := zd.AddCombinerDataNG(cp.Data)
+			err := zd.AddCombinerDataNG("", cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

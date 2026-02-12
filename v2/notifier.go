@@ -95,7 +95,9 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 		log.Printf("Error: Unsupported notify type: %q", dns.TypeToString[ntype])
 	}
 
+	successCount := 0
 	for _, dst := range targets {
+		log.Printf("NOTIFY: Sending NOTIFY(%s) for zone %q to %s", dns.TypeToString[ntype], zd.ZoneName, dst)
 		if Globals.Verbose {
 			log.Printf("Sending NOTIFY(%q) to %q\n", dns.TypeToString[ntype], dst)
 		}
@@ -125,8 +127,13 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 			if Globals.Verbose {
 				fmt.Printf("... and got rcode NOERROR back (good)\n")
 			}
-			return res.Rcode, nil
+			successCount++
+			// Continue to send NOTIFYs to all targets, don't return early
 		}
 	}
-	return dns.RcodeServerFailure, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+	if successCount == 0 {
+		return dns.RcodeServerFailure, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+	}
+	log.Printf("NOTIFY: Successfully sent NOTIFY(%s) for zone %q to %d/%d targets", dns.TypeToString[ntype], zd.ZoneName, successCount, len(targets))
+	return dns.RcodeSuccess, nil
 }

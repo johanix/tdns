@@ -191,6 +191,7 @@ func init() {
 	AgentCmd.AddCommand(agentLocalCmd)
 	AgentCmd.AddCommand(agentDiscoverCmd)
 	AgentCmd.AddCommand(agentPeersCmd)
+	AgentCmd.AddCommand(DebugAgentCmd) // Add debug commands under agent
 
 	// Add subcommands under "agent peers"
 	agentPeersCmd.AddCommand(agentPeersZonesCmd)

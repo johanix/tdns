@@ -174,47 +174,36 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 }
 
 // DetermineMessageType parses the payload to determine the message type.
-// Handles both legacy string "type" field and numeric "MessageType" field (AgentMsg enum).
+// MessageType is now a string field ("sync", "beat", "ping", etc.).
+// Falls back to legacy "type" field for backwards compatibility.
 func DetermineMessageType(payload []byte) MessageType {
-	// Try parsing as struct with string "type" field (new format, e.g., confirmations)
-	var msgWithType struct {
-		Type string `json:"type"`
+	var fields struct {
+		MessageType string `json:"MessageType"` // Standard format (string)
+		Type        string `json:"type"`        // Legacy format (fallback)
 	}
-	if err := json.Unmarshal(payload, &msgWithType); err == nil && msgWithType.Type != "" {
-		switch msgWithType.Type {
-		case "confirm":
-			return MessageType("confirm")
-		case "ping":
-			return MessageType("ping")
-		case "hello":
-			return MessageType("hello")
-		case "beat":
-			return MessageType("beat")
-		case "sync":
-			return MessageType("sync")
-		case "relocate":
-			return MessageType("relocate")
-		}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return MessageTypeUnknown
 	}
 
-	// Try parsing as struct with numeric "MessageType" field (AgentMsg enum)
-	// MessageType values: 1=hello, 2=beat, 3=notify, 4=rfi, 5=status, 6=ping
-	var msgWithEnum struct {
-		MessageType uint8 `json:"MessageType"`
-	}
-	if err := json.Unmarshal(payload, &msgWithEnum); err == nil && msgWithEnum.MessageType > 0 {
-		switch msgWithEnum.MessageType {
-		case 1: // AgentMsgHello
-			return MessageType("hello")
-		case 2: // AgentMsgBeat
-			return MessageType("beat")
-		case 3: // AgentMsgNotify (sync messages)
-			return MessageType("sync")
-		case 6: // AgentMsgPing
-			return MessageType("ping")
-		// Note: relocate messages don't use AgentMsg enum currently
-		}
+	msgType := fields.MessageType
+	if msgType == "" {
+		msgType = fields.Type
 	}
 
-	return MessageTypeUnknown
+	switch msgType {
+	case "hello":
+		return MessageType("hello")
+	case "beat":
+		return MessageType("beat")
+	case "sync":
+		return MessageType("sync")
+	case "ping":
+		return MessageType("ping")
+	case "confirm":
+		return MessageType("confirm")
+	case "relocate":
+		return MessageType("relocate")
+	default:
+		return MessageTypeUnknown
+	}
 }

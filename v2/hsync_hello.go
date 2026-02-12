@@ -182,7 +182,12 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 
 	default:
 		log.Printf("SingleHello: Our HELLO to %q returned: %s", agent.Identity, ahr.Msg)
-		agent.ApiDetails.State = AgentStateIntroduced
+		// Only transition to INTRODUCED if not already OPERATIONAL or better
+		// This prevents Hello messages from downgrading state (e.g., after retry)
+		if agent.ApiDetails.State < AgentStateIntroduced {
+			agent.ApiDetails.State = AgentStateIntroduced
+			log.Printf("SingleHello: Updated agent %s API state to INTRODUCED after successful Hello", agent.Identity)
+		}
 		agent.ApiDetails.LatestError = ""
 	}
 	ar.S.Set(agent.Identity, agent)

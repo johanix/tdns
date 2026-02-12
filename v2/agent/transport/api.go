@@ -361,7 +361,7 @@ type apiSyncRequest struct {
 	YourIdentity  string   `json:"your_identity"`
 	Zone          string   `json:"zone"`
 	SyncType      string   `json:"sync_type"`
-	Records       []string `json:"records"`
+	Records       map[string][]string `json:"records"`
 	Serial        uint32   `json:"serial"`
 	DistributionID string   `json:"distribution_id"`
 	Timestamp     int64    `json:"timestamp"`

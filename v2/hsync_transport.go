@@ -17,6 +17,7 @@ import (
 
 	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // generatePingNonce returns a random nonce for ping requests.
@@ -57,6 +58,12 @@ type TransportManager struct {
 
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
+
+	// combinerID is the AgentId of the combiner (from config), used by EnqueueForCombiner.
+	combinerID AgentId
+
+	// reliableQueue handles retry-until-confirmed delivery for outgoing sync messages.
+	reliableQueue *ReliableMessageQueue
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -84,6 +91,10 @@ type TransportManagerConfig struct {
 
 	// SupportedMechanisms lists active transports ("api", "dns"); default: both if configured
 	SupportedMechanisms []string
+
+	// CombinerID is the identity of the combiner for this agent (from config).
+	// Used by EnqueueForCombiner to know which AgentRegistry entry is the combiner.
+	CombinerID string
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -104,7 +115,13 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		agentRegistry:       cfg.AgentRegistry,
 		agentQs:             cfg.AgentQs,
 		SupportedMechanisms: supportedMechanisms,
+		combinerID:          AgentId(cfg.CombinerID),
 	}
+
+	// Create reliable message queue for outgoing sync messages
+	tm.reliableQueue = NewReliableMessageQueue(&ReliableMessageQueueConfig{
+		AgentRegistry: cfg.AgentRegistry,
+	})
 
 	// Create API transport if supported
 	if tm.isTransportSupported("api") {
@@ -182,6 +199,13 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		// DoS mitigation: Check authorization BEFORE expensive operations (decryption, query fetch)
 		tm.ChunkHandler.IsAgentAuthorized = func(senderID string, zone string) (bool, string) {
 			return tm.IsAgentAuthorized(senderID, zone)
+		}
+
+		// Wire confirmation callback for reliable message queue
+		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string) {
+			if tm.reliableQueue != nil {
+				tm.reliableQueue.MarkConfirmed(distributionID)
+			}
 		}
 
 		// Trigger discovery when we receive messages from authorized but undiscovered peers
@@ -332,7 +356,12 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
-			agent.DnsDetails.State = AgentStateIntroduced
+			// Only transition to INTRODUCED if not already OPERATIONAL or better
+			// This prevents Hello messages from downgrading state (e.g., after peer restart)
+			if agent.DnsDetails.State < AgentStateIntroduced {
+				agent.DnsDetails.State = AgentStateIntroduced
+				log.Printf("TransportManager: Updated agent %s DNS state to INTRODUCED after receiving Hello", senderID)
+			}
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
@@ -472,10 +501,9 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 	records := payload.GetRecords()      // Use helper method to get records from either format
 	zone := payload.Zone
 
-	// Determine message type (NOTIFY, RFI, or STATUS)
-	messageType := AgentMsgNotify // Default to NOTIFY for backward compatibility
-	if payload.MessageType != 0 {
-		// New format includes MessageType field
+	// Determine message type (sync, rfi, or status)
+	messageType := AgentMsgNotify // Default to sync for backward compatibility
+	if payload.MessageType != "" {
 		messageType = AgentMsg(payload.MessageType)
 	}
 	msgTypeStr := core.AgentMsgToString[core.AgentMsg(messageType)]
@@ -508,7 +536,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			MessageType: messageType,
 			MyIdentity:  AgentId(senderID),
 			Zone:        ZoneName(zone),
-			RRs:         records,
+			Records:     records,
 			Time:        time.Unix(payload.Timestamp, 0),
 			RfiType:     payload.RfiType, // Include RfiType for RFI messages
 		},
@@ -519,8 +547,8 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		log.Printf("TransportManager: Routed DNS %s from %s (zone: %s) to hsyncengine",
 			msgTypeStr, senderID, zone)
 
-		// Send confirmation back via DNS
-		go tm.sendSyncConfirmation(msg, payload)
+		// Note: confirmation is already sent inline in the DNS response by HandleSync +
+		// SendResponseMiddleware (EDNS0 CHUNK ack). No separate NOTIFY needed.
 	default:
 		log.Printf("TransportManager: Message channel full, dropping %s from %s", msgTypeStr, senderID)
 	}
@@ -558,9 +586,10 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 	}
 
 	// Get or create peer
-	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
+	senderID := payload.GetSenderID()
+	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		log.Printf("TransportManager: Cannot send confirmation - peer %s not in registry", payload.SenderID)
+		log.Printf("TransportManager: Cannot send confirmation - peer %s not in registry", senderID)
 		return
 	}
 
@@ -727,7 +756,12 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else {
 			log.Printf("TransportManager: API Hello to %s succeeded", peer.ID)
-			agent.ApiDetails.State = AgentStateIntroduced
+			// Only transition to INTRODUCED if not already OPERATIONAL or better
+			// This prevents Hello messages from downgrading state (e.g., after retry or peer restart)
+			if agent.ApiDetails.State < AgentStateIntroduced {
+				agent.ApiDetails.State = AgentStateIntroduced
+				log.Printf("TransportManager: Updated agent %s API state to INTRODUCED after successful Hello", peer.ID)
+			}
 			agent.ApiDetails.HelloTime = time.Now()
 			agent.ApiDetails.LastContactTime = time.Now()
 			agent.ApiDetails.LatestError = ""
@@ -904,4 +938,260 @@ func (tm *TransportManager) HasDNSTransport(agent *Agent) bool {
 // HasAPITransport returns true if API transport is available for an agent.
 func (tm *TransportManager) HasAPITransport(agent *Agent) bool {
 	return tm.APITransport != nil && agent.ApiMethod
+}
+
+// --- Reliable message queue integration ---
+
+// StartReliableQueue wires up the sendFunc and starts the queue's background worker.
+// Must be called after TransportManager is fully initialized (transports, combiner peer, etc.).
+func (tm *TransportManager) StartReliableQueue(ctx context.Context) {
+	if tm.reliableQueue == nil {
+		log.Printf("TransportManager: No reliable queue configured, skipping")
+		return
+	}
+
+	// Wire sendFunc: the queue calls this to actually deliver a message.
+	tm.reliableQueue.SetSendFunc(func(ctx context.Context, msg *OutgoingMessage) error {
+		return tm.deliverMessage(ctx, msg)
+	})
+
+	go tm.reliableQueue.Start(ctx)
+	log.Printf("TransportManager: Reliable message queue started")
+}
+
+// deliverMessage is the sendFunc implementation. It converts an OutgoingMessage
+// into the appropriate transport format and sends it.
+func (tm *TransportManager) deliverMessage(ctx context.Context, msg *OutgoingMessage) error {
+	switch msg.RecipientType {
+	case "combiner":
+		return tm.deliverToCombiner(ctx, msg)
+	case "agent":
+		return tm.deliverToAgent(ctx, msg)
+	default:
+		return fmt.Errorf("unknown recipient type: %s", msg.RecipientType)
+	}
+}
+
+// deliverToCombiner sends a sync message to the combiner via the transport layer.
+func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *OutgoingMessage) error {
+	if tm.agentRegistry == nil {
+		return fmt.Errorf("no agent registry")
+	}
+
+	combiner, exists := tm.agentRegistry.S.Get(msg.RecipientID)
+	if !exists {
+		return fmt.Errorf("combiner %q not found in AgentRegistry", msg.RecipientID)
+	}
+
+	// Build transport peer and sync request
+	peer := tm.SyncPeerFromAgent(combiner)
+
+	// Convert ZoneUpdate to flat record list for transport
+	records := zoneUpdateToGroupedRecords(msg.Update)
+
+	syncReq := &transport.SyncRequest{
+		SenderID:       tm.LocalID,
+		Zone:           string(msg.Zone),
+		Records:        records,
+		Timestamp:      msg.CreatedAt,
+		DistributionID: msg.DistributionID,
+	}
+
+	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+	return err
+}
+
+// deliverToAgent sends a sync message to a remote agent via the transport layer.
+func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMessage) error {
+	if tm.agentRegistry == nil {
+		return fmt.Errorf("no agent registry")
+	}
+
+	agent, exists := tm.agentRegistry.S.Get(msg.RecipientID)
+	if !exists {
+		return fmt.Errorf("agent %q not found in AgentRegistry", msg.RecipientID)
+	}
+
+	peer := tm.SyncPeerFromAgent(agent)
+
+	// Convert ZoneUpdate to flat record list for transport
+	records := zoneUpdateToGroupedRecords(msg.Update)
+
+	syncReq := &transport.SyncRequest{
+		SenderID:       tm.LocalID,
+		Zone:           string(msg.Zone),
+		Records:        records,
+		Timestamp:      msg.CreatedAt,
+		DistributionID: msg.DistributionID,
+	}
+
+	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+	return err
+}
+
+// EnqueueForCombiner enqueues a zone update for reliable delivery to the combiner.
+// Called by SynchedDataEngine when a zone update needs to reach the combiner.
+func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate) error {
+	combinerID, err := tm.getCombinerID()
+	if err != nil {
+		return fmt.Errorf("EnqueueForCombiner: %w", err)
+	}
+
+	msg := &OutgoingMessage{
+		DistributionID: GenerateQueueDistributionID(),
+		RecipientID:    combinerID,
+		RecipientType:  "combiner",
+		Zone:           zone,
+		Update:         update,
+		Priority:       PriorityHigh,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+	}
+
+	return tm.reliableQueue.Enqueue(msg)
+}
+
+// EnqueueForZoneAgents enqueues a zone update for reliable delivery to all
+// remote agents involved with this zone (as determined by AgentRegistry).
+// Called by SynchedDataEngine when a locally-originated update needs to
+// reach all peer agents.
+func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpdate) error {
+	agents, err := tm.getAllAgentsForZone(zone)
+	if err != nil {
+		return fmt.Errorf("EnqueueForZoneAgents: %w", err)
+	}
+
+	if len(agents) == 0 {
+		log.Printf("TransportManager: No remote agents for zone %s, nothing to enqueue", zone)
+		return nil
+	}
+
+	var enqueueErrors []string
+	for _, agentID := range agents {
+		msg := &OutgoingMessage{
+			DistributionID: GenerateQueueDistributionID(),
+			RecipientID:    agentID,
+			RecipientType:  "agent",
+			Zone:           zone,
+			Update:         update,
+			Priority:       PriorityNormal,
+			CreatedAt:      time.Now(),
+			ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+		}
+
+		if err := tm.reliableQueue.Enqueue(msg); err != nil {
+			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", agentID, err))
+		}
+	}
+
+	if len(enqueueErrors) > 0 {
+		return fmt.Errorf("failed to enqueue for some agents: %v", enqueueErrors)
+	}
+
+	log.Printf("TransportManager: Enqueued zone update for %d agents (zone: %s)", len(agents), zone)
+	return nil
+}
+
+// GetQueueStats returns statistics from the reliable message queue.
+func (tm *TransportManager) GetQueueStats() QueueStats {
+	if tm.reliableQueue == nil {
+		return QueueStats{}
+	}
+	return tm.reliableQueue.GetStats()
+}
+
+// GetQueuePendingMessages returns a snapshot of all pending messages in the queue.
+func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
+	if tm.reliableQueue == nil {
+		return nil
+	}
+	return tm.reliableQueue.GetPendingMessages()
+}
+
+// MarkDeliveryConfirmed marks a queued message as confirmed by the recipient.
+// Called when a confirmation is received for a distribution ID.
+func (tm *TransportManager) MarkDeliveryConfirmed(distributionID string) bool {
+	if tm.reliableQueue == nil {
+		return false
+	}
+	return tm.reliableQueue.MarkConfirmed(distributionID)
+}
+
+// --- Helper methods ---
+
+// getCombinerID returns the combiner's AgentId, set at construction time from config.
+func (tm *TransportManager) getCombinerID() (AgentId, error) {
+	if tm.combinerID != "" {
+		return tm.combinerID, nil
+	}
+	return "", fmt.Errorf("combiner ID not configured")
+}
+
+// getAllAgentsForZone returns the AgentIds of all remote agents for a zone.
+// Uses AgentRegistry.GetZoneAgentData() which reads the HSYNC RRset.
+func (tm *TransportManager) getAllAgentsForZone(zone ZoneName) ([]AgentId, error) {
+	if tm.agentRegistry == nil {
+		return nil, fmt.Errorf("no agent registry")
+	}
+
+	zad, err := tm.agentRegistry.GetZoneAgentData(zone)
+	if err != nil {
+		return nil, err
+	}
+
+	var agents []AgentId
+	for _, agent := range zad.Agents {
+		agents = append(agents, agent.Identity)
+	}
+
+	return agents, nil
+}
+
+// zoneUpdateToGroupedRecords converts a ZoneUpdate into records grouped by owner name,
+// suitable for transport.SyncRequest.Records and core.AgentMsgPost.Records.
+//
+// ZoneUpdate has two fields: RRs (for local per-RR updates) and RRsets (for remote
+// full-replace updates). Some callers populate both with the same data, so we use
+// RRs if present, otherwise RRsets, to avoid duplicates.
+func zoneUpdateToGroupedRecords(update *ZoneUpdate) map[string][]string {
+	if update == nil {
+		return nil
+	}
+
+	records := make(map[string][]string)
+
+	if len(update.RRs) > 0 {
+		// Local update: use individual RRs
+		for _, rr := range update.RRs {
+			owner := rr.Header().Name
+			records[owner] = append(records[owner], rr.String())
+		}
+	} else {
+		// Remote update: use RRsets
+		for _, rrset := range update.RRsets {
+			for _, rr := range rrset.RRs {
+				owner := rr.Header().Name
+				records[owner] = append(records[owner], rr.String())
+			}
+		}
+	}
+
+	return records
+}
+
+// groupRRStringsByOwner converts a flat list of RR strings to records grouped by owner name.
+// Used when converting from management commands (AgentMgmtPost.RRs []string) to the
+// grouped format used by AgentMsgPost.Records and SyncRequest.Records.
+func groupRRStringsByOwner(rrStrings []string) map[string][]string {
+	records := make(map[string][]string)
+	for _, rrStr := range rrStrings {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			log.Printf("groupRRStringsByOwner: skipping unparseable RR %q: %v", rrStr, err)
+			continue
+		}
+		owner := rr.Header().Name
+		records[owner] = append(records[owner], rrStr)
+	}
+	return records
 }

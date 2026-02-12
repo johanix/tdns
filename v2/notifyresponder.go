@@ -103,7 +103,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 	}
 	ntype := dnr.Msg.Question[0].Qtype
 
-	log.Printf("NotifyResponder: Received NOTIFY(%s) for zone %q", dns.TypeToString[ntype], qname)
+	log.Printf("NOTIFY: Received NOTIFY(%s) for zone %q from %s", dns.TypeToString[ntype], qname, dnr.ResponseWriter.RemoteAddr())
 
 	m := new(dns.Msg)
 	m.SetReply(dnr.Msg)

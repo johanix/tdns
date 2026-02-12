@@ -37,15 +37,15 @@ func buildChunkQueryQname(receiverID, distID, senderID string) string {
 }
 
 // CombinerSyncRequest represents a sync request to the combiner.
-// This mirrors the DnsSyncPayload structure for consistency.
+// Uses the same data structure as CombinerPost.Data for transport neutrality.
 type CombinerSyncRequest struct {
-	SenderID      string    // Identity of the sending agent
-	Zone          string    // Zone being updated
-	SyncType      string    // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
-	Records       []string  // RR strings to apply
-	Serial        uint32    // Zone serial (optional)
-	DistributionID string    // Distribution ID for tracking
-	Timestamp     time.Time // When the request was created
+	SenderID      string              // Identity of the sending agent
+	Zone          string              // Zone being updated
+	SyncType      string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
+	Records       map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
+	Serial        uint32              // Zone serial (optional)
+	DistributionID string              // Distribution ID for tracking
+	Timestamp     time.Time           // When the request was created
 }
 
 // CombinerSyncResponse represents a confirmation from the combiner.
@@ -147,48 +147,45 @@ func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNo
 		log.Printf("CombinerChunkHandler: Decrypted payload (%d bytes): %s", len(payload), string(payload[:previewLen]))
 	}
 
-	// Parse type first to handle ping and beat without altering zone state
-	// Try string "type" field first (used by ping/sync messages)
-	var typeOnly struct {
-		Type string `json:"type"`
+	// Determine message type: check MessageType (string) first, fall back to legacy "type" field.
+	// Since MessageType is now a string ("sync", "beat", "ping", etc.), both formats
+	// are unified — no more numeric vs string dual dispatch.
+	var msgType struct {
+		MessageType string `json:"MessageType"` // New unified format
+		Type        string `json:"type"`        // Legacy format (fallback)
 	}
-	if err := json.Unmarshal(payload, &typeOnly); err == nil && typeOnly.Type != "" {
-		log.Printf("CombinerChunkHandler: Detected message type (string): %q", typeOnly.Type)
-		if typeOnly.Type == "ping" {
-			return h.handlePing(req, distributionID, payload)
-		}
-		if typeOnly.Type == "beat" {
-			return h.handleBeat(req, distributionID, payload)
-		}
+	if err := json.Unmarshal(payload, &msgType); err != nil {
+		log.Printf("CombinerChunkHandler: Failed to parse message type fields: %v", err)
+		return h.sendErrorResponse(req, distributionID, "failed to parse message type")
 	}
 
-	// Try numeric "MessageType" field (used by AgentBeatPost and other agent messages)
-	var msgTypeOnly struct {
-		MessageType uint8 `json:"MessageType"`
+	messageType := msgType.MessageType
+	if messageType == "" {
+		messageType = msgType.Type // Fall back to legacy "type" field
 	}
-	if err := json.Unmarshal(payload, &msgTypeOnly); err == nil && msgTypeOnly.MessageType > 0 {
-		log.Printf("CombinerChunkHandler: Detected MessageType (enum): %d", msgTypeOnly.MessageType)
-		// MessageType values: 1=hello, 2=beat, 3=notify(sync), 4=rfi, 5=status, 6=ping
-		if msgTypeOnly.MessageType == 2 { // AgentMsgBeat
-			return h.handleBeat(req, distributionID, payload)
+
+	log.Printf("CombinerChunkHandler: Message type: %q", messageType)
+
+	switch messageType {
+	case "ping":
+		return h.handlePing(req, distributionID, payload)
+
+	case "beat":
+		return h.handleBeat(req, distributionID, payload)
+
+	case "sync":
+		syncReq, err := h.parseAgentMsgNotify(payload, distributionID)
+		if err != nil {
+			log.Printf("CombinerChunkHandler: Failed to parse sync payload: %v", err)
+			return h.sendErrorResponse(req, distributionID, fmt.Sprintf("failed to parse sync: %v", err))
 		}
-		if msgTypeOnly.MessageType == 6 { // AgentMsgPing
-			return h.handlePing(req, distributionID, payload)
-		}
+		resp := h.ProcessUpdate(syncReq)
+		return h.sendConfirmResponse(req, resp)
+
+	default:
+		log.Printf("CombinerChunkHandler: Unknown message type %q", messageType)
+		return h.sendErrorResponse(req, distributionID, fmt.Sprintf("unknown message type %q", messageType))
 	}
-
-	// Parse the sync payload
-	syncReq, err := h.parseSyncPayload(payload, distributionID)
-	if err != nil {
-		log.Printf("CombinerChunkHandler: Failed to parse sync payload: %v", err)
-		return h.sendErrorResponse(req, distributionID, "failed to parse payload")
-	}
-
-	// Process the sync request
-	resp := h.ProcessUpdate(syncReq)
-
-	// Send confirmation response
-	return h.sendConfirmResponse(req, resp)
 }
 
 // extractDistributionIDAndControlZone derives distribution ID and control zone from the QNAME.
@@ -266,9 +263,8 @@ func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, distributionID 
 
 // handleBeat responds to a heartbeat with beat_confirm; no zone state change.
 func (h *CombinerChunkHandler) handleBeat(req *DnsNotifyRequest, distributionID string, payload []byte) error {
-	// Beat messages use AgentBeatPost format with MessageType enum
 	var beat struct {
-		MessageType  uint8     `json:"MessageType"`  // Should be 2 for beat
+		MessageType  string    `json:"MessageType"`  // "beat"
 		MyIdentity   string    `json:"MyIdentity"`   // Sender's identity
 		YourIdentity string    `json:"YourIdentity"` // Should be "combiner"
 		Time         time.Time `json:"Time"`
@@ -276,10 +272,6 @@ func (h *CombinerChunkHandler) handleBeat(req *DnsNotifyRequest, distributionID 
 	if err := json.Unmarshal(payload, &beat); err != nil {
 		log.Printf("CombinerChunkHandler: Failed to parse beat payload: %v", err)
 		return h.sendErrorResponse(req, distributionID, "invalid beat payload")
-	}
-	if beat.MessageType != 2 { // AgentMsgBeat = 2
-		log.Printf("CombinerChunkHandler: Invalid beat (MessageType=%d, expected 2)", beat.MessageType)
-		return h.sendErrorResponse(req, distributionID, "invalid beat")
 	}
 
 	log.Printf("CombinerChunkHandler: Received heartbeat from %s", beat.MyIdentity)
@@ -428,50 +420,96 @@ func (h *CombinerChunkHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error)
 	return nil, fmt.Errorf("no CHUNK option (code %d) in EDNS0", edns0.EDNS0_CHUNK_OPTION_CODE)
 }
 
-// parseSyncPayload parses the JSON sync payload.
-func (h *CombinerChunkHandler) parseSyncPayload(data []byte, distributionID string) (*CombinerSyncRequest, error) {
-	// The payload format matches DnsSyncPayload from transport package
-	var payload struct {
-		Type          string   `json:"type"`
-		SenderID      string   `json:"sender_id"`
-		Zone          string   `json:"zone"`
-		SyncType      string   `json:"sync_type"`
-		Records       []string `json:"records"`
-		Serial        uint32   `json:"serial,omitempty"`
-		DistributionID string   `json:"distribution_id,omitempty"`
-		Timestamp     int64    `json:"timestamp"`
-	}
+// parseAgentMsgNotify parses a sync payload into a CombinerSyncRequest.
+// Handles both the standard AgentMsgPost format (MessageType/MyIdentity/Records)
+// and legacy format (type/sender_id/records). Records are already grouped by owner.
+func (h *CombinerChunkHandler) parseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncRequest, error) {
+	// Use a unified struct that accepts fields from both formats
+	var msg struct {
+		// Standard AgentMsgPost fields
+		MyIdentity string              `json:"MyIdentity"`
+		Zone       string              `json:"Zone"`
+		Records    map[string][]string `json:"Records"`
+		Time       time.Time           `json:"Time"`
 
-	if err := json.Unmarshal(data, &payload); err != nil {
+		// Legacy format fields (fallback)
+		SenderID       string              `json:"sender_id"`
+		LegacyZone     string              `json:"zone"`
+		LegacyRecords  map[string][]string `json:"records"`
+		SyncType       string              `json:"sync_type"`
+		Serial         uint32              `json:"serial"`
+		DistributionID string              `json:"distribution_id"`
+		Timestamp      int64               `json:"timestamp"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("JSON unmarshal failed: %w", err)
 	}
 
-	if payload.Type != "sync" {
-		return nil, fmt.Errorf("expected type 'sync', got '%s'", payload.Type)
+	// Resolve fields: prefer standard format, fall back to legacy
+	senderID := msg.MyIdentity
+	if senderID == "" {
+		senderID = msg.SenderID
+	}
+	if senderID == "" {
+		return nil, fmt.Errorf("missing sender identity (MyIdentity or sender_id)")
+	}
+
+	zone := msg.Zone
+	if zone == "" {
+		zone = msg.LegacyZone
+	}
+	if zone == "" {
+		return nil, fmt.Errorf("missing Zone")
+	}
+
+	records := msg.Records
+	if len(records) == 0 {
+		records = msg.LegacyRecords
+	}
+	if records == nil {
+		records = make(map[string][]string)
 	}
 
 	// Use distribution ID from payload if present, otherwise from QNAME
-	corrID := payload.DistributionID
+	corrID := msg.DistributionID
 	if corrID == "" {
 		corrID = distributionID
 	}
 
+	timestamp := msg.Time
+	if timestamp.IsZero() && msg.Timestamp > 0 {
+		timestamp = time.Unix(msg.Timestamp, 0)
+	}
+
+	rrCount := 0
+	for _, rrs := range records {
+		rrCount += len(rrs)
+	}
+	log.Printf("CombinerChunkHandler: Parsed sync from %q for zone %q (%d RRs, %d owners)",
+		senderID, zone, rrCount, len(records))
+
 	return &CombinerSyncRequest{
-		SenderID:      payload.SenderID,
-		Zone:          payload.Zone,
-		SyncType:      payload.SyncType,
-		Records:       payload.Records,
-		Serial:        payload.Serial,
+		SenderID:       senderID,
+		Zone:           zone,
+		SyncType:       msg.SyncType,
+		Records:        records,
+		Serial:         msg.Serial,
 		DistributionID: corrID,
-		Timestamp:     time.Unix(payload.Timestamp, 0),
+		Timestamp:      timestamp,
 	}, nil
 }
 
 // ProcessUpdate handles a sync request and returns a response.
-// This is the main entry point for CHUNK-based updates to the combiner.
+// This is the main entry point for CHUNK-based and API-based updates to the combiner.
+// Both transports use the same data structure (map[string][]string) for transport neutrality.
 func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *CombinerSyncResponse {
-	log.Printf("CombinerChunkHandler: Processing sync from %q for zone %q (%d records)",
-		req.SenderID, req.Zone, len(req.Records))
+	// Count total records for logging
+	totalRecords := 0
+	for _, rrs := range req.Records {
+		totalRecords += len(rrs)
+	}
+	log.Printf("CombinerChunkHandler: Processing sync from %q for zone %q (%d owners, %d records)",
+		req.SenderID, req.Zone, len(req.Records), totalRecords)
 
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
@@ -488,52 +526,53 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 		return resp
 	}
 
-	// Parse RRs and group by owner
-	ownerRRs := make(map[string][]string)
+	// Validate and filter records (already grouped by owner in req.Records)
+	validOwnerRRs := make(map[string][]string)
 	var appliedRecords []string
 	var rejectedItems []RejectedItem
 
-	for _, rrStr := range req.Records {
-		// Parse to validate
-		rr, err := dns.NewRR(rrStr)
-		if err != nil {
-			rejectedItems = append(rejectedItems, RejectedItem{
-				Record: rrStr,
-				Reason: fmt.Sprintf("parse error: %v", err),
-			})
-			continue
-		}
+	for owner, rrStrings := range req.Records {
+		for _, rrStr := range rrStrings {
+			// Parse to validate
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("parse error: %v", err),
+				})
+				continue
+			}
 
-		// Check if RRtype is allowed
-		rrtype := rr.Header().Rrtype
-		if !AllowedLocalRRtypes[rrtype] {
-			rejectedItems = append(rejectedItems, RejectedItem{
-				Record: rrStr,
-				Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", dns.TypeToString[rrtype]),
-			})
-			continue
-		}
+			// Check if RRtype is allowed
+			rrtype := rr.Header().Rrtype
+			if !AllowedLocalRRtypes[rrtype] {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", dns.TypeToString[rrtype]),
+				})
+				continue
+			}
 
-		// Check if owner is at zone apex (combiner only accepts apex updates)
-		owner := rr.Header().Name
-		if owner != zonename {
-			// For glue records, we might accept them - but current policy is apex only
-			// This could be extended later
-			rejectedItems = append(rejectedItems, RejectedItem{
-				Record: rrStr,
-				Reason: fmt.Sprintf("owner %q is not at zone apex %q", owner, zonename),
-			})
-			continue
-		}
+			// Check if owner is at zone apex (combiner only accepts apex updates)
+			if owner != zonename {
+				// For glue records, we might accept them - but current policy is apex only
+				// This could be extended later
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("owner %q is not at zone apex %q", owner, zonename),
+				})
+				continue
+			}
 
-		// Group by owner for AddCombinerDataNG
-		ownerRRs[owner] = append(ownerRRs[owner], rrStr)
-		appliedRecords = append(appliedRecords, rrStr)
+			// Valid record - keep the grouping from input
+			validOwnerRRs[owner] = append(validOwnerRRs[owner], rrStr)
+			appliedRecords = append(appliedRecords, rrStr)
+		}
 	}
 
 	// Apply the updates if we have any valid records
-	if len(ownerRRs) > 0 {
-		err := zd.AddCombinerDataNG(ownerRRs)
+	if len(validOwnerRRs) > 0 {
+		err := zd.AddCombinerDataNG(req.SenderID, validOwnerRRs)
 		if err != nil {
 			resp.Status = "error"
 			resp.Message = fmt.Sprintf("failed to apply updates: %v", err)
@@ -566,8 +605,12 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 // sendConfirmResponse sends a DNS response with confirmation in EDNS0.
 func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *CombinerSyncResponse) error {
 	if req.ResponseWriter == nil {
-		return nil // No response writer, can't send response
+		log.Printf("CombinerChunkHandler: No ResponseWriter, cannot send confirmation for distribution %s", resp.DistributionID)
+		return nil
 	}
+
+	log.Printf("CombinerChunkHandler: Sending confirmation for distribution %s zone %q status=%s applied=%d rejected=%d",
+		resp.DistributionID, resp.Zone, resp.Status, len(resp.AppliedRecords), len(resp.RejectedItems))
 
 	// Build confirmation payload
 	confirmPayload := struct {
@@ -660,18 +703,22 @@ func SendToCombiner(handler *CombinerChunkHandler, req *CombinerSyncRequest) *Co
 }
 
 // ConvertZoneUpdateToSyncRequest converts a ZoneUpdate to a CombinerSyncRequest.
+// Groups records by owner for transport neutrality (same structure as CombinerPost).
 func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distributionID string) *CombinerSyncRequest {
-	var records []string
+	// Group records by owner name
+	records := make(map[string][]string)
 
 	// First, add RRs if present (these are individual RRs to add)
 	for _, rr := range update.RRs {
-		records = append(records, rr.String())
+		owner := rr.Header().Name
+		records[owner] = append(records[owner], rr.String())
 	}
 
 	// Also add from RRsets (for backwards compatibility)
 	for _, rrset := range update.RRsets {
 		for _, rr := range rrset.RRs {
-			records = append(records, rr.String())
+			owner := rr.Header().Name
+			records[owner] = append(records[owner], rr.String())
 		}
 	}
 

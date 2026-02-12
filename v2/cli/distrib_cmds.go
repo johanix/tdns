@@ -414,9 +414,12 @@ func listDistribPeers(cmd *cobra.Command, component string) {
 }
 
 func displayPeers(peers []interface{}, verbose bool) {
+	// Sort peers: combiners first, then by state priority (OPERATIONAL > INTRODUCED > KNOWN > NEEDED)
+	sortedPeers := sortPeersForDisplay(peers)
+
 	if verbose {
 		// Verbose mode: show detailed information for each peer
-		for i, pRaw := range peers {
+		for i, pRaw := range sortedPeers {
 			if i > 0 {
 				fmt.Println() // Blank line between peers
 			}
@@ -431,7 +434,7 @@ func displayPeers(peers []interface{}, verbose bool) {
 	var rows []string
 	rows = append(rows, "Identity | Type | Transport | Address | Crypto | State")
 
-	for _, pRaw := range peers {
+	for _, pRaw := range sortedPeers {
 		if p, ok := pRaw.(map[string]interface{}); ok {
 			peerID := getStringValue(p, "peer_id", "id")
 			if peerID == "" {
@@ -471,6 +474,86 @@ func displayPeers(peers []interface{}, verbose bool) {
 		output := columnize.SimpleFormat(rows)
 		fmt.Println(output)
 	}
+}
+
+// sortPeersForDisplay sorts peers with combiners first, then agents by state priority
+// State priority: OPERATIONAL > INTRODUCED > KNOWN > NEEDED > LEGACY > DEGRADED > INTERRUPTED > ERROR
+func sortPeersForDisplay(peers []interface{}) []interface{} {
+	// State priority mapping (higher number = higher priority)
+	statePriority := map[string]int{
+		"OPERATIONAL": 5,
+		"INTRODUCED":  4,
+		"KNOWN":       3,
+		"NEEDED":      2,
+		"LEGACY":      1,
+		"DEGRADED":    0,
+		"INTERRUPTED": -1,
+		"ERROR":       -2,
+	}
+
+	// Create a sortable slice
+	type peerSortKey struct {
+		peer        interface{}
+		isCombiner  bool
+		stateValue  int
+		identity    string
+		transport   string
+	}
+
+	var sortKeys []peerSortKey
+	for _, pRaw := range peers {
+		if p, ok := pRaw.(map[string]interface{}); ok {
+			peerType := getStringValue(p, "peer_type", "type")
+			state := getStringValue(p, "state")
+			identity := getStringValue(p, "peer_id", "id")
+			transport := getStringValue(p, "transport")
+
+			stateVal := statePriority[state]
+			if _, exists := statePriority[state]; !exists {
+				stateVal = -10 // Unknown states go last
+			}
+
+			sortKeys = append(sortKeys, peerSortKey{
+				peer:        pRaw,
+				isCombiner:  peerType == "combiner",
+				stateValue:  stateVal,
+				identity:    identity,
+				transport:   transport,
+			})
+		}
+	}
+
+	// Sort: combiners first, then ALL entries by state priority (descending), then by identity, then by transport
+	for i := 0; i < len(sortKeys); i++ {
+		for j := i + 1; j < len(sortKeys); j++ {
+			swap := false
+
+			// Primary: combiners before agents
+			if sortKeys[i].isCombiner != sortKeys[j].isCombiner {
+				swap = !sortKeys[i].isCombiner && sortKeys[j].isCombiner
+			} else if sortKeys[i].stateValue != sortKeys[j].stateValue {
+				// Secondary: higher state priority first (OPERATIONAL > INTRODUCED > KNOWN > NEEDED)
+				swap = sortKeys[i].stateValue < sortKeys[j].stateValue
+			} else if sortKeys[i].identity != sortKeys[j].identity {
+				// Tertiary: alphabetical by identity
+				swap = sortKeys[i].identity > sortKeys[j].identity
+			} else {
+				// Quaternary: alphabetical by transport (API before DNS)
+				swap = sortKeys[i].transport > sortKeys[j].transport
+			}
+
+			if swap {
+				sortKeys[i], sortKeys[j] = sortKeys[j], sortKeys[i]
+			}
+		}
+	}
+
+	// Extract sorted peers
+	sorted := make([]interface{}, len(sortKeys))
+	for i, sk := range sortKeys {
+		sorted[i] = sk.peer
+	}
+	return sorted
 }
 
 func displayPeerVerbose(p map[string]interface{}) {

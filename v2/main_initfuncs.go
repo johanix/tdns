@@ -372,6 +372,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			PayloadCrypto:              payloadCrypto,
 			DistributionCache:          conf.Internal.DistributionCache,
 			SupportedMechanisms:        conf.Agent.SupportedMechanisms,
+			CombinerID:                 combinerID,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
@@ -415,6 +416,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
 			}
 			log.Printf("MainInit: Combiner CHUNK handler registered for identity %s", conf.Combiner.Identity)
+			Globals.CombinerConf = conf.Combiner
+			if conf.Combiner.AddSignature {
+				log.Printf("MainInit: Combiner signature TXT enabled")
+			}
 		}
 	default:
 		// ... existing auth/agent/combiner setup ...
@@ -513,6 +518,11 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	if err := conf.Internal.AgentRegistry.InitializeCombinerAsPeer(conf); err != nil {
 		log.Printf("StartAgent: WARNING: Failed to initialize combiner as peer: %v", err)
 		log.Printf("StartAgent: Continuing without combiner heartbeat monitoring")
+	}
+
+	// Start the reliable message queue (must be after combiner peer initialization)
+	if conf.Internal.TransportManager != nil {
+		conf.Internal.TransportManager.StartReliableQueue(ctx)
 	}
 
 	// Agent-specific

@@ -199,18 +199,16 @@ type AgentHelloResponse struct {
 // We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
-	MessageType  AgentMsg // "NOTIFY", ...
+	MessageType  AgentMsg            // "sync", "rfi", "status"
 	MyIdentity   AgentId
 	YourIdentity AgentId
-	Addresses    []string `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
-	Port         uint16   `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
-	TLSA         dns.TLSA `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
-	Zone         ZoneName // An AgentMsgPost should always only refer to one zone.
-	// Data	     map[AgentId]map[uint16]RRset
-	RRs []string // cannot send more structured format, as dns.RR cannot be json marshalled.
-	// Zones []string
-	Time    time.Time
-	RfiType string
+	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA         dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
+	Zone         ZoneName            // An AgentMsgPost should always only refer to one zone.
+	Records      map[string][]string // Resource records grouped by owner name (owner → []RR strings)
+	Time         time.Time
+	RfiType      string
 }
 
 type AgentMsgPostPlus struct {

@@ -122,17 +122,81 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'", zone)
-					// if _, haveParams := refreshCounters[zone]; !haveParams {
-					if _, haveParams := refreshCounters.Get(zone); !haveParams {
-						var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
-						soa, err := zd.GetSOA()
-						if err != nil {
-							log.Printf("RefreshEngine: Error from GetSOA(%s): %v", zone, err)
-							zd.SetError(RefreshError, "get soa error: %v", err)
-							zd.LatestError = time.Now()
-						} else {
-							refresh = soa.Refresh
+					// Update configuration fields from ZoneRefresher for existing zones
+					// This ensures that config reload (reload-zones, zone reload) picks up changes to:
+					// notify addresses, upstream, zonefile, zone store, options, update policy, DNSSEC policy, etc.
+					// Only update fields that are actually set in ZoneRefresher (non-zero/non-empty values)
+					zd.mu.Lock()
+					// Update notify addresses only if provided
+					if zr.Notify != nil {
+						zd.Downstreams = NormalizeAddresses(zr.Notify)
+					}
+					// Update upstream only if provided
+					if zr.Primary != "" {
+						zd.Upstream = NormalizeAddress(zr.Primary)
+					}
+					// Update zonefile only if provided
+					if zr.Zonefile != "" {
+						zd.Zonefile = zr.Zonefile
+					}
+					// Update ZoneStore only if provided (non-zero value)
+					if zr.ZoneStore != 0 {
+						zd.ZoneStore = zr.ZoneStore
+					}
+					// Replace options only if provided (don't merge) to match config reload behavior
+					if zr.Options != nil {
+						zd.Options = zr.Options
+					}
+					// Update UpdatePolicy only if provided (check if it has meaningful content)
+					// UpdatePolicy is a struct, so we check if any fields are set
+					if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate {
+						zd.UpdatePolicy = zr.UpdatePolicy
+					}
+					// Update ZoneType only if provided (non-zero value)
+					if zr.ZoneType != 0 {
+						if zd.ZoneType != zr.ZoneType {
+							log.Printf("RefreshEngine: Zone %s zone type changed from %s to %s", zone, ZoneTypeToString[zd.ZoneType], ZoneTypeToString[zr.ZoneType])
 						}
+						zd.ZoneType = zr.ZoneType
+					}
+					// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation)
+					if zr.DnssecPolicy != "" {
+						if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
+							zd.DnssecPolicy = &dp
+						} else {
+							log.Printf("RefreshEngine: Warning: DNSSEC policy %q not found for zone %s, keeping existing policy", zr.DnssecPolicy, zone)
+						}
+					}
+					if zr.MultiSigner != "" {
+						if msc, exists := conf.MultiSigner[zr.MultiSigner]; exists {
+							zd.MultiSigner = &msc
+						} else {
+							log.Printf("RefreshEngine: Warning: MultiSigner %q not found for zone %s, keeping existing config", zr.MultiSigner, zone)
+						}
+					}
+					zd.mu.Unlock()
+					log.Printf("RefreshEngine: Updated configuration for zone %s: notify=%v, upstream=%s, zonefile=%s, store=%s",
+						zone, zd.Downstreams, zd.Upstream, zd.Zonefile, ZoneStoreToString[zd.ZoneStore])
+
+					// Update or create refreshCounter with current config values
+					var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
+					soa, err := zd.GetSOA()
+					if err != nil {
+						log.Printf("RefreshEngine: Error from GetSOA(%s): %v", zone, err)
+						zd.SetError(RefreshError, "get soa error: %v", err)
+						zd.LatestError = time.Now()
+					} else {
+						refresh = soa.Refresh
+					}
+					if rc, haveParams := refreshCounters.Get(zone); haveParams {
+						// Update existing refreshCounter with new config values
+						rc.Upstream = NormalizeAddress(zr.Primary)
+						rc.Downstreams = NormalizeAddresses(zr.Notify)
+						rc.Zonefile = zr.Zonefile
+						rc.SOARefresh = refresh
+						rc.CurRefresh = 1 // force immediate refresh
+					} else {
+						// Create new refreshCounter
 						refreshCounters.Set(zone, &RefreshCounter{
 							Name:        zone,
 							SOARefresh:  refresh,

@@ -420,6 +420,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	firstSoaSeen := false
 	checkedForUnchanged := false
+	serialChanged := false // Track whether serial actually changed
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		if Globals.Debug {
@@ -439,7 +440,12 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 					zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
 					return false, soa.Serial, nil
 				}
-				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload.", zd.ZoneName)
+				// force=true: continue parsing to validate zone file, but serial didn't change
+				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload (validating zone file).", zd.ZoneName)
+				serialChanged = false
+			} else {
+				// Serial changed - this indicates an actual update
+				serialChanged = true
 			}
 		}
 	}
@@ -470,7 +476,10 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	zd.ComputeIndices()
 	zd.XfrType = "axfr"
-	return true, soa.Serial, nil
+	// Return true only if serial changed (indicates actual update)
+	// If force=true but serial unchanged, return false (validated but no update)
+	// This prevents unnecessary zone file writes on config reload when zone hasn't changed
+	return serialChanged, soa.Serial, nil
 }
 
 func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
