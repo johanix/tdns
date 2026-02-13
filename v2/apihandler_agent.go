@@ -589,6 +589,29 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "No response from SynchedDataCmd after 2 seconds, state unknown"
 			}
 
+		case "resync":
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			sdcmd := &SynchedDataCmd{
+				Cmd:      "resync",
+				Zone:     amp.Zone,
+				Response: make(chan *SynchedDataCmdResponse, 1),
+			}
+			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			select {
+			case response := <-sdcmd.Response:
+				resp.Msg = response.Msg
+				resp.Error = response.Error
+				resp.ErrorMsg = response.ErrorMsg
+			case <-time.After(10 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for resync"
+			}
+			resp.Status = "ok"
+
 		// HSYNC debug commands (Phase 5)
 		case "hsync-chunk-send":
 			// TODO: Implement CHUNK send for DNS transport testing
@@ -1263,12 +1286,19 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			// (a) store in local ZoneDataRepo
 			// (b) send to combiner
 			// (c) send NOTIFY to remote agents
+			force := false
+			if amp.Data != nil {
+				if f, ok := amp.Data["force"].(bool); ok {
+					force = f
+				}
+			}
 			cresp := make(chan *AgentMsgResponse, 1)
 			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    AgentId(conf.Agent.Identity),
 				UpdateType: "local",
 				Update:     zu,
+				Force:      force,
 				Response:   cresp,
 			}
 

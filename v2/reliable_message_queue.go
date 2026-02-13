@@ -18,12 +18,12 @@ package tdns
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"sync"
 	"time"
+
+	"github.com/johanix/tdns/v2/agent/transport"
 )
 
 // MessageState tracks the delivery state of a queued message.
@@ -62,7 +62,7 @@ const (
 
 // OutgoingMessage represents a message to be delivered reliably.
 type OutgoingMessage struct {
-	DistributionID string          // Unique ID for tracking this delivery
+	DistributionID string          // Shared across combiner + all agents for confirmation correlation
 	RecipientID    AgentId         // Who should receive this
 	RecipientType  string          // "combiner" or "agent"
 	Zone           ZoneName        // Zone context
@@ -110,6 +110,14 @@ type PendingMessageInfo struct {
 	Age            string `json:"age"`
 }
 
+// pendingKey returns the composite map key for a message: "{recipientID}.{distID}".
+// Mirrors the {recipientID}.{distID}.{senderID} structure used in CHUNK query qnames.
+// This allows the same distID to be used for multiple recipients (combiner + agents)
+// while keeping each delivery independently tracked in the queue.
+func pendingKey(distID string, recipientID AgentId) string {
+	return string(recipientID) + "." + distID
+}
+
 // ReliableMessageQueue ensures messages are delivered with retry-until-confirmed semantics.
 //
 // Messages are accepted immediately via Enqueue() regardless of recipient state.
@@ -122,7 +130,7 @@ type PendingMessageInfo struct {
 type ReliableMessageQueue struct {
 	mu sync.RWMutex
 
-	// Pending messages indexed by distribution ID
+	// Pending messages indexed by "{recipientID}.{distID}" (see pendingKey())
 	pending map[string]*PendingMessage
 
 	// References to other components (set after creation, before Start)
@@ -230,9 +238,10 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 			len(q.pending), msg.DistributionID, msg.RecipientID)
 	}
 
-	// Check for duplicate distribution ID
-	if _, exists := q.pending[msg.DistributionID]; exists {
-		return fmt.Errorf("duplicate distribution ID: %s", msg.DistributionID)
+	// Check for duplicate (same distID + same recipient)
+	key := pendingKey(msg.DistributionID, msg.RecipientID)
+	if _, exists := q.pending[key]; exists {
+		return fmt.Errorf("duplicate distribution ID: %s for recipient %s", msg.DistributionID, msg.RecipientID)
 	}
 
 	pending := &PendingMessage{
@@ -241,7 +250,7 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 		NextAttempt: time.Now(), // Try immediately
 	}
 
-	q.pending[msg.DistributionID] = pending
+	q.pending[key] = pending
 
 	log.Printf("ReliableMessageQueue: Enqueued %s for %s (zone: %s, type: %s, expires: %s)",
 		msg.DistributionID, msg.RecipientID, msg.Zone, msg.RecipientType,
@@ -251,11 +260,13 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 }
 
 // MarkConfirmed marks a message as successfully delivered and removes it from the queue.
-func (q *ReliableMessageQueue) MarkConfirmed(distributionID string) bool {
+// senderID is the identity of the confirming party (= the original message recipient).
+func (q *ReliableMessageQueue) MarkConfirmed(distributionID string, senderID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	pending, exists := q.pending[distributionID]
+	key := pendingKey(distributionID, AgentId(senderID))
+	pending, exists := q.pending[key]
 	if !exists {
 		// Not in queue - may have already been confirmed or expired
 		return false
@@ -266,7 +277,7 @@ func (q *ReliableMessageQueue) MarkConfirmed(distributionID string) bool {
 		time.Since(pending.Message.CreatedAt).Round(time.Second))
 
 	pending.State = MessageConfirmed
-	delete(q.pending, distributionID)
+	delete(q.pending, key)
 	q.totalDelivered++
 	return true
 }
@@ -351,13 +362,13 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 	var toSend []*PendingMessage
 	var toRemove []string
 
-	for distID, pending := range q.pending {
+	for key, pending := range q.pending {
 		// Check expiration
 		if now.After(pending.Message.ExpiresAt) {
 			log.Printf("ReliableMessageQueue: Expired %s for %s (after %d attempts, age: %s)",
-				distID, pending.Message.RecipientID, pending.AttemptCount,
+				pending.Message.DistributionID, pending.Message.RecipientID, pending.AttemptCount,
 				time.Since(pending.Message.CreatedAt).Round(time.Second))
-			toRemove = append(toRemove, distID)
+			toRemove = append(toRemove, key)
 			q.totalExpired++
 			continue
 		}
@@ -391,7 +402,7 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 						AgentStateToString[agent.State], dnsState, apiState)
 				}
 				log.Printf("ReliableMessageQueue: Deferring %s for %s (recipient state: %s)",
-					distID, pending.Message.RecipientID, stateStr)
+					pending.Message.DistributionID, pending.Message.RecipientID, stateStr)
 			}
 			// Not ready - schedule a retry but don't count it as a failed attempt
 			q.scheduleRetryLocked(pending, false)
@@ -404,8 +415,8 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 	}
 
 	// Remove expired messages
-	for _, distID := range toRemove {
-		delete(q.pending, distID)
+	for _, key := range toRemove {
+		delete(q.pending, key)
 	}
 
 	q.mu.Unlock()
@@ -485,7 +496,7 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *Pen
 		msg.DistributionID, msg.RecipientID, pending.AttemptCount,
 		time.Since(msg.CreatedAt).Round(time.Second))
 	pending.State = MessageConfirmed
-	delete(q.pending, msg.DistributionID)
+	delete(q.pending, pendingKey(msg.DistributionID, msg.RecipientID))
 	q.totalDelivered++
 }
 
@@ -518,10 +529,9 @@ func (q *ReliableMessageQueue) scheduleRetryLocked(pending *PendingMessage, coun
 }
 
 // GenerateQueueDistributionID creates a unique distribution ID for queue messages.
+// Uses the same epoch+counter generator as the DNS transport layer.
 func GenerateQueueDistributionID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("q-%s-%d", hex.EncodeToString(b), time.Now().UnixMilli())
+	return transport.GenerateDistributionID()
 }
 
 // --- Helper functions ---

@@ -413,9 +413,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			if conf.Combiner.Identity == "" {
 				return fmt.Errorf("combiner.identity is required in config")
 			}
-			if err := RegisterCombinerChunkHandler(conf.Combiner.Identity, secureWrapper); err != nil {
+			combinerHandler, err := RegisterCombinerChunkHandler(conf.Combiner.Identity, secureWrapper)
+			if err != nil {
 				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
 			}
+			conf.Internal.CombinerHandler = combinerHandler
 			log.Printf("MainInit: Combiner CHUNK handler registered for identity %s", conf.Combiner.Identity)
 			Globals.CombinerConf = conf.Combiner
 			if conf.Combiner.AddSignature {

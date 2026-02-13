@@ -75,6 +75,7 @@ type ZoneData struct {
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping
+	FirstZoneLoad      bool   // true until first zone data has been loaded
 	Verbose            bool
 	Debug              bool
 	IxfrChain          []Ixfr

@@ -773,10 +773,14 @@ Example:
 			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
 		}
 
+		force, _ := cmd.Flags().GetBool("force")
 		req := tdns.AgentMgmtPost{
 			Command: "add-ns",
 			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
 			RRs:     []string{rr.String()},
+		}
+		if force {
+			req.Data = map[string]interface{}{"force": true}
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -829,10 +833,14 @@ Example:
 			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
 		}
 
+		force, _ := cmd.Flags().GetBool("force")
 		req := tdns.AgentMgmtPost{
 			Command: "del-ns",
 			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
 			RRs:     []string{rr.String()},
+		}
+		if force {
+			req.Data = map[string]interface{}{"force": true}
 		}
 
 		amr, err := SendAgentDebugCmd(req, false)
@@ -846,6 +854,39 @@ Example:
 
 		fmt.Printf("Successfully removed NS record from zone %s\n", tdns.Globals.Zonename)
 		fmt.Printf("  Record: %s\n", rr.String())
+		if amr.Msg != "" {
+			fmt.Printf("  %s\n", amr.Msg)
+		}
+	},
+}
+
+var DebugAgentResyncCmd = &cobra.Command{
+	Use:   "resync",
+	Short: "Re-send all local changes to combiner and remote agents",
+	Long: `Re-send all locally stored synced data for a zone to the combiner and
+all remote agents. Use this when the combiner or remote agents have lost
+state and need to be brought back in sync.
+
+Example:
+  tdns-cliv2 agent debug resync --zone whisky.dnslab.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		req := tdns.AgentMgmtPost{
+			Command: "resync",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("Resync for zone %s:\n", tdns.Globals.Zonename)
 		if amr.Msg != "" {
 			fmt.Printf("  %s\n", amr.Msg)
 		}
@@ -1019,6 +1060,7 @@ func init() {
 	DebugAgentCmd.AddCommand(DebugAgentTestChainCmd)
 	DebugAgentCmd.AddCommand(DebugAgentAddNsCmd)
 	DebugAgentCmd.AddCommand(DebugAgentDelNsCmd)
+	DebugAgentCmd.AddCommand(DebugAgentResyncCmd)
 	DebugAgentCmd.AddCommand(DebugAgentQueueStatusCmd)
 
 	DebugAgentQueueStatusCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details for each message)")
@@ -1044,7 +1086,9 @@ func init() {
 	DebugAgentTestChainCmd.Flags().String("scenario", "add", "Test scenario (add|update|delete)")
 	DebugAgentTestChainCmd.Flags().String("rr", "", "DNS record for test")
 	DebugAgentAddNsCmd.Flags().StringVarP(&dnsRecord, "rr", "", "", "NS record to add")
+	DebugAgentAddNsCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
 	DebugAgentDelNsCmd.Flags().StringVarP(&dnsRecord, "rr", "", "", "NS record to delete")
+	DebugAgentDelNsCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
 
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")
@@ -1057,7 +1101,7 @@ func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtR
 		log.Fatalf("Error getting API client: %v", err)
 	}
 
-	api.Debug = true
+	// api.Debug = true
 
 	_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
 	if err != nil {

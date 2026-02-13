@@ -91,5 +91,9 @@ func init() {
 	cli.AgentCmd.AddCommand(cli.AgentDistribCmd)
 	cli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
 
+	// From ../tdns/cli/transaction_cmds.go:
+	cli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
+	cli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
+
 	rootCmd.AddCommand(cli.VersionCmd)
 }

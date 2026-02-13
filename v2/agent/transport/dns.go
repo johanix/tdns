@@ -96,6 +96,7 @@ type IncomingConfirmation struct {
 	Timestamp      time.Time
 	Zone           string
 	AppliedRecords []string
+	RemovedRecords []string
 	RejectedItems  []RejectedItemDTO
 	Truncated      bool
 }
@@ -170,8 +171,8 @@ var (
 	distributionCounter   uint64
 )
 
-// generateDistributionID returns a unique 8-character (hex) ID: base = unix epoch when first used, then +1 per call.
-func generateDistributionID() string {
+// GenerateDistributionID returns a unique 8-character (hex) ID: base = unix epoch when first used, then +1 per call.
+func GenerateDistributionID() string {
 	distributionEpochOnce.Do(func() { distributionEpoch = time.Now().Unix() })
 	n := atomic.AddUint64(&distributionCounter, 1)
 	return fmt.Sprintf("%08x", uint32(distributionEpoch+int64(n-1)))
@@ -209,7 +210,7 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 		return nil, NewTransportError("DNS", "Hello", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	distributionID := generateDistributionID()
+	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create hello payload using typed struct from core package
@@ -264,7 +265,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		return nil, NewTransportError("DNS", "Beat", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	distributionID := generateDistributionID()
+	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create beat payload using typed struct from core package
@@ -323,7 +324,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 
 	distributionID := req.DistributionID
 	if distributionID == "" {
-		distributionID = generateDistributionID()
+		distributionID = GenerateDistributionID()
 	}
 	qname := t.buildNotifyQNAME(distributionID)
 
@@ -379,7 +380,7 @@ func (t *DNSTransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 		return nil, NewTransportError("DNS", "Relocate", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	distributionID := generateDistributionID()
+	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create relocate payload
@@ -423,7 +424,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		return nil, NewTransportError("DNS", "Ping", peer.ID, fmt.Errorf("no address available"), false)
 	}
 
-	distributionID := generateDistributionID()
+	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
 	if t.distributionAdd != nil {
@@ -506,13 +507,16 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("invalid ping response: %w", err), true)
 	}
+	// Check status before nonce: if the combiner sent an error response, the nonce
+	// will be empty. Checking nonce first would produce a misleading "nonce mismatch"
+	// instead of the actual error message.
+	if confirm.Status != "ok" {
+		return nil, NewTransportError("DNS", "Ping", peer.ID,
+			fmt.Errorf("peer responded with status %q: %s", confirm.Status, confirm.Message), true)
+	}
 	if confirm.Nonce != req.Nonce {
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("ping response nonce mismatch"), true)
-	}
-	if confirm.Status != "ok" {
-		return nil, NewTransportError("DNS", "Ping", peer.ID,
-			fmt.Errorf("peer responded with status %q", confirm.Status), true)
 	}
 
 	if t.distributionMarkCompleted != nil {
@@ -560,18 +564,38 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	// Use the distribution ID from the original request
 	qname := t.buildNotifyQNAME(req.DistributionID)
 
-	// Create confirmation payload
+	// Create confirmation payload with per-RR detail
 	payload := &DnsConfirmPayload{
-		Type:          "confirm",
-		SenderID:      req.SenderID,
-		Zone:          req.Zone,
+		Type:           "confirm",
+		SenderID:       req.SenderID,
+		Zone:           req.Zone,
 		DistributionID: req.DistributionID,
-		Status:        req.Status.String(),
-		Message:       req.Message,
-		Timestamp:     req.Timestamp.Unix(),
+		Status:         req.Status.String(),
+		Message:        req.Message,
+		AppliedCount:   len(req.AppliedRecords),
+		RemovedCount:   len(req.RemovedRecords),
+		RejectedCount:  len(req.RejectedItems),
+		AppliedRecords: req.AppliedRecords,
+		RemovedRecords: req.RemovedRecords,
+		RejectedItems:  req.RejectedItems,
+		Truncated:      req.Truncated,
+		Timestamp:      req.Timestamp.Unix(),
 	}
 
 	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return NewTransportError("DNS", "Confirm", peer.ID,
+			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
+	}
+
+	// Size guard: EDNS0 payload must fit in UDP. If too large, drop per-RR detail
+	// and set Truncated so the receiver knows full detail was not included.
+	if len(payloadJSON) > 3500 {
+		payload.AppliedRecords = nil
+		payload.RemovedRecords = nil
+		payload.Truncated = true
+		payloadJSON, err = json.Marshal(payload)
+	}
 	if err != nil {
 		return NewTransportError("DNS", "Confirm", peer.ID,
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
@@ -955,6 +979,7 @@ type DnsPingConfirmPayload struct {
 	Nonce          string `json:"nonce"`
 	DistributionID string `json:"distribution_id"`
 	Status         string `json:"status"`
+	Message        string `json:"message,omitempty"` // Error detail from combiner
 	Timestamp      int64  `json:"timestamp"`
 }
 

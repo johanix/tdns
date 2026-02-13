@@ -398,6 +398,11 @@ type AgentQs struct {
 	SynchedDataUpdate chan *SynchedDataUpdate   // incoming combiner updates
 	SynchedDataCmd    chan *SynchedDataCmd      // local commands TO the combiner
 	Confirmation      chan *ConfirmationDetail  // combiner confirmation feedback
+
+	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
+	// receives a combiner confirmation for a sync that originated from another agent.
+	// The callback sends the final confirmation NOTIFY back to the originating agent.
+	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

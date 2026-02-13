@@ -147,12 +147,8 @@ func RegisterNotifyHandler(qtype uint16, handler NotifyHandlerFunc) error {
 		return fmt.Errorf("handler cannot be nil")
 	}
 
-	// Register in global storage (for early registration before conf is available)
-	globalNotifyHandlersMutex.Lock()
-	globalNotifyHandlers[qtype] = append(globalNotifyHandlers[qtype], handler)
-	globalNotifyHandlersMutex.Unlock()
-
-	// Also register in conf if available (and map is initialized)
+	// Register in conf if available; otherwise in global storage (copied to conf during MainInit).
+	// Only one location to avoid getNotifyHandlers returning duplicates.
 	if Conf.Internal.NotifyHandlers != nil {
 		Conf.Internal.NotifyHandlersMutex.Lock()
 		if Conf.Internal.NotifyHandlers[qtype] == nil {
@@ -161,7 +157,10 @@ func RegisterNotifyHandler(qtype uint16, handler NotifyHandlerFunc) error {
 		Conf.Internal.NotifyHandlers[qtype] = append(Conf.Internal.NotifyHandlers[qtype], handler)
 		Conf.Internal.NotifyHandlersMutex.Unlock()
 	} else {
-		// Conf not initialized yet, will be copied from global storage during MainInit
+		// Conf not initialized yet — register in global storage, will be copied to conf during MainInit
+		globalNotifyHandlersMutex.Lock()
+		globalNotifyHandlers[qtype] = append(globalNotifyHandlers[qtype], handler)
+		globalNotifyHandlersMutex.Unlock()
 	}
 
 	if Globals.Debug {

@@ -62,8 +62,8 @@ type ChunkNotifyHandler struct {
 	// OnConfirmationReceived is called when a confirmation is received for a distribution ID.
 	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue
 	// and to forward per-RR detail to the SynchedDataEngine.
-	OnConfirmationReceived func(distributionID string, status ConfirmStatus,
-		zone string, applied []string, rejected []RejectedItemDTO, truncated bool)
+	OnConfirmationReceived func(distributionID string, senderID string, status ConfirmStatus,
+		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool)
 
 	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
 	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
@@ -438,6 +438,7 @@ func (h *ChunkNotifyHandler) handleConfirmation(msg *IncomingMessage) {
 			Timestamp:      time.Unix(confirm.Timestamp, 0),
 			Zone:           confirm.Zone,
 			AppliedRecords: confirm.AppliedRecords,
+			RemovedRecords: confirm.RemovedRecords,
 			RejectedItems:  confirm.RejectedItems,
 			Truncated:      confirm.Truncated,
 		})
@@ -445,8 +446,8 @@ func (h *ChunkNotifyHandler) handleConfirmation(msg *IncomingMessage) {
 
 	// Forward confirmation detail (all statuses carry useful information)
 	if h.OnConfirmationReceived != nil && confirm.DistributionID != "" {
-		h.OnConfirmationReceived(confirm.DistributionID, status,
-			confirm.Zone, confirm.AppliedRecords, confirm.RejectedItems, confirm.Truncated)
+		h.OnConfirmationReceived(confirm.DistributionID, confirm.SenderID, status,
+			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated)
 	}
 }
 

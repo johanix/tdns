@@ -202,10 +202,10 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		}
 
 		// Wire confirmation callback for reliable message queue and per-RR tracking
-		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, status transport.ConfirmStatus,
-			zone string, applied []string, rejected []transport.RejectedItemDTO, truncated bool) {
+		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
+			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool) {
 			if tm.reliableQueue != nil && status == transport.ConfirmSuccess {
-				tm.reliableQueue.MarkConfirmed(distributionID)
+				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 			// Forward per-RR detail to SynchedDataEngine
 			if tm.agentQs != nil && tm.agentQs.Confirmation != nil {
@@ -216,8 +216,10 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				detail := &ConfirmationDetail{
 					DistributionID: distributionID,
 					Zone:           ZoneName(zone),
+					Source:         senderID,
 					Status:         status.String(),
 					AppliedRecords: applied,
+					RemovedRecords: removed,
 					RejectedItems:  rejItems,
 					Truncated:      truncated,
 					Timestamp:      time.Now(),
@@ -227,6 +229,15 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				default:
 					log.Printf("TransportManager: Confirmation channel full, dropping detail for %s", distributionID)
 				}
+			}
+		}
+
+		// Wire remote confirmation callback (two-phase protocol: Phase 7).
+		// When this agent's combiner confirms a sync that originated from another agent,
+		// send the final confirmation NOTIFY back to the originating agent.
+		if tm.agentQs != nil {
+			tm.agentQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
+				go tm.sendRemoteConfirmation(detail)
 			}
 		}
 
@@ -555,12 +566,13 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
-			MessageType: messageType,
-			MyIdentity:  AgentId(senderID),
-			Zone:        ZoneName(zone),
-			Records:     records,
-			Time:        time.Unix(payload.Timestamp, 0),
-			RfiType:     payload.RfiType, // Include RfiType for RFI messages
+			MessageType:    messageType,
+			MyIdentity:     AgentId(senderID),
+			Zone:           ZoneName(zone),
+			Records:        records,
+			Time:           time.Unix(payload.Timestamp, 0),
+			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
+			DistributionID: payload.DistributionID, // Originating distID from sending agent
 		},
 	}
 
@@ -569,8 +581,9 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		log.Printf("TransportManager: Routed DNS %s from %s (zone: %s) to hsyncengine",
 			msgTypeStr, senderID, zone)
 
-		// Note: confirmation is already sent inline in the DNS response by HandleSync +
-		// SendResponseMiddleware (EDNS0 CHUNK ack). No separate NOTIFY needed.
+		// Send immediate "pending" confirmation back to originating agent (two-phase protocol).
+		// This tells the originator "I received your sync" so it doesn't need to resend.
+		go tm.sendImmediateConfirmation(payload)
 	default:
 		log.Printf("TransportManager: Message channel full, dropping %s from %s", msgTypeStr, senderID)
 	}
@@ -632,6 +645,103 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 		log.Printf("TransportManager: Failed to send confirmation for %s: %v", payload.DistributionID, err)
 	} else {
 		log.Printf("TransportManager: Sent confirmation for sync %s", payload.DistributionID)
+	}
+}
+
+// sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
+// to indicate that the sync was received and is being processed. This is the first of two
+// NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
+func (tm *TransportManager) sendImmediateConfirmation(payload *transport.DnsSyncPayload) {
+	if tm.DNSTransport == nil {
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	if payload.DistributionID == "" {
+		log.Printf("TransportManager: Cannot send immediate confirmation — no distribution ID from %s", senderID)
+		return
+	}
+
+	peer, exists := tm.PeerRegistry.Get(senderID)
+	if !exists {
+		log.Printf("TransportManager: Cannot send immediate confirmation — peer %s not in registry", senderID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+		SenderID:       tm.LocalID,
+		Zone:           payload.Zone,
+		DistributionID: payload.DistributionID,
+		Status:         transport.ConfirmPending,
+		Message:        "Sync received, forwarding to combiner",
+		Timestamp:      time.Now(),
+	})
+
+	if err != nil {
+		log.Printf("TransportManager: Failed to send immediate confirmation for %s to %s: %v",
+			payload.DistributionID, senderID, err)
+	} else {
+		log.Printf("TransportManager: Sent immediate (pending) confirmation for %s to %s",
+			payload.DistributionID, senderID)
+	}
+}
+
+// sendRemoteConfirmation sends the final confirmation NOTIFY back to the originating agent
+// after the remote agent's combiner has confirmed the sync. This is the second of two
+// NOTIFYs in the two-phase remote confirmation protocol (Phase 7).
+func (tm *TransportManager) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
+	if tm.DNSTransport == nil {
+		return
+	}
+
+	peer, exists := tm.PeerRegistry.Get(detail.OriginatingSender)
+	if !exists {
+		log.Printf("TransportManager: Cannot send remote confirmation — peer %s not in registry", detail.OriginatingSender)
+		return
+	}
+
+	var rejItems []transport.RejectedItemDTO
+	for _, ri := range detail.RejectedItems {
+		rejItems = append(rejItems, transport.RejectedItemDTO{Record: ri.Record, Reason: ri.Reason})
+	}
+
+	// Map status string back to ConfirmStatus
+	status := transport.ConfirmSuccess
+	switch detail.Status {
+	case "PARTIAL":
+		status = transport.ConfirmPartial
+	case "FAILED":
+		status = transport.ConfirmFailed
+	case "REJECTED":
+		status = transport.ConfirmRejected
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
+		SenderID:       tm.LocalID,
+		Zone:           string(detail.Zone),
+		DistributionID: detail.OriginatingDistID, // Use the originating agent's distID
+		Status:         status,
+		Message:        detail.Message,
+		AppliedRecords: detail.AppliedRecords,
+		RemovedRecords: detail.RemovedRecords,
+		RejectedItems:  rejItems,
+		Truncated:      detail.Truncated,
+		Timestamp:      time.Now(),
+	})
+
+	if err != nil {
+		log.Printf("TransportManager: Failed to send remote confirmation for originating distID %s to %s: %v",
+			detail.OriginatingDistID, detail.OriginatingSender, err)
+	} else {
+		log.Printf("TransportManager: Sent remote confirmation for originating distID %s to %s (applied=%d removed=%d rejected=%d)",
+			detail.OriginatingDistID, detail.OriginatingSender,
+			len(detail.AppliedRecords), len(detail.RemovedRecords), len(detail.RejectedItems))
 	}
 }
 
@@ -1087,14 +1197,17 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 
 // EnqueueForCombiner enqueues a zone update for reliable delivery to the combiner.
 // Called by SynchedDataEngine when a zone update needs to reach the combiner.
+// If distID is non-empty, it is used as the distribution ID; otherwise a new one is generated.
 // Returns the distributionID for tracking and any error.
-func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate) (string, error) {
+func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
 		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
 	}
 
-	distID := GenerateQueueDistributionID()
+	if distID == "" {
+		distID = GenerateQueueDistributionID()
+	}
 	msg := &OutgoingMessage{
 		DistributionID: distID,
 		RecipientID:    combinerID,
@@ -1112,8 +1225,9 @@ func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate
 // EnqueueForZoneAgents enqueues a zone update for reliable delivery to all
 // remote agents involved with this zone (as determined by AgentRegistry).
 // Called by SynchedDataEngine when a locally-originated update needs to
-// reach all peer agents.
-func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpdate) error {
+// reach all peer agents. Uses the same distID for all agents so the
+// originating agent can correlate confirmations from combiner and agents.
+func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpdate, distID string) error {
 	agents, err := tm.getAllAgentsForZone(zone)
 	if err != nil {
 		return fmt.Errorf("EnqueueForZoneAgents: %w", err)
@@ -1127,7 +1241,7 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 	var enqueueErrors []string
 	for _, agentID := range agents {
 		msg := &OutgoingMessage{
-			DistributionID: GenerateQueueDistributionID(),
+			DistributionID: distID,
 			RecipientID:    agentID,
 			RecipientType:  "agent",
 			Zone:           zone,
@@ -1146,7 +1260,7 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 		return fmt.Errorf("failed to enqueue for some agents: %v", enqueueErrors)
 	}
 
-	log.Printf("TransportManager: Enqueued zone update for %d agents (zone: %s)", len(agents), zone)
+	log.Printf("TransportManager: Enqueued zone update for %d agents (zone: %s, distID: %s)", len(agents), zone, distID)
 	return nil
 }
 
@@ -1167,12 +1281,12 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 }
 
 // MarkDeliveryConfirmed marks a queued message as confirmed by the recipient.
-// Called when a confirmation is received for a distribution ID.
-func (tm *TransportManager) MarkDeliveryConfirmed(distributionID string) bool {
+// senderID is the identity of the confirming party (= the original message recipient).
+func (tm *TransportManager) MarkDeliveryConfirmed(distributionID string, senderID string) bool {
 	if tm.reliableQueue == nil {
 		return false
 	}
-	return tm.reliableQueue.MarkConfirmed(distributionID)
+	return tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 }
 
 // --- Helper methods ---

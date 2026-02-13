@@ -90,6 +90,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	if Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 		sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.Internal.DistributionCache)).Methods("POST")
+		sr.HandleFunc("/agent/transaction", conf.APIagentTransaction(conf.Internal.DistributionCache)).Methods("POST")
 		// XXX: Should be behind a debug requirement, but for now always present
 		// if Globals.Debug {
 		log.Printf("Setting up debug endpoint for agent API")
@@ -104,6 +105,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	if Globals.App.Type == AppTypeCombiner {
 		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 		sr.HandleFunc("/combiner/distrib", conf.APIcombinerDistrib(conf.Internal.DistributionCache)).Methods("POST")
+		sr.HandleFunc("/combiner/transaction", conf.APIcombinerTransaction()).Methods("POST")
 		sr.HandleFunc("/combiner/debug", APIcombinerDebug()).Methods("POST")
 	}
 

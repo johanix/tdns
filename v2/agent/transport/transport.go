@@ -49,6 +49,7 @@ const (
 	ConfirmPartial                           // Partial success
 	ConfirmFailed                            // Operation failed
 	ConfirmRejected                          // Rejected (invalid, expired)
+	ConfirmPending                           // Received, processing in progress
 )
 
 func (c ConfirmStatus) String() string {
@@ -61,6 +62,8 @@ func (c ConfirmStatus) String() string {
 		return "FAILED"
 	case ConfirmRejected:
 		return "REJECTED"
+	case ConfirmPending:
+		return "PENDING"
 	default:
 		return "UNKNOWN"
 	}
@@ -200,13 +203,17 @@ type PingResponse struct {
 
 // ConfirmRequest confirms receipt and processing of a sync operation.
 type ConfirmRequest struct {
-	SenderID      string        // Identity of the sender (who is confirming)
-	Zone          string        // The zone the sync was for
-	DistributionID string        // The correlation ID from the sync
-	Status        ConfirmStatus // Result of processing
-	Message       string        // Optional details
-	Timestamp     time.Time     // Confirmation timestamp
-	Signature     []byte        // Optional signature
+	SenderID       string            // Identity of the sender (who is confirming)
+	Zone           string            // The zone the sync was for
+	DistributionID string            // The correlation ID from the sync
+	Status         ConfirmStatus     // Result of processing
+	Message        string            // Optional details
+	AppliedRecords []string          // RRs accepted (additions)
+	RemovedRecords []string          // RRs confirmed removed (deletions)
+	RejectedItems  []RejectedItemDTO // RRs rejected with reasons
+	Truncated      bool              // True if applied/removed_records was dropped for size
+	Timestamp      time.Time         // Confirmation timestamp
+	Signature      []byte            // Optional signature
 }
 
 // Address represents a network address that can be used for communication.

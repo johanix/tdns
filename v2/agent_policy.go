@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -44,6 +45,35 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 	case "local":
 		rrs := append([]dns.RR{}, synchedDataUpdate.Update.RRs...)
 
+		// Check HSYNC nsmgmt policy for NS record operations
+		hasNS := false
+		for _, rr := range rrs {
+			if rr.Header().Rrtype == dns.TypeNS {
+				hasNS = true
+				break
+			}
+		}
+		if hasNS {
+			zd, exists := Zones.Get(string(synchedDataUpdate.Zone))
+			if !exists {
+				return false, fmt.Sprintf("Local update for zone %q: zone not found", synchedDataUpdate.Zone), nil
+			}
+			apex, err := zd.GetOwner(zd.ZoneName)
+			if err != nil {
+				return false, fmt.Sprintf("Local update for zone %q: cannot get apex: %v", synchedDataUpdate.Zone, err), nil
+			}
+			hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
+			if !exists || len(hsyncRRset.RRs) == 0 {
+				return false, fmt.Sprintf("Local update for zone %q: no HSYNC record (NS management not configured)",
+					synchedDataUpdate.Zone), nil
+			}
+			hsync := hsyncRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNC)
+			if hsync.NSmgmt != core.HsyncNSmgmtAGENT {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNC nsmgmt=%s, NS management not delegated to agents",
+					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsync.NSmgmt]), nil
+			}
+		}
+
 		// Must check for (at least): approved RRtype, apex of zone and zone with us in the HSYNC RRset
 		for _, rr := range rrs {
 			if !validRRtype[rr.Header().Rrtype] {
@@ -55,6 +85,38 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 				log.Printf("SynchedDataEngine: Invalid RR name (outside apex): %s", rr.String())
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR name (outside apex): %s",
 					synchedDataUpdate.Zone, rr.String()), nil
+			}
+
+			// For local deletes, verify the RR belongs to this agent
+			if rr.Header().Class == dns.ClassNONE {
+				agentRepo, ok := zdr.Get(synchedDataUpdate.Zone)
+				if ok {
+					nod, ok := agentRepo.Get(synchedDataUpdate.AgentId)
+					if ok {
+						rrset, ok := nod.RRtypes.Get(rr.Header().Rrtype)
+						if ok {
+							checkRR := dns.Copy(rr)
+							checkRR.Header().Class = dns.ClassINET
+							found := false
+							for _, existingRR := range rrset.RRs {
+								if dns.IsDuplicate(existingRR, checkRR) {
+									found = true
+									break
+								}
+							}
+							if !found {
+								return false, fmt.Sprintf("Local delete for zone %q: RR not owned by this agent (%s)",
+									synchedDataUpdate.Zone, rr.String()), nil
+							}
+						} else {
+							return false, fmt.Sprintf("Local delete for zone %q: no %s RRset owned by this agent",
+								synchedDataUpdate.Zone, dns.TypeToString[rr.Header().Rrtype]), nil
+						}
+					} else {
+						return false, fmt.Sprintf("Local delete for zone %q: no data owned by this agent",
+							synchedDataUpdate.Zone), nil
+					}
+				}
 			}
 		}
 	}
@@ -167,10 +229,18 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						changed = true
 					} else {
 						for _, rr := range rrset.RRs {
-							msg = fmt.Sprintf("Adding RR: %s to RRset\n%v", rr.String(), cur_rrset.RRs)
-							log.Printf("SynchedDataEngine: %s", msg)
+							prevLen := len(cur_rrset.RRs)
 							cur_rrset.Add(rr)
-							changed = true
+							if len(cur_rrset.RRs) > prevLen {
+								msg = fmt.Sprintf("Adding RR: %s to RRset", rr.String())
+								log.Printf("SynchedDataEngine: %s", msg)
+								changed = true
+							} else if synchedDataUpdate.Force {
+								log.Printf("SynchedDataEngine: RR already present but --force set, marking changed: %s", rr.String())
+								changed = true
+							} else {
+								log.Printf("SynchedDataEngine: RR already present, skipping: %s", rr.String())
+							}
 						}
 					}
 					nod.RRtypes.Set(rrtype, cur_rrset)

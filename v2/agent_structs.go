@@ -205,10 +205,11 @@ type AgentMsgPost struct {
 	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
 	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
 	TLSA         dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
-	Zone         ZoneName            // An AgentMsgPost should always only refer to one zone.
-	Records      map[string][]string // Resource records grouped by owner name (owner → []RR strings)
-	Time         time.Time
-	RfiType      string
+	Zone           ZoneName            // An AgentMsgPost should always only refer to one zone.
+	Records        map[string][]string // Resource records grouped by owner name (owner → []RR strings)
+	Time           time.Time
+	RfiType        string
+	DistributionID string // Originating distribution ID from the sending agent
 }
 
 type AgentMsgPostPlus struct {

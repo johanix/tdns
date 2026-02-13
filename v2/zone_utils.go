@@ -189,7 +189,12 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
 	zd.IncomingSerial = new_zd.IncomingSerial
-	zd.CurrentSerial = new_zd.CurrentSerial
+	if zd.FirstZoneLoad {
+		zd.CurrentSerial = new_zd.CurrentSerial
+		zd.FirstZoneLoad = false
+	} else {
+		zd.CurrentSerial++
+	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
@@ -334,7 +339,12 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
 	zd.IncomingSerial = new_zd.IncomingSerial
-	zd.CurrentSerial = new_zd.CurrentSerial
+	if zd.FirstZoneLoad {
+		zd.CurrentSerial = new_zd.CurrentSerial
+		zd.FirstZoneLoad = false
+	} else {
+		zd.CurrentSerial++
+	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
@@ -790,28 +800,24 @@ func FindZoneNG(qname string) *ZoneData {
 	return nil
 }
 
-func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
+// BumpSerialOnly increments the SOA serial and updates the SOA RR,
+// but does not notify downstreams. Use when the caller will handle
+// notification separately or when notification is not appropriate
+// (e.g. inside a NOTIFY handler where triggering downstream NOTIFYs
+// could cause side effects).
+func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp := BumperResponse{
 		Zone: zd.ZoneName,
 	}
 
-	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
+	log.Printf("BumpSerialOnly: bumping SOA serial for zone '%s'", zd.ZoneName)
 	zd.mu.Lock()
-
-	defer func() {
-		zd.mu.Unlock()
-	}()
+	defer zd.mu.Unlock()
 
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
 	if zd.Options[OptOnlineSigning] {
-		//		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
-		//		if err != nil {
-		//			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
-		//			zd.mu.Unlock()
-		//			return resp, err
-		//		}
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err != nil {
 			zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
@@ -824,14 +830,20 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
 		if err != nil {
-			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
+			log.Printf("BumpSerialOnly: failed to sign SOA RRset for zone %s", zd.ZoneName)
 			return resp, err
 		}
 	}
-	//	zd.mu.Unlock()
 
+	return resp, nil
+}
+
+func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
+	resp, err := zd.BumpSerialOnly()
+	if err != nil {
+		return resp, err
+	}
 	zd.NotifyDownstreams()
-
 	return resp, nil
 }
 

@@ -214,6 +214,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
 						} else {
+							// Clear any previous error state after successful refresh
+							if zd.Error {
+								log.Printf("RefreshEngine: Zone %s refresh succeeded, clearing %s error state",
+									zone, ErrorTypeToString[zd.ErrorType])
+								zd.SetError(NoError, "")
+							}
 							// No error from refresh - zone data is valid
 							if updated {
 								log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
@@ -319,6 +325,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						SyncQ:           conf.Internal.SyncQ,
 						Data:            cmap.New[OwnerData](),
 						KeyDB:           conf.Internal.KeyDB,
+					FirstZoneLoad:   true,
 					}
 
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
