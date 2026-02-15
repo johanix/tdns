@@ -59,19 +59,17 @@ func (ar *AgentRegistry) HelloRetrier() {
 }
 
 // HelloRetrierNG manages Hello retries for an agent.
-// UPDATED: Now handles both API and DNS transports independently.
+// Handles both API and DNS transports independently.
 // Continues retrying while EITHER transport is in KNOWN state.
+//
+// Fast-start: up to 3 immediate attempts with 5s spacing.
+// If all 3 fail, falls back to the normal helloretry ticker.
+// On HELLO success (INTRODUCED), triggers fast beat attempts.
 func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 	helloRetryInterval := configureInterval("agent.syncengine.intervals.helloretry", 15, 1800)
 	go func(agent *Agent) {
-		ticker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
-		defer ticker.Stop()
-
 		// Check if ANY transport needs Hello retries
-		apiNeedsRetry := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
-		dnsNeedsRetry := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
-
-		if !apiNeedsRetry && !dnsNeedsRetry {
+		if !ar.agentNeedsHello(agent) {
 			log.Printf("HelloRetrierNG: agent %q has no transports in state KNOWN (API: %s, DNS: %s), stopping",
 				agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 			return
@@ -80,66 +78,177 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 		log.Printf("HelloRetrierNG: started for agent %q (API: %s, DNS: %s)",
 			agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 
-		// Send immediate Hello, then wait for ticker for retries
-		sendHello := true
+		// Phase 1: Fast attempts — up to 3 tries with 5s spacing
+		const fastAttempts = 3
+		const fastInterval = 5 * time.Second
 
-		for {
-			if !sendHello {
+		for attempt := 1; attempt <= fastAttempts; attempt++ {
+			if attempt > 1 {
 				select {
 				case <-ctx.Done():
-					log.Printf("HelloRetrierNG: context done, stopping")
 					return
-				case <-ticker.C:
-					sendHello = true
+				case <-time.After(fastInterval):
 				}
 			}
 
-			// Check current state of both transports
-			agent.mu.RLock()
-			apiState := agent.ApiDetails.State
-			dnsState := agent.DnsDetails.State
-			apiMethod := agent.ApiMethod
-			dnsMethod := agent.DnsMethod
-			agent.mu.RUnlock()
-
-			apiNeedsRetry = apiMethod && apiState == AgentStateKnown
-			dnsNeedsRetry = dnsMethod && dnsState == AgentStateKnown
-
-			if !apiNeedsRetry && !dnsNeedsRetry {
-				log.Printf("HelloRetrierNG: agent %q no longer in state KNOWN (API: %s, DNS: %s), stopping",
-					agent.Identity, AgentStateToString[apiState], AgentStateToString[dnsState])
+			if !ar.agentNeedsHello(agent) {
+				log.Printf("HelloRetrierNG: agent %q HELLO succeeded (fast attempt %d/%d)",
+					agent.Identity, attempt, fastAttempts)
+				// HELLO succeeded — trigger fast beat attempts
+				ar.FastBeatAttempts(ctx, agent)
 				return
 			}
 
-			log.Printf("HelloRetrierNG: with agent %q we share the zones: %v", agent.Identity, agent.Zones)
+			log.Printf("HelloRetrierNG: fast attempt %d/%d HELLO to %q", attempt, fastAttempts, agent.Identity)
+			ar.sendHelloToAgent(agent)
+		}
 
-			// Send ONE Hello per retry interval with all shared zones
-			// Old behavior sent one Hello PER ZONE which caused message bursts
-			if apiNeedsRetry || dnsNeedsRetry {
-				if len(agent.Zones) > 0 {
-					// Pick first zone for the Hello message zone field (for backward compat with receivers)
-					// But SendHelloWithFallback uses sharedZonesForAgent() which includes ALL zones
-					var firstZone ZoneName
-					for zone := range agent.Zones {
-						firstZone = zone
-						break
-					}
-					log.Printf("HelloRetrierNG: trying HELLO with agent %q with %d shared zone(s), using %q as primary zone (API needs: %v, DNS needs: %v)",
-						agent.Identity, len(agent.Zones), firstZone, apiNeedsRetry, dnsNeedsRetry)
-					ar.SingleHello(agent, firstZone)
-				} else {
-					// Config-based agent with no shared zones - send Hello anyway
-					log.Printf("HelloRetrierNG: trying HELLO with agent %q (no shared zones, config-based agent, API needs: %v, DNS needs: %v)",
-						agent.Identity, apiNeedsRetry, dnsNeedsRetry)
-					ar.SingleHello(agent, "")
-				}
+		// Check if fast phase succeeded
+		if !ar.agentNeedsHello(agent) {
+			log.Printf("HelloRetrierNG: agent %q HELLO succeeded after fast attempts", agent.Identity)
+			ar.FastBeatAttempts(ctx, agent)
+			return
+		}
+
+		// Phase 2: Fall back to normal ticker
+		log.Printf("HelloRetrierNG: agent %q fast attempts exhausted, falling back to %ds ticker",
+			agent.Identity, helloRetryInterval)
+
+		ticker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("HelloRetrierNG: context done, stopping")
+				return
+			case <-ticker.C:
 			}
 
-			// Reset flag to wait for next ticker
-			sendHello = false
+			if !ar.agentNeedsHello(agent) {
+				log.Printf("HelloRetrierNG: agent %q no longer in state KNOWN, stopping", agent.Identity)
+				ar.FastBeatAttempts(ctx, agent)
+				return
+			}
+
+			log.Printf("HelloRetrierNG: ticker retry HELLO to %q", agent.Identity)
+			ar.sendHelloToAgent(agent)
 		}
 	}(agent)
 	log.Printf("HelloRetrierNG: started HelloRetrierNG for agent %q", agent.Identity)
+}
+
+// agentNeedsHello returns true if any transport is still in KNOWN state.
+func (ar *AgentRegistry) agentNeedsHello(agent *Agent) bool {
+	agent.mu.RLock()
+	defer agent.mu.RUnlock()
+	apiNeeds := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
+	dnsNeeds := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
+	return apiNeeds || dnsNeeds
+}
+
+// sendHelloToAgent sends a single HELLO to an agent using all shared zones.
+func (ar *AgentRegistry) sendHelloToAgent(agent *Agent) {
+	if len(agent.Zones) > 0 {
+		var firstZone ZoneName
+		for zone := range agent.Zones {
+			firstZone = zone
+			break
+		}
+		ar.SingleHello(agent, firstZone)
+	} else {
+		ar.SingleHello(agent, "")
+	}
+}
+
+// FastBeatAttempts sends up to 3 beats with 5s spacing after HELLO succeeds.
+// If any beat succeeds (agent becomes OPERATIONAL), returns immediately.
+// If all 3 fail, returns — the normal heartbeat ticker will take over.
+func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
+	const fastAttempts = 3
+	const fastInterval = 5 * time.Second
+
+	// Check if any transport is INTRODUCED (needs beat to reach OPERATIONAL)
+	needsBeat := func() bool {
+		agent.mu.RLock()
+		defer agent.mu.RUnlock()
+		apiIntro := agent.ApiMethod && agent.ApiDetails.State == AgentStateIntroduced
+		dnsIntro := agent.DnsMethod && agent.DnsDetails.State == AgentStateIntroduced
+		return apiIntro || dnsIntro
+	}
+
+	if !needsBeat() {
+		return
+	}
+
+	log.Printf("FastBeatAttempts: starting for agent %q", agent.Identity)
+
+	for attempt := 1; attempt <= fastAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(fastInterval):
+			}
+		}
+
+		if !needsBeat() {
+			log.Printf("FastBeatAttempts: agent %q reached OPERATIONAL (attempt %d/%d)",
+				agent.Identity, attempt, fastAttempts)
+			return
+		}
+
+		log.Printf("FastBeatAttempts: fast attempt %d/%d BEAT to %q", attempt, fastAttempts, agent.Identity)
+
+		if ar.TransportManager != nil {
+			beatCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			agent.mu.RLock()
+			sequence := uint64(agent.ApiDetails.SentBeats)
+			agent.mu.RUnlock()
+			beatResp, err := ar.TransportManager.SendBeatWithFallback(beatCtx, agent, sequence)
+			cancel()
+
+			if err == nil && beatResp != nil && beatResp.Ack {
+				agent.mu.Lock()
+				agent.ApiDetails.State = AgentStateOperational
+				agent.ApiDetails.LatestSBeat = time.Now()
+				agent.ApiDetails.SentBeats++
+				agent.ApiDetails.LatestError = ""
+				// Execute deferred tasks on first successful beat
+				if len(agent.DeferredTasks) > 0 {
+					log.Printf("FastBeatAttempts: Agent %s has %d deferred tasks, executing", agent.Identity, len(agent.DeferredTasks))
+					var remaining []DeferredAgentTask
+					for _, task := range agent.DeferredTasks {
+						if task.Precondition() {
+							ok, taskErr := task.Action()
+							if taskErr != nil {
+								log.Printf("FastBeatAttempts: Deferred task %s error: %v", task.Desc, taskErr)
+								remaining = append(remaining, task)
+							} else if !ok {
+								remaining = append(remaining, task)
+							} else {
+								log.Printf("FastBeatAttempts: Deferred task %s executed", task.Desc)
+							}
+						} else {
+							remaining = append(remaining, task)
+						}
+					}
+					agent.DeferredTasks = remaining
+				}
+				ar.S.Set(agent.Identity, agent)
+				agent.mu.Unlock()
+				log.Printf("FastBeatAttempts: agent %q reached OPERATIONAL", agent.Identity)
+				return
+			}
+		}
+	}
+
+	// Check final state
+	if !needsBeat() {
+		log.Printf("FastBeatAttempts: agent %q reached OPERATIONAL after fast attempts", agent.Identity)
+	} else {
+		log.Printf("FastBeatAttempts: agent %q fast beat attempts exhausted, heartbeat ticker will take over", agent.Identity)
+	}
 }
 
 func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {

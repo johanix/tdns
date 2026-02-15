@@ -572,7 +572,15 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	}
 
 	ar.S.Set(remoteid, agent)
-	log.Printf("MarkAgentAsNeeded: Marked %s as NEEDED for zone %s (will be discovered by DiscoveryRetrierNG)", remoteid, zonename)
+	log.Printf("MarkAgentAsNeeded: Marked %s as NEEDED for zone %s", remoteid, zonename)
+
+	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
+	if imr := Conf.Internal.ImrEngine; imr != nil {
+		log.Printf("MarkAgentAsNeeded: Triggering immediate discovery for %s", remoteid)
+		go ar.attemptDiscovery(agent, imr)
+	} else {
+		log.Printf("MarkAgentAsNeeded: IMR not ready, %s will be discovered by DiscoveryRetrierNG", remoteid)
+	}
 }
 
 // attemptDiscovery performs a single discovery attempt for an agent.
@@ -609,12 +617,24 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr) {
 		}
 	}
 
-	// SUCCESS: Agent transitioned from NEEDED → KNOWN
-	// (RegisterDiscoveredAgent sets state to KNOWN)
-	log.Printf("attemptDiscovery: Successfully discovered %s, now in state KNOWN", agent.Identity)
+	// SUCCESS: Discovery complete. Contact info updated.
+	log.Printf("attemptDiscovery: Successfully discovered %s (API: %s, DNS: %s)",
+		agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 
-	// Start Hello retry loop (existing mechanism)
-	// Cancel any existing HelloRetrierNG for this agent first
+	// Only start/restart HelloRetrierNG if a transport is actually in KNOWN state.
+	// If DNS is already INTRODUCED or OPERATIONAL (preserved by RegisterDiscoveredAgent),
+	// restarting HelloRetrierNG would cancel an in-progress fast-retry phase for no reason.
+	agent.mu.RLock()
+	apiKnown := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
+	dnsKnown := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
+	agent.mu.RUnlock()
+
+	if !apiKnown && !dnsKnown {
+		log.Printf("attemptDiscovery: Agent %s has no transports in KNOWN state, skipping HelloRetrierNG", agent.Identity)
+		return
+	}
+
+	// Cancel any existing HelloRetrierNG for this agent before starting a new one
 	ar.mu.Lock()
 	if existingCancel, exists := ar.helloContexts[agent.Identity]; exists {
 		log.Printf("attemptDiscovery: Cancelling existing Hello retry loop for %s", agent.Identity)
@@ -831,7 +851,7 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 // "change" (i.e. the same identity, but now roles). ADD+REMOVE doesn't deal with that.
 func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate) error {
 
-	var updatedIdentities = map[AgentId]bool{} // Tracks modified agents (both add and remove)
+	var updatedIdentities = map[AgentId]bool{}  // Tracks modified agents (both add and remove)
 	var affectedIdentities = map[AgentId]bool{} // Tracks ALL agents that need zone recomputation
 
 	// First pass: Check if WE are in this zone's HSYNC RRset

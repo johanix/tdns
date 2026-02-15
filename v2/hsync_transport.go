@@ -514,7 +514,7 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 		BeatInterval: beatInterval,
 	}
 
-	select{
+	select {
 	case tm.agentQs.Beat <- report:
 		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL)", senderID)
 	default:
@@ -530,8 +530,8 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	senderID := payload.GetSenderID()   // Use helper method to get sender ID from either format
-	records := payload.GetRecords()      // Use helper method to get records from either format
+	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
+	records := payload.GetRecords()   // Use helper method to get records from either format
 	zone := payload.Zone
 
 	// Determine message type (sync, rfi, or status)
@@ -633,12 +633,12 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 	defer cancel()
 
 	err := tm.DNSTransport.Confirm(ctx, peer, &transport.ConfirmRequest{
-		SenderID:      tm.LocalID,
-		Zone:          payload.Zone,
+		SenderID:       tm.LocalID,
+		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
-		Status:        transport.ConfirmSuccess,
-		Message:       "Sync received and processed",
-		Timestamp:     time.Now(),
+		Status:         transport.ConfirmSuccess,
+		Message:        "Sync received and processed",
+		Timestamp:      time.Now(),
 	})
 
 	if err != nil {
@@ -980,6 +980,10 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 				log.Printf("TransportManager: API Beat to %s failed: %v", peer.ID, apiErr)
 				agent.ApiDetails.LatestError = apiErr.Error()
 				agent.ApiDetails.LatestErrorTime = time.Now()
+			} else if apiResp != nil && !apiResp.Ack {
+				log.Printf("TransportManager: API Beat to %s: no confirmation (Ack=false)", peer.ID)
+				agent.ApiDetails.LatestError = "beat sent but not confirmed by peer"
+				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else {
 				log.Printf("TransportManager: API Beat to %s succeeded", peer.ID)
 				agent.ApiDetails.State = AgentStateOperational
@@ -1000,6 +1004,12 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 			if dnsErr != nil {
 				log.Printf("TransportManager: DNS Beat to %s failed: %v", peer.ID, dnsErr)
 				agent.DnsDetails.LatestError = dnsErr.Error()
+				agent.DnsDetails.LatestErrorTime = time.Now()
+			} else if dnsResp != nil && !dnsResp.Ack {
+				// Beat() returns nil error but Ack:false when EDNS0 confirmation is missing.
+				// This means the DNS response was received but the peer didn't confirm processing.
+				log.Printf("TransportManager: DNS Beat to %s: no confirmation (Ack=false)", peer.ID)
+				agent.DnsDetails.LatestError = "beat sent but not confirmed by peer"
 				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else {
 				log.Printf("TransportManager: DNS Beat to %s succeeded", peer.ID)

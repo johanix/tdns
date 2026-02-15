@@ -21,32 +21,32 @@ import (
 
 // AgentDiscoveryResult holds the result of discovering an agent.
 type AgentDiscoveryResult struct {
-	Identity      string
-	APIUri        string           // Base URI from URI record (e.g., https://agent.example.com:8443/api)
-	DNSUri        string           // DNS endpoint if discovered
-	JWKData       string           // Base64url-encoded JWK (preferred)
-	PublicKey     crypto.PublicKey // Decoded public key from JWK
-	KeyAlgorithm  string           // Algorithm from JWK (e.g., "ES256")
-	LegacyKeyRR   *dns.KEY         // Legacy KEY record (fallback if no JWK)
-	TLSA          *dns.TLSA        // TLSA record for TLS verification
-	APIAddresses  []string         // IP addresses for API service from SVCB
-	DNSAddresses  []string         // IP addresses for DNS service from SVCB
-	Port          uint16           // Port from URI record
-	Error         error            // Any error during discovery
-	Partial       bool             // True if some records were found but discovery incomplete
+	Identity     string
+	APIUri       string           // Base URI from URI record (e.g., https://agent.example.com:8443/api)
+	DNSUri       string           // DNS endpoint if discovered
+	JWKData      string           // Base64url-encoded JWK (preferred)
+	PublicKey    crypto.PublicKey // Decoded public key from JWK
+	KeyAlgorithm string           // Algorithm from JWK (e.g., "ES256")
+	LegacyKeyRR  *dns.KEY         // Legacy KEY record (fallback if no JWK)
+	TLSA         *dns.TLSA        // TLSA record for TLS verification
+	APIAddresses []string         // IP addresses for API service from SVCB
+	DNSAddresses []string         // IP addresses for DNS service from SVCB
+	Port         uint16           // Port from URI record
+	Error        error            // Any error during discovery
+	Partial      bool             // True if some records were found but discovery incomplete
 }
 
 // DiscoverAgent performs DNS-based discovery of an agent's contact information.
 // Discovery flow for API transport:
-//   1. URI record at _https._tcp.<identity> → get API endpoint URI and port
-//   2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
-//   3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
+//  1. URI record at _https._tcp.<identity> → get API endpoint URI and port
+//  2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
+//  3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
 //
 // Discovery flow for DNS transport (optional):
-//   1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
-//   2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
-//   3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
-//   4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
+//  1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
+//  2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
+//  3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
+//  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
 //
 // Returns a result structure with all discovered information.
 func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscoveryResult {
@@ -264,11 +264,14 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			}
 		}
 
-		// Update agent details
+		// Update agent details — only set state to KNOWN if not already beyond it.
+		// Re-discovery must not regress an OPERATIONAL or INTRODUCED transport.
 		if result.APIUri != "" {
 			agent.ApiDetails.BaseUri = result.APIUri
 			agent.ApiDetails.ContactInfo = "complete"
-			agent.ApiDetails.State = AgentStateKnown
+			if agent.ApiDetails.State <= AgentStateNeeded {
+				agent.ApiDetails.State = AgentStateKnown
+			}
 			agent.ApiDetails.TlsaRR = result.TLSA
 			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
@@ -276,7 +279,9 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		if result.DNSUri != "" {
 			agent.DnsDetails.BaseUri = result.DNSUri
 			agent.DnsDetails.ContactInfo = "complete"
-			agent.DnsDetails.State = AgentStateKnown
+			if agent.DnsDetails.State <= AgentStateNeeded {
+				agent.DnsDetails.State = AgentStateKnown
+			}
 
 			// Extract port from DNS URI for SyncPeerFromAgent
 			parsed, err := url.Parse(result.DNSUri)

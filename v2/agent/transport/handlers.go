@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -247,7 +248,28 @@ func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
 			}
 		}
 
-		// Send standard response
+		// Build a generic EDNS0 confirmation for all other message types (hello, beat, etc).
+		// The sender requires an EDNS0 CHUNK confirmation to distinguish "message received
+		// and processed" from a bare DNS ACK (which could come from any DNS server).
+		if rcode == dns.RcodeSuccess {
+			confirmPayload := struct {
+				Type           string `json:"type"`
+				DistributionID string `json:"distribution_id"`
+				Status         string `json:"status"`
+				Message        string `json:"message"`
+				Timestamp      int64  `json:"timestamp"`
+			}{
+				Type:           "confirm",
+				DistributionID: ctx.DistributionID,
+				Status:         "ok",
+				Message:        "received",
+				Timestamp:      time.Now().Unix(),
+			}
+			payloadBytes, marshalErr := json.Marshal(confirmPayload)
+			if marshalErr == nil {
+				return sendChunkResponse(w, msg, payloadBytes, rcode)
+			}
+		}
 		return sendStandardResponse(w, msg, rcode)
 	}
 }

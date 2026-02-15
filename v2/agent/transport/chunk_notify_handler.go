@@ -202,6 +202,8 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 	case "confirm":
 		// Confirmations go to the transport's pending confirmation handler
 		h.handleConfirmation(incomingMsg)
+		// Confirm messages get a bare DNS ACK (no EDNS0 needed — sender doesn't wait for confirm-of-confirm)
+		return h.sendResponse(w, msg, dns.RcodeSuccess)
 
 	case "ping":
 		// Ping: validate and send confirmation with echoed nonce in same response
@@ -219,8 +221,10 @@ func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string
 		}
 	}
 
-	// Send success response
-	return h.sendResponse(w, msg, dns.RcodeSuccess)
+	// Send success response with EDNS0 confirmation payload.
+	// The sender checks for this to distinguish "message received and routed"
+	// from a bare DNS ACK (which could come from any DNS server).
+	return h.sendConfirmResponse(w, msg, distributionID, incomingMsg.Type)
 }
 
 // extractDistributionID extracts the distribution ID from a QNAME.
@@ -363,13 +367,13 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 	}
 
 	return &IncomingMessage{
-		Type:          msgType,
+		Type:           msgType,
 		DistributionID: distributionID,
-		SenderID:      senderID,
-		Zone:          zone,
-		Payload:       payload,
-		ReceivedAt:    time.Now(),
-		SourceAddr:    sourceAddr,
+		SenderID:       senderID,
+		Zone:           zone,
+		Payload:        payload,
+		ReceivedAt:     time.Now(),
+		SourceAddr:     sourceAddr,
 	}, nil
 }
 
@@ -388,12 +392,12 @@ func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, dist
 	}
 
 	confirm := &DnsPingConfirmPayload{
-		Type:          "ping_confirm",
-		SenderID:      h.LocalID,
-		Nonce:         ping.Nonce,
+		Type:           "ping_confirm",
+		SenderID:       h.LocalID,
+		Nonce:          ping.Nonce,
 		DistributionID: distributionID,
-		Status:        "ok",
-		Timestamp:     time.Now().Unix(),
+		Status:         "ok",
+		Timestamp:      time.Now().Unix(),
 	}
 	confirmJSON, err := json.Marshal(confirm)
 	if err != nil {
@@ -462,6 +466,46 @@ func (h *ChunkNotifyHandler) sendResponse(w dns.ResponseWriter, req *dns.Msg, rc
 	resp.Authoritative = true
 	resp.Rcode = rcode
 
+	return w.WriteMsg(resp)
+}
+
+// sendConfirmResponse sends a DNS response with an EDNS0 CHUNK confirmation payload.
+// This proves to the sender that the message was received and routed (not just DNS-level ACK).
+func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.Msg, distributionID, msgType string) error {
+	if w == nil {
+		return nil
+	}
+
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: distributionID,
+		Status:         "ok",
+		Message:        fmt.Sprintf("%s received", msgType),
+		Timestamp:      time.Now().Unix(),
+	}
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return h.sendResponse(w, req, dns.RcodeServerFailure)
+	}
+
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.Authoritative = true
+	resp.Rcode = dns.RcodeSuccess
+	resp.SetEdns0(4096, true)
+	opt := resp.IsEdns0()
+	if opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
+			Data: payloadBytes,
+		})
+	}
 	return w.WriteMsg(resp)
 }
 
