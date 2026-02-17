@@ -187,6 +187,73 @@ Displays all agents that have the specified zone in their shared zones list.`,
 	},
 }
 
+var resyncPush, resyncPull, resyncFull bool
+
+var agentPeersResyncCmd = &cobra.Command{
+	Use:   "resync",
+	Short: "Re-synchronize zone data with peers and combiner",
+	Long: `Re-synchronize zone data between this agent, its peers, and the combiner.
+
+Modes:
+  --push   Re-send all local data to combiner and remote agents
+  --pull   Request all remote agents to re-send their data (RFI SYNC)
+  --full   Both push and pull (default if no flag specified)`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		// Default to --full if no flag specified
+		if !resyncPush && !resyncPull && !resyncFull {
+			resyncFull = true
+		}
+
+		zone := tdns.ZoneName(tdns.Globals.Zonename)
+
+		// Push: re-send local data to combiner and remote agents
+		if resyncPush || resyncFull {
+			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
+			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
+			amr, err := SendAgentMgmtCmd(req, "peers")
+			if err != nil {
+				fmt.Printf("Error sending resync push: %v\n", err)
+				os.Exit(1)
+			}
+			if amr.Error {
+				fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
+				os.Exit(1)
+			}
+			fmt.Printf("Resync push: %s\n", amr.Msg)
+		}
+
+		// Pull: send RFI SYNC to all remote agents
+		if resyncPull || resyncFull {
+			fmt.Printf("Resync pull: requesting peers to re-send data for zone %s...\n", zone)
+			req := &tdns.AgentMgmtPost{
+				Command:     "send-rfi",
+				MessageType: tdns.AgentMsgRfi,
+				RfiType:     "SYNC",
+				Zone:        zone,
+			}
+			amr, err := SendAgentMgmtCmd(req, "peers")
+			if err != nil {
+				fmt.Printf("Error sending resync pull: %v\n", err)
+				os.Exit(1)
+			}
+			if amr.Error {
+				fmt.Printf("Resync pull error: %s\n", amr.ErrorMsg)
+				os.Exit(1)
+			}
+			fmt.Printf("Resync pull: %s\n", amr.Msg)
+			for agentId, rfiData := range amr.RfiResponse {
+				if rfiData.Error {
+					fmt.Printf("  %s: error: %s\n", agentId, rfiData.ErrorMsg)
+				} else {
+					fmt.Printf("  %s: %s\n", agentId, rfiData.Msg)
+				}
+			}
+		}
+	},
+}
+
 func init() {
 	AgentCmd.AddCommand(agentLocalCmd)
 	AgentCmd.AddCommand(agentDiscoverCmd)
@@ -196,6 +263,7 @@ func init() {
 	// Add subcommands under "agent peers"
 	agentPeersCmd.AddCommand(agentPeersZonesCmd)
 	agentPeersCmd.AddCommand(agentPeersZoneCmd)
+	agentPeersCmd.AddCommand(agentPeersResyncCmd)
 
 	agentLocalCmd.AddCommand(agentLocalConfigCmd)
 	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
@@ -208,6 +276,9 @@ func init() {
 	agentPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
 	agentPeersZoneCmd.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
 
+	agentPeersResyncCmd.Flags().BoolVar(&resyncPush, "push", false, "Re-send local data to combiner and peers")
+	agentPeersResyncCmd.Flags().BoolVar(&resyncPull, "pull", false, "Request peers to re-send their data (RFI SYNC)")
+	agentPeersResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
 }
 
 func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {

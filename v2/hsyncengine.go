@@ -92,7 +92,7 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
 			registry.HeartbeatHandler(msgReport)
 
 		case msgPost = <-msgQ:
-			registry.MsgHandler(msgPost, synchedDataUpdateQ)
+			registry.MsgHandler(msgPost, synchedDataUpdateQ, agentQs.SynchedDataCmd)
 
 		case mgmtPost = <-commandQ:
 			registry.CommandHandler(mgmtPost, synchedDataUpdateQ)
@@ -158,8 +158,9 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 		}
 
 		neededCount++
-		// Spawn async discovery attempt (non-blocking)
-		go ar.attemptDiscovery(agent, imr)
+		// Spawn async discovery attempt — only discover the transports
+		// that are actually in NEEDED state (non-blocking)
+		go ar.attemptDiscovery(agent, imr, apiNeeded, dnsNeeded)
 	}
 
 	if neededCount > 0 {
@@ -223,7 +224,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 }
 
 // Handler for messages received from other agents
-func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate) {
+func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate, synchedDataCmdQ chan *SynchedDataCmd) {
 	log.Printf("MsgHandler: Received %q message from %s: %+v", AgentMsgToString[ampp.MessageType], ampp.MyIdentity, ampp)
 
 	// var resp = SynchedDataResponse{
@@ -380,6 +381,56 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			}
 			// log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
 
+		case "SYNC":
+			// Remote agent asks us to re-send all our local data.
+			log.Printf("MsgHandler: RFI SYNC from %q for zone %q — triggering local resync",
+				ampp.MyIdentity, ampp.Zone)
+			sdcmd := &SynchedDataCmd{
+				Cmd:      "resync",
+				Zone:     ZoneName(ampp.Zone),
+				Response: make(chan *SynchedDataCmdResponse, 1),
+			}
+			synchedDataCmdQ <- sdcmd
+			select {
+			case sdResp := <-sdcmd.Response:
+				if sdResp.Error {
+					resp.Error = true
+					resp.ErrorMsg = sdResp.ErrorMsg
+				} else {
+					resp.Msg = fmt.Sprintf("Resync triggered: %s", sdResp.Msg)
+				}
+			case <-time.After(10 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "Timeout waiting for resync"
+			}
+
+		case "AUDIT":
+			// Remote agent wants to see all data we have for this zone.
+			log.Printf("MsgHandler: RFI AUDIT from %q for zone %q",
+				ampp.MyIdentity, ampp.Zone)
+			sdcmd := &SynchedDataCmd{
+				Cmd:      "dump-zonedatarepo",
+				Zone:     ZoneName(ampp.Zone),
+				Response: make(chan *SynchedDataCmdResponse, 1),
+			}
+			synchedDataCmdQ <- sdcmd
+			select {
+			case sdResp := <-sdcmd.Response:
+				if sdResp.Error {
+					resp.Error = true
+					resp.ErrorMsg = sdResp.ErrorMsg
+				} else {
+					resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
+						Status:    "ok",
+						Msg:       sdResp.Msg,
+						AuditData: sdResp.ZDR,
+					}
+				}
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "Timeout waiting for audit data"
+			}
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown RFI type: %s", ar.LocalAgent.Identity, ampp.RfiType)
@@ -478,11 +529,12 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				peer := ar.TransportManager.SyncPeerFromAgent(agent)
 				syncReq := &agenttransport.SyncRequest{
-					SenderID:  ar.LocalAgent.Identity,
-					Zone:      string(msg.Zone),
-					SyncType:  agenttransport.SyncTypeNS,
-					Records:   groupRRStringsByOwner(msg.RRs),
-					Timestamp: time.Now(),
+					SenderID:    ar.LocalAgent.Identity,
+					Zone:        string(msg.Zone),
+					SyncType:    agenttransport.SyncTypeNS,
+					Records:     groupRRStringsByOwner(msg.RRs),
+					Timestamp:   time.Now(),
+					MessageType: "sync",
 				}
 				syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
 				cancel()
@@ -545,15 +597,15 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				return
 			}
 
-			// RFI is a synchronous request-response, so the agent must be operational
-			if agent.State != AgentStateOperational {
+			// RFI requires the agent to be operational on at least one transport
+			if !agent.IsAnyTransportOperational() {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %q: Upstream agent %s is not operational (state: %s), ignoring command for now", msg.Zone, zad.MyUpstream, AgentStateToString[agent.State])
+				resp.ErrorMsg = fmt.Sprintf("zone %q: Upstream agent %s is not operational (state: %s), ignoring command for now", msg.Zone, zad.MyUpstream, AgentStateToString[agent.EffectiveState()])
 				return
 			}
 
 			// Send the RFI to the upstream agent
-			amr, err := agent.SendApiMsg(&AgentMsgPost{
+			amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 				MessageType:  AgentMsgRfi,
 				MyIdentity:   AgentId(ar.LocalAgent.Identity),
 				YourIdentity: agent.Identity,
@@ -595,18 +647,18 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					continue
 				}
 
-				// RFI is synchronous request-response, agent must be operational
-				if agent.State != AgentStateOperational {
+				// RFI requires the agent to be operational on at least one transport
+				if !agent.IsAnyTransportOperational() {
 					resp.RfiResponse[aid] = &RfiData{
 						Status:   "error",
 						Error:    true,
-						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational (state: %s)", msg.Zone, aid, AgentStateToString[agent.State]),
+						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational (state: %s)", msg.Zone, aid, AgentStateToString[agent.EffectiveState()]),
 					}
 					continue
 				}
 
-				// Send the RFI to the upstream agent
-				amr, err := agent.SendApiMsg(&AgentMsgPost{
+				// Send the RFI to the downstream agent
+				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
 					MyIdentity:   AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
@@ -631,6 +683,62 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					ErrorMsg: fmt.Sprintf("DOWNSTREAM RFI message to agent %q for zone %q returned strange response: %v", aid, msg.Zone, amr.RfiResponse),
 				}
 			}
+
+		case "SYNC":
+			// Send RFI SYNC to all remote agents for this zone.
+			log.Printf("CommandHandler: Sending SYNC RFI to %d agents for zone %q", len(zad.Agents), msg.Zone)
+			for _, agent := range zad.Agents {
+				if !agent.IsAnyTransportOperational() {
+					resp.RfiResponse[agent.Identity] = &RfiData{
+						Error:    true,
+						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()]),
+					}
+					continue
+				}
+				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+					MessageType:  AgentMsgRfi,
+					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					YourIdentity: agent.Identity,
+					Zone:         msg.Zone,
+					RfiType:      "SYNC",
+				})
+				if err != nil {
+					resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: err.Error()}
+					continue
+				}
+				resp.RfiResponse[agent.Identity] = &RfiData{Status: "ok", Msg: amr.Msg}
+			}
+			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
+
+		case "AUDIT":
+			// Send RFI AUDIT to all remote agents for this zone.
+			log.Printf("CommandHandler: Sending AUDIT RFI to %d agents for zone %q", len(zad.Agents), msg.Zone)
+			for _, agent := range zad.Agents {
+				if !agent.IsAnyTransportOperational() {
+					resp.RfiResponse[agent.Identity] = &RfiData{
+						Error:    true,
+						ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()]),
+					}
+					continue
+				}
+				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+					MessageType:  AgentMsgRfi,
+					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					YourIdentity: agent.Identity,
+					Zone:         msg.Zone,
+					RfiType:      "AUDIT",
+				})
+				if err != nil {
+					resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: err.Error()}
+					continue
+				}
+				if rfiresp, ok := amr.RfiResponse[agent.Identity]; ok {
+					resp.RfiResponse[agent.Identity] = rfiresp
+				} else {
+					resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: "unexpected response format"}
+				}
+			}
+			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
 
 		default:
 			resp.Error = true
@@ -689,6 +797,43 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("Unknown message type: %+v", msg.MessageType)
 	}
+}
+
+// sendRfiToAgent sends an RFI message to a remote agent using the best available
+// transport. DNS is tried first (primary transport), with API as fallback.
+func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
+	// Try DNS transport first via TransportManager (primary transport)
+	if ar.TransportManager != nil {
+		peer := ar.TransportManager.SyncPeerFromAgent(agent)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		syncReq := &agenttransport.SyncRequest{
+			SenderID:    ar.LocalAgent.Identity,
+			Zone:        string(msg.Zone),
+			Records:     msg.Records,
+			Timestamp:   time.Now(),
+			MessageType: string(msg.MessageType),
+			RfiType:     msg.RfiType,
+		}
+
+		syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+		if err == nil {
+			return &AgentMsgResponse{
+				Status: string(syncResp.Status),
+				Msg:    syncResp.Message,
+				Zone:   msg.Zone,
+			}, nil
+		}
+		log.Printf("sendRfiToAgent: DNS transport failed for %q: %v, trying API", agent.Identity, err)
+	}
+
+	// Fall back to API transport (synchronous request-response)
+	if agent.Api != nil {
+		return agent.SendApiMsg(msg)
+	}
+
+	return nil, fmt.Errorf("no transport available for agent %q", agent.Identity)
 }
 
 // XXX: Not used at the moment.

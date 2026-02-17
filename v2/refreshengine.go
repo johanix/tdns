@@ -194,13 +194,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						rc.Downstreams = NormalizeAddresses(zr.Notify)
 						rc.Zonefile = zr.Zonefile
 						rc.SOARefresh = refresh
-						rc.CurRefresh = 1 // force immediate refresh
+						rc.CurRefresh = refresh // immediate refresh handled by goroutine below
 					} else {
 						// Create new refreshCounter
 						refreshCounters.Set(zone, &RefreshCounter{
 							Name:        zone,
 							SOARefresh:  refresh,
-							CurRefresh:  1, // force immediate refresh
+							CurRefresh:  refresh, // immediate refresh handled by goroutine below
 							Upstream:    NormalizeAddress(zr.Primary),
 							Downstreams: NormalizeAddresses(zr.Notify),
 							Zonefile:    zr.Zonefile,

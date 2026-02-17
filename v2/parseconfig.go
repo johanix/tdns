@@ -180,9 +180,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Configure mapstructure decoder to respect yaml tags
+	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName: "yaml",
-		Result:  conf,
+		TagName:  "yaml",
+		Result:   conf,
+		Metadata: &md,
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -204,7 +206,15 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// Decode the entire config at once
 	if err := decoder.Decode(configMap); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "'Primary'") && strings.Contains(errMsg, "[]interface") {
+			return fmt.Errorf("error decoding config: %v\nHint: 'primary' must be a single address string (e.g., primary: \"10.4.0.4:8055\"), not a YAML list", err)
+		}
 		return fmt.Errorf("error decoding config: %v", err)
+	}
+
+	if len(md.Unused) > 0 {
+		log.Printf("Warning: the following config keys are unknown and were ignored (possible misspellings): %v", md.Unused)
 	}
 
 	// Normalize service.transport.type (default: none)
@@ -229,36 +239,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 		log.Printf("Templates: %d templates defined: %s", len(conf.Templates), strings.Join(tmplNames, " "))
 	}
 
-	if Globals.App.Type != AppTypeReporter && Globals.App.Type != AppTypeImr {
-		// Build template map
-		Templates = make(map[string]ZoneConf) // Clear existing entries on reload
-		for _, tmpl := range conf.Templates {
-			if tmpl.Name == "" {
-				return fmt.Errorf("template missing required 'name' field")
-			}
-			if _, exists := Templates[tmpl.Name]; exists {
-				return fmt.Errorf("duplicate template name: %s", tmpl.Name)
-			}
-			Templates[tmpl.Name] = tmpl
-		}
-
-		// Handle template expansion if specified
-		// Robust expansion with cycle detection
-		var done = make(map[string]bool)
-		for _, t := range conf.Templates {
-			if _, ok := Templates[t.Name]; !ok {
-				continue
-			}
-			_, _ = expandTemplateChain(t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
-		}
-
-		if Globals.Debug {
-			tmplNames := make([]string, 0, len(Templates))
-			for _, tmpl := range Templates {
-				tmplNames = append(tmplNames, tmpl.Name)
-			}
-			log.Printf("Templates (again): %d templates defined: %s", len(Templates), strings.Join(tmplNames, " "))
-		}
+	if err := conf.buildTemplateMap(); err != nil {
+		return err
 	}
 
 	// log.Printf("*** ParseConfig: 1")
@@ -550,7 +532,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			zconf.DnssecPolicy = ""
 		}
 		if zconf.DnssecPolicy != "" {
-			_, exist := conf.DnssecPolicies[zconf.DnssecPolicy]
+			_, exist := conf.Internal.DnssecPolicies[zconf.DnssecPolicy]
 			if !exist {
 				log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Zone will not be signed.", zname, zconf.DnssecPolicy)
 				zconf.DnssecPolicy = ""
@@ -746,6 +728,79 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	zconf.MultiSigner = tmpl.MultiSigner
 
 	return zconf, nil
+}
+
+// buildTemplateMap rebuilds the global Templates map from conf.Templates.
+// Called from ParseConfig() and reloadTemplatesFromFile().
+func (conf *Config) buildTemplateMap() error {
+	if Globals.App.Type == AppTypeReporter || Globals.App.Type == AppTypeImr {
+		return nil
+	}
+
+	// Build template map
+	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
+	for _, tmpl := range conf.Templates {
+		if tmpl.Name == "" {
+			return fmt.Errorf("template missing required 'name' field")
+		}
+		if _, exists := Templates[tmpl.Name]; exists {
+			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
+		}
+		Templates[tmpl.Name] = tmpl
+	}
+
+	// Handle template expansion if specified
+	// Robust expansion with cycle detection
+	var done = make(map[string]bool)
+	for _, t := range conf.Templates {
+		if _, ok := Templates[t.Name]; !ok {
+			continue
+		}
+		_, _ = expandTemplateChain(t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
+	}
+
+	if Globals.Debug {
+		tmplNames := make([]string, 0, len(Templates))
+		for _, tmpl := range Templates {
+			tmplNames = append(tmplNames, tmpl.Name)
+		}
+		log.Printf("buildTemplateMap: %d templates defined: %s", len(Templates), strings.Join(tmplNames, " "))
+	}
+	return nil
+}
+
+// reloadTemplatesFromFile re-reads the config file and rebuilds the Templates map.
+// Used by ReloadZoneConfig() to pick up template changes without a full config reload.
+func (conf *Config) reloadTemplatesFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	// Decode only the templates from the config
+	// Note: TagName:"yaml" means mapstructure reads yaml struct tags
+	var partial struct {
+		Templates []ZoneConf `yaml:"templates"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding templates: %v", err)
+	}
+
+	conf.Templates = partial.Templates
+	return conf.buildTemplateMap()
 }
 
 // expandTemplateChain expands a template by following its parent chain (via the Template field)

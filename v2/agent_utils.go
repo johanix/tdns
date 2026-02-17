@@ -577,7 +577,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
 	if imr := Conf.Internal.ImrEngine; imr != nil {
 		log.Printf("MarkAgentAsNeeded: Triggering immediate discovery for %s", remoteid)
-		go ar.attemptDiscovery(agent, imr)
+		go ar.attemptDiscovery(agent, imr, true, true)
 	} else {
 		log.Printf("MarkAgentAsNeeded: IMR not ready, %s will be discovered by DiscoveryRetrierNG", remoteid)
 	}
@@ -585,22 +585,32 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 
 // attemptDiscovery performs a single discovery attempt for an agent.
 // Called by DiscoveryRetrierNG for agents in NEEDED state.
+// discoverAPI and discoverDNS control which transports are discovered,
+// avoiding wasteful DNS lookups for transports already past NEEDED.
 // On success, transitions agent from NEEDED → KNOWN and starts HelloRetrierNG.
 // On failure, agent remains in NEEDED state for retry next interval.
-func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr) {
+func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, discoverDNS bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	log.Printf("attemptDiscovery: Attempting discovery for %s", agent.Identity)
+	log.Printf("attemptDiscovery: Attempting discovery for %s (API: %v, DNS: %v)", agent.Identity, discoverAPI, discoverDNS)
 
-	result := DiscoverAgent(ctx, imr, string(agent.Identity))
+	result := &AgentDiscoveryResult{Identity: string(agent.Identity)}
 
-	if result.Error != nil {
+	if discoverAPI {
+		DiscoverAgentAPI(ctx, imr, string(agent.Identity), result)
+	}
+	if discoverDNS {
+		DiscoverAgentDNS(ctx, imr, string(agent.Identity), result)
+	}
+
+	// Check if we got anything useful from the transports we discovered
+	if result.APIUri == "" && result.DNSUri == "" {
 		agent.mu.Lock()
-		agent.ApiDetails.LatestError = result.Error.Error()
+		agent.ApiDetails.LatestError = "no contact endpoints found"
 		agent.ApiDetails.LatestErrorTime = time.Now()
 		agent.mu.Unlock()
-		log.Printf("attemptDiscovery: Discovery failed for %s (will retry next interval): %v", agent.Identity, result.Error)
+		log.Printf("attemptDiscovery: Discovery failed for %s (will retry next interval): no contact endpoints found", agent.Identity)
 		return
 	}
 
@@ -621,16 +631,28 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr) {
 	log.Printf("attemptDiscovery: Successfully discovered %s (API: %s, DNS: %s)",
 		agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 
-	// Only start/restart HelloRetrierNG if a transport is actually in KNOWN state.
-	// If DNS is already INTRODUCED or OPERATIONAL (preserved by RegisterDiscoveredAgent),
-	// restarting HelloRetrierNG would cancel an in-progress fast-retry phase for no reason.
+	// Two-stage check:
+	// 1. Did discovery produce any useful result? (any transport at KNOWN or beyond)
+	// 2. Does any transport actually need Hello? (exactly at KNOWN state)
+	//
+	// On re-discovery, a transport may already be OPERATIONAL (preserved by
+	// RegisterDiscoveredAgent). That's fine — it means Hello already succeeded.
+	// We only start HelloRetrierNG if a transport is exactly at KNOWN.
 	agent.mu.RLock()
-	apiKnown := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
-	dnsKnown := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
+	apiUseful := agent.ApiMethod && agent.ApiDetails.State >= AgentStateKnown
+	dnsUseful := agent.DnsMethod && agent.DnsDetails.State >= AgentStateKnown
+	apiNeedsHello := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
+	dnsNeedsHello := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
 	agent.mu.RUnlock()
 
-	if !apiKnown && !dnsKnown {
-		log.Printf("attemptDiscovery: Agent %s has no transports in KNOWN state, skipping HelloRetrierNG", agent.Identity)
+	if !apiUseful && !dnsUseful {
+		log.Printf("attemptDiscovery: Agent %s has no transports at KNOWN or beyond, skipping HelloRetrierNG", agent.Identity)
+		return
+	}
+
+	if !apiNeedsHello && !dnsNeedsHello {
+		log.Printf("attemptDiscovery: Agent %s already past KNOWN state (API: %s, DNS: %s), no Hello needed",
+			agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
 		return
 	}
 

@@ -202,7 +202,7 @@ var DaemonRestartCmd = &cobra.Command{
 		// Extract flags to pass to daemon (--config, --debug, -v, etc.)
 		daemonFlags := extractDaemonFlags(cmd)
 
-		tdns.Globals.Api.StartDaemon(maxwait, false, daemonCommand, daemonFlags) // no slurping on restart
+		api.StartDaemon(maxwait, false, daemonCommand, daemonFlags) // no slurping on restart
 	},
 }
 

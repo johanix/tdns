@@ -70,7 +70,7 @@ func init() {
 	// From ../tdns/cli/zone_cmds.go:
 	rootCmd.AddCommand(cli.ZoneCmd)
 	cli.CombinerCmd.AddCommand(cli.ZoneCmd)
-	cli.AgentCmd.AddCommand(cli.ZoneCmd)
+	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go) instead of the shared ZoneCmd
 
 	// From ../tdns/cli/base32_cmds.go
 	rootCmd.AddCommand(cli.Base32Cmd)

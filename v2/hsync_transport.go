@@ -123,16 +123,15 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		AgentRegistry: cfg.AgentRegistry,
 	})
 
-	// Create API transport if supported
-	if tm.isTransportSupported("api") {
-		tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
-			LocalID:        cfg.LocalID,
-			DefaultTimeout: cfg.APITimeout,
-		})
-		log.Printf("TransportManager: API transport enabled")
-	} else {
-		log.Printf("TransportManager: API transport disabled by configuration")
-	}
+	// Always create API client transport — it's a pure HTTP client with no server-side
+	// implications. An agent that only serves DNS can still act as an API client to
+	// remote agents that serve API. supported_mechanisms controls the server role, not
+	// the client role.
+	tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
+		LocalID:        cfg.LocalID,
+		DefaultTimeout: cfg.APITimeout,
+	})
+	log.Printf("TransportManager: API client transport enabled")
 
 	// Create DNS transport if control zone is configured AND supported
 	if cfg.ControlZone != "" && tm.isTransportSupported("dns") {
@@ -345,7 +344,7 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeHelloMessage(msg)
 	case "beat":
 		tm.routeBeatMessage(msg)
-	case "sync":
+	case "sync", "rfi":
 		tm.routeSyncMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
@@ -528,6 +527,13 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 	if err != nil {
 		log.Printf("TransportManager: Failed to parse sync payload: %v", err)
 		return
+	}
+
+	// The distribution ID is extracted from the CHUNK qname, not the JSON payload.
+	// Propagate it into the parsed payload so downstream code (AgentMsgPost,
+	// sendImmediateConfirmation) can access it uniformly.
+	if msg.DistributionID != "" && payload.DistributionID == "" {
+		payload.DistributionID = msg.DistributionID
 	}
 
 	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
@@ -805,7 +811,7 @@ func (tm *TransportManager) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 
 	// Sync API details
 	if agent.ApiDetails != nil {
-		peer.APIEndpoint = agent.ApiDetails.Endpoint
+		peer.APIEndpoint = agent.ApiDetails.BaseUri
 		if agent.ApiDetails.TlsaRR != nil {
 			// Store TLSA for TLS verification
 			peer.TLSARecord = []byte{} // Would need to serialize TLSA
@@ -874,8 +880,9 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if supported and has valid endpoint
-	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
+	// Try API transport if available, has valid endpoint, and actually needs Hello (state == KNOWN).
+	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
+	if tm.APITransport != nil && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if apiErr != nil {
@@ -901,8 +908,9 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		agent.mu.Unlock()
 	}
 
-	// Try DNS transport if supported
-	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
+	// Try DNS transport if supported and actually needs Hello (state == KNOWN).
+	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
+	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && agent.DnsDetails.State == AgentStateKnown {
 		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if dnsErr != nil {
@@ -915,7 +923,12 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else {
 			log.Printf("TransportManager: DNS Hello to %s succeeded", peer.ID)
-			agent.DnsDetails.State = AgentStateIntroduced
+			// Only transition to INTRODUCED if not already OPERATIONAL or better
+			// This prevents Hello messages from downgrading state (e.g., after retry or peer restart)
+			if agent.DnsDetails.State < AgentStateIntroduced {
+				agent.DnsDetails.State = AgentStateIntroduced
+				log.Printf("TransportManager: Updated agent %s DNS state to INTRODUCED after successful Hello", peer.ID)
+			}
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
 			agent.DnsDetails.LatestError = ""
@@ -931,7 +944,12 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		return dnsResp, nil
 	}
 
-	// Both failed
+	// Both failed or skipped
+	if apiResp == nil && dnsResp == nil && apiErr == nil && dnsErr == nil {
+		// No transport was in KNOWN state — nothing to do
+		return nil, fmt.Errorf("no transports in KNOWN state for Hello to peer %s (API: %s, DNS: %s)",
+			peer.ID, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+	}
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
@@ -971,8 +989,8 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if supported, has valid endpoint, and OPERATIONAL/LEGACY
-	if tm.APITransport != nil && agent.ApiMethod && tm.isTransportSupported("api") && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
+	// Try API transport if available, has valid endpoint, and OPERATIONAL/LEGACY
+	if tm.APITransport != nil && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
@@ -1145,6 +1163,7 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
+		MessageType:    "sync",
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -1199,6 +1218,7 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
+		MessageType:    "sync",
 	}
 
 	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)

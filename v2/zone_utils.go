@@ -203,6 +203,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.Ready = true
 	zd.mu.Unlock()
 
+	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
+	if Globals.App.Type == AppTypeCombiner {
+		zd.snapshotUpstreamData()
+	}
+
 	// Repopulate all dynamically generated RRs after zone refresh
 	// (they may have been lost if not present in the zone file)
 	zd.RepopulateDynamicRRs(dynamicRRs)
@@ -352,6 +357,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.Data = new_zd.Data
 	zd.Ready = true
 	zd.mu.Unlock()
+
+	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
+	if Globals.App.Type == AppTypeCombiner {
+		zd.snapshotUpstreamData()
+	}
 
 	// Repopulate all dynamically generated RRs after zone refresh
 	// (they may have been lost if not present in the transferred zone)

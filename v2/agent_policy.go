@@ -12,14 +12,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-var validRRtype = map[uint16]bool{
-	dns.TypeDNSKEY: true,
-	dns.TypeCDS:    true,
-	dns.TypeCSYNC:  true,
-	dns.TypeNS:     true,
-	// dns.TypeKEY: true,
-}
-
 func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (bool, string, error) {
 	log.Printf("SynchedDataEngine: Evaluating update for zone %q from %q", synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
 	// 1. Evaluate the update for applicability (valid zone, etc)
@@ -29,7 +21,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 	case "remote":
 		for _, rrset := range synchedDataUpdate.Update.RRsets {
 			for _, rr := range rrset.RRs {
-				if !validRRtype[rr.Header().Rrtype] {
+				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
 					log.Printf("SynchedDataEngine: Invalid RR type: %s", rr.String())
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR type: %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
@@ -76,7 +68,7 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 
 		// Must check for (at least): approved RRtype, apex of zone and zone with us in the HSYNC RRset
 		for _, rr := range rrs {
-			if !validRRtype[rr.Header().Rrtype] {
+			if !AllowedLocalRRtypes[rr.Header().Rrtype] {
 				log.Printf("SynchedDataEngine: Invalid RR type: %s", rr.String())
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR type: %s",
 					synchedDataUpdate.Zone, rr.String()), nil

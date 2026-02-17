@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/miekg/dns"
 )
 
 // InitializeCombinerAsPeer registers the combiner as a virtual peer in the AgentRegistry
@@ -52,9 +53,9 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 
 	// Create an agent entry for the combiner
 	combinerAgent := &Agent{
-		Identity:   combinerID,
-		DnsMethod:  true,  // Combiner only supports DNS transport (CHUNK)
-		ApiMethod:  false, // Combiner doesn't support API transport for Beat
+		Identity:  combinerID,
+		DnsMethod: true,  // Combiner only supports DNS transport (CHUNK)
+		ApiMethod: false, // Combiner doesn't support API transport for Beat
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational, // Start as operational
 			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),
@@ -136,8 +137,12 @@ func performCombinerConnectivityCheck(conf *Config) error {
 		return fmt.Errorf("invalid port in combiner address %q", conf.Agent.Combiner.Address)
 	}
 
-	// Create peer for combiner
-	peer := transport.NewPeer("combiner")
+	// Create peer for combiner — use configured identity so CHUNK qname matches
+	combinerID := "combiner"
+	if conf.Agent.Combiner.Identity != "" {
+		combinerID = dns.Fqdn(conf.Agent.Combiner.Identity)
+	}
+	peer := transport.NewPeer(combinerID)
 	peer.SetDiscoveryAddress(&transport.Address{
 		Host:      host,
 		Port:      uint16(port),

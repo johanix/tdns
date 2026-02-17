@@ -64,6 +64,7 @@ type ZoneData struct {
 	//	RRs            RRArray
 	Data         cmap.ConcurrentMap[string, OwnerData]
 	CombinerData *cmap.ConcurrentMap[string, OwnerData]
+	UpstreamData *cmap.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
 	// AgentContributions stores per-agent contributions for the combiner.
 	// Key: agentID (e.g. "agent.alpha.dnslab."), Value: map[owner]map[rrtype]core.RRset
 	// When merging, all agents' contributions for the same owner/rrtype are combined

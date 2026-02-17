@@ -77,8 +77,9 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		PrepArgs("zonename", "identity")
 
 		rfitype = strings.ToUpper(rfitype)
-		if rfitype != "UPSTREAM" && rfitype != "DOWNSTREAM" {
-			log.Fatalf("Error: RFI type must be either UPSTREAM or DOWNSTREAM (is %q)", rfitype)
+		validRfiTypes := map[string]bool{"UPSTREAM": true, "DOWNSTREAM": true, "SYNC": true, "AUDIT": true}
+		if !validRfiTypes[rfitype] {
+			log.Fatalf("Error: RFI type must be one of UPSTREAM, DOWNSTREAM, SYNC, or AUDIT (is %q)", rfitype)
 		}
 
 		req := tdns.AgentMgmtPost{
@@ -100,25 +101,54 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Result from %s RFI message sent to agent %q:\n", amr.RfiType, amr.Identity)
+		if amr.Msg != "" {
+			fmt.Printf("%s\n", amr.Msg)
+		}
 		if len(amr.RfiResponse) > 0 {
-			var out []string
-			if tdns.Globals.ShowHeaders {
-				out = append(out, "Zone|Provider|Where|XFR src|XFR dst|XFR auth")
-			}
-			for aid, rfidata := range amr.RfiResponse {
-				if len(rfidata.ZoneXfrSrcs) > 0 {
-					out = append(out, fmt.Sprintf("%s|%s|UPSTREAM|%v|%v|%v", tdns.Globals.Zonename, aid, rfidata.ZoneXfrSrcs, "", rfidata.ZoneXfrAuth))
+			switch rfitype {
+			case "UPSTREAM", "DOWNSTREAM":
+				var out []string
+				if tdns.Globals.ShowHeaders {
+					out = append(out, "Zone|Provider|Where|XFR src|XFR dst|XFR auth")
 				}
-				if len(rfidata.ZoneXfrDsts) > 0 {
-					out = append(out, fmt.Sprintf("%s|%s|DOWNSTREAM|%v|%v|%v", tdns.Globals.Zonename, aid, "", rfidata.ZoneXfrDsts, rfidata.ZoneXfrAuth))
+				for aid, rfidata := range amr.RfiResponse {
+					if len(rfidata.ZoneXfrSrcs) > 0 {
+						out = append(out, fmt.Sprintf("%s|%s|UPSTREAM|%v|%v|%v", tdns.Globals.Zonename, aid, rfidata.ZoneXfrSrcs, "", rfidata.ZoneXfrAuth))
+					}
+					if len(rfidata.ZoneXfrDsts) > 0 {
+						out = append(out, fmt.Sprintf("%s|%s|DOWNSTREAM|%v|%v|%v", tdns.Globals.Zonename, aid, "", rfidata.ZoneXfrDsts, rfidata.ZoneXfrAuth))
+					}
 				}
-				// if len(rfidata.ZoneXfrAuth) > 0 {
-				// 	fmt.Printf("ZoneXfrAuth for %q: %s", aid, rfidata.ZoneXfrAuth)
-				// }
+				fmt.Printf("%s\n", columnize.SimpleFormat(out))
+
+			case "SYNC":
+				for aid, rfidata := range amr.RfiResponse {
+					if rfidata.Error {
+						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+					} else {
+						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+					}
+				}
+
+			case "AUDIT":
+				for aid, rfidata := range amr.RfiResponse {
+					if rfidata.Error {
+						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+					} else {
+						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+						if rfidata.AuditData != nil {
+							auditJSON, err := json.MarshalIndent(rfidata.AuditData, "    ", "  ")
+							if err != nil {
+								fmt.Printf("    Error formatting audit data: %v\n", err)
+							} else {
+								fmt.Printf("    Audit data:\n    %s\n", string(auditJSON))
+							}
+						}
+					}
+				}
 			}
-			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		} else {
-			fmt.Printf("No RFI data in response from agent %q", amr.Identity)
+			fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)
 		}
 	},
 }
@@ -1068,7 +1098,7 @@ func init() {
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM)")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM|SYNC|AUDIT)")
 
 	// New command flags
 	DebugAgentShowSyncedDataCmd.Flags().String("zone", "", "Filter by specific zone")

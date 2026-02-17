@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -150,6 +151,13 @@ func listDistributions(cmd *cobra.Command, component string) {
 }
 
 func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiClient, component string) {
+	// Sort by distribution ID (hex monotonic counter — lexicographic order = chronological order)
+	sort.Slice(summaries, func(i, j int) bool {
+		si, _ := summaries[i].(map[string]interface{})
+		sj, _ := summaries[j].(map[string]interface{})
+		return getStringValue(si, "distribution_id") < getStringValue(sj, "distribution_id")
+	})
+
 	if verbose {
 		// Verbose mode: show full multiline information
 		fmt.Println("\nDistributions:")
@@ -493,11 +501,11 @@ func sortPeersForDisplay(peers []interface{}) []interface{} {
 
 	// Create a sortable slice
 	type peerSortKey struct {
-		peer        interface{}
-		isCombiner  bool
-		stateValue  int
-		identity    string
-		transport   string
+		peer       interface{}
+		isCombiner bool
+		stateValue int
+		identity   string
+		transport  string
 	}
 
 	var sortKeys []peerSortKey
@@ -514,11 +522,11 @@ func sortPeersForDisplay(peers []interface{}) []interface{} {
 			}
 
 			sortKeys = append(sortKeys, peerSortKey{
-				peer:        pRaw,
-				isCombiner:  peerType == "combiner",
-				stateValue:  stateVal,
-				identity:    identity,
-				transport:   transport,
+				peer:       pRaw,
+				isCombiner: peerType == "combiner",
+				stateValue: stateVal,
+				identity:   identity,
+				transport:  transport,
 			})
 		}
 	}

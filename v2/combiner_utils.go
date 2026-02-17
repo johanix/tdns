@@ -13,12 +13,21 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
-var AllowedLocalRRtypes = map[uint16]bool{
-	dns.TypeDNSKEY: true,
-	dns.TypeCDS:    true,
-	dns.TypeCSYNC:  true,
-	dns.TypeNS:     true,
+// Named presets for allowed RRtypes. Hardcoded for safety.
+// "apex-combiner": manages DNSKEY, CDS, CSYNC, NS at the zone apex.
+// "delegation-combiner": (future) manages NS, DS, GLUE at delegation points.
+var AllowedRRtypePresets = map[string]map[uint16]bool{
+	"apex-combiner": {
+		dns.TypeDNSKEY: true,
+		dns.TypeCDS:    true,
+		dns.TypeCSYNC:  true,
+		dns.TypeNS:     true,
+	},
+	// "delegation-combiner": { dns.TypeNS: true, dns.TypeDS: true, ... },
 }
+
+// AllowedLocalRRtypes is the active preset. Default: "apex-combiner".
+var AllowedLocalRRtypes = AllowedRRtypePresets["apex-combiner"]
 
 // Returns true if the zone data was modified.
 func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
@@ -430,6 +439,10 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	if modified {
 		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
 	}
+
+	// Clean up rrtypes with no remaining agent contributions
+	zd.cleanupRemovedRRtypes(data)
+
 	if zd.InjectSignatureTXT(Globals.CombinerConf) {
 		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
@@ -486,6 +499,10 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	if modified {
 		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Local changes applied after removal (from %s)", zd.ZoneName, senderID)
 	}
+
+	// Clean up if this rrtype has no remaining contributions from any agent
+	zd.cleanupRemovedRRtype(owner, rrtype)
+
 	if zd.InjectSignatureTXT(Globals.CombinerConf) {
 		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
@@ -529,4 +546,97 @@ func (zd *ZoneData) InjectSignatureTXT(conf *LocalCombinerConf) bool {
 	})
 	zd.Data.Set(ownerName, ownerData)
 	return true
+}
+
+// snapshotUpstreamData captures the current apex RRsets for AllowedLocalRRtypes
+// from zd.Data into zd.UpstreamData. Called after zone load/refresh, before
+// CombineWithLocalChanges applies agent contributions.
+func (zd *ZoneData) snapshotUpstreamData() {
+	m := cmap.New[OwnerData]()
+	zd.UpstreamData = &m
+
+	// Only snapshot the apex owner (agent contributions only apply at apex)
+	if apexOd, ok := zd.Data.Get(zd.ZoneName); ok {
+		snapshotOd := OwnerData{
+			Name:    zd.ZoneName,
+			RRtypes: NewRRTypeStore(),
+		}
+		for _, rrtype := range apexOd.RRtypes.Keys() {
+			if AllowedLocalRRtypes[rrtype] {
+				rrset, _ := apexOd.RRtypes.Get(rrtype)
+				// Deep copy the RR slice to avoid sharing references
+				copiedRRs := make([]dns.RR, len(rrset.RRs))
+				copy(copiedRRs, rrset.RRs)
+				snapshotOd.RRtypes.Set(rrtype, core.RRset{
+					Name:   rrset.Name,
+					RRtype: rrset.RRtype,
+					RRs:    copiedRRs,
+				})
+			}
+		}
+		zd.UpstreamData.Set(zd.ZoneName, snapshotOd)
+	}
+}
+
+// restoreUpstreamRRset restores an rrtype from UpstreamData back into the zone.
+// Used when all agent contributions for a mandatory rrtype (e.g. NS) are removed.
+func (zd *ZoneData) restoreUpstreamRRset(owner string, rrtype uint16) {
+	if zd.UpstreamData == nil {
+		zd.Logger.Printf("restoreUpstreamRRset: Zone %q: No upstream data, cannot restore %s",
+			zd.ZoneName, dns.TypeToString[rrtype])
+		return
+	}
+	if od, ok := zd.UpstreamData.Get(owner); ok {
+		if rrset, exists := od.RRtypes.Get(rrtype); exists {
+			if zoneOd, ok := zd.Data.Get(owner); ok {
+				zoneOd.RRtypes.Set(rrtype, rrset)
+				zd.Data.Set(owner, zoneOd)
+				zd.Logger.Printf("restoreUpstreamRRset: Zone %q: Restored original %s for %q (%d records)",
+					zd.ZoneName, dns.TypeToString[rrtype], owner, len(rrset.RRs))
+				return
+			}
+		}
+	}
+	zd.Logger.Printf("restoreUpstreamRRset: Zone %q: No upstream %s found for %q",
+		zd.ZoneName, dns.TypeToString[rrtype], owner)
+}
+
+// cleanupRemovedRRtypes checks each owner+rrtype in data for remaining agent contributions.
+// If no contributions remain: for NS at the apex, restore from upstream; otherwise delete from zone.
+func (zd *ZoneData) cleanupRemovedRRtypes(data map[string][]string) {
+	for owner, rrStrings := range data {
+		for _, rrStr := range rrStrings {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				continue
+			}
+			zd.cleanupRemovedRRtype(owner, rr.Header().Rrtype)
+		}
+	}
+}
+
+// cleanupRemovedRRtype checks if a single owner+rrtype still has agent contributions.
+// If not: for NS at the apex, restore from upstream; otherwise delete from zone data.
+func (zd *ZoneData) cleanupRemovedRRtype(owner string, rrtype uint16) {
+	stillExists := false
+	if zd.CombinerData != nil {
+		if od, ok := zd.CombinerData.Get(owner); ok {
+			if _, exists := od.RRtypes.Get(rrtype); exists {
+				stillExists = true
+			}
+		}
+	}
+	if stillExists {
+		return
+	}
+	if rrtype == dns.TypeNS && owner == zd.ZoneName {
+		zd.restoreUpstreamRRset(owner, rrtype)
+	} else {
+		if od, ok := zd.Data.Get(owner); ok {
+			od.RRtypes.Delete(rrtype)
+			zd.Data.Set(owner, od)
+			zd.Logger.Printf("cleanupRemovedRRtype: Zone %q: Removed %s from %q (no remaining contributions)",
+				zd.ZoneName, dns.TypeToString[rrtype], owner)
+		}
+	}
 }

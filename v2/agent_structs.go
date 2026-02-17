@@ -106,6 +106,32 @@ type AgentDetails struct {
 	LatestRBeat     time.Time
 }
 
+// IsAnyTransportOperational returns true if at least one transport layer
+// (DNS or API) is in the OPERATIONAL state. DNS is checked first as it is
+// the primary (and currently only fully implemented) transport.
+func (a *Agent) IsAnyTransportOperational() bool {
+	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
+		return true
+	}
+	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
+		return true
+	}
+	return false
+}
+
+// EffectiveState returns the most relevant transport-layer state.
+// DNS is checked first as it is the primary transport.
+// Falls back to the top-level aggregate state if no transport is operational.
+func (a *Agent) EffectiveState() AgentState {
+	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
+		return AgentStateOperational
+	}
+	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
+		return AgentStateOperational
+	}
+	return a.State
+}
+
 // AgentTask is a task that needs to be executed once the Precondition is met.
 // A typical case is when we need to talk to a remote agent regarding zone transfer
 // provisioning, but cannot do that until the remote agent is operational.
@@ -241,6 +267,7 @@ type RfiData struct {
 	ZoneXfrSrcs []string
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
+	AuditData   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo `json:"audit_data,omitempty"`
 }
 
 // AgentPingPost is defined in core package to avoid circular dependencies.

@@ -39,18 +39,18 @@ func buildChunkQueryQname(receiverID, distID, senderID string) string {
 // CombinerSyncRequest represents a sync request to the combiner.
 // Uses the same data structure as CombinerPost.Data for transport neutrality.
 type CombinerSyncRequest struct {
-	SenderID      string              // Identity of the sending agent
-	Zone          string              // Zone being updated
-	SyncType      string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
-	Records       map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
-	Serial        uint32              // Zone serial (optional)
+	SenderID       string              // Identity of the sending agent
+	Zone           string              // Zone being updated
+	SyncType       string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
+	Records        map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
+	Serial         uint32              // Zone serial (optional)
 	DistributionID string              // Distribution ID for tracking
-	Timestamp     time.Time           // When the request was created
+	Timestamp      time.Time           // When the request was created
 }
 
 // CombinerSyncResponse represents a confirmation from the combiner.
 type CombinerSyncResponse struct {
-	DistributionID  string         // Echoed from request
+	DistributionID string         // Echoed from request
 	Zone           string         // Zone that was updated
 	Status         string         // "ok", "partial", "error"
 	Message        string         // Human-readable message
@@ -252,19 +252,20 @@ func (h *CombinerChunkHandler) extractDistributionIDAndControlZone(qname string)
 // Both success and error use the same ping_confirm struct — errors set Status:"error"
 // with a Message describing the problem (follows the TDNS Error/ErrorMsg pattern).
 func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, distributionID, controlZone string, payload []byte) error {
+	// AgentPingPost has no json tags — fields serialize with Go names.
 	var ping struct {
-		Type      string `json:"type"`
-		SenderID  string `json:"sender_id"`
-		Nonce     string `json:"nonce"`
-		Timestamp int64  `json:"timestamp"`
+		MessageType  string `json:"MessageType"`
+		MyIdentity   string `json:"MyIdentity"`
+		YourIdentity string `json:"YourIdentity"`
+		Nonce        string `json:"Nonce"`
 	}
 	if err := json.Unmarshal(payload, &ping); err != nil {
 		log.Printf("CombinerChunkHandler: Failed to parse ping payload: %v", err)
 		h.recordError(distributionID, controlZone, "ping", "invalid ping payload", req.Qname)
 		return h.sendPingResponse(req, distributionID, "", "error", "invalid ping payload")
 	}
-	if ping.Type != "ping" || ping.Nonce == "" {
-		log.Printf("CombinerChunkHandler: Invalid ping (type=%q nonce=%q)", ping.Type, ping.Nonce)
+	if ping.MessageType != "ping" || ping.Nonce == "" {
+		log.Printf("CombinerChunkHandler: Invalid ping (MessageType=%q Nonce=%q)", ping.MessageType, ping.Nonce)
 		h.recordError(distributionID, controlZone, "ping", "invalid ping", req.Qname)
 		return h.sendPingResponse(req, distributionID, "", "error", "invalid ping")
 	}
@@ -554,8 +555,8 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
-		Zone:          req.Zone,
-		Timestamp:     time.Now(),
+		Zone:           req.Zone,
+		Timestamp:      time.Now(),
 	}
 
 	// Get the zone data
@@ -568,9 +569,9 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 	}
 
 	// Separate records into adds, deletes (ClassNONE), and bulk deletes (ClassANY)
-	addOwnerRRs := make(map[string][]string)    // ClassINET: owner → RR strings
+	addOwnerRRs := make(map[string][]string)     // ClassINET: owner → RR strings
 	deleteOwnerRRs := make(map[string][]string)  // ClassNONE: owner → RR strings (with ClassINET for removal matching)
-	bulkDeleteOwner := make(map[string][]uint16)  // ClassANY: owner → rrtypes to delete entirely
+	bulkDeleteOwner := make(map[string][]uint16) // ClassANY: owner → rrtypes to delete entirely
 
 	var appliedRecords []string
 	var removedRecords []string
@@ -796,9 +797,9 @@ func (h *CombinerChunkHandler) sendGenericEdns0Response(req *DnsNotifyRequest, p
 func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, distributionID, errMsg string) error {
 	resp := &CombinerSyncResponse{
 		DistributionID: distributionID,
-		Status:        "error",
-		Message:       errMsg,
-		Timestamp:     time.Now(),
+		Status:         "error",
+		Message:        errMsg,
+		Timestamp:      time.Now(),
 	}
 	return h.sendConfirmResponse(req, resp)
 }
@@ -827,10 +828,10 @@ func SendToCombiner(handler *CombinerChunkHandler, req *CombinerSyncRequest) *Co
 		log.Printf("SendToCombiner: handler is nil, cannot send update")
 		return &CombinerSyncResponse{
 			DistributionID: req.DistributionID,
-			Zone:          req.Zone,
-			Status:        "error",
-			Message:       "combiner handler not initialized",
-			Timestamp:     time.Now(),
+			Zone:           req.Zone,
+			Status:         "error",
+			Message:        "combiner handler not initialized",
+			Timestamp:      time.Now(),
 		}
 	}
 
@@ -862,12 +863,12 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 	syncType := determineSyncType(update)
 
 	return &CombinerSyncRequest{
-		SenderID:      senderID,
-		Zone:          string(update.Zone),
-		SyncType:      syncType,
-		Records:       records,
+		SenderID:       senderID,
+		Zone:           string(update.Zone),
+		SyncType:       syncType,
+		Records:        records,
 		DistributionID: distributionID,
-		Timestamp:     time.Now(),
+		Timestamp:      time.Now(),
 	}
 }
 

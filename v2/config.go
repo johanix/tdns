@@ -418,6 +418,13 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// Re-read config file to pick up template changes
+	if err := conf.reloadTemplatesFromFile(); err != nil {
+		log.Printf("ReloadZoneConfig: Warning: failed to reload templates: %v", err)
+		// Continue with existing templates rather than failing entirely
+	}
+
 	prezones := Zones.Keys()
 	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)

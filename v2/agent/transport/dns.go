@@ -329,13 +329,18 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	qname := t.buildNotifyQNAME(distributionID)
 
 	// Create sync payload using typed struct from core package
+	messageType := core.AgentMsg(req.MessageType)
+	if messageType == "" {
+		messageType = core.AgentMsgNotify // backward compat safety net
+	}
 	payload := &core.AgentMsgPost{
-		MessageType:  core.AgentMsgNotify,
+		MessageType:  messageType,
 		MyIdentity:   req.SenderID,
 		YourIdentity: peer.ID,
 		Zone:         req.Zone,
 		Records:      req.Records,
 		Time:         req.Timestamp,
+		RfiType:      req.RfiType,
 	}
 
 	payloadJSON, err := json.Marshal(payload)

@@ -36,35 +36,19 @@ type AgentDiscoveryResult struct {
 	Partial      bool             // True if some records were found but discovery incomplete
 }
 
-// DiscoverAgent performs DNS-based discovery of an agent's contact information.
-// Discovery flow for API transport:
+// DiscoverAgentAPI performs DNS-based discovery of an agent's API transport.
 //  1. URI record at _https._tcp.<identity> → get API endpoint URI and port
 //  2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
 //  3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
-//
-// Discovery flow for DNS transport (optional):
-//  1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
-//  2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
-//  3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
-//  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
-//
-// Returns a result structure with all discovered information.
-func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscoveryResult {
-	result := &AgentDiscoveryResult{
-		Identity: identity,
-	}
-
-	// Ensure identity is FQDN
+func DiscoverAgentAPI(ctx context.Context, imr *Imr, identity string, result *AgentDiscoveryResult) {
 	identity = dns.Fqdn(identity)
 
-	// 1. Look up API URI (_https._tcp.<identity> URI)
-	// This gives us the API endpoint URI and the port
 	apiUri, apiHost, apiPort, err := imr.lookupAgentAPIEndpoint(ctx, identity)
 	if err == nil {
 		result.APIUri = apiUri
 		result.Port = apiPort
 
-		// 1a. Look up SVCB at api.<identity> to get IP addresses
+		// Look up SVCB at api.<identity> to get IP addresses
 		apiServiceName := "api." + identity
 		addresses, err := imr.lookupServiceAddresses(ctx, apiServiceName)
 		if err == nil {
@@ -74,7 +58,7 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 			result.Partial = true
 		}
 
-		// 1b. Look up TLSA at _<port>._tcp.api.<identity> for TLS verification
+		// Look up TLSA at _<port>._tcp.api.<identity> for TLS verification
 		tlsaRR, err := imr.lookupAgentTLSA(ctx, apiServiceName, apiPort)
 		if err == nil {
 			result.TLSA = tlsaRR
@@ -88,14 +72,21 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 		log.Printf("AgentDiscovery: No API URI record found: %v", err)
 		result.Partial = true
 	}
+}
 
-	// 2. Look up DNS URI (_dns._udp.<identity> URI) - optional
-	// This gives us the DNS endpoint URI
+// DiscoverAgentDNS performs DNS-based discovery of an agent's DNS transport.
+//  1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
+//  2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
+//  3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
+//  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
+func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *AgentDiscoveryResult) {
+	identity = dns.Fqdn(identity)
+
 	dnsUri, dnsHost, dnsPort, err := imr.lookupAgentDNSEndpoint(ctx, identity)
 	if err == nil {
 		result.DNSUri = dnsUri
 
-		// 2a. Look up SVCB at dns.<identity> to get IP addresses
+		// Look up SVCB at dns.<identity> to get IP addresses
 		dnsServiceName := "dns." + identity
 		addresses, err := imr.lookupServiceAddresses(ctx, dnsServiceName)
 		if err == nil {
@@ -105,7 +96,7 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 			result.Partial = true
 		}
 
-		// 2b. Look up JWK at dns.<identity> for JOSE/HPKE public key
+		// Look up JWK at dns.<identity> for JOSE/HPKE public key
 		jwkData, publicKey, algorithm, err := imr.lookupAgentJWK(ctx, identity)
 		if err == nil {
 			result.JWKData = jwkData
@@ -115,7 +106,7 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 		} else {
 			log.Printf("AgentDiscovery: No JWK record found for %s: %v", identity, err)
 
-			// 2c. Fallback to KEY record for legacy support
+			// Fallback to KEY record for legacy support
 			keyRR, err := imr.lookupAgentKEY(ctx, identity)
 			if err == nil {
 				result.LegacyKeyRR = keyRR
@@ -130,6 +121,17 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 	} else {
 		log.Printf("AgentDiscovery: No DNS URI record found (optional): %v", err)
 	}
+}
+
+// DiscoverAgent performs full DNS-based discovery of an agent's contact information
+// for both API and DNS transports. Convenience wrapper around DiscoverAgentAPI + DiscoverAgentDNS.
+func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscoveryResult {
+	result := &AgentDiscoveryResult{
+		Identity: identity,
+	}
+
+	DiscoverAgentAPI(ctx, imr, identity, result)
+	DiscoverAgentDNS(ctx, imr, identity, result)
 
 	// Check if we have enough information to contact the agent
 	if result.APIUri == "" && result.DNSUri == "" {
@@ -167,23 +169,26 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		}
 
 		// Use discovered IP address instead of hostname (DNS-34 fix)
+		// Non-fatal: skip API peer registration if SVCB addresses are missing,
+		// but continue to DNS and AgentRegistry update.
 		if len(result.APIAddresses) == 0 {
-			return fmt.Errorf("no IP addresses discovered for API transport (DNS-35 prevention)")
-		}
-		host := result.APIAddresses[0]
-		log.Printf("AgentDiscovery: Using discovered IP %s for API transport (from SVCB)", host)
+			log.Printf("AgentDiscovery: Warning: No SVCB addresses for API transport of %s, skipping API peer registration", result.Identity)
+		} else {
+			host := result.APIAddresses[0]
+			log.Printf("AgentDiscovery: Using discovered IP %s for API transport (from SVCB)", host)
 
-		addr := &transport.Address{
-			Host:      host,
-			Port:      port,
-			Transport: "https",
-			Path:      parsed.Path,
-		}
-		peer.SetDiscoveryAddress(addr)
-		peer.APIEndpoint = result.APIUri
-		peer.PreferredTransport = "API"
+			addr := &transport.Address{
+				Host:      host,
+				Port:      port,
+				Transport: "https",
+				Path:      parsed.Path,
+			}
+			peer.SetDiscoveryAddress(addr)
+			peer.APIEndpoint = result.APIUri
+			peer.PreferredTransport = "API"
 
-		log.Printf("AgentDiscovery: Registered peer %s with API endpoint %s (address: %s:%d)", result.Identity, result.APIUri, host, port)
+			log.Printf("AgentDiscovery: Registered peer %s with API endpoint %s (address: %s:%d)", result.Identity, result.APIUri, host, port)
+		}
 	}
 
 	// Register DNS transport address (DNS-33 fix: NOT else if - both can exist)
@@ -201,24 +206,27 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		}
 
 		// Use discovered IP address instead of hostname (DNS-34 fix)
+		// Non-fatal: skip DNS peer registration if SVCB addresses are missing,
+		// but continue to AgentRegistry update.
 		if len(result.DNSAddresses) == 0 {
-			return fmt.Errorf("no IP addresses discovered for DNS transport (DNS-35 prevention)")
+			log.Printf("AgentDiscovery: Warning: No SVCB addresses for DNS transport of %s, skipping DNS peer registration", result.Identity)
+		} else {
+			host := result.DNSAddresses[0]
+			log.Printf("AgentDiscovery: Using discovered IP %s for DNS transport (from SVCB)", host)
+
+			addr := &transport.Address{
+				Host:      host,
+				Port:      port,
+				Transport: "udp",
+			}
+
+			// If both transports exist, DNS address goes to DiscoveryAddress (preferred for ping)
+			// API address was already set above but will be overwritten
+			peer.SetDiscoveryAddress(addr)
+			peer.PreferredTransport = "DNS"
+
+			log.Printf("AgentDiscovery: Registered peer %s with DNS endpoint %s (address: %s:%d)", result.Identity, result.DNSUri, host, port)
 		}
-		host := result.DNSAddresses[0]
-		log.Printf("AgentDiscovery: Using discovered IP %s for DNS transport (from SVCB)", host)
-
-		addr := &transport.Address{
-			Host:      host,
-			Port:      port,
-			Transport: "udp",
-		}
-
-		// If both transports exist, DNS address goes to DiscoveryAddress (preferred for ping)
-		// API address was already set above but will be overwritten
-		peer.SetDiscoveryAddress(addr)
-		peer.PreferredTransport = "DNS"
-
-		log.Printf("AgentDiscovery: Registered peer %s with DNS endpoint %s (address: %s:%d)", result.Identity, result.DNSUri, host, port)
 	}
 
 	// Store TLSA for TLS verification
@@ -275,6 +283,10 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			agent.ApiDetails.TlsaRR = result.TLSA
 			agent.ApiDetails.Addrs = result.APIAddresses
 			agent.ApiMethod = true
+		} else {
+			// No API endpoint found — clear the flag so DiscoveryRetrierNG
+			// doesn't perpetually retry discovery for a non-existent transport.
+			agent.ApiMethod = false
 		}
 		if result.DNSUri != "" {
 			agent.DnsDetails.BaseUri = result.DNSUri
@@ -304,6 +316,10 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			agent.DnsDetails.KeyRR = result.LegacyKeyRR
 			agent.DnsDetails.Addrs = result.DNSAddresses
 			agent.DnsMethod = true
+		} else {
+			// No DNS endpoint found — clear the flag so DiscoveryRetrierNG
+			// doesn't perpetually retry discovery for a non-existent transport.
+			agent.DnsMethod = false
 		}
 
 		tm.agentRegistry.S.Set(AgentId(result.Identity), agent)

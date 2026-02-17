@@ -66,11 +66,25 @@ func (t *APITransport) Name() string {
 	return "API"
 }
 
-// Hello sends a hello handshake request to a peer via HTTPS API.
-func (t *APITransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest) (*HelloResponse, error) {
+// apiURL returns the full URL for an API operation on a peer.
+// Uses peer.APIEndpoint (the discovered base URI) when available,
+// falling back to constructing from CurrentAddress().
+func apiURL(peer *Peer, path string) (string, error) {
+	if peer.APIEndpoint != "" {
+		return peer.APIEndpoint + path, nil
+	}
 	addr := peer.CurrentAddress()
 	if addr == nil {
-		return nil, NewTransportError("API", "Hello", peer.ID, fmt.Errorf("no address available"), false)
+		return "", fmt.Errorf("no address available")
+	}
+	return buildURL(addr, path), nil
+}
+
+// Hello sends a hello handshake request to a peer via HTTPS API.
+func (t *APITransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest) (*HelloResponse, error) {
+	url, err := apiURL(peer, "/hello")
+	if err != nil {
+		return nil, NewTransportError("API", "Hello", peer.ID, err, false)
 	}
 
 	// Build the API request payload
@@ -83,8 +97,6 @@ func (t *APITransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 		Timestamp:    req.Timestamp.Unix(),
 		Nonce:        req.Nonce,
 	}
-
-	url := buildURL(addr, "/hello")
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
 		return nil, NewTransportError("API", "Hello", peer.ID, err, true)
@@ -117,9 +129,9 @@ func (t *APITransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 
 // Beat sends a heartbeat to a peer via HTTPS API.
 func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (*BeatResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("API", "Beat", peer.ID, fmt.Errorf("no address available"), false)
+	url, err := apiURL(peer, "/beat")
+	if err != nil {
+		return nil, NewTransportError("API", "Beat", peer.ID, err, false)
 	}
 
 	apiReq := &apiBeatRequest{
@@ -130,8 +142,6 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		Sequence:     req.Sequence,
 		State:        req.State,
 	}
-
-	url := buildURL(addr, "/beat")
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
 		return nil, NewTransportError("API", "Beat", peer.ID, err, true)
@@ -154,9 +164,9 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 
 // Sync sends a data synchronization request to a peer via HTTPS API.
 func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (*SyncResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("API", "Sync", peer.ID, fmt.Errorf("no address available"), false)
+	url, err := apiURL(peer, "/sync")
+	if err != nil {
+		return nil, NewTransportError("API", "Sync", peer.ID, err, false)
 	}
 
 	apiReq := &apiSyncRequest{
@@ -170,8 +180,6 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		DistributionID: req.DistributionID,
 		Timestamp:     req.Timestamp.Unix(),
 	}
-
-	url := buildURL(addr, "/sync")
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
 		return nil, NewTransportError("API", "Sync", peer.ID, err, true)
@@ -200,9 +208,9 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 
 // Relocate requests a peer to use a different address via HTTPS API.
 func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRequest) (*RelocateResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID, fmt.Errorf("no address available"), false)
+	url, err := apiURL(peer, "/relocate")
+	if err != nil {
+		return nil, NewTransportError("API", "Relocate", peer.ID, err, false)
 	}
 
 	apiReq := &apiRelocateRequest{
@@ -217,8 +225,6 @@ func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 		Reason:     req.Reason,
 		ValidUntil: req.ValidUntil.Unix(),
 	}
-
-	url := buildURL(addr, "/relocate")
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
 		return nil, NewTransportError("API", "Relocate", peer.ID, err, true)
@@ -246,9 +252,9 @@ func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 
 // Confirm sends an acknowledgment of a sync operation via HTTPS API.
 func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return NewTransportError("API", "Confirm", peer.ID, fmt.Errorf("no address available"), false)
+	url, err := apiURL(peer, "/confirm")
+	if err != nil {
+		return NewTransportError("API", "Confirm", peer.ID, err, false)
 	}
 
 	apiReq := &apiConfirmRequest{
@@ -260,9 +266,7 @@ func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		Message:       req.Message,
 		Timestamp:     req.Timestamp.Unix(),
 	}
-
-	url := buildURL(addr, "/confirm")
-	_, err := t.doRequest(ctx, "POST", url, apiReq)
+	_, err = t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
 		return NewTransportError("API", "Confirm", peer.ID, err, true)
 	}

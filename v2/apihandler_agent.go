@@ -102,7 +102,11 @@ func doCombinerPing(conf *Config, useAPI bool) *AgentMgmtResponse {
 		resp.ErrorMsg = fmt.Sprintf("invalid port in agent.combiner.address %q", conf.Agent.Combiner.Address)
 		return resp
 	}
-	peer := transport.NewPeer("combiner")
+	combinerID := "combiner"
+	if conf.Agent.Combiner.Identity != "" {
+		combinerID = dns.Fqdn(conf.Agent.Combiner.Identity)
+	}
+	peer := transport.NewPeer(combinerID)
 	peer.SetDiscoveryAddress(&transport.Address{
 		Host:      host,
 		Port:      uint16(port),
@@ -461,6 +465,49 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp = *routerResp
 			resp.Identity = AgentId(conf.Agent.Identity)
 
+		case "resync":
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			sdcmd := &SynchedDataCmd{
+				Cmd:      "resync",
+				Zone:     amp.Zone,
+				Response: make(chan *SynchedDataCmdResponse, 1),
+			}
+			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			select {
+			case response := <-sdcmd.Response:
+				resp.Msg = response.Msg
+				resp.Error = response.Error
+				resp.ErrorMsg = response.ErrorMsg
+			case <-time.After(10 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for resync"
+			}
+			resp.Status = "ok"
+
+		case "send-rfi":
+			switch amp.MessageType {
+			case AgentMsgRfi:
+				conf.Internal.AgentQs.Command <- &AgentMgmtPostPlus{
+					amp,
+					rch,
+				}
+				select {
+				case r := <-rch:
+					resp = *r
+					resp.Status = "ok"
+				case <-time.After(30 * time.Second):
+					resp.Error = true
+					resp.ErrorMsg = "timeout waiting for RFI response"
+				}
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("send-rfi requires MessageType RFI, got %q", AgentMsgToString[amp.MessageType])
+			}
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
 			resp.Error = true
@@ -770,9 +817,10 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 
 			syncReq := &transport.SyncRequest{
-				Zone:          string(amp.Zone),
-				Records:       groupRRStringsByOwner(amp.RRs),
+				Zone:           string(amp.Zone),
+				Records:        groupRRStringsByOwner(amp.RRs),
 				DistributionID: fmt.Sprintf("debug-force-sync-%d", time.Now().Unix()),
+				MessageType:    "sync",
 			}
 
 			log.Printf("hsync-force-sync: Forcing sync to peer %q for zone %q", amp.AgentId, amp.Zone)
@@ -787,10 +835,10 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.Msg = fmt.Sprintf("Sync sent successfully to %q (distribution: %s)", amp.AgentId, syncReq.DistributionID)
 				resp.Data = map[string]interface{}{
 					"distribution_id": syncReq.DistributionID,
-					"peer_id":        amp.AgentId,
-					"zone":           amp.Zone,
-					"status":         syncResp.Status,
-					"message":        syncResp.Message,
+					"peer_id":         amp.AgentId,
+					"zone":            amp.Zone,
+					"status":          syncResp.Status,
+					"message":         syncResp.Message,
 				}
 			}
 			resp.Status = "ok"
@@ -1031,9 +1079,10 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 						peerCount++
 						peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
 						syncReq := &transport.SyncRequest{
-							Zone:          string(amp.Zone),
-							Records:       groupRRStringsByOwner(amp.RRs),
+							Zone:           string(amp.Zone),
+							Records:        groupRRStringsByOwner(amp.RRs),
 							DistributionID: fmt.Sprintf("test-chain-%d-%s", time.Now().Unix(), agent.Identity),
+							MessageType:    "sync",
 						}
 
 						ctx := context.Background()
@@ -1045,8 +1094,8 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 							}
 						} else {
 							syncResults[string(agent.Identity)] = map[string]interface{}{
-								"success":        syncResp.Status == transport.ConfirmSuccess,
-								"message":        syncResp.Message,
+								"success":         syncResp.Status == transport.ConfirmSuccess,
+								"message":         syncResp.Message,
 								"distribution_id": syncReq.DistributionID,
 							}
 						}
@@ -1321,6 +1370,116 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.Status = "timeout"
 			}
 
+		case "add-rr", "del-rr":
+			// Add or delete an RR of any allowed type: store locally + sync to peers + send to combiner
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+
+			isAdd := amp.Command == "add-rr"
+
+			// Parse and validate the RRs (must be an allowed type at the zone apex)
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("RR type %s is not allowed", dns.TypeToString[rr.Header().Rrtype])
+					return
+				}
+				if isAdd {
+					rr.Header().Class = dns.ClassINET
+				} else {
+					rr.Header().Class = dns.ClassNONE
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// Create the ZoneUpdate with RRs and RRsets
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: AgentId(conf.Agent.Identity),
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			// Populate RRsets (needed by ProcessUpdate)
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+			}
+
+			action := "Adding"
+			if !isAdd {
+				action = "Removing"
+			}
+			// Collect RR type names for logging
+			rrtypeNames := make(map[string]bool)
+			for _, rr := range parsedRRs {
+				rrtypeNames[dns.TypeToString[rr.Header().Rrtype]] = true
+			}
+			var typeList []string
+			for name := range rrtypeNames {
+				typeList = append(typeList, name)
+			}
+			log.Printf("%s: %s %d RR(s) (types: %s) for zone %q", amp.Command, action, len(parsedRRs), strings.Join(typeList, ", "), amp.Zone)
+
+			force := false
+			if amp.Data != nil {
+				if f, ok := amp.Data["force"].(bool); ok {
+					force = f
+				}
+			}
+			cresp := make(chan *AgentMsgResponse, 1)
+			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    AgentId(conf.Agent.Identity),
+				UpdateType: "local",
+				Update:     zu,
+				Force:      force,
+				Response:   cresp,
+			}
+
+			select {
+			case r := <-cresp:
+				if r.Error {
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
+					resp.Msg = fmt.Sprintf("%s RR(s) failed: %s", amp.Command, r.ErrorMsg)
+				} else {
+					resp.Msg = fmt.Sprintf("%s %d RR(s) for zone %q", action, len(parsedRRs), amp.Zone)
+					if r.Msg != "" {
+						resp.Msg += " - " + r.Msg
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
+				resp.Status = "timeout"
+			}
+
 		case "send-sync-to":
 			// Send a real SYNC to a remote agent
 			if amp.AgentId == "" {
@@ -1364,11 +1523,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{
-				SenderID:      conf.Agent.Identity,
-				Zone:          string(amp.Zone),
-				SyncType:      transport.SyncTypeNS, // Default to NS, could be detected from RRs
-				Records:       groupRRStringsByOwner(amp.RRs),
+				SenderID:       conf.Agent.Identity,
+				Zone:           string(amp.Zone),
+				SyncType:       transport.SyncTypeNS, // Default to NS, could be detected from RRs
+				Records:        groupRRStringsByOwner(amp.RRs),
 				DistributionID: fmt.Sprintf("debug-send-sync-%d", time.Now().Unix()),
+				MessageType:    "sync",
 			}
 
 			log.Printf("send-sync-to: Sending sync to agent %q for zone %q (%d RRs)", amp.AgentId, amp.Zone, len(amp.RRs))
@@ -1383,11 +1543,11 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.Msg = fmt.Sprintf("SYNC sent successfully to %q (distribution: %s)", amp.AgentId, syncReq.DistributionID)
 				resp.Data = map[string]interface{}{
 					"distribution_id": syncReq.DistributionID,
-					"target":         amp.AgentId,
-					"zone":           amp.Zone,
-					"rr_count":       len(amp.RRs),
-					"status":         syncResp.Status,
-					"message":        syncResp.Message,
+					"target":          amp.AgentId,
+					"zone":            amp.Zone,
+					"rr_count":        len(amp.RRs),
+					"status":          syncResp.Status,
+					"message":         syncResp.Message,
 				}
 			}
 			resp.Status = "ok"

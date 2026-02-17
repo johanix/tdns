@@ -167,7 +167,19 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	log.Printf("InitializeRouter: Registered 6 message handlers")
+	// RFI handler (priority: 100)
+	err = router.Register(
+		"RfiHandler",
+		MessageType("rfi"),
+		HandleRfi,
+		WithPriority(100),
+		WithDescription("Processes RFI (Request For Information) messages"),
+	)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("InitializeRouter: Registered 7 message handlers")
 	log.Printf("InitializeRouter: Router initialization complete")
 
 	return nil
@@ -203,6 +215,8 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("confirm")
 	case "relocate":
 		return MessageType("relocate")
+	case "rfi":
+		return MessageType("rfi")
 	default:
 		return MessageTypeUnknown
 	}

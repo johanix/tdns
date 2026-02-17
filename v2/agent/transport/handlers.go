@@ -195,6 +195,49 @@ func HandleSync(ctx *MessageContext) error {
 	return nil
 }
 
+// HandleRfi processes RFI (Request For Information) messages.
+func HandleRfi(ctx *MessageContext) error {
+	log.Printf("HandleRfi: Processing RFI from %s (distrib=%s)",
+		ctx.PeerID, ctx.DistributionID)
+
+	// Get the pre-parsed message from context (set by RouteViaRouter)
+	rfiMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
+	if !ok {
+		var msg IncomingMessage
+		if err := json.Unmarshal(ctx.ChunkPayload, &msg); err != nil {
+			return fmt.Errorf("failed to parse rfi: %w", err)
+		}
+		rfiMsg = &msg
+	}
+
+	if rfiMsg.Type != "rfi" {
+		return fmt.Errorf("invalid message type for rfi handler: %s", rfiMsg.Type)
+	}
+
+	// Store for routing to hsyncengine
+	ctx.Data["message_type"] = "rfi"
+	ctx.Data["incoming_message"] = rfiMsg
+
+	// Create RFI acknowledgment response — format must match extractConfirmFromResponse
+	ack := map[string]interface{}{
+		"type":            "confirm",
+		"status":          "ok",
+		"distribution_id": ctx.DistributionID,
+		"message":         fmt.Sprintf("rfi received from %s", ctx.PeerID),
+	}
+
+	ackPayload, err := json.Marshal(ack)
+	if err != nil {
+		log.Printf("HandleRfi: Failed to marshal rfi acknowledgment: %v", err)
+	} else {
+		ctx.Data["sync_response"] = ackPayload
+		log.Printf("HandleRfi: RFI acknowledgment prepared for %s (distrib=%s)", ctx.PeerID, ctx.DistributionID)
+	}
+
+	log.Printf("HandleRfi: RFI processed from %s", ctx.PeerID)
+	return nil
+}
+
 // HandleRelocate processes relocate messages for DDoS mitigation.
 func HandleRelocate(ctx *MessageContext) error {
 	log.Printf("HandleRelocate: Processing relocate from %s (distrib=%s)",
