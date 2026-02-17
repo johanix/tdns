@@ -85,6 +85,10 @@ type CombinerChunkHandler struct {
 	// If nil, payloads are expected to be plaintext JSON.
 	SecureWrapper *transport.SecurePayloadWrapper
 
+	// Router handles message routing and middleware (optional).
+	// If set, RouteViaRouter dispatches through the router; if nil, falls back to HandleChunkNotify.
+	Router *transport.DNSMessageRouter
+
 	// ErrorJournal records errors during CHUNK NOTIFY processing for operational diagnostics.
 	// Queried via "transaction errors" CLI commands. If nil, errors are only logged.
 	ErrorJournal *ErrorJournal
@@ -109,10 +113,97 @@ func NewCombinerChunkHandler(localID string) *CombinerChunkHandler {
 
 // CreateNotifyHandlerFunc creates a function compatible with tdns.NotifyHandlerFunc.
 // Usage: RegisterNotifyHandler(core.TypeCHUNK, handler.CreateNotifyHandlerFunc())
+// If Router is set, dispatches through the router; otherwise falls back to HandleChunkNotify.
 func (h *CombinerChunkHandler) CreateNotifyHandlerFunc() NotifyHandlerFunc {
 	return func(ctx context.Context, req *DnsNotifyRequest) error {
+		if h.Router != nil {
+			return h.RouteViaRouter(ctx, req)
+		}
 		return h.HandleChunkNotify(ctx, req)
 	}
+}
+
+// RouteViaRouter dispatches a CHUNK NOTIFY through the DNSMessageRouter with middleware.
+// Reuses the same EDNS0/CHUNK extraction and decryption as HandleChunkNotify, then
+// creates a transport.MessageContext and routes through the router. The router's
+// registered handlers (CombinerHandlePing/Beat/Sync) store responses in ctx.Data,
+// and SendResponseMiddleware sends the DNS reply with the EDNS0 CHUNK payload.
+func (h *CombinerChunkHandler) RouteViaRouter(ctx context.Context, req *DnsNotifyRequest) error {
+	if req == nil || req.Msg == nil {
+		return fmt.Errorf("nil request or message")
+	}
+
+	sourceAddr := ""
+	if req.ResponseWriter != nil {
+		sourceAddr = req.ResponseWriter.RemoteAddr().String()
+	}
+
+	// Extract distribution ID and sender identity from QNAME
+	distributionID, controlZone, err := h.extractDistributionIDAndControlZone(req.Qname)
+	if err != nil {
+		log.Printf("CombinerRouteViaRouter: Failed to extract distribution ID from %s: %v", req.Qname, err)
+		return ErrNotHandled
+	}
+
+	log.Printf("CombinerRouteViaRouter: Received CHUNK NOTIFY qname=%q distrib=%q sender=%q",
+		req.Qname, distributionID, controlZone)
+
+	// Get CHUNK payload (EDNS0 or query mode)
+	payload, chunkQueryQname, err := h.getChunkPayload(ctx, req)
+	if err != nil {
+		log.Printf("CombinerRouteViaRouter: Failed to get CHUNK payload for qname %s: %v", req.Qname, err)
+		errorQname := chunkQueryQname
+		if errorQname == "" {
+			errorQname = req.Qname
+		}
+		h.recordError(distributionID, controlZone, "unknown", fmt.Sprintf("failed to get CHUNK payload: %v", err), errorQname)
+		return fmt.Errorf("failed to get CHUNK payload: %w", err)
+	}
+
+	// Decrypt payload if secure wrapper is configured
+	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() {
+		decrypted, err := h.SecureWrapper.UnwrapIncoming("agent", payload)
+		if err != nil {
+			log.Printf("CombinerRouteViaRouter: Failed to decrypt payload for dist %s: %v", distributionID, err)
+			h.recordError(distributionID, controlZone, "unknown", fmt.Sprintf("failed to decrypt payload: %v", err), req.Qname)
+			return fmt.Errorf("failed to decrypt payload: %w", err)
+		}
+		payload = decrypted
+	}
+
+	// Determine message type
+	msgType := transport.DetermineMessageType(payload)
+	if msgType == transport.MessageTypeUnknown {
+		log.Printf("CombinerRouteViaRouter: Unknown message type in payload for dist %s", distributionID)
+		h.recordError(distributionID, controlZone, "unknown", "unknown message type", req.Qname)
+		return h.sendErrorResponse(req, distributionID, "unknown message type")
+	}
+
+	log.Printf("CombinerRouteViaRouter: Message type: %s from %s", msgType, controlZone)
+
+	// Create message context for the router
+	msgCtx := transport.NewMessageContext(req.Msg, sourceAddr)
+	msgCtx.DistributionID = distributionID
+	msgCtx.PeerID = controlZone // sender identity from QNAME
+	msgCtx.ChunkPayload = payload
+	// Payload is already decrypted — skip crypto middleware
+	msgCtx.ChunkCrypted = false
+	msgCtx.SignatureValid = true
+	msgCtx.SignatureReason = "decrypted_by_combiner"
+
+	// Route through router with SendResponseMiddleware wrapping it
+	responseMiddleware := transport.SendResponseMiddleware(req.ResponseWriter, req.Msg)
+	err = responseMiddleware(msgCtx, func(innerCtx *transport.MessageContext) error {
+		return h.Router.Route(innerCtx, msgType)
+	})
+
+	if err != nil {
+		log.Printf("CombinerRouteViaRouter: Routing failed for dist %s: %v", distributionID, err)
+		h.recordError(distributionID, controlZone, string(msgType), fmt.Sprintf("routing failed: %v", err), req.Qname)
+		// SendResponseMiddleware already sent an error response (SERVFAIL) on error
+	}
+
+	return nil
 }
 
 // recordError records an error in the ErrorJournal if available.
@@ -802,6 +893,186 @@ func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, distribu
 		Timestamp:      time.Now(),
 	}
 	return h.sendConfirmResponse(req, resp)
+}
+
+// --- Router-compatible handler functions ---
+// These methods match the transport.MessageHandlerFunc signature
+// (func(ctx *MessageContext) error) and can be registered with the
+// DNSMessageRouter via InitializeCombinerRouter().
+//
+// They use ctx.ChunkPayload (already decrypted by middleware) and store
+// their response payloads in ctx.Data for SendResponseMiddleware.
+
+// CombinerHandlePing processes a ping message via the router.
+// Echoes the nonce back in a ping_confirm response.
+func (h *CombinerChunkHandler) CombinerHandlePing(ctx *transport.MessageContext) error {
+	log.Printf("CombinerHandlePing: Processing ping from %s (distrib=%s)",
+		ctx.PeerID, ctx.DistributionID)
+
+	var ping struct {
+		MessageType  string `json:"MessageType"`
+		MyIdentity   string `json:"MyIdentity"`
+		YourIdentity string `json:"YourIdentity"`
+		Nonce        string `json:"Nonce"`
+	}
+	if err := json.Unmarshal(ctx.ChunkPayload, &ping); err != nil {
+		log.Printf("CombinerHandlePing: Failed to parse ping payload: %v", err)
+		h.recordError(ctx.DistributionID, ctx.PeerID, "ping", "invalid ping payload", "")
+		return fmt.Errorf("invalid ping payload: %w", err)
+	}
+	if ping.Nonce == "" {
+		h.recordError(ctx.DistributionID, ctx.PeerID, "ping", "empty nonce", "")
+		return fmt.Errorf("ping has empty nonce")
+	}
+
+	// Build ping_confirm response
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		SenderID       string `json:"sender_id"`
+		Nonce          string `json:"nonce"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "ping_confirm",
+		SenderID:       h.LocalID,
+		Nonce:          ping.Nonce,
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Timestamp:      time.Now().Unix(),
+	}
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ping_confirm: %w", err)
+	}
+
+	ctx.Data["ping_response"] = payloadBytes
+	log.Printf("CombinerHandlePing: Ping processed from %s, nonce=%s", ctx.PeerID, ping.Nonce)
+	return nil
+}
+
+// CombinerHandleBeat processes a heartbeat message via the router.
+// Acknowledges the beat with a confirm response.
+func (h *CombinerChunkHandler) CombinerHandleBeat(ctx *transport.MessageContext) error {
+	log.Printf("CombinerHandleBeat: Processing beat from %s (distrib=%s)",
+		ctx.PeerID, ctx.DistributionID)
+
+	var beat struct {
+		MessageType  string    `json:"MessageType"`
+		MyIdentity   string    `json:"MyIdentity"`
+		YourIdentity string    `json:"YourIdentity"`
+		Time         time.Time `json:"Time"`
+	}
+	if err := json.Unmarshal(ctx.ChunkPayload, &beat); err != nil {
+		log.Printf("CombinerHandleBeat: Failed to parse beat payload: %v", err)
+		h.recordError(ctx.DistributionID, ctx.PeerID, "beat", "invalid beat payload", "")
+		return fmt.Errorf("invalid beat payload: %w", err)
+	}
+
+	log.Printf("CombinerHandleBeat: Received heartbeat from %s", beat.MyIdentity)
+
+	// Build beat confirm response
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        "beat acknowledged",
+		Timestamp:      time.Now().Unix(),
+	}
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal beat confirm: %w", err)
+	}
+
+	// Store as sync_response — SendResponseMiddleware checks this key
+	ctx.Data["sync_response"] = payloadBytes
+	log.Printf("CombinerHandleBeat: Beat processed from %s", ctx.PeerID)
+	return nil
+}
+
+// CombinerHandleSync processes a sync message via the router.
+// Parses the sync payload, applies updates via ProcessUpdate, and
+// stores the confirmation response for SendResponseMiddleware.
+func (h *CombinerChunkHandler) CombinerHandleSync(ctx *transport.MessageContext) error {
+	log.Printf("CombinerHandleSync: Processing sync from %s (distrib=%s)",
+		ctx.PeerID, ctx.DistributionID)
+
+	syncReq, err := h.parseAgentMsgNotify(ctx.ChunkPayload, ctx.DistributionID)
+	if err != nil {
+		log.Printf("CombinerHandleSync: Failed to parse sync payload: %v", err)
+		h.recordError(ctx.DistributionID, ctx.PeerID, "sync", fmt.Sprintf("failed to parse sync: %v", err), "")
+		return fmt.Errorf("failed to parse sync: %w", err)
+	}
+
+	resp := h.ProcessUpdate(syncReq)
+	if resp.Status == "error" {
+		h.recordError(ctx.DistributionID, ctx.PeerID, "sync", resp.Message, "")
+	}
+
+	// Build confirmation payload (same structure as sendConfirmResponse)
+	type rejectedItemJSON struct {
+		Record string `json:"record"`
+		Reason string `json:"reason"`
+	}
+	var rejItems []rejectedItemJSON
+	for _, ri := range resp.RejectedItems {
+		rejItems = append(rejItems, rejectedItemJSON{Record: ri.Record, Reason: ri.Reason})
+	}
+
+	confirmPayload := struct {
+		Type           string             `json:"type"`
+		DistributionID string             `json:"distribution_id"`
+		Zone           string             `json:"zone"`
+		Status         string             `json:"status"`
+		Message        string             `json:"message"`
+		AppliedCount   int                `json:"applied_count"`
+		RemovedCount   int                `json:"removed_count"`
+		RejectedCount  int                `json:"rejected_count"`
+		AppliedRecords []string           `json:"applied_records,omitempty"`
+		RemovedRecords []string           `json:"removed_records,omitempty"`
+		RejectedItems  []rejectedItemJSON `json:"rejected_items,omitempty"`
+		Truncated      bool               `json:"truncated,omitempty"`
+		Timestamp      int64              `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: resp.DistributionID,
+		Zone:           resp.Zone,
+		Status:         resp.Status,
+		Message:        resp.Message,
+		AppliedCount:   len(resp.AppliedRecords),
+		RemovedCount:   len(resp.RemovedRecords),
+		RejectedCount:  len(resp.RejectedItems),
+		AppliedRecords: resp.AppliedRecords,
+		RemovedRecords: resp.RemovedRecords,
+		RejectedItems:  rejItems,
+		Timestamp:      resp.Timestamp.Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal confirm payload: %w", err)
+	}
+
+	// Size guard: EDNS0 payload must fit in UDP
+	if len(payloadBytes) > 3500 {
+		confirmPayload.AppliedRecords = nil
+		confirmPayload.RemovedRecords = nil
+		confirmPayload.Truncated = true
+		payloadBytes, err = json.Marshal(confirmPayload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal truncated confirm payload: %w", err)
+		}
+	}
+
+	ctx.Data["sync_response"] = payloadBytes
+	log.Printf("CombinerHandleSync: Sync processed from %s, status=%s", ctx.PeerID, resp.Status)
+	return nil
 }
 
 // RegisterCombinerChunkHandler registers the combiner's CHUNK handler.

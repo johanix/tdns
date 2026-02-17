@@ -80,10 +80,10 @@ type Agent struct {
 }
 
 type AgentDetails struct {
-	Addrs        []string
-	Port         uint16
-	BaseUri      string
-	UriRR        *dns.URI
+	Addrs   []string
+	Port    uint16
+	BaseUri string
+	UriRR   *dns.URI
 	//	SvcbRR  *dns.SVCB
 	Host         string    // the host part of the BaseUri
 	KeyRR        *dns.KEY  // for DNS transport (legacy)
@@ -198,14 +198,14 @@ type AgentBeatReport struct {
 // We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 type AgentHelloPost struct {
 	MessageType  AgentMsg
-	Name         string     `json:"name,omitempty"`       // DEPRECATED: Unused field
+	Name         string `json:"name,omitempty"` // DEPRECATED: Unused field
 	MyIdentity   AgentId
 	YourIdentity AgentId
-	Addresses    []string   `json:"addresses,omitempty"`  // DEPRECATED: Use DNS discovery (SVCB records) instead
-	Port         uint16     `json:"port,omitempty"`       // DEPRECATED: Use DNS discovery (URI scheme) instead
-	TLSA         dns.TLSA   `json:"tlsa,omitempty"`       // DEPRECATED: Use DNS discovery (TLSA query) instead
-	Zone         ZoneName   // in the /hello we only send one zone, the one that triggered the /hello
-	Time         time.Time  // message timestamp
+	Addresses    []string  `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port         uint16    `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA         dns.TLSA  `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
+	Zone         ZoneName  // in the /hello we only send one zone, the one that triggered the /hello
+	Time         time.Time // message timestamp
 }
 
 // AgentHelloResponse is defined in core package to avoid circular dependencies.
@@ -225,12 +225,12 @@ type AgentHelloResponse struct {
 // We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
-	MessageType  AgentMsg            // "sync", "rfi", "status"
-	MyIdentity   AgentId
-	YourIdentity AgentId
-	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
-	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
-	TLSA         dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
+	MessageType    AgentMsg // "sync", "rfi", "status"
+	MyIdentity     AgentId
+	YourIdentity   AgentId
+	Addresses      []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port           uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA           dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
 	Zone           ZoneName            // An AgentMsgPost should always only refer to one zone.
 	Records        map[string][]string // Resource records grouped by owner name (owner → []RR strings)
 	Time           time.Time
@@ -285,10 +285,10 @@ type AgentPingPost struct {
 // We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 // AgentPingResponse is the response to a ping operation
 type AgentPingResponse struct {
-	Status       string    // "ok" | "error"
-	MyIdentity   AgentId   // responder's identity
-	YourIdentity AgentId   // original sender
-	Nonce        string    // echo from request
+	Status       string  // "ok" | "error"
+	MyIdentity   AgentId // responder's identity
+	YourIdentity AgentId // original sender
+	Nonce        string  // echo from request
 	Time         time.Time
 	Msg          string
 	Error        bool
@@ -297,15 +297,15 @@ type AgentPingResponse struct {
 
 // AgentMgmt{Post,Response} are used in the mgmt API
 type AgentMgmtPost struct {
-	Command     string                 `json:"command"`
+	Command     string `json:"command"`
 	MessageType AgentMsg
-	Zone        ZoneName               `json:"zone"`
-	AgentId     AgentId                `json:"agent_id"`
+	Zone        ZoneName `json:"zone"`
+	AgentId     AgentId  `json:"agent_id"`
 	RRType      uint16
 	RR          string
 	RRs         []string
-	AddedRRs    []string               // for update-local-zonedata
-	RemovedRRs  []string               // for update-local-zonedata
+	AddedRRs    []string // for update-local-zonedata
+	RemovedRRs  []string // for update-local-zonedata
 	Upstream    AgentId
 	Downstream  AgentId
 	RfiType     string
@@ -334,11 +334,11 @@ type AgentMgmtResponse struct {
 	RfiType       string
 	RfiResponse   map[AgentId]*RfiData
 	AgentRegistry *AgentRegistry
-	ZoneDataRepo map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
-	Msg          string
-	Error        bool
-	ErrorMsg     string
-	Data         interface{} `json:"data,omitempty"` // Generic data field for custom responses
+	ZoneDataRepo  map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
+	Msg           string
+	Error         bool
+	ErrorMsg      string
+	Data          interface{} `json:"data,omitempty"` // Generic data field for custom responses
 
 	// HSYNC debug data (Phase 5)
 	HsyncPeers         []*HsyncPeerInfo         `json:"hsync_peers,omitempty"`
@@ -374,29 +374,29 @@ type HsyncPeerInfo struct {
 // HsyncSyncOpInfo contains sync operation information for CLI display
 type HsyncSyncOpInfo struct {
 	DistributionID string    `json:"distribution_id"`
-	ZoneName      string    `json:"zone_name"`
-	SyncType      string    `json:"sync_type"`
-	Direction     string    `json:"direction"`
-	SenderID      string    `json:"sender_id"`
-	ReceiverID    string    `json:"receiver_id"`
-	Status        string    `json:"status"`
-	StatusMessage string    `json:"status_message,omitempty"`
-	Transport     string    `json:"transport,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	SentAt        time.Time `json:"sent_at,omitempty"`
-	ReceivedAt    time.Time `json:"received_at,omitempty"`
-	ConfirmedAt   time.Time `json:"confirmed_at,omitempty"`
-	RetryCount    int       `json:"retry_count"`
+	ZoneName       string    `json:"zone_name"`
+	SyncType       string    `json:"sync_type"`
+	Direction      string    `json:"direction"`
+	SenderID       string    `json:"sender_id"`
+	ReceiverID     string    `json:"receiver_id"`
+	Status         string    `json:"status"`
+	StatusMessage  string    `json:"status_message,omitempty"`
+	Transport      string    `json:"transport,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	SentAt         time.Time `json:"sent_at,omitempty"`
+	ReceivedAt     time.Time `json:"received_at,omitempty"`
+	ConfirmedAt    time.Time `json:"confirmed_at,omitempty"`
+	RetryCount     int       `json:"retry_count"`
 }
 
 // HsyncConfirmationInfo contains confirmation information for CLI display
 type HsyncConfirmationInfo struct {
 	DistributionID string    `json:"distribution_id"`
-	ConfirmerID   string    `json:"confirmer_id"`
-	Status        string    `json:"status"`
-	Message       string    `json:"message,omitempty"`
-	ConfirmedAt   time.Time `json:"confirmed_at"`
-	ReceivedAt    time.Time `json:"received_at"`
+	ConfirmerID    string    `json:"confirmer_id"`
+	Status         string    `json:"status"`
+	Message        string    `json:"message,omitempty"`
+	ConfirmedAt    time.Time `json:"confirmed_at"`
+	ReceivedAt     time.Time `json:"received_at"`
 }
 
 // HsyncTransportEvent contains transport event information for CLI display
@@ -434,12 +434,13 @@ type AgentMgmtPostPlus struct {
 }
 
 type AgentMsgReport struct {
-	Transport    string
-	MessageType  AgentMsg
-	Zone         ZoneName
-	Identity     AgentId
-	BeatInterval uint32
-	Msg          interface{}
-	RfiType      string
-	Response     chan *SynchedDataResponse
+	Transport      string
+	MessageType    AgentMsg
+	Zone           ZoneName
+	Identity       AgentId
+	BeatInterval   uint32
+	Msg            interface{}
+	RfiType        string
+	DistributionID string
+	Response       chan *SynchedDataResponse
 }

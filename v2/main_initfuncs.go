@@ -419,6 +419,23 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			conf.Internal.CombinerHandler = combinerHandler
 			log.Printf("MainInit: Combiner CHUNK handler registered for identity %s", conf.Combiner.Identity)
+
+			// Initialize combiner router with handler closures
+			combinerRouter := transport.NewDNSMessageRouter()
+			combinerRouterCfg := &transport.CombinerRouterConfig{
+				HandlePing: combinerHandler.CombinerHandlePing,
+				HandleBeat: combinerHandler.CombinerHandleBeat,
+				HandleSync: combinerHandler.CombinerHandleSync,
+			}
+			// Add crypto middleware if secure wrapper is available
+			if secureWrapper != nil && secureWrapper.GetCrypto() != nil {
+				combinerRouterCfg.PayloadCrypto = secureWrapper.GetCrypto()
+			}
+			if err := transport.InitializeCombinerRouter(combinerRouter, combinerRouterCfg); err != nil {
+				return fmt.Errorf("InitializeCombinerRouter: %w", err)
+			}
+			combinerHandler.Router = combinerRouter
+			log.Printf("MainInit: Combiner router initialized with 3 handlers")
 			Globals.CombinerConf = conf.Combiner
 			if conf.Combiner.AddSignature {
 				log.Printf("MainInit: Combiner signature TXT enabled")

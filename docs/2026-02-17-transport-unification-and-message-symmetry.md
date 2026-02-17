@@ -31,37 +31,43 @@
 
 ## Phase 1: Message Symmetry & Uniform Transport
 
-### 1a: Fill transport gaps
+### 1a: Fill transport gaps — DONE (DNS-88)
 
 Ensure every message type works over both DNS and API:
 
-- **PING over API**: Implement `APITransport.Ping()` — POST to `/ping`
-- **RFI over API**: Add `/rfi` endpoint (or route through `/sync` with MessageType discrimination)
-- **Auth for PING/RELOCATE**: Add zone context or require agent authorization
+- **PING over API**: Implemented `APITransport.Ping()` — POST to `/ping` with nonce echo
+- **RFI over API**: `Sync()` now propagates `req.MessageType` and `req.RfiType` (no separate endpoint needed)
+- **Auth for RELOCATE**: Added authorization check in `routeRelocateMessage()` (PING already had auth via router middleware)
 
-### 1b: Uniform DistributionID propagation
+### 1b: Uniform DistributionID propagation — DONE (DNS-89)
 
-- All incoming CHUNK messages already have a distribution ID from the qname
-- Ensure `routeBeatMessage()` propagates `msg.DistributionID` (same fix pattern as DNS-87 for sync)
-- Ensure all handlers can access the distribution ID for logging/tracking
+- `routeBeatMessage()` propagates `msg.DistributionID` into `AgentMsgReport`
+- `routeHelloMessage()` propagates `msg.DistributionID` into `AgentMsgReport`
+- Added `DistributionID` field to `AgentMsgReport` struct
 
 ### 1c: Unify combiner onto DNSMessageRouter
 
 Broken into 4 sub-steps to minimize risk. Each step builds and can be verified independently.
 
-#### 1c-i: Extract handler functions
+#### 1c-i: Extract handler functions — DONE (DNS-90)
 
 Move `handlePing`, `handleBeat`, and sync processing into standalone functions matching the router's `HandlerFunc` signature. The old `HandleChunkNotify` switch calls the new functions — behavior unchanged.
 
-#### 1c-ii: Add `InitializeCombinerRouter()`
+- `CombinerHandlePing(ctx *transport.MessageContext)` — parses ping, echoes nonce via `ctx.Data["ping_response"]`
+- `CombinerHandleBeat(ctx *transport.MessageContext)` — parses beat, stores confirm via `ctx.Data["sync_response"]`
+- `CombinerHandleSync(ctx *transport.MessageContext)` — calls `parseAgentMsgNotify` + `ProcessUpdate`, stores confirmation with size guard
 
-New function in `router_init.go` that registers combiner handlers (`CombinerHandleSync`, `CombinerHandleBeat`, `CombinerHandlePing`) with a `DNSMessageRouter`. Same middleware chain as agent (auth, crypto, stats, logging). Router exists but isn't wired yet.
+#### 1c-ii: Add `InitializeCombinerRouter()` — DONE (DNS-91)
 
-#### 1c-iii: Wire combiner to router
+New function in `router_init.go` that registers combiner handlers with a `DNSMessageRouter`. Middleware chain: authorization (optional), crypto/signature (optional), logging. No `RouteToHsyncEngine` (combiner processes synchronously). Accepts handler closures via `CombinerRouterConfig` so it doesn't import the `tdns` package. Router exists but isn't wired yet.
 
-Replace `HandleChunkNotify()` dispatch with `ChunkNotifyHandler.RouteViaRouter()`. The router handles message type dispatch, middleware, and handler invocation. Old switch becomes dead code.
+#### 1c-iii: Wire combiner to router — DONE (DNS-92)
 
-**Verification**: Test all 3 message types (ping, beat, sync) via DNS transport to combiner.
+- Added `Router *transport.DNSMessageRouter` field to `CombinerChunkHandler`
+- Added `RouteViaRouter(ctx, req)` — extracts distID, gets payload, decrypts, creates `MessageContext`, routes through router with `SendResponseMiddleware`
+- `CreateNotifyHandlerFunc()` now dispatches to `RouteViaRouter` when `Router` is set, falls back to `HandleChunkNotify` when nil
+- `main_initfuncs.go` creates router, calls `InitializeCombinerRouter` with handler closures, sets `combinerHandler.Router`
+- Old `HandleChunkNotify` switch is now dead code (still present for 1c-iv cleanup)
 
 #### 1c-iv: Delete dead code
 

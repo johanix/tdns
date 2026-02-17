@@ -169,16 +169,23 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		return nil, NewTransportError("API", "Sync", peer.ID, err, false)
 	}
 
+	// Use req.MessageType if set (e.g. "rfi"), default to "sync"
+	msgType := req.MessageType
+	if msgType == "" {
+		msgType = "sync"
+	}
+
 	apiReq := &apiSyncRequest{
-		MessageType:   "SYNC",
-		MyIdentity:    req.SenderID,
-		YourIdentity:  peer.ID,
-		Zone:          req.Zone,
-		SyncType:      req.SyncType.String(),
-		Records:       req.Records,
-		Serial:        req.Serial,
+		MessageType:    msgType,
+		MyIdentity:     req.SenderID,
+		YourIdentity:   peer.ID,
+		Zone:           req.Zone,
+		SyncType:       req.SyncType.String(),
+		Records:        req.Records,
+		Serial:         req.Serial,
 		DistributionID: req.DistributionID,
-		Timestamp:     req.Timestamp.Unix(),
+		RfiType:        req.RfiType,
+		Timestamp:      req.Timestamp.Unix(),
 	}
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
@@ -197,12 +204,12 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	}
 
 	return &SyncResponse{
-		ResponderID:   apiResp.Identity,
-		Zone:          req.Zone,
+		ResponderID:    apiResp.Identity,
+		Zone:           req.Zone,
 		DistributionID: req.DistributionID,
-		Status:        status,
-		Message:       apiResp.Msg,
-		Timestamp:     time.Now(),
+		Status:         status,
+		Message:        apiResp.Msg,
+		Timestamp:      time.Now(),
 	}, nil
 }
 
@@ -244,10 +251,37 @@ func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 	}, nil
 }
 
-// Ping is not implemented for API transport; use DNS transport for ping.
+// Ping sends a lightweight liveness probe to a peer via HTTPS API.
 func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (*PingResponse, error) {
-	return nil, NewTransportError("API", "Ping", peer.ID,
-		fmt.Errorf("ping not implemented for API transport; use DNS transport"), false)
+	url, err := apiURL(peer, "/ping")
+	if err != nil {
+		return nil, NewTransportError("API", "Ping", peer.ID, err, false)
+	}
+
+	apiReq := &apiPingRequest{
+		MessageType:  "PING",
+		MyIdentity:   req.SenderID,
+		YourIdentity: peer.ID,
+		Nonce:        req.Nonce,
+		Timestamp:    req.Timestamp.Unix(),
+	}
+	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
+	if err != nil {
+		return nil, NewTransportError("API", "Ping", peer.ID, err, true)
+	}
+
+	var apiResp apiPingResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, NewTransportError("API", "Ping", peer.ID,
+			fmt.Errorf("failed to unmarshal response: %w", err), false)
+	}
+
+	return &PingResponse{
+		ResponderID: apiResp.Identity,
+		Nonce:       apiResp.Nonce,
+		OK:          !apiResp.Error,
+		Timestamp:   time.Now(),
+	}, nil
 }
 
 // Confirm sends an acknowledgment of a sync operation via HTTPS API.
@@ -258,13 +292,13 @@ func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	}
 
 	apiReq := &apiConfirmRequest{
-		MessageType:   "CONFIRM",
-		MyIdentity:    req.SenderID,
-		Zone:          req.Zone,
+		MessageType:    "CONFIRM",
+		MyIdentity:     req.SenderID,
+		Zone:           req.Zone,
 		DistributionID: req.DistributionID,
-		Status:        req.Status.String(),
-		Message:       req.Message,
-		Timestamp:     req.Timestamp.Unix(),
+		Status:         req.Status.String(),
+		Message:        req.Message,
+		Timestamp:      req.Timestamp.Unix(),
 	}
 	_, err = t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
@@ -360,23 +394,24 @@ type apiBeatResponse struct {
 }
 
 type apiSyncRequest struct {
-	MessageType   string   `json:"message_type"`
-	MyIdentity    string   `json:"my_identity"`
-	YourIdentity  string   `json:"your_identity"`
-	Zone          string   `json:"zone"`
-	SyncType      string   `json:"sync_type"`
-	Records       map[string][]string `json:"records"`
-	Serial        uint32   `json:"serial"`
-	DistributionID string   `json:"distribution_id"`
-	Timestamp     int64    `json:"timestamp"`
+	MessageType    string              `json:"message_type"`
+	MyIdentity     string              `json:"my_identity"`
+	YourIdentity   string              `json:"your_identity"`
+	Zone           string              `json:"zone"`
+	SyncType       string              `json:"sync_type"`
+	Records        map[string][]string `json:"records"`
+	Serial         uint32              `json:"serial"`
+	DistributionID string              `json:"distribution_id"`
+	RfiType        string              `json:"rfi_type,omitempty"`
+	Timestamp      int64               `json:"timestamp"`
 }
 
 type apiSyncResponse struct {
-	Identity      string `json:"identity,omitempty"`
+	Identity       string `json:"identity,omitempty"`
 	DistributionID string `json:"distribution_id,omitempty"`
-	Msg           string `json:"msg,omitempty"`
-	Error         bool   `json:"error"`
-	ErrorMsg      string `json:"error_msg,omitempty"`
+	Msg            string `json:"msg,omitempty"`
+	Error          bool   `json:"error"`
+	ErrorMsg       string `json:"error_msg,omitempty"`
 }
 
 type apiAddress struct {
@@ -402,12 +437,28 @@ type apiRelocateResponse struct {
 	ErrorMsg string `json:"error_msg,omitempty"`
 }
 
+type apiPingRequest struct {
+	MessageType  string `json:"message_type"`
+	MyIdentity   string `json:"my_identity"`
+	YourIdentity string `json:"your_identity"`
+	Nonce        string `json:"nonce"`
+	Timestamp    int64  `json:"timestamp"`
+}
+
+type apiPingResponse struct {
+	Identity string `json:"identity,omitempty"`
+	Nonce    string `json:"nonce,omitempty"`
+	Msg      string `json:"msg,omitempty"`
+	Error    bool   `json:"error"`
+	ErrorMsg string `json:"error_msg,omitempty"`
+}
+
 type apiConfirmRequest struct {
-	MessageType   string `json:"message_type"`
-	MyIdentity    string `json:"my_identity"`
-	Zone          string `json:"zone"`
+	MessageType    string `json:"message_type"`
+	MyIdentity     string `json:"my_identity"`
+	Zone           string `json:"zone"`
 	DistributionID string `json:"distribution_id"`
-	Status        string `json:"status"`
-	Message       string `json:"message,omitempty"`
-	Timestamp     int64  `json:"timestamp"`
+	Status         string `json:"status"`
+	Message        string `json:"message,omitempty"`
+	Timestamp      int64  `json:"timestamp"`
 }

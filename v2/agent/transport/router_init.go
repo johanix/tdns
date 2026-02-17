@@ -185,6 +185,120 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	return nil
 }
 
+// CombinerRouterConfig holds configuration for combiner router initialization.
+// The combiner processes messages synchronously (no IncomingChan/RouteToHsyncEngine)
+// and only handles 3 message types: ping, beat, sync.
+type CombinerRouterConfig struct {
+	// Authorizer for authorization middleware (optional).
+	// If nil, authorization middleware is skipped.
+	Authorizer interface {
+		IsAgentAuthorized(senderID string, zone string) (bool, string)
+	}
+
+	// PayloadCrypto for signature verification and decryption middleware (optional).
+	// Obtain from SecurePayloadWrapper.GetCrypto().
+	PayloadCrypto *PayloadCrypto
+
+	// AllowUnencrypted allows unencrypted payloads when crypto is enabled.
+	AllowUnencrypted bool
+
+	// Handler functions — closures over the CombinerChunkHandler methods.
+	// The caller adapts CombinerChunkHandler.CombinerHandlePing/Beat/Sync
+	// into MessageHandlerFunc closures.
+	HandlePing MessageHandlerFunc
+	HandleBeat MessageHandlerFunc
+	HandleSync MessageHandlerFunc
+}
+
+// InitializeCombinerRouter registers combiner-specific handlers and middleware.
+// The combiner uses the same router/middleware infrastructure as the agent but:
+//   - Only handles 3 message types (ping, beat, sync)
+//   - Processes messages synchronously (no RouteToHsyncEngine middleware)
+//   - Has no PeerRegistry for statistics (yet)
+func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfig) error {
+	if router == nil {
+		return nil
+	}
+
+	log.Printf("InitializeCombinerRouter: Registering combiner handlers and middleware")
+
+	// 1. Authorization (outermost — prevents unauthorized access)
+	if cfg.Authorizer != nil {
+		router.Use(NewAuthorizationMiddleware(cfg.Authorizer))
+		log.Printf("InitializeCombinerRouter: Registered authorization middleware")
+	}
+
+	// 2. Signature verification (authenticates sender)
+	if cfg.PayloadCrypto != nil && cfg.PayloadCrypto.Enabled {
+		cryptoCfg := &CryptoMiddlewareConfig{
+			PayloadCrypto:    cfg.PayloadCrypto,
+			AllowUnencrypted: cfg.AllowUnencrypted,
+		}
+		router.Use(NewSignatureMiddleware(cryptoCfg))
+		log.Printf("InitializeCombinerRouter: Registered signature middleware")
+	}
+
+	// 3. Logging
+	router.Use(NewLoggingMiddleware(true))
+	log.Printf("InitializeCombinerRouter: Registered logging middleware")
+
+	// No RouteToHsyncEngine — combiner processes messages synchronously
+
+	// Register combiner handlers (3 message types)
+
+	if cfg.HandlePing != nil {
+		if err := router.Register(
+			"CombinerPingHandler",
+			MessageType("ping"),
+			cfg.HandlePing,
+			WithPriority(100),
+			WithDescription("Combiner: processes ping messages and echoes nonce"),
+		); err != nil {
+			return err
+		}
+	}
+
+	if cfg.HandleBeat != nil {
+		if err := router.Register(
+			"CombinerBeatHandler",
+			MessageType("beat"),
+			cfg.HandleBeat,
+			WithPriority(100),
+			WithDescription("Combiner: processes heartbeat messages from agents"),
+		); err != nil {
+			return err
+		}
+	}
+
+	if cfg.HandleSync != nil {
+		if err := router.Register(
+			"CombinerSyncHandler",
+			MessageType("sync"),
+			cfg.HandleSync,
+			WithPriority(100),
+			WithDescription("Combiner: processes zone synchronization messages"),
+		); err != nil {
+			return err
+		}
+	}
+
+	handlerCount := 0
+	if cfg.HandlePing != nil {
+		handlerCount++
+	}
+	if cfg.HandleBeat != nil {
+		handlerCount++
+	}
+	if cfg.HandleSync != nil {
+		handlerCount++
+	}
+
+	log.Printf("InitializeCombinerRouter: Registered %d message handlers", handlerCount)
+	log.Printf("InitializeCombinerRouter: Router initialization complete")
+
+	return nil
+}
+
 // DetermineMessageType parses the payload to determine the message type.
 // MessageType is now a string field ("sync", "beat", "ping", etc.).
 // Falls back to legacy "type" field for backwards compatibility.

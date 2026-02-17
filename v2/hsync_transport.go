@@ -424,13 +424,14 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 
 	// Convert to AgentMsgReport for the existing hsyncengine
 	report := &AgentMsgReport{
-		MessageType: AgentMsgHello,
-		Identity:    AgentId(senderID),
+		MessageType:    AgentMsgHello,
+		Identity:       AgentId(senderID),
+		DistributionID: msg.DistributionID,
 	}
 
 	select {
 	case tm.agentQs.Hello <- report:
-		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING)", senderID)
+		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING, distrib=%s)", senderID, msg.DistributionID)
 	default:
 		log.Printf("TransportManager: Hello channel full, dropping message from %s", senderID)
 	}
@@ -507,15 +508,20 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 		beatInterval = 30 // Default if not provided
 	}
 
+	// Propagate distribution ID from CHUNK qname into the report
+	// (same pattern as DNS-87 fix for sync messages).
+	distributionID := msg.DistributionID
+
 	report := &AgentMsgReport{
-		MessageType:  AgentMsgBeat,
-		Identity:     AgentId(senderID),
-		BeatInterval: beatInterval,
+		MessageType:    AgentMsgBeat,
+		Identity:       AgentId(senderID),
+		BeatInterval:   beatInterval,
+		DistributionID: distributionID,
 	}
 
 	select {
 	case tm.agentQs.Beat <- report:
-		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL)", senderID)
+		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL, distrib=%s)", senderID, distributionID)
 	default:
 		log.Printf("TransportManager: Beat channel full, dropping message from %s", senderID)
 	}
@@ -602,6 +608,16 @@ func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage)
 		log.Printf("TransportManager: Failed to parse relocate payload: %v", err)
 		return
 	}
+
+	// Authorization check: relocate changes the address we communicate with,
+	// so only authorized agents should be able to issue this.
+	authorized, reason := tm.IsAgentAuthorized(payload.SenderID, "")
+	if !authorized {
+		log.Printf("TransportManager: REJECTED DNS relocate from %s: %s", payload.SenderID, reason)
+		log.Printf("TransportManager: Security: Unauthorized Relocate attempt from %s", payload.SenderID)
+		return
+	}
+	log.Printf("TransportManager: DNS relocate from %s authorized: %s", payload.SenderID, reason)
 
 	// Update peer's operational address
 	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
