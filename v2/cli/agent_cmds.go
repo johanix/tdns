@@ -149,8 +149,13 @@ Example:
 	},
 }
 
-var agentPeersCmd = &cobra.Command{
-	Use:   "peers",
+var agentPeerCmd = &cobra.Command{
+	Use:   "peer",
+	Short: "Peer agent commands (list, ping, zones, resync)",
+}
+
+var agentPeerListCmd = &cobra.Command{
+	Use:   "list",
 	Short: "List all known peer agents",
 	Long: `Show all peer agents that this agent has discovered and established communication with.
 Displays both API and DNS transports independently with their current state.
@@ -158,12 +163,56 @@ Displays both API and DNS transports independently with their current state.
 This shows all peers regardless of transport type - both API (TLS) and DNS (JOSE) transports
 are displayed as separate entries to show their independent states.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Import the function from distrib_cmds.go
 		listDistribPeers(cmd, "agent")
 	},
 }
 
-var agentPeersZonesCmd = &cobra.Command{
+var (
+	peerPingID  string
+	peerPingDns bool
+	peerPingApi bool
+)
+
+var agentPeerPingCmd = &cobra.Command{
+	Use:   "ping",
+	Short: "Ping a peer (agent or combiner) via DNS CHUNK or API",
+	Long: `Send a ping to a peer and report the result.
+The --id flag specifies the peer identity (e.g. agent.beta.dnslab. or combiner.dnslab.).
+Default transport is DNS CHUNK; use --api for HTTPS API ping.
+
+Examples:
+  tdns-cliv2 agent peer ping --id agent.beta.dnslab.
+  tdns-cliv2 agent peer ping --id combiner.dnslab. --api`,
+	Run: func(cmd *cobra.Command, args []string) {
+		if peerPingID == "" {
+			log.Fatalf("--id flag is required")
+		}
+		if peerPingDns && peerPingApi {
+			log.Fatalf("use either --dns or --api, not both")
+		}
+
+		agentCmd := "peer-ping"
+		if peerPingApi {
+			agentCmd = "peer-apiping"
+		}
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: agentCmd,
+			AgentId: tdns.AgentId(peerPingID),
+		}, "peer")
+		if err != nil {
+			log.Fatalf("Request failed: %v", err)
+		}
+
+		if amr.Error {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", amr.ErrorMsg)
+			return
+		}
+		fmt.Println(amr.Msg)
+	},
+}
+
+var agentPeerZonesCmd = &cobra.Command{
 	Use:   "zones",
 	Short: "List shared zones for each peer agent",
 	Long: `Show which zones are shared with each peer agent.
@@ -173,7 +222,7 @@ Displays agent identity and their shared zones in a compact format.`,
 	},
 }
 
-var agentPeersZoneCmd = &cobra.Command{
+var agentPeerZoneCmd = &cobra.Command{
 	Use:   "zone --zone <zonename>",
 	Short: "List peer agents for a specific zone",
 	Long: `Show which peer agents share a specific zone with us.
@@ -189,7 +238,7 @@ Displays all agents that have the specified zone in their shared zones list.`,
 
 var resyncPush, resyncPull, resyncFull bool
 
-var agentPeersResyncCmd = &cobra.Command{
+var agentPeerResyncCmd = &cobra.Command{
 	Use:   "resync",
 	Short: "Re-synchronize zone data with peers and combiner",
 	Long: `Re-synchronize zone data between this agent, its peers, and the combiner.
@@ -212,7 +261,7 @@ Modes:
 		if resyncPush || resyncFull {
 			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
 			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
-			amr, err := SendAgentMgmtCmd(req, "peers")
+			amr, err := SendAgentMgmtCmd(req, "peer")
 			if err != nil {
 				fmt.Printf("Error sending resync push: %v\n", err)
 				os.Exit(1)
@@ -233,7 +282,7 @@ Modes:
 				RfiType:     "SYNC",
 				Zone:        zone,
 			}
-			amr, err := SendAgentMgmtCmd(req, "peers")
+			amr, err := SendAgentMgmtCmd(req, "peer")
 			if err != nil {
 				fmt.Printf("Error sending resync pull: %v\n", err)
 				os.Exit(1)
@@ -257,13 +306,15 @@ Modes:
 func init() {
 	AgentCmd.AddCommand(agentLocalCmd)
 	AgentCmd.AddCommand(agentDiscoverCmd)
-	AgentCmd.AddCommand(agentPeersCmd)
+	AgentCmd.AddCommand(agentPeerCmd)
 	AgentCmd.AddCommand(DebugAgentCmd) // Add debug commands under agent
 
-	// Add subcommands under "agent peers"
-	agentPeersCmd.AddCommand(agentPeersZonesCmd)
-	agentPeersCmd.AddCommand(agentPeersZoneCmd)
-	agentPeersCmd.AddCommand(agentPeersResyncCmd)
+	// Add subcommands under "agent peer"
+	agentPeerCmd.AddCommand(agentPeerListCmd)
+	agentPeerCmd.AddCommand(agentPeerPingCmd)
+	agentPeerCmd.AddCommand(agentPeerZonesCmd)
+	agentPeerCmd.AddCommand(agentPeerZoneCmd)
+	agentPeerCmd.AddCommand(agentPeerResyncCmd)
 
 	agentLocalCmd.AddCommand(agentLocalConfigCmd)
 	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
@@ -273,12 +324,15 @@ func init() {
 
 	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
 	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
-	agentPeersCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	agentPeersZoneCmd.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
+	agentPeerListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
+	agentPeerPingCmd.Flags().StringVar(&peerPingID, "id", "", "Peer identity to ping (required)")
+	agentPeerPingCmd.Flags().BoolVar(&peerPingDns, "dns", false, "Use DNS CHUNK ping (default)")
+	agentPeerPingCmd.Flags().BoolVar(&peerPingApi, "api", false, "Use HTTPS API ping")
+	agentPeerZoneCmd.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
 
-	agentPeersResyncCmd.Flags().BoolVar(&resyncPush, "push", false, "Re-send local data to combiner and peers")
-	agentPeersResyncCmd.Flags().BoolVar(&resyncPull, "pull", false, "Request peers to re-send their data (RFI SYNC)")
-	agentPeersResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
+	agentPeerResyncCmd.Flags().BoolVar(&resyncPush, "push", false, "Re-send local data to combiner and peers")
+	agentPeerResyncCmd.Flags().BoolVar(&resyncPull, "pull", false, "Request peers to re-send their data (RFI SYNC)")
+	agentPeerResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
 }
 
 func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
@@ -368,7 +422,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 // listPeerZones shows shared zones for each peer agent
 func listPeerZones(cmd *cobra.Command, component string) {
-	prefixcmd, _ := getCommandContext("peers")
+	prefixcmd, _ := getCommandContext("peer")
 	api, err := getApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
@@ -433,7 +487,7 @@ func listPeerZones(cmd *cobra.Command, component string) {
 
 // listAgentsForZone shows which peer agents share a specific zone
 func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
-	prefixcmd, _ := getCommandContext("peers")
+	prefixcmd, _ := getCommandContext("peer")
 	api, err := getApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)

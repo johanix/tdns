@@ -17,23 +17,45 @@ import (
 )
 
 // HandleConfirmation processes confirmation messages.
+// Routes the confirmation to the transport's reliable message queue and
+// forwards per-RR detail to the SynchedDataEngine via OnConfirmationReceived.
 func HandleConfirmation(ctx *MessageContext) error {
 	log.Printf("HandleConfirmation: Processing confirmation from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
 
 	// Parse the confirmation message
-	var confirmMsg map[string]interface{}
-	if err := json.Unmarshal(ctx.ChunkPayload, &confirmMsg); err != nil {
+	var confirm DnsConfirmPayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &confirm); err != nil {
 		return fmt.Errorf("failed to parse confirmation: %w", err)
 	}
 
-	// Route to transport's confirmation handler
-	// This needs access to the transport's pending confirmation map
-	// For now, we'll add the confirmation to the context data
-	ctx.Data["confirmation"] = confirmMsg
-	ctx.Data["confirmation_type"] = "confirm"
+	status := parseConfirmStatus(confirm.Status)
 
-	log.Printf("HandleConfirmation: Confirmation processed from %s", ctx.PeerID)
+	// Forward to transport's reliable message queue (marks distribution as confirmed)
+	if transport, ok := ctx.Data["transport"].(*DNSTransport); ok && transport != nil {
+		transport.HandleIncomingConfirmation(&IncomingConfirmation{
+			DistributionID: confirm.DistributionID,
+			PeerID:         confirm.SenderID,
+			Status:         status,
+			Message:        confirm.Message,
+			Timestamp:      time.Unix(confirm.Timestamp, 0),
+			Zone:           confirm.Zone,
+			AppliedRecords: confirm.AppliedRecords,
+			RemovedRecords: confirm.RemovedRecords,
+			RejectedItems:  confirm.RejectedItems,
+			Truncated:      confirm.Truncated,
+		})
+	}
+
+	// Forward confirmation detail to SynchedDataEngine
+	type confirmCallback = func(distributionID string, senderID string, status ConfirmStatus,
+		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool)
+	if cb, ok := ctx.Data["on_confirmation_received"].(confirmCallback); ok && cb != nil && confirm.DistributionID != "" {
+		cb(confirm.DistributionID, confirm.SenderID, status,
+			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated)
+	}
+
+	log.Printf("HandleConfirmation: Confirmation processed from %s (status=%s)", ctx.PeerID, confirm.Status)
 	return nil
 }
 
@@ -51,25 +73,31 @@ func HandlePing(ctx *MessageContext) error {
 		}
 	}
 
-	// Parse the ping message to get nonce field
-	var pingMsg struct {
-		Type  string `json:"type"`
-		Nonce string `json:"nonce"`
-	}
-	if err := json.Unmarshal(ctx.ChunkPayload, &pingMsg); err != nil {
+	// Parse the ping message using DnsPingPayload (handles both standard and legacy field names)
+	var ping DnsPingPayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &ping); err != nil {
 		return fmt.Errorf("failed to parse ping: %w", err)
 	}
 
-	if !ok && pingMsg.Type != "ping" {
-		return fmt.Errorf("invalid message type for ping handler: %s", pingMsg.Type)
+	if !ok && ping.Type != "ping" && ping.MessageType != "ping" {
+		return fmt.Errorf("invalid message type for ping handler: type=%s MessageType=%s", ping.Type, ping.MessageType)
 	}
 
-	// Create confirmation response with echoed nonce
-	confirmation := map[string]interface{}{
-		"type":        "confirm",
-		"ok":          true,
-		"original_id": ctx.DistributionID,
-		"nonce":       pingMsg.Nonce,
+	if ping.Nonce == "" {
+		return fmt.Errorf("ping has empty nonce")
+	}
+
+	// Get local identity from context (set by RouteViaRouter)
+	localID, _ := ctx.Data["local_id"].(string)
+
+	// Create confirmation response matching DnsPingConfirmPayload format
+	confirmation := &DnsPingConfirmPayload{
+		Type:           "ping_confirm",
+		SenderID:       localID,
+		Nonce:          ping.Nonce,
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Timestamp:      time.Now().Unix(),
 	}
 
 	confirmPayload, err := json.Marshal(confirmation)
@@ -79,9 +107,9 @@ func HandlePing(ctx *MessageContext) error {
 
 	// Store confirmation in context for response middleware
 	ctx.Data["ping_response"] = confirmPayload
-	ctx.Data["ping_nonce"] = pingMsg.Nonce
+	ctx.Data["ping_nonce"] = ping.Nonce
 
-	log.Printf("HandlePing: Ping processed from %s, nonce=%s", ctx.PeerID, pingMsg.Nonce)
+	log.Printf("HandlePing: Ping processed from %s, nonce=%s", ctx.PeerID, ping.Nonce)
 	return nil
 }
 
@@ -90,15 +118,14 @@ func HandleHello(ctx *MessageContext) error {
 	log.Printf("HandleHello: Processing hello from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by RouteViaRouter)
+	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	helloMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if !ok {
-		// Fallback: parse the payload if not pre-parsed
-		var msg IncomingMessage
-		if err := json.Unmarshal(ctx.ChunkPayload, &msg); err != nil {
-			return fmt.Errorf("failed to parse hello: %w", err)
+		// Not pre-parsed: parse from raw payload (handles both standard and legacy field names)
+		helloMsg = parseIncomingMessage(ctx.ChunkPayload)
+		if helloMsg == nil {
+			return fmt.Errorf("failed to parse hello payload")
 		}
-		helloMsg = &msg
 	}
 
 	if helloMsg.Type != "hello" {
@@ -114,28 +141,50 @@ func HandleHello(ctx *MessageContext) error {
 }
 
 // HandleBeat processes heartbeat messages.
+// Works for both agent and combiner — the confirm response is always constructed,
+// and the RouteToHsyncEngine middleware (agent only) picks up the message for further processing.
 func HandleBeat(ctx *MessageContext) error {
 	log.Printf("HandleBeat: Processing beat from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by RouteViaRouter)
+	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	beatMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if !ok {
-		// Fallback: parse the payload if not pre-parsed
-		var msg IncomingMessage
-		if err := json.Unmarshal(ctx.ChunkPayload, &msg); err != nil {
-			return fmt.Errorf("failed to parse beat: %w", err)
+		// Not pre-parsed: parse from raw payload (handles both standard and legacy field names)
+		beatMsg = parseIncomingMessage(ctx.ChunkPayload)
+		if beatMsg == nil {
+			return fmt.Errorf("failed to parse beat payload")
 		}
-		beatMsg = &msg
 	}
 
 	if beatMsg.Type != "beat" {
 		return fmt.Errorf("invalid message type for beat handler: %s", beatMsg.Type)
 	}
 
-	// Store for routing to hsyncengine
+	// Store for routing to hsyncengine (agent middleware picks this up; combiner ignores it)
 	ctx.Data["message_type"] = "beat"
 	ctx.Data["incoming_message"] = beatMsg
+
+	// Construct confirm response (used by both agent and combiner)
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        "beat acknowledged",
+		Timestamp:      time.Now().Unix(),
+	}
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		log.Printf("HandleBeat: Failed to marshal beat confirm: %v", err)
+	} else {
+		ctx.Data["sync_response"] = payloadBytes
+	}
 
 	log.Printf("HandleBeat: Beat processed from %s", ctx.PeerID)
 	return nil
@@ -154,15 +203,13 @@ func HandleSync(ctx *MessageContext) error {
 		return fmt.Errorf("LEGACY agent %s cannot send sync messages (zero shared zones)", ctx.PeerID)
 	}
 
-	// Get the pre-parsed message from context (set by RouteViaRouter)
+	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	syncMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if !ok {
-		// Fallback: parse the payload if not pre-parsed
-		var msg IncomingMessage
-		if err := json.Unmarshal(ctx.ChunkPayload, &msg); err != nil {
-			return fmt.Errorf("failed to parse sync: %w", err)
+		syncMsg = parseIncomingMessage(ctx.ChunkPayload)
+		if syncMsg == nil {
+			return fmt.Errorf("failed to parse sync payload")
 		}
-		syncMsg = &msg
 	}
 
 	if syncMsg.Type != "sync" {
@@ -200,14 +247,13 @@ func HandleRfi(ctx *MessageContext) error {
 	log.Printf("HandleRfi: Processing RFI from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by RouteViaRouter)
+	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	rfiMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if !ok {
-		var msg IncomingMessage
-		if err := json.Unmarshal(ctx.ChunkPayload, &msg); err != nil {
-			return fmt.Errorf("failed to parse rfi: %w", err)
+		rfiMsg = parseIncomingMessage(ctx.ChunkPayload)
+		if rfiMsg == nil {
+			return fmt.Errorf("failed to parse rfi payload")
 		}
-		rfiMsg = &msg
 	}
 
 	if rfiMsg.Type != "rfi" {
@@ -243,10 +289,13 @@ func HandleRelocate(ctx *MessageContext) error {
 	log.Printf("HandleRelocate: Processing relocate from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
 
-	// Parse the relocate message
-	var relocateMsg IncomingMessage
-	if err := json.Unmarshal(ctx.ChunkPayload, &relocateMsg); err != nil {
-		return fmt.Errorf("failed to parse relocate: %w", err)
+	// Get the pre-parsed message from context (set by agent RouteViaRouter)
+	relocateMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
+	if !ok {
+		relocateMsg = parseIncomingMessage(ctx.ChunkPayload)
+		if relocateMsg == nil {
+			return fmt.Errorf("failed to parse relocate payload")
+		}
 	}
 
 	if relocateMsg.Type != "relocate" {
@@ -255,10 +304,45 @@ func HandleRelocate(ctx *MessageContext) error {
 
 	// Store for routing to hsyncengine
 	ctx.Data["message_type"] = "relocate"
-	ctx.Data["incoming_message"] = &relocateMsg
+	ctx.Data["incoming_message"] = relocateMsg
 
 	log.Printf("HandleRelocate: Relocate processed from %s", ctx.PeerID)
 	return nil
+}
+
+// parseIncomingMessage parses a raw JSON payload into an IncomingMessage.
+// Handles both standard format (MessageType/MyIdentity) and legacy format (type/sender_id).
+// Returns nil if parsing fails.
+func parseIncomingMessage(payload []byte) *IncomingMessage {
+	var fields struct {
+		MessageType string `json:"MessageType"`
+		Type        string `json:"type"`
+		MyIdentity  string `json:"MyIdentity"`
+		SenderID    string `json:"sender_id"`
+		Zone        string `json:"Zone"`
+		LegacyZone  string `json:"zone"`
+	}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil
+	}
+	msgType := fields.MessageType
+	if msgType == "" {
+		msgType = fields.Type
+	}
+	senderID := fields.MyIdentity
+	if senderID == "" {
+		senderID = fields.SenderID
+	}
+	zone := fields.Zone
+	if zone == "" {
+		zone = fields.LegacyZone
+	}
+	return &IncomingMessage{
+		Type:     msgType,
+		SenderID: senderID,
+		Zone:     zone,
+		Payload:  payload,
+	}
 }
 
 // SendResponseMiddleware sends the DNS response after all handlers complete.

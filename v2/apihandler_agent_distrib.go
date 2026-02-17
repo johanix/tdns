@@ -408,7 +408,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			case "ping":
 				if toIdentity == "combiner" {
 					useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
-					pingResp := doCombinerPing(conf, useAPI)
+					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
 					resp.Error = pingResp.Error
 					resp.ErrorMsg = pingResp.ErrorMsg
 					resp.Msg = pingResp.Msg
@@ -424,7 +424,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					if !ok {
 						// DNS-42: Authorization check BEFORE discovery
 						// Prevents DoS attack via discovery amplification
-						authorized, reason := conf.Internal.TransportManager.IsAgentAuthorized(toFqdn, "")
+						authorized, reason := conf.Internal.TransportManager.IsPeerAuthorized(toFqdn, "")
 						if !authorized {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", req.To, reason)
@@ -496,7 +496,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			// DNS-42: Authorization check BEFORE discovery
 			// Prevents DoS attack via discovery amplification
-			authorized, reason := conf.Internal.TransportManager.IsAgentAuthorized(agentFqdn, "")
+			authorized, reason := conf.Internal.TransportManager.IsPeerAuthorized(agentFqdn, "")
 			if !authorized {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", agentId, reason)
@@ -586,23 +586,23 @@ func StartDistributionGC(cache *DistributionCache, interval time.Duration) {
 func listKnownPeers(conf *Config) []PeerInfo {
 	var peers []PeerInfo
 
-	// For combiners: only list the local agent (combiners never communicate with remote parties)
-	if conf.Combiner != nil && conf.Combiner.Agent != nil {
-		agent := conf.Combiner.Agent
-		// Use Identity if set, otherwise fall back to Address
-		peerID := agent.Identity
-		if peerID == "" {
-			peerID = agent.Address
+	// For combiners: list all configured agents
+	if conf.Combiner != nil && len(conf.Combiner.Agents) > 0 {
+		for _, agent := range conf.Combiner.Agents {
+			peerID := agent.Identity
+			if peerID == "" {
+				peerID = agent.Address
+			}
+			peerInfo := PeerInfo{
+				PeerID:      peerID,
+				PeerType:    "agent",
+				Transport:   "DNS",
+				Address:     agent.Address,
+				CryptoType:  "JOSE",
+				DistribSent: 0, // TODO: track actual count
+			}
+			peers = append(peers, peerInfo)
 		}
-		peerInfo := PeerInfo{
-			PeerID:      peerID,
-			PeerType:    "agent",
-			Transport:   "DNS",
-			Address:     agent.Address,
-			CryptoType:  "JOSE",
-			DistribSent: 0, // TODO: track actual count
-		}
-		peers = append(peers, peerInfo)
 		return peers
 	}
 
@@ -628,7 +628,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 			isCombiner := false
 			if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
 				isCombiner = string(agent.Identity) == conf.Agent.Combiner.Identity ||
-					         dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Combiner.Identity)
+					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Combiner.Identity)
 			} else {
 				// Fallback to old hardcoded "combiner" for backward compatibility
 				isCombiner = agent.Identity == "combiner"

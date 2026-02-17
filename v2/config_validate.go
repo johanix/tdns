@@ -311,10 +311,13 @@ func ValidateCryptoFiles(config *Config) error {
 			return err
 		}
 
-		// Check agent public key if configured
-		if config.Combiner.Agent != nil && strings.TrimSpace(config.Combiner.Agent.LongTermJosePubKey) != "" {
-			if err := validateFileExists(config.Combiner.Agent.LongTermJosePubKey, "agent public key (combiner.agent)"); err != nil {
-				return err
+		// Check agent public keys for all configured agents
+		for _, agent := range config.Combiner.Agents {
+			if strings.TrimSpace(agent.LongTermJosePubKey) != "" {
+				label := fmt.Sprintf("agent public key (combiner.agents[%s])", agent.Identity)
+				if err := validateFileExists(agent.LongTermJosePubKey, label); err != nil {
+					return err
+				}
 			}
 		}
 	}

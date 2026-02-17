@@ -119,7 +119,7 @@ type DNSTransportConfig struct {
 	ChunkPayloadSet func(qname string, payload []byte, format uint8)
 	// ChunkQueryEndpoint: for query mode, the address (host:port) where this agent answers CHUNK queries
 	ChunkQueryEndpoint string
-	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agent.address)
+	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agents[].address)
 	ChunkQueryEndpointInNotify bool
 
 	// Optional: register distributions for "agent distrib list". Called when sending; MarkCompleted when response is success.

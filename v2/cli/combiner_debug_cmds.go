@@ -125,8 +125,8 @@ func sortedKeys[T any](m map[string]T) []string {
 }
 
 func SendCombinerDebugCmd(req tdns.CombinerDebugPost) (*tdns.CombinerDebugResponse, error) {
-	prefixcmd, _ := getCommandContext("show-combiner-data")
-	api, err := getApiClient(prefixcmd, true)
+	// Always use the combiner API client — this command only talks to the combiner.
+	api, err := getApiClient("combiner", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
@@ -135,14 +135,20 @@ func SendCombinerDebugCmd(req tdns.CombinerDebugPost) (*tdns.CombinerDebugRespon
 		req.Zone = dns.Fqdn(req.Zone)
 	}
 
-	_, buf, err := api.RequestNG("POST", "/combiner/debug", req, true)
+	status, buf, err := api.RequestNG("POST", "/combiner/debug", req, true)
 	if err != nil {
 		return nil, fmt.Errorf("API request failed: %w", err)
 	}
 
+	if status != 200 {
+		return nil, fmt.Errorf("API request to %s/combiner/debug returned HTTP %d: %s",
+			api.BaseUrl, status, string(buf))
+	}
+
 	var resp tdns.CombinerDebugResponse
 	if err := json.Unmarshal(buf, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, fmt.Errorf("failed to parse response from %s/combiner/debug: %w",
+			api.BaseUrl, err)
 	}
 
 	if resp.Error {

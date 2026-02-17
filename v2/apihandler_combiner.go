@@ -4,12 +4,14 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/miekg/dns"
 )
 
@@ -77,7 +79,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 	}
 }
 
-func APIcombinerDebug() func(w http.ResponseWriter, r *http.Request) {
+func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var cp CombinerDebugPost
@@ -173,6 +175,109 @@ func APIcombinerDebug() func(w http.ResponseWriter, r *http.Request) {
 			resp.CombinerData = combinerData
 			resp.AgentContributions = agentContribs
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
+
+		case "agent-ping":
+			ct := conf.Internal.CombinerTransport
+			if ct == nil {
+				resp.Error = true
+				resp.ErrorMsg = "CombinerTransport not initialized"
+				return
+			}
+			agentID := cp.AgentID
+			if agentID == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id is required for agent-ping"
+				return
+			}
+			agentID = dns.Fqdn(agentID)
+
+			nonce := fmt.Sprintf("combiner-ping-%d", time.Now().UnixNano())
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			pingResp, err := ct.Ping(ctx, agentID, &transport.PingRequest{
+				SenderID:  ct.LocalID,
+				Nonce:     nonce,
+				Timestamp: time.Now(),
+			})
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("ping to agent %s failed: %v", agentID, err)
+				return
+			}
+
+			resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s",
+				pingResp.ResponderID, pingResp.Nonce)
+
+		case "agent-resync":
+			ct := conf.Internal.CombinerTransport
+			if ct == nil {
+				resp.Error = true
+				resp.ErrorMsg = "CombinerTransport not initialized"
+				return
+			}
+
+			// Determine which agents to resync
+			var agents []*PeerConf
+			if cp.AgentID != "" {
+				agentID := dns.Fqdn(cp.AgentID)
+				if a := conf.Combiner.FindAgent(agentID); a != nil {
+					agents = append(agents, a)
+				} else {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("agent %q not found in config", agentID)
+					return
+				}
+			} else {
+				agents = conf.Combiner.Agents
+			}
+
+			// Determine which zones to resync
+			var zones []string
+			if cp.Zone != "" {
+				zone := dns.Fqdn(cp.Zone)
+				if _, exists := Zones.Get(zone); !exists {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
+					return
+				}
+				zones = append(zones, zone)
+			} else {
+				for _, zd := range Zones.Items() {
+					zones = append(zones, zd.ZoneName)
+				}
+			}
+
+			// Send RFI SYNC to each agent for each zone
+			var results []string
+			var errCount int
+			for _, agent := range agents {
+				for _, zone := range zones {
+					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					_, err := ct.Sync(ctx, agent.Identity, &transport.SyncRequest{
+						SenderID:    ct.LocalID,
+						Zone:        zone,
+						Records:     map[string][]string{},
+						Timestamp:   time.Now(),
+						MessageType: "rfi",
+						RfiType:     "SYNC",
+					})
+					cancel()
+					if err != nil {
+						results = append(results, fmt.Sprintf("  %s / %s: error: %v", agent.Identity, zone, err))
+						errCount++
+					} else {
+						results = append(results, fmt.Sprintf("  %s / %s: RFI SYNC sent", agent.Identity, zone))
+					}
+				}
+			}
+
+			summary := fmt.Sprintf("Resync: sent RFI SYNC to %d agent(s) for %d zone(s) (%d errors)\n",
+				len(agents), len(zones), errCount)
+			for _, r := range results {
+				summary += r + "\n"
+			}
+			resp.Msg = summary
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown combiner debug command: %s", cp.Command)

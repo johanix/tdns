@@ -22,27 +22,57 @@ import (
 	"github.com/miekg/dns"
 )
 
-// doCombinerPing runs a ping to the configured combiner (DNS CHUNK or API).
+// doPeerPing pings any known peer (agent or combiner) via DNS CHUNK or API.
+// The peer must be in the PeerRegistry (discovered via Hello or configured).
 // useAPI true = HTTPS API ping; false = CHUNK-based DNS ping.
-// Returns an AgentMgmtResponse with Msg/Error/ErrorMsg set.
-func doCombinerPing(conf *Config, useAPI bool) *AgentMgmtResponse {
+func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 	resp := &AgentMgmtResponse{
 		Identity: AgentId(conf.Agent.Identity),
 		Time:     time.Now(),
 	}
-	if conf.Agent == nil || conf.Agent.Combiner == nil {
+	peerID = dns.Fqdn(peerID)
+
+	if conf.Internal.TransportManager == nil {
 		resp.Error = true
-		resp.ErrorMsg = "agent.combiner not configured"
+		resp.ErrorMsg = "TransportManager not configured"
 		return resp
 	}
-	if useAPI {
-		if conf.Agent.Combiner.ApiBaseUrl == "" {
+
+	peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(peerID)
+	if !ok {
+		// Peer not in registry yet — check if it's the combiner (which has static config)
+		if conf.Agent.Combiner != nil && dns.Fqdn(conf.Agent.Combiner.Identity) == peerID && conf.Agent.Combiner.Address != "" {
+			host, portStr, splitErr := net.SplitHostPort(conf.Agent.Combiner.Address)
+			if splitErr != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("peer %q not in registry and combiner address %q is invalid: %v", peerID, conf.Agent.Combiner.Address, splitErr)
+				return resp
+			}
+			port, _ := strconv.Atoi(portStr)
+			peer = transport.NewPeer(peerID)
+			peer.SetDiscoveryAddress(&transport.Address{
+				Host:      host,
+				Port:      uint16(port),
+				Transport: "udp",
+			})
+			if conf.Agent.Combiner.ApiBaseUrl != "" {
+				peer.APIEndpoint = conf.Agent.Combiner.ApiBaseUrl
+			}
+		} else {
 			resp.Error = true
-			resp.ErrorMsg = "agent.combiner.api_base_url not configured"
+			resp.ErrorMsg = fmt.Sprintf("peer %q not found in registry (run discovery first)", peerID)
 			return resp
 		}
-		url := strings.TrimSuffix(conf.Agent.Combiner.ApiBaseUrl, "/") + "/ping"
-		body := PingPost{Msg: "agent combiner ping", Pings: 1}
+	}
+
+	if useAPI {
+		if peer.APIEndpoint == "" {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("peer %q has no API endpoint configured", peerID)
+			return resp
+		}
+		url := strings.TrimSuffix(peer.APIEndpoint, "/") + "/ping"
+		body := PingPost{Msg: fmt.Sprintf("peer ping %s", peerID), Pings: 1}
 		data, _ := json.Marshal(body)
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
 		if err != nil {
@@ -61,71 +91,40 @@ func doCombinerPing(conf *Config, useAPI bool) *AgentMgmtResponse {
 		res, err := client.Do(req)
 		if err != nil {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("apiping failed: %v", err)
+			resp.ErrorMsg = fmt.Sprintf("apiping to %s failed: %v", peerID, err)
 			return resp
 		}
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusOK {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("combiner API returned %d", res.StatusCode)
+			resp.ErrorMsg = fmt.Sprintf("peer %s API returned %d", peerID, res.StatusCode)
 			return resp
 		}
 		var pr PingResponse
 		if err := json.NewDecoder(res.Body).Decode(&pr); err != nil {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("decode combiner ping response: %v", err)
+			resp.ErrorMsg = fmt.Sprintf("decode ping response from %s: %v", peerID, err)
 			return resp
 		}
-		resp.Msg = fmt.Sprintf("apiping ok: %s", pr.Msg)
+		resp.Msg = fmt.Sprintf("ping ok (api transport): %s responded", peerID)
 		return resp
 	}
+
 	// DNS CHUNK ping
-	if conf.Agent.Combiner.Address == "" {
-		resp.Error = true
-		resp.ErrorMsg = "agent.combiner.address not configured"
-		return resp
-	}
-	if conf.Internal.TransportManager == nil {
-		resp.Error = true
-		resp.ErrorMsg = "TransportManager not configured (DNS transport disabled?)"
-		return resp
-	}
-	host, portStr, err := net.SplitHostPort(conf.Agent.Combiner.Address)
-	if err != nil {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("invalid agent.combiner.address %q: %v", conf.Agent.Combiner.Address, err)
-		return resp
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("invalid port in agent.combiner.address %q", conf.Agent.Combiner.Address)
-		return resp
-	}
-	combinerID := "combiner"
-	if conf.Agent.Combiner.Identity != "" {
-		combinerID = dns.Fqdn(conf.Agent.Combiner.Identity)
-	}
-	peer := transport.NewPeer(combinerID)
-	peer.SetDiscoveryAddress(&transport.Address{
-		Host:      host,
-		Port:      uint16(port),
-		Transport: "udp",
-	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
 	if err != nil {
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("dnsping failed: %v", err)
+		resp.ErrorMsg = fmt.Sprintf("dnsping to %s failed: %v", peerID, err)
 		return resp
 	}
 	if !pingResp.OK {
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("combiner did not acknowledge (responder: %s)", pingResp.ResponderID)
+		resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
 		return resp
 	}
-	resp.Msg = fmt.Sprintf("dnsping ok: %s echoed nonce", pingResp.ResponderID)
+	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s", pingResp.ResponderID, pingResp.Nonce)
 	return resp
 }
 
@@ -160,7 +159,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		var zd *ZoneData
 		var exist bool
 		noZoneCommands := map[string]bool{
-			"config": true, "hsync-agentstatus": true, "combiner-dnsping": true, "combiner-apiping": true,
+			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
 			"discover": true, "hsync-locate": true,
 			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
 		}
@@ -183,14 +182,24 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
 
-		case "combiner-dnsping":
-			pingResp := doCombinerPing(conf, false)
+		case "peer-ping":
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id is required for peer-ping"
+				return
+			}
+			pingResp := doPeerPing(conf, string(amp.AgentId), false)
 			resp.Error = pingResp.Error
 			resp.ErrorMsg = pingResp.ErrorMsg
 			resp.Msg = pingResp.Msg
 
-		case "combiner-apiping":
-			pingResp := doCombinerPing(conf, true)
+		case "peer-apiping":
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id is required for peer-apiping"
+				return
+			}
+			pingResp := doPeerPing(conf, string(amp.AgentId), true)
 			resp.Error = pingResp.Error
 			resp.ErrorMsg = pingResp.ErrorMsg
 			resp.Msg = pingResp.Msg
@@ -269,7 +278,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			// Check authorization before discovery (DNS-38)
 			if conf.Internal.AgentRegistry.TransportManager != nil {
-				authorized, reason := conf.Internal.AgentRegistry.TransportManager.IsAgentAuthorized(string(amp.AgentId), string(amp.Zone))
+				authorized, reason := conf.Internal.AgentRegistry.TransportManager.IsPeerAuthorized(string(amp.AgentId), string(amp.Zone))
 				if !authorized {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", amp.AgentId, reason)

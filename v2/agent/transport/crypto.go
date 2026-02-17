@@ -476,7 +476,7 @@ func (w *SecurePayloadWrapper) UnwrapIncomingTryAllPeers(payload []byte, senderH
 // This is the secure version that prevents DoS attacks via QNAME forgery.
 //
 // Use this function when:
-// - You've already performed authorization checks (IsAgentAuthorized)
+// - You've already performed authorization checks (IsPeerAuthorized)
 // - The peerID comes from a trusted source (e.g., QNAME after authorization)
 // - You want to prevent attackers from forcing crypto operations with all peer keys
 //

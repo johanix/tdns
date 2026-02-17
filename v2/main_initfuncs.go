@@ -295,6 +295,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		combinerID := "combiner"
 		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
 			combinerID = conf.Agent.Combiner.Identity
+			// Inject combiner into authorized_peers so IsPeerAuthorized() accepts it
+			conf.Agent.AuthorizedPeers = append(conf.Agent.AuthorizedPeers, combinerID)
+			log.Printf("MainInit: added combiner %s to authorized_peers", combinerID)
 		}
 		conf.Internal.CombinerHandler = NewCombinerChunkHandler(combinerID)
 
@@ -423,8 +426,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			// Initialize combiner router with handler closures
 			combinerRouter := transport.NewDNSMessageRouter()
 			combinerRouterCfg := &transport.CombinerRouterConfig{
-				HandlePing: combinerHandler.CombinerHandlePing,
-				HandleBeat: combinerHandler.CombinerHandleBeat,
 				HandleSync: combinerHandler.CombinerHandleSync,
 			}
 			// Add crypto middleware if secure wrapper is available
@@ -436,6 +437,32 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			combinerHandler.Router = combinerRouter
 			log.Printf("MainInit: Combiner router initialized with 3 handlers")
+
+			// Initialize distribution cache for combiner outbound tracking
+			if conf.Internal.DistributionCache == nil {
+				conf.Internal.DistributionCache = NewDistributionCache()
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+				log.Printf("MainInit: Combiner distribution cache initialized")
+			}
+
+			// Initialize CombinerTransport for outbound communication to agents
+			listenAddr := ""
+			if len(conf.DnsEngine.Addresses) > 0 {
+				listenAddr = conf.DnsEngine.Addresses[0]
+			}
+			combinerTransport, err := NewCombinerTransport(&CombinerTransportConfig{
+				LocalID:           conf.Combiner.Identity,
+				Agents:            conf.Combiner.Agents,
+				ListenAddr:        listenAddr,
+				SecureWrapper:     secureWrapper,
+				DistributionCache: conf.Internal.DistributionCache,
+			})
+			if err != nil {
+				return fmt.Errorf("NewCombinerTransport: %w", err)
+			}
+			conf.Internal.CombinerTransport = combinerTransport
+			log.Printf("MainInit: CombinerTransport initialized with %d agent peers", len(combinerTransport.Peers))
+
 			Globals.CombinerConf = conf.Combiner
 			if conf.Combiner.AddSignature {
 				log.Printf("MainInit: Combiner signature TXT enabled")
@@ -709,25 +736,6 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 		return nil, fmt.Errorf("failed to derive public key: %w", err)
 	}
 
-	// Load agent's public key for signature verification
-	if conf.Combiner.Agent == nil || strings.TrimSpace(conf.Combiner.Agent.LongTermJosePubKey) == "" {
-		return nil, fmt.Errorf("combiner.agent.long_term_jose_pub_key not configured")
-	}
-	agentPubKeyPath := strings.TrimSpace(conf.Combiner.Agent.LongTermJosePubKey)
-	agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("agent public key file not found: %q: %w", agentPubKeyPath, err)
-		}
-		return nil, fmt.Errorf("failed to read agent public key %q: %w", agentPubKeyPath, err)
-	}
-	agentPubKeyData = StripKeyFileComments(agentPubKeyData)
-	agentVerifyKey, err := backend.ParsePublicKey(agentPubKeyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse agent public key: %w", err)
-	}
-	log.Printf("initCombinerCrypto: Loaded agent public key from %s", agentPubKeyPath)
-
 	// Create PayloadCrypto instance using the generic transport infrastructure
 	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
 		Backend: backend.(crypto.Backend),
@@ -740,9 +748,36 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	// Set local keys for decryption
 	pc.SetLocalKeys(localPrivKey, localPubKey)
 
-	// Add agent as peer for verification (agent sends to combiner, combiner verifies)
-	pc.AddPeerKey("agent", agentVerifyKey)
-	pc.AddPeerVerificationKey("agent", agentVerifyKey)
+	// Load public keys for all configured agents
+	if len(conf.Combiner.Agents) == 0 {
+		return nil, fmt.Errorf("combiner.agents not configured (need at least one agent)")
+	}
+	for _, agent := range conf.Combiner.Agents {
+		if strings.TrimSpace(agent.Identity) == "" {
+			return nil, fmt.Errorf("combiner.agents: agent entry missing required identity field")
+		}
+		if strings.TrimSpace(agent.LongTermJosePubKey) == "" {
+			return nil, fmt.Errorf("combiner.agents[%s]: long_term_jose_pub_key not configured", agent.Identity)
+		}
+		agentPubKeyPath := strings.TrimSpace(agent.LongTermJosePubKey)
+		agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("agent public key file not found for %s: %q: %w", agent.Identity, agentPubKeyPath, err)
+			}
+			return nil, fmt.Errorf("failed to read agent public key for %s: %q: %w", agent.Identity, agentPubKeyPath, err)
+		}
+		agentPubKeyData = StripKeyFileComments(agentPubKeyData)
+		agentVerifyKey, err := backend.ParsePublicKey(agentPubKeyData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse agent public key for %s: %w", agent.Identity, err)
+		}
+
+		// Register agent with its identity as the peer key ID
+		pc.AddPeerKey(agent.Identity, agentVerifyKey)
+		pc.AddPeerVerificationKey(agent.Identity, agentVerifyKey)
+		log.Printf("initCombinerCrypto: Loaded public key for agent %s from %s", agent.Identity, agentPubKeyPath)
+	}
 
 	return transport.NewSecurePayloadWrapper(pc), nil
 }

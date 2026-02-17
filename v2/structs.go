@@ -70,9 +70,9 @@ type ZoneData struct {
 	// When merging, all agents' contributions for the same owner/rrtype are combined
 	// into a single RRset in CombinerData.
 	AgentContributions map[string]map[string]map[uint16]core.RRset
-	Ready        bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType      string // axfr | ixfr
-	Logger       *log.Logger
+	Ready              bool   // true if zd.Data has been populated (from file or upstream)
+	XfrType            string // axfr | ixfr
+	Logger             *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping
@@ -479,16 +479,17 @@ type CombinerResponse struct {
 type CombinerDebugPost struct {
 	Command string `json:"command"`
 	Zone    string `json:"zone,omitempty"`
+	AgentID string `json:"agent_id,omitempty"` // For agent-targeted commands (e.g. agent-ping)
 }
 
 // CombinerDebugResponse returns both the merged CombinerData and the per-agent
 // AgentContributions breakdown.
 type CombinerDebugResponse struct {
-	Time               time.Time                                      `json:"time"`
-	Error              bool                                           `json:"error"`
-	ErrorMsg           string                                         `json:"error_msg,omitempty"`
-	Msg                string                                         `json:"msg,omitempty"`
-	CombinerData       map[string]map[string]map[string][]string      `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
+	Time               time.Time                                            `json:"time"`
+	Error              bool                                                 `json:"error"`
+	ErrorMsg           string                                               `json:"error_msg,omitempty"`
+	Msg                string                                               `json:"msg,omitempty"`
+	CombinerData       map[string]map[string]map[string][]string            `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
 	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
 }
 

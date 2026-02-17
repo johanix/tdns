@@ -371,10 +371,11 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 }
 
 func listDistribPeers(cmd *cobra.Command, component string) {
-	// Try to get context from the actual command name (peers or distrib)
-	prefixcmd, _ := getCommandContext("peers")
+	// Determine parent command to select the right API client.
+	// Called from "agent peer list" (parent of "peer" = "agent") or
+	// "agent distrib peers" / "combiner distrib peers" (parent of "distrib" = component).
+	prefixcmd, _ := getCommandContext("peer")
 	if prefixcmd == "server" {
-		// Fallback to distrib if peers not found (backward compat)
 		prefixcmd, _ = getCommandContext("distrib")
 	}
 	api, err := getApiClient(prefixcmd, true)

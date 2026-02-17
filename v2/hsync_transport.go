@@ -79,7 +79,7 @@ type TransportManagerConfig struct {
 	ChunkPayloadStore ChunkPayloadStore
 	// ChunkQueryEndpoint: for query mode, address (host:port) where agent answers CHUNK queries
 	ChunkQueryEndpoint string
-	// ChunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0 option 65005); when false, receiver uses static config (e.g. combiner.agent.address)
+	// ChunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0 option 65005); when false, receiver uses static config (e.g. combiner.agents[].address)
 	ChunkQueryEndpointInNotify bool
 
 	// PayloadCrypto enables JWS/JWE encryption for CHUNK payloads (optional)
@@ -196,8 +196,8 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		}
 
 		// DoS mitigation: Check authorization BEFORE expensive operations (decryption, query fetch)
-		tm.ChunkHandler.IsAgentAuthorized = func(senderID string, zone string) (bool, string) {
-			return tm.IsAgentAuthorized(senderID, zone)
+		tm.ChunkHandler.IsPeerAuthorized = func(senderID string, zone string) (bool, string) {
+			return tm.IsPeerAuthorized(senderID, zone)
 		}
 
 		// Wire confirmation callback for reliable message queue and per-RR tracking
@@ -300,7 +300,7 @@ func (tm *TransportManager) RegisterChunkNotifyHandler() error {
 	}
 
 	// Register the handler for CHUNK type NOTIFYs
-	// Use RouteViaRouter for new routing path (falls back to HandleChunkNotify if Router is nil)
+	// RouteViaRouter routes through the DNSMessageRouter with middleware
 	err := RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *DnsNotifyRequest) error {
 		return tm.ChunkHandler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
 	})
@@ -370,7 +370,7 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 		zone = sharedZones[0] // Use first shared zone for HSYNC check
 	}
 	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
-	authorized, reason := tm.IsAgentAuthorized(senderID, zone)
+	authorized, reason := tm.IsPeerAuthorized(senderID, zone)
 	if !authorized {
 		log.Printf("TransportManager: REJECTED DNS hello from %s: %s", senderID, reason)
 		// Security audit log - this may indicate attack attempt
@@ -464,7 +464,7 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	} else if len(payload.Zones) > 0 {
 		// Try HSYNC path for each zone in the Beat
 		for _, zone := range payload.Zones {
-			if auth, rsn := tm.IsAgentAuthorized(senderID, zone); auth {
+			if auth, rsn := tm.IsPeerAuthorized(senderID, zone); auth {
 				authorized = true
 				reason = rsn
 				break
@@ -555,7 +555,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 
 	// DNS-51: Authorization check for Sync/Notify/RFI/Status messages
 	// Check if sender is authorized for this zone (via config or HSYNC)
-	authorized, reason := tm.IsAgentAuthorized(senderID, zone)
+	authorized, reason := tm.IsPeerAuthorized(senderID, zone)
 	if !authorized {
 		log.Printf("TransportManager: REJECTED DNS %s from %s for zone %s: %s", msgTypeStr, senderID, zone, reason)
 		log.Printf("TransportManager: Security: Unauthorized %s attempt from %s for zone %s", msgTypeStr, senderID, zone)
@@ -611,7 +611,7 @@ func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage)
 
 	// Authorization check: relocate changes the address we communicate with,
 	// so only authorized agents should be able to issue this.
-	authorized, reason := tm.IsAgentAuthorized(payload.SenderID, "")
+	authorized, reason := tm.IsPeerAuthorized(payload.SenderID, "")
 	if !authorized {
 		log.Printf("TransportManager: REJECTED DNS relocate from %s: %s", payload.SenderID, reason)
 		log.Printf("TransportManager: Security: Unauthorized Relocate attempt from %s", payload.SenderID)

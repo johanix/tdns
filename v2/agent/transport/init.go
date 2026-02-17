@@ -33,7 +33,7 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 		// Register the handler with tdns
 		// This creates an adapter from the generic handler to tdns.NotifyHandlerFunc
 		tdns.RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *tdns.DnsNotifyRequest) error {
-			return chunkHandler.HandleChunkNotify(ctx, req.Qname, req.Msg, req.ResponseWriter)
+			return chunkHandler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
 		})
 
 		// Start a goroutine to process incoming messages and route to hsyncengine

@@ -17,7 +17,7 @@ import (
 type RouterConfig struct {
 	// TransportManager for authorization middleware
 	TransportManager interface {
-		IsAgentAuthorized(senderID string, zone string) (bool, string)
+		IsPeerAuthorized(senderID string, zone string) (bool, string)
 	}
 
 	// PeerRegistry for statistics tracking
@@ -192,7 +192,7 @@ type CombinerRouterConfig struct {
 	// Authorizer for authorization middleware (optional).
 	// If nil, authorization middleware is skipped.
 	Authorizer interface {
-		IsAgentAuthorized(senderID string, zone string) (bool, string)
+		IsPeerAuthorized(senderID string, zone string) (bool, string)
 	}
 
 	// PayloadCrypto for signature verification and decryption middleware (optional).
@@ -202,11 +202,9 @@ type CombinerRouterConfig struct {
 	// AllowUnencrypted allows unencrypted payloads when crypto is enabled.
 	AllowUnencrypted bool
 
-	// Handler functions — closures over the CombinerChunkHandler methods.
-	// The caller adapts CombinerChunkHandler.CombinerHandlePing/Beat/Sync
-	// into MessageHandlerFunc closures.
-	HandlePing MessageHandlerFunc
-	HandleBeat MessageHandlerFunc
+	// HandleSync is a closure over CombinerChunkHandler.CombinerHandleSync.
+	// SYNC is not yet unified (deferred to Phase 6) because processing differs
+	// significantly between agent and combiner.
 	HandleSync MessageHandlerFunc
 }
 
@@ -244,32 +242,29 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 
 	// No RouteToHsyncEngine — combiner processes messages synchronously
 
-	// Register combiner handlers (3 message types)
-
-	if cfg.HandlePing != nil {
-		if err := router.Register(
-			"CombinerPingHandler",
-			MessageType("ping"),
-			cfg.HandlePing,
-			WithPriority(100),
-			WithDescription("Combiner: processes ping messages and echoes nonce"),
-		); err != nil {
-			return err
-		}
+	// Register shared handlers for ping and beat (same implementation as agent)
+	if err := router.Register(
+		"PingHandler",
+		MessageType("ping"),
+		HandlePing,
+		WithPriority(100),
+		WithDescription("Processes ping messages and echoes nonce"),
+	); err != nil {
+		return err
 	}
 
-	if cfg.HandleBeat != nil {
-		if err := router.Register(
-			"CombinerBeatHandler",
-			MessageType("beat"),
-			cfg.HandleBeat,
-			WithPriority(100),
-			WithDescription("Combiner: processes heartbeat messages from agents"),
-		); err != nil {
-			return err
-		}
+	if err := router.Register(
+		"BeatHandler",
+		MessageType("beat"),
+		HandleBeat,
+		WithPriority(100),
+		WithDescription("Processes heartbeat messages from peers"),
+	); err != nil {
+		return err
 	}
 
+	// Register combiner-specific sync handler (not yet unified — Phase 6)
+	handlerCount := 2
 	if cfg.HandleSync != nil {
 		if err := router.Register(
 			"CombinerSyncHandler",
@@ -280,16 +275,6 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		); err != nil {
 			return err
 		}
-	}
-
-	handlerCount := 0
-	if cfg.HandlePing != nil {
-		handlerCount++
-	}
-	if cfg.HandleBeat != nil {
-		handlerCount++
-	}
-	if cfg.HandleSync != nil {
 		handlerCount++
 	}
 
@@ -300,23 +285,16 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 }
 
 // DetermineMessageType parses the payload to determine the message type.
-// MessageType is now a string field ("sync", "beat", "ping", etc.).
-// Falls back to legacy "type" field for backwards compatibility.
+// Reads the "MessageType" field (e.g. "sync", "beat", "ping").
 func DetermineMessageType(payload []byte) MessageType {
 	var fields struct {
-		MessageType string `json:"MessageType"` // Standard format (string)
-		Type        string `json:"type"`        // Legacy format (fallback)
+		MessageType string `json:"MessageType"`
 	}
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return MessageTypeUnknown
 	}
 
-	msgType := fields.MessageType
-	if msgType == "" {
-		msgType = fields.Type
-	}
-
-	switch msgType {
+	switch fields.MessageType {
 	case "hello":
 		return MessageType("hello")
 	case "beat":

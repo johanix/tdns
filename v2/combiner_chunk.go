@@ -85,8 +85,8 @@ type CombinerChunkHandler struct {
 	// If nil, payloads are expected to be plaintext JSON.
 	SecureWrapper *transport.SecurePayloadWrapper
 
-	// Router handles message routing and middleware (optional).
-	// If set, RouteViaRouter dispatches through the router; if nil, falls back to HandleChunkNotify.
+	// Router handles message routing and middleware.
+	// RouteViaRouter dispatches through the router with middleware chain.
 	Router *transport.DNSMessageRouter
 
 	// ErrorJournal records errors during CHUNK NOTIFY processing for operational diagnostics.
@@ -113,21 +113,19 @@ func NewCombinerChunkHandler(localID string) *CombinerChunkHandler {
 
 // CreateNotifyHandlerFunc creates a function compatible with tdns.NotifyHandlerFunc.
 // Usage: RegisterNotifyHandler(core.TypeCHUNK, handler.CreateNotifyHandlerFunc())
-// If Router is set, dispatches through the router; otherwise falls back to HandleChunkNotify.
+// Dispatches through the DNSMessageRouter with middleware.
 func (h *CombinerChunkHandler) CreateNotifyHandlerFunc() NotifyHandlerFunc {
 	return func(ctx context.Context, req *DnsNotifyRequest) error {
-		if h.Router != nil {
-			return h.RouteViaRouter(ctx, req)
-		}
-		return h.HandleChunkNotify(ctx, req)
+		return h.RouteViaRouter(ctx, req)
 	}
 }
 
 // RouteViaRouter dispatches a CHUNK NOTIFY through the DNSMessageRouter with middleware.
 // Reuses the same EDNS0/CHUNK extraction and decryption as HandleChunkNotify, then
 // creates a transport.MessageContext and routes through the router. The router's
-// registered handlers (CombinerHandlePing/Beat/Sync) store responses in ctx.Data,
-// and SendResponseMiddleware sends the DNS reply with the EDNS0 CHUNK payload.
+// registered handlers (shared HandlePing/HandleBeat, combiner-specific CombinerHandleSync)
+// store responses in ctx.Data, and SendResponseMiddleware sends the DNS reply with the
+// EDNS0 CHUNK payload.
 func (h *CombinerChunkHandler) RouteViaRouter(ctx context.Context, req *DnsNotifyRequest) error {
 	if req == nil || req.Msg == nil {
 		return fmt.Errorf("nil request or message")
@@ -162,9 +160,9 @@ func (h *CombinerChunkHandler) RouteViaRouter(ctx context.Context, req *DnsNotif
 
 	// Decrypt payload if secure wrapper is configured
 	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() {
-		decrypted, err := h.SecureWrapper.UnwrapIncoming("agent", payload)
+		decrypted, err := h.SecureWrapper.UnwrapIncoming(controlZone, payload)
 		if err != nil {
-			log.Printf("CombinerRouteViaRouter: Failed to decrypt payload for dist %s: %v", distributionID, err)
+			log.Printf("CombinerRouteViaRouter: Failed to decrypt payload for dist %s from %s: %v", distributionID, controlZone, err)
 			h.recordError(distributionID, controlZone, "unknown", fmt.Sprintf("failed to decrypt payload: %v", err), req.Qname)
 			return fmt.Errorf("failed to decrypt payload: %w", err)
 		}
@@ -176,7 +174,7 @@ func (h *CombinerChunkHandler) RouteViaRouter(ctx context.Context, req *DnsNotif
 	if msgType == transport.MessageTypeUnknown {
 		log.Printf("CombinerRouteViaRouter: Unknown message type in payload for dist %s", distributionID)
 		h.recordError(distributionID, controlZone, "unknown", "unknown message type", req.Qname)
-		return h.sendErrorResponse(req, distributionID, "unknown message type")
+		return fmt.Errorf("unknown message type in payload for dist %s", distributionID)
 	}
 
 	log.Printf("CombinerRouteViaRouter: Message type: %s from %s", msgType, controlZone)
@@ -190,6 +188,8 @@ func (h *CombinerChunkHandler) RouteViaRouter(ctx context.Context, req *DnsNotif
 	msgCtx.ChunkCrypted = false
 	msgCtx.SignatureValid = true
 	msgCtx.SignatureReason = "decrypted_by_combiner"
+	// Store local identity so handlers (e.g. ping) can include it in responses
+	msgCtx.Data["local_id"] = h.LocalID
 
 	// Route through router with SendResponseMiddleware wrapping it
 	responseMiddleware := transport.SendResponseMiddleware(req.ResponseWriter, req.Msg)
@@ -221,106 +221,6 @@ func (h *CombinerChunkHandler) recordError(distID, sender, messageType, errMsg, 
 	})
 }
 
-// HandleChunkNotify processes a CHUNK NOTIFY message for the combiner.
-// It extracts the sync payload from the EDNS0 option and applies the update.
-func (h *CombinerChunkHandler) HandleChunkNotify(ctx context.Context, req *DnsNotifyRequest) error {
-	if req == nil || req.Msg == nil {
-		return fmt.Errorf("nil request or message")
-	}
-
-	// Extract distribution ID and control zone from QNAME: {distid}.{controlzone}. (distid = first label, control zone = rest)
-	distributionID, controlZone, err := h.extractDistributionIDAndControlZone(req.Qname)
-	if err != nil {
-		log.Printf("CombinerChunkHandler: Failed to extract distribution ID from %s: %v", req.Qname, err)
-		return ErrNotHandled // Let other handlers try
-	}
-
-	log.Printf("CombinerChunkHandler: Received CHUNK NOTIFY qname=%q distribution_id=%q control_zone=%q", req.Qname, distributionID, controlZone)
-
-	// Get CHUNK payload: from EDNS0 (edns0 mode) or via CHUNK query to NOTIFY source (query mode or fallback)
-	payload, chunkQueryQname, err := h.getChunkPayload(ctx, req)
-	if err != nil {
-		// Pre-parse error: we don't know the message type and the transport is likely
-		// broken (e.g. CHUNK query REFUSED), so we can't reliably send a response.
-		// Log and return — the agent will timeout and retry.
-		log.Printf("CombinerChunkHandler: Failed to get CHUNK payload for qname %s (dist %s, sender %s): %v", req.Qname, distributionID, controlZone, err)
-		// Use the CHUNK query qname if available (shows the actual qname that was queried);
-		// fall back to NOTIFY qname for EDNS0-only failures where no query was attempted.
-		errorQname := chunkQueryQname
-		if errorQname == "" {
-			errorQname = req.Qname
-		}
-		h.recordError(distributionID, controlZone, "unknown", fmt.Sprintf("failed to get CHUNK payload: %v", err), errorQname)
-		return fmt.Errorf("failed to get CHUNK payload: %w", err)
-	}
-
-	// Decrypt payload if secure wrapper is configured
-	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() {
-		decrypted, err := h.SecureWrapper.UnwrapIncoming("agent", payload)
-		if err != nil {
-			// Pre-parse error: payload is encrypted and we can't decrypt it.
-			// We still don't know the message type. Log and return.
-			log.Printf("CombinerChunkHandler: Failed to decrypt payload for dist %s: %v", distributionID, err)
-			h.recordError(distributionID, controlZone, "unknown", fmt.Sprintf("failed to decrypt payload: %v", err), req.Qname)
-			return fmt.Errorf("failed to decrypt payload: %w", err)
-		}
-		payload = decrypted
-		previewLen := len(payload)
-		if previewLen > 100 {
-			previewLen = 100
-		}
-		log.Printf("CombinerChunkHandler: Decrypted payload (%d bytes): %s", len(payload), string(payload[:previewLen]))
-	}
-
-	// Determine message type: check MessageType (string) first, fall back to legacy "type" field.
-	// Since MessageType is now a string ("sync", "beat", "ping", etc.), both formats
-	// are unified — no more numeric vs string dual dispatch.
-	var msgType struct {
-		MessageType string `json:"MessageType"` // New unified format
-		Type        string `json:"type"`        // Legacy format (fallback)
-	}
-	if err := json.Unmarshal(payload, &msgType); err != nil {
-		// Pre-parse error: payload is not valid JSON so we don't know the message type.
-		// Log and return.
-		log.Printf("CombinerChunkHandler: Failed to parse message type fields for dist %s: %v", distributionID, err)
-		h.recordError(distributionID, controlZone, "unknown", fmt.Sprintf("failed to parse message type: %v", err), req.Qname)
-		return fmt.Errorf("failed to parse message type: %w", err)
-	}
-
-	messageType := msgType.MessageType
-	if messageType == "" {
-		messageType = msgType.Type // Fall back to legacy "type" field
-	}
-
-	log.Printf("CombinerChunkHandler: Message type: %q", messageType)
-
-	switch messageType {
-	case "ping":
-		return h.handlePing(req, distributionID, controlZone, payload)
-
-	case "beat":
-		return h.handleBeat(req, distributionID, controlZone, payload)
-
-	case "sync":
-		syncReq, err := h.parseAgentMsgNotify(payload, distributionID)
-		if err != nil {
-			log.Printf("CombinerChunkHandler: Failed to parse sync payload: %v", err)
-			h.recordError(distributionID, controlZone, "sync", fmt.Sprintf("failed to parse sync: %v", err), req.Qname)
-			return h.sendErrorResponse(req, distributionID, fmt.Sprintf("failed to parse sync: %v", err))
-		}
-		resp := h.ProcessUpdate(syncReq)
-		if resp.Status == "error" {
-			h.recordError(distributionID, controlZone, "sync", resp.Message, req.Qname)
-		}
-		return h.sendConfirmResponse(req, resp)
-
-	default:
-		log.Printf("CombinerChunkHandler: Unknown message type %q", messageType)
-		h.recordError(distributionID, controlZone, messageType, fmt.Sprintf("unknown message type %q", messageType), req.Qname)
-		return h.sendErrorResponse(req, distributionID, fmt.Sprintf("unknown message type %q", messageType))
-	}
-}
-
 // extractDistributionIDAndControlZone derives distribution ID and control zone from the QNAME.
 // QNAME format: {distid}.{controlzone}. — distid has no dots (single label), so distribution ID = first label, control zone = rest (qname minus leftmost label).
 func (h *CombinerChunkHandler) extractDistributionIDAndControlZone(qname string) (distributionID, controlZone string, err error) {
@@ -337,106 +237,6 @@ func (h *CombinerChunkHandler) extractDistributionIDAndControlZone(qname string)
 	// Control zone = qname minus leftmost label (e.g. 65a1b2c3.agent.provider. -> agent.provider.)
 	controlZone = qname[len(labels[0])+1:] // +1 for the dot after first label
 	return distributionID, controlZone, nil
-}
-
-// handlePing responds to a ping with ping_confirm (echoed nonce); no zone state change.
-// Both success and error use the same ping_confirm struct — errors set Status:"error"
-// with a Message describing the problem (follows the TDNS Error/ErrorMsg pattern).
-func (h *CombinerChunkHandler) handlePing(req *DnsNotifyRequest, distributionID, controlZone string, payload []byte) error {
-	// AgentPingPost has no json tags — fields serialize with Go names.
-	var ping struct {
-		MessageType  string `json:"MessageType"`
-		MyIdentity   string `json:"MyIdentity"`
-		YourIdentity string `json:"YourIdentity"`
-		Nonce        string `json:"Nonce"`
-	}
-	if err := json.Unmarshal(payload, &ping); err != nil {
-		log.Printf("CombinerChunkHandler: Failed to parse ping payload: %v", err)
-		h.recordError(distributionID, controlZone, "ping", "invalid ping payload", req.Qname)
-		return h.sendPingResponse(req, distributionID, "", "error", "invalid ping payload")
-	}
-	if ping.MessageType != "ping" || ping.Nonce == "" {
-		log.Printf("CombinerChunkHandler: Invalid ping (MessageType=%q Nonce=%q)", ping.MessageType, ping.Nonce)
-		h.recordError(distributionID, controlZone, "ping", "invalid ping", req.Qname)
-		return h.sendPingResponse(req, distributionID, "", "error", "invalid ping")
-	}
-
-	return h.sendPingResponse(req, distributionID, ping.Nonce, "ok", "")
-}
-
-// sendPingResponse builds and sends a ping_confirm response. Used for both success and error.
-func (h *CombinerChunkHandler) sendPingResponse(req *DnsNotifyRequest, distributionID, nonce, status, message string) error {
-	log.Printf("CombinerChunkHandler: Sending ping_confirm for distribution %s status=%s", distributionID, status)
-
-	confirmPayload := struct {
-		Type           string `json:"type"`
-		SenderID       string `json:"sender_id"`
-		Nonce          string `json:"nonce"`
-		DistributionID string `json:"distribution_id"`
-		Status         string `json:"status"`
-		Message        string `json:"message,omitempty"`
-		Timestamp      int64  `json:"timestamp"`
-	}{
-		Type:           "ping_confirm",
-		SenderID:       h.LocalID,
-		Nonce:          nonce,
-		DistributionID: distributionID,
-		Status:         status,
-		Message:        message,
-		Timestamp:      time.Now().Unix(),
-	}
-	payloadBytes, err := json.Marshal(confirmPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal ping_confirm: %w", err)
-	}
-
-	return h.sendGenericEdns0Response(req, payloadBytes)
-}
-
-// handleBeat responds to a heartbeat with beat_confirm; no zone state change.
-// Both success and error use the same confirm struct — errors set Status:"error"
-// with a Message describing the problem (follows the TDNS Error/ErrorMsg pattern).
-func (h *CombinerChunkHandler) handleBeat(req *DnsNotifyRequest, distributionID, controlZone string, payload []byte) error {
-	var beat struct {
-		MessageType  string    `json:"MessageType"`  // "beat"
-		MyIdentity   string    `json:"MyIdentity"`   // Sender's identity
-		YourIdentity string    `json:"YourIdentity"` // Should be "combiner"
-		Time         time.Time `json:"Time"`
-	}
-	if err := json.Unmarshal(payload, &beat); err != nil {
-		log.Printf("CombinerChunkHandler: Failed to parse beat payload: %v", err)
-		h.recordError(distributionID, controlZone, "beat", "invalid beat payload", req.Qname)
-		return h.sendBeatResponse(req, distributionID, "error", "invalid beat payload")
-	}
-
-	log.Printf("CombinerChunkHandler: Received heartbeat from %s", beat.MyIdentity)
-
-	return h.sendBeatResponse(req, distributionID, "ok", "beat acknowledged")
-}
-
-// sendBeatResponse builds and sends a beat confirm response. Used for both success and error.
-func (h *CombinerChunkHandler) sendBeatResponse(req *DnsNotifyRequest, distributionID, status, message string) error {
-	log.Printf("CombinerChunkHandler: Sending beat confirm for distribution %s status=%s", distributionID, status)
-
-	confirmPayload := struct {
-		Type           string `json:"type"`
-		DistributionID string `json:"distribution_id"`
-		Status         string `json:"status"`
-		Message        string `json:"message"`
-		Timestamp      int64  `json:"timestamp"`
-	}{
-		Type:           "confirm",
-		DistributionID: distributionID,
-		Status:         status,
-		Message:        message,
-		Timestamp:      time.Now().Unix(),
-	}
-	payloadBytes, err := json.Marshal(confirmPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal beat confirm: %w", err)
-	}
-
-	return h.sendGenericEdns0Response(req, payloadBytes)
 }
 
 // getChunkPayload returns the CHUNK payload from the NOTIFY. Receiver adapts: first try EDNS(0) CHUNK option;
@@ -460,13 +260,15 @@ func (h *CombinerChunkHandler) getChunkPayload(ctx context.Context, req *DnsNoti
 
 	chunkQueryQname := buildChunkQueryQname(h.LocalID, distributionID, senderControlZone)
 
-	// Use CHUNK_QUERY_ENDPOINT from NOTIFY if present, else static config (combiner.agent.address).
+	// Use CHUNK_QUERY_ENDPOINT from NOTIFY if present, else look up agent address from config by sender identity.
 	queryTarget := extractChunkQueryEndpoint(req.Msg)
-	if queryTarget == "" && Conf.Combiner != nil && Conf.Combiner.Agent != nil && Conf.Combiner.Agent.Address != "" {
-		queryTarget = strings.TrimSpace(Conf.Combiner.Agent.Address)
+	if queryTarget == "" && Conf.Combiner != nil {
+		if agent := Conf.Combiner.FindAgent(senderControlZone); agent != nil && agent.Address != "" {
+			queryTarget = strings.TrimSpace(agent.Address)
+		}
 	}
 	if queryTarget == "" {
-		return nil, chunkQueryQname, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option, no combiner.agent.address)")
+		return nil, chunkQueryQname, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option, no agent address for %s)", senderControlZone)
 	}
 	data, err := fetchChunkPayloadViaQuery(ctx, queryTarget, chunkQueryQname)
 	return data, chunkQueryQname, err
@@ -549,64 +351,28 @@ func (h *CombinerChunkHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error)
 }
 
 // parseAgentMsgNotify parses a sync payload into a CombinerSyncRequest.
-// Handles both the standard AgentMsgPost format (MessageType/MyIdentity/Records)
-// and legacy format (type/sender_id/records). Records are already grouped by owner.
+// Expects the standard AgentMsgPost format (MyIdentity/Zone/Records).
 func (h *CombinerChunkHandler) parseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncRequest, error) {
-	// Use a unified struct that accepts fields from both formats
 	var msg struct {
-		// Standard AgentMsgPost fields
 		MyIdentity string              `json:"MyIdentity"`
 		Zone       string              `json:"Zone"`
 		Records    map[string][]string `json:"Records"`
 		Time       time.Time           `json:"Time"`
-
-		// Legacy format fields (fallback)
-		SenderID       string              `json:"sender_id"`
-		LegacyZone     string              `json:"zone"`
-		LegacyRecords  map[string][]string `json:"records"`
-		SyncType       string              `json:"sync_type"`
-		Serial         uint32              `json:"serial"`
-		DistributionID string              `json:"distribution_id"`
-		Timestamp      int64               `json:"timestamp"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("JSON unmarshal failed: %w", err)
 	}
 
-	// Resolve fields: prefer standard format, fall back to legacy
-	senderID := msg.MyIdentity
-	if senderID == "" {
-		senderID = msg.SenderID
+	if msg.MyIdentity == "" {
+		return nil, fmt.Errorf("missing MyIdentity")
 	}
-	if senderID == "" {
-		return nil, fmt.Errorf("missing sender identity (MyIdentity or sender_id)")
-	}
-
-	zone := msg.Zone
-	if zone == "" {
-		zone = msg.LegacyZone
-	}
-	if zone == "" {
+	if msg.Zone == "" {
 		return nil, fmt.Errorf("missing Zone")
 	}
 
 	records := msg.Records
-	if len(records) == 0 {
-		records = msg.LegacyRecords
-	}
 	if records == nil {
 		records = make(map[string][]string)
-	}
-
-	// Use distribution ID from payload if present, otherwise from QNAME
-	corrID := msg.DistributionID
-	if corrID == "" {
-		corrID = distributionID
-	}
-
-	timestamp := msg.Time
-	if timestamp.IsZero() && msg.Timestamp > 0 {
-		timestamp = time.Unix(msg.Timestamp, 0)
 	}
 
 	rrCount := 0
@@ -614,16 +380,14 @@ func (h *CombinerChunkHandler) parseAgentMsgNotify(data []byte, distributionID s
 		rrCount += len(rrs)
 	}
 	log.Printf("CombinerChunkHandler: Parsed sync from %q for zone %q (%d RRs, %d owners)",
-		senderID, zone, rrCount, len(records))
+		msg.MyIdentity, msg.Zone, rrCount, len(records))
 
 	return &CombinerSyncRequest{
-		SenderID:       senderID,
-		Zone:           zone,
-		SyncType:       msg.SyncType,
+		SenderID:       msg.MyIdentity,
+		Zone:           msg.Zone,
 		Records:        records,
-		Serial:         msg.Serial,
-		DistributionID: corrID,
-		Timestamp:      timestamp,
+		DistributionID: distributionID,
+		Timestamp:      msg.Time,
 	}, nil
 }
 
@@ -791,210 +555,16 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 	return resp
 }
 
-// sendConfirmResponse sends a DNS response with confirmation in EDNS0.
-func (h *CombinerChunkHandler) sendConfirmResponse(req *DnsNotifyRequest, resp *CombinerSyncResponse) error {
-	if req.ResponseWriter == nil {
-		log.Printf("CombinerChunkHandler: No ResponseWriter, cannot send confirmation for distribution %s", resp.DistributionID)
-		return nil
-	}
-
-	log.Printf("CombinerChunkHandler: Sending confirmation for distribution %s zone %q status=%s applied=%d removed=%d rejected=%d",
-		resp.DistributionID, resp.Zone, resp.Status, len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
-
-	// Build per-RR rejected items for the payload
-	type rejectedItemJSON struct {
-		Record string `json:"record"`
-		Reason string `json:"reason"`
-	}
-	var rejItems []rejectedItemJSON
-	for _, ri := range resp.RejectedItems {
-		rejItems = append(rejItems, rejectedItemJSON{Record: ri.Record, Reason: ri.Reason})
-	}
-
-	// Build confirmation payload with full per-RR detail
-	confirmPayload := struct {
-		Type           string             `json:"type"`
-		DistributionID string             `json:"distribution_id"`
-		Zone           string             `json:"zone"`
-		Status         string             `json:"status"`
-		Message        string             `json:"message"`
-		AppliedCount   int                `json:"applied_count"`
-		RemovedCount   int                `json:"removed_count"`
-		RejectedCount  int                `json:"rejected_count"`
-		AppliedRecords []string           `json:"applied_records,omitempty"`
-		RemovedRecords []string           `json:"removed_records,omitempty"`
-		RejectedItems  []rejectedItemJSON `json:"rejected_items,omitempty"`
-		Truncated      bool               `json:"truncated,omitempty"`
-		Timestamp      int64              `json:"timestamp"`
-	}{
-		Type:           "confirm",
-		DistributionID: resp.DistributionID,
-		Zone:           resp.Zone,
-		Status:         resp.Status,
-		Message:        resp.Message,
-		AppliedCount:   len(resp.AppliedRecords),
-		RemovedCount:   len(resp.RemovedRecords),
-		RejectedCount:  len(resp.RejectedItems),
-		AppliedRecords: resp.AppliedRecords,
-		RemovedRecords: resp.RemovedRecords,
-		RejectedItems:  rejItems,
-		Timestamp:      resp.Timestamp.Unix(),
-	}
-
-	payloadBytes, err := json.Marshal(confirmPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal confirm payload: %w", err)
-	}
-
-	// Size guard: EDNS0 payload must fit in UDP. If too large, drop applied_records
-	// and removed_records (the actionable data is in rejected_items) and set Truncated.
-	if len(payloadBytes) > 3500 {
-		confirmPayload.AppliedRecords = nil
-		confirmPayload.RemovedRecords = nil
-		confirmPayload.Truncated = true
-		payloadBytes, err = json.Marshal(confirmPayload)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to marshal confirm payload: %w", err)
-	}
-
-	return h.sendGenericEdns0Response(req, payloadBytes)
-}
-
-// sendGenericEdns0Response builds and sends a DNS response with the given payload in an EDNS0 CHUNK option.
-// This is the common response-building pattern used by all message type handlers (ping, beat, sync).
-func (h *CombinerChunkHandler) sendGenericEdns0Response(req *DnsNotifyRequest, payload []byte) error {
-	if req.ResponseWriter == nil {
-		return nil
-	}
-
-	resp := new(dns.Msg)
-	resp.SetReply(req.Msg)
-	resp.Authoritative = true
-	resp.Rcode = dns.RcodeSuccess
-	resp.SetEdns0(4096, true)
-	opt := resp.IsEdns0()
-	if opt != nil {
-		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: payload,
-		})
-	}
-	return req.ResponseWriter.WriteMsg(resp)
-}
-
-// sendErrorResponse sends a sync-shaped error response.
-// Only used for sync errors and unknown message types where the sync confirmation shape is appropriate.
-func (h *CombinerChunkHandler) sendErrorResponse(req *DnsNotifyRequest, distributionID, errMsg string) error {
-	resp := &CombinerSyncResponse{
-		DistributionID: distributionID,
-		Status:         "error",
-		Message:        errMsg,
-		Timestamp:      time.Now(),
-	}
-	return h.sendConfirmResponse(req, resp)
-}
-
 // --- Router-compatible handler functions ---
 // These methods match the transport.MessageHandlerFunc signature
 // (func(ctx *MessageContext) error) and can be registered with the
 // DNSMessageRouter via InitializeCombinerRouter().
 //
+// Ping and Beat use the shared handlers from transport/handlers.go.
+// Only SYNC remains combiner-specific (deferred to Phase 6).
+//
 // They use ctx.ChunkPayload (already decrypted by middleware) and store
 // their response payloads in ctx.Data for SendResponseMiddleware.
-
-// CombinerHandlePing processes a ping message via the router.
-// Echoes the nonce back in a ping_confirm response.
-func (h *CombinerChunkHandler) CombinerHandlePing(ctx *transport.MessageContext) error {
-	log.Printf("CombinerHandlePing: Processing ping from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
-
-	var ping struct {
-		MessageType  string `json:"MessageType"`
-		MyIdentity   string `json:"MyIdentity"`
-		YourIdentity string `json:"YourIdentity"`
-		Nonce        string `json:"Nonce"`
-	}
-	if err := json.Unmarshal(ctx.ChunkPayload, &ping); err != nil {
-		log.Printf("CombinerHandlePing: Failed to parse ping payload: %v", err)
-		h.recordError(ctx.DistributionID, ctx.PeerID, "ping", "invalid ping payload", "")
-		return fmt.Errorf("invalid ping payload: %w", err)
-	}
-	if ping.Nonce == "" {
-		h.recordError(ctx.DistributionID, ctx.PeerID, "ping", "empty nonce", "")
-		return fmt.Errorf("ping has empty nonce")
-	}
-
-	// Build ping_confirm response
-	confirmPayload := struct {
-		Type           string `json:"type"`
-		SenderID       string `json:"sender_id"`
-		Nonce          string `json:"nonce"`
-		DistributionID string `json:"distribution_id"`
-		Status         string `json:"status"`
-		Timestamp      int64  `json:"timestamp"`
-	}{
-		Type:           "ping_confirm",
-		SenderID:       h.LocalID,
-		Nonce:          ping.Nonce,
-		DistributionID: ctx.DistributionID,
-		Status:         "ok",
-		Timestamp:      time.Now().Unix(),
-	}
-	payloadBytes, err := json.Marshal(confirmPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal ping_confirm: %w", err)
-	}
-
-	ctx.Data["ping_response"] = payloadBytes
-	log.Printf("CombinerHandlePing: Ping processed from %s, nonce=%s", ctx.PeerID, ping.Nonce)
-	return nil
-}
-
-// CombinerHandleBeat processes a heartbeat message via the router.
-// Acknowledges the beat with a confirm response.
-func (h *CombinerChunkHandler) CombinerHandleBeat(ctx *transport.MessageContext) error {
-	log.Printf("CombinerHandleBeat: Processing beat from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
-
-	var beat struct {
-		MessageType  string    `json:"MessageType"`
-		MyIdentity   string    `json:"MyIdentity"`
-		YourIdentity string    `json:"YourIdentity"`
-		Time         time.Time `json:"Time"`
-	}
-	if err := json.Unmarshal(ctx.ChunkPayload, &beat); err != nil {
-		log.Printf("CombinerHandleBeat: Failed to parse beat payload: %v", err)
-		h.recordError(ctx.DistributionID, ctx.PeerID, "beat", "invalid beat payload", "")
-		return fmt.Errorf("invalid beat payload: %w", err)
-	}
-
-	log.Printf("CombinerHandleBeat: Received heartbeat from %s", beat.MyIdentity)
-
-	// Build beat confirm response
-	confirmPayload := struct {
-		Type           string `json:"type"`
-		DistributionID string `json:"distribution_id"`
-		Status         string `json:"status"`
-		Message        string `json:"message"`
-		Timestamp      int64  `json:"timestamp"`
-	}{
-		Type:           "confirm",
-		DistributionID: ctx.DistributionID,
-		Status:         "ok",
-		Message:        "beat acknowledged",
-		Timestamp:      time.Now().Unix(),
-	}
-	payloadBytes, err := json.Marshal(confirmPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal beat confirm: %w", err)
-	}
-
-	// Store as sync_response — SendResponseMiddleware checks this key
-	ctx.Data["sync_response"] = payloadBytes
-	log.Printf("CombinerHandleBeat: Beat processed from %s", ctx.PeerID)
-	return nil
-}
 
 // CombinerHandleSync processes a sync message via the router.
 // Parses the sync payload, applies updates via ProcessUpdate, and

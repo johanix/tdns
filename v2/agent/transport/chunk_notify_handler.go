@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/edns0"
-	"github.com/johanix/tdns/v2/notifyerrors"
 	"github.com/miekg/dns"
 )
 
@@ -50,10 +49,10 @@ type ChunkNotifyHandler struct {
 	// If nil, fallback is NOTIFY source with port 53.
 	GetPeerAddress func(senderID string) (address string, ok bool)
 
-	// IsAgentAuthorized checks if a sender is authorized to send us messages.
+	// IsPeerAuthorized checks if a sender is authorized to send us messages.
 	// This is called BEFORE expensive operations (decryption, query fetch) to prevent DoS attacks.
 	// If nil, no authorization check is performed (not recommended for production).
-	IsAgentAuthorized func(senderID string, zone string) (authorized bool, reason string)
+	IsPeerAuthorized func(senderID string, zone string) (authorized bool, reason string)
 
 	// OnPeerDiscoveryNeeded is called when we receive a message from an authorized peer
 	// but don't have their verification key yet. Handler should trigger discovery asynchronously.
@@ -95,136 +94,6 @@ type DnsNotifyRequest struct {
 	Msg            *dns.Msg
 	Qname          string
 	// Options contains EDNS0 options - we'll extract CHUNK from raw message
-}
-
-// HandleChunkNotify is the handler function for NOTIFY(CHUNK) messages.
-// This function signature matches tdns.NotifyHandlerFunc.
-//
-// Usage: Register this with tdns.RegisterNotifyHandler(core.TypeCHUNK, handler.HandleChunkNotify)
-//
-// The handler:
-// 1. Extracts distribution ID from QNAME
-// 2. Extracts CHUNK payload from EDNS0 option
-// 3. Parses the payload to determine message type
-// 4. Routes to appropriate handler (confirmation vs incoming message)
-// 5. Sends DNS response
-func (h *ChunkNotifyHandler) HandleChunkNotify(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
-	sourceAddr := ""
-	if w != nil {
-		sourceAddr = w.RemoteAddr().String()
-	}
-
-	log.Printf("ChunkNotifyHandler: Received NOTIFY(CHUNK) for %s from %s", qname, sourceAddr)
-
-	// Extract distribution ID from QNAME
-	distributionID, err := h.extractDistributionID(qname)
-	if err != nil {
-		log.Printf("ChunkNotifyHandler: Failed to extract distribution ID from %s: %v", qname, err)
-		_ = h.sendResponse(w, msg, dns.RcodeFormatError)
-		return notifyerrors.ErrNotifyHandlerErrorResponse
-	}
-
-	// SECURITY: Authorization check BEFORE expensive operations (DoS mitigation)
-	// Extract sender hint from QNAME (cheap operation) and check authorization
-	senderHint := extractSenderHintFromQname(qname)
-	if h.IsAgentAuthorized != nil && senderHint != "" {
-		// Extract zone from QNAME if available (for HSYNC-based authorization)
-		var zone string
-		if len(msg.Question) > 0 {
-			zone = msg.Question[0].Name
-		}
-
-		authorized, reason := h.IsAgentAuthorized(senderHint, zone)
-		if !authorized {
-			// NOT AUTHORIZED: Increment counter, log, and silently drop (no response to avoid info leak)
-			count := atomic.AddUint64(&h.unsolicitedCount, 1)
-			log.Printf("ChunkNotifyHandler: REJECTED unauthorized NOTIFY from %s (hint: %s): %s [total rejected: %d]",
-				sourceAddr, senderHint, reason, count)
-			// Do NOT send response - silent drop to avoid confirming we exist
-			return nil
-		}
-		log.Printf("ChunkNotifyHandler: Sender %s authorized: %s", senderHint, reason)
-	}
-
-	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
-	payload, err := h.extractChunkPayload(msg)
-	if err != nil {
-		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
-		payload, err = h.fetchChunkViaQuery(ctx, qname, distributionID, msg, w)
-		if err != nil {
-			log.Printf("ChunkNotifyHandler: Failed to get CHUNK payload (EDNS0 and query mode): %v", err)
-			_ = h.sendResponse(w, msg, dns.RcodeFormatError)
-			return notifyerrors.ErrNotifyHandlerErrorResponse
-		}
-	}
-
-	// Decrypt the payload if it is encrypted
-	// SECURITY: Use strict decryption - ONLY try the authorized peer's key to prevent DoS
-	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && IsPayloadEncrypted(payload) {
-		log.Printf("ChunkNotifyHandler: Encrypted payload detected from %s", sourceAddr)
-
-		// Use strict decryption: ONLY the senderHint's key (prevents DoS via QNAME forgery)
-		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
-		if err != nil {
-			// Check if error is due to missing verification key (peer not yet discovered)
-			if strings.Contains(err.Error(), "no verification key for") {
-				log.Printf("ChunkNotifyHandler: Missing verification key for authorized peer %s from %s - triggering discovery, sender should retry",
-					senderHint, sourceAddr)
-				// Trigger discovery asynchronously so we have the key for next retry
-				if h.OnPeerDiscoveryNeeded != nil {
-					go h.OnPeerDiscoveryNeeded(senderHint)
-				}
-				// Drop this message - sender will retry and we'll have the key by then
-				return nil
-			} else {
-				// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
-				count := atomic.AddUint64(&h.unsolicitedCount, 1)
-				log.Printf("ChunkNotifyHandler: FORGERY ATTEMPT detected from %s: QNAME claimed to be %s but crypto verification failed: %v [total rejected: %d]",
-					sourceAddr, senderHint, err, count)
-				// Silent drop - don't confirm we exist or give error details to attacker
-				return nil
-			}
-		}
-		payload = decrypted
-		log.Printf("ChunkNotifyHandler: Successfully decrypted payload from %s using key for %s", sourceAddr, senderHint)
-	}
-
-	// Parse the payload
-	incomingMsg, err := h.parsePayload(distributionID, payload, sourceAddr)
-	if err != nil {
-		log.Printf("ChunkNotifyHandler: Failed to parse payload: %v", err)
-		_ = h.sendResponse(w, msg, dns.RcodeFormatError)
-		return notifyerrors.ErrNotifyHandlerErrorResponse
-	}
-
-	// Route based on message type
-	switch incomingMsg.Type {
-	case "confirm":
-		// Confirmations go to the transport's pending confirmation handler
-		h.handleConfirmation(incomingMsg)
-		// Confirm messages get a bare DNS ACK (no EDNS0 needed — sender doesn't wait for confirm-of-confirm)
-		return h.sendResponse(w, msg, dns.RcodeSuccess)
-
-	case "ping":
-		// Ping: validate and send confirmation with echoed nonce in same response
-		return h.handlePing(w, msg, distributionID, payload)
-	default:
-		// All other messages (hello, beat, sync, relocate) go to hsyncengine
-		select {
-		case h.IncomingChan <- incomingMsg:
-			log.Printf("ChunkNotifyHandler: Routed %s message from %s (correlation: %s)",
-				incomingMsg.Type, incomingMsg.SenderID, incomingMsg.DistributionID)
-		default:
-			log.Printf("ChunkNotifyHandler: Incoming channel full, dropping %s message", incomingMsg.Type)
-			_ = h.sendResponse(w, msg, dns.RcodeServerFailure)
-			return notifyerrors.ErrNotifyHandlerErrorResponse
-		}
-	}
-
-	// Send success response with EDNS0 confirmation payload.
-	// The sender checks for this to distinguish "message received and routed"
-	// from a bare DNS ACK (which could come from any DNS server).
-	return h.sendConfirmResponse(w, msg, distributionID, incomingMsg.Type)
 }
 
 // extractDistributionID extracts the distribution ID from a QNAME.
@@ -377,84 +246,6 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 	}, nil
 }
 
-// handlePing processes an incoming ping: parse payload, echo nonce in EDNS0 CHUNK response.
-func (h *ChunkNotifyHandler) handlePing(w dns.ResponseWriter, req *dns.Msg, distributionID string, payload []byte) error {
-	var ping DnsPingPayload
-	if err := json.Unmarshal(payload, &ping); err != nil {
-		log.Printf("ChunkNotifyHandler: Failed to parse ping payload: %v", err)
-		_ = h.sendResponse(w, req, dns.RcodeFormatError)
-		return notifyerrors.ErrNotifyHandlerErrorResponse
-	}
-	if ping.Type != "ping" || ping.Nonce == "" {
-		log.Printf("ChunkNotifyHandler: Invalid ping payload (type=%q nonce=%q)", ping.Type, ping.Nonce)
-		_ = h.sendResponse(w, req, dns.RcodeFormatError)
-		return notifyerrors.ErrNotifyHandlerErrorResponse
-	}
-
-	confirm := &DnsPingConfirmPayload{
-		Type:           "ping_confirm",
-		SenderID:       h.LocalID,
-		Nonce:          ping.Nonce,
-		DistributionID: distributionID,
-		Status:         "ok",
-		Timestamp:      time.Now().Unix(),
-	}
-	confirmJSON, err := json.Marshal(confirm)
-	if err != nil {
-		_ = h.sendResponse(w, req, dns.RcodeServerFailure)
-		return notifyerrors.ErrNotifyHandlerErrorResponse
-	}
-
-	resp := new(dns.Msg)
-	resp.SetReply(req)
-	resp.Authoritative = true
-	resp.Rcode = dns.RcodeSuccess
-	resp.SetEdns0(4096, true)
-	opt := resp.IsEdns0()
-	if opt != nil {
-		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: confirmJSON,
-		})
-	}
-	if w != nil {
-		return w.WriteMsg(resp)
-	}
-	return nil
-}
-
-// handleConfirmation processes an incoming confirmation message.
-func (h *ChunkNotifyHandler) handleConfirmation(msg *IncomingMessage) {
-	var confirm DnsConfirmPayload
-	if err := json.Unmarshal(msg.Payload, &confirm); err != nil {
-		log.Printf("ChunkNotifyHandler: Failed to parse confirmation: %v", err)
-		return
-	}
-
-	status := parseConfirmStatus(confirm.Status)
-
-	if h.Transport != nil {
-		h.Transport.HandleIncomingConfirmation(&IncomingConfirmation{
-			DistributionID: confirm.DistributionID,
-			PeerID:         confirm.SenderID,
-			Status:         status,
-			Message:        confirm.Message,
-			Timestamp:      time.Unix(confirm.Timestamp, 0),
-			Zone:           confirm.Zone,
-			AppliedRecords: confirm.AppliedRecords,
-			RemovedRecords: confirm.RemovedRecords,
-			RejectedItems:  confirm.RejectedItems,
-			Truncated:      confirm.Truncated,
-		})
-	}
-
-	// Forward confirmation detail (all statuses carry useful information)
-	if h.OnConfirmationReceived != nil && confirm.DistributionID != "" {
-		h.OnConfirmationReceived(confirm.DistributionID, confirm.SenderID, status,
-			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated)
-	}
-}
-
 // sendResponse sends a DNS response with the given rcode.
 func (h *ChunkNotifyHandler) sendResponse(w dns.ResponseWriter, req *dns.Msg, rcode int) error {
 	if w == nil {
@@ -510,7 +301,7 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 }
 
 // CreateNotifyHandlerFunc creates a function compatible with tdns.NotifyHandlerFunc.
-// This is a helper that wraps HandleChunkNotify for use with tdns.RegisterNotifyHandler.
+// This is a helper that wraps RouteViaRouter for use with tdns.RegisterNotifyHandler.
 //
 // Usage in agent initialization:
 //
@@ -525,7 +316,7 @@ func (h *ChunkNotifyHandler) CreateNotifyHandlerFunc() interface{} {
 	// Return a closure that can be type-asserted to the correct signature
 	// in the calling code that has access to tdns types
 	return func(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
-		return h.HandleChunkNotify(ctx, qname, msg, w)
+		return h.RouteViaRouter(ctx, qname, msg, w)
 	}
 }
 
@@ -536,12 +327,11 @@ func (h *ChunkNotifyHandler) UnsolicitedMessageCount() uint64 {
 }
 
 // RouteViaRouter routes a message through the DNS message router with middleware.
-// This is the new routing path that uses the modular router architecture.
-// Falls back to legacy HandleChunkNotify if Router is not configured.
+// This is the only routing path — the router must be configured.
 func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
-	// Fallback to legacy routing if no router configured
 	if h.Router == nil {
-		return h.HandleChunkNotify(ctx, qname, msg, w)
+		log.Printf("RouteViaRouter: ERROR: Router is nil — cannot route message for %s", qname)
+		return fmt.Errorf("router not configured")
 	}
 
 	sourceAddr := ""
@@ -637,6 +427,15 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	msgCtx.ChunkCrypted = false
 	msgCtx.SignatureValid = true // We verified during decryption above
 	msgCtx.SignatureReason = "decrypted_by_router"
+	// Store local identity so handlers (e.g. ping) can include it in responses
+	msgCtx.Data["local_id"] = h.LocalID
+	// Store transport for confirmation handling
+	if h.Transport != nil {
+		msgCtx.Data["transport"] = h.Transport
+	}
+	if h.OnConfirmationReceived != nil {
+		msgCtx.Data["on_confirmation_received"] = h.OnConfirmationReceived
+	}
 	// Store the parsed message so handlers don't need to re-parse
 	msgCtx.Data["incoming_message"] = incomingMsg
 	// Extract zone for authorization middleware (HSYNC check)

@@ -58,8 +58,8 @@ type CryptoMiddlewareConfig struct {
 //   - If signature is valid: sets ctx.SignatureValid=true, continues to next middleware
 //   - If signature is invalid: logs CRITICAL security event (forgery attempt), returns error
 //   - If peer verification key is missing:
-//     * With TriggerDiscoveryOnMissingKey=true: logs INFO, triggers discovery, continues
-//     * With TriggerDiscoveryOnMissingKey=false: logs WARNING, returns error
+//   - With TriggerDiscoveryOnMissingKey=true: logs INFO, triggers discovery, continues
+//   - With TriggerDiscoveryOnMissingKey=false: logs WARNING, returns error
 //   - If crypto is disabled: passes through without verification
 func NewSignatureMiddleware(cfg *CryptoMiddlewareConfig) MiddlewareFunc {
 	if cfg.SecurityLogger == nil {
@@ -234,7 +234,9 @@ func NewDecryptionMiddleware(cfg *CryptoMiddlewareConfig) MiddlewareFunc {
 // Behavior:
 //   - If authorized: sets ctx.Authorized=true, ctx.AuthorizedVia, continues
 //   - If not authorized: logs WARNING security event, returns error
-func NewAuthorizationMiddleware(tm interface{ IsAgentAuthorized(senderID string, zone string) (bool, string) }) MiddlewareFunc {
+func NewAuthorizationMiddleware(tm interface {
+	IsPeerAuthorized(senderID string, zone string) (bool, string)
+}) MiddlewareFunc {
 	logger := &DefaultSecurityLogger{}
 
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
@@ -247,7 +249,7 @@ func NewAuthorizationMiddleware(tm interface{ IsAgentAuthorized(senderID string,
 		}
 
 		// Check authorization
-		authorized, reason := tm.IsAgentAuthorized(ctx.PeerID, zone)
+		authorized, reason := tm.IsPeerAuthorized(ctx.PeerID, zone)
 		if !authorized {
 			logger.LogSecurityEvent(SecurityEvent{
 				Type:      "unauthorized_peer",
@@ -299,7 +301,9 @@ func NewLoggingMiddleware(verbose bool) MiddlewareFunc {
 }
 
 // NewMetricsMiddleware creates middleware for metrics collection.
-func NewMetricsMiddleware(collector interface{ RecordMetric(name string, value float64) }) MiddlewareFunc {
+func NewMetricsMiddleware(collector interface {
+	RecordMetric(name string, value float64)
+}) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
 		err := next(ctx)
 

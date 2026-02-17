@@ -50,12 +50,23 @@ type LocalCombinerConf struct {
 	// Chunk config (same key names as agent.dns for consistency)
 	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
-	// Agent (combiner only): the agent we talk to; symmetric to agent.combiner
-	Agent *PeerConf `yaml:"agent"`
+	// Agents: list of agents this combiner communicates with.
+	// Each agent must have an identity, address:port, and JOSE public key.
+	Agents []*PeerConf `yaml:"agents"`
 	// Signature: template string for a TXT record injected into combined zones (demo feature).
 	// Supports {identity} and {zone} placeholders.
 	Signature    string `yaml:"signature"`
 	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"`
+}
+
+// FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.
+func (c *LocalCombinerConf) FindAgent(identity string) *PeerConf {
+	for _, a := range c.Agents {
+		if a.Identity == identity {
+			return a
+		}
+	}
+	return nil
 }
 
 type AppDetails struct {
@@ -141,8 +152,8 @@ type ApiServerAppConf struct {
 type PeerConf struct {
 	Address            string `yaml:"address"`
 	LongTermJosePubKey string `yaml:"long_term_jose_pub_key"`
-	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional: for API ping (e.g. https://combiner:8085/api/v1)
-	Identity           string `yaml:"identity,omitempty"`     // Optional: agent identity (combiner only); NOTIFY(CHUNK) QNAME suffix for correlation ID extraction
+	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional: for API transport (e.g. https://combiner:8085/api/v1)
+	Identity           string `yaml:"identity"`               // Peer identity (FQDN); required for combiner agents, optional for agent combiner
 }
 
 type LocalAgentConf struct {
@@ -209,7 +220,7 @@ type LocalAgentDnsConf struct {
 	ControlZone string `yaml:"control_zone" mapstructure:"control_zone"` // Zone used for NOTIFY(CHUNK) QNAMEs in DNS mode (default: agent identity)
 	// Chunk config (same key names as combiner for consistency)
 	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
-	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agent.address
+	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agents[].address
 	// Message retention times for CHUNK distributions (in seconds)
 	MessageRetention MessageRetentionConf `yaml:"message_retention" mapstructure:"message_retention"`
 }
@@ -218,12 +229,12 @@ type LocalAgentDnsConf struct {
 // Times are in seconds. Beat and ping messages expire quickly to reduce clutter,
 // while other message types are kept longer for debugging purposes.
 type MessageRetentionConf struct {
-	Beat     int `yaml:"beat" mapstructure:"beat"`           // Beat message retention (default: 30s)
-	Ping     int `yaml:"ping" mapstructure:"ping"`           // Ping message retention (default: 30s)
-	Hello    int `yaml:"hello" mapstructure:"hello"`         // Hello message retention (default: 300s)
-	Sync     int `yaml:"sync" mapstructure:"sync"`           // Sync message retention (default: 300s)
-	Relocate int `yaml:"relocate" mapstructure:"relocate"`   // Relocate message retention (default: 300s)
-	Default  int `yaml:"default" mapstructure:"default"`     // Default retention for other types (default: 300s)
+	Beat     int `yaml:"beat" mapstructure:"beat"`         // Beat message retention (default: 30s)
+	Ping     int `yaml:"ping" mapstructure:"ping"`         // Ping message retention (default: 30s)
+	Hello    int `yaml:"hello" mapstructure:"hello"`       // Hello message retention (default: 300s)
+	Sync     int `yaml:"sync" mapstructure:"sync"`         // Sync message retention (default: 300s)
+	Relocate int `yaml:"relocate" mapstructure:"relocate"` // Relocate message retention (default: 300s)
+	Default  int `yaml:"default" mapstructure:"default"`   // Default retention for other types (default: 300s)
 }
 
 // GetRetentionForMessageType returns the retention time in seconds for a given message type.
@@ -231,8 +242,8 @@ type MessageRetentionConf struct {
 func (m *MessageRetentionConf) GetRetentionForMessageType(messageType string) int {
 	// Apply defaults if values are not set (0 or negative)
 	const (
-		defaultBeatPing = 30   // 30 seconds for beat and ping
-		defaultOther    = 300  // 5 minutes for other message types
+		defaultBeatPing = 30  // 30 seconds for beat and ping
+		defaultOther    = 300 // 5 minutes for other message types
 	)
 
 	switch messageType {
@@ -383,6 +394,7 @@ type InternalConf struct {
 	KrsConf             interface{}           // *krs.KrsConf - using interface{} to avoid circular import
 	Scanner             *Scanner              // Scanner instance for async job tracking
 	CombinerHandler     *CombinerChunkHandler // CHUNK-based combiner handler
+	CombinerTransport   *CombinerTransport    // Outbound transport for combiner → agent communication; nil if not combiner
 	TransportManager    *TransportManager     // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
 	ChunkPayloadStore   ChunkPayloadStore     // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
 	DistributionCache   *DistributionCache    // In-memory cache of distributions (agent/combiner)
@@ -392,12 +404,12 @@ type AgentQs struct {
 	Hello chan *AgentMsgReport // incoming /hello from other agents
 	Beat  chan *AgentMsgReport // incoming /beat from other agents
 	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
-	Msg               chan *AgentMsgPostPlus    // incoming /msg from other agents
-	Command           chan *AgentMgmtPostPlus   // local commands TO the agent, usually for passing on to other agents
-	DebugCommand      chan *AgentMgmtPostPlus   // local commands TO the agent, usually for passing on to other agents
-	SynchedDataUpdate chan *SynchedDataUpdate   // incoming combiner updates
-	SynchedDataCmd    chan *SynchedDataCmd      // local commands TO the combiner
-	Confirmation      chan *ConfirmationDetail  // combiner confirmation feedback
+	Msg               chan *AgentMsgPostPlus   // incoming /msg from other agents
+	Command           chan *AgentMgmtPostPlus  // local commands TO the agent, usually for passing on to other agents
+	DebugCommand      chan *AgentMgmtPostPlus  // local commands TO the agent, usually for passing on to other agents
+	SynchedDataUpdate chan *SynchedDataUpdate  // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd     // local commands TO the combiner
+	Confirmation      chan *ConfirmationDetail // combiner confirmation feedback
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.

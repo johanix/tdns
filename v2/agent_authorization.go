@@ -15,7 +15,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// IsAgentAuthorized checks if an agent is authorized to communicate with us.
+// IsPeerAuthorized checks if an agent is authorized to communicate with us.
 // Authorization can come from two sources:
 //
 // 1. Explicit authorization: Agent is in our agent.authorized_peers config list
@@ -32,7 +32,7 @@ import (
 // Returns:
 //   - authorized: true if agent is authorized
 //   - reason: human-readable explanation of authorization decision
-func (tm *TransportManager) IsAgentAuthorized(senderID string, zone string) (bool, string) {
+func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool, string) {
 	// Check 1: Explicit authorization via config
 	if tm.isInAuthorizedPeers(senderID) {
 		return true, "authorized via config (agent.authorized_peers)"
@@ -56,7 +56,7 @@ func (tm *TransportManager) IsAgentAuthorized(senderID string, zone string) (boo
 		if authorized {
 			return true, fmt.Sprintf("authorized via HSYNC membership for zone %s", zone)
 		}
-		log.Printf("IsAgentAuthorized: Sender %s not in HSYNC for zone %s: %s",
+		log.Printf("IsPeerAuthorized: Sender %s not in HSYNC for zone %s: %s",
 			senderID, zone, reason)
 	} else {
 		// No specific zone - check if sender is in HSYNC for ANY zone we share
@@ -86,7 +86,7 @@ func (tm *TransportManager) isInAuthorizedPeers(senderID string) bool {
 		// Normalize config entry to FQDN for comparison
 		authorizedFQDN := dns.Fqdn(authorizedID)
 		if authorizedFQDN == senderFQDN {
-			log.Printf("IsAgentAuthorized: Agent %s found in agent.authorized_peers config", senderID)
+			log.Printf("IsPeerAuthorized: Agent %s found in agent.authorized_peers config", senderID)
 			return true
 		}
 	}
@@ -138,7 +138,7 @@ func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, strin
 		return false, fmt.Sprintf("sender %q not in HSYNC RRset for zone %s", senderID, zone)
 	}
 
-	log.Printf("IsAgentAuthorized: Both %s and %s found in HSYNC for zone %s", tm.LocalID, senderID, zone)
+	log.Printf("IsPeerAuthorized: Both %s and %s found in HSYNC for zone %s", tm.LocalID, senderID, zone)
 	return true, ""
 }
 
@@ -177,7 +177,7 @@ func (tm *TransportManager) isInHSYNCAnyZone(senderID string) (bool, string) {
 
 		// If we found both in this zone's HSYNC, authorize
 		if foundMe && foundSender {
-			log.Printf("IsAgentAuthorized: Both %s and %s found in HSYNC for zone %s (any-zone check)",
+			log.Printf("IsPeerAuthorized: Both %s and %s found in HSYNC for zone %s (any-zone check)",
 				tm.LocalID, senderID, zoneName)
 			return true, zoneName
 		}

@@ -16,8 +16,8 @@ import (
 
 // Mock crypto backend for testing
 type mockCryptoBackend struct {
-	signShouldFail   bool
-	verifyShouldFail bool
+	signShouldFail    bool
+	verifyShouldFail  bool
 	decryptShouldFail bool
 }
 
@@ -95,7 +95,7 @@ type mockTransportManager struct {
 	authorizedPeers map[string]bool
 }
 
-func (m *mockTransportManager) IsAgentAuthorized(senderID string, zone string) (bool, string) {
+func (m *mockTransportManager) IsPeerAuthorized(senderID string, zone string) (bool, string) {
 	if m.authorizedPeers == nil {
 		return false, "no authorized peers configured"
 	}
