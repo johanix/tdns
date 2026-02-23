@@ -242,6 +242,44 @@ Options:
 
 This needs careful design because SYNC is the core data path and any abstraction must not add latency or complexity. Deferred to after Phase 5 when TransportManager is cleaner.
 
+## Phase 7: Inline Phase-1 Confirmation in NOTIFY Response
+
+### Problem
+
+The current two-phase SYNC confirmation uses two separate outbound NOTIFY(CHUNK) messages back to the originator:
+
+1. **Phase 1 (immediate)**: Remote agent receives SYNC, validates it, sends back an immediate confirmation via a separate NOTIFY(CHUNK) — "I received and accepted your SYNC"
+2. **Phase 2 (deferred)**: After the remote combiner processes the data, a second NOTIFY(CHUNK) carries the final confirmation (accepted or rejected with `RejectedItems`)
+
+Phase 1 is generated synchronously during NOTIFY processing — the result is known before the DNS response is sent. There's no reason this confirmation can't ride the NOTIFY **response** (via EDNS0 options, the same pattern the combiner already uses in `sendGenericEdns0Response`) instead of requiring a separate outbound message.
+
+### Design: Try inline, fall back to explicit
+
+The optimization is NOT to replace the explicit NOTIFY confirmation — it's to **try the inline response first** and fall back:
+
+1. Remote agent processes incoming SYNC NOTIFY
+2. Remote agent packs phase-1 confirmation into the NOTIFY **response** (EDNS0 payload)
+3. If the originating agent receives the response → phase 1 confirmed, no separate NOTIFY needed
+4. If the response is blocked (middleboxes dropping unknown EDNS0 options, packet too large, etc.) → originating agent gets no response → retries the same SYNC
+5. Remote agent receives the **duplicate SYNC** → detects it's a retransmission (same DistributionID, already processed) → realizes the inline response didn't get through → falls back to sending an **explicit NOTIFY(CHUNK) confirmation** (current model)
+
+This is strictly an optimization: one fewer round-trip in the common case, with automatic fallback when the inline response path is broken.
+
+### Why both paths are needed
+
+Devices exist that drop DNS packets with unknown or encrypted EDNS0 options. If the phase-1 confirmation only rides the NOTIFY response and that response is dropped, the originating agent never learns the SYNC was received. The duplicate-detection + fallback ensures delivery.
+
+### Effort estimate
+
+~100-150 lines. The EDNS0 response packing already exists (`sendGenericEdns0Response` pattern). The main new code is:
+- Pack confirmation into NOTIFY response in the agent's CHUNK handler
+- Duplicate SYNC detection (by DistributionID) in the receiving agent
+- Fallback to explicit NOTIFY on duplicate detection
+
+### Dependency
+
+Independent of multi-signer work. Can be done whenever transport unification reaches this level of refinement.
+
 ---
 
 ## Verification
@@ -271,5 +309,12 @@ After Phase 6:
 
 - SYNC also unified (single handler with role-specific processing callback)
 - All 7 message types: one sender, one receiver
+
+After Phase 7:
+
+- Phase-1 SYNC confirmation arrives in NOTIFY response (one fewer round-trip)
+- Duplicate SYNC (same DistributionID) triggers fallback to explicit NOTIFY confirmation
+- Phase-2 confirmation unchanged (always explicit NOTIFY)
+- Works correctly through middleboxes that drop unknown EDNS0 options
 
 Build: `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
