@@ -223,13 +223,40 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			break
 		}
 
-		log.Printf("HsyncEngine: Zone %s: %d local DNSKEY adds, %d local DNSKEY removes → distributing to remote agents",
+		log.Printf("HsyncEngine: Zone %s: %d local DNSKEY adds, %d local DNSKEY removes → feeding into SynchedDataEngine",
 			req.ZoneName, len(ds.LocalAdds), len(ds.LocalRemoves))
 
-		// Build ZoneUpdate with the local DNSKEY changes for transport
-		go func() {
-			ar.DistributeDnskeyChanges(req.ZoneName, ds)
-		}()
+		// Build RR list: adds use ClassINET, removes use ClassNONE
+		var rrs []dns.RR
+		for _, rr := range ds.LocalAdds {
+			rrs = append(rrs, dns.Copy(rr))
+		}
+		for _, rr := range ds.LocalRemoves {
+			rrCopy := dns.Copy(rr)
+			rrCopy.Header().Class = dns.ClassNONE
+			rrs = append(rrs, rrCopy)
+		}
+
+		zu := &ZoneUpdate{
+			Zone:   req.ZoneName,
+			RRs:    rrs,
+			RRsets: make(map[uint16]core.RRset),
+		}
+		for _, rr := range rrs {
+			rrtype := rr.Header().Rrtype
+			rrset := zu.RRsets[rrtype]
+			rrset.RRs = append(rrset.RRs, rr)
+			zu.RRsets[rrtype] = rrset
+		}
+
+		// Feed into SynchedDataEngine as local data — same path as "agent zone addrr".
+		// SynchedDataEngine stores the data and distributes to remote agents.
+		synchedDataUpdateQ <- &SynchedDataUpdate{
+			Zone:       req.ZoneName,
+			AgentId:    ourId,
+			UpdateType: "local",
+			Update:     zu,
+		}
 
 	default:
 		log.Printf("HsyncEngine: Unknown command: %s", req.Command)
