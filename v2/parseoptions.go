@@ -197,8 +197,9 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 
 		case OptMultiProvider:
-			// Two-level config gate: zone option AND server-level multi-provider.active must both be set.
-			if conf.MultiProvider == nil || !conf.MultiProvider.Active {
+			// On the signer (AppTypeAuth), require server-level multi-provider config.
+			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
+			if Globals.App.Type == AppTypeAuth && (conf.MultiProvider == nil || !conf.MultiProvider.Active) {
 				log.Printf("Error: Zone %s: Option \"%s\" set but multi-provider.active is not true in server config. Option ignored.", zname, ZoneOptionToString[opt])
 				if zd != nil {
 					zd.SetError(ConfigError, "option %s requires multi-provider.active: true in server config", ZoneOptionToString[opt])
@@ -207,7 +208,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
-			log.Printf("ParseZones: Zone %s: option \"%s\" accepted (multi-provider.active: true)", zname, ZoneOptionToString[opt])
+			log.Printf("ParseZones: Zone %s: option \"%s\" accepted", zname, ZoneOptionToString[opt])
 
 		case OptCatalogZone:
 			// Catalog zone requires valid catalog configuration
