@@ -362,13 +362,12 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	var differ bool
 
 	oldapex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
-	}
-
-	if oldapex == nil {
-		log.Printf("DnskeysChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
-		return true, nil // on initial load, we always return true, nil as we don't know that the DNSKEYs have changed
+	if err != nil || oldapex == nil {
+		// On initial zone load, the old zone data isn't ready yet (zd.Ready == false),
+		// so GetOwner returns an error. Treat this the same as oldapex == nil: we have
+		// no old data to compare against, so report that DNSKEYs changed.
+		log.Printf("DnskeysChangedNG: Zone %s: no old zone data available (initial load). Reporting DNSKEYs changed.", zd.ZoneName)
+		return true, nil
 	}
 
 	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
