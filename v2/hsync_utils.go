@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -26,38 +27,13 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 
 	zd.Logger.Printf("*** HsyncChanged: enter (zone %q)", zd.ZoneName)
 
-	var oldapex *OwnerData
-	// ------------------------------------------------------------
-	// Inline version of zd.GetOwner() to get around the "ready" test:
-	var owner OwnerData
-	var ok bool
-	switch zd.ZoneStore {
-	case SliceZone:
-		if len(zd.Owners) == 0 {
-			oldapex = nil
+	oldapex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		if !errors.Is(err, ErrZoneNotReady) {
+			return false, nil, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 		}
-		idx, _ := zd.OwnerIndex.Get(zd.ZoneName)
-		oldapex = &zd.Owners[idx]
-
-	case MapZone:
-		if zd.Data.IsEmpty() {
-			oldapex = nil
-		}
-		if owner, ok = zd.Data.Get(zd.ZoneName); ok {
-			oldapex = &owner
-		} else {
-			oldapex = nil
-		}
-
-	default:
-		zd.Logger.Printf("HsyncChanged: zone storage not supported: %q", ZoneStoreToString[zd.ZoneStore])
+		// Fall through with oldapex == nil (initial load)
 	}
-	// ------
-
-	// log.Printf("*** newzd.PrintOwnerNames()")
-	// newzd.PrintOwnerNames()
-	// log.Printf("*** newzd.PrintApexRRs()")
-	// newzd.PrintApexRRs()
 
 	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC)
 	if err != nil {
@@ -125,10 +101,18 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 		}
 	}
 
-	// Get old DNSKEY RRset (from current zone data)
+	// Get old DNSKEY RRset (from current zone data).
+	// On initial load, zd may not be ready yet, so GetRRset returns ErrZoneNotReady.
+	// Treat this as oldkeys == nil (no old data) — the existing nil handling below
+	// will correctly classify all new keys as adds.
 	oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
-		return false, nil, fmt.Errorf("LocalDnskeysChanged: old GetRRset: %v", err)
+		if errors.Is(err, ErrZoneNotReady) {
+			zd.Logger.Printf("LocalDnskeysChanged: old zone not ready (initial load), treating as no old keys")
+			oldkeys = nil
+		} else {
+			return false, nil, fmt.Errorf("LocalDnskeysChanged: old GetRRset: %v", err)
+		}
 	}
 
 	// Get new DNSKEY RRset (from incoming zone data)

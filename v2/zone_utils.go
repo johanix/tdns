@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +18,11 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
+
+// ErrZoneNotReady is returned by GetOwner/GetRRset when the zone data
+// has not been loaded yet (zd.Ready == false). Callers that need to
+// handle initial-load gracefully can check with errors.Is.
+var ErrZoneNotReady = errors.New("zone data is not yet ready")
 
 func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
@@ -585,7 +591,7 @@ func (zd *ZoneData) NameExists(qname string) bool {
 
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	if !zd.Ready {
-		return nil, fmt.Errorf("getOwner: zone %s: zone data is not yet ready", zd.ZoneName)
+		return nil, fmt.Errorf("getOwner: zone %s: %w", zd.ZoneName, ErrZoneNotReady)
 	}
 	var owner OwnerData
 	var ok bool
