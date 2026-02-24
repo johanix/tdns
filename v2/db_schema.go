@@ -77,6 +77,8 @@ creator	  	  TEXT,
 privatekey	  TEXT,
 keyrr		  TEXT,
 comment		  TEXT,
+propagation_confirmed     INTEGER DEFAULT 0,
+propagation_confirmed_at  TEXT DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
 }

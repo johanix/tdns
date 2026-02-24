@@ -18,7 +18,8 @@ const (
 	OptDontPublishKey
 	OptDontPublishJWK
 	OptOnlineSigning
-	OptMultiSigner // OBE?
+	OptInlineSigning
+	OptMultiProvider
 	OptDirty
 	OptFrozen
 	OptAutomaticZone
@@ -40,7 +41,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptDontPublishKey:    "dont-publish-key",
 	OptDontPublishJWK:    "dont-publish-jwk",
 	OptOnlineSigning:     "online-signing",
-	OptMultiSigner:       "multisigner", // OBE?
+	OptInlineSigning:     "inline-signing",
+	OptMultiProvider:     "multi-provider",
 	OptDirty:             "dirty",
 	OptFrozen:            "frozen",
 	OptAutomaticZone:     "automatic-zone",
@@ -62,7 +64,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"dont-publish-key":           OptDontPublishKey,
 	"dont-publish-jwk":           OptDontPublishJWK,
 	"online-signing":             OptOnlineSigning,
-	"multisigner":                OptMultiSigner, // OBE?
+	"inline-signing":             OptInlineSigning,
+	"multi-provider":             OptMultiProvider,
 	"dirty":                      OptDirty,
 	"frozen":                     OptFrozen,
 	"automatic-zone":             OptAutomaticZone,

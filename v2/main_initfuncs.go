@@ -362,6 +362,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			log.Printf("MainInit: Agent crypto not configured - CHUNK payloads will be unencrypted")
 		}
 
+		// Extract signer peer config for KEYSTATE signaling (Phase 6)
+		var signerID, signerAddress string
+		if conf.Agent.Signer != nil {
+			signerID = conf.Agent.Signer.Identity
+			signerAddress = conf.Agent.Signer.Address
+			log.Printf("MainInit: Signer peer configured (identity: %s, address: %s)", signerID, signerAddress)
+		}
+
 		tm := NewTransportManager(&TransportManagerConfig{
 			LocalID:                    conf.Agent.Identity,
 			ControlZone:                controlZone,
@@ -377,6 +385,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			DistributionCache:          conf.Internal.DistributionCache,
 			SupportedMechanisms:        conf.Agent.SupportedMechanisms,
 			CombinerID:                 combinerID,
+			SignerID:                   signerID,
+			SignerAddress:              signerAddress,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
@@ -387,7 +397,104 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return fmt.Errorf("failed to register peer agents: %w", err)
 		}
 	case AppTypeAuth, AppTypeCombiner:
-		// ... existing auth/combiner setup ...
+		// Auth: initialize TransportManager for multi-provider DNSSEC (only when multi-provider.active)
+		if Globals.App.Type == AppTypeAuth && conf.MultiProvider != nil && conf.MultiProvider.Active {
+			mp := conf.MultiProvider
+			if mp.Identity == "" {
+				return fmt.Errorf("multi-provider.identity is required when multi-provider.active is true")
+			}
+			if mp.Agent == nil {
+				return fmt.Errorf("multi-provider.agent is required when multi-provider.active is true")
+			}
+
+			// Initialize PayloadCrypto for secure CHUNK transport (optional)
+			var signerPayloadCrypto *transport.PayloadCrypto
+			if strings.TrimSpace(mp.LongTermJosePrivKey) != "" {
+				pc, err := initSignerCrypto(conf)
+				if err != nil {
+					return fmt.Errorf("failed to initialize signer crypto: %w", err)
+				}
+				signerPayloadCrypto = pc
+				log.Printf("MainInit: Signer PayloadCrypto initialized (encryption enabled)")
+			} else {
+				log.Printf("MainInit: Signer crypto not configured - CHUNK payloads will be unencrypted")
+			}
+
+			// Initialize signer router (ping only in Phase 3; KEYSTATE in Phase 4)
+			signerRouter := transport.NewDNSMessageRouter()
+			signerRouterCfg := &transport.SignerRouterConfig{
+				AllowUnencrypted: true,
+			}
+			if signerPayloadCrypto != nil {
+				signerRouterCfg.PayloadCrypto = signerPayloadCrypto
+				signerRouterCfg.AllowUnencrypted = false
+			}
+			if err := transport.InitializeSignerRouter(signerRouter, signerRouterCfg); err != nil {
+				return fmt.Errorf("InitializeSignerRouter: %w", err)
+			}
+			log.Printf("MainInit: Signer router initialized")
+
+			// Register CHUNK handler for incoming NOTIFY(CHUNK) from agent
+			signerHandler, err := RegisterSignerChunkHandler(mp.Identity, signerRouter)
+			if err != nil {
+				return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
+			}
+			conf.Internal.CombinerHandler = signerHandler
+			log.Printf("MainInit: Signer CHUNK handler registered for identity %s", mp.Identity)
+
+			// Initialize distribution cache for outbound tracking
+			if conf.Internal.DistributionCache == nil {
+				conf.Internal.DistributionCache = NewDistributionCache()
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+				log.Printf("MainInit: Signer distribution cache initialized")
+			}
+
+			// Create TransportManager for signer↔agent communication
+			chunkMode := strings.TrimSpace(mp.ChunkMode)
+			if chunkMode == "" {
+				chunkMode = "edns0"
+			}
+			controlZone := mp.Identity
+			tm := NewTransportManager(&TransportManagerConfig{
+				LocalID:             mp.Identity,
+				ControlZone:         controlZone,
+				APITimeout:          10 * time.Second,
+				DNSTimeout:          5 * time.Second,
+				ChunkMode:           chunkMode,
+				PayloadCrypto:       signerPayloadCrypto,
+				DistributionCache:   conf.Internal.DistributionCache,
+				SupportedMechanisms: []string{"dns"},
+			})
+			conf.Internal.TransportManager = tm
+			log.Printf("MainInit: Signer TransportManager created (identity: %s, chunk_mode: %s)", mp.Identity, chunkMode)
+
+			// Register the agent as a peer in the TransportManager
+			agentPeer := transport.NewPeer(mp.Agent.Identity)
+			agentPeer.SetState(transport.PeerStateKnown, "configured")
+			if mp.Agent.Address != "" {
+				host, portStr, err := net.SplitHostPort(mp.Agent.Address)
+				if err != nil {
+					return fmt.Errorf("multi-provider.agent.address: invalid address %q: %w", mp.Agent.Address, err)
+				}
+				port, err := strconv.Atoi(portStr)
+				if err != nil {
+					return fmt.Errorf("multi-provider.agent.address: invalid port in %q: %w", mp.Agent.Address, err)
+				}
+				agentPeer.SetDiscoveryAddress(&transport.Address{
+					Host:      host,
+					Port:      uint16(port),
+					Transport: "udp",
+				})
+			}
+			if mp.Agent.ApiBaseUrl != "" {
+				agentPeer.APIEndpoint = mp.Agent.ApiBaseUrl
+			}
+			if err := tm.PeerRegistry.Add(agentPeer); err != nil {
+				return fmt.Errorf("failed to register agent peer: %w", err)
+			}
+			log.Printf("MainInit: Registered agent peer %s (address: %s)", mp.Agent.Identity, mp.Agent.Address)
+		}
+
 		if Globals.App.Type == AppTypeCombiner {
 			if conf.Combiner == nil {
 				return fmt.Errorf("combiner config block is required for combiner app type")
@@ -419,6 +526,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			combinerHandler, err := RegisterCombinerChunkHandler(conf.Combiner.Identity, secureWrapper)
 			if err != nil {
 				return fmt.Errorf("RegisterCombinerChunkHandler: %w", err)
+			}
+			combinerHandler.ProtectedNamespaces = conf.Combiner.ProtectedNamespaces
+			if len(combinerHandler.ProtectedNamespaces) > 0 {
+				log.Printf("MainInit: Combiner protected namespaces: %v", combinerHandler.ProtectedNamespaces)
 			}
 			conf.Internal.CombinerHandler = combinerHandler
 			log.Printf("MainInit: Combiner CHUNK handler registered for identity %s", conf.Combiner.Identity)
@@ -530,6 +641,17 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	startEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
+	// Multi-provider: register CHUNK NOTIFY handler and start incoming message router
+	// (must be before NotifyHandler so incoming CHUNK NOTIFYs are routed correctly)
+	if conf.Internal.TransportManager != nil {
+		if err := conf.Internal.TransportManager.RegisterChunkNotifyHandler(); err != nil {
+			log.Printf("StartAuth: failed to register CHUNK NOTIFY handler: %v", err)
+		} else {
+			conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
+			log.Printf("StartAuth: Signer CHUNK NOTIFY handler and message router started")
+		}
+	}
+
 	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	startEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
@@ -565,6 +687,12 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	if err := conf.Internal.AgentRegistry.InitializeCombinerAsPeer(conf); err != nil {
 		log.Printf("StartAgent: WARNING: Failed to initialize combiner as peer: %v", err)
 		log.Printf("StartAgent: Continuing without combiner heartbeat monitoring")
+	}
+
+	// Initialize signer as a virtual peer so it shows in "agent peer list" and can be pinged
+	if err := conf.Internal.AgentRegistry.InitializeSignerAsPeer(conf); err != nil {
+		log.Printf("StartAgent: WARNING: Failed to initialize signer as peer: %v", err)
+		log.Printf("StartAgent: Continuing without signer peer registration")
 	}
 
 	// Start the reliable message queue (must be after combiner peer initialization)

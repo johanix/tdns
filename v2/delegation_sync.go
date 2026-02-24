@@ -148,7 +148,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 
 			case "SYNC-DNSKEY-RRSET":
 				log.Printf("DelegationSyncher: Zone %s request for DNSKEY RRset sync.", ds.ZoneName)
-				if zd.Options[OptMultiSigner] {
+				if zd.Options[OptMultiProvider] {
 					log.Printf("DelegationSyncher: Zone %s is a multisigner zone. Notifying multisigner controller.", ds.ZoneName)
 					notifyq <- NotifyRequest{
 						ZoneName: zd.ZoneName,
@@ -496,7 +496,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 		}
 
 		// Try to sign the CSYNC RRset
-		if zd.Options[OptOnlineSigning] {
+		if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 			apex, _ := zd.GetOwner(zd.ZoneName)
 			rrset, _ := apex.RRtypes.Get(dns.TypeCSYNC)
 			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)

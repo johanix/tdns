@@ -16,13 +16,14 @@ import (
 )
 
 type SyncRequest struct {
-	Command    string
-	ZoneName   ZoneName
-	ZoneData   *ZoneData
-	SyncStatus *HsyncStatus
-	OldDnskeys *core.RRset
-	NewDnskeys *core.RRset
-	Response   chan SyncResponse
+	Command      string
+	ZoneName     ZoneName
+	ZoneData     *ZoneData
+	SyncStatus   *HsyncStatus
+	OldDnskeys   *core.RRset
+	NewDnskeys   *core.RRset
+	DnskeyStatus *DnskeyStatus // Local DNSKEY adds/removes (Phase 5)
+	Response     chan SyncResponse
 }
 
 type SyncResponse struct {
@@ -208,18 +209,93 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		}()
 
 	case "SYNC-DNSKEY-RRSET":
-		log.Printf("HsyncEngine: Zone %s DNSKEY RRset has changed. Should send NOTIFY(DNSKEY) to other agents.",
-			req.ZoneName)
+		log.Printf("HsyncEngine: Zone %s DNSKEY RRset has changed.", req.ZoneName)
 
-		if req.NewDnskeys != nil {
-			for _, rr := range req.NewDnskeys.RRs {
-				// process the record
-				_ = rr // TODO: process the record
-			}
+		if req.DnskeyStatus == nil {
+			log.Printf("HsyncEngine: Zone %s: SYNC-DNSKEY-RRSET but no DnskeyStatus, ignoring", req.ZoneName)
+			break
 		}
+
+		ds := req.DnskeyStatus
+		totalChanges := len(ds.LocalAdds) + len(ds.LocalRemoves)
+		if totalChanges == 0 {
+			log.Printf("HsyncEngine: Zone %s: DNSKEY changed but no local key changes (remote keys only), ignoring", req.ZoneName)
+			break
+		}
+
+		log.Printf("HsyncEngine: Zone %s: %d local DNSKEY adds, %d local DNSKEY removes → distributing to remote agents",
+			req.ZoneName, len(ds.LocalAdds), len(ds.LocalRemoves))
+
+		// Build ZoneUpdate with the local DNSKEY changes for transport
+		go func() {
+			ar.DistributeDnskeyChanges(req.ZoneName, ds)
+		}()
 
 	default:
 		log.Printf("HsyncEngine: Unknown command: %s", req.Command)
+	}
+}
+
+// DistributeDnskeyChanges sends local DNSKEY adds/removes to all remote agents
+// for a given zone. Uses the TransportManager's reliable message queue for delivery.
+// This is the core Phase 5 distribution function: when our signer publishes or
+// removes a DNSKEY, we tell all remote agents so they can include/remove it.
+// Phase 6 addition: registers the distribution for propagation tracking, so that
+// KEYSTATE "propagated" (or "rejected") is sent to the signer when all agents confirm.
+func (ar *AgentRegistry) DistributeDnskeyChanges(zone ZoneName, ds *DnskeyStatus) {
+	if ar.TransportManager == nil {
+		log.Printf("DistributeDnskeyChanges: zone %s: no TransportManager, cannot distribute", zone)
+		return
+	}
+
+	// Build the RR list: adds use ClassINET, removes use ClassNONE (DNS UPDATE semantics)
+	var rrs []dns.RR
+	var keyTags []uint16
+	for _, rr := range ds.LocalAdds {
+		rrs = append(rrs, dns.Copy(rr)) // ClassINET (default)
+		if dnskey, ok := rr.(*dns.DNSKEY); ok {
+			keyTags = append(keyTags, dnskey.KeyTag())
+		}
+	}
+	for _, rr := range ds.LocalRemoves {
+		rrCopy := dns.Copy(rr)
+		rrCopy.Header().Class = dns.ClassNONE // Signal removal
+		rrs = append(rrs, rrCopy)
+		if dnskey, ok := rr.(*dns.DNSKEY); ok {
+			keyTags = append(keyTags, dnskey.KeyTag())
+		}
+	}
+
+	if len(rrs) == 0 {
+		return
+	}
+
+	update := &ZoneUpdate{
+		Zone: zone,
+		RRs:  rrs,
+	}
+
+	// Get the list of remote agents for propagation tracking
+	agents, err := ar.TransportManager.getAllAgentsForZone(zone)
+	if err != nil {
+		log.Printf("DistributeDnskeyChanges: zone %s: cannot get agents: %v", zone, err)
+		return
+	}
+	if len(agents) == 0 {
+		log.Printf("DistributeDnskeyChanges: zone %s: no remote agents, nothing to distribute", zone)
+		return
+	}
+
+	distID := GenerateQueueDistributionID()
+	log.Printf("DistributeDnskeyChanges: zone %s: enqueueing %d DNSKEY changes (adds: %d, removes: %d) for %d remote agents (distID: %s)",
+		zone, len(rrs), len(ds.LocalAdds), len(ds.LocalRemoves), len(agents), distID)
+
+	// Register for propagation tracking (Phase 6) before enqueueing
+	ar.TransportManager.TrackDnskeyPropagation(zone, distID, keyTags, agents)
+
+	err = ar.TransportManager.EnqueueForZoneAgents(zone, update, distID)
+	if err != nil {
+		log.Printf("DistributeDnskeyChanges: zone %s: error enqueueing: %v", zone, err)
 	}
 }
 

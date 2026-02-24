@@ -12,8 +12,8 @@ import (
 )
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
-	if !zd.Options[OptAllowUpdates] {
-		return fmt.Errorf("zone %s does not allow updates", zd.ZoneName)
+	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return fmt.Errorf("zone %s does not allow updates or signing", zd.ZoneName)
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -70,35 +70,33 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		publishkeys = append(publishkeys, rr)
 	}
 
-	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (all): %v", publishkeys)
-
-	//	for _, k := range dak.KSKs {
-	//		dump.P(k.DnskeyRR.String())
-	//	}
-	//	for _, k := range dak.ZSKs {
-	//		dump.P(k.DnskeyRR.String())
-	//	}
-
-	var dnskeys core.RRset
-	var exist bool
-
-	if dnskeys, exist = apex.RRtypes.Get(dns.TypeDNSKEY); exist {
-		for _, k := range publishkeys {
-			present := false
-			for _, dnskey := range dnskeys.RRs {
-				if dns.IsDuplicate(k, dnskey) {
-					present = true
+	// Multi-signer mode 4: merge remote DNSKEYs from other providers.
+	// Per RFC 8901, each signer includes all signers' DNSKEYs in the RRset.
+	if len(zd.RemoteDNSKEYs) > 0 {
+		for _, rk := range zd.RemoteDNSKEYs {
+			// Deduplicate: only add if not already present
+			dup := false
+			for _, pk := range publishkeys {
+				if dns.IsDuplicate(rk, pk) {
+					dup = true
 					break
 				}
 			}
-			if !present {
-				dnskeys.RRs = append(dnskeys.RRs, k)
+			if !dup {
+				publishkeys = append(publishkeys, rk)
 			}
 		}
-	} else {
-		dnskeys = core.RRset{
-			RRs: publishkeys,
-		}
+		zd.Logger.Printf("PublishDnskeyRRs: merged remote DNSKEYs (multi-signer mode 4), total keys: %d", len(publishkeys))
+	}
+
+	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (all): %v", publishkeys)
+
+	// Build the DNSKEY RRset: replace the zone's DNSKEY RRset entirely with
+	// publishkeys (local + keystore published/retired/foreign + remote).
+	// This ensures stale keys from incoming zones are stripped.
+	var dnskeys core.RRset
+	dnskeys = core.RRset{
+		RRs: publishkeys,
 	}
 
 	apex.RRtypes.Set(dns.TypeDNSKEY, dnskeys)

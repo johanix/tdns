@@ -43,5 +43,5 @@ templates:
      type:            secondary
      notify:          [ 127.0.0.1:5399 ]
      options:         [ delegation-sync-child, multisigner ]
-     dnssecpolicy:    none
+     dnssecpolicy:    default
      multisigner:     mstest

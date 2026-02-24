@@ -127,6 +127,28 @@ dnssecpolicies:
                               lifetime:     none
                               sigvalidity:  168h
 
+# Multi-provider DNSSEC configuration (RFC 8901)
+# Signer-side config for tdns-auth. When active, the signer initializes
+# a TransportManager for communication with its local agent (KEYSTATE
+# signaling, PING diagnostics, DNSKEY propagation).
+#
+# Prerequisites:
+#   - Zones participating must have options: [multi-provider]
+#   - The local agent (tdns-agent) must be running and reachable
+#   - JOSE keypairs generated for secure CHUNK transport (optional but recommended)
+#
+multi-provider:
+                        active:    true
+                        identity:  signer1.dnslab.org.    # Signer's FQDN identity for transport protocol
+                        long_term_jose_priv_key:  /etc/tdns/keys/signer1.jose.priv.json
+                        chunk_mode:  edns0                # edns0 | query (default: edns0)
+
+                        # Local agent peer: how the signer reaches its co-located agent
+                        agent:
+                           address:               127.0.0.1:5359    # Agent's DNS listen address (host:port)
+                           identity:              agent.alpha.dnslab.org.   # Agent's FQDN identity
+                           long_term_jose_pub_key:  /etc/tdns/keys/agent-alpha.jose.pub.json
+
 multisigner:
                         mstest:
                            controller:

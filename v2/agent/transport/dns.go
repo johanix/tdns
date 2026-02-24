@@ -70,10 +70,10 @@ type DNSTransport struct {
 // pendingOperation tracks an operation awaiting confirmation
 type pendingOperation struct {
 	DistributionID string
-	PeerID        string
-	OperationType string // "hello", "beat", "sync", "relocate"
-	SentAt        time.Time
-	ResponseChan  chan *operationResponse
+	PeerID         string
+	OperationType  string // "hello", "beat", "sync", "relocate"
+	SentAt         time.Time
+	ResponseChan   chan *operationResponse
 }
 
 // operationResponse represents a response to a pending operation
@@ -558,6 +558,74 @@ func extractPingConfirmFromResponse(res *dns.Msg) (*DnsPingConfirmPayload, error
 	return nil, fmt.Errorf("no CHUNK option in response")
 }
 
+// Keystate sends a key lifecycle signal to a peer via DNS NOTIFY(CHUNK).
+// Used for agent↔signer DNSKEY propagation signaling.
+func (t *DNSTransport) Keystate(ctx context.Context, peer *Peer, req *KeystateRequest) (*KeystateResponse, error) {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return nil, NewTransportError("DNS", "Keystate", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	distributionID := GenerateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
+
+	// Create keystate payload using typed struct from core package
+	payload := &core.AgentKeystatePost{
+		MessageType:  core.AgentMsgKeystate,
+		MyIdentity:   req.SenderID,
+		YourIdentity: peer.ID,
+		Zone:         req.Zone,
+		KeyTag:       req.KeyTag,
+		Algorithm:    req.Algorithm,
+		Signal:       req.Signal,
+		Message:      req.Message,
+		Time:         req.Timestamp,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Keystate", peer.ID,
+			fmt.Errorf("failed to marshal keystate payload: %w", err), false)
+	}
+
+	// Send via sendNotifyWithPayload (reuses standard NOTIFY+confirm flow)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "keystate", distributionID, payloadJSON, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &KeystateResponse{
+		ResponderID: peer.ID,
+		Zone:        req.Zone,
+		KeyTag:      req.KeyTag,
+		Signal:      req.Signal,
+		Accepted:    resp.Status == ConfirmSuccess,
+		Message:     resp.Message,
+		Timestamp:   time.Now(),
+	}, nil
+}
+
+// extractKeystateConfirmFromResponse extracts DnsKeystateConfirmPayload from response EDNS0 CHUNK.
+func extractKeystateConfirmFromResponse(res *dns.Msg) (*DnsKeystateConfirmPayload, error) {
+	opt := res.IsEdns0()
+	if opt == nil {
+		return nil, fmt.Errorf("no EDNS0 in response")
+	}
+	for _, o := range opt.Option {
+		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			var confirm DnsKeystateConfirmPayload
+			if err := json.Unmarshal(local.Data, &confirm); err != nil {
+				return nil, err
+			}
+			if confirm.Type != "keystate_confirm" && confirm.Type != "confirm" {
+				return nil, fmt.Errorf("expected keystate_confirm or confirm, got %s", confirm.Type)
+			}
+			return &confirm, nil
+		}
+	}
+	return nil, fmt.Errorf("no CHUNK option in response")
+}
+
 // Confirm sends an acknowledgment of a sync operation via DNS.
 // Uses NOTIFY(CHUNK) with status in EDNS0 option.
 func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
@@ -707,10 +775,10 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	responseChan := make(chan *operationResponse, 1)
 	pending := &pendingOperation{
 		DistributionID: distributionID,
-		PeerID:        peer.ID,
-		OperationType: opType,
-		SentAt:        time.Now(),
-		ResponseChan:  responseChan,
+		PeerID:         peer.ID,
+		OperationType:  opType,
+		SentAt:         time.Now(),
+		ResponseChan:   responseChan,
 	}
 
 	t.pendingMu.Lock()
@@ -839,7 +907,7 @@ type DnsHelloPayload struct {
 	Nonce        string   `json:"nonce,omitempty"`
 
 	// Standard fields
-	MessageType  string `json:"MessageType"`   // "hello"
+	MessageType  string `json:"MessageType"` // "hello"
 	MyIdentity   string `json:"MyIdentity"`
 	YourIdentity string `json:"YourIdentity"`
 	Zone         string `json:"Zone"`
@@ -895,10 +963,10 @@ type DnsSyncPayload struct {
 	MyIdentity     string              `json:"MyIdentity"`
 	YourIdentity   string              `json:"YourIdentity"`
 	Zone           string              `json:"Zone"`
-	Records        map[string][]string `json:"Records"`    // RRs grouped by owner name
-	Time           string              `json:"Time"`       // RFC3339 timestamp
+	Records        map[string][]string `json:"Records"` // RRs grouped by owner name
+	Time           string              `json:"Time"`    // RFC3339 timestamp
 	RfiType        string              `json:"RfiType"`
-	Timestamp      int64               `json:"timestamp"`  // Unix timestamp (legacy compat)
+	Timestamp      int64               `json:"timestamp"` // Unix timestamp (legacy compat)
 	DistributionID string              `json:"distribution_id"`
 }
 
@@ -927,20 +995,20 @@ type RejectedItemDTO struct {
 
 // DnsConfirmPayload represents a confirmation message payload.
 type DnsConfirmPayload struct {
-	Type           string             `json:"type"`
-	SenderID       string             `json:"sender_id"`
-	Zone           string             `json:"zone"`
-	DistributionID string             `json:"distribution_id"`
-	Status         string             `json:"status"`
-	Message        string             `json:"message,omitempty"`
-	AppliedCount   int                `json:"applied_count,omitempty"`
-	RemovedCount   int                `json:"removed_count,omitempty"`
-	RejectedCount  int                `json:"rejected_count,omitempty"`
-	AppliedRecords []string           `json:"applied_records,omitempty"`
-	RemovedRecords []string           `json:"removed_records,omitempty"`
-	RejectedItems  []RejectedItemDTO  `json:"rejected_items,omitempty"`
-	Truncated      bool               `json:"truncated,omitempty"`
-	Timestamp      int64              `json:"timestamp"`
+	Type           string            `json:"type"`
+	SenderID       string            `json:"sender_id"`
+	Zone           string            `json:"zone"`
+	DistributionID string            `json:"distribution_id"`
+	Status         string            `json:"status"`
+	Message        string            `json:"message,omitempty"`
+	AppliedCount   int               `json:"applied_count,omitempty"`
+	RemovedCount   int               `json:"removed_count,omitempty"`
+	RejectedCount  int               `json:"rejected_count,omitempty"`
+	AppliedRecords []string          `json:"applied_records,omitempty"`
+	RemovedRecords []string          `json:"removed_records,omitempty"`
+	RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
+	Truncated      bool              `json:"truncated,omitempty"`
+	Timestamp      int64             `json:"timestamp"`
 }
 
 // GetSenderID returns the sender ID.
@@ -975,6 +1043,47 @@ func (d *DnsPingPayload) GetSenderID() string {
 		return d.MyIdentity // New format
 	}
 	return d.SenderID // Old format
+}
+
+// DnsKeystatePayload represents a KEYSTATE message payload.
+// Used for agent↔signer key lifecycle signaling.
+type DnsKeystatePayload struct {
+	// Standard fields
+	MessageType  string `json:"MessageType"`  // "keystate"
+	MyIdentity   string `json:"MyIdentity"`   // Sender identity
+	YourIdentity string `json:"YourIdentity"` // Recipient identity
+
+	// KEYSTATE-specific fields
+	Zone      string `json:"Zone"`              // Zone this key belongs to (FQDN)
+	KeyTag    uint16 `json:"KeyTag"`            // DNSKEY key tag
+	Algorithm uint8  `json:"Algorithm"`         // DNSKEY algorithm number
+	Signal    string `json:"Signal"`            // "propagated", "rejected", "removed", "published", "retired"
+	Message   string `json:"Message,omitempty"` // Optional detail (e.g. rejection reason)
+	Timestamp int64  `json:"timestamp"`         // Unix timestamp
+
+	// Legacy fields (fallback)
+	Type     string `json:"type"`      // "keystate"
+	SenderID string `json:"sender_id"` // Sender identity (legacy)
+}
+
+// GetSenderID returns the sender ID from either standard or legacy format.
+func (d *DnsKeystatePayload) GetSenderID() string {
+	if d.MyIdentity != "" {
+		return d.MyIdentity
+	}
+	return d.SenderID
+}
+
+// DnsKeystateConfirmPayload is the response to a KEYSTATE message.
+type DnsKeystateConfirmPayload struct {
+	Type      string `json:"type"`              // "keystate_confirm"
+	SenderID  string `json:"sender_id"`         // Responder identity
+	Zone      string `json:"zone"`              // Echoed zone
+	KeyTag    uint16 `json:"key_tag"`           // Echoed key tag
+	Signal    string `json:"signal"`            // Echoed signal
+	Status    string `json:"status"`            // "ok" or "error"
+	Message   string `json:"message,omitempty"` // Optional detail
+	Timestamp int64  `json:"timestamp"`
 }
 
 // DnsPingConfirmPayload is the response to a ping; echoes the nonce.

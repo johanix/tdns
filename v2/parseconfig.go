@@ -1016,7 +1016,6 @@ func (conf *Config) migrateMetaGroupsToConfigGroups() {
 	}
 }
 
-
 // validateDynamicZonesConfig validates dynamiczones configuration
 // Checks if configfile is included in the include list (warns if not)
 func (conf *Config) validateDynamicZonesConfig(includedFiles []string) {

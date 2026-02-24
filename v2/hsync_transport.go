@@ -13,6 +13,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -62,8 +64,18 @@ type TransportManager struct {
 	// combinerID is the AgentId of the combiner (from config), used by EnqueueForCombiner.
 	combinerID AgentId
 
+	// signerID is the identity of the local signer (tdns-auth) for KEYSTATE signaling.
+	signerID string
+	// signerAddress is the DNS address (host:port) of the local signer.
+	signerAddress string
+
 	// reliableQueue handles retry-until-confirmed delivery for outgoing sync messages.
 	reliableQueue *ReliableMessageQueue
+
+	// pendingDnskeyPropagations tracks DNSKEY distributions awaiting confirmation from all remote agents.
+	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
+	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
+	dnskeyPropMu              sync.Mutex
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -95,6 +107,11 @@ type TransportManagerConfig struct {
 	// CombinerID is the identity of the combiner for this agent (from config).
 	// Used by EnqueueForCombiner to know which AgentRegistry entry is the combiner.
 	CombinerID string
+
+	// SignerID is the identity of the local signer for KEYSTATE signaling (Phase 6).
+	SignerID string
+	// SignerAddress is the DNS address (host:port) of the local signer.
+	SignerAddress string
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -108,14 +125,17 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 	}
 
 	tm := &TransportManager{
-		LocalID:             cfg.LocalID,
-		ControlZone:         cfg.ControlZone,
-		PeerRegistry:        transport.NewPeerRegistry(),
-		Router:              transport.NewDNSMessageRouter(),
-		agentRegistry:       cfg.AgentRegistry,
-		agentQs:             cfg.AgentQs,
-		SupportedMechanisms: supportedMechanisms,
-		combinerID:          AgentId(cfg.CombinerID),
+		LocalID:                   cfg.LocalID,
+		ControlZone:               cfg.ControlZone,
+		PeerRegistry:              transport.NewPeerRegistry(),
+		Router:                    transport.NewDNSMessageRouter(),
+		agentRegistry:             cfg.AgentRegistry,
+		agentQs:                   cfg.AgentQs,
+		SupportedMechanisms:       supportedMechanisms,
+		combinerID:                AgentId(cfg.CombinerID),
+		signerID:                  cfg.SignerID,
+		signerAddress:             cfg.SignerAddress,
+		pendingDnskeyPropagations: make(map[string]*PendingDnskeyPropagation),
 	}
 
 	// Create reliable message queue for outgoing sync messages
@@ -156,7 +176,14 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 
 				// Calculate expiration time based on message type (operation)
 				// Use config retention times with sensible defaults
-				retentionSecs := Conf.Agent.Dns.MessageRetention.GetRetentionForMessageType(operation)
+				var retentionSecs int
+				if Conf.Agent != nil {
+					retentionSecs = Conf.Agent.Dns.MessageRetention.GetRetentionForMessageType(operation)
+				} else {
+					// Signer (tdns-auth) has no Agent config — use default retention
+					var m MessageRetentionConf
+					retentionSecs = m.GetRetentionForMessageType(operation)
+				}
 				expiresAt := now.Add(time.Duration(retentionSecs) * time.Second)
 
 				cache.Add(qname, &DistributionInfo{
@@ -206,12 +233,16 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			if tm.reliableQueue != nil && status == transport.ConfirmSuccess {
 				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 			}
+
+			// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
+			var rejItems []RejectedItemInfo
+			for _, ri := range rejected {
+				rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
+			}
+			tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), rejItems)
+
 			// Forward per-RR detail to SynchedDataEngine
 			if tm.agentQs != nil && tm.agentQs.Confirmation != nil {
-				var rejItems []RejectedItemInfo
-				for _, ri := range rejected {
-					rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
-				}
 				detail := &ConfirmationDetail{
 					DistributionID: distributionID,
 					Zone:           ZoneName(zone),
@@ -461,6 +492,9 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	if tm.isInAuthorizedPeers(senderID) {
 		authorized = true
 		reason = "found in agent.authorized_peers"
+	} else if tm.isConfiguredPeer(senderID) {
+		authorized = true
+		reason = "authorized via configured peer relationship"
 	} else if len(payload.Zones) > 0 {
 		// Try HSYNC path for each zone in the Beat
 		for _, zone := range payload.Zones {
@@ -1412,4 +1446,171 @@ func groupRRStringsByOwner(rrStrings []string) map[string][]string {
 		records[owner] = append(records[owner], rrStr)
 	}
 	return records
+}
+
+// --- Phase 6: DNSKEY Propagation Tracking and KEYSTATE Signaling ---
+
+// PendingDnskeyPropagation tracks a DNSKEY distribution awaiting confirmation from all remote agents.
+type PendingDnskeyPropagation struct {
+	Zone           ZoneName
+	DistributionID string
+	KeyTags        []uint16         // DNSKEY key tags being propagated
+	ExpectedAgents map[AgentId]bool // Agents we're waiting for (true = confirmed)
+	Rejected       bool             // True if any agent rejected
+	RejectionMsg   string           // First rejection reason
+	CreatedAt      time.Time
+}
+
+// TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
+// Called by DistributeDnskeyChanges after enqueueing for remote agents.
+func (tm *TransportManager) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+
+	expected := make(map[AgentId]bool, len(agents))
+	for _, a := range agents {
+		expected[a] = false // false = not yet confirmed
+	}
+
+	tm.pendingDnskeyPropagations[distID] = &PendingDnskeyPropagation{
+		Zone:           zone,
+		DistributionID: distID,
+		KeyTags:        keyTags,
+		ExpectedAgents: expected,
+		CreatedAt:      time.Now(),
+	}
+
+	log.Printf("TrackDnskeyPropagation: zone %s distID %s: tracking %d agents for %d key tags",
+		zone, distID, len(agents), len(keyTags))
+}
+
+// ProcessDnskeyConfirmation checks if a confirmation is for a pending DNSKEY propagation.
+// If so, marks the agent as confirmed. When all agents have confirmed, sends KEYSTATE
+// "propagated" to the signer. If any agent rejects, sends KEYSTATE "rejected".
+// Returns true if this confirmation was for a DNSKEY propagation (handled here).
+func (tm *TransportManager) ProcessDnskeyConfirmation(distID string, source string, status string, rejectedItems []RejectedItemInfo) bool {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+
+	prop, exists := tm.pendingDnskeyPropagations[distID]
+	if !exists {
+		return false // Not a DNSKEY propagation confirmation
+	}
+
+	agentID := AgentId(source)
+
+	// Check for rejection
+	if len(rejectedItems) > 0 {
+		prop.Rejected = true
+		if prop.RejectionMsg == "" {
+			prop.RejectionMsg = rejectedItems[0].Reason
+		}
+		log.Printf("ProcessDnskeyConfirmation: zone %s distID %s: agent %s REJECTED (%s)",
+			prop.Zone, distID, source, prop.RejectionMsg)
+	}
+
+	// Mark this agent as confirmed
+	if _, expected := prop.ExpectedAgents[agentID]; expected {
+		prop.ExpectedAgents[agentID] = true
+		log.Printf("ProcessDnskeyConfirmation: zone %s distID %s: agent %s confirmed (%s)",
+			prop.Zone, distID, source, status)
+	}
+
+	// Check if all agents have confirmed
+	allConfirmed := true
+	for _, confirmed := range prop.ExpectedAgents {
+		if !confirmed {
+			allConfirmed = false
+			break
+		}
+	}
+
+	if !allConfirmed {
+		return true // Still waiting for more confirmations
+	}
+
+	// All agents confirmed — send KEYSTATE to signer
+	log.Printf("ProcessDnskeyConfirmation: zone %s distID %s: ALL %d agents confirmed (rejected=%v)",
+		prop.Zone, distID, len(prop.ExpectedAgents), prop.Rejected)
+
+	// Send KEYSTATE asynchronously (don't hold the mutex)
+	zone := prop.Zone
+	keyTags := prop.KeyTags
+	rejected := prop.Rejected
+	rejectionMsg := prop.RejectionMsg
+	delete(tm.pendingDnskeyPropagations, distID)
+
+	go func() {
+		if rejected {
+			tm.sendKeystateToSigner(zone, keyTags, "rejected", rejectionMsg)
+		} else {
+			tm.sendKeystateToSigner(zone, keyTags, "propagated", "all remote agents confirmed")
+		}
+	}()
+
+	return true
+}
+
+// sendKeystateToSigner sends a KEYSTATE message to the local signer.
+// signal is "propagated", "rejected", or "removed".
+func (tm *TransportManager) sendKeystateToSigner(zone ZoneName, keyTags []uint16, signal string, message string) {
+	if tm.signerID == "" || tm.signerAddress == "" {
+		log.Printf("sendKeystateToSigner: zone %s: no signer configured (signerID=%q, signerAddress=%q), cannot send KEYSTATE %s",
+			zone, tm.signerID, tm.signerAddress, signal)
+		return
+	}
+
+	if tm.DNSTransport == nil {
+		log.Printf("sendKeystateToSigner: zone %s: no DNS transport available, cannot send KEYSTATE %s",
+			zone, signal)
+		return
+	}
+
+	// Get or create signer peer
+	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
+	// Parse address into host:port
+	host, port := parseHostPort(tm.signerAddress, 53)
+	peer.SetDiscoveryAddress(&transport.Address{
+		Host:      host,
+		Port:      port,
+		Transport: "udp",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Send one KEYSTATE per key tag
+	for _, keyTag := range keyTags {
+		req := &transport.KeystateRequest{
+			SenderID:  tm.LocalID,
+			Zone:      string(zone),
+			KeyTag:    keyTag,
+			Signal:    signal,
+			Message:   message,
+			Timestamp: time.Now(),
+		}
+
+		resp, err := tm.DNSTransport.Keystate(ctx, peer, req)
+		if err != nil {
+			log.Printf("sendKeystateToSigner: zone %s key %d: KEYSTATE %s failed: %v",
+				zone, keyTag, signal, err)
+			continue
+		}
+
+		log.Printf("sendKeystateToSigner: zone %s key %d: KEYSTATE %s sent to signer %s (accepted=%v, msg=%s)",
+			zone, keyTag, signal, tm.signerID, resp.Accepted, resp.Message)
+	}
+}
+
+// parseHostPort splits an address into host and port, defaulting to defaultPort.
+func parseHostPort(addr string, defaultPort uint16) (string, uint16) {
+	if idx := strings.LastIndex(addr, ":"); idx > 0 {
+		host := addr[:idx]
+		portStr := addr[idx+1:]
+		var port uint16
+		if _, err := fmt.Sscanf(portStr, "%d", &port); err == nil {
+			return host, port
+		}
+	}
+	return addr, defaultPort
 }

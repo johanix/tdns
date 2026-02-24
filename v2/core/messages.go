@@ -11,28 +11,30 @@ import (
 type AgentMsg string
 
 const (
-	AgentMsgHello  AgentMsg = "hello"
-	AgentMsgBeat   AgentMsg = "beat"
-	AgentMsgNotify AgentMsg = "sync" // sync/notify: agent notifies about a change in zone data
-	AgentMsgRfi    AgentMsg = "rfi"
-	AgentMsgStatus AgentMsg = "status"
-	AgentMsgPing   AgentMsg = "ping"
+	AgentMsgHello    AgentMsg = "hello"
+	AgentMsgBeat     AgentMsg = "beat"
+	AgentMsgNotify   AgentMsg = "sync" // sync/notify: agent notifies about a change in zone data
+	AgentMsgRfi      AgentMsg = "rfi"
+	AgentMsgStatus   AgentMsg = "status"
+	AgentMsgPing     AgentMsg = "ping"
+	AgentMsgKeystate AgentMsg = "keystate"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
-	AgentMsgHello:  "HELLO",
-	AgentMsgBeat:   "BEAT",
-	AgentMsgNotify: "SYNC",
-	AgentMsgRfi:    "RFI",
-	AgentMsgStatus: "STATUS",
-	AgentMsgPing:   "PING",
+	AgentMsgHello:    "HELLO",
+	AgentMsgBeat:     "BEAT",
+	AgentMsgNotify:   "SYNC",
+	AgentMsgRfi:      "RFI",
+	AgentMsgStatus:   "STATUS",
+	AgentMsgPing:     "PING",
+	AgentMsgKeystate: "KEYSTATE",
 }
 
 // AgentHelloPost represents a hello handshake message.
 // Used by both API and DNS transports.
 type AgentHelloPost struct {
 	MessageType  AgentMsg
-	Name         string    `json:"name,omitempty"`      // DEPRECATED: Unused field
+	Name         string    `json:"name,omitempty"` // DEPRECATED: Unused field
 	MyIdentity   string    // Agent identity (FQDN)
 	YourIdentity string    // Recipient identity (FQDN)
 	Addresses    []string  `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
@@ -132,6 +134,34 @@ type AgentPingResponse struct {
 	MyIdentity   string // Responder's identity
 	YourIdentity string // Original sender
 	Nonce        string // Echo from request
+	Time         time.Time
+	Msg          string
+	Error        bool
+	ErrorMsg     string
+}
+
+// AgentKeystatePost represents a KEYSTATE message for key lifecycle signaling.
+// Used for agent↔signer communication about DNSKEY propagation status.
+type AgentKeystatePost struct {
+	MessageType  AgentMsg  // AgentMsgKeystate
+	MyIdentity   string    // Sender's identity
+	YourIdentity string    // Recipient's identity
+	Zone         string    // Zone this key belongs to (FQDN)
+	KeyTag       uint16    // DNSKEY key tag
+	Algorithm    uint8     // DNSKEY algorithm number
+	Signal       string    // "propagated", "rejected", "removed", "published", "retired"
+	Message      string    // Optional detail (e.g. rejection reason)
+	Time         time.Time // Message timestamp
+}
+
+// AgentKeystateResponse represents the response to a KEYSTATE message.
+type AgentKeystateResponse struct {
+	Status       string // ok | error
+	MyIdentity   string // Responder's identity
+	YourIdentity string // Original sender
+	Zone         string // Echoed zone
+	KeyTag       uint16 // Echoed key tag
+	Signal       string // Echoed signal
 	Time         time.Time
 	Msg          string
 	Error        bool

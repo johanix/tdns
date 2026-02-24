@@ -179,7 +179,19 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	log.Printf("InitializeRouter: Registered 7 message handlers")
+	// Keystate handler (priority: 100)
+	err = router.Register(
+		"KeystateHandler",
+		MessageType("keystate"),
+		HandleKeystate,
+		WithPriority(100),
+		WithDescription("Processes KEYSTATE messages for key lifecycle signaling"),
+	)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("InitializeRouter: Registered 8 message handlers")
 	log.Printf("InitializeRouter: Router initialization complete")
 
 	return nil
@@ -284,6 +296,70 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 	return nil
 }
 
+// SignerRouterConfig holds configuration for signer (tdns-auth) router initialization.
+// The signer processes messages synchronously and handles ping + keystate.
+type SignerRouterConfig struct {
+	// PayloadCrypto for signature verification and decryption middleware (optional).
+	PayloadCrypto *PayloadCrypto
+
+	// AllowUnencrypted allows unencrypted payloads when crypto is enabled.
+	AllowUnencrypted bool
+}
+
+// InitializeSignerRouter registers signer-specific handlers and middleware.
+// The signer (tdns-auth) uses the same router/middleware infrastructure as agent/combiner but:
+//   - Handles ping and keystate
+//   - Processes messages synchronously (no RouteToHsyncEngine)
+//   - No PeerRegistry for statistics (yet)
+func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) error {
+	if router == nil {
+		return nil
+	}
+
+	log.Printf("InitializeSignerRouter: Registering signer handlers and middleware")
+
+	// 1. Signature verification (authenticates sender)
+	if cfg.PayloadCrypto != nil && cfg.PayloadCrypto.Enabled {
+		cryptoCfg := &CryptoMiddlewareConfig{
+			PayloadCrypto:    cfg.PayloadCrypto,
+			AllowUnencrypted: cfg.AllowUnencrypted,
+		}
+		router.Use(NewSignatureMiddleware(cryptoCfg))
+		log.Printf("InitializeSignerRouter: Registered signature middleware")
+	}
+
+	// 2. Logging
+	router.Use(NewLoggingMiddleware(true))
+	log.Printf("InitializeSignerRouter: Registered logging middleware")
+
+	// Register ping handler (shared implementation with agent/combiner)
+	if err := router.Register(
+		"PingHandler",
+		MessageType("ping"),
+		HandlePing,
+		WithPriority(100),
+		WithDescription("Processes ping messages and echoes nonce"),
+	); err != nil {
+		return err
+	}
+
+	// Register keystate handler (agent→signer: propagated/rejected/removed)
+	if err := router.Register(
+		"KeystateHandler",
+		MessageType("keystate"),
+		HandleKeystate,
+		WithPriority(100),
+		WithDescription("Processes KEYSTATE messages for key lifecycle signaling"),
+	); err != nil {
+		return err
+	}
+
+	log.Printf("InitializeSignerRouter: Registered 2 message handlers")
+	log.Printf("InitializeSignerRouter: Router initialization complete")
+
+	return nil
+}
+
 // DetermineMessageType parses the payload to determine the message type.
 // Reads the "MessageType" field (e.g. "sync", "beat", "ping").
 func DetermineMessageType(payload []byte) MessageType {
@@ -309,6 +385,8 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("relocate")
 	case "rfi":
 		return MessageType("rfi")
+	case "keystate":
+		return MessageType("keystate")
 	default:
 		return MessageTypeUnknown
 	}

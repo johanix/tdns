@@ -284,6 +284,81 @@ func HandleRfi(ctx *MessageContext) error {
 	return nil
 }
 
+// HandleKeystate processes KEYSTATE messages for key lifecycle signaling.
+// Used for agent↔signer communication about DNSKEY propagation status.
+// Signals: propagated, rejected, removed (agent→signer), published, retired (signer→agent).
+func HandleKeystate(ctx *MessageContext) error {
+	log.Printf("HandleKeystate: Processing keystate from %s (distrib=%s)",
+		ctx.PeerID, ctx.DistributionID)
+
+	// Parse the keystate message
+	var keystate DnsKeystatePayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &keystate); err != nil {
+		return fmt.Errorf("failed to parse keystate: %w", err)
+	}
+
+	// Validate message type
+	msgType := keystate.MessageType
+	if msgType == "" {
+		msgType = keystate.Type
+	}
+	if msgType != "keystate" {
+		return fmt.Errorf("invalid message type for keystate handler: %s", msgType)
+	}
+
+	// Validate signal
+	switch keystate.Signal {
+	case "propagated", "rejected", "removed", "published", "retired":
+		// valid signals
+	default:
+		return fmt.Errorf("unknown keystate signal: %q", keystate.Signal)
+	}
+
+	if keystate.Zone == "" {
+		return fmt.Errorf("keystate message missing zone")
+	}
+	if keystate.KeyTag == 0 {
+		return fmt.Errorf("keystate message missing key tag")
+	}
+
+	// Store for processing by the recipient (signer or agent)
+	ctx.Data["message_type"] = "keystate"
+	ctx.Data["incoming_message"] = &IncomingMessage{
+		Type:     "keystate",
+		SenderID: keystate.GetSenderID(),
+		Zone:     keystate.Zone,
+		Payload:  ctx.ChunkPayload,
+	}
+
+	// Create confirmation response using standard "confirm" type so sendNotifyWithPayload
+	// can extract it via extractConfirmFromResponse
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        fmt.Sprintf("keystate %s received for key %d in %s", keystate.Signal, keystate.KeyTag, keystate.Zone),
+		Timestamp:      time.Now().Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal keystate confirmation: %w", err)
+	}
+
+	// Store confirmation in context for response middleware
+	ctx.Data["sync_response"] = payloadBytes
+
+	log.Printf("HandleKeystate: keystate %s processed from %s for key %d in zone %s",
+		keystate.Signal, ctx.PeerID, keystate.KeyTag, keystate.Zone)
+	return nil
+}
+
 // HandleRelocate processes relocate messages for DDoS mitigation.
 func HandleRelocate(ctx *MessageContext) error {
 	log.Printf("HandleRelocate: Processing relocate from %s (distrib=%s)",

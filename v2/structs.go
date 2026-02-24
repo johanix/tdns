@@ -105,6 +105,11 @@ type ZoneData struct {
 	SourceCatalog      string      // if auto-configured, which catalog zone created this zone
 	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
 	AddTransportSignal bool        // whether to attach TransportSignal in responses
+	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
+	// These are DNSKEYs found in the incoming zone that do not match keys in our
+	// local keystore. They are preserved across resignings and merged into the
+	// DNSKEY RRset during PublishDnskeyRRs().
+	RemoteDNSKEYs []dns.RR
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -326,15 +331,17 @@ type Sig0Key struct {
 }
 
 type DnssecKey struct {
-	Name       string
-	State      string
-	Keyid      uint16
-	Flags      uint16
-	Algorithm  string
-	Creator    string
-	PrivateKey string //
-	Key        dns.DNSKEY
-	Keystr     string
+	Name                   string
+	State                  string
+	Keyid                  uint16
+	Flags                  uint16
+	Algorithm              string
+	Creator                string
+	PrivateKey             string //
+	Key                    dns.DNSKEY
+	Keystr                 string
+	PropagationConfirmed   bool      // True when all remote providers confirmed this key
+	PropagationConfirmedAt time.Time // When propagation was confirmed (zero if not confirmed)
 }
 
 type DelegationSyncRequest struct {

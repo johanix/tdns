@@ -142,16 +142,18 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		log.Printf("QueryResponder: DNSSEC not requested (DO=0), skipping signing for %s %s", name, dns.TypeToString[rrset.RRtype])
 		return rrset, nil
 	}
+	// If the RRset is already signed (e.g. by inline-signing), return as-is.
+	if len(rrset.RRSIGs) > 0 {
+		return rrset, nil
+	}
 	if kdb == nil {
 		log.Printf("QueryResponder: no KeyDB available for zone %s, cannot sign %s %s", zd.ZoneName, name, dns.TypeToString[rrset.RRtype])
 		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
 	}
 	if !zd.Options[OptOnlineSigning] {
-		log.Printf("QueryResponder: online signing not enabled for zone %s, skipping signing for %s %s", zd.ZoneName, name, dns.TypeToString[rrset.RRtype])
-		return rrset, fmt.Errorf("online signing not enabled for zone %s", zd.ZoneName)
-	}
-	if len(rrset.RRSIGs) > 0 {
-		log.Printf("QueryResponder: RRset %s %s already has %d RRSIGs, skipping signing", name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs))
+		// No online signing — return unsigned. For inline-signed zones this means
+		// the RRset lost its RRSIG (shouldn't happen), but returning an error here
+		// would SERVFAIL the entire query which is worse than returning unsigned data.
 		return rrset, nil
 	}
 

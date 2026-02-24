@@ -540,8 +540,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil && zd.Options[OptOnlineSigning] && (err != nil || dak == nil || len(dak.KSKs) == 0) {
-		log.Printf("ApplyZoneUpdateToZoneData: GetDnssecKeys failed for zone %s (online-signing enabled), attempting to ensure keys exist", zd.ZoneName)
+	if err != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
+		log.Printf("ApplyZoneUpdateToZoneData: GetDnssecKeys failed for zone %s (signing enabled), attempting to ensure keys exist", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
 		dak, err = zd.ensureActiveDnssecKeys(kdb)
 		if err != nil {

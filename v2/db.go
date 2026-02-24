@@ -111,6 +111,56 @@ func dbSetupTables(db *sql.DB) bool {
 		}
 	}
 
+	dbMigrateSchema(db)
+	return false
+}
+
+// dbMigrateSchema adds columns that may be missing from tables created by older schema versions.
+// Uses ALTER TABLE ADD COLUMN which is a no-op if the column already exists (SQLite ignores duplicates via error check).
+func dbMigrateSchema(db *sql.DB) {
+	migrations := []struct {
+		table  string
+		column string
+		ddl    string
+	}{
+		{"DnssecKeyStore", "propagation_confirmed", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed INTEGER DEFAULT 0"},
+		{"DnssecKeyStore", "propagation_confirmed_at", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed_at TEXT DEFAULT ''"},
+	}
+
+	for _, m := range migrations {
+		if dbColumnExists(db, m.table, m.column) {
+			continue
+		}
+		_, err := db.Exec(m.ddl)
+		if err != nil {
+			log.Printf("dbMigrateSchema: failed to add column %s.%s: %v", m.table, m.column, err)
+		} else {
+			log.Printf("dbMigrateSchema: added column %s.%s", m.table, m.column)
+		}
+	}
+}
+
+// dbColumnExists checks whether a column exists in a table using PRAGMA table_info.
+func dbColumnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		if name == column {
+			return true
+		}
+	}
 	return false
 }
 

@@ -106,7 +106,7 @@ func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.Res
 				resp.Msg = fmt.Sprintf("Purged %d completed distribution(s)", deleted)
 			}
 
-		case "peers":
+		case "peer-list":
 			// List all known peers with working keys
 			peers := listKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))

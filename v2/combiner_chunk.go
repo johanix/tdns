@@ -92,6 +92,10 @@ type CombinerChunkHandler struct {
 	// ErrorJournal records errors during CHUNK NOTIFY processing for operational diagnostics.
 	// Queried via "transaction errors" CLI commands. If nil, errors are only logged.
 	ErrorJournal *ErrorJournal
+
+	// ProtectedNamespaces: domain suffixes belonging to this provider.
+	// NS records from remote agents whose targets fall within these namespaces are rejected.
+	ProtectedNamespaces []string
 }
 
 // CombinerSyncRequestPlus includes a response channel for async processing.
@@ -463,6 +467,15 @@ func (h *CombinerChunkHandler) ProcessUpdate(req *CombinerSyncRequest) *Combiner
 				continue
 			}
 
+			// Checkpoint 5: Content-based policy checks
+			if reason := h.checkContentPolicy(rr); reason != "" {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: reason,
+				})
+				continue
+			}
+
 			// Route by class
 			switch rr.Header().Class {
 			case dns.ClassINET:
@@ -734,4 +747,42 @@ func determineSyncType(update *ZoneUpdate) string {
 		return "MIXED"
 	}
 	return "UNKNOWN"
+}
+
+// checkContentPolicy applies content-based policy checks to a parsed RR.
+// Returns empty string if accepted, or a rejection reason.
+// This is checkpoint 5 in ProcessUpdate(), after structural validation.
+func (h *CombinerChunkHandler) checkContentPolicy(rr dns.RR) string {
+	if rr.Header().Rrtype == dns.TypeNS && rr.Header().Class == dns.ClassINET {
+		return h.checkNSNamespacePolicy(rr)
+	}
+	return ""
+}
+
+// checkNSNamespacePolicy rejects NS records whose targets fall within any of
+// our protected namespaces. This prevents remote agents from claiming
+// nameservers inside our provider's domains.
+//
+// Example: if protected-namespaces contains "echo.dnslab.", then an NS record
+// targeting "ns7.echo.dnslab." from any remote agent is rejected. But
+// "ns12.cooldns.com." from the same agent is accepted (not our namespace).
+func (h *CombinerChunkHandler) checkNSNamespacePolicy(rr dns.RR) string {
+	if len(h.ProtectedNamespaces) == 0 {
+		return ""
+	}
+
+	nsRR, ok := rr.(*dns.NS)
+	if !ok {
+		return ""
+	}
+
+	target := strings.ToLower(nsRR.Ns)
+	for _, ns := range h.ProtectedNamespaces {
+		ns = strings.ToLower(ns)
+		if strings.HasSuffix(target, "."+ns) || target == ns {
+			return fmt.Sprintf("NS target %s intrudes on protected namespace %s",
+				nsRR.Ns, ns)
+		}
+	}
+	return ""
 }

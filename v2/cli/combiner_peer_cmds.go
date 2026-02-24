@@ -23,6 +23,20 @@ var combinerPeerCmd = &cobra.Command{
 	Long:  `Commands that instruct the combiner to perform an action toward a peer agent (e.g. ping, resync).`,
 }
 
+var combinerPeerListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all known peer agents",
+	Long: `Show all peer agents that this combiner knows about.
+Displays both DNS and API transports independently with their current state.
+
+Example:
+  tdns-cliv2 combiner peer list
+  tdns-cliv2 combiner peer list --verbose`,
+	Run: func(cmd *cobra.Command, args []string) {
+		listDistribPeers(cmd, "combiner")
+	},
+}
+
 var combinerPeerPingID string
 
 var combinerPeerPingCmd = &cobra.Command{
@@ -88,10 +102,12 @@ Example:
 }
 
 func init() {
+	combinerPeerCmd.AddCommand(combinerPeerListCmd)
 	combinerPeerCmd.AddCommand(combinerPeerPingCmd)
 	combinerPeerCmd.AddCommand(combinerPeerResyncCmd)
 	CombinerCmd.AddCommand(combinerPeerCmd)
 
+	combinerPeerListCmd.Flags().Bool("verbose", false, "Show detailed per-peer statistics")
 	combinerPeerPingCmd.Flags().StringVar(&combinerPeerPingID, "id", "", "Identity of the peer to ping (required)")
 	combinerPeerResyncCmd.Flags().String("zone", "", "Resync only this zone (default: all zones)")
 	combinerPeerResyncCmd.Flags().String("agent", "", "Resync only this agent (default: all agents)")

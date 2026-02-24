@@ -72,8 +72,14 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
-			// log.Printf("RefEng: ticker. refCounters: %v", refreshCounters)
 			for _, zd := range ZonesToKeepSigned {
+				// Skip multi-provider zones where our HSYNC says NOSIGN
+				if zd.Options[OptMultiProvider] {
+					shouldSign, _ := zd.weAreASigner()
+					if !shouldSign {
+						continue
+					}
+				}
 				log.Printf("ResignerEngine: Re-signing zone %s", zd.ZoneName)
 				newrrsigs, err := zd.SignZone(zd.KeyDB, false)
 				if err != nil {

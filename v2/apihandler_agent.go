@@ -22,43 +22,29 @@ import (
 	"github.com/miekg/dns"
 )
 
-// doPeerPing pings any known peer (agent or combiner) via DNS CHUNK or API.
-// The peer must be in the PeerRegistry (discovered via Hello or configured).
+// doPeerPing pings any known peer via DNS CHUNK or API.
+// Role-agnostic: works for agent, auth/signer, or any role with a TransportManager.
+// The peer must be in the PeerRegistry or have static config (combiner, signer, multi-provider agent).
 // useAPI true = HTTPS API ping; false = CHUNK-based DNS ping.
 func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 	resp := &AgentMgmtResponse{
-		Identity: AgentId(conf.Agent.Identity),
-		Time:     time.Now(),
+		Time: time.Now(),
 	}
 	peerID = dns.Fqdn(peerID)
 
-	if conf.Internal.TransportManager == nil {
+	tm := conf.Internal.TransportManager
+	if tm == nil {
 		resp.Error = true
 		resp.ErrorMsg = "TransportManager not configured"
 		return resp
 	}
+	resp.Identity = AgentId(tm.LocalID)
 
-	peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(peerID)
+	peer, ok := tm.PeerRegistry.Get(peerID)
 	if !ok {
-		// Peer not in registry yet — check if it's the combiner (which has static config)
-		if conf.Agent.Combiner != nil && dns.Fqdn(conf.Agent.Combiner.Identity) == peerID && conf.Agent.Combiner.Address != "" {
-			host, portStr, splitErr := net.SplitHostPort(conf.Agent.Combiner.Address)
-			if splitErr != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("peer %q not in registry and combiner address %q is invalid: %v", peerID, conf.Agent.Combiner.Address, splitErr)
-				return resp
-			}
-			port, _ := strconv.Atoi(portStr)
-			peer = transport.NewPeer(peerID)
-			peer.SetDiscoveryAddress(&transport.Address{
-				Host:      host,
-				Port:      uint16(port),
-				Transport: "udp",
-			})
-			if conf.Agent.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = conf.Agent.Combiner.ApiBaseUrl
-			}
-		} else {
+		// Peer not in registry — try static config fallbacks for all roles
+		peer = conf.lookupStaticPeer(peerID)
+		if peer == nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("peer %q not found in registry (run discovery first)", peerID)
 			return resp
@@ -113,10 +99,10 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 	// DNS CHUNK ping
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
+	pingResp, err := tm.SendPing(ctx, peer)
 	if err != nil {
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("dnsping to %s failed: %v", peerID, err)
+		resp.ErrorMsg = fmt.Sprintf("ping to %s failed: %v", peerID, err)
 		return resp
 	}
 	if !pingResp.OK {
@@ -126,6 +112,52 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 	}
 	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s", pingResp.ResponderID, pingResp.Nonce)
 	return resp
+}
+
+// lookupStaticPeer checks all static peer configurations (agent-side: combiner, signer;
+// signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
+func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
+	// Agent-side: combiner
+	if conf.Agent != nil && conf.Agent.Combiner != nil &&
+		dns.Fqdn(conf.Agent.Combiner.Identity) == peerID && conf.Agent.Combiner.Address != "" {
+		if peer := peerFromAddress(peerID, conf.Agent.Combiner.Address); peer != nil {
+			if conf.Agent.Combiner.ApiBaseUrl != "" {
+				peer.APIEndpoint = conf.Agent.Combiner.ApiBaseUrl
+			}
+			return peer
+		}
+	}
+
+	// Agent-side: signer
+	if conf.Agent != nil && conf.Agent.Signer != nil &&
+		dns.Fqdn(conf.Agent.Signer.Identity) == peerID && conf.Agent.Signer.Address != "" {
+		return peerFromAddress(peerID, conf.Agent.Signer.Address)
+	}
+
+	// Signer-side: multi-provider agent
+	if conf.MultiProvider != nil && conf.MultiProvider.Agent != nil &&
+		dns.Fqdn(conf.MultiProvider.Agent.Identity) == peerID && conf.MultiProvider.Agent.Address != "" {
+		return peerFromAddress(peerID, conf.MultiProvider.Agent.Address)
+	}
+
+	return nil
+}
+
+// peerFromAddress creates a temporary transport.Peer from a host:port address string.
+func peerFromAddress(peerID string, address string) *transport.Peer {
+	host, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		log.Printf("lookupStaticPeer: invalid address %q for %s: %v", address, peerID, err)
+		return nil
+	}
+	port, _ := strconv.Atoi(portStr)
+	peer := transport.NewPeer(peerID)
+	peer.SetDiscoveryAddress(&transport.Address{
+		Host:      host,
+		Port:      uint16(port),
+		Transport: "udp",
+	})
+	return peer
 }
 
 func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {

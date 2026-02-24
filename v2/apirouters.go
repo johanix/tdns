@@ -87,6 +87,11 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	}
 
+	if Globals.App.Type == AppTypeAuth {
+		sr.HandleFunc("/auth/peer", APIauthPeer(conf)).Methods("POST")
+		sr.HandleFunc("/auth/distrib", APIauthDistrib(conf)).Methods("POST")
+	}
+
 	if Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
 		sr.HandleFunc("/agent/distrib", conf.APIagentDistrib(conf.Internal.DistributionCache)).Methods("POST")

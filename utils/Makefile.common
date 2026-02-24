@@ -27,17 +27,15 @@ netbsd:
 
 # johaniaws: Sync local tdns source to remote AWS environment.
 # Requires: sshfs mount at ~/sshfs/msigner1
-# TDNS_SRC=~/src/git/tdns-project/tdns
-# TDNS_AWS_DIR ?= ~/sshfs/msigner1/src/tdns
-# TDNS_NBSD_DIR=root@godev101.axfr.net:/usr/store/axfr.net/go/tdns.rsync
+# export TDNS_SRC=~/src/git/tdns-project/tdns
+# export TDNS_AWS_DIR ?= ~/sshfs/msigner1/src/tdns
+# export TDNS_NBSD_DIR=root@godev101.axfr.net:/usr/store/axfr.net/go/tdns.rsync
 
 # mount:
 # sshfs ubuntu@msigner1.ddns.axfr.net:/home/ubuntu ~/sshfs/msigner1 
 # umount:
 # umount ~/sshfs/msigner1
 
-# TDNS_SRC ?= /Users/johani/src/git/tdns
-# TDNS_AWS_DIR ?= /Users/johani/sshfs/msigner1/src/tdns
 
 johaniaws:
 	rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore --exclude-from=${TDNS_SRC}/.rsyncignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/

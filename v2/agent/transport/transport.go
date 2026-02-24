@@ -203,6 +203,29 @@ type PingResponse struct {
 	Timestamp   time.Time // Response timestamp
 }
 
+// KeystateRequest carries a key lifecycle signal between agent and signer.
+// Direction: Agent→Signer (propagated, rejected, removed) or Signer→Agent (published, retired).
+type KeystateRequest struct {
+	SenderID  string    // Identity of the sender
+	Zone      string    // Zone this key belongs to (FQDN)
+	KeyTag    uint16    // DNSKEY key tag
+	Algorithm uint8     // DNSKEY algorithm number
+	Signal    string    // "propagated", "rejected", "removed", "published", "retired"
+	Message   string    // Optional detail (e.g. rejection reason)
+	Timestamp time.Time // Request timestamp
+}
+
+// KeystateResponse acknowledges a KEYSTATE signal.
+type KeystateResponse struct {
+	ResponderID string    // Identity of the responder
+	Zone        string    // Echoed zone name
+	KeyTag      uint16    // Echoed key tag
+	Signal      string    // Echoed signal
+	Accepted    bool      // Whether the signal was accepted
+	Message     string    // Optional status message
+	Timestamp   time.Time // Response timestamp
+}
+
 // ConfirmRequest confirms receipt and processing of a sync operation.
 type ConfirmRequest struct {
 	SenderID       string            // Identity of the sender (who is confirming)

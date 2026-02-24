@@ -179,7 +179,7 @@ func (dc *DistributionCache) StartCleanupGoroutine(ctx context.Context) {
 
 // AgentDistribPost represents a request to the agent distrib API
 type AgentDistribPost struct {
-	Command       string `json:"command"`                  // "list", "purge", "peers", "peer-zones", "zone-agents", "op", "discover"
+	Command       string `json:"command"`                  // "list", "purge", "peer-list", "peer-zones", "zone-agents", "op", "discover"
 	Force         bool   `json:"force,omitempty"`          // for purge
 	Op            string `json:"op,omitempty"`             // for op: operation name (e.g. "ping")
 	To            string `json:"to,omitempty"`             // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
@@ -321,7 +321,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				resp.Msg = fmt.Sprintf("Purged %d completed distribution(s)", deleted)
 			}
 
-		case "peers":
+		case "peer-list":
 			// List all known peers with working keys
 			peers := listKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))
@@ -630,13 +630,21 @@ func listKnownPeers(conf *Config) []PeerInfo {
 				isCombiner = string(agent.Identity) == conf.Agent.Combiner.Identity ||
 					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Combiner.Identity)
 			} else {
-				// Fallback to old hardcoded "combiner" for backward compatibility
 				isCombiner = agent.Identity == "combiner"
+			}
+
+			// Special handling for signer virtual peer
+			isSigner := false
+			if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
+				isSigner = string(agent.Identity) == conf.Agent.Signer.Identity ||
+					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Signer.Identity)
 			}
 
 			peerType := "agent"
 			if isCombiner {
 				peerType = "combiner"
+			} else if isSigner {
+				peerType = "signer"
 			}
 
 			// Add API transport entry if available
@@ -646,9 +654,9 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 
 					// Compute effective state: if agent has established relationship but no shared zones, show LEGACY
-					// (but not for combiner, which doesn't have shared zones by design)
+					// (but not for combiner/signer, which don't have shared zones by design)
 					effectiveState := agent.ApiDetails.State
-					if !isCombiner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+					if !isCombiner && !isSigner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 
@@ -704,9 +712,9 @@ func listKnownPeers(conf *Config) []PeerInfo {
 					seen[key] = true
 
 					// Compute effective state: if agent has established relationship but no shared zones, show LEGACY
-					// (but not for combiner, which doesn't have shared zones by design)
+					// (but not for combiner/signer, which don't have shared zones by design)
 					effectiveState := agent.DnsDetails.State
-					if !isCombiner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
+					if !isCombiner && !isSigner && len(agent.Zones) == 0 && (effectiveState == AgentStateOperational || effectiveState == AgentStateIntroduced || effectiveState == AgentStateKnown) {
 						effectiveState = AgentStateLegacy
 					}
 

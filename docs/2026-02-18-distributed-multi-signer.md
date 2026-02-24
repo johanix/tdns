@@ -205,7 +205,7 @@ Five components, each described in detail below:
 | **B: Signer DNSKEY handling** | Four modes: strip+replace, pass-through, or merge depending on multi-provider/signer state |
 | **C: Agent DNSKEY analysis** | Detect local key changes, SYNC to remote agents, signal signer |
 | **D: HSYNC Sign field check in signer** | Signer checks HSYNC `Sign` field to decide whether to sign or pass through |
-| **E: General SYNC rejection** | Per-record policy evaluation on incoming remote SYNCs with rejection feedback |
+| **E: Combiner SYNC policy** | Content-based policy in combiner's ProcessUpdate: NS namespace protection, future DNSKEY collision check |
 
 ---
 
@@ -497,17 +497,29 @@ This is a small, mechanical change — essentially a conditional check copied fr
 
 ---
 
-## Component E: General SYNC Rejection Protocol
+## Component E: Combiner-Side SYNC Policy
 
 ### Problem
 
-The SYNC protocol currently has no agent-side per-record policy evaluation for incoming remote SYNCs. The combiner does per-record rejection (parse errors, disallowed RRtypes, non-apex owners), but the agent's `EvaluateUpdate()` is all-or-nothing — it either accepts or rejects the entire update. There is no content-based policy checking on the receiving agent.
+The combiner's `ProcessUpdate()` already performs structural validation (parse errors, disallowed RRtypes, non-apex owners, unsupported class) and produces per-record `RejectedItems`. But it has no **content-based** policy checking — it doesn't evaluate what the records actually claim.
 
 This is a general protocol gap, not just a DNSKEY concern. Examples of policy violations that should trigger per-record rejection:
 
-- **NS namespace policy**: agent.alpha adds `whisky.dnslab. IN NS ns7.ECHO.dnslab.` — echo should reject this because alpha is claiming nameservers inside echo's namespace. An agent should only be allowed to add NS records pointing to nameservers in its own namespace.
-- **DNSKEY key tag collision**: agent.alpha SYNCs a DNSKEY with key tag X, but echo already has its own local key with tag X — collision must be detected and resolved.
-- **Future policies**: RRSIG validation, TTL sanity checks, content-based filtering.
+- **NS namespace intrusion**: agent.alpha adds `whisky.dnslab. IN NS ns7.ECHO.dnslab.` — echo's combiner should reject this because alpha is claiming nameservers inside echo's namespace. The check is: reject NS records whose targets fall within any of **our** protected namespaces when sent by a remote agent.
+- **DNSKEY key tag collision**: agent.alpha SYNCs a DNSKEY with key tag X, but our provider already has a local key with tag X — collision must be detected and resolved.
+- **Future policies**: RRSIG validation, TTL sanity checks, content-based filtering, operator approval queues.
+
+### Why combiner, not agent
+
+The agent is a complex synchronization hub — it communicates with multiple remote agents, the combiner, and (in future) the signer. Its job is reliable delivery, not policy decisions. Adding a policy engine to the agent mixes concerns and adds risk to an already complex component.
+
+The combiner is the right place for policy because:
+
+1. **It is the gatekeeper**: The combiner is the entity that actually modifies the customer zone. Policy belongs where the modification happens.
+2. **It is simpler**: The combiner only talks to the agent. It receives a single stream of changes, each tagged with the originator. Adding policy here is lower risk.
+3. **It already has rejection infrastructure**: 4 checkpoints producing `RejectedItems` in `ProcessUpdate()`. Content-based policy checks are natural extensions of this existing pattern.
+4. **Future needs point here**: Operator approval queues, manual review workflows, rate limiting — these are all combiner-side concerns. Building the policy framework here avoids duplication.
+5. **It knows its own namespaces**: The combiner serves one provider's zones. A `protected-namespaces` config in the combiner block naturally lists "our" domains. No knowledge of the sender's namespaces is needed.
 
 ### Existing infrastructure
 
@@ -522,57 +534,66 @@ The rejection wire format is **already fully implemented** end-to-end:
 | Confirmation callback | Rejection forwarding via `OnConfirmationReceived` | `hsync_transport.go:203-232` |
 | Remote forwarding | `RemoteConfirmationDetail.RejectedItems` | `hsync_transport.go:234-241` |
 
-The combiner already produces `RejectedItems` in 4 checkpoints in `ProcessUpdate()`. The agent just needs to produce the same structure.
+The combiner already produces `RejectedItems` in 4 structural checkpoints in `ProcessUpdate()`. Content-based policy adds a 5th checkpoint in the same function.
 
 ### Design
 
-**New function: `EvaluateRemoteSyncRecords()`** — called in the agent's remote SYNC processing path (in `syncheddataengine.go` or `agent_policy.go`). Unlike the current `EvaluateUpdate()` which is all-or-nothing, this function evaluates each record individually and returns:
-- `accepted []dns.RR` — records that pass all policy checks
-- `rejected []RejectedItemInfo` — records that fail, with per-record reasons
+**New checkpoint in combiner's `ProcessUpdate()`** — after existing structural validation (parse, RRtype, apex, class), add content-based policy checks. Each policy check is a function that takes a parsed RR + agent identity and returns accept/reject with reason.
 
-**Policy checks** (extensible, each is a function that takes a record + context and returns accept/reject):
+**Policy checks** (extensible):
 
-1. **NS namespace policy** — For NS records: the RDATA (nameserver target) must be within the sending agent's own namespace. The agent knows the sender's identity from the SYNC message (`AgentID` field). The agent's namespace is derivable from its HSYNC identity (e.g., `agent.alpha.dnslab.` → namespace `alpha.dnslab.`). If the NS target is not a subdomain of the sender's namespace, reject with reason `"NS target <target> is outside sender's namespace <namespace>"`.
+1. **NS namespace protection** — For NS records (ClassINET adds): check if the RDATA (nameserver target) falls within any of our `protected-namespaces`. If so, reject with reason `"NS target <target> intrudes on protected namespace <namespace>"`. This is a "blocklist on receiver" model — the combiner protects its own namespaces, rather than trying to verify the sender's.
 
-2. **DNSKEY key tag collision** — For DNSKEY records: check if the incoming key has the same key tag as any local (non-remote) DNSKEY. If collision:
-   - If local key is in `created` or `published` state: prefer remote (it has propagated further), scrap local key, accept remote
-   - If local key is `active`: reject with reason `"key tag collision with active local key <tag>"`
-   - Compare full DNSKEY RDATA, not just key tags — identical keys from different sources should be accepted
+   Config example:
+   ```yaml
+   combiner:
+     protected-namespaces:
+       - echo.dnslab.
+       - ultrafastdns.com.
+       - cozydns.net.
+       - foobar.se.
+   ```
 
-3. **Additional policies** (future, not for initial implementation):
-   - RRSIG validity checks
+2. **DNSKEY key tag collision** (future, Phase 5/6) — For DNSKEY records: check if the incoming key has the same key tag as a local key. Resolution depends on key state.
+
+3. **Additional policies** (future):
+   - Operator approval queue (hold changes for manual review)
+   - Rate limiting per agent
    - TTL sanity bounds
    - Record count limits per RRtype
 
-**Integration point**: The agent's remote SYNC processing path currently calls `EvaluateUpdate()` and then forwards accepted records to the combiner. The new flow:
+**Integration point**: The existing `ProcessUpdate()` flow in `combiner_chunk.go`:
 
-1. `EvaluateUpdate()` — existing coarse checks (RRtype, apex) — rejects entire update if fundamentally invalid
-2. `EvaluateRemoteSyncRecords()` — **new** per-record policy evaluation — splits accepted from rejected
-3. Forward only accepted records to combiner
-4. Include rejected records in the confirmation response back to originating agent (using existing `RejectedItems` wire format)
+1. Parse RR string → reject on parse error (existing checkpoint 1)
+2. Check RRtype allowed → reject if not (existing checkpoint 2)
+3. Check owner at apex → reject if not (existing checkpoint 3)
+4. Check class → reject if unsupported (existing checkpoint 4)
+5. **NEW: Content-based policy** → reject if NS intrudes on protected namespace, etc. (new checkpoint 5)
+6. Apply the change (ClassINET add, ClassNONE delete, ClassANY delete-rrset)
+
+Rejections from checkpoint 5 flow through the existing `RejectedItems` → `CombinerSyncResponse` → agent confirmation → remote confirmation path with zero new wiring.
 
 ### Key integration points
 
 | File | Integration |
 |------|-------------|
-| `agent_policy.go` | New `EvaluateRemoteSyncRecords()` function with per-record policy checks |
-| `syncheddataengine.go` | Call `EvaluateRemoteSyncRecords()` after `EvaluateUpdate()`, split records, populate `RejectedItems` in confirmation |
-| `hsync_transport.go` | Agent-generated `RejectedItems` flow through existing confirmation path (no changes needed — already works for combiner-generated rejections) |
+| `combiner_chunk.go` | New checkpoint 5 in `ProcessUpdate()`: content-based policy checks after structural validation |
+| `config.go` | Add `ProtectedNamespaces []string` to `LocalCombinerConf` |
+| `parseoptions.go` | Auto-decoded by mapstructure (no manual parsing needed) |
 
 ### Effort estimate
 
 | Component | Lines |
 |-----------|-------|
-| `EvaluateRemoteSyncRecords()` framework | ~60-80 |
-| NS namespace policy check | ~40-60 |
-| DNSKEY key tag collision check | ~60-80 |
-| Wire into remote SYNC processing path | ~40-60 |
-| Tests | ~100-150 |
-| **Total** | **~300-430** |
+| NS namespace protection check | ~30-50 |
+| Config field + validation | ~10-20 |
+| DNSKEY key tag collision check (future) | ~60-80 |
+| Tests | ~80-120 |
+| **Total** | **~180-270** |
 
-The rejection wire format is already fully implemented. This is primarily new policy logic + wiring into the existing processing path.
+The rejection wire format is already fully implemented. This is purely new policy logic in an existing checkpoint pattern — no new wiring, no new structs, no new message flows.
 
-**Comparable to**: Extending the existing combiner-side `ProcessUpdate()` rejection pattern to the agent side. The individual policy checks are small; the framework to evaluate per-record and produce `RejectedItems` is the main new code.
+**Comparable to**: Adding a 5th rejection checkpoint to the combiner's existing 4-checkpoint pattern. Smaller than the original estimate because no agent-side framework or confirmation merging is needed.
 
 ---
 
@@ -584,7 +605,7 @@ The rejection wire format is already fully implemented. This is primarily new po
 | **B: Signer DNSKEY handling** | ~510-830 | 0 new + 4-5 modified | Medium | Error Journal (Phase 6) |
 | **C: Agent DNSKEY analysis** | ~360-550 | 1 new + 2-3 modified | Medium | HsyncChanged + KEYSTATE wiring |
 | **D: HSYNC Sign check** | ~60-100 | 0 new + 1 modified | Low | Single policy gate |
-| **E: General SYNC rejection** | ~300-430 | 0 new + 2-3 modified | Medium | Combiner ProcessUpdate pattern |
+| **E: Combiner SYNC policy** | ~180-270 | 0 new + 1-2 modified | Low-Medium | Extending combiner ProcessUpdate |
 | **All combined** | **~2030-3060** | **3 new + 11-14 modified** | **Medium-High** | **~Transport Unification Phases 1-2** |
 
 ### Comparison to completed work
@@ -605,10 +626,10 @@ The rejection wire format is already fully implemented. This is primarily new po
 
 2. **Circular dependency in publish/activate** — Signer publishes DNSKEY → agent detects → SYNCs to remote → remote confirms → agent tells signer to activate. The "publish" and "activate" steps must be clearly separated. Publishing triggers the SYNC; activation waits for confirmation. The SYNC of a published key must not be confused with activation.
 
-3. **SYNC rejection as a general protocol requirement** — The ability to reject individual records in a SYNC is not just a DNSKEY concern — it is a fundamental protocol requirement. Component E addresses this comprehensively. Key examples:
-   - **DNSKEY key tag collision**: Different DNSKEY records can share the same key tag (rare but possible per RFC 4034 appendix B). When provider A SYNCs a new DNSKEY to provider B and B has its own key with the same tag, B must reject or resolve the collision.
-   - **NS namespace policy**: An agent should not be able to claim nameservers inside another agent's namespace. E.g., agent.alpha adding `whisky.dnslab. IN NS ns7.ECHO.dnslab.` should be rejected by echo — alpha should not be asserting nameservers within echo's domain.
-   - The rejection wire format (`RejectedItems`) already flows end-to-end through the confirmation protocol. What's missing is agent-side per-record policy evaluation on incoming remote SYNCs (see Component E).
+3. **SYNC rejection as a general protocol requirement** — The ability to reject individual records in a SYNC is not just a DNSKEY concern — it is a fundamental protocol requirement. Component E addresses this in the combiner, which is the right place for policy (the agent is a synchronization hub and should not mix in policy decisions). Key examples:
+   - **DNSKEY key tag collision**: Different DNSKEY records can share the same key tag (rare but possible per RFC 4034 appendix B). When provider A SYNCs a new DNSKEY to provider B and B has its own key with the same tag, B's combiner must reject or resolve the collision.
+   - **NS namespace intrusion**: An agent should not be able to claim nameservers inside our provider's namespaces. E.g., agent.alpha adding `whisky.dnslab. IN NS ns7.ECHO.dnslab.` should be rejected by echo's combiner — alpha should not be asserting nameservers within echo's domains. The combiner protects its own namespaces via `protected-namespaces` config (blocklist model), rather than trying to verify the sender's namespace (which breaks for providers using vanity nameserver domains like `cooldns.com`).
+   - The rejection wire format (`RejectedItems`) already flows end-to-end through the confirmation protocol. The combiner already produces `RejectedItems` in 4 structural checkpoints; content-based policy (Component E) adds a 5th checkpoint in the same pattern.
 
 4. **IXFR vs AXFR** — If the agent receives incremental transfers from the signer, DNSKEY changes appear as IXFR diffs. If AXFR, the agent compares the full RRset. Both paths need to work.
 
@@ -628,54 +649,84 @@ All components use existing TDNS infrastructure: TransportManager, SYNC protocol
 
 1. **Component D first** (HSYNC Sign check) — trivially small, no dependencies, immediately useful. Ensures the signer respects the SIGN/NOSIGN policy before any multi-signer logic is added.
 
-2. **Component E second** (general SYNC rejection) — independently useful for the existing agent↔agent SYNC protocol, even before multi-signer. Provides the NS namespace policy check and the per-record rejection framework that DNSKEY collision handling will use.
+2. **Component E second** (combiner SYNC policy) — independently useful for the existing SYNC protocol, even before multi-signer. Adds NS namespace protection to the combiner's existing rejection checkpoints (protected-namespaces config). The same checkpoint pattern will be used for DNSKEY collision handling later.
 
 3. **Component B third** (signer DNSKEY merge) — small, self-contained, immediately useful. A signer that correctly includes remote DNSKEYs is the foundation for the coordination logic.
 
 4. **Component A fourth** (agent↔signer signaling) — TransportManager for tdns-auth + KEYSTATE message type. Enables the coordination channel.
 
-5. **Component C last** (agent DNSKEY analysis) — the coordination glue that ties B, A, and E together. Depends on A (KEYSTATE transport), B (signer understanding remote keys), and E (DNSKEY collision rejection).
+5. **Component C last** (agent DNSKEY analysis) — the coordination glue that ties B, A, and E together. Depends on A (KEYSTATE transport), B (signer understanding remote keys), and E (combiner-side DNSKEY collision rejection).
 
 ## Phasing Sketch
 
-**Phase 0**: HSYNC Sign field check (D)
-- Check `Sign` field in `SignZone()` before signing
-- Skip NOSIGN zones in ResignerEngine
-- Pattern: copy from `agent_policy.go:63` NSmgmt check
+**Phase 0**: HSYNC Sign field check (D) — **DONE** (DNS-95)
+- ~~Check `Sign` field in `SignZone()` before signing~~
+- ~~Skip NOSIGN zones in ResignerEngine~~
+- ~~Pattern: copy from `agent_policy.go:63` NSmgmt check~~
+- Also renamed `OptMultiSigner` → `OptMultiProvider` (config string `"multi-provider"`)
+- Added `weAreASigner()` helper on `ZoneData` (handles both HSYNC and HSYNC2 record types)
 
-**Phase 1**: General SYNC rejection (E)
-- `EvaluateRemoteSyncRecords()` per-record policy framework
-- NS namespace policy check (agent can only claim nameservers in its own namespace)
-- DNSKEY key tag collision policy check
-- Wire into remote SYNC processing path in `syncheddataengine.go`
-- Agent-generated `RejectedItems` flow through existing confirmation path
+**Phase 1**: Combiner SYNC policy (E) — **DONE** (DNS-96)
+- **Design decision**: Policy belongs in the combiner, not the agent. The agent is a synchronization hub and should not mix in policy decisions. The combiner is the gatekeeper that modifies customer zones — policy belongs where the modification happens. See Component E for full rationale.
+- NS namespace protection in combiner's `ProcessUpdate()` (5th checkpoint, after existing 4 structural checks)
+- `protected-namespaces` config in `LocalCombinerConf` — blocklist model: reject NS records whose targets intrude on our namespaces, accept everything else (supports vanity nameserver domains like `cooldns.com`)
+- Rejections flow through existing `RejectedItems` → `CombinerSyncResponse` path (zero new wiring)
+- DNSKEY key tag collision policy check — deferred to Phase 5/6 when agent has DNSKEY awareness
+- Agent-side `EvaluateRemoteSyncRecords()` removed (was initially implemented in agent, moved to combiner)
 
-**Phase 2**: Signer DNSKEY handling (B)
-- Four-mode decision tree: `weAreASigner()` + `isMultiSigner()` checks
-- Mode 3 (pass-through) is largely handled by Phase 0's Sign field check
-- Remote DNSKEY detection in incoming zone (compare against local keystore, mode 4 only)
-- Merge into DNSKEY RRset during signing (`PublishDnskeyRRs()`, mode 4 only)
-- Preserve remote DNSKEYs across resignings
+**Phase 2**: Signer DNSKEY handling (B) — **DONE** (DNS-97)
+- Four-mode decision tree in `SignZone()`: `weAreASigner()` + `isMultiSigner()` checks
+- Mode 3 (pass-through) handled by Phase 0's Sign field check (early return before DNSKEY logic)
+- Added `isMultiSigner()` helper on `ZoneData` — counts HSYNC/HSYNC2 records with SIGN=YES
+- Added `RemoteDNSKEYs []dns.RR` field on `ZoneData` for tracking other signers' keys
+- `extractRemoteDNSKEYs()` compares zone DNSKEY RRset against local keystore (active/published/retired/foreign states)
+- `PublishDnskeyRRs()` merges remote DNSKEYs in mode 4 (with dedup); changed to replace-entirely semantics for modes 1/2/4
+- Preservation across resignings: `extractRemoteDNSKEYs()` re-reads on every `SignZone()` call in mode 4
+- Per RFC 8901: each signer signs the entire DNSKEY RRset (local + remote) with its own KSK
 
-**Phase 3**: TransportManager for tdns-auth (A, part 1)
-- Init TransportManager in tdns-auth `MainInit()`
-- PING support for diagnostics
-- Config + basic CLI (`auth peer ping`)
+**Phase 3**: TransportManager for tdns-auth (A, part 1) — **DONE** (DNS-98)
+- `MultiProviderConf` config struct replacing `MultiSignerConf` — YAML key `multi-provider:`, with `Active bool`, identity, JOSE key path, chunk mode, and `Agent *PeerConf`
+- Two-level config gate: `multi-provider.active: true` at server level AND `options: [multi-provider]` at zone level (updated `parseoptions.go` validation)
+- TransportManager initialization in `MainInit()` for `AppTypeAuth` when multi-provider is active
+- `InitializeSignerRouter()` in `router_init.go` — lightweight router with ping handler + logging/crypto middleware
+- `RegisterSignerChunkHandler()` + `initSignerCrypto()` in `signer_transport.go` — reuses `CombinerChunkHandler` dispatch shell
+- CHUNK NOTIFY handler and incoming message router started in `StartAuth()`
+- Agent registered as peer in TransportManager's PeerRegistry from config
+- `/auth/debug` API endpoint with `agent-ping` and `status` commands
+- CLI: `auth peer ping`, `auth peer status` commands in `cli/auth_peer_cmds.go`
 
-**Phase 4**: KEYSTATE message type (A, part 2)
-- Message definition, handler, sender
-- Key activation gating in keystore: dual-condition check (`propagation_confirmed` AND DNSKEY TTL expired since confirmation)
+**Phase 4**: KEYSTATE message type (A, part 2) — **DONE** (DNS-99)
+- `AgentMsgKeystate` constant + `AgentKeystatePost`/`AgentKeystateResponse` structs in `core/messages.go`
+- `KeystateRequest`/`KeystateResponse` transport structs in `transport.go`
+- `DnsKeystatePayload` + `DnsKeystateConfirmPayload` wire format in `dns.go`
+- `HandleKeystate` handler in `handlers.go` — validates signal, stores incoming message, returns standard confirm
+- `Keystate()` sender on `DNSTransport` — reuses `sendNotifyWithPayload` for standard NOTIFY+confirm flow
+- Registered in `InitializeRouter` (agent), `InitializeSignerRouter` (signer), and `DetermineMessageType`
+- Five signals: `propagated`/`rejected`/`removed` (agent→signer), `published`/`retired` (signer→agent)
+- DB schema: `propagation_confirmed` + `propagation_confirmed_at` columns on `DnssecKeyStore`
+- `DnssecKey` struct: `PropagationConfirmed bool` + `PropagationConfirmedAt time.Time`
+- `SetPropagationConfirmed()`, `GetDnssecKeyPropagation()`, `canPromoteMultiProvider()` in `keystore.go`
+- Dual-condition gating in `ensureActiveDnssecKeys()`: for `OptMultiProvider` zones, published→active requires propagation confirmed AND DNSKEY TTL (default 3600s) expired since confirmation
+- Normal zones unaffected (no gating)
 
-**Phase 5**: Agent DNSKEY tracker (C, part 1)
-- `DnskeyChanged()` function (modeled on `HsyncChanged()`)
-- Local/remote DNSKEY classification
-- DNSKEY change → SYNC distribution to remote agents (not our own combiner — it only needs foreign DNSKEYs)
+**Phase 5**: Agent DNSKEY tracker (C, part 1) — **DONE** (DNS-100)
+- `LocalDnskeysChanged()` function in `hsync_utils.go` — modeled on `HsyncChanged()`, filters out remote DNSKEYs via `zd.RemoteDNSKEYs` key tags, returns `DnskeyStatus{LocalAdds, LocalRemoves}`
+- `filterLocalDNSKEYs()` helper for remote key tag exclusion
+- `DistributeDnskeyChanges()` in `hsyncengine.go` — builds `ZoneUpdate` (ClassINET for adds, ClassNONE for removes), enqueues via `TransportManager.EnqueueForZoneAgents()` for reliable delivery
+- HsyncEngine "SYNC-DNSKEY-RRSET" handler: replaced TODO stub with real dispatch (validates DnskeyStatus, skips remote-only changes, async distribution)
+- `zone_utils.go`: `FetchFromFile` and `FetchFromUpstream` both call `LocalDnskeysChanged()` before zone swap, pass `DnskeyStatus` to SyncQ for multi-provider zones
+- `SyncRequest` struct extended with `DnskeyStatus *DnskeyStatus` field
 
-**Phase 6**: Propagation confirmation → KEYSTATE (C, part 2)
-- Hook into `PendingRemoteConfirms` in `syncheddataengine.go`
-- Send KEYSTATE `propagated` to signer on full confirmation
-- Handle KEYSTATE `rejected` in signer: scrap key, regenerate, retry (rejection itself handled by Phase 1's DNSKEY collision policy)
-- End-to-end key rollover flow verified (both happy path and collision path)
+**Phase 6**: Propagation confirmation → KEYSTATE (C, part 2) — **DONE** (DNS-101)
+- `PendingDnskeyPropagation` struct in `hsync_transport.go` — tracks distID → {zone, key tags, expected agents, confirmed set, rejected flag}
+- `TrackDnskeyPropagation()` — registers distribution for tracking when `DistributeDnskeyChanges` enqueues (called before `EnqueueForZoneAgents`)
+- `ProcessDnskeyConfirmation()` — hooked into `OnConfirmationReceived` callback; marks agents confirmed; on all-confirmed sends KEYSTATE to signer
+- `sendKeystateToSigner()` — sends KEYSTATE `propagated` (all confirmed) or `rejected` (any rejection) to the signer via `DNSTransport.Keystate()`
+- Agent config: new `agent.signer` peer config (`identity` + `address`) for KEYSTATE delivery
+- `TransportManagerConfig` extended with `SignerID`/`SignerAddress`; wired in `main_initfuncs.go`
+- `parseHostPort()` helper for signer address parsing
+- Happy path: all agents confirm → KEYSTATE `propagated` sent per key tag → signer records `propagation_confirmed_at` (Phase 4)
+- Rejection path: any agent rejects → KEYSTATE `rejected` sent with rejection reason → signer can scrap and regenerate key
 
 ## Key Rollover Lifecycle (End-to-End)
 
@@ -702,10 +753,10 @@ All components use existing TDNS infrastructure: TransportManager, SYNC protocol
 ### Key tag collision path:
 
 1. Steps 1-5 as above: provider A publishes key with tag X, agent SYNCs to remote agents
-2. **Remote agent B detects collision** (via Component E's DNSKEY key tag collision policy): incoming DNSKEY has key tag X, but provider B has its own unpublished/published key with the same tag X
+2. **Provider B's combiner detects collision** (via Component E's DNSKEY key tag collision policy in combiner's ProcessUpdate): incoming DNSKEY has key tag X, but provider B has its own unpublished/published key with the same tag X
 3. **Resolution options** (in priority order):
    a. **Remote agent B scraps its own key**: If its local key with tag X is still in `created` or `published` state (not yet active), it can scrap the local key, accept provider A's key, regenerate its own key with a different tag. This is the preferred resolution — provider A's key has propagated further.
-   b. **Remote agent B rejects**: If its local key with tag X is already `active` (can't be scrapped), it rejects the SYNC with reason `"key tag collision with active local key <tag>"` via `EvaluateRemoteSyncRecords()`. The `RejectedItems` field carries this through the existing confirmation flow.
+   b. **Provider B's combiner rejects**: If its local key with tag X is already `active` (can't be scrapped), the combiner rejects the SYNC with reason `"key tag collision with active local key <tag>"` via the Component E policy checkpoint. The `RejectedItems` field carries this through the existing confirmation flow.
 4. **On rejection**: Originating agent receives the rejection in the SYNC confirmation
 5. **Agent sends KEYSTATE `rejected`** to signer with the rejection reason
 6. **Signer scraps key with tag X**, generates a new key with a different tag, and restarts from step 1

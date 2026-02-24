@@ -387,7 +387,7 @@ func listDistribPeers(cmd *cobra.Command, component string) {
 	endpoint := fmt.Sprintf("/%s/distrib", component)
 
 	req := map[string]interface{}{
-		"command": "peers",
+		"command": "peer-list",
 	}
 
 	_, buf, err := api.RequestNG("POST", endpoint, req, true)

@@ -24,6 +24,7 @@ type Config struct {
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
+	MultiProvider  *MultiProviderConf         `yaml:"multi-provider" mapstructure:"multi-provider"`
 	Catalog        CatalogConf                `yaml:"catalog" mapstructure:"catalog"`
 	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones          []ZoneConf                 `yaml:"zones"`
@@ -57,6 +58,10 @@ type LocalCombinerConf struct {
 	// Supports {identity} and {zone} placeholders.
 	Signature    string `yaml:"signature"`
 	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"`
+	// ProtectedNamespaces: list of domain suffixes that belong to this provider.
+	// NS records from remote agents whose targets fall within any of these namespaces
+	// are rejected (prevents namespace intrusion). Example: ["echo.dnslab.", "ultrafastdns.com."]
+	ProtectedNamespaces []string `yaml:"protected-namespaces" mapstructure:"protected-namespaces"`
 }
 
 // FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.
@@ -67,6 +72,27 @@ func (c *LocalCombinerConf) FindAgent(identity string) *PeerConf {
 		}
 	}
 	return nil
+}
+
+// MultiProviderConf holds signer-side config for multi-provider DNSSEC (RFC 8901).
+// Only used by tdns-auth. When Active is true, the signer initializes a TransportManager
+// for communication with its local agent (KEYSTATE signaling, PING diagnostics).
+// YAML key: "multi-provider:"
+type MultiProviderConf struct {
+	// Active: master switch for multi-provider mode.
+	// Must be true AND zone must have options: [multi-provider] for MP behavior.
+	Active bool `yaml:"active"`
+	// Identity: signer's identity (FQDN) for transport protocol.
+	Identity string `yaml:"identity"`
+	// HsyncIdentity: identity to match in the HSYNC RRset (typically the agent FQDN).
+	// If empty, falls back to Identity.
+	HsyncIdentity string `yaml:"hsync-identity" mapstructure:"hsync-identity"`
+	// LongTermJosePrivKey: path to signer's JOSE private key for secure CHUNK.
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK) to agent.
+	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
+	// Agent: the local agent peer (address, JOSE public key, optional API URL).
+	Agent *PeerConf `yaml:"agent"`
 }
 
 type AppDetails struct {
@@ -179,6 +205,8 @@ type LocalAgentConf struct {
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
 	Combiner *PeerConf `yaml:"combiner"`
+	// Signer peer (agent only): address and JOSE public key path for KEYSTATE signaling (Phase 6)
+	Signer *PeerConf `yaml:"signer"`
 	// AuthorizedPeers: List of agent identities authorized to communicate (identity-only, DNS provides contact info)
 	AuthorizedPeers []string `yaml:"authorized_peers"`
 	// Peers (DEPRECATED): Old format with embedded addresses/keys - use authorized_peers instead

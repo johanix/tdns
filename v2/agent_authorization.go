@@ -38,6 +38,13 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 		return true, "authorized via config (agent.authorized_peers)"
 	}
 
+	// Check 1b: Authorization via configured peer relationships
+	// Agent-side: check if sender is our configured combiner or signer
+	// Signer-side: check if sender is our configured agent (multi-provider.agent)
+	if tm.isConfiguredPeer(senderID) {
+		return true, "authorized via configured peer relationship"
+	}
+
 	// Check 2: LEGACY state agents (established relationship, zero zones)
 	// These agents were previously in HSYNC but all shared zones have been removed
 	// We still allow beat messages to maintain the relationship
@@ -69,6 +76,39 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 
 	// Not authorized via either path
 	return false, fmt.Sprintf("not authorized (not in config or HSYNC for zone %q)", zone)
+}
+
+// isConfiguredPeer checks if senderID matches a statically configured peer relationship.
+// On the agent side: checks agent.combiner.identity and agent.signer.identity.
+// On the signer side: checks multi-provider.agent.identity.
+func (tm *TransportManager) isConfiguredPeer(senderID string) bool {
+	senderFQDN := dns.Fqdn(senderID)
+
+	// Agent-side: check combiner and signer identities
+	if Conf.Agent != nil {
+		if Conf.Agent.Combiner != nil && Conf.Agent.Combiner.Identity != "" {
+			if dns.Fqdn(Conf.Agent.Combiner.Identity) == senderFQDN {
+				log.Printf("IsPeerAuthorized: Agent %s is configured combiner peer", senderID)
+				return true
+			}
+		}
+		if Conf.Agent.Signer != nil && Conf.Agent.Signer.Identity != "" {
+			if dns.Fqdn(Conf.Agent.Signer.Identity) == senderFQDN {
+				log.Printf("IsPeerAuthorized: Agent %s is configured signer peer", senderID)
+				return true
+			}
+		}
+	}
+
+	// Signer-side: check multi-provider.agent identity
+	if Conf.MultiProvider != nil && Conf.MultiProvider.Agent != nil && Conf.MultiProvider.Agent.Identity != "" {
+		if dns.Fqdn(Conf.MultiProvider.Agent.Identity) == senderFQDN {
+			log.Printf("IsPeerAuthorized: Agent %s is configured multi-provider agent peer", senderID)
+			return true
+		}
+	}
+
+	return false
 }
 
 // isInAuthorizedPeers checks if senderID is in our agent.authorized_peers config.

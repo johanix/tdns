@@ -246,9 +246,9 @@ func (kdb *KeyDB) DnssecKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, err
 INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		setStateDnskeySql = "UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?"
 		deleteDnskeySql   = `DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
-		getAllDnskeysSql  = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore`
+		getAllDnskeysSql  = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, propagation_confirmed, propagation_confirmed_at FROM DnssecKeyStore`
 		getDnskeySql      = `
-SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, propagation_confirmed, propagation_confirmed_at FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	)
 
 	var localtx = false
@@ -285,10 +285,12 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 		var keyname, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid, flags int
+		var propConfirmed int
+		var propConfirmedAt string
 
 		tmp2 := map[string]DnssecKey{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr)
+			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr, &propConfirmed, &propConfirmedAt)
 			if err != nil {
 				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
@@ -296,15 +298,20 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				privatekey = "ULTRA SECRET KEY"
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
-			tmp2[mapkey] = DnssecKey{
-				Name:       keyname,
-				State:      state,
-				Flags:      uint16(flags),
-				Algorithm:  algorithm,
-				Creator:    creator,
-				PrivateKey: "-***-",
-				Keystr:     keyrrstr,
+			dk := DnssecKey{
+				Name:                 keyname,
+				State:                state,
+				Flags:                uint16(flags),
+				Algorithm:            algorithm,
+				Creator:              creator,
+				PrivateKey:           "-***-",
+				Keystr:               keyrrstr,
+				PropagationConfirmed: propConfirmed != 0,
 			}
+			if propConfirmedAt != "" {
+				dk.PropagationConfirmedAt, _ = time.Parse(time.RFC3339, propConfirmedAt)
+			}
+			tmp2[mapkey] = dk
 		}
 		resp.Dnskeys = tmp2
 		resp.Msg = "Here are all the DNSSEC keys that we know"
@@ -659,4 +666,80 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
 
 	return nil
+}
+
+// SetPropagationConfirmed marks a DNSKEY as propagation-confirmed in the keystore.
+// Called when the agent sends KEYSTATE "propagated" to the signer.
+func (kdb *KeyDB) SetPropagationConfirmed(zonename string, keyid uint16) error {
+	const updateSql = `UPDATE DnssecKeyStore SET propagation_confirmed=1, propagation_confirmed_at=? WHERE zonename=? AND keyid=?`
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := kdb.Exec(updateSql, now, zonename, keyid)
+	if err != nil {
+		return fmt.Errorf("SetPropagationConfirmed: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("SetPropagationConfirmed: key %d not found in zone %s", keyid, zonename)
+	}
+
+	// Invalidate cache for published state (the key should be in published state)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStatePublished)
+	log.Printf("SetPropagationConfirmed: key %d in zone %s marked as propagation confirmed", keyid, zonename)
+	return nil
+}
+
+// GetDnssecKeyPropagation returns the propagation state for a specific key.
+// Returns (confirmed bool, confirmedAt time.Time, err error).
+func (kdb *KeyDB) GetDnssecKeyPropagation(zonename string, keyid uint16) (bool, time.Time, error) {
+	const querySql = `SELECT propagation_confirmed, propagation_confirmed_at FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+
+	var confirmed int
+	var confirmedAtStr string
+	err := kdb.QueryRow(querySql, zonename, keyid).Scan(&confirmed, &confirmedAtStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, time.Time{}, fmt.Errorf("key %d not found in zone %s", keyid, zonename)
+		}
+		return false, time.Time{}, err
+	}
+
+	var confirmedAt time.Time
+	if confirmedAtStr != "" {
+		confirmedAt, _ = time.Parse(time.RFC3339, confirmedAtStr)
+	}
+	return confirmed != 0, confirmedAt, nil
+}
+
+// DefaultDnskeyTTL is the assumed DNSKEY RRset TTL for multi-provider gating.
+// Used when the actual TTL is not readily available. 3600 seconds (1 hour) is
+// a common DNSKEY RRset TTL.
+const DefaultDnskeyTTL = 3600 * time.Second
+
+// canPromoteMultiProvider checks whether a key in a multi-provider zone is eligible
+// for promotion from published to active. Both conditions must be met:
+// 1. propagation_confirmed is true (all remote providers confirmed the key)
+// 2. Enough time has passed since confirmation for old cached DNSKEY RRsets to expire
+func (kdb *KeyDB) canPromoteMultiProvider(zonename string, keyid uint16) bool {
+	confirmed, confirmedAt, err := kdb.GetDnssecKeyPropagation(zonename, keyid)
+	if err != nil {
+		log.Printf("canPromoteMultiProvider: error checking propagation for key %d in %s: %v", keyid, zonename, err)
+		return false
+	}
+
+	if !confirmed {
+		log.Printf("canPromoteMultiProvider: key %d in %s: propagation not yet confirmed", keyid, zonename)
+		return false
+	}
+
+	elapsed := time.Since(confirmedAt)
+	if elapsed < DefaultDnskeyTTL {
+		log.Printf("canPromoteMultiProvider: key %d in %s: propagation confirmed %s ago, need %s (DNSKEY TTL wait)",
+			keyid, zonename, elapsed.Truncate(time.Second), DefaultDnskeyTTL)
+		return false
+	}
+
+	log.Printf("canPromoteMultiProvider: key %d in %s: eligible for promotion (propagation confirmed %s ago, TTL %s expired)",
+		keyid, zonename, elapsed.Truncate(time.Second), DefaultDnskeyTTL)
+	return true
 }

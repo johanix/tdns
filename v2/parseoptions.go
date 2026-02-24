@@ -181,9 +181,9 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 
-		case OptOnlineSigning:
+		case OptOnlineSigning, OptInlineSigning:
 			if Globals.App.Type == AppTypeAgent {
-				log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
+				log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow signing.", zname, ZoneOptionToString[opt])
 				continue
 			}
 			if zconf.DnssecPolicy != "" {
@@ -191,36 +191,23 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				cleanoptions = append(cleanoptions, opt)
 			} else {
 				if zd != nil {
-					zd.SetError(ConfigError, "online-signing is ignored because the DNSSEC policy is not set")
+					zd.SetError(ConfigError, "%s is ignored because the DNSSEC policy is not set", ZoneOptionToString[opt])
 				}
-				log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
+				log.Printf("Error: Zone %s: Option \"%s\" is ignored because the DNSSEC policy is not set.", zname, ZoneOptionToString[opt])
 			}
 
-		case OptMultiSigner:
-			if zconf.MultiSigner == "" || zconf.MultiSigner == "none" {
-				log.Printf("Error: Zone %s: Option \"%s\" set without a corresponding multisigner config. Option ignored.", zname, ZoneOptionToString[opt])
+		case OptMultiProvider:
+			// Two-level config gate: zone option AND server-level multi-provider.active must both be set.
+			if conf.MultiProvider == nil || !conf.MultiProvider.Active {
+				log.Printf("Error: Zone %s: Option \"%s\" set but multi-provider.active is not true in server config. Option ignored.", zname, ZoneOptionToString[opt])
 				if zd != nil {
-					zd.SetError(ConfigError, "option %s set without a corresponding multisigner config", ZoneOptionToString[opt])
-				}
-				continue
-			}
-			if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
-				log.Printf("Error: Zone %s: Option \"%s\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, ZoneOptionToString[opt], zconf.MultiSigner)
-				if zd != nil {
-					zd.SetError(ConfigError, "option %s set to non-existing multi-signer config \"%s\"", ZoneOptionToString[opt], zconf.MultiSigner)
-				}
-				continue
-			}
-			if conf.Internal.MusicSyncQ == nil {
-				log.Printf("Error: Zone %s: Option \"%s\" set but no multi-signer sync channel configured. This is a fatal error.", zname, ZoneOptionToString[opt])
-				if zd != nil {
-					zd.SetError(ConfigError, "no multi-signer sync channel configured")
+					zd.SetError(ConfigError, "option %s requires multi-provider.active: true in server config", ZoneOptionToString[opt])
 				}
 				continue
 			}
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
-			log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, ZoneOptionToString[opt], zconf.MultiSigner)
+			log.Printf("ParseZones: Zone %s: option \"%s\" accepted (multi-provider.active: true)", zname, ZoneOptionToString[opt])
 
 		case OptCatalogZone:
 			// Catalog zone requires valid catalog configuration
