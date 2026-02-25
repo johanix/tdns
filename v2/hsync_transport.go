@@ -460,6 +460,11 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 		DistributionID: msg.DistributionID,
 	}
 
+	if tm.agentQs == nil {
+		log.Printf("TransportManager: Hello from %s authorized but no agent queues (signer mode), ignoring", senderID)
+		return
+	}
+
 	select {
 	case tm.agentQs.Hello <- report:
 		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING, distrib=%s)", senderID, msg.DistributionID)
@@ -553,6 +558,11 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 		DistributionID: distributionID,
 	}
 
+	if tm.agentQs == nil {
+		log.Printf("TransportManager: Beat from %s authorized but no agent queues (signer mode), ignoring", senderID)
+		return
+	}
+
 	select {
 	case tm.agentQs.Beat <- report:
 		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL, distrib=%s)", senderID, distributionID)
@@ -620,6 +630,11 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 		},
+	}
+
+	if tm.agentQs == nil {
+		log.Printf("TransportManager: %s from %s authorized but no agent queues (signer mode), ignoring", msgTypeStr, senderID)
+		return
 	}
 
 	select {
