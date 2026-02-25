@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -59,15 +60,15 @@ func APIauthPeer(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch dp.Command {
 		case "peer-ping":
-			// Determine target peer: use --id if provided, otherwise default to configured agent
+			// Determine target peer: use --id if provided, otherwise default to first configured agent
 			targetID := dp.PeerID
 			if targetID == "" {
-				if conf.MultiProvider == nil || conf.MultiProvider.Agent == nil {
+				if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
 					resp.Error = true
-					resp.ErrorMsg = "multi-provider.agent not configured and no --id specified"
+					resp.ErrorMsg = "multi-provider.agents not configured and no --id specified"
 					return
 				}
-				targetID = conf.MultiProvider.Agent.Identity
+				targetID = conf.MultiProvider.Agents[0].Identity
 			}
 
 			// Use the shared doPeerPing — same function as agent uses
@@ -83,11 +84,17 @@ func APIauthPeer(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			mp := conf.MultiProvider
-			agentID := "not configured"
-			if mp != nil && mp.Agent != nil {
-				agentID = mp.Agent.Identity
+			var agentIDs []string
+			if mp != nil {
+				for _, a := range mp.Agents {
+					agentIDs = append(agentIDs, a.Identity)
+				}
 			}
-			resp.Msg = fmt.Sprintf("multi-provider: active, identity: %s, agent: %s", tm.LocalID, agentID)
+			agentList := "none"
+			if len(agentIDs) > 0 {
+				agentList = strings.Join(agentIDs, ", ")
+			}
+			resp.Msg = fmt.Sprintf("multi-provider: active, identity: %s, agents: [%s]", tm.LocalID, agentList)
 
 		default:
 			resp.Error = true

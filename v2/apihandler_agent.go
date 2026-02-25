@@ -134,10 +134,13 @@ func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 		return peerFromAddress(peerID, conf.Agent.Signer.Address)
 	}
 
-	// Signer-side: multi-provider agent
-	if conf.MultiProvider != nil && conf.MultiProvider.Agent != nil &&
-		dns.Fqdn(conf.MultiProvider.Agent.Identity) == peerID && conf.MultiProvider.Agent.Address != "" {
-		return peerFromAddress(peerID, conf.MultiProvider.Agent.Address)
+	// Signer-side: multi-provider agents
+	if conf.MultiProvider != nil {
+		for _, agentConf := range conf.MultiProvider.Agents {
+			if agentConf != nil && dns.Fqdn(agentConf.Identity) == peerID && agentConf.Address != "" {
+				return peerFromAddress(peerID, agentConf.Address)
+			}
+		}
 	}
 
 	return nil
@@ -240,7 +243,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			log.Printf("API: update-local-zonedata: added RRs: %+v", amp.AddedRRs)
 			log.Printf("API: update-local-zonedata: removed RRs: %+v", amp.RemovedRRs)
 
-			conf.Internal.AgentQs.Command <- &AgentMgmtPostPlus{
+			conf.Internal.MsgQs.Command <- &AgentMgmtPostPlus{
 				amp,
 				rch,
 			}
@@ -517,7 +520,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				Zone:     amp.Zone,
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
-			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			conf.Internal.MsgQs.SynchedDataCmd <- sdcmd
 			select {
 			case response := <-sdcmd.Response:
 				resp.Msg = response.Msg
@@ -532,7 +535,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		case "send-rfi":
 			switch amp.MessageType {
 			case AgentMsgRfi:
-				conf.Internal.AgentQs.Command <- &AgentMgmtPostPlus{
+				conf.Internal.MsgQs.Command <- &AgentMgmtPostPlus{
 					amp,
 					rch,
 				}
@@ -557,9 +560,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 }
 
 func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request) {
-	if conf.Internal.AgentQs.DebugCommand == nil {
+	if conf.Internal.MsgQs.DebugCommand == nil {
 		log.Println("APIagentDebug: DebugCommand channel is not set. Cannot forward debug commands. This is a fatal error.")
-		log.Printf("APIagentDebug: AgentQs: %+v", conf.Internal.AgentQs)
+		log.Printf("APIagentDebug: MsgQs: %+v", conf.Internal.MsgQs)
 		os.Exit(1)
 	}
 
@@ -600,7 +603,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			switch amp.MessageType {
 			case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
 				resp.Status = "ok"
-				conf.Internal.AgentQs.DebugCommand <- &AgentMgmtPostPlus{
+				conf.Internal.MsgQs.DebugCommand <- &AgentMgmtPostPlus{
 					amp,
 					rch,
 				}
@@ -667,7 +670,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				Zone:     "",
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
-			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			conf.Internal.MsgQs.SynchedDataCmd <- sdcmd
 			select {
 			case response := <-sdcmd.Response:
 				resp.Msg = response.Msg
@@ -688,7 +691,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				Zone:     amp.Zone,
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
-			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			conf.Internal.MsgQs.SynchedDataCmd <- sdcmd
 			select {
 			case response := <-sdcmd.Response:
 				resp.Msg = response.Msg
@@ -787,7 +790,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 
 			// Send to SynchedDataEngine
-			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    amp.AgentId,
 				UpdateType: "remote",
@@ -898,7 +901,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				Zone:     amp.Zone,
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
-			conf.Internal.AgentQs.SynchedDataCmd <- sdcmd
+			conf.Internal.MsgQs.SynchedDataCmd <- sdcmd
 
 			select {
 			case response := <-sdcmd.Response:
@@ -978,7 +981,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 
 			// Send to SynchedDataEngine (which forwards to combiner)
-			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    amp.AgentId,
 				UpdateType: "local", // "local" means from this agent to combiner
@@ -1069,7 +1072,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Step 2: Send to local SynchedDataEngine
 			cresp := make(chan *AgentMsgResponse, 1)
-			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    AgentId(conf.Agent.Identity),
 				UpdateType: "local",
@@ -1278,7 +1281,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 
 			// Send to SynchedDataEngine
-			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    amp.AgentId,
 				UpdateType: "remote",
@@ -1295,111 +1298,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 					resp.Msg = fmt.Sprintf("Fake sync injection failed: %s", r.ErrorMsg)
 				} else {
 					resp.Msg = fmt.Sprintf("Fake sync injected successfully: %d RRs processed from %q", len(parsedRRs), amp.AgentId)
-					if r.Msg != "" {
-						resp.Msg += " - " + r.Msg
-					}
-				}
-				resp.Status = "ok"
-			case <-time.After(5 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
-				resp.Status = "timeout"
-			}
-
-		case "add-ns", "del-ns":
-			// Add or delete an NS record: store locally + sync to peers + send to combiner
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-			if len(amp.RRs) == 0 {
-				resp.Error = true
-				resp.ErrorMsg = "at least one RR is required"
-				return
-			}
-
-			isAdd := amp.Command == "add-ns"
-
-			// Parse and validate the RRs (must be NS records at the zone apex)
-			var parsedRRs []dns.RR
-			for _, rrStr := range amp.RRs {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-				if rr.Header().Rrtype != dns.TypeNS {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("record must be an NS record (got %s)", dns.TypeToString[rr.Header().Rrtype])
-					return
-				}
-				if isAdd {
-					rr.Header().Class = dns.ClassINET
-				} else {
-					rr.Header().Class = dns.ClassNONE
-				}
-				parsedRRs = append(parsedRRs, rr)
-			}
-
-			// Create the ZoneUpdate with RRs and RRsets
-			zu := &ZoneUpdate{
-				Zone:    amp.Zone,
-				AgentId: AgentId(conf.Agent.Identity),
-				RRs:     parsedRRs,
-				RRsets:  make(map[uint16]core.RRset),
-			}
-
-			// Populate RRsets (needed by ProcessUpdate)
-			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
-				if !exists {
-					rrset = core.RRset{
-						Name:   rr.Header().Name,
-						Class:  rr.Header().Class,
-						RRtype: rrtype,
-					}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-			}
-
-			action := "Adding"
-			if !isAdd {
-				action = "Removing"
-			}
-			log.Printf("%s: %s %d NS RRs for zone %q", amp.Command, action, len(parsedRRs), amp.Zone)
-
-			// Send as a "local" update to SynchedDataEngine, which will:
-			// (a) store in local ZoneDataRepo
-			// (b) send to combiner
-			// (c) send NOTIFY to remote agents
-			force := false
-			if amp.Data != nil {
-				if f, ok := amp.Data["force"].(bool); ok {
-					force = f
-				}
-			}
-			cresp := make(chan *AgentMsgResponse, 1)
-			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
-				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.Agent.Identity),
-				UpdateType: "local",
-				Update:     zu,
-				Force:      force,
-				Response:   cresp,
-			}
-
-			select {
-			case r := <-cresp:
-				if r.Error {
-					resp.Error = true
-					resp.ErrorMsg = r.ErrorMsg
-					resp.Msg = fmt.Sprintf("%s NS record failed: %s", amp.Command, r.ErrorMsg)
-				} else {
-					resp.Msg = fmt.Sprintf("%s %d NS record(s) for zone %q", action, len(parsedRRs), amp.Zone)
 					if r.Msg != "" {
 						resp.Msg += " - " + r.Msg
 					}
@@ -1493,7 +1391,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			cresp := make(chan *AgentMsgResponse, 1)
-			conf.Internal.AgentQs.SynchedDataUpdate <- &SynchedDataUpdate{
+			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    AgentId(conf.Agent.Identity),
 				UpdateType: "local",
@@ -1620,7 +1518,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 }
 
 func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
-	if conf.Internal.AgentQs.Beat == nil {
+	if conf.Internal.MsgQs.Beat == nil {
 		log.Println("APIbeat: AgentBeatQ channel is not set. Cannot forward heartbeats. This is a fatal error.")
 		os.Exit(1)
 	}
@@ -1657,7 +1555,7 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 		switch abp.MessageType {
 		case AgentMsgBeat:
 			resp.Status = "ok"
-			conf.Internal.AgentQs.Beat <- &AgentMsgReport{
+			conf.Internal.MsgQs.Beat <- &AgentMsgReport{
 				Transport:    "API",
 				MessageType:  abp.MessageType,
 				Identity:     abp.MyIdentity,
@@ -1674,7 +1572,7 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 
 // This is the agent-to-agent sync API hello handler.
 func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
-	if conf.Internal.AgentQs.Hello == nil {
+	if conf.Internal.MsgQs.Hello == nil {
 		log.Println("APIhello: HelloQ channel is not set. Cannot forward HELLO msgs. This is a fatal error.")
 		os.Exit(1)
 	}
@@ -1731,7 +1629,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		switch ahp.MessageType {
 		case AgentMsgHello:
 			resp.Status = "ok" // important
-			conf.Internal.AgentQs.Hello <- &AgentMsgReport{
+			conf.Internal.MsgQs.Hello <- &AgentMsgReport{
 				Transport:   "API",
 				MessageType: ahp.MessageType,
 				Identity:    ahp.MyIdentity,
@@ -1746,7 +1644,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 }
 
 func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
-	if conf.Internal.AgentQs.Msg == nil {
+	if conf.Internal.MsgQs.Msg == nil {
 		log.Println("APImsg: msgQ channel is not set. Cannot forward API msgs. This is a fatal error.")
 		os.Exit(1)
 	}
@@ -1793,7 +1691,7 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 			var cresp = make(chan *AgentMsgResponse, 1)
 
 			select {
-			case conf.Internal.AgentQs.Msg <- &AgentMsgPostPlus{
+			case conf.Internal.MsgQs.Msg <- &AgentMsgPostPlus{
 				AgentMsgPost: amp,
 				Response:     cresp,
 			}:

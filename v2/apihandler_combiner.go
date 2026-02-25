@@ -177,10 +177,10 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
 
 		case "agent-ping":
-			ct := conf.Internal.CombinerTransport
-			if ct == nil {
+			tm := conf.Internal.TransportManager
+			if tm == nil {
 				resp.Error = true
-				resp.ErrorMsg = "CombinerTransport not initialized"
+				resp.ErrorMsg = "TransportManager not initialized"
 				return
 			}
 			agentID := cp.AgentID
@@ -191,45 +191,47 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			}
 			agentID = dns.Fqdn(agentID)
 
-			nonce := fmt.Sprintf("combiner-ping-%d", time.Now().UnixNano())
+			peer, ok := tm.PeerRegistry.Get(agentID)
+			if !ok {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("agent %q not found in peer registry", agentID)
+				return
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			pingResp, err := ct.Ping(ctx, agentID, &transport.PingRequest{
-				SenderID:  ct.LocalID,
-				Nonce:     nonce,
-				Timestamp: time.Now(),
-			})
+			pingResp, err := tm.SendPing(ctx, peer)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ping to agent %s failed: %v", agentID, err)
 				return
 			}
 
-			resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s",
+			resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce %s",
 				pingResp.ResponderID, pingResp.Nonce)
 
 		case "agent-resync":
-			ct := conf.Internal.CombinerTransport
-			if ct == nil {
+			tm := conf.Internal.TransportManager
+			if tm == nil {
 				resp.Error = true
-				resp.ErrorMsg = "CombinerTransport not initialized"
+				resp.ErrorMsg = "TransportManager not initialized"
 				return
 			}
 
 			// Determine which agents to resync
-			var agents []*PeerConf
+			var agentPeers []*transport.Peer
 			if cp.AgentID != "" {
 				agentID := dns.Fqdn(cp.AgentID)
-				if a := conf.Combiner.FindAgent(agentID); a != nil {
-					agents = append(agents, a)
-				} else {
+				peer, ok := tm.PeerRegistry.Get(agentID)
+				if !ok {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("agent %q not found in config", agentID)
+					resp.ErrorMsg = fmt.Sprintf("agent %q not found in peer registry", agentID)
 					return
 				}
+				agentPeers = append(agentPeers, peer)
 			} else {
-				agents = conf.Combiner.Agents
+				agentPeers = tm.PeerRegistry.All()
 			}
 
 			// Determine which zones to resync
@@ -251,11 +253,11 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			// Send RFI SYNC to each agent for each zone
 			var results []string
 			var errCount int
-			for _, agent := range agents {
+			for _, peer := range agentPeers {
 				for _, zone := range zones {
 					ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-					_, err := ct.Sync(ctx, agent.Identity, &transport.SyncRequest{
-						SenderID:    ct.LocalID,
+					_, err := tm.SendSyncWithFallback(ctx, peer, &transport.SyncRequest{
+						SenderID:    tm.LocalID,
 						Zone:        zone,
 						Records:     map[string][]string{},
 						Timestamp:   time.Now(),
@@ -264,16 +266,16 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					})
 					cancel()
 					if err != nil {
-						results = append(results, fmt.Sprintf("  %s / %s: error: %v", agent.Identity, zone, err))
+						results = append(results, fmt.Sprintf("  %s / %s: error: %v", peer.ID, zone, err))
 						errCount++
 					} else {
-						results = append(results, fmt.Sprintf("  %s / %s: RFI SYNC sent", agent.Identity, zone))
+						results = append(results, fmt.Sprintf("  %s / %s: RFI SYNC sent", peer.ID, zone))
 					}
 				}
 			}
 
 			summary := fmt.Sprintf("Resync: sent RFI SYNC to %d agent(s) for %d zone(s) (%d errors)\n",
-				len(agents), len(zones), errCount)
+				len(agentPeers), len(zones), errCount)
 			for _, r := range results {
 				summary += r + "\n"
 			}

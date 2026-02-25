@@ -37,10 +37,10 @@ netbsd:
 # umount ~/sshfs/msigner1
 
 
-johaniaws:
+tdnsaws:
 	rsync --delete --exclude=.git --exclude-from=${TDNS_SRC}/.gitignore --exclude-from=${TDNS_SRC}/.rsyncignore -avx ${TDNS_SRC}/ ${TDNS_AWS_DIR}/
 
-johaninbsd:
+tdnsnbsd:
 	@if [ -z "$$TDNS_SRC" ]; then \
 	   echo "Error: TDNS_SRC is not set (required for johaninbsd)"; \
 	   exit 1; \

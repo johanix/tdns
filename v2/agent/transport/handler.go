@@ -21,7 +21,7 @@ import (
 // IncomingMessage represents a message received via DNS transport.
 // This is routed to the hsyncengine for processing.
 type IncomingMessage struct {
-	Type           string    // "hello", "beat", "sync", "relocate", "confirm"
+	Type           string    // "hello", "beat", "ping", "sync", "update", "relocate", "confirm"
 	DistributionID string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
 	SenderID       string    // Sender identity
 	Zone           string    // Zone (for zone-scoped operations)
@@ -119,7 +119,7 @@ func (h *MessageHandler) HandleNotify(msg *dns.Msg, sourceAddr string) (*dns.Msg
 // QNAME format: <distributionID>.<zone> — the first label is the correlation ID; the rest is the sender's
 // control zone. We do not require QNAME to end with our control zone: NOTIFY(CHUNK) can be agent-to-agent.
 func (h *MessageHandler) extractDistributionID(qname string) (string, error) {
-	qname = ensureFQDN(qname)
+	qname = dns.Fqdn(qname)
 	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
 	if len(labels) == 0 {
 		return "", fmt.Errorf("empty QNAME")
@@ -167,13 +167,13 @@ func (h *MessageHandler) parsePayload(distributionID string, payload []byte, sou
 	json.Unmarshal(payload, &common) // Ignore error, fields are optional
 
 	return &IncomingMessage{
-		Type:          typeOnly.Type,
+		Type:           typeOnly.Type,
 		DistributionID: distributionID,
-		SenderID:      common.SenderID,
-		Zone:          common.Zone,
-		Payload:       payload,
-		ReceivedAt:    time.Now(),
-		SourceAddr:    sourceAddr,
+		SenderID:       common.SenderID,
+		Zone:           common.Zone,
+		Payload:        payload,
+		ReceivedAt:     time.Now(),
+		SourceAddr:     sourceAddr,
 	}, nil
 }
 
@@ -192,10 +192,10 @@ func (h *MessageHandler) handleConfirmation(msg *IncomingMessage) {
 	// Route to transport's confirmation handler
 	h.Transport.HandleIncomingConfirmation(&IncomingConfirmation{
 		DistributionID: confirm.DistributionID,
-		PeerID:        confirm.SenderID,
-		Status:        status,
-		Message:       confirm.Message,
-		Timestamp:     time.Unix(confirm.Timestamp, 0),
+		PeerID:         confirm.SenderID,
+		Status:         status,
+		Message:        confirm.Message,
+		Timestamp:      time.Unix(confirm.Timestamp, 0),
 	})
 }
 
@@ -212,6 +212,8 @@ func parseConfirmStatus(s string) ConfirmStatus {
 		return ConfirmFailed
 	case "REJECTED":
 		return ConfirmRejected
+	case "PENDING":
+		return ConfirmPending
 	default:
 		return ConfirmFailed
 	}

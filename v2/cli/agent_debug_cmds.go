@@ -770,126 +770,6 @@ Example:
 	},
 }
 
-var DebugAgentAddNsCmd = &cobra.Command{
-	Use:   "add-ns",
-	Short: "Add an NS record to a zone and sync with peers and combiner",
-	Long: `Add an NS record to the specified zone. This will:
-- Add the NS record to the local synced data store
-- Send sync operations to all remote agents for this zone
-- Send the update to the combiner
-
-Example:
-  tdns-cliv2 agent debug add-ns --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-
-		if dnsRecord == "" {
-			log.Fatalf("Error: --rr flag is required")
-		}
-
-		// Parse and validate the RR
-		rr, err := dns.NewRR(dnsRecord)
-		if err != nil {
-			log.Fatalf("Error: Invalid DNS record: %v", err)
-		}
-
-		// Ensure it's an NS record
-		if rr.Header().Rrtype != dns.TypeNS {
-			log.Fatalf("Error: Record must be an NS record (got %s)", dns.TypeToString[rr.Header().Rrtype])
-		}
-
-		// Ensure the owner matches the zone
-		if dns.Fqdn(rr.Header().Name) != dns.Fqdn(tdns.Globals.Zonename) {
-			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
-		}
-
-		force, _ := cmd.Flags().GetBool("force")
-		req := tdns.AgentMgmtPost{
-			Command: "add-ns",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
-			RRs:     []string{rr.String()},
-		}
-		if force {
-			req.Data = map[string]interface{}{"force": true}
-		}
-
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		fmt.Printf("Successfully added NS record to zone %s\n", tdns.Globals.Zonename)
-		fmt.Printf("  Record: %s\n", rr.String())
-		if amr.Msg != "" {
-			fmt.Printf("  %s\n", amr.Msg)
-		}
-	},
-}
-
-var DebugAgentDelNsCmd = &cobra.Command{
-	Use:   "del-ns",
-	Short: "Delete an NS record from a zone and sync with peers and combiner",
-	Long: `Delete an NS record from the specified zone. This will:
-- Remove the NS record from the local synced data store
-- Send sync operations to all remote agents for this zone
-- Send the update to the combiner
-
-Example:
-  tdns-cliv2 agent debug del-ns --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-
-		if dnsRecord == "" {
-			log.Fatalf("Error: --rr flag is required")
-		}
-
-		// Parse and validate the RR
-		rr, err := dns.NewRR(dnsRecord)
-		if err != nil {
-			log.Fatalf("Error: Invalid DNS record: %v", err)
-		}
-
-		// Ensure it's an NS record
-		if rr.Header().Rrtype != dns.TypeNS {
-			log.Fatalf("Error: Record must be an NS record (got %s)", dns.TypeToString[rr.Header().Rrtype])
-		}
-
-		// Ensure the owner matches the zone
-		if dns.Fqdn(rr.Header().Name) != dns.Fqdn(tdns.Globals.Zonename) {
-			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
-		}
-
-		force, _ := cmd.Flags().GetBool("force")
-		req := tdns.AgentMgmtPost{
-			Command: "del-ns",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
-			RRs:     []string{rr.String()},
-		}
-		if force {
-			req.Data = map[string]interface{}{"force": true}
-		}
-
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		fmt.Printf("Successfully removed NS record from zone %s\n", tdns.Globals.Zonename)
-		fmt.Printf("  Record: %s\n", rr.String())
-		if amr.Msg != "" {
-			fmt.Printf("  %s\n", amr.Msg)
-		}
-	},
-}
-
 var DebugAgentResyncCmd = &cobra.Command{
 	Use:   "resync",
 	Short: "Re-send all local changes to combiner and remote agents",
@@ -1088,8 +968,6 @@ func init() {
 	DebugAgentCmd.AddCommand(DebugAgentSyncStateCmd)
 	DebugAgentCmd.AddCommand(DebugAgentSendToCombinerCmd)
 	DebugAgentCmd.AddCommand(DebugAgentTestChainCmd)
-	DebugAgentCmd.AddCommand(DebugAgentAddNsCmd)
-	DebugAgentCmd.AddCommand(DebugAgentDelNsCmd)
 	DebugAgentCmd.AddCommand(DebugAgentResyncCmd)
 	DebugAgentCmd.AddCommand(DebugAgentQueueStatusCmd)
 
@@ -1115,11 +993,6 @@ func init() {
 	DebugAgentSendToCombinerCmd.Flags().String("rr", "", "DNS record to send")
 	DebugAgentTestChainCmd.Flags().String("scenario", "add", "Test scenario (add|update|delete)")
 	DebugAgentTestChainCmd.Flags().String("rr", "", "DNS record for test")
-	DebugAgentAddNsCmd.Flags().StringVarP(&dnsRecord, "rr", "", "", "NS record to add")
-	DebugAgentAddNsCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
-	DebugAgentDelNsCmd.Flags().StringVarP(&dnsRecord, "rr", "", "", "NS record to delete")
-	DebugAgentDelNsCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
-
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")
 }

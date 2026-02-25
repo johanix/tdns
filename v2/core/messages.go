@@ -13,7 +13,8 @@ type AgentMsg string
 const (
 	AgentMsgHello    AgentMsg = "hello"
 	AgentMsgBeat     AgentMsg = "beat"
-	AgentMsgNotify   AgentMsg = "sync" // sync/notify: agent notifies about a change in zone data
+	AgentMsgNotify   AgentMsg = "sync"   // sync: agent→agent zone data synchronization
+	AgentMsgUpdate   AgentMsg = "update" // update: agent→combiner zone data contribution
 	AgentMsgRfi      AgentMsg = "rfi"
 	AgentMsgStatus   AgentMsg = "status"
 	AgentMsgPing     AgentMsg = "ping"
@@ -24,6 +25,7 @@ var AgentMsgToString = map[AgentMsg]string{
 	AgentMsgHello:    "HELLO",
 	AgentMsgBeat:     "BEAT",
 	AgentMsgNotify:   "SYNC",
+	AgentMsgUpdate:   "UPDATE",
 	AgentMsgRfi:      "RFI",
 	AgentMsgStatus:   "STATUS",
 	AgentMsgPing:     "PING",
@@ -78,10 +80,10 @@ type AgentBeatResponse struct {
 	ErrorMsg     string
 }
 
-// AgentMsgPost represents a generic agent-to-agent message (sync, rfi, status).
+// AgentMsgPost represents a generic agent message (sync, update, rfi, status).
 // Used by both API and DNS transports.
 type AgentMsgPost struct {
-	MessageType  AgentMsg            // "sync", "rfi", "status"
+	MessageType  AgentMsg            // "sync", "update", "rfi", "status"
 	MyIdentity   string              // Sender's identity
 	YourIdentity string              // Recipient's identity
 	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead

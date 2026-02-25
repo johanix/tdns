@@ -161,7 +161,7 @@ func (ms *MessageStats) RecordMessageSent(msgType string) {
 		ms.HelloSent++
 	case "beat":
 		ms.BeatSent++
-	case "sync":
+	case "sync", "update":
 		ms.SyncSent++
 	case "ping":
 		ms.PingSent++
@@ -181,7 +181,7 @@ func (ms *MessageStats) RecordMessageReceived(msgType string) {
 		ms.HelloReceived++
 	case "beat":
 		ms.BeatReceived++
-	case "sync":
+	case "sync", "update":
 		ms.SyncReceived++
 	case "ping":
 		ms.PingReceived++

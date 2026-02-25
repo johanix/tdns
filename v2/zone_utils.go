@@ -110,6 +110,10 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	case dns.RcodeRefused, dns.RcodeServerFailure, dns.RcodeNameError:
 		return false, 0, nil // never mind
 	case dns.RcodeSuccess:
+		if len(r.Answer) == 0 {
+			log.Printf("DoTransfer: zone %s: NOERROR but empty answer section from %s", zd.ZoneName, upstream)
+			return false, 0, nil
+		}
 		if soa, ok := r.Answer[0].(*dns.SOA); ok {
 			// log.Printf("UpstreamSOA: %v", soa.String())
 			if soa.Serial <= zd.IncomingSerial {
@@ -193,6 +197,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		// For multi-provider zones, also compute local DNSKEY adds/removes
 		// (must be done before zone data swap below)
 		if keyschanged && zd.Options[OptMultiProvider] {
+			// On the agent, populate RemoteDNSKEYs from ZoneDataRepo so that
+			// LocalDnskeysChanged can filter out remote keys correctly.
+			if Globals.App.Type == AppTypeAgent {
+				zd.PopulateRemoteDNSKEYsFromRepo()
+			}
 			_, dskeyStatus, err = zd.LocalDnskeysChanged(&new_zd)
 			if err != nil {
 				zd.Logger.Printf("Error from LocalDnskeysChanged(%s): %v", zd.ZoneName, err)
@@ -358,6 +367,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		}
 		// For multi-provider zones, compute local DNSKEY adds/removes before zone swap
 		if dnskeyschanged && zd.Options[OptMultiProvider] {
+			// On the agent, populate RemoteDNSKEYs from ZoneDataRepo so that
+			// LocalDnskeysChanged can filter out remote keys correctly.
+			if Globals.App.Type == AppTypeAgent {
+				zd.PopulateRemoteDNSKEYsFromRepo()
+			}
 			_, dskeyStatusUpstream, err = zd.LocalDnskeysChanged(&new_zd)
 			if err != nil {
 				zd.Logger.Printf("Error from LocalDnskeysChanged(%s): %v", zd.ZoneName, err)

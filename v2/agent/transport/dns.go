@@ -136,7 +136,7 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 
 	t := &DNSTransport{
 		LocalID:                    cfg.LocalID,
-		ControlZone:                ensureFQDN(cfg.ControlZone),
+		ControlZone:                dns.Fqdn(cfg.ControlZone),
 		ListenAddr:                 cfg.ListenAddr,
 		Timeout:                    timeout,
 		DNSClient:                  &dns.Client{Timeout: timeout, Net: "udp"},
@@ -178,17 +178,6 @@ func GenerateDistributionID() string {
 	return fmt.Sprintf("%08x", uint32(distributionEpoch+int64(n-1)))
 }
 
-// ensureFQDN ensures a domain name ends with a dot.
-func ensureFQDN(name string) string {
-	if name == "" {
-		return name
-	}
-	if name[len(name)-1] != '.' {
-		return name + "."
-	}
-	return name
-}
-
 // buildNotifyQNAME constructs a NOTIFY QNAME from distribution ID and control zone.
 // NOTIFY qname = {distid}.{sender} e.g. "69812b15.agent.alpha.dnslab."
 func (t *DNSTransport) buildNotifyQNAME(distributionID string) string {
@@ -198,9 +187,9 @@ func (t *DNSTransport) buildNotifyQNAME(distributionID string) string {
 // buildChunkQueryQname constructs the CHUNK query/store qname: {receiver}.{distid}.{sender}.
 // Used when chunk_mode=query: sender stores under this key; receiver fetches with this qname.
 func buildChunkQueryQname(receiverID, distID, senderID string) string {
-	r := strings.TrimSuffix(ensureFQDN(receiverID), ".")
-	s := strings.TrimSuffix(ensureFQDN(senderID), ".")
-	return ensureFQDN(r + "." + distID + "." + s)
+	r := strings.TrimSuffix(dns.Fqdn(receiverID), ".")
+	s := strings.TrimSuffix(dns.Fqdn(senderID), ".")
+	return dns.Fqdn(r + "." + distID + "." + s)
 }
 
 // Hello sends a hello handshake request to a peer via DNS.
@@ -328,10 +317,10 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	}
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create sync payload using typed struct from core package
+	// Create payload using typed struct from core package
 	messageType := core.AgentMsg(req.MessageType)
 	if messageType == "" {
-		messageType = core.AgentMsgNotify // backward compat safety net
+		messageType = core.AgentMsgNotify // default to sync
 	}
 	payload := &core.AgentMsgPost{
 		MessageType:  messageType,
@@ -346,11 +335,15 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, NewTransportError("DNS", "Sync", peer.ID,
-			fmt.Errorf("failed to marshal sync payload: %w", err), false)
+			fmt.Errorf("failed to marshal payload: %w", err), false)
 	}
 
-	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "sync", distributionID, payloadJSON, false)
+	// Create and send NOTIFY(CHUNK) — opType reflects actual message type (sync, update, rfi)
+	opType := req.MessageType
+	if opType == "" {
+		opType = "sync"
+	}
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, opType, distributionID, payloadJSON, false)
 	if err != nil {
 		return nil, err
 	}

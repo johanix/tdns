@@ -167,6 +167,43 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 	return local
 }
 
+// PopulateRemoteDNSKEYsFromRepo collects DNSKEY RRs from remote agents in the
+// ZoneDataRepo and stores them in zd.RemoteDNSKEYs. This is needed on the agent
+// side so that LocalDnskeysChanged can correctly filter out remote keys.
+// On the signer side, RemoteDNSKEYs is populated by extractRemoteDNSKEYs (sign.go).
+func (zd *ZoneData) PopulateRemoteDNSKEYsFromRepo() {
+	zdr := Conf.Internal.ZoneDataRepo
+	if zdr == nil {
+		return
+	}
+	localAgent := string(Globals.AgentId)
+	zone := ZoneName(zd.ZoneName)
+	agentRepo, ok := zdr.Get(zone)
+	if !ok {
+		return
+	}
+
+	var remoteKeys []dns.RR
+	for agentId, od := range agentRepo.Data.Items() {
+		// Skip our own agent — those are local keys
+		if string(agentId) == localAgent {
+			continue
+		}
+		dnskeyRRset, exists := od.RRtypes.Get(dns.TypeDNSKEY)
+		if !exists {
+			continue
+		}
+		for _, rr := range dnskeyRRset.RRs {
+			remoteKeys = append(remoteKeys, dns.Copy(rr))
+		}
+	}
+
+	zd.RemoteDNSKEYs = remoteKeys
+	if len(remoteKeys) > 0 {
+		zd.Logger.Printf("PopulateRemoteDNSKEYsFromRepo: zone %s: %d remote DNSKEYs from ZoneDataRepo", zd.ZoneName, len(remoteKeys))
+	}
+}
+
 // bool=true if the HSYNC RRset exists and is valid, false otherwise
 // error is non-nil for errors other than the HSYNC RRset not existing
 func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
@@ -217,8 +254,8 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 	if Globals.App.Type == AppTypeAuth && Conf.MultiProvider != nil {
 		if Conf.MultiProvider.HsyncIdentity != "" {
 			ourIdentity = dns.Fqdn(Conf.MultiProvider.HsyncIdentity)
-		} else if Conf.MultiProvider.Agent != nil && Conf.MultiProvider.Agent.Identity != "" {
-			ourIdentity = dns.Fqdn(Conf.MultiProvider.Agent.Identity)
+		} else if len(Conf.MultiProvider.Agents) > 0 && Conf.MultiProvider.Agents[0].Identity != "" {
+			ourIdentity = dns.Fqdn(Conf.MultiProvider.Agents[0].Identity)
 		}
 	}
 

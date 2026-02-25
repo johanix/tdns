@@ -103,9 +103,9 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		return fmt.Errorf("failed to parse combiner public key from %s: %w", conf.Agent.Combiner.LongTermJosePubKey, err)
 	}
 
-	// Register combiner's public key for encryption
+	// Register combiner's public key for encryption and signature verification
 	payloadCrypto.AddPeerKey(string(combinerID), combinerPubKey)
-	payloadCrypto.PeerVerificationKeys[string(combinerID)] = combinerPubKey // Also add for signature verification
+	payloadCrypto.AddPeerVerificationKey(string(combinerID), combinerPubKey)
 
 	log.Printf("InitializeCombinerAsPeer: Loaded combiner public key from %s", conf.Agent.Combiner.LongTermJosePubKey)
 

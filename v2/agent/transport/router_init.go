@@ -53,6 +53,9 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 
 	log.Printf("InitializeRouter: Registering handlers and middleware")
 
+	// Register default handler for unregistered message types
+	router.SetDefaultHandler(DefaultUnsupportedHandler)
+
 	// Register global middleware (executed in order for all messages)
 	// Order matters: outer middleware wraps inner middleware
 
@@ -87,10 +90,10 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	router.Use(NewLoggingMiddleware(true))
 	log.Printf("InitializeRouter: Registered logging middleware")
 
-	// 5. Route to hsyncengine (after processing)
+	// 5. Route to message handler goroutine (after processing)
 	if cfg.IncomingChan != nil {
-		router.Use(RouteToHsyncEngine(cfg.IncomingChan))
-		log.Printf("InitializeRouter: Registered hsyncengine routing middleware")
+		router.Use(RouteToMsgHandler(cfg.IncomingChan))
+		log.Printf("InitializeRouter: Registered message handler routing middleware")
 	}
 
 	// Register message handlers (by message type)
@@ -198,14 +201,18 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 }
 
 // CombinerRouterConfig holds configuration for combiner router initialization.
-// The combiner processes messages synchronously (no IncomingChan/RouteToHsyncEngine)
-// and only handles 3 message types: ping, beat, sync.
+// Handles 3 message types: ping, beat, update.
+// Beat, hello, and update are routed to CombinerMsgHandler via IncomingChan.
 type CombinerRouterConfig struct {
 	// Authorizer for authorization middleware (optional).
 	// If nil, authorization middleware is skipped.
 	Authorizer interface {
 		IsPeerAuthorized(senderID string, zone string) (bool, string)
 	}
+
+	// PeerRegistry for statistics tracking (optional).
+	// If nil, StatsMiddleware is not registered.
+	PeerRegistry *PeerRegistry
 
 	// PayloadCrypto for signature verification and decryption middleware (optional).
 	// Obtain from SecurePayloadWrapper.GetCrypto().
@@ -214,23 +221,27 @@ type CombinerRouterConfig struct {
 	// AllowUnencrypted allows unencrypted payloads when crypto is enabled.
 	AllowUnencrypted bool
 
-	// HandleSync is a closure over CombinerChunkHandler.CombinerHandleSync.
-	// SYNC is not yet unified (deferred to Phase 6) because processing differs
-	// significantly between agent and combiner.
-	HandleSync MessageHandlerFunc
+	// HandleUpdate is a closure from NewCombinerSyncHandler (combiner_chunk.go).
+	// Handles "update" messages (agent→combiner zone data contributions).
+	HandleUpdate MessageHandlerFunc
+
+	// IncomingChan for routing messages to the handler goroutine.
+	// If nil, RouteToMsgHandler middleware is not registered.
+	IncomingChan chan<- *IncomingMessage
 }
 
 // InitializeCombinerRouter registers combiner-specific handlers and middleware.
-// The combiner uses the same router/middleware infrastructure as the agent but:
-//   - Only handles 3 message types (ping, beat, sync)
-//   - Processes messages synchronously (no RouteToHsyncEngine middleware)
-//   - Has no PeerRegistry for statistics (yet)
+// The combiner uses the same router/middleware infrastructure as the agent but
+// only handles 3 message types (ping, beat, update).
 func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfig) error {
 	if router == nil {
 		return nil
 	}
 
 	log.Printf("InitializeCombinerRouter: Registering combiner handlers and middleware")
+
+	// Register default handler for unregistered message types
+	router.SetDefaultHandler(DefaultUnsupportedHandler)
 
 	// 1. Authorization (outermost — prevents unauthorized access)
 	if cfg.Authorizer != nil {
@@ -248,11 +259,24 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		log.Printf("InitializeCombinerRouter: Registered signature middleware")
 	}
 
-	// 3. Logging
+	// 3. Statistics tracking (after authentication, before processing)
+	if cfg.PeerRegistry != nil {
+		statsCfg := &StatsMiddlewareConfig{
+			PeerRegistry: cfg.PeerRegistry,
+		}
+		router.Use(NewStatsMiddleware(statsCfg))
+		log.Printf("InitializeCombinerRouter: Registered statistics middleware")
+	}
+
+	// 4. Logging
 	router.Use(NewLoggingMiddleware(true))
 	log.Printf("InitializeCombinerRouter: Registered logging middleware")
 
-	// No RouteToHsyncEngine — combiner processes messages synchronously
+	// 5. Route to message handler goroutine (after processing)
+	if cfg.IncomingChan != nil {
+		router.Use(RouteToMsgHandler(cfg.IncomingChan))
+		log.Printf("InitializeCombinerRouter: Registered message handler routing middleware")
+	}
 
 	// Register shared handlers for ping and beat (same implementation as agent)
 	if err := router.Register(
@@ -275,15 +299,15 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		return err
 	}
 
-	// Register combiner-specific sync handler (not yet unified — Phase 6)
+	// Register combiner-specific update handler (agent→combiner zone contributions)
 	handlerCount := 2
-	if cfg.HandleSync != nil {
+	if cfg.HandleUpdate != nil {
 		if err := router.Register(
-			"CombinerSyncHandler",
-			MessageType("sync"),
-			cfg.HandleSync,
+			"CombinerUpdateHandler",
+			MessageType("update"),
+			cfg.HandleUpdate,
 			WithPriority(100),
-			WithDescription("Combiner: processes zone synchronization messages"),
+			WithDescription("Combiner: processes zone update contributions from agents"),
 		); err != nil {
 			return err
 		}
@@ -297,20 +321,32 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 }
 
 // SignerRouterConfig holds configuration for signer (tdns-auth) router initialization.
-// The signer processes messages synchronously and handles ping + keystate.
+// Handles ping + keystate. Beat messages are routed to SignerMsgHandler via IncomingChan.
 type SignerRouterConfig struct {
+	// Authorizer for authorization middleware (optional).
+	// If nil, authorization middleware is skipped.
+	Authorizer interface {
+		IsPeerAuthorized(senderID string, zone string) (bool, string)
+	}
+
+	// PeerRegistry for statistics tracking (optional).
+	// If nil, StatsMiddleware is not registered.
+	PeerRegistry *PeerRegistry
+
 	// PayloadCrypto for signature verification and decryption middleware (optional).
 	PayloadCrypto *PayloadCrypto
 
 	// AllowUnencrypted allows unencrypted payloads when crypto is enabled.
 	AllowUnencrypted bool
+
+	// IncomingChan for routing messages to the handler goroutine.
+	// If nil, RouteToMsgHandler middleware is not registered.
+	IncomingChan chan<- *IncomingMessage
 }
 
 // InitializeSignerRouter registers signer-specific handlers and middleware.
-// The signer (tdns-auth) uses the same router/middleware infrastructure as agent/combiner but:
-//   - Handles ping and keystate
-//   - Processes messages synchronously (no RouteToHsyncEngine)
-//   - No PeerRegistry for statistics (yet)
+// The signer (tdns-auth) uses the same router/middleware infrastructure as agent/combiner
+// but only handles ping and keystate.
 func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) error {
 	if router == nil {
 		return nil
@@ -318,7 +354,16 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 
 	log.Printf("InitializeSignerRouter: Registering signer handlers and middleware")
 
-	// 1. Signature verification (authenticates sender)
+	// Register default handler for unregistered message types
+	router.SetDefaultHandler(DefaultUnsupportedHandler)
+
+	// 1. Authorization (outermost — prevents unauthorized access)
+	if cfg.Authorizer != nil {
+		router.Use(NewAuthorizationMiddleware(cfg.Authorizer))
+		log.Printf("InitializeSignerRouter: Registered authorization middleware")
+	}
+
+	// 2. Signature verification (authenticates sender)
 	if cfg.PayloadCrypto != nil && cfg.PayloadCrypto.Enabled {
 		cryptoCfg := &CryptoMiddlewareConfig{
 			PayloadCrypto:    cfg.PayloadCrypto,
@@ -328,9 +373,24 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		log.Printf("InitializeSignerRouter: Registered signature middleware")
 	}
 
-	// 2. Logging
+	// 3. Statistics tracking (after authentication, before processing)
+	if cfg.PeerRegistry != nil {
+		statsCfg := &StatsMiddlewareConfig{
+			PeerRegistry: cfg.PeerRegistry,
+		}
+		router.Use(NewStatsMiddleware(statsCfg))
+		log.Printf("InitializeSignerRouter: Registered statistics middleware")
+	}
+
+	// 4. Logging
 	router.Use(NewLoggingMiddleware(true))
 	log.Printf("InitializeSignerRouter: Registered logging middleware")
+
+	// 5. Route to message handler goroutine (after processing)
+	if cfg.IncomingChan != nil {
+		router.Use(RouteToMsgHandler(cfg.IncomingChan))
+		log.Printf("InitializeSignerRouter: Registered message handler routing middleware")
+	}
 
 	// Register ping handler (shared implementation with agent/combiner)
 	if err := router.Register(
@@ -361,7 +421,7 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 }
 
 // DetermineMessageType parses the payload to determine the message type.
-// Reads the "MessageType" field (e.g. "sync", "beat", "ping").
+// Reads the "MessageType" field (e.g. "sync", "update", "beat", "ping").
 func DetermineMessageType(payload []byte) MessageType {
 	var fields struct {
 		MessageType string `json:"MessageType"`
@@ -377,6 +437,8 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("beat")
 	case "sync":
 		return MessageType("sync")
+	case "update":
+		return MessageType("update")
 	case "ping":
 		return MessageType("ping")
 	case "confirm":

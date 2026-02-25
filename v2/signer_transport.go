@@ -13,28 +13,11 @@ import (
 	"log"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
 )
-
-// RegisterSignerChunkHandler registers a CHUNK NOTIFY handler for the signer (tdns-auth).
-// Reuses CombinerChunkHandler as the dispatch shell (Router + CreateNotifyHandlerFunc).
-// The signer does not use ProcessUpdate — it only routes messages to the signer router
-// which handles ping (Phase 3) and KEYSTATE (Phase 4).
-func RegisterSignerChunkHandler(localID string, router *transport.DNSMessageRouter) (*CombinerChunkHandler, error) {
-	handler := &CombinerChunkHandler{
-		RequestChan:  make(chan *CombinerSyncRequestPlus, 10),
-		LocalID:      localID,
-		Router:       router,
-		ErrorJournal: NewErrorJournal(100, 24*time.Hour),
-	}
-	log.Printf("RegisterSignerChunkHandler: Registering CHUNK handler for signer %s", localID)
-	return handler, RegisterNotifyHandler(core.TypeCHUNK, handler.CreateNotifyHandlerFunc())
-}
 
 // initSignerCrypto initializes PayloadCrypto for the signer from MultiProviderConf.
 // Loads the signer's JOSE private key and the agent's public key (if configured).
@@ -84,31 +67,34 @@ func initSignerCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	pc.SetLocalKeys(privKey, pubKey)
 	log.Printf("initSignerCrypto: Loaded signer JOSE key from %s", privKeyPath)
 
-	// Load agent's public key if configured
-	if mp.Agent != nil && strings.TrimSpace(mp.Agent.LongTermJosePubKey) != "" {
-		agentPubKeyPath := strings.TrimSpace(mp.Agent.LongTermJosePubKey)
+	// Load public keys for all configured agents
+	for i, agentConf := range mp.Agents {
+		if agentConf == nil || strings.TrimSpace(agentConf.LongTermJosePubKey) == "" {
+			continue
+		}
+		agentPubKeyPath := strings.TrimSpace(agentConf.LongTermJosePubKey)
 		agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				log.Printf("initSignerCrypto: agent public key file not found %q: %v (agent encryption disabled)", agentPubKeyPath, err)
+				log.Printf("initSignerCrypto: agent[%d] public key file not found %q: %v (agent encryption disabled)", i, agentPubKeyPath, err)
 			} else {
-				log.Printf("initSignerCrypto: failed to read agent public key %q: %v (agent encryption disabled)", agentPubKeyPath, err)
+				log.Printf("initSignerCrypto: failed to read agent[%d] public key %q: %v (agent encryption disabled)", i, agentPubKeyPath, err)
 			}
-		} else {
-			agentPubKeyData = StripKeyFileComments(agentPubKeyData)
-			agentPubKey, err := backend.ParsePublicKey(agentPubKeyData)
-			if err != nil {
-				log.Printf("initSignerCrypto: failed to parse agent public key: %v (agent encryption disabled)", err)
-			} else {
-				agentID := "agent"
-				if mp.Agent.Identity != "" {
-					agentID = mp.Agent.Identity
-				}
-				pc.AddPeerKey(agentID, agentPubKey)
-				pc.AddPeerVerificationKey(agentID, agentPubKey)
-				log.Printf("initSignerCrypto: Loaded agent public key from %s (peer: %s)", agentPubKeyPath, agentID)
-			}
+			continue
 		}
+		agentPubKeyData = StripKeyFileComments(agentPubKeyData)
+		agentPubKey, err := backend.ParsePublicKey(agentPubKeyData)
+		if err != nil {
+			log.Printf("initSignerCrypto: failed to parse agent[%d] public key: %v (agent encryption disabled)", i, err)
+			continue
+		}
+		agentID := agentConf.Identity
+		if agentID == "" {
+			agentID = fmt.Sprintf("agent-%d", i)
+		}
+		pc.AddPeerKey(agentID, agentPubKey)
+		pc.AddPeerVerificationKey(agentID, agentPubKey)
+		log.Printf("initSignerCrypto: Loaded agent public key from %s (peer: %s)", agentPubKeyPath, agentID)
 	}
 
 	return pc, nil

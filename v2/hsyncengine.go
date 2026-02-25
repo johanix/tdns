@@ -50,15 +50,15 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
-func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
+func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	ourId := AgentId(conf.Agent.Identity)
 
-	helloQ := agentQs.Hello
-	heartbeatQ := agentQs.Beat
-	msgQ := agentQs.Msg
-	commandQ := agentQs.Command
-	debugCommandQ := agentQs.DebugCommand
-	synchedDataUpdateQ := agentQs.SynchedDataUpdate
+	helloQ := msgQs.Hello
+	heartbeatQ := msgQs.Beat
+	msgQ := msgQs.Msg
+	commandQ := msgQs.Command
+	debugCommandQ := msgQs.DebugCommand
+	synchedDataUpdateQ := msgQs.SynchedDataUpdate
 	registry := conf.Internal.AgentRegistry
 	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
 
@@ -93,7 +93,7 @@ func HsyncEngine(ctx context.Context, conf *Config, agentQs *AgentQs) {
 			registry.HeartbeatHandler(msgReport)
 
 		case msgPost = <-msgQ:
-			registry.MsgHandler(msgPost, synchedDataUpdateQ, agentQs.SynchedDataCmd)
+			registry.MsgHandler(msgPost, synchedDataUpdateQ, msgQs.SynchedDataCmd)
 
 		case mgmtPost = <-commandQ:
 			registry.CommandHandler(mgmtPost, synchedDataUpdateQ)
@@ -251,11 +251,14 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 
 		// Feed into SynchedDataEngine as local data — same path as "agent zone addrr".
 		// SynchedDataEngine stores the data and distributes to remote agents.
+		// SkipCombiner: local DNSKEYs don't need to go to the combiner — the signer
+		// adds its own keys during signing. Only remote agents need our DNSKEY changes.
 		synchedDataUpdateQ <- &SynchedDataUpdate{
-			Zone:       req.ZoneName,
-			AgentId:    ourId,
-			UpdateType: "local",
-			Update:     zu,
+			Zone:         req.ZoneName,
+			AgentId:      ourId,
+			UpdateType:   "local",
+			Update:       zu,
+			SkipCombiner: true,
 		}
 
 	default:

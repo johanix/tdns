@@ -16,7 +16,7 @@ import (
 
 // TransactionPost represents a request to the transaction API
 type TransactionPost struct {
-	Command string `json:"command"` // "open-outgoing", "open-incoming", "errors", "error-details"
+	Command string `json:"command"`           // "open-outgoing", "open-incoming", "errors", "error-details"
 	Last    string `json:"last,omitempty"`    // Duration filter for errors (e.g. "30m", "2h")
 	DistID  string `json:"dist_id,omitempty"` // For error-details: specific distribution ID
 }
@@ -24,7 +24,7 @@ type TransactionPost struct {
 // TransactionSummary contains summary information about an open transaction
 type TransactionSummary struct {
 	DistributionID string `json:"distribution_id"`
-	Peer           string `json:"peer"`       // Receiver (outgoing) or Sender (incoming)
+	Peer           string `json:"peer"` // Receiver (outgoing) or Sender (incoming)
 	Operation      string `json:"operation"`
 	Zone           string `json:"zone,omitempty"`
 	Age            string `json:"age"`
@@ -179,10 +179,10 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 			}
 		}()
 
-		handler := conf.Internal.CombinerHandler
-		if handler == nil || handler.ErrorJournal == nil {
+		combinerState := conf.Internal.CombinerState
+		if combinerState == nil || combinerState.ErrorJournal == nil {
 			resp.Error = true
-			resp.ErrorMsg = "Combiner handler or error journal not configured"
+			resp.ErrorMsg = "Combiner state or error journal not configured"
 			return
 		}
 
@@ -195,7 +195,7 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 				return
 			}
 
-			entries := handler.ErrorJournal.ListSince(duration)
+			entries := combinerState.ErrorJournal.ListSince(duration)
 			now := time.Now()
 
 			var errors []*TransactionErrorSummary
@@ -220,7 +220,7 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 				return
 			}
 
-			entry, found := handler.ErrorJournal.LookupByDistID(req.DistID)
+			entry, found := combinerState.ErrorJournal.LookupByDistID(req.DistID)
 			if !found {
 				resp.Msg = fmt.Sprintf("No error record for distID %s (which itself is diagnostic — the transaction may have succeeded or never arrived)", req.DistID)
 				return

@@ -225,7 +225,7 @@ type AgentHelloResponse struct {
 // We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
-	MessageType    AgentMsg // "sync", "rfi", "status"
+	MessageType    AgentMsg // "sync", "update", "rfi", "status"
 	MyIdentity     AgentId
 	YourIdentity   AgentId
 	Addresses      []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead

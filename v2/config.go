@@ -91,8 +91,9 @@ type MultiProviderConf struct {
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK) to agent.
 	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
-	// Agent: the local agent peer (address, JOSE public key, optional API URL).
-	Agent *PeerConf `yaml:"agent"`
+	// Agents: the local agent peers (address, JOSE public key, optional API URL).
+	// Supports multiple agents for load distribution and fault isolation.
+	Agents []*PeerConf `yaml:"agents"`
 }
 
 type AppDetails struct {
@@ -410,27 +411,27 @@ type InternalConf struct {
 	AuthQueryQ          chan AuthQueryRequest
 	ResignQ             chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ               chan SyncRequest
-	AgentQs             *AgentQs // aggregated channels for agent communication
+	MsgQs               *MsgQs // aggregated channels for agent communication
 	SyncStatusQ         chan SyncStatus
 	AgentRegistry       *AgentRegistry
 	ZoneDataRepo        *ZoneDataRepo
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	KdcDB               interface{}           // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf             interface{}           // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB               interface{}           // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf             interface{}           // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner             *Scanner              // Scanner instance for async job tracking
-	CombinerHandler     *CombinerChunkHandler // CHUNK-based combiner handler
-	CombinerTransport   *CombinerTransport    // Outbound transport for combiner → agent communication; nil if not combiner
-	TransportManager    *TransportManager     // Multi-transport (API + DNS) for agent; nil if not agent or DNS mode disabled
-	ChunkPayloadStore   ChunkPayloadStore     // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	DistributionCache   *DistributionCache    // In-memory cache of distributions (agent/combiner)
+	KdcDB               interface{}        // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf             interface{}        // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB               interface{}        // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf             interface{}        // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner             *Scanner           // Scanner instance for async job tracking
+	CombinerState       *CombinerState     // Combiner business logic state (error journal, protected namespaces)
+	TransportManager    *TransportManager  // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
+	ChunkPayloadStore   ChunkPayloadStore  // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	DistributionCache   *DistributionCache // In-memory cache of distributions (agent/combiner)
 }
 
-type AgentQs struct {
+type MsgQs struct {
 	Hello chan *AgentMsgReport // incoming /hello from other agents
 	Beat  chan *AgentMsgReport // incoming /beat from other agents
+	Ping  chan *AgentMsgReport // incoming /ping from other agents
 	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
 	Msg               chan *AgentMsgPostPlus   // incoming /msg from other agents
 	Command           chan *AgentMgmtPostPlus  // local commands TO the agent, usually for passing on to other agents

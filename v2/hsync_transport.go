@@ -55,8 +55,8 @@ type TransportManager struct {
 	// AgentRegistry for integration with existing code
 	agentRegistry *AgentRegistry
 
-	// AgentQs for routing messages to hsyncengine
-	agentQs *AgentQs
+	// MsgQs for routing messages to hsyncengine
+	msgQs *MsgQs
 
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
@@ -76,6 +76,18 @@ type TransportManager struct {
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
 	pendingDnskeyPropagations map[string]*PendingDnskeyPropagation
 	dnskeyPropMu              sync.Mutex
+
+	// authorizedPeers returns the list of peer identities authorized via config.
+	// Injected at config time; role-specific (each role provides its own list).
+	authorizedPeers func() []string
+
+	// messageRetention returns retention seconds for a given message type.
+	// Used by distribution cache for expiration. If nil, default retention is used.
+	messageRetention func(operation string) int
+
+	// getImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
+	// Uses a closure because ImrEngine starts asynchronously after TM creation.
+	getImrEngine func() *Imr
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -85,7 +97,7 @@ type TransportManagerConfig struct {
 	APITimeout    time.Duration
 	DNSTimeout    time.Duration
 	AgentRegistry *AgentRegistry
-	AgentQs       *AgentQs
+	MsgQs         *MsgQs
 	// ChunkMode: "edns0" or "query"; when "query", agent stores payload and sends NOTIFY without EDNS0; receiver fetches via CHUNK query
 	ChunkMode         string
 	ChunkPayloadStore ChunkPayloadStore
@@ -112,6 +124,20 @@ type TransportManagerConfig struct {
 	SignerID string
 	// SignerAddress is the DNS address (host:port) of the local signer.
 	SignerAddress string
+
+	// AuthorizedPeers returns the list of peer identities authorized via config.
+	// Called at runtime during authorization. Each role provides its own implementation.
+	// If nil, only HSYNC-based and LEGACY-based authorization is used.
+	AuthorizedPeers func() []string
+
+	// MessageRetention returns retention seconds for a given message type (operation).
+	// Used by distribution cache for expiration. If nil, default retention is used.
+	MessageRetention func(operation string) int
+
+	// GetImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
+	// Uses a closure because ImrEngine starts asynchronously after TM creation.
+	// Only the agent needs this; combiner/signer/external apps pass nil.
+	GetImrEngine func() *Imr
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -130,18 +156,23 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		PeerRegistry:              transport.NewPeerRegistry(),
 		Router:                    transport.NewDNSMessageRouter(),
 		agentRegistry:             cfg.AgentRegistry,
-		agentQs:                   cfg.AgentQs,
+		msgQs:                     cfg.MsgQs,
 		SupportedMechanisms:       supportedMechanisms,
 		combinerID:                AgentId(cfg.CombinerID),
 		signerID:                  cfg.SignerID,
 		signerAddress:             cfg.SignerAddress,
 		pendingDnskeyPropagations: make(map[string]*PendingDnskeyPropagation),
+		authorizedPeers:           cfg.AuthorizedPeers,
+		messageRetention:          cfg.MessageRetention,
+		getImrEngine:              cfg.GetImrEngine,
 	}
 
-	// Create reliable message queue for outgoing sync messages
-	tm.reliableQueue = NewReliableMessageQueue(&ReliableMessageQueueConfig{
-		AgentRegistry: cfg.AgentRegistry,
-	})
+	// Create reliable message queue for outgoing sync messages (agent only — requires AgentRegistry)
+	if cfg.AgentRegistry != nil {
+		tm.reliableQueue = NewReliableMessageQueue(&ReliableMessageQueueConfig{
+			AgentRegistry: cfg.AgentRegistry,
+		})
+	}
 
 	// Always create API client transport — it's a pure HTTP client with no server-side
 	// implications. An agent that only serves DNS can still act as an API client to
@@ -177,10 +208,9 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				// Calculate expiration time based on message type (operation)
 				// Use config retention times with sensible defaults
 				var retentionSecs int
-				if Conf.Agent != nil {
-					retentionSecs = Conf.Agent.Dns.MessageRetention.GetRetentionForMessageType(operation)
+				if tm.messageRetention != nil {
+					retentionSecs = tm.messageRetention(operation)
 				} else {
-					// Signer (tdns-auth) has no Agent config — use default retention
 					var m MessageRetentionConf
 					retentionSecs = m.GetRetentionForMessageType(operation)
 				}
@@ -242,7 +272,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			tm.ProcessDnskeyConfirmation(distributionID, senderID, status.String(), rejItems)
 
 			// Forward per-RR detail to SynchedDataEngine
-			if tm.agentQs != nil && tm.agentQs.Confirmation != nil {
+			if tm.msgQs != nil && tm.msgQs.Confirmation != nil {
 				detail := &ConfirmationDetail{
 					DistributionID: distributionID,
 					Zone:           ZoneName(zone),
@@ -255,7 +285,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 					Timestamp:      time.Now(),
 				}
 				select {
-				case tm.agentQs.Confirmation <- detail:
+				case tm.msgQs.Confirmation <- detail:
 				default:
 					log.Printf("TransportManager: Confirmation channel full, dropping detail for %s", distributionID)
 				}
@@ -265,8 +295,8 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		// Wire remote confirmation callback (two-phase protocol: Phase 7).
 		// When this agent's combiner confirms a sync that originated from another agent,
 		// send the final confirmation NOTIFY back to the originating agent.
-		if tm.agentQs != nil {
-			tm.agentQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
+		if tm.msgQs != nil {
+			tm.msgQs.OnRemoteConfirmationReady = func(detail *RemoteConfirmationDetail) {
 				go tm.sendRemoteConfirmation(detail)
 			}
 		}
@@ -375,7 +405,9 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeHelloMessage(msg)
 	case "beat":
 		tm.routeBeatMessage(msg)
-	case "sync", "rfi":
+	case "ping":
+		tm.routePingMessage(msg)
+	case "sync", "update", "rfi":
 		tm.routeSyncMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
@@ -392,23 +424,10 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 		return
 	}
 
-	// DNS-38: Authorization check BEFORE routing to hsyncengine
-	// This prevents discovery amplification attacks by rejecting unauthorized senders
-	// Use helper method to get zones from either old or new format
-	sharedZones := payload.GetSharedZones()
-	var zone string
-	if len(sharedZones) > 0 {
-		zone = sharedZones[0] // Use first shared zone for HSYNC check
-	}
-	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
-	authorized, reason := tm.IsPeerAuthorized(senderID, zone)
-	if !authorized {
-		log.Printf("TransportManager: REJECTED DNS hello from %s: %s", senderID, reason)
-		// Security audit log - this may indicate attack attempt
-		log.Printf("TransportManager: Security: Unauthorized Hello attempt from %s (zone: %q)", senderID, zone)
-		return
-	}
-	log.Printf("TransportManager: DNS hello from %s authorized: %s", senderID, reason)
+	// Authorization already verified by AuthorizationMiddleware in the router.
+	// Messages reaching routeHelloMessage have passed middleware auth.
+	senderID := payload.GetSenderID()
+	log.Printf("TransportManager: Processing authorized DNS hello from %s", senderID)
 
 	// DNS-37: Update PeerRegistry state (DNS hello accepted → INTRODUCING state)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -460,13 +479,13 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 		DistributionID: msg.DistributionID,
 	}
 
-	if tm.agentQs == nil {
+	if tm.msgQs == nil {
 		log.Printf("TransportManager: Hello from %s authorized but no agent queues (signer mode), ignoring", senderID)
 		return
 	}
 
 	select {
-	case tm.agentQs.Hello <- report:
+	case tm.msgQs.Hello <- report:
 		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING, distrib=%s)", senderID, msg.DistributionID)
 	default:
 		log.Printf("TransportManager: Hello channel full, dropping message from %s", senderID)
@@ -485,47 +504,9 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 
 	// DNS-51: Authorization check for Beat messages
 	// Beat includes Zones field (list of zones sender believes are shared)
-	// Authorization succeeds if:
-	// 1. Sender in authorized_peers config, OR
-	// 2. Sender in HSYNC for any zone in Zones list, OR
-	// 3. Zones list empty AND sender previously authorized (agent in OPERATIONAL state)
-
-	var authorized bool
-	var reason string
-
-	// Try config path first (works for all cases)
-	if tm.isInAuthorizedPeers(senderID) {
-		authorized = true
-		reason = "found in agent.authorized_peers"
-	} else if tm.isConfiguredPeer(senderID) {
-		authorized = true
-		reason = "authorized via configured peer relationship"
-	} else if len(payload.Zones) > 0 {
-		// Try HSYNC path for each zone in the Beat
-		for _, zone := range payload.Zones {
-			if auth, rsn := tm.IsPeerAuthorized(senderID, zone); auth {
-				authorized = true
-				reason = rsn
-				break
-			}
-		}
-	} else {
-		// Empty zone list - check if agent exists and was previously authorized
-		if tm.agentRegistry != nil {
-			agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
-			if exists && agent.State == AgentStateOperational {
-				authorized = true
-				reason = "previously authorized agent (OPERATIONAL state, empty zone list)"
-			}
-		}
-	}
-
-	if !authorized {
-		log.Printf("TransportManager: REJECTED DNS beat from %s: not authorized (zones: %v)", senderID, payload.Zones)
-		log.Printf("TransportManager: Security: Unauthorized Beat attempt from %s", senderID)
-		return
-	}
-	log.Printf("TransportManager: DNS beat from %s authorized: %s (zones: %v)", senderID, reason, payload.Zones)
+	// Authorization already verified by AuthorizationMiddleware in the router.
+	// Messages reaching routeBeatMessage have passed middleware auth.
+	log.Printf("TransportManager: Processing authorized DNS beat from %s (zones: %v)", senderID, payload.Zones)
 
 	// DNS-37: Update peer state on successful beat
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -558,16 +539,46 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 		DistributionID: distributionID,
 	}
 
-	if tm.agentQs == nil {
+	if tm.msgQs == nil {
 		log.Printf("TransportManager: Beat from %s authorized but no agent queues (signer mode), ignoring", senderID)
 		return
 	}
 
 	select {
-	case tm.agentQs.Beat <- report:
+	case tm.msgQs.Beat <- report:
 		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL, distrib=%s)", senderID, distributionID)
 	default:
 		log.Printf("TransportManager: Beat channel full, dropping message from %s", senderID)
+	}
+}
+
+// routePingMessage updates peer liveness and routes to MsgQs.Ping.
+// The DNS response was already sent synchronously by SendResponseMiddleware;
+// this routing is for peer liveness tracking and counting.
+func (tm *TransportManager) routePingMessage(msg *transport.IncomingMessage) {
+	senderID := msg.SenderID
+	log.Printf("TransportManager: Processing ping from %s", senderID)
+
+	// Update PeerRegistry liveness
+	peer := tm.PeerRegistry.GetOrCreate(senderID)
+	peer.LastBeatReceived = time.Now()
+	peer.SetState(transport.PeerStateOperational, "ping received")
+
+	report := &AgentMsgReport{
+		MessageType:    AgentMsgPing,
+		Identity:       AgentId(senderID),
+		DistributionID: msg.DistributionID,
+	}
+
+	if tm.msgQs == nil {
+		return
+	}
+
+	select {
+	case tm.msgQs.Ping <- report:
+		log.Printf("TransportManager: Routed ping from %s to MsgQs", senderID)
+	default:
+		log.Printf("TransportManager: Ping channel full, dropping message from %s", senderID)
 	}
 }
 
@@ -590,22 +601,16 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 	records := payload.GetRecords()   // Use helper method to get records from either format
 	zone := payload.Zone
 
-	// Determine message type (sync, rfi, or status)
-	messageType := AgentMsgNotify // Default to sync for backward compatibility
+	// Determine message type (sync, update, rfi, or status)
+	messageType := AgentMsgNotify // Default to sync
 	if payload.MessageType != "" {
 		messageType = AgentMsg(payload.MessageType)
 	}
 	msgTypeStr := core.AgentMsgToString[core.AgentMsg(messageType)]
 
-	// DNS-51: Authorization check for Sync/Notify/RFI/Status messages
-	// Check if sender is authorized for this zone (via config or HSYNC)
-	authorized, reason := tm.IsPeerAuthorized(senderID, zone)
-	if !authorized {
-		log.Printf("TransportManager: REJECTED DNS %s from %s for zone %s: %s", msgTypeStr, senderID, zone, reason)
-		log.Printf("TransportManager: Security: Unauthorized %s attempt from %s for zone %s", msgTypeStr, senderID, zone)
-		return
-	}
-	log.Printf("TransportManager: DNS %s from %s for zone %s authorized: %s", msgTypeStr, senderID, zone, reason)
+	// Authorization already verified by AuthorizationMiddleware in the router.
+	// Messages reaching routeSyncMessage have passed middleware auth.
+	log.Printf("TransportManager: Processing authorized DNS %s from %s for zone %s", msgTypeStr, senderID, zone)
 
 	// Update peer state on successful message
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -632,19 +637,23 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		},
 	}
 
-	if tm.agentQs == nil {
+	if tm.msgQs == nil {
 		log.Printf("TransportManager: %s from %s authorized but no agent queues (signer mode), ignoring", msgTypeStr, senderID)
 		return
 	}
 
 	select {
-	case tm.agentQs.Msg <- msgPost:
+	case tm.msgQs.Msg <- msgPost:
 		log.Printf("TransportManager: Routed DNS %s from %s (zone: %s) to hsyncengine",
 			msgTypeStr, senderID, zone)
 
 		// Send immediate "pending" confirmation back to originating agent (two-phase protocol).
 		// This tells the originator "I received your sync" so it doesn't need to resend.
-		go tm.sendImmediateConfirmation(payload)
+		// Only agents acting as relay (with an agentRegistry) send this — the combiner already
+		// returned a "pending" ACK inline in the DNS response.
+		if tm.agentRegistry != nil {
+			go tm.sendImmediateConfirmation(payload)
+		}
 	default:
 		log.Printf("TransportManager: Message channel full, dropping %s from %s", msgTypeStr, senderID)
 	}
@@ -658,15 +667,9 @@ func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage)
 		return
 	}
 
-	// Authorization check: relocate changes the address we communicate with,
-	// so only authorized agents should be able to issue this.
-	authorized, reason := tm.IsPeerAuthorized(payload.SenderID, "")
-	if !authorized {
-		log.Printf("TransportManager: REJECTED DNS relocate from %s: %s", payload.SenderID, reason)
-		log.Printf("TransportManager: Security: Unauthorized Relocate attempt from %s", payload.SenderID)
-		return
-	}
-	log.Printf("TransportManager: DNS relocate from %s authorized: %s", payload.SenderID, reason)
+	// Authorization already verified by AuthorizationMiddleware in the router.
+	// Messages reaching routeRelocateMessage have passed middleware auth.
+	log.Printf("TransportManager: Processing authorized DNS relocate from %s", payload.SenderID)
 
 	// Update peer's operational address
 	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
@@ -1228,13 +1231,15 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
-		MessageType:    "sync",
+		MessageType:    "update", // agent→combiner uses "update" (not "sync")
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
-	// Forward per-RR detail from inline confirmation to SynchedDataEngine
-	if syncResp != nil && tm.agentQs != nil && tm.agentQs.Confirmation != nil {
+	// Forward per-RR detail from inline confirmation to SynchedDataEngine.
+	// Skip PENDING status — the detailed confirmation will arrive later via OnConfirmationReceived
+	// when the combiner processes the sync asynchronously.
+	if syncResp != nil && syncResp.Status != transport.ConfirmPending && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
 		var rejItems []RejectedItemInfo
 		for _, ri := range syncResp.RejectedItems {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
@@ -1252,7 +1257,7 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 			Timestamp:      time.Now(),
 		}
 		select {
-		case tm.agentQs.Confirmation <- detail:
+		case tm.msgQs.Confirmation <- detail:
 		default:
 			log.Printf("TransportManager: Confirmation channel full, dropping inline detail for %s", msg.DistributionID)
 		}

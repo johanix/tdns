@@ -106,8 +106,11 @@ func HandlePing(ctx *MessageContext) error {
 	}
 
 	// Store confirmation in context for response middleware
-	ctx.Data["ping_response"] = confirmPayload
+	ctx.Data["response"] = confirmPayload
 	ctx.Data["ping_nonce"] = ping.Nonce
+
+	// Route to MsgQs for peer liveness tracking (response already sent synchronously)
+	ctx.Data["message_type"] = "ping"
 
 	log.Printf("HandlePing: Ping processed from %s, nonce=%s", ctx.PeerID, ping.Nonce)
 	return nil
@@ -142,7 +145,7 @@ func HandleHello(ctx *MessageContext) error {
 
 // HandleBeat processes heartbeat messages.
 // Works for both agent and combiner — the confirm response is always constructed,
-// and the RouteToHsyncEngine middleware (agent only) picks up the message for further processing.
+// and the RouteToMsgHandler middleware (agent only) picks up the message for further processing.
 func HandleBeat(ctx *MessageContext) error {
 	log.Printf("HandleBeat: Processing beat from %s (distrib=%s)",
 		ctx.PeerID, ctx.DistributionID)
@@ -183,7 +186,7 @@ func HandleBeat(ctx *MessageContext) error {
 	if err != nil {
 		log.Printf("HandleBeat: Failed to marshal beat confirm: %v", err)
 	} else {
-		ctx.Data["sync_response"] = payloadBytes
+		ctx.Data["response"] = payloadBytes
 	}
 
 	log.Printf("HandleBeat: Beat processed from %s", ctx.PeerID)
@@ -234,7 +237,7 @@ func HandleSync(ctx *MessageContext) error {
 		// Don't return error - ack failure shouldn't prevent sync processing
 	} else {
 		// Store acknowledgment in context for response middleware
-		ctx.Data["sync_response"] = ackPayload
+		ctx.Data["response"] = ackPayload
 		log.Printf("HandleSync: Sync acknowledgment prepared for %s (distrib=%s)", ctx.PeerID, ctx.DistributionID)
 	}
 
@@ -276,7 +279,7 @@ func HandleRfi(ctx *MessageContext) error {
 	if err != nil {
 		log.Printf("HandleRfi: Failed to marshal rfi acknowledgment: %v", err)
 	} else {
-		ctx.Data["sync_response"] = ackPayload
+		ctx.Data["response"] = ackPayload
 		log.Printf("HandleRfi: RFI acknowledgment prepared for %s (distrib=%s)", ctx.PeerID, ctx.DistributionID)
 	}
 
@@ -352,7 +355,7 @@ func HandleKeystate(ctx *MessageContext) error {
 	}
 
 	// Store confirmation in context for response middleware
-	ctx.Data["sync_response"] = payloadBytes
+	ctx.Data["response"] = payloadBytes
 
 	log.Printf("HandleKeystate: keystate %s processed from %s for key %d in zone %s",
 		keystate.Signal, ctx.PeerID, keystate.KeyTag, keystate.Zone)
@@ -420,6 +423,42 @@ func parseIncomingMessage(payload []byte) *IncomingMessage {
 	}
 }
 
+// DefaultUnsupportedHandler returns a handler for message types that have no
+// registered handler. Instead of returning an error (which causes SERVFAIL),
+// it sends a clean REFUSED response with an error payload explaining that the
+// message type is not supported.
+func DefaultUnsupportedHandler(ctx *MessageContext) error {
+	msgType := "unknown"
+	if mt, ok := ctx.Data["unhandled_message_type"].(string); ok {
+		msgType = mt
+	}
+
+	log.Printf("DefaultUnsupportedHandler: unsupported message type %q from %s", msgType, ctx.PeerID)
+
+	errorPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "error",
+		DistributionID: ctx.DistributionID,
+		Status:         "unsupported",
+		Message:        fmt.Sprintf("message type %q not supported", msgType),
+		Timestamp:      time.Now().Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(errorPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal unsupported-type error response: %w", err)
+	}
+
+	ctx.Data["response"] = payloadBytes
+	ctx.Data["response_rcode"] = dns.RcodeRefused
+	return nil
+}
+
 // SendResponseMiddleware sends the DNS response after all handlers complete.
 // This middleware should be the outermost one (last to wrap, first to execute on return).
 func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
@@ -434,18 +473,14 @@ func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
 			rcode = dns.RcodeServerFailure
 		}
 
-		// Check for ping response
-		if pingResponse, ok := ctx.Data["ping_response"]; ok {
-			if payload, ok := pingResponse.([]byte); ok {
-				// Send response with CHUNK payload
-				return sendChunkResponse(w, msg, payload, rcode)
-			}
+		// Check for explicit response_rcode (set by default handler, etc.)
+		if rc, ok := ctx.Data["response_rcode"].(int); ok {
+			rcode = rc
 		}
 
-		// Check for sync response
-		if syncResponse, ok := ctx.Data["sync_response"]; ok {
-			if payload, ok := syncResponse.([]byte); ok {
-				// Send response with CHUNK payload
+		// Check for response payload (unified key for all message types)
+		if response, ok := ctx.Data["response"]; ok {
+			if payload, ok := response.([]byte); ok {
 				return sendChunkResponse(w, msg, payload, rcode)
 			}
 		}
@@ -507,8 +542,11 @@ func sendStandardResponse(w dns.ResponseWriter, req *dns.Msg, rcode int) error {
 	return w.WriteMsg(resp)
 }
 
-// RouteToHsyncEngine is a middleware that routes processed messages to hsyncengine.
-func RouteToHsyncEngine(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
+// RouteToMsgHandler is a middleware that routes processed messages to a handler goroutine.
+// After the handler executes, if it set "message_type" and "incoming_message" in ctx.Data,
+// the IncomingMessage is forwarded to the incomingChan for async processing.
+// Used by all roles (agent, combiner, signer).
+func RouteToMsgHandler(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
 		// Execute handler
 		err := next(ctx)
@@ -516,16 +554,16 @@ func RouteToHsyncEngine(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
 			return err
 		}
 
-		// Check if message should be routed to hsyncengine
+		// Route message to handler goroutine if handler stored it for routing
 		if msgType, ok := ctx.Data["message_type"]; ok {
 			if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
 				select {
 				case incomingChan <- incomingMsg:
-					log.Printf("RouteToHsyncEngine: Routed %s message from %s to hsyncengine",
+					log.Printf("RouteToMsgHandler: Routed %s message from %s",
 						msgType, ctx.PeerID)
 				default:
-					log.Printf("RouteToHsyncEngine: Incoming channel full, dropping %s message", msgType)
-					return fmt.Errorf("hsyncengine channel full")
+					log.Printf("RouteToMsgHandler: Incoming channel full, dropping %s message", msgType)
+					return fmt.Errorf("message handler channel full")
 				}
 			}
 		}

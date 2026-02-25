@@ -333,10 +333,13 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 func (tm *TransportManager) DiscoverAndRegisterAgent(ctx context.Context, identity string) error {
 	log.Printf("AgentDiscovery: Starting discovery for agent %s", identity)
 
-	// Get IMR engine from global config
-	imr := Conf.Internal.ImrEngine
+	// Get IMR engine via injected callback (late-binding: IMR starts asynchronously)
+	if tm.getImrEngine == nil {
+		return fmt.Errorf("IMR engine not configured for this TransportManager")
+	}
+	imr := tm.getImrEngine()
 	if imr == nil {
-		return fmt.Errorf("IMR engine not available for discovery")
+		return fmt.Errorf("IMR engine not available for discovery (not yet started)")
 	}
 
 	result := DiscoverAgent(ctx, imr, identity)

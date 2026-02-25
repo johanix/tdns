@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/crypto"
+	"github.com/miekg/dns"
 )
 
 // PayloadCrypto handles encryption and signing of DNS transport payloads.
@@ -96,24 +97,26 @@ func (pc *PayloadCrypto) SetLocalKeys(privKey crypto.PrivateKey, pubKey crypto.P
 }
 
 // AddPeerKey adds a peer's public key for encryption.
+// Normalizes peerID to FQDN for consistent lookup.
 func (pc *PayloadCrypto) AddPeerKey(peerID string, pubKey crypto.PublicKey) {
-	pc.PeerKeys[peerID] = pubKey
+	pc.PeerKeys[dns.Fqdn(peerID)] = pubKey
 }
 
 // AddPeerVerificationKey adds a peer's public key for signature verification.
+// Normalizes peerID to FQDN for consistent lookup.
 func (pc *PayloadCrypto) AddPeerVerificationKey(peerID string, pubKey crypto.PublicKey) {
-	pc.PeerVerificationKeys[peerID] = pubKey
+	pc.PeerVerificationKeys[dns.Fqdn(peerID)] = pubKey
 }
 
 // GetPeerKey retrieves a peer's public key for encryption.
 func (pc *PayloadCrypto) GetPeerKey(peerID string) (crypto.PublicKey, bool) {
-	key, exists := pc.PeerKeys[peerID]
+	key, exists := pc.PeerKeys[dns.Fqdn(peerID)]
 	return key, exists
 }
 
 // GetPeerVerificationKey retrieves a peer's public key for signature verification.
 func (pc *PayloadCrypto) GetPeerVerificationKey(peerID string) (crypto.PublicKey, bool) {
-	key, exists := pc.PeerVerificationKeys[peerID]
+	key, exists := pc.PeerVerificationKeys[dns.Fqdn(peerID)]
 	return key, exists
 }
 
@@ -134,7 +137,7 @@ func (pc *PayloadCrypto) EncryptPayload(peerID string, payload []byte) ([]byte, 
 		return payload, nil
 	}
 
-	peerKey, exists := pc.PeerKeys[peerID]
+	peerKey, exists := pc.PeerKeys[dns.Fqdn(peerID)]
 	if !exists {
 		return nil, fmt.Errorf("no encryption key for peer %s", peerID)
 	}
@@ -200,7 +203,7 @@ func (pc *PayloadCrypto) VerifyPayload(peerID string, signedPayload []byte, orig
 		return true, nil
 	}
 
-	verifyKey, exists := pc.PeerVerificationKeys[peerID]
+	verifyKey, exists := pc.PeerVerificationKeys[dns.Fqdn(peerID)]
 	if !exists {
 		return false, fmt.Errorf("no verification key for peer %s", peerID)
 	}
@@ -226,7 +229,7 @@ func (pc *PayloadCrypto) EncryptAndSignPayload(peerID string, payload []byte, me
 		return payload, nil
 	}
 
-	peerKey, exists := pc.PeerKeys[peerID]
+	peerKey, exists := pc.PeerKeys[dns.Fqdn(peerID)]
 	if !exists {
 		return nil, fmt.Errorf("no encryption key for peer %s", peerID)
 	}
@@ -272,7 +275,7 @@ func (pc *PayloadCrypto) DecryptAndVerifyPayload(peerID string, encodedPayload [
 		return nil, fmt.Errorf("no private key configured for decryption")
 	}
 
-	verifyKey, exists := pc.PeerVerificationKeys[peerID]
+	verifyKey, exists := pc.PeerVerificationKeys[dns.Fqdn(peerID)]
 	if !exists {
 		return nil, fmt.Errorf("no verification key for peer %s", peerID)
 	}
@@ -500,7 +503,7 @@ func (w *SecurePayloadWrapper) UnwrapIncomingFromPeer(payload []byte, requiredPe
 	}
 
 	// Verify we have the peer's key
-	_, exists := w.crypto.PeerVerificationKeys[requiredPeerID]
+	_, exists := w.crypto.PeerVerificationKeys[dns.Fqdn(requiredPeerID)]
 	if !exists {
 		return nil, fmt.Errorf("no verification key for required peer %s", requiredPeerID)
 	}

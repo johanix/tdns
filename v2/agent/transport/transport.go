@@ -151,7 +151,7 @@ type SyncRequest struct {
 	Serial         uint32              // Zone serial at time of sync
 	DistributionID string              // For tracking confirmations
 	Signature      []byte              // Optional signature over the request
-	MessageType    string              // Required: "sync" for data sync, "rfi" for RFI messages
+	MessageType    string              // "sync" (agent→agent), "update" (agent→combiner), "rfi" (RFI)
 	RfiType        string              // For RFI messages: "SYNC", "AUDIT", "UPSTREAM", "DOWNSTREAM"
 }
 

@@ -16,9 +16,9 @@ import (
 type ErrorJournalEntry struct {
 	DistributionID string    `json:"distribution_id"`
 	Sender         string    `json:"sender"`       // Sender identity (extracted from QNAME control zone)
-	MessageType    string    `json:"message_type"`  // "ping", "beat", "sync", or "unknown"
+	MessageType    string    `json:"message_type"` // "ping", "beat", "sync", "update", or "unknown"
 	ErrorMsg       string    `json:"error_msg"`
-	QNAME          string    `json:"qname"`         // Original NOTIFY qname
+	QNAME          string    `json:"qname"` // Original NOTIFY qname
 	Timestamp      time.Time `json:"timestamp"`
 }
 

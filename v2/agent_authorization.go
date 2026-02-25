@@ -15,15 +15,15 @@ import (
 	"github.com/miekg/dns"
 )
 
-// IsPeerAuthorized checks if an agent is authorized to communicate with us.
-// Authorization can come from two sources:
+// IsPeerAuthorized checks if a peer is authorized to communicate with us.
+// Authorization can come from three sources:
 //
-// 1. Explicit authorization: Agent is in our agent.authorized_peers config list
-// 2. Implicit authorization: Agent is in HSYNC RRset for a shared zone
+// 1. Configured peers: Provided via AuthorizedPeers callback (role-specific)
+// 2. LEGACY state: Established relationship with zero shared zones
+// 3. HSYNC membership: Both peers listed in HSYNC RRset for a shared zone
 //
-// This function is used to prevent discovery amplification attacks:
-// we only accept Hello from agents we're configured to work with OR
-// agents that appear in HSYNC RRsets for zones we serve.
+// This function is role-agnostic. Each role injects its own AuthorizedPeers
+// callback at TransportManager creation time.
 //
 // Parameters:
 //   - senderID: Identity of the agent attempting to communicate
@@ -33,16 +33,10 @@ import (
 //   - authorized: true if agent is authorized
 //   - reason: human-readable explanation of authorization decision
 func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool, string) {
-	// Check 1: Explicit authorization via config
-	if tm.isInAuthorizedPeers(senderID) {
-		return true, "authorized via config (agent.authorized_peers)"
-	}
-
-	// Check 1b: Authorization via configured peer relationships
-	// Agent-side: check if sender is our configured combiner or signer
-	// Signer-side: check if sender is our configured agent (multi-provider.agent)
-	if tm.isConfiguredPeer(senderID) {
-		return true, "authorized via configured peer relationship"
+	// Check 1: Authorization via role-specific configured peers
+	// The AuthorizedPeers callback is injected at config time by each role.
+	if tm.isAuthorizedPeer(senderID) {
+		return true, "authorized via configured peer"
 	}
 
 	// Check 2: LEGACY state agents (established relationship, zero zones)
@@ -78,59 +72,21 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 	return false, fmt.Sprintf("not authorized (not in config or HSYNC for zone %q)", zone)
 }
 
-// isConfiguredPeer checks if senderID matches a statically configured peer relationship.
-// On the agent side: checks agent.combiner.identity and agent.signer.identity.
-// On the signer side: checks multi-provider.agent.identity.
-func (tm *TransportManager) isConfiguredPeer(senderID string) bool {
-	senderFQDN := dns.Fqdn(senderID)
-
-	// Agent-side: check combiner and signer identities
-	if Conf.Agent != nil {
-		if Conf.Agent.Combiner != nil && Conf.Agent.Combiner.Identity != "" {
-			if dns.Fqdn(Conf.Agent.Combiner.Identity) == senderFQDN {
-				log.Printf("IsPeerAuthorized: Agent %s is configured combiner peer", senderID)
-				return true
-			}
-		}
-		if Conf.Agent.Signer != nil && Conf.Agent.Signer.Identity != "" {
-			if dns.Fqdn(Conf.Agent.Signer.Identity) == senderFQDN {
-				log.Printf("IsPeerAuthorized: Agent %s is configured signer peer", senderID)
-				return true
-			}
-		}
-	}
-
-	// Signer-side: check multi-provider.agent identity
-	if Conf.MultiProvider != nil && Conf.MultiProvider.Agent != nil && Conf.MultiProvider.Agent.Identity != "" {
-		if dns.Fqdn(Conf.MultiProvider.Agent.Identity) == senderFQDN {
-			log.Printf("IsPeerAuthorized: Agent %s is configured multi-provider agent peer", senderID)
-			return true
-		}
-	}
-
-	return false
-}
-
-// isInAuthorizedPeers checks if senderID is in our agent.authorized_peers config.
-// This represents explicit authorization - we've configured this agent as a trusted peer.
-func (tm *TransportManager) isInAuthorizedPeers(senderID string) bool {
-	if Conf.Agent == nil {
+// isAuthorizedPeer checks if senderID is in the role-specific authorized peers list.
+// The list is provided via the AuthorizedPeers callback in TransportManagerConfig.
+// This replaces the former isConfiguredPeer + isInAuthorizedPeers methods which
+// hardcoded role-specific Conf checks. Now any role (agent, combiner, signer, kdc, krs)
+// provides its own callback returning the list of authorized peer identities.
+func (tm *TransportManager) isAuthorizedPeer(senderID string) bool {
+	if tm.authorizedPeers == nil {
 		return false
 	}
-
-	// Normalize senderID to FQDN for comparison
 	senderFQDN := dns.Fqdn(senderID)
-
-	// Check authorized_peers list
-	for _, authorizedID := range Conf.Agent.AuthorizedPeers {
-		// Normalize config entry to FQDN for comparison
-		authorizedFQDN := dns.Fqdn(authorizedID)
-		if authorizedFQDN == senderFQDN {
-			log.Printf("IsPeerAuthorized: Agent %s found in agent.authorized_peers config", senderID)
+	for _, peerID := range tm.authorizedPeers() {
+		if dns.Fqdn(peerID) == senderFQDN {
 			return true
 		}
 	}
-
 	return false
 }
 

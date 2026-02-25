@@ -105,7 +105,7 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	}
 
 	payloadCrypto.AddPeerKey(string(signerID), signerPubKey)
-	payloadCrypto.PeerVerificationKeys[string(signerID)] = signerPubKey
+	payloadCrypto.AddPeerVerificationKey(string(signerID), signerPubKey)
 
 	log.Printf("InitializeSignerAsPeer: Loaded signer public key from %s", conf.Agent.Signer.LongTermJosePubKey)
 

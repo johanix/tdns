@@ -100,6 +100,9 @@ type DNSMessageRouter struct {
 	// Handler registry by message type
 	handlers map[MessageType][]*HandlerRegistration
 
+	// Default handler for unregistered message types (nil = return error)
+	defaultHandler MessageHandlerFunc
+
 	// Global middleware applied to all messages
 	middleware []MiddlewareFunc
 
@@ -184,6 +187,16 @@ func WithDescription(desc string) HandlerOption {
 	}
 }
 
+// SetDefaultHandler sets the handler called when no handler is registered for a message type.
+// The default handler receives the message context and should return nil after storing
+// an appropriate error response in ctx.Data. If no default handler is set, Route()
+// returns an error for unregistered message types.
+func (r *DNSMessageRouter) SetDefaultHandler(handler MessageHandlerFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defaultHandler = handler
+}
+
 // Use adds middleware to the global middleware chain.
 // Middleware is executed in the order it was added.
 func (r *DNSMessageRouter) Use(middleware MiddlewareFunc) {
@@ -208,7 +221,23 @@ func (r *DNSMessageRouter) Route(ctx *MessageContext, msgType MessageType) error
 		r.metrics.mu.Lock()
 		r.metrics.UnhandledTypes[msgType]++
 		r.metrics.mu.Unlock()
-		return fmt.Errorf("no handlers registered for message type %s", msgType)
+
+		// Use default handler if set, otherwise return error
+		if r.defaultHandler == nil {
+			return fmt.Errorf("no handlers registered for message type %s", msgType)
+		}
+		// Store message type so the default handler can report it
+		ctx.Data["unhandled_message_type"] = string(msgType)
+		// Route through middleware chain with the default handler
+		handler := r.defaultHandler
+		for i := len(r.middleware) - 1; i >= 0; i-- {
+			mw := r.middleware[i]
+			next := handler
+			handler = func(ctx *MessageContext) error {
+				return mw(ctx, next)
+			}
+		}
+		return handler(ctx)
 	}
 
 	// Build the handler chain (all handlers for this type)

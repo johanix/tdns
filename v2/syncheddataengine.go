@@ -21,6 +21,7 @@ type SynchedDataUpdate struct {
 	Update            *ZoneUpdate
 	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
 	Force             bool   // Bypass dedup check (always send even if RR already present)
+	SkipCombiner      bool   // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
 	// Response chan *SynchedDataResponse
 	Response chan *AgentMsgResponse
 }
@@ -216,9 +217,9 @@ type TrackedRRInfo struct {
 
 // SynchedDataEngine is a component that updates the combiner with new information
 // received from the agents that are sharing zones with us.
-func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
-	SDupdateQ := agentQs.SynchedDataUpdate
-	SDcmdQ := agentQs.SynchedDataCmd
+func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
+	SDupdateQ := msgQs.SynchedDataUpdate
+	SDcmdQ := msgQs.SynchedDataCmd
 
 	var synchedDataUpdate *SynchedDataUpdate
 	var ok bool
@@ -309,22 +310,25 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 						resp.Msg = msg
 					}
 					if change {
-						log.Printf("SynchedDataEngine: Update applied, local data has changed, enqueuing for combiner and remote agents")
-
 						tm := conf.Internal.TransportManager
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Generate a single shared distID for combiner + all agents
 							distID := GenerateQueueDistributionID()
 
-							// Enqueue for combiner (reliable delivery with retry)
-							_, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID)
-							if err != nil {
-								log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
-								resp.Error = true
-								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
+							if synchedDataUpdate.SkipCombiner {
+								log.Printf("SynchedDataEngine: Update applied, enqueuing for remote agents only (SkipCombiner)")
 							} else {
-								// Mark all RRs in this update as pending with the distribution ID
-								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
+								log.Printf("SynchedDataEngine: Update applied, enqueuing for combiner and remote agents")
+								// Enqueue for combiner (reliable delivery with retry)
+								_, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID)
+								if err != nil {
+									log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
+									resp.Error = true
+									resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
+								} else {
+									// Mark all RRs in this update as pending with the distribution ID
+									zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
+								}
 							}
 
 							// Enqueue for all remote agents in this zone (same distID)
@@ -339,7 +343,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 							}
 
 							if !resp.Error {
-								resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
+								if synchedDataUpdate.SkipCombiner {
+									resp.Msg = "Local update applied, sync enqueued for remote agents"
+								} else {
+									resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
+								}
 							}
 						} else if tm == nil {
 							log.Printf("SynchedDataEngine: TransportManager not available, cannot enqueue sync messages")
@@ -626,11 +634,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, agentQs *AgentQs) {
 				}
 			}
 
-		case detail := <-agentQs.Confirmation:
+		case detail := <-msgQs.Confirmation:
 			log.Printf("SynchedDataEngine: Received confirmation from %s for distribution %s zone %s status=%s applied=%d removed=%d rejected=%d truncated=%v",
 				detail.Source, detail.DistributionID, detail.Zone, detail.Status,
 				len(detail.AppliedRecords), len(detail.RemovedRecords), len(detail.RejectedItems), detail.Truncated)
-			zdr.ProcessConfirmation(detail, agentQs)
+			zdr.ProcessConfirmation(detail, msgQs)
 		}
 	}
 }
@@ -776,7 +784,7 @@ func (zdr *ZoneDataRepo) markAllDeletePending(tracked *TrackedRRset, distID stri
 // For additions: Pending → Accepted or Rejected.
 // For deletions: PendingRemoval → Removed (and the RR is actually deleted from the ZoneDataRepo).
 // If a PendingRemoval RR appears in the rejected list, it transitions back to Accepted.
-func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, agentQs *AgentQs) {
+func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *MsgQs) {
 	now := time.Now()
 	source := detail.Source
 	if source == "" {
@@ -904,8 +912,8 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, agentQs
 			RejectedItems:     detail.RejectedItems,
 			Truncated:         detail.Truncated,
 		}
-		if agentQs != nil && agentQs.OnRemoteConfirmationReady != nil {
-			agentQs.OnRemoteConfirmationReady(remoteDetail)
+		if msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
+			msgQs.OnRemoteConfirmationReady(remoteDetail)
 		}
 		delete(zdr.PendingRemoteConfirms, detail.DistributionID)
 	}

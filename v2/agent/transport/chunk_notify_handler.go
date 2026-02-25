@@ -64,6 +64,11 @@ type ChunkNotifyHandler struct {
 	OnConfirmationReceived func(distributionID string, senderID string, status ConfirmStatus,
 		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool)
 
+	// FetchChunkQuery performs a CHUNK query to the given server for the given qname.
+	// Used when Transport is nil (combiner/signer mode) for chunk_mode=query fallback.
+	// If nil and Transport is nil, query mode is not supported.
+	FetchChunkQuery func(ctx context.Context, serverAddr, qname string) ([]byte, error)
+
 	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
 	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
 	unsolicitedCount uint64
@@ -72,7 +77,7 @@ type ChunkNotifyHandler struct {
 // NewChunkNotifyHandler creates a new ChunkNotifyHandler.
 func NewChunkNotifyHandler(controlZone, localID string, transport *DNSTransport) *ChunkNotifyHandler {
 	h := &ChunkNotifyHandler{
-		ControlZone:  ensureFQDN(controlZone),
+		ControlZone:  dns.Fqdn(controlZone),
 		Transport:    transport,
 		IncomingChan: make(chan *IncomingMessage, 100),
 		LocalID:      localID,
@@ -96,33 +101,24 @@ type DnsNotifyRequest struct {
 	// Options contains EDNS0 options - we'll extract CHUNK from raw message
 }
 
-// extractDistributionID extracts the distribution ID from a QNAME.
-// QNAME format: <distributionID>.<zone> — the first label is the distribution ID; the rest is the sender's
-// control zone (or any zone). We do not require QNAME to end with our control zone: NOTIFY(CHUNK)
-// can be sent agent-to-agent, so the sender uses its own control zone in the QNAME.
-func (h *ChunkNotifyHandler) extractDistributionID(qname string) (string, error) {
-	qname = ensureFQDN(qname)
+// extractDistributionIDAndSender extracts the distribution ID and sender identity from a QNAME.
+// QNAME format: <distributionID>.<sender-identity> e.g. "6981284f.agent.alpha.dnslab."
+// The first label is the distribution ID; the rest is the sender's identity (FQDN).
+// Returns (distributionID, senderID, error). senderID may be empty if QNAME has only one label.
+func (h *ChunkNotifyHandler) extractDistributionIDAndSender(qname string) (distributionID, senderID string, err error) {
+	qname = dns.Fqdn(qname)
 	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
 	if len(labels) == 0 {
-		return "", fmt.Errorf("empty QNAME")
+		return "", "", fmt.Errorf("empty QNAME")
 	}
-	distributionID := labels[0]
+	distributionID = labels[0]
 	if distributionID == "" {
-		return "", fmt.Errorf("no distribution ID in QNAME %s", qname)
+		return "", "", fmt.Errorf("no distribution ID in QNAME %s", qname)
 	}
-	return distributionID, nil
-}
-
-// extractSenderHintFromQname returns the sender identity hint from QNAME for decryption order.
-// QNAME format: <distributionID>.<senderZone> e.g. "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab."
-// Used to try the sender's key first when decrypting (avoids trying "combiner" first for agent-to-agent NOTIFYs).
-func extractSenderHintFromQname(qname string) string {
-	qname = ensureFQDN(qname)
-	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
-	if len(labels) < 2 {
-		return ""
+	if len(labels) > 1 {
+		senderID = dns.Fqdn(strings.Join(labels[1:], "."))
 	}
-	return ensureFQDN(strings.Join(labels[1:], "."))
+	return distributionID, senderID, nil
 }
 
 // extractChunkPayload extracts the CHUNK payload from the EDNS0 option.
@@ -169,20 +165,19 @@ func extractChunkQueryEndpointFromMsg(msg *dns.Msg) string {
 
 // fetchChunkViaQuery fetches the CHUNK payload via DNS CHUNK query when NOTIFY had no EDNS0 payload (chunk_mode=query).
 // Builds qname as {receiver}.{distid}.{sender} and queries the sender (from EDNS0 option 65005 or NOTIFY source).
-func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
-	if h.Transport == nil {
-		return nil, fmt.Errorf("no transport for CHUNK query")
+func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
+	if h.Transport == nil && h.FetchChunkQuery == nil {
+		return nil, fmt.Errorf("no transport or FetchChunkQuery callback for CHUNK query")
 	}
-	senderFromQname := extractSenderHintFromQname(qname)
-	if senderFromQname == "" {
-		return nil, fmt.Errorf("cannot derive sender from NOTIFY qname %q for query mode", qname)
+	if senderID == "" {
+		return nil, fmt.Errorf("cannot derive sender for query mode (empty senderID)")
 	}
 	// CHUNK query qname = {receiver}.{distid}.{sender}
-	chunkQueryQname := buildChunkQueryQname(h.LocalID, distributionID, senderFromQname)
+	chunkQueryQname := buildChunkQueryQname(h.LocalID, distributionID, senderID)
 	queryTarget := extractChunkQueryEndpointFromMsg(msg)
 	if queryTarget == "" && h.GetPeerAddress != nil {
 		// Use configured peer address (e.g. from agent.peers) so we use correct host:port
-		if addr, ok := h.GetPeerAddress(senderFromQname); ok && addr != "" {
+		if addr, ok := h.GetPeerAddress(senderID); ok && addr != "" {
 			queryTarget = addr
 		}
 	}
@@ -194,16 +189,20 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, qname, dist
 		}
 	}
 	if queryTarget == "" {
-		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option 65005, no peer address for %q)", senderFromQname)
+		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option 65005, no peer address for %q)", senderID)
 	}
-	payload, _, err := h.Transport.FetchChunkViaQuery(ctx, queryTarget, chunkQueryQname)
-	return payload, err
+	// Use Transport if available, otherwise FetchChunkQuery callback (combiner/signer mode)
+	if h.Transport != nil {
+		payload, _, err := h.Transport.FetchChunkViaQuery(ctx, queryTarget, chunkQueryQname)
+		return payload, err
+	}
+	return h.FetchChunkQuery(ctx, queryTarget, chunkQueryQname)
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
 func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
 	var fields struct {
-		MessageType string `json:"MessageType"` // Standard format (string: "sync", "beat", etc.)
+		MessageType string `json:"MessageType"` // Standard format (string: "sync", "update", "beat", etc.)
 		Type        string `json:"type"`        // Legacy format (fallback)
 		MyIdentity  string `json:"MyIdentity"`
 		SenderID    string `json:"sender_id"` // Legacy
@@ -341,21 +340,18 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 
 	log.Printf("RouteViaRouter: Received NOTIFY(CHUNK) for %s from %s", qname, sourceAddr)
 
-	// Extract distribution ID from QNAME
-	distributionID, err := h.extractDistributionID(qname)
+	// Extract distribution ID and sender identity from QNAME
+	distributionID, senderHint, err := h.extractDistributionIDAndSender(qname)
 	if err != nil {
 		log.Printf("RouteViaRouter: Failed to extract distribution ID from %s: %v", qname, err)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
 
-	// Extract sender hint from QNAME
-	senderHint := extractSenderHintFromQname(qname)
-
 	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
 	payload, err := h.extractChunkPayload(msg)
 	if err != nil {
 		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
-		payload, err = h.fetchChunkViaQuery(ctx, qname, distributionID, msg, w)
+		payload, err = h.fetchChunkViaQuery(ctx, senderHint, distributionID, msg, w)
 		if err != nil {
 			log.Printf("RouteViaRouter: Failed to get CHUNK payload (EDNS0 and query mode): %v", err)
 			return h.sendResponse(w, msg, dns.RcodeFormatError)
