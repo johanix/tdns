@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -409,6 +410,8 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routePingMessage(msg)
 	case "sync", "update", "rfi":
 		tm.routeSyncMessage(msg)
+	case "keystate":
+		tm.routeKeystateMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
 	default:
@@ -656,6 +659,59 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		}
 	default:
 		log.Printf("TransportManager: Message channel full, dropping %s from %s", msgTypeStr, senderID)
+	}
+}
+
+// routeKeystateMessage routes an incoming KEYSTATE message.
+// For "inventory" signals, delivers the full key inventory to MsgQs.KeystateInventory
+// so RequestAndWaitForKeyInventory can pick it up.
+func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsKeystatePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Printf("TransportManager: Failed to parse keystate payload: %v", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	log.Printf("TransportManager: Processing KEYSTATE %s from %s for zone %s",
+		payload.Signal, senderID, payload.Zone)
+
+	if payload.Signal != "inventory" {
+		log.Printf("TransportManager: Non-inventory KEYSTATE %s from %s, routing to Msg queue",
+			payload.Signal, senderID)
+		// Per-key signals go through the normal Msg channel (for hsyncengine)
+		tm.routeSyncMessage(msg)
+		return
+	}
+
+	if tm.msgQs == nil {
+		log.Printf("TransportManager: KEYSTATE inventory from %s but no MsgQs, ignoring", senderID)
+		return
+	}
+
+	// Convert transport.KeyInventoryEntry → KeyInventoryItem for the channel
+	items := make([]KeyInventoryItem, len(payload.KeyInventory))
+	for i, e := range payload.KeyInventory {
+		items[i] = KeyInventoryItem{
+			KeyTag:    e.KeyTag,
+			Algorithm: e.Algorithm,
+			Flags:     e.Flags,
+			State:     e.State,
+		}
+	}
+
+	inventoryMsg := &KeystateInventoryMsg{
+		SenderID:  senderID,
+		Zone:      payload.Zone,
+		Inventory: items,
+	}
+
+	select {
+	case tm.msgQs.KeystateInventory <- inventoryMsg:
+		log.Printf("TransportManager: Routed KEYSTATE inventory from %s for zone %s (%d keys) to agent",
+			senderID, payload.Zone, len(items))
+	default:
+		log.Printf("TransportManager: KeystateInventory channel full, dropping inventory from %s", senderID)
 	}
 }
 
@@ -1633,4 +1689,41 @@ func parseHostPort(addr string, defaultPort uint16) (string, uint16) {
 		}
 	}
 	return addr, defaultPort
+}
+
+// sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).
+// Returns the ACK from the signer. The actual data comes back as a separate KEYSTATE message.
+func (tm *TransportManager) sendRfiToSigner(zone string, rfiType string) error {
+	if tm.signerID == "" || tm.signerAddress == "" {
+		return fmt.Errorf("no signer configured (signerID=%q, signerAddress=%q)", tm.signerID, tm.signerAddress)
+	}
+
+	// Get or create signer peer with address
+	peer := tm.PeerRegistry.GetOrCreate(tm.signerID)
+	host, port := parseHostPort(tm.signerAddress, 53)
+	peer.SetDiscoveryAddress(&transport.Address{
+		Host:      host,
+		Port:      port,
+		Transport: "udp",
+	})
+
+	syncReq := &transport.SyncRequest{
+		SenderID:    tm.LocalID,
+		Zone:        zone,
+		Timestamp:   time.Now(),
+		MessageType: "rfi",
+		RfiType:     rfiType,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+	if err != nil {
+		return fmt.Errorf("RFI %s to signer %s failed: %w", rfiType, tm.signerID, err)
+	}
+
+	log.Printf("sendRfiToSigner: RFI %s for zone %s sent to signer %s (status=%s)",
+		rfiType, zone, tm.signerID, resp.Status)
+	return nil
 }

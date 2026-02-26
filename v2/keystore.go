@@ -743,3 +743,47 @@ func (kdb *KeyDB) canPromoteMultiProvider(zonename string, keyid uint16) bool {
 		keyid, zonename, elapsed.Truncate(time.Second), DefaultDnskeyTTL)
 	return true
 }
+
+// KeyInventoryItem is a lightweight DNSKEY entry for inventory responses.
+// Does not include private key material — only the metadata needed for key classification.
+type KeyInventoryItem struct {
+	KeyTag    uint16
+	Algorithm uint8
+	Flags     uint16
+	State     string // "created","published","standby","active","retired","foreign"
+}
+
+// GetKeyInventory returns the complete DNSKEY inventory for a zone — all keys
+// across all states. Used by the signer to respond to RFI KEYSTATE requests.
+// Returns lightweight entries (keytag, algorithm, flags, state) without private keys.
+func (kdb *KeyDB) GetKeyInventory(zonename string) ([]KeyInventoryItem, error) {
+	const inventorySql = `SELECT keyid, flags, algorithm, state FROM DnssecKeyStore WHERE zonename=?`
+
+	rows, err := kdb.Query(inventorySql, zonename)
+	if err != nil {
+		return nil, fmt.Errorf("GetKeyInventory: query failed for zone %s: %w", zonename, err)
+	}
+	defer rows.Close()
+
+	var entries []KeyInventoryItem
+	for rows.Next() {
+		var keyid, flags int
+		var algorithm string
+		var state string
+		if err := rows.Scan(&keyid, &flags, &algorithm, &state); err != nil {
+			return nil, fmt.Errorf("GetKeyInventory: scan failed: %w", err)
+		}
+		alg := dns.StringToAlgorithm[algorithm]
+		entries = append(entries, KeyInventoryItem{
+			KeyTag:    uint16(keyid),
+			Algorithm: alg,
+			Flags:     uint16(flags),
+			State:     state,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetKeyInventory: rows iteration failed: %w", err)
+	}
+
+	return entries, nil
+}

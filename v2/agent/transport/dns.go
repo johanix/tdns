@@ -562,6 +562,17 @@ func (t *DNSTransport) Keystate(ctx context.Context, peer *Peer, req *KeystateRe
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
+	// Convert KeyInventory from transport to core type
+	var coreInventory []core.KeyInventoryEntry
+	for _, e := range req.KeyInventory {
+		coreInventory = append(coreInventory, core.KeyInventoryEntry{
+			KeyTag:    e.KeyTag,
+			Algorithm: e.Algorithm,
+			Flags:     e.Flags,
+			State:     e.State,
+		})
+	}
+
 	// Create keystate payload using typed struct from core package
 	payload := &core.AgentKeystatePost{
 		MessageType:  core.AgentMsgKeystate,
@@ -572,6 +583,7 @@ func (t *DNSTransport) Keystate(ctx context.Context, peer *Peer, req *KeystateRe
 		Algorithm:    req.Algorithm,
 		Signal:       req.Signal,
 		Message:      req.Message,
+		KeyInventory: coreInventory,
 		Time:         req.Timestamp,
 	}
 
@@ -1047,12 +1059,13 @@ type DnsKeystatePayload struct {
 	YourIdentity string `json:"YourIdentity"` // Recipient identity
 
 	// KEYSTATE-specific fields
-	Zone      string `json:"Zone"`              // Zone this key belongs to (FQDN)
-	KeyTag    uint16 `json:"KeyTag"`            // DNSKEY key tag
-	Algorithm uint8  `json:"Algorithm"`         // DNSKEY algorithm number
-	Signal    string `json:"Signal"`            // "propagated", "rejected", "removed", "published", "retired"
-	Message   string `json:"Message,omitempty"` // Optional detail (e.g. rejection reason)
-	Timestamp int64  `json:"timestamp"`         // Unix timestamp
+	Zone         string              `json:"Zone"`                   // Zone this key belongs to (FQDN)
+	KeyTag       uint16              `json:"KeyTag"`                 // DNSKEY key tag (unused for inventory)
+	Algorithm    uint8               `json:"Algorithm"`              // DNSKEY algorithm number (unused for inventory)
+	Signal       string              `json:"Signal"`                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
+	Message      string              `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
+	KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
+	Timestamp    int64               `json:"timestamp"`              // Unix timestamp
 
 	// Legacy fields (fallback)
 	Type     string `json:"type"`      // "keystate"

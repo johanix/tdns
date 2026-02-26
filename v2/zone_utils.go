@@ -200,7 +200,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 			// On the agent, populate RemoteDNSKEYs from ZoneDataRepo so that
 			// LocalDnskeysChanged can filter out remote keys correctly.
 			if Globals.App.Type == AppTypeAgent {
-				zd.PopulateRemoteDNSKEYsFromRepo()
+				zd.RequestAndWaitForKeyInventory()
 			}
 			_, dskeyStatus, err = zd.LocalDnskeysChanged(&new_zd)
 			if err != nil {
@@ -370,7 +370,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			// On the agent, populate RemoteDNSKEYs from ZoneDataRepo so that
 			// LocalDnskeysChanged can filter out remote keys correctly.
 			if Globals.App.Type == AppTypeAgent {
-				zd.PopulateRemoteDNSKEYsFromRepo()
+				zd.RequestAndWaitForKeyInventory()
 			}
 			_, dskeyStatusUpstream, err = zd.LocalDnskeysChanged(&new_zd)
 			if err != nil {

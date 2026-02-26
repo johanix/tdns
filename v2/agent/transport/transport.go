@@ -203,16 +203,27 @@ type PingResponse struct {
 	Timestamp   time.Time // Response timestamp
 }
 
+// KeyInventoryEntry describes a single DNSKEY in a KEYSTATE inventory message.
+// Used when Signal == "inventory" to carry the complete set of keys for a zone.
+type KeyInventoryEntry struct {
+	KeyTag    uint16 `json:"key_tag"`
+	Algorithm uint8  `json:"algorithm"`
+	Flags     uint16 `json:"flags"`
+	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
+}
+
 // KeystateRequest carries a key lifecycle signal between agent and signer.
-// Direction: Agent→Signer (propagated, rejected, removed) or Signer→Agent (published, retired).
+// Direction: Agent→Signer (propagated, rejected, removed) or Signer→Agent (published, retired, inventory).
+// When Signal == "inventory", KeyInventory carries the complete key set for the zone.
 type KeystateRequest struct {
-	SenderID  string    // Identity of the sender
-	Zone      string    // Zone this key belongs to (FQDN)
-	KeyTag    uint16    // DNSKEY key tag
-	Algorithm uint8     // DNSKEY algorithm number
-	Signal    string    // "propagated", "rejected", "removed", "published", "retired"
-	Message   string    // Optional detail (e.g. rejection reason)
-	Timestamp time.Time // Request timestamp
+	SenderID     string              // Identity of the sender
+	Zone         string              // Zone this key belongs to (FQDN)
+	KeyTag       uint16              // DNSKEY key tag (unused for inventory)
+	Algorithm    uint8               // DNSKEY algorithm number (unused for inventory)
+	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
+	Message      string              // Optional detail (e.g. rejection reason)
+	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
+	Timestamp    time.Time           // Request timestamp
 }
 
 // KeystateResponse acknowledges a KEYSTATE signal.

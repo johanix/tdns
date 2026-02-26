@@ -49,8 +49,10 @@ const (
 	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
 	DnskeyStatePublished string = "published"
+	DnskeyStateStandby   string = "standby"
 	DnskeyStateActive    string = "active"
 	DnskeyStateRetired   string = "retired"
+	DnskeyStateForeign   string = "foreign"
 )
 
 type ZoneData struct {

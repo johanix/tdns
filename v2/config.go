@@ -433,17 +433,26 @@ type MsgQs struct {
 	Beat  chan *AgentMsgReport // incoming /beat from other agents
 	Ping  chan *AgentMsgReport // incoming /ping from other agents
 	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
-	Msg               chan *AgentMsgPostPlus   // incoming /msg from other agents
-	Command           chan *AgentMgmtPostPlus  // local commands TO the agent, usually for passing on to other agents
-	DebugCommand      chan *AgentMgmtPostPlus  // local commands TO the agent, usually for passing on to other agents
-	SynchedDataUpdate chan *SynchedDataUpdate  // incoming combiner updates
-	SynchedDataCmd    chan *SynchedDataCmd     // local commands TO the combiner
-	Confirmation      chan *ConfirmationDetail // combiner confirmation feedback
+	Msg               chan *AgentMsgPostPlus     // incoming /msg from other agents
+	Command           chan *AgentMgmtPostPlus    // local commands TO the agent, usually for passing on to other agents
+	DebugCommand      chan *AgentMgmtPostPlus    // local commands TO the agent, usually for passing on to other agents
+	SynchedDataUpdate chan *SynchedDataUpdate    // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd       // local commands TO the combiner
+	Confirmation      chan *ConfirmationDetail   // combiner confirmation feedback
+	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
 	// The callback sends the final confirmation NOTIFY back to the originating agent.
 	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
+}
+
+// KeystateInventoryMsg carries a complete KEYSTATE inventory from signer to agent.
+// Delivered via MsgQs.KeystateInventory channel.
+type KeystateInventoryMsg struct {
+	SenderID  string
+	Zone      string
+	Inventory []KeyInventoryItem
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

@@ -243,6 +243,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		Confirmation:      make(chan *ConfirmationDetail, 100),
+		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
 	}
 
 	// Create KeyDB channels if KeyDB exists

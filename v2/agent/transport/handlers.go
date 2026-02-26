@@ -312,7 +312,9 @@ func HandleKeystate(ctx *MessageContext) error {
 	// Validate signal
 	switch keystate.Signal {
 	case "propagated", "rejected", "removed", "published", "retired":
-		// valid signals
+		// per-key signals
+	case "inventory":
+		// full inventory signal — KeyInventory carries the data, KeyTag not required
 	default:
 		return fmt.Errorf("unknown keystate signal: %q", keystate.Signal)
 	}
@@ -320,7 +322,11 @@ func HandleKeystate(ctx *MessageContext) error {
 	if keystate.Zone == "" {
 		return fmt.Errorf("keystate message missing zone")
 	}
-	if keystate.KeyTag == 0 {
+	if keystate.Signal == "inventory" {
+		if len(keystate.KeyInventory) == 0 {
+			return fmt.Errorf("keystate inventory message has empty key inventory")
+		}
+	} else if keystate.KeyTag == 0 {
 		return fmt.Errorf("keystate message missing key tag")
 	}
 
@@ -345,7 +351,7 @@ func HandleKeystate(ctx *MessageContext) error {
 		Type:           "confirm",
 		DistributionID: ctx.DistributionID,
 		Status:         "ok",
-		Message:        fmt.Sprintf("keystate %s received for key %d in %s", keystate.Signal, keystate.KeyTag, keystate.Zone),
+		Message:        fmt.Sprintf("keystate %s received for zone %s", keystate.Signal, keystate.Zone),
 		Timestamp:      time.Now().Unix(),
 	}
 
@@ -357,8 +363,13 @@ func HandleKeystate(ctx *MessageContext) error {
 	// Store confirmation in context for response middleware
 	ctx.Data["response"] = payloadBytes
 
-	log.Printf("HandleKeystate: keystate %s processed from %s for key %d in zone %s",
-		keystate.Signal, ctx.PeerID, keystate.KeyTag, keystate.Zone)
+	if keystate.Signal == "inventory" {
+		log.Printf("HandleKeystate: inventory received from %s for zone %s (%d keys)",
+			ctx.PeerID, keystate.Zone, len(keystate.KeyInventory))
+	} else {
+		log.Printf("HandleKeystate: %s processed from %s for key %d in zone %s",
+			keystate.Signal, ctx.PeerID, keystate.KeyTag, keystate.Zone)
+	}
 	return nil
 }
 

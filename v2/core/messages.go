@@ -144,16 +144,26 @@ type AgentPingResponse struct {
 
 // AgentKeystatePost represents a KEYSTATE message for key lifecycle signaling.
 // Used for agent↔signer communication about DNSKEY propagation status.
+// When Signal == "inventory", KeyInventory carries the complete key set for the zone.
 type AgentKeystatePost struct {
-	MessageType  AgentMsg  // AgentMsgKeystate
-	MyIdentity   string    // Sender's identity
-	YourIdentity string    // Recipient's identity
-	Zone         string    // Zone this key belongs to (FQDN)
-	KeyTag       uint16    // DNSKEY key tag
-	Algorithm    uint8     // DNSKEY algorithm number
-	Signal       string    // "propagated", "rejected", "removed", "published", "retired"
-	Message      string    // Optional detail (e.g. rejection reason)
-	Time         time.Time // Message timestamp
+	MessageType  AgentMsg            // AgentMsgKeystate
+	MyIdentity   string              // Sender's identity
+	YourIdentity string              // Recipient's identity
+	Zone         string              // Zone this key belongs to (FQDN)
+	KeyTag       uint16              // DNSKEY key tag (unused for inventory)
+	Algorithm    uint8               // DNSKEY algorithm number (unused for inventory)
+	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
+	Message      string              // Optional detail (e.g. rejection reason)
+	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
+	Time         time.Time           // Message timestamp
+}
+
+// KeyInventoryEntry describes a single DNSKEY in a KEYSTATE inventory message.
+type KeyInventoryEntry struct {
+	KeyTag    uint16 `json:"key_tag"`
+	Algorithm uint8  `json:"algorithm"`
+	Flags     uint16 `json:"flags"`
+	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 }
 
 // AgentKeystateResponse represents the response to a KEYSTATE message.

@@ -414,7 +414,18 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
-	log.Printf("InitializeSignerRouter: Registered 2 message handlers")
+	// Register RFI handler (agent→signer: KEYSTATE requests trigger inventory push)
+	if err := router.Register(
+		"RfiHandler",
+		MessageType("rfi"),
+		HandleRfi,
+		WithPriority(100),
+		WithDescription("Processes RFI messages (e.g. KEYSTATE inventory requests)"),
+	); err != nil {
+		return err
+	}
+
+	log.Printf("InitializeSignerRouter: Registered 3 message handlers")
 	log.Printf("InitializeSignerRouter: Router initialization complete")
 
 	return nil

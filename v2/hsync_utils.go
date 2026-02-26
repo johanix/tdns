@@ -167,41 +167,93 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 	return local
 }
 
-// PopulateRemoteDNSKEYsFromRepo collects DNSKEY RRs from remote agents in the
-// ZoneDataRepo and stores them in zd.RemoteDNSKEYs. This is needed on the agent
-// side so that LocalDnskeysChanged can correctly filter out remote keys.
-// On the signer side, RemoteDNSKEYs is populated by extractRemoteDNSKEYs (sign.go).
-func (zd *ZoneData) PopulateRemoteDNSKEYsFromRepo() {
-	zdr := Conf.Internal.ZoneDataRepo
-	if zdr == nil {
-		return
-	}
-	localAgent := string(Globals.AgentId)
-	zone := ZoneName(zd.ZoneName)
-	agentRepo, ok := zdr.Get(zone)
-	if !ok {
+// RequestAndWaitForKeyInventory sends an RFI KEYSTATE to the signer and waits
+// for the inventory response. Uses the inventory to populate zd.RemoteDNSKEYs
+// by matching foreign key tags against the actual DNSKEY RRset in the zone.
+//
+// On timeout or error, falls back to empty RemoteDNSKEYs (conservative — treats
+// all keys as local, which is safe: worst case we send a DNSKEY update that
+// the combiner already has).
+func (zd *ZoneData) RequestAndWaitForKeyInventory() {
+	tm := Conf.Internal.TransportManager
+	if tm == nil {
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: no TransportManager, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.RemoteDNSKEYs = nil
 		return
 	}
 
-	var remoteKeys []dns.RR
-	for agentId, od := range agentRepo.Data.Items() {
-		// Skip our own agent — those are local keys
-		if string(agentId) == localAgent {
-			continue
-		}
-		dnskeyRRset, exists := od.RRtypes.Get(dns.TypeDNSKEY)
-		if !exists {
-			continue
-		}
-		for _, rr := range dnskeyRRset.RRs {
-			remoteKeys = append(remoteKeys, dns.Copy(rr))
-		}
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.KeystateInventory == nil {
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: no MsgQs/KeystateInventory channel, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.RemoteDNSKEYs = nil
+		return
 	}
 
-	zd.RemoteDNSKEYs = remoteKeys
-	if len(remoteKeys) > 0 {
-		zd.Logger.Printf("PopulateRemoteDNSKEYsFromRepo: zone %s: %d remote DNSKEYs from ZoneDataRepo", zd.ZoneName, len(remoteKeys))
+	// Send RFI KEYSTATE to signer
+	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: RFI KEYSTATE failed: %v, falling back to empty RemoteDNSKEYs", zd.ZoneName, err)
+		zd.RemoteDNSKEYs = nil
+		return
 	}
+
+	// Wait for the inventory response (signer sends it as a separate KEYSTATE "inventory" message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case inv := <-msgQs.KeystateInventory:
+		if inv == nil || inv.Zone != zd.ZoneName {
+			zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received nil or mismatched inventory, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+			zd.RemoteDNSKEYs = nil
+			return
+		}
+
+		// Build set of foreign key tags from the inventory
+		foreignKeyTags := make(map[uint16]bool)
+		for _, entry := range inv.Inventory {
+			if entry.State == DnskeyStateForeign {
+				foreignKeyTags[entry.KeyTag] = true
+			}
+		}
+
+		// Match foreign key tags against actual DNSKEYs in the zone
+		zd.RemoteDNSKEYs = zd.buildRemoteDNSKEYsFromTags(foreignKeyTags)
+
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
+			zd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(zd.RemoteDNSKEYs))
+
+	case <-timeout.C:
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: timeout waiting for inventory (15s), falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.RemoteDNSKEYs = nil
+	}
+}
+
+// buildRemoteDNSKEYsFromTags returns DNSKEY RRs from the zone that match the given key tags.
+func (zd *ZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]bool) []dns.RR {
+	if len(foreignKeyTags) == 0 {
+		return nil
+	}
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		zd.Logger.Printf("buildRemoteDNSKEYsFromTags: zone %s: cannot get apex: %v", zd.ZoneName, err)
+		return nil
+	}
+
+	dnskeyRRset, exists := apex.RRtypes.Get(dns.TypeDNSKEY)
+	if !exists || len(dnskeyRRset.RRs) == 0 {
+		return nil
+	}
+
+	var remote []dns.RR
+	for _, rr := range dnskeyRRset.RRs {
+		if dnskey, ok := rr.(*dns.DNSKEY); ok {
+			if foreignKeyTags[dnskey.KeyTag()] {
+				remote = append(remote, dns.Copy(rr))
+			}
+		}
+	}
+	return remote
 }
 
 // bool=true if the HSYNC RRset exists and is valid, false otherwise
