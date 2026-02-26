@@ -680,6 +680,28 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "No response from SynchedDataCmd after 2 seconds, state unknown"
 			}
 
+		case "show-key-inventory":
+			if amp.Zone == "" {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required for show-key-inventory"
+				return
+			}
+			zd, exists := Zones.Get(string(amp.Zone))
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %q not found", amp.Zone)
+				return
+			}
+			if zd.LastKeyInventory == nil {
+				resp.Msg = fmt.Sprintf("No key inventory received yet for zone %s", amp.Zone)
+			} else {
+				resp.Data = zd.LastKeyInventory
+				resp.Msg = fmt.Sprintf("Key inventory for zone %s: %d keys (received %s from %s)",
+					amp.Zone, len(zd.LastKeyInventory.Inventory),
+					zd.LastKeyInventory.Received.Format("15:04:05"),
+					zd.LastKeyInventory.SenderID)
+			}
+
 		case "resync":
 			if amp.Zone == "" {
 				resp.Error = true

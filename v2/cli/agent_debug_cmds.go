@@ -803,6 +803,79 @@ Example:
 	},
 }
 
+var DebugAgentShowKeyInventoryCmd = &cobra.Command{
+	Use:   "show-key-inventory",
+	Short: "Show DNSKEY inventory received from signer (KEYSTATE)",
+	Long: `Display the last KEYSTATE inventory received from the signer for a zone.
+Shows all keys reported by the signer's KeyDB with their state
+(created, published, standby, active, retired, foreign).
+
+Keys marked "foreign" are from other providers' signers.
+
+Example:
+  tdns-cliv2 agent debug show-key-inventory --zone whisky.dnslab.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		req := tdns.AgentMgmtPost{
+			Command: "show-key-inventory",
+			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
+		}
+
+		amr, err := SendAgentDebugCmd(req, false)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		if amr.Error {
+			log.Fatalf("Error: %s", amr.ErrorMsg)
+		}
+
+		if amr.Data == nil {
+			fmt.Println(amr.Msg)
+			return
+		}
+
+		// Parse the Data field as KeyInventorySnapshot
+		dataBytes, err := json.Marshal(amr.Data)
+		if err != nil {
+			log.Fatalf("Failed to marshal inventory data: %v", err)
+		}
+		var snapshot tdns.KeyInventorySnapshot
+		if err := json.Unmarshal(dataBytes, &snapshot); err != nil {
+			log.Fatalf("Failed to parse inventory data: %v", err)
+		}
+
+		fmt.Printf("DNSKEY Inventory for zone %s\n", snapshot.Zone)
+		fmt.Printf("Received: %s from %s\n", snapshot.Received.Format("2006-01-02 15:04:05"), snapshot.SenderID)
+		fmt.Printf("────────────────────────────────────────\n")
+
+		if len(snapshot.Inventory) == 0 {
+			fmt.Printf("  (no keys)\n")
+			return
+		}
+
+		out := []string{"KeyTag|Algorithm|Flags|State|Role"}
+		for _, entry := range snapshot.Inventory {
+			role := "local"
+			if entry.State == "foreign" {
+				role = "REMOTE"
+			}
+			algStr := dns.AlgorithmToString[entry.Algorithm]
+			if algStr == "" {
+				algStr = fmt.Sprintf("ALG%d", entry.Algorithm)
+			}
+			flagDesc := "ZSK"
+			if entry.Flags&0x0001 != 0 {
+				flagDesc = "KSK"
+			}
+			out = append(out, fmt.Sprintf("%d|%s|%d (%s)|%s|%s",
+				entry.KeyTag, algStr, entry.Flags, flagDesc, entry.State, role))
+		}
+		fmt.Println(columnize.SimpleFormat(out))
+	},
+}
+
 var DebugAgentQueueStatusCmd = &cobra.Command{
 	Use:   "queue-status",
 	Short: "Show reliable message queue status and pending messages",
@@ -969,6 +1042,7 @@ func init() {
 	DebugAgentCmd.AddCommand(DebugAgentSendToCombinerCmd)
 	DebugAgentCmd.AddCommand(DebugAgentTestChainCmd)
 	DebugAgentCmd.AddCommand(DebugAgentResyncCmd)
+	DebugAgentCmd.AddCommand(DebugAgentShowKeyInventoryCmd)
 	DebugAgentCmd.AddCommand(DebugAgentQueueStatusCmd)
 
 	DebugAgentQueueStatusCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details for each message)")

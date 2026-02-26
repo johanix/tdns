@@ -112,6 +112,18 @@ type ZoneData struct {
 	// local keystore. They are preserved across resignings and merged into the
 	// DNSKEY RRset during PublishDnskeyRRs().
 	RemoteDNSKEYs []dns.RR
+
+	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
+	// Used for diagnostics (CLI show-key-inventory command).
+	LastKeyInventory *KeyInventorySnapshot
+}
+
+// KeyInventorySnapshot stores a complete key inventory received from the signer.
+type KeyInventorySnapshot struct {
+	SenderID  string
+	Zone      string
+	Inventory []KeyInventoryItem
+	Received  time.Time
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data

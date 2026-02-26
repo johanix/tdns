@@ -640,7 +640,9 @@ func (zd *ZoneData) ShowNsecChain() ([]string, error) {
 
 // extractRemoteDNSKEYs examines the current zone's DNSKEY RRset and identifies
 // keys that are NOT in our local keystore (i.e. remote signers' keys).
-// These are stored in zd.RemoteDNSKEYs for later merging in PublishDnskeyRRs().
+// These are stored in zd.RemoteDNSKEYs for later merging in PublishDnskeyRRs()
+// and persisted to the DnssecKeyStore with state='foreign' so that
+// GetKeyInventory() can report them in KEYSTATE inventory responses.
 // Only called in mode 4 (multi-provider, multi-signer).
 func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -655,9 +657,9 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 		return nil
 	}
 
-	// Get all local keys (active + published + retired) to identify what's ours
+	// Get all local keys (active + published + retired + created) to identify what's ours
 	localKeyTags := make(map[uint16]bool)
-	for _, state := range []string{DnskeyStateActive, DnskeyStatePublished, DnskeyStateRetired} {
+	for _, state := range []string{DnskeyStateActive, DnskeyStatePublished, DnskeyStateRetired, DnskeyStateCreated} {
 		dak, err := kdb.GetDnssecKeys(zd.ZoneName, state)
 		if err != nil {
 			continue
@@ -670,32 +672,68 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 		}
 	}
 
-	// Also check the 'foreign' state keys already in the keystore
+	// Get existing foreign keys from the DB (to detect removals)
 	const fetchForeignSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state='foreign'`
 	rows, err := kdb.Query(fetchForeignSql, zd.ZoneName)
 	if err != nil {
 		return fmt.Errorf("extractRemoteDNSKEYs: zone %s: error querying foreign keys: %v", zd.ZoneName, err)
 	}
 	defer rows.Close()
+	existingForeign := make(map[uint16]bool)
 	for rows.Next() {
 		var keyid int
 		if err := rows.Scan(&keyid); err != nil {
 			return fmt.Errorf("extractRemoteDNSKEYs: zone %s: error scanning foreign key row: %v", zd.ZoneName, err)
 		}
-		localKeyTags[uint16(keyid)] = true
+		existingForeign[uint16(keyid)] = true
 	}
 
+	// Identify foreign keys: any DNSKEY in the zone that is not a local key
 	var remote []dns.RR
+	currentForeign := make(map[uint16]*dns.DNSKEY)
 	for _, rr := range dnskeyRRset.RRs {
 		dnskey, ok := rr.(*dns.DNSKEY)
 		if !ok {
 			continue
 		}
-		if !localKeyTags[dnskey.KeyTag()] {
+		kt := dnskey.KeyTag()
+		if !localKeyTags[kt] {
 			remote = append(remote, dns.Copy(rr))
-			log.Printf("extractRemoteDNSKEYs: zone %s: identified remote DNSKEY keytag=%d flags=%d",
-				zd.ZoneName, dnskey.KeyTag(), dnskey.Flags)
+			currentForeign[kt] = dnskey
 		}
+	}
+
+	// Persist new foreign keys to KeyDB
+	const insertForeignSql = `INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	for kt, dnskey := range currentForeign {
+		if !existingForeign[kt] {
+			log.Printf("extractRemoteDNSKEYs: zone %s: persisting new foreign DNSKEY keytag=%d flags=%d alg=%s",
+				zd.ZoneName, kt, dnskey.Flags, dns.AlgorithmToString[dnskey.Algorithm])
+		}
+		// Always INSERT OR REPLACE to keep keyrr up to date
+		_, err := kdb.Exec(insertForeignSql, zd.ZoneName, DnskeyStateForeign, kt, dnskey.Flags,
+			dns.AlgorithmToString[dnskey.Algorithm], "foreign", "", dnskey.String())
+		if err != nil {
+			log.Printf("extractRemoteDNSKEYs: zone %s: failed to persist foreign key %d: %v", zd.ZoneName, kt, err)
+		}
+	}
+
+	// Remove foreign keys from DB that are no longer in the zone
+	const deleteForeignSql = `DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=? AND state='foreign'`
+	for kt := range existingForeign {
+		if _, stillPresent := currentForeign[kt]; !stillPresent {
+			log.Printf("extractRemoteDNSKEYs: zone %s: removing stale foreign DNSKEY keytag=%d from KeyDB",
+				zd.ZoneName, kt)
+			_, err := kdb.Exec(deleteForeignSql, zd.ZoneName, kt)
+			if err != nil {
+				log.Printf("extractRemoteDNSKEYs: zone %s: failed to delete stale foreign key %d: %v", zd.ZoneName, kt, err)
+			}
+		}
+	}
+
+	if len(remote) > 0 || len(existingForeign) > 0 {
+		log.Printf("extractRemoteDNSKEYs: zone %s: %d foreign keys in zone, %d were in DB, %d persisted",
+			zd.ZoneName, len(currentForeign), len(existingForeign), len(currentForeign))
 	}
 
 	zd.RemoteDNSKEYs = remote

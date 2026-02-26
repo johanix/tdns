@@ -208,6 +208,14 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 			return
 		}
 
+		// Store the inventory snapshot for diagnostics
+		zd.LastKeyInventory = &KeyInventorySnapshot{
+			SenderID:  inv.SenderID,
+			Zone:      inv.Zone,
+			Inventory: inv.Inventory,
+			Received:  time.Now(),
+		}
+
 		// Build set of foreign key tags from the inventory
 		foreignKeyTags := make(map[uint16]bool)
 		for _, entry := range inv.Inventory {
