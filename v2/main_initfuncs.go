@@ -134,8 +134,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs:
-		fmt.Printf("*** TDNS %s mode of operation: %q (verbose: %t, debug: %t)\n",
-			Globals.App.Name, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
+		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
+			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
 		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %q",
 			Globals.App.Name, Globals.App.Type)
