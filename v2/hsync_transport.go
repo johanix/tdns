@@ -697,6 +697,7 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 			Algorithm: e.Algorithm,
 			Flags:     e.Flags,
 			State:     e.State,
+			KeyRR:     e.KeyRR,
 		}
 	}
 

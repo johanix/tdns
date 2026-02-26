@@ -570,6 +570,7 @@ func (t *DNSTransport) Keystate(ctx context.Context, peer *Peer, req *KeystateRe
 			Algorithm: e.Algorithm,
 			Flags:     e.Flags,
 			State:     e.State,
+			KeyRR:     e.KeyRR,
 		})
 	}
 

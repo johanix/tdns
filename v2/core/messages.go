@@ -163,7 +163,8 @@ type KeyInventoryEntry struct {
 	KeyTag    uint16 `json:"key_tag"`
 	Algorithm uint8  `json:"algorithm"`
 	Flags     uint16 `json:"flags"`
-	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
+	State     string `json:"state"`  // "created","published","standby","active","retired","foreign"
+	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
 }
 
 // AgentKeystateResponse represents the response to a KEYSTATE message.

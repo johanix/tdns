@@ -261,8 +261,36 @@ Example:
 					}
 
 					fmt.Printf("    %s (%d records):\n", rrTypeName, len(rrStrings))
-					for _, rrStr := range rrStrings {
-						fmt.Printf("      %s\n", rrStr)
+					if rrtype == dns.TypeDNSKEY {
+						// Special DNSKEY display: keytag + truncated pub key
+						for _, info := range rrStrings {
+							rr, err := dns.NewRR(info.RR)
+							if err != nil {
+								fmt.Printf("      %s  %s  %s\n", info.RR, info.State, info.UpdatedAt)
+								continue
+							}
+							dnskey, ok := rr.(*dns.DNSKEY)
+							if !ok {
+								fmt.Printf("      %s  %s  %s\n", info.RR, info.State, info.UpdatedAt)
+								continue
+							}
+							pub := dnskey.PublicKey
+							if len(pub) > 15 {
+								pub = pub[:10] + "..." + pub[len(pub)-5:]
+							}
+							flagDesc := "ZSK"
+							if dnskey.Flags&0x0001 != 0 {
+								flagDesc = "KSK"
+							}
+							fmt.Printf("      keytag=%-5d  %s (%d)  alg=%-10s  key=%s  [%s %s]\n",
+								dnskey.KeyTag(), flagDesc, dnskey.Flags,
+								dns.AlgorithmToString[dnskey.Algorithm], pub,
+								info.State, info.UpdatedAt)
+						}
+					} else {
+						for _, info := range rrStrings {
+							fmt.Printf("      %s\n", info)
+						}
 					}
 				}
 				fmt.Printf("\n")
@@ -855,7 +883,7 @@ Example:
 			return
 		}
 
-		out := []string{"KeyTag|Algorithm|Flags|State|Role"}
+		out := []string{"KeyTag|Algorithm|Flags|State|Role|Key data"}
 		for _, entry := range snapshot.Inventory {
 			role := "local"
 			if entry.State == "foreign" {
@@ -869,8 +897,9 @@ Example:
 			if entry.Flags&0x0001 != 0 {
 				flagDesc = "KSK"
 			}
-			out = append(out, fmt.Sprintf("%d|%s|%d (%s)|%s|%s",
-				entry.KeyTag, algStr, entry.Flags, flagDesc, entry.State, role))
+			keyData := truncatePubKey(entry.KeyRR)
+			out = append(out, fmt.Sprintf("%d|%s|%d (%s)|%s|%s|%s",
+				entry.KeyTag, algStr, entry.Flags, flagDesc, entry.State, role, keyData))
 		}
 		fmt.Println(columnize.SimpleFormat(out))
 	},
@@ -1069,6 +1098,29 @@ func init() {
 	DebugAgentTestChainCmd.Flags().String("rr", "", "DNS record for test")
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfiupstream, "upstream", "", "", "Identity of upstream agent")
 	// DebugAgentSendRfiCmd.Flags().StringVarP(&rfidownstream, "downstream", "", "", "Identity of downstream agent")
+}
+
+// truncatePubKey extracts the public key from a DNSKEY RR string and
+// truncates it to "first10...last5" for display. If the RR string is empty
+// or unparseable, returns "-".
+func truncatePubKey(keyrr string) string {
+	if keyrr == "" {
+		return "-"
+	}
+	// Parse the DNSKEY RR to extract the public key field
+	rr, err := dns.NewRR(keyrr)
+	if err != nil {
+		return "-"
+	}
+	dnskey, ok := rr.(*dns.DNSKEY)
+	if !ok {
+		return "-"
+	}
+	pub := dnskey.PublicKey
+	if len(pub) <= 15 {
+		return pub
+	}
+	return pub[:10] + "..." + pub[len(pub)-5:]
 }
 
 func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtResponse, error) {

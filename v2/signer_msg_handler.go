@@ -123,6 +123,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 			Algorithm: item.Algorithm,
 			Flags:     item.Flags,
 			State:     item.State,
+			KeyRR:     item.KeyRR,
 		}
 	}
 
