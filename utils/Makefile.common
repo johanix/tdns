@@ -47,7 +47,7 @@ tdnsnbsd:
 	fi
 	@if [ -n "$$TDNS_NBSD_DIR" ]; then \
 	   echo rsyncing from ${TDNS_SRC} to ${TDNS_NBSD_DIR} ; \
-	   (cd ${TDNS_SRC} ; rsync --delete --exclude=.git \
+	   (cd ${TDNS_SRC} ; rsync --delete --exclude=.git --include='*/*/version.go' \
 		--exclude-from=${TDNS_SRC}/.gitignore --exclude-from=${TDNS_SRC}/.rsyncignore \
 		-avx ${TDNS_SRC}/ ${TDNS_NBSD_DIR}/ );\
 	else \
