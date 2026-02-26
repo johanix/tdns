@@ -91,3 +91,63 @@ Multi-signer is in practice just a special case of multi-provider where more tha
 is requested by the zone owner to sign the zone. this requires additional synchronization among the
 providers using the same mechanisms as for all multi-provider synchronization.
 
+
+# Running agent in Docker
+
+## Building the image:
+
+```
+$ docker buildx build --no-cache -t tdns - < Dockerfile
+[+] Building 66.1s (22/22) FINISHED                                                                                                               docker:desktop-linux
+ => [internal] load build definition from Dockerfile                                                                                                              0.0s
+ => => transferring dockerfile: 1.57kB                                                                                                                            0.0s
+ => [internal] load metadata for docker.io/library/golang:1.25.2-alpine                                                                                           5.3s
+ => [internal] load metadata for docker.io/library/alpine:latest                                                                                                  5.4s
+ => [internal] load .dockerignore                                                                                                                                 0.0s
+ => => transferring context: 2B                                                                                                                                   0.0s
+ => CACHED [stage-1  1/10] FROM docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659                           0.0s
+ => CACHED [builder 1/7] FROM docker.io/library/golang:1.25.2-alpine@sha256:06cdd34bd531b810650e47762c01e025eb9b1c7eadd191553b91c9f2d549fae8                      0.0s
+ => [builder 2/7] RUN apk add --no-cache make git gcc musl-dev                                                                                                    4.7s
+ => [stage-1  2/10] RUN apk add --no-cache ca-certificates openssl                                                                                                2.8s
+ => [stage-1  3/10] WORKDIR /etc/tdns                                                                                                                             0.0s
+ => [builder 3/7] WORKDIR /app                                                                                                                                    0.0s
+ => [builder 4/7] RUN git clone https://github.com/johanix/tdns.git .                                                                                             3.3s
+ => [builder 5/7] RUN make all                                                                                                                                   50.3s
+ => [builder 6/7] RUN mkdir -p /usr/local/libexec /usr/local/bin     && find . -type f -name "tdns*" -executable -exec cp {} /usr/local/bin/ ;                    0.4s
+ => [builder 7/7] RUN make install                                                                                                                                0.5s
+ => [stage-1  4/10] COPY --from=builder /usr/local/bin/tdns-* /usr/local/bin/                                                                                     0.2s
+ => [stage-1  5/10] RUN mkdir -p /etc/tdns/certs                                                                                                                  0.1s
+ => [stage-1  6/10] COPY --from=builder /app/agent/tdns-agent.sample.yaml /etc/tdns/tdns-agent.yaml                                                               0.0s
+ => [stage-1  7/10] COPY --from=builder /app/agent/agent-zones.yaml /etc/tdns/                                                                                    0.0s
+ => [stage-1  8/10] COPY --from=builder /app/cli/tdns-cli.sample.yaml /etc/tdns/tdns-cli.yaml                                                                     0.0s
+ => [stage-1  9/10] COPY --from=builder /app/utils/ /tmp/utils/                                                                                                   0.0s
+ => [stage-1 10/10] RUN tdns-cli db init -f /var/tmp/tdns-agent.db     && cd /tmp/utils     && for cn in localhost. agent.provider. ; do echo $cn | sh gen-cert.  0.2s
+ => exporting to image                                                                                                                                            0.3s
+ => => exporting layers                                                                                                                                           0.3s
+ => => writing image sha256:3ae118b7141299307e8f93f9e73bd1db9b7dd4d8adad83245e5fffc634fbfeda                                                                      0.0s
+ => => naming to docker.io/library/tdns                                                                                                                           0.0s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/xszczfw3zdzqykmtray03bmse
+
+What's next:
+    View a summary of image vulnerabilities and recommendations → docker scout quickview
+```
+
+## Running the image built
+
+```
+$ docker run -it tdns
+*** TDNS tdns-agent mode of operation: "agent" (verbose: false, debug: false)
+Verifying existence of TDNS DB file: /var/tmp/tdns-agent.db
+2026/02/05 18:49:01 TDNS-AGENT: Validating config for "log" section
+2026/02/05 18:49:01 TDNS-AGENT: Validating config for "service" section
+2026/02/05 18:49:01 TDNS-AGENT: Validating config for "db" section
+2026/02/05 18:49:01 TDNS-AGENT: Validating config for "apiserver" section
+2026/02/05 18:49:01 TDNS-AGENT: Validating config for "dnsengine" section
+Logging to file: /var/log/tdns/tdns-agent.log
+TDNS tdns-agent version v0.8-main-f233696 starting.
+Zone "test.net." refers to the non-existing template "parent-primary". Ignored.
+Zone "johani.org." refers to the non-existing template "secondary". Ignored.
+PRINT AT github.com/johanix/tdns/tdns.(*KeyDB).GenerateKeypair(sig0_utils.go:233)
+string("/opt/local/bin/dnssec-keygen -K /tmp -a ED25519 -T KEY -f KSK -n ZONE dns.agent.provider."), #len=89
+```
