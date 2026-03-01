@@ -182,6 +182,10 @@ func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiCl
 					fmt.Printf("    Content Type: %s\n", contentType)
 				}
 
+				if payloadSize := getUint64Value(s, "payload_size"); payloadSize > 0 {
+					fmt.Printf("    Payload Size: %d bytes\n", payloadSize)
+				}
+
 				if opCount, ok := s["operation_count"].(float64); ok {
 					fmt.Printf("    Operation Count: %d\n", int(opCount))
 				}
@@ -210,7 +214,7 @@ func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiCl
 	} else {
 		// Default mode: show tabular format
 		var rows []string
-		rows = append(rows, "Id | State | Time | Receiver | Operation | Query")
+		rows = append(rows, "Id | Size | State | Time | Receiver | Operation | Query")
 
 		for _, sRaw := range summaries {
 			if s, ok := sRaw.(map[string]interface{}); ok {
@@ -269,8 +273,20 @@ func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiCl
 					}
 				}
 
-				rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s",
-					distID, state, timeStr, receiver, operation, queryStr))
+				// Format payload size for display
+				sizeStr := "-"
+				if payloadSize := getUint64Value(s, "payload_size"); payloadSize > 0 {
+					if payloadSize >= 1024*1024 {
+						sizeStr = fmt.Sprintf("%.1fM", float64(payloadSize)/(1024*1024))
+					} else if payloadSize >= 1024 {
+						sizeStr = fmt.Sprintf("%.1fK", float64(payloadSize)/1024)
+					} else {
+						sizeStr = fmt.Sprintf("%d", payloadSize)
+					}
+				}
+
+				rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s",
+					distID, sizeStr, state, timeStr, receiver, operation, queryStr))
 			}
 		}
 

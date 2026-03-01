@@ -2,13 +2,10 @@
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
  * CHUNK query handler for query-mode CHUNK. Registered with RegisterQueryHandler(core.TypeCHUNK, ...).
- * When chunk_mode is "query", the agent stores payload by qname and sends NOTIFY without EDNS0;
- * the combiner then queries the agent for qname CHUNK. This handler answers those queries
- * by looking up the payload in the store and returning it as a CHUNK RR.
+ * Supports both manifest-based chunk arrays (sequence-numbered qnames) and legacy single-blob lookups.
  *
- * For potential reuse: tdns-kdc has a CHUNK query handler (e.g. KDC DNS handler for CHUNK type)
- * that serves distribution chunks by qname; comparing with that implementation may allow
- * sharing store semantics or response-building logic if both codebases are available.
+ * Qname format for chunk arrays: <sequence>.<receiver>.<distid>.<sender>.
+ * If the first label is numeric, it's treated as a sequence number and stripped to form the base qname.
  */
 
 package tdns
@@ -17,8 +14,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 
-	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -37,19 +36,35 @@ func chunkQueryHandler(ctx context.Context, req *DnsQueryRequest, store ChunkPay
 	if req.Qtype != core.TypeCHUNK {
 		return ErrNotHandled
 	}
-	// Normalize to FQDN so lookup matches what we store (e.g. "xxx.agent" and "xxx.agent." hit same entry)
 	qname := dns.Fqdn(req.Qname)
+
+	// Try sequence-numbered lookup: if the first label is numeric, parse it as a sequence number
+	// and look up the chunk array under the base qname (remaining labels).
+	labels := dns.SplitDomainName(qname)
+	if len(labels) >= 4 {
+		if seq, err := strconv.ParseUint(labels[0], 10, 16); err == nil {
+			baseQname := dns.Fqdn(strings.Join(labels[1:], "."))
+			if chunk, ok := store.GetChunk(baseQname, uint16(seq)); ok {
+				if Globals.Debug {
+					log.Printf("ChunkQueryHandler: qname=%q seq=%d base=%q datalen=%d",
+						qname, seq, baseQname, len(chunk.Data))
+				}
+				return serveChunkRR(req, qname, chunk)
+			}
+		}
+	}
+
+	// Fall back to legacy single-blob lookup
 	payload, format, ok := store.Get(qname)
 	if !ok {
 		return ErrNotHandled
 	}
 
 	if Globals.Debug {
-		log.Printf("ChunkQueryHandler: qname=%q len=%d format=%d (JSON=%d JWT=%d)",
-			qname, len(payload), format, core.FormatJSON, core.FormatJWT)
+		log.Printf("ChunkQueryHandler: legacy qname=%q len=%d format=%d",
+			qname, len(payload), format)
 	}
 
-	// Build CHUNK RR: single payload as Sequence=0, Total=1 (opaque payload record)
 	chunk := &core.CHUNK{
 		Format:     format,
 		HMACLen:    0,
@@ -59,6 +74,11 @@ func chunkQueryHandler(ctx context.Context, req *DnsQueryRequest, store ChunkPay
 		DataLength: uint16(len(payload)),
 		Data:       payload,
 	}
+	return serveChunkRR(req, qname, chunk)
+}
+
+// serveChunkRR builds and sends a DNS response containing a single CHUNK RR.
+func serveChunkRR(req *DnsQueryRequest, qname string, chunk *core.CHUNK) error {
 	chunkRR := &dns.PrivateRR{
 		Hdr: dns.RR_Header{
 			Name:   qname,

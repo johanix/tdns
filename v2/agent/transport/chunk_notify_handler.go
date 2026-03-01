@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/distrib"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -121,26 +123,31 @@ func (h *ChunkNotifyHandler) extractDistributionIDAndSender(qname string) (distr
 	return distributionID, senderID, nil
 }
 
-// extractChunkPayload extracts the CHUNK payload from the EDNS0 option.
-func (h *ChunkNotifyHandler) extractChunkPayload(msg *dns.Msg) ([]byte, error) {
+// extractChunkPayload extracts the CHUNK payload from the EDNS0 option using ChunkOption framing.
+// Returns the payload data, the format byte (FormatJSON or FormatJWT), and any error.
+func (h *ChunkNotifyHandler) extractChunkPayload(msg *dns.Msg) ([]byte, uint8, error) {
 	if msg == nil {
-		return nil, fmt.Errorf("message is nil")
+		return nil, 0, fmt.Errorf("message is nil")
 	}
 
 	opt := msg.IsEdns0()
 	if opt == nil {
-		return nil, fmt.Errorf("no EDNS0 OPT record")
+		return nil, 0, fmt.Errorf("no EDNS0 OPT record")
 	}
 
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			if localOpt.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
-				return localOpt.Data, nil
+				chunkOpt, err := edns0.ParseChunkOption(localOpt)
+				if err != nil {
+					return nil, 0, fmt.Errorf("invalid CHUNK option: %w", err)
+				}
+				return chunkOpt.Data, chunkOpt.Format, nil
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("no CHUNK EDNS0 option found")
+	return nil, 0, fmt.Errorf("no CHUNK EDNS0 option found")
 }
 
 // extractChunkQueryEndpointFromMsg returns the sender's CHUNK query endpoint (host:port) from NOTIFY EDNS0 option 65005, or "" if absent.
@@ -164,7 +171,8 @@ func extractChunkQueryEndpointFromMsg(msg *dns.Msg) string {
 }
 
 // fetchChunkViaQuery fetches the CHUNK payload via DNS CHUNK query when NOTIFY had no EDNS0 payload (chunk_mode=query).
-// Builds qname as {receiver}.{distid}.{sender} and queries the sender (from EDNS0 option 65005 or NOTIFY source).
+// Uses manifest-first fetch: fetches manifest (sequence 0), checks if inline, otherwise fetches data chunks 1..N.
+// Builds base qname as {receiver}.{distid}.{sender} and queries the sender.
 func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
 	if h.Transport == nil && h.FetchChunkQuery == nil {
 		return nil, fmt.Errorf("no transport or FetchChunkQuery callback for CHUNK query")
@@ -172,17 +180,15 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	if senderID == "" {
 		return nil, fmt.Errorf("cannot derive sender for query mode (empty senderID)")
 	}
-	// CHUNK query qname = {receiver}.{distid}.{sender}
-	chunkQueryQname := buildChunkQueryQname(h.LocalID, distributionID, senderID)
+
+	baseQname := buildChunkQueryQname(h.LocalID, distributionID, senderID)
 	queryTarget := extractChunkQueryEndpointFromMsg(msg)
 	if queryTarget == "" && h.GetPeerAddress != nil {
-		// Use configured peer address (e.g. from agent.peers) so we use correct host:port
 		if addr, ok := h.GetPeerAddress(senderID); ok && addr != "" {
 			queryTarget = addr
 		}
 	}
 	if queryTarget == "" && w != nil {
-		// Fallback: NOTIFY source; CHUNK query goes to DNS port (53)
 		queryTarget = w.RemoteAddr().String()
 		if host, _, err := net.SplitHostPort(queryTarget); err == nil && host != "" {
 			queryTarget = net.JoinHostPort(host, "53")
@@ -191,12 +197,40 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	if queryTarget == "" {
 		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option 65005, no peer address for %q)", senderID)
 	}
-	// Use Transport if available, otherwise FetchChunkQuery callback (combiner/signer mode)
-	if h.Transport != nil {
-		payload, _, err := h.Transport.FetchChunkViaQuery(ctx, queryTarget, chunkQueryQname)
-		return payload, err
+
+	// Phase 1: Fetch manifest (sequence 0)
+	if h.Transport == nil {
+		// Combiner/signer fallback: no Transport, use legacy single-fetch callback
+		return h.FetchChunkQuery(ctx, queryTarget, baseQname)
 	}
-	return h.FetchChunkQuery(ctx, queryTarget, chunkQueryQname)
+
+	manifestQname := buildChunkQueryQnameWithSeq(0, baseQname)
+	manifestChunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, manifestQname)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch manifest (seq 0): %w", err)
+	}
+
+	// Phase 2: Extract manifest data — check if payload is inline
+	manifestData, err := core.ExtractManifestData(manifestChunk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	}
+	if manifestData.ChunkCount == 0 {
+		// Payload is inline in the manifest
+		return manifestData.Payload, nil
+	}
+
+	// Phase 3: Fetch data chunks 1..N and reassemble
+	dataChunks := make([]*core.CHUNK, 0, manifestData.ChunkCount)
+	for i := uint16(1); i <= manifestData.ChunkCount; i++ {
+		chunkQname := buildChunkQueryQnameWithSeq(i, baseQname)
+		chunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, chunkQname)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch chunk %d/%d: %w", i, manifestData.ChunkCount, err)
+		}
+		dataChunks = append(dataChunks, chunk)
+	}
+	return distrib.ReassembleCHUNKs(dataChunks)
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
@@ -261,7 +295,7 @@ func (h *ChunkNotifyHandler) sendResponse(w dns.ResponseWriter, req *dns.Msg, rc
 
 // sendConfirmResponse sends a DNS response with an EDNS0 CHUNK confirmation payload.
 // This proves to the sender that the message was received and routed (not just DNS-level ACK).
-func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.Msg, distributionID, msgType string) error {
+func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.Msg, distributionID, msgType, senderID string) error {
 	if w == nil {
 		return nil
 	}
@@ -284,6 +318,17 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 		return h.sendResponse(w, req, dns.RcodeServerFailure)
 	}
 
+	// Encrypt response when SecureWrapper is configured
+	var payloadFormat uint8 = core.FormatJSON
+	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && senderID != "" {
+		if encrypted, err := h.SecureWrapper.WrapOutgoing(senderID, payloadBytes); err == nil {
+			payloadBytes = encrypted
+			payloadFormat = core.FormatJWT
+		} else {
+			log.Printf("sendConfirmResponse: encryption failed for peer %s: %v", senderID, err)
+		}
+	}
+
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Authoritative = true
@@ -291,10 +336,7 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 	resp.SetEdns0(4096, true)
 	opt := resp.IsEdns0()
 	if opt != nil {
-		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: payloadBytes,
-		})
+		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, payloadBytes))
 	}
 	return w.WriteMsg(resp)
 }
@@ -348,7 +390,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	}
 
 	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
-	payload, err := h.extractChunkPayload(msg)
+	payload, _, err := h.extractChunkPayload(msg)
 	if err != nil {
 		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
 		payload, err = h.fetchChunkViaQuery(ctx, senderHint, distributionID, msg, w)
@@ -429,6 +471,11 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	if h.Transport != nil {
 		msgCtx.Data["transport"] = h.Transport
 	}
+	// Store SecureWrapper + peer ID so SendResponseMiddleware can encrypt responses
+	if h.SecureWrapper != nil {
+		msgCtx.Data["secure_wrapper"] = h.SecureWrapper
+	}
+	msgCtx.Data["response_peer_id"] = senderHint
 	if h.OnConfirmationReceived != nil {
 		msgCtx.Data["on_confirmation_received"] = h.OnConfirmationReceived
 	}

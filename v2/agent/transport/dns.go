@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/distrib"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -55,15 +56,18 @@ type DNSTransport struct {
 	SecureWrapper *SecurePayloadWrapper
 
 	// chunkMode: "edns0" or "query"; when "query", payload is stored and NOTIFY sent without EDNS0
-	chunkMode string
-	chunkGet  func(qname string) ([]byte, uint8, bool)
-	chunkSet  func(qname string, payload []byte, format uint8)
+	chunkMode      string
+	chunkGet       func(qname string) ([]byte, uint8, bool)
+	chunkSet       func(qname string, payload []byte, format uint8)
+	chunkSetChunks func(qname string, chunks []*core.CHUNK)
 	// chunkQueryEndpoint: for query mode, address (host:port) where we answer CHUNK queries
 	chunkQueryEndpoint string
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
 	chunkQueryEndpointInNotify bool
+	// chunkMaxSize: maximum data chunk size in bytes for PrepareDistributionChunks (0 = default 60000)
+	chunkMaxSize int
 
-	distributionAdd           func(qname string, senderID string, receiverID string, operation string, distributionID string)
+	distributionAdd           func(qname string, senderID string, receiverID string, operation string, distributionID string, payloadSize int)
 	distributionMarkCompleted func(qname string)
 }
 
@@ -115,15 +119,19 @@ type DNSTransportConfig struct {
 	ChunkMode string
 	// For ChunkMode "query": optional get/set for payload store (keyed by qname). If nil, query mode is effectively disabled.
 	// Format: FormatJSON=1, FormatJWT=2 (from core package)
-	ChunkPayloadGet func(qname string) ([]byte, uint8, bool)
-	ChunkPayloadSet func(qname string, payload []byte, format uint8)
+	ChunkPayloadGet       func(qname string) ([]byte, uint8, bool)
+	ChunkPayloadSet       func(qname string, payload []byte, format uint8)
+	ChunkPayloadSetChunks func(qname string, chunks []*core.CHUNK)
 	// ChunkQueryEndpoint: for query mode, the address (host:port) where this agent answers CHUNK queries
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agents[].address)
 	ChunkQueryEndpointInNotify bool
+	// ChunkMaxSize: maximum data chunk size in bytes for PrepareDistributionChunks.
+	// 0 = default (60000).
+	ChunkMaxSize int
 
 	// Optional: register distributions for "agent distrib list". Called when sending; MarkCompleted when response is success.
-	DistributionAdd           func(qname string, senderID string, receiverID string, operation string, distributionID string)
+	DistributionAdd           func(qname string, senderID string, receiverID string, operation string, distributionID string, payloadSize int)
 	DistributionMarkCompleted func(qname string)
 }
 
@@ -145,8 +153,10 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		chunkMode:                  cfg.ChunkMode,
 		chunkGet:                   cfg.ChunkPayloadGet,
 		chunkSet:                   cfg.ChunkPayloadSet,
+		chunkSetChunks:             cfg.ChunkPayloadSetChunks,
 		chunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 		chunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
+		chunkMaxSize:               cfg.ChunkMaxSize,
 		distributionAdd:            cfg.DistributionAdd,
 		distributionMarkCompleted:  cfg.DistributionMarkCompleted,
 	}
@@ -190,6 +200,12 @@ func buildChunkQueryQname(receiverID, distID, senderID string) string {
 	r := strings.TrimSuffix(dns.Fqdn(receiverID), ".")
 	s := strings.TrimSuffix(dns.Fqdn(senderID), ".")
 	return dns.Fqdn(r + "." + distID + "." + s)
+}
+
+// buildChunkQueryQnameWithSeq prepends a sequence number to a base chunk query qname.
+// Format: <sequence>.<receiver>.<distid>.<sender>.
+func buildChunkQueryQnameWithSeq(sequence uint16, baseQname string) string {
+	return dns.Fqdn(fmt.Sprintf("%d.%s", sequence, strings.TrimSuffix(baseQname, ".")))
 }
 
 // Hello sends a hello handshake request to a peer via DNS.
@@ -425,10 +441,6 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	if t.distributionAdd != nil {
-		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", distributionID)
-	}
-
 	// Create ping payload using typed struct from core package
 	payload := &core.AgentPingPost{
 		MessageType:  core.AgentMsgPing,
@@ -456,11 +468,21 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		payloadFormat = core.FormatJWT
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
+	if t.distributionAdd != nil {
+		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", distributionID, len(finalPayload))
+	}
+
+	useQueryMode := t.chunkMode == "query" && t.chunkSetChunks != nil
 	if useQueryMode {
-		// Store under CHUNK query qname so receiver can fetch: {receiver}.{distid}.{sender}
+		// Prepare manifest + data chunks via distrib framework
 		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
-		t.chunkSet(chunkQueryQname, finalPayload, payloadFormat)
+		allChunks, err := distrib.PrepareDistributionChunks(
+			finalPayload, "ping", distributionID, peer.ID, nil, t.chunkMaxSize, nil)
+		if err != nil {
+			return nil, NewTransportError("DNS", "Ping", peer.ID,
+				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
+		}
+		t.chunkSetChunks(chunkQueryQname, allChunks)
 	}
 
 	m := new(dns.Msg)
@@ -472,10 +494,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		m.SetEdns0(4096, true)
 		opt := m.IsEdns0()
 		if opt != nil {
-			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-				Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-				Data: finalPayload,
-			})
+			opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
 		}
 	} else if t.chunkQueryEndpoint != "" && t.chunkQueryEndpointInNotify {
 		m.SetEdns0(4096, true)
@@ -500,7 +519,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	}
 
 	// Parse EDNS0 CHUNK from response for ping_confirm
-	confirm, err := extractPingConfirmFromResponse(res)
+	confirm, err := extractPingConfirmFromResponse(res, peer.ID, t.SecureWrapper)
 	if err != nil {
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("invalid ping response: %w", err), true)
@@ -530,15 +549,27 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 }
 
 // extractPingConfirmFromResponse extracts DnsPingConfirmPayload from response EDNS0 CHUNK.
-func extractPingConfirmFromResponse(res *dns.Msg) (*DnsPingConfirmPayload, error) {
+func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWrapper) (*DnsPingConfirmPayload, error) {
 	opt := res.IsEdns0()
 	if opt == nil {
 		return nil, fmt.Errorf("no EDNS0 in response")
 	}
 	for _, o := range opt.Option {
 		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			chunkOpt, err := edns0.ParseChunkOption(local)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
+			}
+			data := chunkOpt.Data
+			if chunkOpt.Format == core.FormatJWT && sw != nil {
+				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				if err != nil {
+					return nil, fmt.Errorf("decryption of ping confirm failed: %w", err)
+				}
+				data = decrypted
+			}
 			var confirm DnsPingConfirmPayload
-			if err := json.Unmarshal(local.Data, &confirm); err != nil {
+			if err := json.Unmarshal(data, &confirm); err != nil {
 				return nil, err
 			}
 			// Accept both "ping_confirm" (new format) and "confirm" (legacy format from older combiners)
@@ -612,15 +643,27 @@ func (t *DNSTransport) Keystate(ctx context.Context, peer *Peer, req *KeystateRe
 }
 
 // extractKeystateConfirmFromResponse extracts DnsKeystateConfirmPayload from response EDNS0 CHUNK.
-func extractKeystateConfirmFromResponse(res *dns.Msg) (*DnsKeystateConfirmPayload, error) {
+func extractKeystateConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWrapper) (*DnsKeystateConfirmPayload, error) {
 	opt := res.IsEdns0()
 	if opt == nil {
 		return nil, fmt.Errorf("no EDNS0 in response")
 	}
 	for _, o := range opt.Option {
 		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			chunkOpt, err := edns0.ParseChunkOption(local)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
+			}
+			data := chunkOpt.Data
+			if chunkOpt.Format == core.FormatJWT && sw != nil {
+				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				if err != nil {
+					return nil, fmt.Errorf("decryption of keystate confirm failed: %w", err)
+				}
+				data = decrypted
+			}
 			var confirm DnsKeystateConfirmPayload
-			if err := json.Unmarshal(local.Data, &confirm); err != nil {
+			if err := json.Unmarshal(data, &confirm); err != nil {
 				return nil, err
 			}
 			if confirm.Type != "keystate_confirm" && confirm.Type != "confirm" {
@@ -682,6 +725,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payloadJSON
+	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
 		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
@@ -689,6 +733,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
+		payloadFormat = core.FormatJWT
 	}
 
 	// Create NOTIFY message
@@ -702,11 +747,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	m.SetEdns0(4096, true)
 	opt := m.IsEdns0()
 	if opt != nil {
-		chunkOpt := &dns.EDNS0_LOCAL{
-			Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-			Data: finalPayload,
-		}
-		opt.Option = append(opt.Option, chunkOpt)
+		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
 	}
 
 	// Send NOTIFY to peer
@@ -724,10 +765,6 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, distributionID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
 	addr := peer.CurrentAddress()
 
-	if t.distributionAdd != nil {
-		t.distributionAdd(qname, t.LocalID, peer.ID, opType, distributionID)
-	}
-
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payload
 	var payloadFormat uint8 = core.FormatJSON
@@ -741,11 +778,21 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		payloadFormat = core.FormatJWT
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkSet != nil
+	if t.distributionAdd != nil {
+		t.distributionAdd(qname, t.LocalID, peer.ID, opType, distributionID, len(finalPayload))
+	}
+
+	useQueryMode := t.chunkMode == "query" && t.chunkSetChunks != nil
 	if useQueryMode {
-		// Store under CHUNK query qname: {receiver}.{distid}.{sender}
+		// Prepare manifest + data chunks via distrib framework
 		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
-		t.chunkSet(chunkQueryQname, finalPayload, payloadFormat)
+		allChunks, err := distrib.PrepareDistributionChunks(
+			finalPayload, opType, distributionID, peer.ID, nil, t.chunkMaxSize, nil)
+		if err != nil {
+			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
+				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
+		}
+		t.chunkSetChunks(chunkQueryQname, allChunks)
 	}
 
 	// Create NOTIFY message
@@ -760,10 +807,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		m.SetEdns0(4096, true)
 		opt := m.IsEdns0()
 		if opt != nil {
-			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-				Code: edns0.EDNS0_CHUNK_OPTION_CODE,
-				Data: finalPayload,
-			})
+			opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
 		}
 	} else if t.chunkQueryEndpoint != "" && (t.chunkQueryEndpointInNotify || forceEndpoint) {
 		// Include endpoint if configured OR if forced (discovery messages need it)
@@ -817,7 +861,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 
 	// Try to extract application-level confirmation from the DNS response EDNS0.
 	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
-	if confirm := extractConfirmFromResponse(res); confirm != nil {
+	if confirm := extractConfirmFromResponse(res, peer.ID, t.SecureWrapper); confirm != nil {
 		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q applied=%d removed=%d rejected=%d",
 			opType, distributionID, peer.ID, confirm.Status, confirm.Message,
 			len(confirm.AppliedRecords), len(confirm.RemovedRecords), len(confirm.RejectedItems))
@@ -859,15 +903,27 @@ type inlineConfirm struct {
 
 // extractConfirmFromResponse extracts a JSON confirmation from the EDNS0 CHUNK option in a DNS response.
 // Returns nil if no confirmation is present.
-func extractConfirmFromResponse(res *dns.Msg) *inlineConfirm {
+func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWrapper) *inlineConfirm {
 	opt := res.IsEdns0()
 	if opt == nil {
 		return nil
 	}
 	for _, o := range opt.Option {
 		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			chunkOpt, parseErr := edns0.ParseChunkOption(local)
+			if parseErr != nil {
+				continue
+			}
+			data := chunkOpt.Data
+			if chunkOpt.Format == core.FormatJWT && sw != nil {
+				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				if err != nil {
+					continue
+				}
+				data = decrypted
+			}
 			var confirm inlineConfirm
-			if err := json.Unmarshal(local.Data, &confirm); err == nil && confirm.Type == "confirm" {
+			if err := json.Unmarshal(data, &confirm); err == nil && confirm.Type == "confirm" {
 				return &confirm
 			}
 		}
@@ -1106,7 +1162,9 @@ type DnsPingConfirmPayload struct {
 
 // FetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.
 // Used by the receiver in chunk_mode=query when NOTIFY has no EDNS0 payload.
-func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
+// FetchChunkRR sends a CHUNK query and returns the full CHUNK RR from the response.
+// This is the low-level method; FetchChunkViaQuery is a convenience wrapper.
+func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname string) (*core.CHUNK, error) {
 	if host, port, err := net.SplitHostPort(serverAddr); err != nil {
 		if host != "" {
 			serverAddr = net.JoinHostPort(host, "53")
@@ -1124,23 +1182,33 @@ func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname
 	c := &dns.Client{Timeout: t.Timeout, Net: "tcp"}
 	in, _, err := c.ExchangeContext(ctx, m, serverAddr)
 	if err != nil {
-		return nil, 0, fmt.Errorf("CHUNK query to %s failed: %w", serverAddr, err)
+		return nil, fmt.Errorf("CHUNK query to %s failed: %w", serverAddr, err)
 	}
 	if in == nil || in.Rcode != dns.RcodeSuccess {
 		rcode := dns.RcodeSuccess
 		if in != nil {
 			rcode = in.Rcode
 		}
-		return nil, 0, fmt.Errorf("CHUNK query to %s returned rcode %s", serverAddr, dns.RcodeToString[rcode])
+		return nil, fmt.Errorf("CHUNK query to %s returned rcode %s", serverAddr, dns.RcodeToString[rcode])
 	}
 	for _, rr := range in.Answer {
 		if prr, ok := rr.(*dns.PrivateRR); ok && prr.Hdr.Rrtype == TypeCHUNK {
 			if chunk, ok := prr.Data.(*core.CHUNK); ok && chunk != nil {
-				return chunk.Data, chunk.Format, nil
+				return chunk, nil
 			}
 		}
 	}
-	return nil, 0, fmt.Errorf("no CHUNK RR in response from %s", serverAddr)
+	return nil, fmt.Errorf("no CHUNK RR in response from %s", serverAddr)
+}
+
+// FetchChunkViaQuery sends a CHUNK query and returns the payload data and format.
+// Convenience wrapper around FetchChunkRR.
+func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
+	chunk, err := t.FetchChunkRR(ctx, serverAddr, qname)
+	if err != nil {
+		return nil, 0, err
+	}
+	return chunk.Data, chunk.Format, nil
 }
 
 // Constants for DNS transport

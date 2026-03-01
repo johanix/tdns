@@ -106,6 +106,9 @@ type TransportManagerConfig struct {
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0 option 65005); when false, receiver uses static config (e.g. combiner.agents[].address)
 	ChunkQueryEndpointInNotify bool
+	// ChunkMaxSize: maximum data chunk size in bytes for PrepareDistributionChunks.
+	// 0 = default (60000). Set small (e.g. 500) for fragmentation testing.
+	ChunkMaxSize int
 
 	// PayloadCrypto enables JWS/JWE encryption for CHUNK payloads (optional)
 	// If set and Enabled, all outgoing CHUNK payloads will be encrypted and signed
@@ -194,16 +197,18 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			ChunkMode:                  cfg.ChunkMode,
 			ChunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 			ChunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
+			ChunkMaxSize:               cfg.ChunkMaxSize,
 			PayloadCrypto:              cfg.PayloadCrypto,
 		}
 		if cfg.ChunkPayloadStore != nil {
 			store := cfg.ChunkPayloadStore
 			dnsCfg.ChunkPayloadGet = func(qname string) ([]byte, uint8, bool) { return store.Get(qname) }
 			dnsCfg.ChunkPayloadSet = func(qname string, payload []byte, format uint8) { store.Set(qname, payload, format) }
+			dnsCfg.ChunkPayloadSetChunks = func(qname string, chunks []*core.CHUNK) { store.SetChunks(qname, chunks) }
 		}
 		if cfg.DistributionCache != nil {
 			cache := cfg.DistributionCache
-			dnsCfg.DistributionAdd = func(qname string, senderID string, receiverID string, operation string, distributionID string) {
+			dnsCfg.DistributionAdd = func(qname string, senderID string, receiverID string, operation string, distributionID string, payloadSize int) {
 				now := time.Now()
 
 				// Calculate expiration time based on message type (operation)
@@ -218,16 +223,17 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				expiresAt := now.Add(time.Duration(retentionSecs) * time.Second)
 
 				cache.Add(qname, &DistributionInfo{
-					DistributionID: distributionID,
-					SenderID:       senderID,
-					ReceiverID:     receiverID,
-					Operation:      operation,
-					ContentType:    "",
-					State:          "pending",
-					CreatedAt:      now,
-					CompletedAt:    nil,
-					ExpiresAt:      &expiresAt,
-					QNAME:          qname,
+					DistributionID:   distributionID,
+					SenderID:         senderID,
+					ReceiverID:       receiverID,
+					Operation:        operation,
+					ContentType:      "",
+					State:            "pending",
+					PayloadSize:      payloadSize,
+					CreatedAt:        now,
+					CompletedAt:      nil,
+					ExpiresAt:        &expiresAt,
+					QNAME:            qname,
 				})
 			}
 			dnsCfg.DistributionMarkCompleted = func(qname string) { cache.MarkCompleted(qname) }

@@ -13,6 +13,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -470,6 +472,21 @@ func DefaultUnsupportedHandler(ctx *MessageContext) error {
 	return nil
 }
 
+// encryptResponsePayload encrypts a response payload if SecureWrapper is available in ctx.Data.
+// Returns the (possibly encrypted) payload and the appropriate format byte.
+func encryptResponsePayload(ctx *MessageContext, payload []byte) ([]byte, uint8) {
+	if sw, ok := ctx.Data["secure_wrapper"].(*SecurePayloadWrapper); ok && sw != nil && sw.IsEnabled() {
+		if peerID, ok := ctx.Data["response_peer_id"].(string); ok && peerID != "" {
+			if encrypted, err := sw.WrapOutgoing(peerID, payload); err == nil {
+				return encrypted, core.FormatJWT
+			} else {
+				log.Printf("encryptResponsePayload: encryption failed for peer %s: %v", peerID, err)
+			}
+		}
+	}
+	return payload, core.FormatJSON
+}
+
 // SendResponseMiddleware sends the DNS response after all handlers complete.
 // This middleware should be the outermost one (last to wrap, first to execute on return).
 func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
@@ -492,7 +509,8 @@ func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
 		// Check for response payload (unified key for all message types)
 		if response, ok := ctx.Data["response"]; ok {
 			if payload, ok := response.([]byte); ok {
-				return sendChunkResponse(w, msg, payload, rcode)
+				payload, format := encryptResponsePayload(ctx, payload)
+				return sendChunkResponse(w, msg, payload, format, rcode)
 			}
 		}
 
@@ -515,7 +533,8 @@ func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
 			}
 			payloadBytes, marshalErr := json.Marshal(confirmPayload)
 			if marshalErr == nil {
-				return sendChunkResponse(w, msg, payloadBytes, rcode)
+				payloadBytes, format := encryptResponsePayload(ctx, payloadBytes)
+				return sendChunkResponse(w, msg, payloadBytes, format, rcode)
 			}
 		}
 		return sendStandardResponse(w, msg, rcode)
@@ -523,23 +542,18 @@ func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
 }
 
 // sendChunkResponse sends a DNS response with CHUNK payload in EDNS0.
-func sendChunkResponse(w dns.ResponseWriter, req *dns.Msg, payload []byte, rcode int) error {
+func sendChunkResponse(w dns.ResponseWriter, req *dns.Msg, payload []byte, format uint8, rcode int) error {
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Rcode = rcode
 
-	// Add EDNS0 with CHUNK option
+	// Add EDNS0 with CHUNK option using proper framing
 	opt := new(dns.OPT)
 	opt.Hdr.Name = "."
 	opt.Hdr.Rrtype = dns.TypeOPT
 	opt.SetUDPSize(4096)
 
-	// Create CHUNK option (code 65004)
-	chunkOpt := &dns.EDNS0_LOCAL{
-		Code: 65004,
-		Data: payload,
-	}
-	opt.Option = append(opt.Option, chunkOpt)
+	opt.Option = append(opt.Option, edns0.CreateChunkOption(format, nil, payload))
 	resp.Extra = append(resp.Extra, opt)
 
 	return w.WriteMsg(resp)

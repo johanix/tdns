@@ -51,6 +51,9 @@ type LocalCombinerConf struct {
 	// Chunk config (same key names as agent.dns for consistency)
 	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
+	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.
+	// 0 = default (60000). Useful for testing fragmentation with small values.
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
 	// Agents: list of agents this combiner communicates with.
 	// Each agent must have an identity, address:port, and JOSE public key.
 	Agents []*PeerConf `yaml:"agents"`
@@ -91,6 +94,9 @@ type MultiProviderConf struct {
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
 	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK) to agent.
 	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
+	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.
+	// 0 = default (60000). Useful for testing fragmentation with small values.
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
 	// Agents: the local agent peers (address, JOSE public key, optional API URL).
 	// Supports multiple agents for load distribution and fault isolation.
 	Agents []*PeerConf `yaml:"agents"`
@@ -250,6 +256,9 @@ type LocalAgentDnsConf struct {
 	// Chunk config (same key names as combiner for consistency)
 	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agents[].address
+	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads via PrepareDistributionChunks.
+	// 0 = default (60000). Useful for testing fragmentation with small values (e.g. 500).
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
 	// Message retention times for CHUNK distributions (in seconds)
 	MessageRetention MessageRetentionConf `yaml:"message_retention" mapstructure:"message_retention"`
 }

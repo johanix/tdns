@@ -26,6 +26,7 @@ type DistributionInfo struct {
 	Operation      string
 	ContentType    string
 	State          string
+	PayloadSize    int // Size of the final payload in bytes (after encryption, before chunking)
 	CreatedAt      time.Time
 	CompletedAt    *time.Time
 	ExpiresAt      *time.Time // When this distribution should be cleaned up (nil = no expiration)
@@ -196,6 +197,7 @@ type DistributionSummary struct {
 	Operation      string `json:"operation"`
 	ContentType    string `json:"content_type"`
 	State          string `json:"state"`
+	PayloadSize    int    `json:"payload_size"`
 	CreatedAt      string `json:"created_at"`
 	CompletedAt    string `json:"completed_at,omitempty"`
 }
@@ -296,6 +298,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					Operation:      info.Operation,
 					ContentType:    info.ContentType,
 					State:          info.State,
+					PayloadSize:    info.PayloadSize,
 					CreatedAt:      info.CreatedAt.Format(time.RFC3339),
 				}
 				if info.CompletedAt != nil {

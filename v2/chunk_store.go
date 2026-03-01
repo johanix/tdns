@@ -10,6 +10,8 @@ package tdns
 import (
 	"sync"
 	"time"
+
+	"github.com/johanix/tdns/v2/core"
 )
 
 // ChunkPayloadStore stores payloads keyed by NOTIFY qname for query-mode CHUNK.
@@ -19,6 +21,8 @@ import (
 type ChunkPayloadStore interface {
 	Get(qname string) (payload []byte, format uint8, ok bool)
 	Set(qname string, payload []byte, format uint8)
+	GetChunk(qname string, sequence uint16) (chunk *core.CHUNK, ok bool)
+	SetChunks(qname string, chunks []*core.CHUNK)
 }
 
 type chunkPayloadEntry struct {
@@ -27,11 +31,17 @@ type chunkPayloadEntry struct {
 	expires time.Time
 }
 
+type chunkArrayEntry struct {
+	chunks  []*core.CHUNK
+	expires time.Time
+}
+
 // MemChunkPayloadStore is an in-memory store with TTL.
 type MemChunkPayloadStore struct {
-	mu      sync.RWMutex
-	entries map[string]*chunkPayloadEntry
-	ttl     time.Duration
+	mu          sync.RWMutex
+	entries     map[string]*chunkPayloadEntry
+	chunkArrays map[string]*chunkArrayEntry
+	ttl         time.Duration
 }
 
 // NewMemChunkPayloadStore creates a store with the given TTL (e.g. 5*time.Minute).
@@ -40,8 +50,9 @@ func NewMemChunkPayloadStore(ttl time.Duration) *MemChunkPayloadStore {
 		ttl = 5 * time.Minute
 	}
 	return &MemChunkPayloadStore{
-		entries: make(map[string]*chunkPayloadEntry),
-		ttl:     ttl,
+		entries:     make(map[string]*chunkPayloadEntry),
+		chunkArrays: make(map[string]*chunkArrayEntry),
+		ttl:         ttl,
 	}
 }
 
@@ -70,4 +81,55 @@ func (s *MemChunkPayloadStore) Set(qname string, payload []byte, format uint8) {
 		format:  format,
 		expires: time.Now().Add(s.ttl),
 	}
+}
+
+// SetChunks stores a chunk array (manifest + data chunks) under the given qname.
+// The chunks are deep-copied to prevent mutation by the caller.
+func (s *MemChunkPayloadStore) SetChunks(qname string, chunks []*core.CHUNK) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Deep copy all chunks
+	copied := make([]*core.CHUNK, len(chunks))
+	for i, c := range chunks {
+		cp := *c
+		cp.Data = append([]byte(nil), c.Data...)
+		if c.HMAC != nil {
+			cp.HMAC = append([]byte(nil), c.HMAC...)
+		}
+		copied[i] = &cp
+	}
+
+	s.chunkArrays[qname] = &chunkArrayEntry{
+		chunks:  copied,
+		expires: time.Now().Add(s.ttl),
+	}
+}
+
+// GetChunk returns a specific chunk by sequence number from a stored chunk array.
+// Sequence 0 = manifest, 1..N = data chunks. The index into the array equals the sequence number.
+func (s *MemChunkPayloadStore) GetChunk(qname string, sequence uint16) (*core.CHUNK, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, ok := s.chunkArrays[qname]
+	if !ok || e == nil {
+		return nil, false
+	}
+	if time.Now().After(e.expires) {
+		delete(s.chunkArrays, qname)
+		return nil, false
+	}
+	if int(sequence) >= len(e.chunks) {
+		return nil, false
+	}
+
+	// Return a copy
+	c := e.chunks[sequence]
+	cp := *c
+	cp.Data = append([]byte(nil), c.Data...)
+	if c.HMAC != nil {
+		cp.HMAC = append([]byte(nil), c.HMAC...)
+	}
+	return &cp, true
 }
