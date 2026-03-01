@@ -285,6 +285,20 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			cleanoptions = append(cleanoptions, opt)
 			log.Printf("ParseZones: Zone %s: catalog member auto-delete enabled", zname)
 
+		case OptMPManualApproval:
+			// Only valid on the combiner — controls whether incoming UPDATEs
+			// from agents require manual approval before being applied.
+			if Globals.App.Type != AppTypeCombiner {
+				log.Printf("Error: Zone %s: Option \"mp-manual-approval\" is only valid on the combiner. Ignored.", zname)
+				if zd != nil {
+					zd.SetError(ConfigError, "mp-manual-approval is only valid on combiner zones")
+				}
+				continue
+			}
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+			log.Printf("ParseZones: Zone %s: mp-manual-approval enabled", zname)
+
 		default:
 			log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])
 			if zd != nil {

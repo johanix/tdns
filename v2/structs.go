@@ -503,6 +503,25 @@ type CombinerDebugPost struct {
 	AgentID string `json:"agent_id,omitempty"` // For agent-targeted commands (e.g. agent-ping)
 }
 
+// CombinerEditPost represents a CLI request for managing pending/rejected edits.
+type CombinerEditPost struct {
+	Command string `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "purge"
+	Zone    string `json:"zone"`
+	EditID  int    `json:"edit_id,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// CombinerEditResponse is the response for edit management commands.
+type CombinerEditResponse struct {
+	Time     time.Time             `json:"time"`
+	Error    bool                  `json:"error"`
+	ErrorMsg string                `json:"error_msg,omitempty"`
+	Msg      string                `json:"msg,omitempty"`
+	Pending  []*PendingEditRecord  `json:"pending,omitempty"`
+	Approved []*ApprovedEditRecord `json:"approved,omitempty"`
+	Rejected []*RejectedEditRecord `json:"rejected,omitempty"`
+}
+
 // CombinerDebugResponse returns both the merged CombinerData and the per-agent
 // AgentContributions breakdown.
 type CombinerDebugResponse struct {

@@ -220,6 +220,44 @@ var HsyncTables = map[string]string{
 		-- Auto-cleanup: events older than 7 days can be purged
 		expires_at      INTEGER
 	)`,
+
+	// CombinerPendingEdits stores agent UPDATEs awaiting manual approval.
+	// Created when a zone has the mp-manual-approval option.
+	"CombinerPendingEdits": `CREATE TABLE IF NOT EXISTS 'CombinerPendingEdits' (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		edit_id         INTEGER NOT NULL UNIQUE,
+		zone            TEXT NOT NULL,
+		sender_id       TEXT NOT NULL,
+		delivered_by    TEXT NOT NULL DEFAULT '',
+		distribution_id TEXT NOT NULL,
+		records_json    TEXT NOT NULL,
+		received_at     INTEGER NOT NULL
+	)`,
+
+	// CombinerApprovedEdits records edits that were approved by the operator.
+	"CombinerApprovedEdits": `CREATE TABLE IF NOT EXISTS 'CombinerApprovedEdits' (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		edit_id         INTEGER NOT NULL UNIQUE,
+		zone            TEXT NOT NULL,
+		sender_id       TEXT NOT NULL,
+		distribution_id TEXT NOT NULL,
+		records_json    TEXT NOT NULL,
+		received_at     INTEGER NOT NULL,
+		approved_at     INTEGER NOT NULL
+	)`,
+
+	// CombinerRejectedEdits records edits that were rejected by the operator.
+	"CombinerRejectedEdits": `CREATE TABLE IF NOT EXISTS 'CombinerRejectedEdits' (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		edit_id         INTEGER NOT NULL UNIQUE,
+		zone            TEXT NOT NULL,
+		sender_id       TEXT NOT NULL,
+		distribution_id TEXT NOT NULL,
+		records_json    TEXT NOT NULL,
+		received_at     INTEGER NOT NULL,
+		rejected_at     INTEGER NOT NULL,
+		reason          TEXT NOT NULL
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.
@@ -252,6 +290,15 @@ var HsyncIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_events_peer ON TransportEvents(peer_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_events_type ON TransportEvents(event_type)`,
 	`CREATE INDEX IF NOT EXISTS idx_events_expires ON TransportEvents(expires_at)`,
+
+	// CombinerPendingEdits indexes
+	`CREATE INDEX IF NOT EXISTS idx_pending_edits_zone ON CombinerPendingEdits(zone)`,
+
+	// CombinerApprovedEdits indexes
+	`CREATE INDEX IF NOT EXISTS idx_approved_edits_zone ON CombinerApprovedEdits(zone)`,
+
+	// CombinerRejectedEdits indexes
+	`CREATE INDEX IF NOT EXISTS idx_rejected_edits_zone ON CombinerRejectedEdits(zone)`,
 }
 
 // InitHsyncTables initializes the HSYNC tables in the KeyDB.
@@ -272,6 +319,43 @@ func (kdb *KeyDB) InitHsyncTables() error {
 	for _, indexSQL := range HsyncIndexes {
 		_, err := kdb.DB.Exec(indexSQL)
 		if err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// InitCombinerEditTables initializes only the combiner edit tables.
+// Call this on combiner startup — avoids creating agent-only HSYNC tables.
+func (kdb *KeyDB) InitCombinerEditTables() error {
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	combinerTables := []string{
+		"CombinerPendingEdits",
+		"CombinerApprovedEdits",
+		"CombinerRejectedEdits",
+	}
+
+	for _, name := range combinerTables {
+		schema, ok := HsyncTables[name]
+		if !ok {
+			return fmt.Errorf("table schema %q not found in HsyncTables", name)
+		}
+		if _, err := kdb.DB.Exec(schema); err != nil {
+			return fmt.Errorf("failed to create table %s: %w", name, err)
+		}
+	}
+
+	combinerIndexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_pending_edits_zone ON CombinerPendingEdits(zone)`,
+		`CREATE INDEX IF NOT EXISTS idx_approved_edits_zone ON CombinerApprovedEdits(zone)`,
+		`CREATE INDEX IF NOT EXISTS idx_rejected_edits_zone ON CombinerRejectedEdits(zone)`,
+	}
+
+	for _, indexSQL := range combinerIndexes {
+		if _, err := kdb.DB.Exec(indexSQL); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}

@@ -391,13 +391,22 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer
-
-		error := json.Indent(&prettyJSON, buf, "", "  ")
-		if error != nil {
-			log.Println("JSON parse error: ", error)
+		if err := json.Indent(&prettyJSON, buf, "", "  "); err != nil {
+			log.Printf("API %s %s: response (%d bytes, not JSON): %s", method, endpoint, len(buf), string(buf))
+		} else {
+			log.Printf("API %s %s: response (%d bytes):\n%s", method, endpoint, len(buf), prettyJSON.String())
 		}
-		log.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
-		log.Printf("API%s: end of response\n", method)
+	}
+
+	// Report non-2xx status codes clearly
+	if status < 200 || status >= 300 {
+		body := strings.TrimSpace(string(buf))
+		msg := fmt.Sprintf("API %s %s%s returned HTTP %d: %s", method, api.BaseUrl, endpoint, status, body)
+		if dieOnError {
+			fmt.Println(msg)
+			os.Exit(1)
+		}
+		return status, buf, fmt.Errorf("%s", msg)
 	}
 
 	// not bothering to copy buf, this is a one-off
@@ -544,13 +553,22 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 
 	if api.Debug {
 		var prettyJSON bytes.Buffer
-
-		error := json.Indent(&prettyJSON, buf, "", "  ")
-		if error != nil {
-			log.Println("JSON parse error: ", error)
+		if err := json.Indent(&prettyJSON, buf, "", "  "); err != nil {
+			log.Printf("API %s %s: response (%d bytes, not JSON): %s", method, endpoint, len(buf), string(buf))
+		} else {
+			log.Printf("API %s %s: response (%d bytes):\n%s", method, endpoint, len(buf), prettyJSON.String())
 		}
-		log.Printf("API%s: received %d bytes of response data: %s\n%s\n", method, len(buf), string(buf), prettyJSON.String())
-		log.Printf("API%s: end of response\n", method)
+	}
+
+	// Report non-2xx status codes clearly
+	if status < 200 || status >= 300 {
+		body := strings.TrimSpace(string(buf))
+		msg := fmt.Sprintf("API %s %s%s returned HTTP %d: %s", method, api.BaseUrl, endpoint, status, body)
+		if dieOnError {
+			fmt.Println(msg)
+			os.Exit(1)
+		}
+		return status, buf, fmt.Errorf("%s", msg)
 	}
 
 	// not bothering to copy buf, this is a one-off

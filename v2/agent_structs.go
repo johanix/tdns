@@ -226,7 +226,8 @@ type AgentHelloResponse struct {
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
 	MessageType    AgentMsg // "sync", "update", "rfi", "status"
-	MyIdentity     AgentId
+	OriginatorID   AgentId  // Original author of the update
+	DeliveredBy    AgentId  // Transport-level sender (who delivered this message to us)
 	YourIdentity   AgentId
 	Addresses      []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
 	Port           uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead

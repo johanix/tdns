@@ -15,13 +15,14 @@ import (
 // IncomingMessage represents a message received via DNS transport.
 // This is routed to the hsyncengine for processing.
 type IncomingMessage struct {
-	Type           string    // "hello", "beat", "ping", "sync", "update", "relocate", "confirm"
-	DistributionID string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
-	SenderID       string    // Sender identity
-	Zone           string    // Zone (for zone-scoped operations)
-	Payload        []byte    // Raw payload (JSON)
-	ReceivedAt     time.Time // When the message was received
-	SourceAddr     string    // Source address of the sender
+	Type            string    // "hello", "beat", "ping", "sync", "update", "relocate", "confirm"
+	DistributionID  string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
+	SenderID        string    // Sender identity (from payload OriginatorID — original author)
+	TransportSender string    // Transport-level sender (from QNAME — who actually sent the DNS NOTIFY)
+	Zone            string    // Zone (for zone-scoped operations)
+	Payload         []byte    // Raw payload (JSON)
+	ReceivedAt      time.Time // When the message was received
+	SourceAddr      string    // Source address of the sender
 }
 
 // parseConfirmStatus converts a status string to ConfirmStatus.

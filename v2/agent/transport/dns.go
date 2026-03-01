@@ -340,7 +340,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	}
 	payload := &core.AgentMsgPost{
 		MessageType:  messageType,
-		MyIdentity:   req.SenderID,
+		OriginatorID: req.SenderID,
 		YourIdentity: peer.ID,
 		Zone:         req.Zone,
 		Records:      req.Records,
@@ -939,7 +939,9 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 	t.pendingMu.RUnlock()
 
 	if !exists {
-		log.Printf("DNS: Received confirmation for unknown distribution ID: %s", confirm.DistributionID)
+		// Expected when the inline DNS response already completed the round-trip.
+		// The async NOTIFY(CHUNK) confirmation still reaches the SDE via the
+		// on_confirmation_received callback in HandleConfirmation.
 		return
 	}
 
@@ -1022,7 +1024,7 @@ func (d *DnsBeatPayload) GetSenderID() string {
 // DnsSyncPayload represents a sync message payload.
 type DnsSyncPayload struct {
 	MessageType    string              `json:"MessageType"`
-	MyIdentity     string              `json:"MyIdentity"`
+	OriginatorID   string              `json:"OriginatorID"`
 	YourIdentity   string              `json:"YourIdentity"`
 	Zone           string              `json:"Zone"`
 	Records        map[string][]string `json:"Records"` // RRs grouped by owner name
@@ -1075,7 +1077,7 @@ type DnsConfirmPayload struct {
 
 // GetSenderID returns the sender ID.
 func (d *DnsSyncPayload) GetSenderID() string {
-	return d.MyIdentity
+	return d.OriginatorID
 }
 
 // GetRecords returns records grouped by owner name.

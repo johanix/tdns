@@ -23,6 +23,8 @@ import (
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
+	"github.com/miekg/dns"
+
 	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
@@ -296,7 +298,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Use combiner identity from config, or default to "combiner"
 		combinerID := "combiner"
 		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-			combinerID = conf.Agent.Combiner.Identity
+			combinerID = dns.Fqdn(conf.Agent.Combiner.Identity)
 			// Inject combiner into authorized_peers so IsPeerAuthorized() accepts it
 			conf.Agent.AuthorizedPeers = append(conf.Agent.AuthorizedPeers, combinerID)
 			log.Printf("MainInit: added combiner %s to authorized_peers", combinerID)
@@ -370,14 +372,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Extract signer peer config for KEYSTATE signaling (Phase 6)
 		var signerID, signerAddress string
 		if conf.Agent.Signer != nil {
-			signerID = conf.Agent.Signer.Identity
+			signerID = dns.Fqdn(conf.Agent.Signer.Identity)
 			signerAddress = conf.Agent.Signer.Address
 			log.Printf("MainInit: Signer peer configured (identity: %s, address: %s)", signerID, signerAddress)
 		}
 
 		tm := NewTransportManager(&TransportManagerConfig{
-			LocalID:                    conf.Agent.Identity,
-			ControlZone:                controlZone,
+			LocalID:                    dns.Fqdn(conf.Agent.Identity),
+			ControlZone:                dns.Fqdn(controlZone),
 			APITimeout:                 10 * time.Second,
 			DNSTimeout:                 5 * time.Second,
 			AgentRegistry:              conf.Internal.AgentRegistry,
@@ -395,12 +397,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			SignerAddress:              signerAddress,
 			AuthorizedPeers: func() []string {
 				var peers []string
-				peers = append(peers, conf.Agent.AuthorizedPeers...)
+				for _, p := range conf.Agent.AuthorizedPeers {
+					peers = append(peers, dns.Fqdn(p))
+				}
 				if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-					peers = append(peers, conf.Agent.Combiner.Identity)
+					peers = append(peers, dns.Fqdn(conf.Agent.Combiner.Identity))
 				}
 				if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
-					peers = append(peers, conf.Agent.Signer.Identity)
+					peers = append(peers, dns.Fqdn(conf.Agent.Signer.Identity))
 				}
 				return peers
 			},
@@ -454,9 +458,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			if chunkMode == "" {
 				chunkMode = "edns0"
 			}
-			controlZone := mp.Identity
+			controlZone := dns.Fqdn(mp.Identity)
 			tm := NewTransportManager(&TransportManagerConfig{
-				LocalID:             mp.Identity,
+				LocalID:             dns.Fqdn(mp.Identity),
 				ControlZone:         controlZone,
 				APITimeout:          10 * time.Second,
 				DNSTimeout:          5 * time.Second,
@@ -470,14 +474,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					var peers []string
 					for _, a := range mp.Agents {
 						if a != nil && a.Identity != "" {
-							peers = append(peers, a.Identity)
+							peers = append(peers, dns.Fqdn(a.Identity))
 						}
 					}
 					return peers
 				},
 			})
 			conf.Internal.TransportManager = tm
-			log.Printf("MainInit: Signer TransportManager created (identity: %s, chunk_mode: %s)", mp.Identity, chunkMode)
+			log.Printf("MainInit: Signer TransportManager created (identity: %s, chunk_mode: %s)", dns.Fqdn(mp.Identity), chunkMode)
 
 			// Create SecurePayloadWrapper for decrypting incoming CHUNK payloads
 			var signerSecureWrapper *transport.SecurePayloadWrapper
@@ -519,16 +523,17 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				if agentConf.Identity == "" {
 					return fmt.Errorf("multi-provider.agents: entry missing identity")
 				}
-				agentPeer := transport.NewPeer(agentConf.Identity)
+				peerID := dns.Fqdn(agentConf.Identity)
+				agentPeer := transport.NewPeer(peerID)
 				agentPeer.SetState(transport.PeerStateKnown, "configured")
 				if agentConf.Address != "" {
 					host, portStr, err := net.SplitHostPort(agentConf.Address)
 					if err != nil {
-						return fmt.Errorf("multi-provider.agents: invalid address %q for %s: %w", agentConf.Address, agentConf.Identity, err)
+						return fmt.Errorf("multi-provider.agents: invalid address %q for %s: %w", agentConf.Address, peerID, err)
 					}
 					port, err := strconv.Atoi(portStr)
 					if err != nil {
-						return fmt.Errorf("multi-provider.agents: invalid port in %q for %s: %w", agentConf.Address, agentConf.Identity, err)
+						return fmt.Errorf("multi-provider.agents: invalid port in %q for %s: %w", agentConf.Address, peerID, err)
 					}
 					agentPeer.SetDiscoveryAddress(&transport.Address{
 						Host:      host,
@@ -540,15 +545,23 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					agentPeer.APIEndpoint = agentConf.ApiBaseUrl
 				}
 				if err := tm.PeerRegistry.Add(agentPeer); err != nil {
-					return fmt.Errorf("failed to register agent peer %s: %w", agentConf.Identity, err)
+					return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
 				}
-				log.Printf("MainInit: Registered agent peer %s (address: %s)", agentConf.Identity, agentConf.Address)
+				log.Printf("MainInit: Registered agent peer %s (address: %s)", peerID, agentConf.Address)
 			}
 		}
 
 		if Globals.App.Type == AppTypeCombiner {
 			if conf.Combiner == nil {
 				return fmt.Errorf("combiner config block is required for combiner app type")
+			}
+
+			// Initialize only the combiner edit tables (not the full HSYNC schema)
+			if conf.Internal.KeyDB != nil {
+				if err := conf.Internal.KeyDB.InitCombinerEditTables(); err != nil {
+					return fmt.Errorf("InitCombinerEditTables: %w", err)
+				}
+				log.Printf("MainInit: Combiner edit tables initialized")
 			}
 			chunkMode := strings.TrimSpace(conf.Combiner.ChunkMode)
 			if chunkMode == "query" {
@@ -602,8 +615,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				chunkMode = "edns0"
 			}
 			tm := NewTransportManager(&TransportManagerConfig{
-				LocalID:             conf.Combiner.Identity,
-				ControlZone:         conf.Combiner.Identity,
+				LocalID:             dns.Fqdn(conf.Combiner.Identity),
+				ControlZone:         dns.Fqdn(conf.Combiner.Identity),
 				DNSTimeout:          5 * time.Second,
 				APITimeout:          10 * time.Second,
 				ChunkMode:           chunkMode,
@@ -616,7 +629,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					var peers []string
 					for _, a := range conf.Combiner.Agents {
 						if a != nil && a.Identity != "" {
-							peers = append(peers, a.Identity)
+							peers = append(peers, dns.Fqdn(a.Identity))
 						}
 					}
 					return peers
@@ -629,16 +642,17 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				if agentConf.Identity == "" {
 					return fmt.Errorf("combiner.agents: entry missing identity")
 				}
-				agentPeer := transport.NewPeer(agentConf.Identity)
+				peerID := dns.Fqdn(agentConf.Identity)
+				agentPeer := transport.NewPeer(peerID)
 				agentPeer.SetState(transport.PeerStateKnown, "configured")
 				if agentConf.Address != "" {
 					host, portStr, parseErr := net.SplitHostPort(agentConf.Address)
 					if parseErr != nil {
-						return fmt.Errorf("combiner.agents: invalid address %q for %s: %w", agentConf.Address, agentConf.Identity, parseErr)
+						return fmt.Errorf("combiner.agents: invalid address %q for %s: %w", agentConf.Address, peerID, parseErr)
 					}
 					port, parseErr := strconv.Atoi(portStr)
 					if parseErr != nil {
-						return fmt.Errorf("combiner.agents: invalid port in %q for %s: %w", agentConf.Address, agentConf.Identity, parseErr)
+						return fmt.Errorf("combiner.agents: invalid port in %q for %s: %w", agentConf.Address, peerID, parseErr)
 					}
 					agentPeer.SetDiscoveryAddress(&transport.Address{
 						Host:      host,
@@ -653,10 +667,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					agentPeer.PreferredTransport = "DNS"
 				}
 				if addErr := tm.PeerRegistry.Add(agentPeer); addErr != nil {
-					return fmt.Errorf("failed to register combiner agent peer %s: %w", agentConf.Identity, addErr)
+					return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, addErr)
 				}
 				log.Printf("MainInit: Combiner registered agent peer %s (address=%s, transport=%s)",
-					agentConf.Identity, agentConf.Address, agentPeer.PreferredTransport)
+					peerID, agentConf.Address, agentPeer.PreferredTransport)
 			}
 			log.Printf("MainInit: Combiner TransportManager initialized with %d agent peers", len(conf.Combiner.Agents))
 
@@ -709,6 +723,31 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 // StartCombiner starts subsystems for tdns-combiner
 func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
+	// Rebuild in-memory CombinerData from approved edits persisted in the DB.
+	// This must happen before CombinerMsgHandler starts so that the combiner
+	// has correct state before processing new incoming updates.
+	if kdb := conf.Internal.KeyDB; kdb != nil {
+		approved, err := kdb.ListApprovedEdits("")
+		if err != nil {
+			log.Printf("StartCombiner: Warning: failed to load approved edits: %v", err)
+		} else if len(approved) > 0 {
+			rebuilt := 0
+			for _, rec := range approved {
+				zd, exists := Zones.Get(dns.Fqdn(rec.Zone))
+				if !exists {
+					log.Printf("StartCombiner: Skipping approved edit #%d for unknown zone %s", rec.EditID, rec.Zone)
+					continue
+				}
+				if err := zd.AddCombinerDataNG(rec.SenderID, rec.Records); err != nil {
+					log.Printf("StartCombiner: Failed to rebuild edit #%d for zone %s: %v", rec.EditID, rec.Zone, err)
+					continue
+				}
+				rebuilt++
+			}
+			log.Printf("StartCombiner: Rebuilt CombinerData from %d approved edits (%d total in DB)", rebuilt, len(approved))
+		}
+	}
+
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
 	startEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })

@@ -84,7 +84,7 @@ type AgentBeatResponse struct {
 // Used by both API and DNS transports.
 type AgentMsgPost struct {
 	MessageType  AgentMsg            // "sync", "update", "rfi", "status"
-	MyIdentity   string              // Sender's identity
+	OriginatorID string              // Original author of the update
 	YourIdentity string              // Recipient's identity
 	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
 	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
@@ -163,7 +163,7 @@ type KeyInventoryEntry struct {
 	KeyTag    uint16 `json:"key_tag"`
 	Algorithm uint8  `json:"algorithm"`
 	Flags     uint16 `json:"flags"`
-	State     string `json:"state"`  // "created","published","standby","active","retired","foreign"
+	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
 }
 

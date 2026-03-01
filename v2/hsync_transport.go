@@ -223,17 +223,17 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				expiresAt := now.Add(time.Duration(retentionSecs) * time.Second)
 
 				cache.Add(qname, &DistributionInfo{
-					DistributionID:   distributionID,
-					SenderID:         senderID,
-					ReceiverID:       receiverID,
-					Operation:        operation,
-					ContentType:      "",
-					State:            "pending",
-					PayloadSize:      payloadSize,
-					CreatedAt:        now,
-					CompletedAt:      nil,
-					ExpiresAt:        &expiresAt,
-					QNAME:            qname,
+					DistributionID: distributionID,
+					SenderID:       senderID,
+					ReceiverID:     receiverID,
+					Operation:      operation,
+					ContentType:    "",
+					State:          "pending",
+					PayloadSize:    payloadSize,
+					CreatedAt:      now,
+					CompletedAt:    nil,
+					ExpiresAt:      &expiresAt,
+					QNAME:          qname,
 				})
 			}
 			dnsCfg.DistributionMarkCompleted = func(qname string) { cache.MarkCompleted(qname) }
@@ -619,7 +619,8 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
 	// Messages reaching routeSyncMessage have passed middleware auth.
-	log.Printf("TransportManager: Processing authorized DNS %s from %s for zone %s", msgTypeStr, senderID, zone)
+	log.Printf("TransportManager: Processing authorized DNS %s from %s for zone %s (transport sender: %s)",
+		msgTypeStr, senderID, zone, msg.TransportSender)
 
 	// Update peer state on successful message
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -634,10 +635,39 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		}
 	}
 
+	// DeliveredBy is the transport-level sender (from QNAME), which may differ from
+	// the originator for forwarded messages. The combiner needs this to send confirmations
+	// back to the agent that actually delivered the message, not the original author.
+	deliveredBy := msg.TransportSender
+	if deliveredBy == "" {
+		deliveredBy = senderID // Fallback for direct delivery
+	}
+
+	// Ensure the transport sender (deliverer) has a PeerRegistry entry with an address.
+	// For forwarded messages, the deliverer may be a remote agent not pre-registered in this
+	// combiner's config. Trigger async discovery so the address is available for confirmation.
+	if deliveredBy != senderID {
+		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
+		deliverPeer.SetState(transport.PeerStateOperational, fmt.Sprintf("delivered %s for %s", msgTypeStr, senderID))
+		if deliverPeer.CurrentAddress() == nil {
+			log.Printf("TransportManager: Transport sender %s has no address, triggering async discovery", deliveredBy)
+			go func(peerID string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := tm.DiscoverAndRegisterAgent(ctx, peerID); err != nil {
+					log.Printf("TransportManager: Discovery failed for transport sender %s: %v", peerID, err)
+				} else {
+					log.Printf("TransportManager: Discovered transport sender %s", peerID)
+				}
+			}(deliveredBy)
+		}
+	}
+
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
-			MyIdentity:     AgentId(senderID),
+			OriginatorID:   AgentId(senderID),
+			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
 			Time:           time.Unix(payload.Timestamp, 0),
@@ -1300,9 +1330,9 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
 	// Forward per-RR detail from inline confirmation to SynchedDataEngine.
-	// Skip PENDING status — the detailed confirmation will arrive later via OnConfirmationReceived
-	// when the combiner processes the sync asynchronously.
-	if syncResp != nil && syncResp.Status != transport.ConfirmPending && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
+	// PENDING status is forwarded too so the per-recipient tracking records
+	// that the combiner received the message (even before final confirmation).
+	if syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
 		var rejItems []RejectedItemInfo
 		for _, ri := range syncResp.RejectedItems {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
@@ -1480,6 +1510,32 @@ func (tm *TransportManager) getAllAgentsForZone(zone ZoneName) ([]AgentId, error
 	}
 
 	return agents, nil
+}
+
+// GetDistributionRecipients returns the list of recipient identities that will
+// receive an update for the given zone. This is used by the SynchedDataEngine to
+// populate TrackedRR.ExpectedRecipients so that ProcessConfirmation knows who
+// must confirm before transitioning Pending → Accepted.
+// If skipCombiner is true, the combiner is excluded from the list.
+func (tm *TransportManager) GetDistributionRecipients(zone ZoneName, skipCombiner bool) []string {
+	var recipients []string
+
+	// Add combiner unless skipped
+	if !skipCombiner && tm.combinerID != "" {
+		recipients = append(recipients, string(tm.combinerID))
+	}
+
+	// Add all remote agents for this zone
+	agents, err := tm.getAllAgentsForZone(zone)
+	if err != nil {
+		log.Printf("GetDistributionRecipients: failed to get zone agents for %s: %v", zone, err)
+	} else {
+		for _, a := range agents {
+			recipients = append(recipients, string(a))
+		}
+	}
+
+	return recipients
 }
 
 // zoneUpdateToGroupedRecords converts a ZoneUpdate into records grouped by owner name,

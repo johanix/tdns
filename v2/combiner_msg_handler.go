@@ -11,10 +11,12 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/miekg/dns"
 )
 
 // CombinerMsgHandler consumes beat, hello, ping, and sync messages from MsgQs.
@@ -34,7 +36,19 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 		peerRegistry = tm.PeerRegistry
 	}
 
-	log.Printf("CombinerMsgHandler: Starting (peerRegistry=%v, tm=%v)", peerRegistry != nil, tm != nil)
+	// Build set of local agent identities (our own provider's agents).
+	// Protected-namespace checks only apply to remote agents, not our own.
+	localAgents := make(map[string]bool)
+	if conf.Combiner != nil {
+		for _, a := range conf.Combiner.Agents {
+			if a != nil && a.Identity != "" {
+				localAgents[a.Identity] = true
+			}
+		}
+	}
+
+	log.Printf("CombinerMsgHandler: Starting (peerRegistry=%v, tm=%v, localAgents=%d)",
+		peerRegistry != nil, tm != nil, len(localAgents))
 
 	for {
 		select {
@@ -81,12 +95,54 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if msg == nil {
 				continue
 			}
-			senderID := string(msg.MyIdentity)
+			senderID := string(msg.OriginatorID)   // Original author of the update
+			deliveredBy := string(msg.DeliveredBy) // Agent that delivered it to us
+			if deliveredBy == "" {
+				deliveredBy = senderID // Fallback: direct delivery
+			}
 			zone := string(msg.Zone)
-			log.Printf("CombinerMsgHandler: Processing async update from %s zone %s (distrib=%s)",
-				senderID, zone, msg.DistributionID)
+			log.Printf("CombinerMsgHandler: Processing async update from %s (delivered by %s) zone %s (distrib=%s)",
+				senderID, deliveredBy, zone, msg.DistributionID)
 
-			// Build CombinerSyncRequest from AgentMsgPostPlus
+			kdb := conf.Internal.KeyDB
+
+			// Persist all incoming edits to CombinerPendingEdits first.
+			var editID int
+			if kdb != nil {
+				editID, _ = kdb.NextEditID()
+				rec := &PendingEditRecord{
+					EditID:         editID,
+					Zone:           zone,
+					SenderID:       senderID,
+					DeliveredBy:    deliveredBy,
+					DistributionID: msg.DistributionID,
+					Records:        msg.Records,
+					ReceivedAt:     time.Now(),
+				}
+				if err := kdb.SavePendingEdit(rec); err != nil {
+					log.Printf("CombinerMsgHandler: Failed to persist edit for zone %s: %v", zone, err)
+				} else {
+					log.Printf("CombinerMsgHandler: Persisted edit #%d from %s for zone %s", editID, senderID, zone)
+				}
+			}
+
+			// Manual approval gate: if zone has mp-manual-approval, keep the
+			// edit pending for operator review.
+			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[OptMPManualApproval] {
+				log.Printf("CombinerMsgHandler: Zone %s has mp-manual-approval, edit #%d awaits operator action",
+					zone, editID)
+				// Send PENDING confirmation to the delivering agent
+				combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
+					DistributionID: msg.DistributionID,
+					Zone:           zone,
+					Status:         "pending",
+					Message:        "update queued for manual approval",
+					Timestamp:      time.Now(),
+				})
+				continue
+			}
+
+			// Auto-approve: process the edit immediately.
 			syncReq := &CombinerSyncRequest{
 				SenderID:       senderID,
 				Zone:           zone,
@@ -95,16 +151,52 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				Timestamp:      msg.Time,
 			}
 
-			resp := CombinerProcessUpdate(syncReq, protectedNamespaces)
+			// Only apply protected-namespace checks to remote agents.
+			// Our own agents are trusted to use our namespaces.
+			nsGuard := protectedNamespaces
+			if localAgents[senderID] {
+				nsGuard = nil
+			}
+			resp := CombinerProcessUpdate(syncReq, nsGuard)
 			if resp.Status == "error" {
 				recordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
+			}
+
+			// Split results into approved and rejected record maps and persist.
+			if kdb != nil && editID > 0 {
+				approved := rrStringsToOwnerMap(resp.AppliedRecords)
+				// Removals were also successfully processed
+				for owner, rrs := range rrStringsToOwnerMap(resp.RemovedRecords) {
+					approved[owner] = append(approved[owner], rrs...)
+				}
+				rejected := make(map[string][]string)
+				var reasons []string
+				for _, ri := range resp.RejectedItems {
+					rr, err := dns.NewRR(ri.Record)
+					if err != nil {
+						continue
+					}
+					owner := rr.Header().Name
+					rejected[owner] = append(rejected[owner], ri.Record)
+					reasons = append(reasons, ri.Reason)
+				}
+				reason := ""
+				if len(reasons) > 0 {
+					reason = reasons[0]
+					if len(reasons) > 1 {
+						reason = fmt.Sprintf("%s (and %d more)", reason, len(reasons)-1)
+					}
+				}
+				if err := kdb.ResolvePendingEdit(editID, approved, rejected, reason); err != nil {
+					log.Printf("CombinerMsgHandler: Failed to resolve edit #%d: %v", editID, err)
+				}
 			}
 
 			log.Printf("CombinerMsgHandler: Update processed from %s zone %s: status=%s applied=%d removed=%d rejected=%d",
 				senderID, zone, resp.Status, len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
 
-			// Send detailed confirmation back to agent via DNSTransport.Confirm()
-			combinerSendConfirmation(tm, senderID, resp)
+			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
+			combinerSendConfirmation(tm, deliveredBy, resp)
 		}
 	}
 }
@@ -133,6 +225,8 @@ func combinerSendConfirmation(tm *TransportManager, senderID string, resp *Combi
 		status = transport.ConfirmPartial
 	case "error":
 		status = transport.ConfirmFailed
+	case "pending":
+		status = transport.ConfirmPending
 	}
 
 	var rejItems []transport.RejectedItemDTO
@@ -164,4 +258,18 @@ func combinerSendConfirmation(tm *TransportManager, senderID string, resp *Combi
 			resp.DistributionID, senderID, resp.Status,
 			len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
 	}
+}
+
+// rrStringsToOwnerMap parses RR strings and groups them by owner name.
+func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
+	result := make(map[string][]string)
+	for _, rrStr := range rrStrings {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			continue
+		}
+		owner := rr.Header().Name
+		result[owner] = append(result[owner], rrStr)
+	}
+	return result
 }

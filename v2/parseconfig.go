@@ -217,6 +217,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		log.Printf("Warning: the following config keys are unknown and were ignored (possible misspellings): %v", md.Unused)
 	}
 
+	// Normalize all identity fields (domain names) from config to FQDN form.
+	// Config files may omit trailing dots; wire protocol always uses FQDN.
+	conf.normalizeConfigIdentities()
+
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
 		conf.Service.Transport.Type = "none"
@@ -1116,4 +1120,59 @@ func validateGroupPrefix(prefix string, prefixType string) error {
 	}
 
 	return nil
+}
+
+// normalizeConfigIdentities applies dns.Fqdn() to all identity fields (domain names)
+// in the parsed config. This ensures trailing dots are present regardless of whether
+// the YAML config included them.
+func (conf *Config) normalizeConfigIdentities() {
+	// Agent identity and peers
+	if conf.Agent != nil {
+		conf.Agent.Identity = dns.Fqdn(conf.Agent.Identity)
+		if conf.Agent.Dns.ControlZone != "" {
+			conf.Agent.Dns.ControlZone = dns.Fqdn(conf.Agent.Dns.ControlZone)
+		}
+		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
+			conf.Agent.Combiner.Identity = dns.Fqdn(conf.Agent.Combiner.Identity)
+		}
+		if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
+			conf.Agent.Signer.Identity = dns.Fqdn(conf.Agent.Signer.Identity)
+		}
+		for i, p := range conf.Agent.AuthorizedPeers {
+			conf.Agent.AuthorizedPeers[i] = dns.Fqdn(p)
+		}
+		for _, peer := range conf.Agent.Peers {
+			if peer != nil && peer.Identity != "" {
+				peer.Identity = dns.Fqdn(peer.Identity)
+			}
+		}
+	}
+
+	// Combiner identity and agent peers
+	if conf.Combiner != nil {
+		conf.Combiner.Identity = dns.Fqdn(conf.Combiner.Identity)
+		for _, agent := range conf.Combiner.Agents {
+			if agent != nil && agent.Identity != "" {
+				agent.Identity = dns.Fqdn(agent.Identity)
+			}
+		}
+		for i, ns := range conf.Combiner.ProtectedNamespaces {
+			conf.Combiner.ProtectedNamespaces[i] = dns.Fqdn(ns)
+		}
+	}
+
+	// Signer (multi-provider) identity and agent peers
+	if conf.MultiProvider != nil {
+		if conf.MultiProvider.Identity != "" {
+			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
+		}
+		if conf.MultiProvider.HsyncIdentity != "" {
+			conf.MultiProvider.HsyncIdentity = dns.Fqdn(conf.MultiProvider.HsyncIdentity)
+		}
+		for _, agent := range conf.MultiProvider.Agents {
+			if agent != nil && agent.Identity != "" {
+				agent.Identity = dns.Fqdn(agent.Identity)
+			}
+		}
+	}
 }

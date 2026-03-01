@@ -236,12 +236,13 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 // parsePayload parses the JSON payload to determine message type and content.
 func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
 	var fields struct {
-		MessageType string `json:"MessageType"` // Standard format (string: "sync", "update", "beat", etc.)
-		Type        string `json:"type"`        // Legacy format (fallback)
-		MyIdentity  string `json:"MyIdentity"`
-		SenderID    string `json:"sender_id"` // Legacy
-		Zone        string `json:"Zone"`
-		LegacyZone  string `json:"zone"` // Legacy
+		MessageType  string `json:"MessageType"`  // Standard format (string: "sync", "update", "beat", etc.)
+		Type         string `json:"type"`         // Legacy format (fallback)
+		OriginatorID string `json:"OriginatorID"` // Sync/update messages
+		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
+		SenderID     string `json:"sender_id"`    // Legacy
+		Zone         string `json:"Zone"`
+		LegacyZone   string `json:"zone"` // Legacy
 	}
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return nil, fmt.Errorf("failed to parse message: %w", err)
@@ -256,8 +257,11 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 		return nil, fmt.Errorf("no message type found in payload")
 	}
 
-	// Get sender ID: prefer MyIdentity, fall back to legacy sender_id
-	senderID := fields.MyIdentity
+	// Get sender ID: OriginatorID (sync/update), MyIdentity (hello/beat/ping), sender_id (legacy)
+	senderID := fields.OriginatorID
+	if senderID == "" {
+		senderID = fields.MyIdentity
+	}
 	if senderID == "" {
 		senderID = fields.SenderID
 	}
@@ -451,9 +455,12 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		log.Printf("RouteViaRouter: Failed to parse payload: %v", err)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
+	// Set the transport-level sender (from QNAME) — distinct from SenderID (payload OriginatorID).
+	// For forwarded messages, SenderID is the original author while TransportSender is the relay agent.
+	incomingMsg.TransportSender = senderHint
 
 	msgType := MessageType(incomingMsg.Type)
-	log.Printf("RouteViaRouter: Message type: %s from %s", msgType, incomingMsg.SenderID)
+	log.Printf("RouteViaRouter: Message type: %s from %s (transport sender: %s)", msgType, incomingMsg.SenderID, senderHint)
 
 	// Create message context
 	msgCtx := NewMessageContext(msg, sourceAddr)

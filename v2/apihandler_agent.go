@@ -1704,7 +1704,7 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("APImsg: received /msg %q request from %s (identity: %s).\n", amp.MessageType, r.RemoteAddr, amp.MyIdentity)
+		log.Printf("APImsg: received /msg %q request from %s (identity: %s).\n", amp.MessageType, r.RemoteAddr, amp.OriginatorID)
 
 		switch amp.MessageType {
 		case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
@@ -1721,7 +1721,7 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 				case r := <-cresp:
 					log.Printf("APImsg: Received response from msg handler: %+v", r)
 					if r.Error {
-						log.Printf("APImsg: Error processing message from %s: %s", amp.MyIdentity, r.ErrorMsg)
+						log.Printf("APImsg: Error processing message from %s: %s", amp.OriginatorID, r.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = r.ErrorMsg
 						resp.Status = "error"
@@ -1732,19 +1732,19 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 					return
 
 				case <-time.After(2 * time.Second):
-					log.Printf("APImsg: No response received for message from %s after waiting 2 seconds", amp.MyIdentity)
+					log.Printf("APImsg: No response received for message from %s after waiting 2 seconds", amp.OriginatorID)
 					resp.Error = true
 					resp.ErrorMsg = "No response received within timeout period"
 				}
 			default:
-				log.Printf("APImsg: Msg response channel is blocked, skipping message from %s", amp.MyIdentity)
+				log.Printf("APImsg: Msg response channel is blocked, skipping message from %s", amp.OriginatorID)
 				resp.Error = true
 				resp.ErrorMsg = "Msg channel is blocked"
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", AgentMsgToString[amp.MessageType], amp.MyIdentity)
+			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", AgentMsgToString[amp.MessageType], amp.OriginatorID)
 		}
 	}
 }

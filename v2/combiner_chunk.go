@@ -108,20 +108,20 @@ func recordCombinerError(journal *ErrorJournal, distID, sender, messageType, err
 }
 
 // ParseAgentMsgNotify parses a sync payload into a CombinerSyncRequest.
-// Expects the standard AgentMsgPost format (MyIdentity/Zone/Records).
+// Expects the standard AgentMsgPost format (OriginatorID/Zone/Records).
 func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncRequest, error) {
 	var msg struct {
-		MyIdentity string              `json:"MyIdentity"`
-		Zone       string              `json:"Zone"`
-		Records    map[string][]string `json:"Records"`
-		Time       time.Time           `json:"Time"`
+		OriginatorID string              `json:"OriginatorID"`
+		Zone         string              `json:"Zone"`
+		Records      map[string][]string `json:"Records"`
+		Time         time.Time           `json:"Time"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("JSON unmarshal failed: %w", err)
 	}
 
-	if msg.MyIdentity == "" {
-		return nil, fmt.Errorf("missing MyIdentity")
+	if msg.OriginatorID == "" {
+		return nil, fmt.Errorf("missing OriginatorID")
 	}
 	if msg.Zone == "" {
 		return nil, fmt.Errorf("missing Zone")
@@ -137,10 +137,10 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 		rrCount += len(rrs)
 	}
 	log.Printf("ParseAgentMsgNotify: Parsed sync from %q for zone %q (%d RRs, %d owners)",
-		msg.MyIdentity, msg.Zone, rrCount, len(records))
+		msg.OriginatorID, msg.Zone, rrCount, len(records))
 
 	return &CombinerSyncRequest{
-		SenderID:       msg.MyIdentity,
+		SenderID:       msg.OriginatorID,
 		Zone:           msg.Zone,
 		Records:        records,
 		DistributionID: distributionID,

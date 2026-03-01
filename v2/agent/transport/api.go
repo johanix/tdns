@@ -177,7 +177,7 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 
 	apiReq := &apiSyncRequest{
 		MessageType:    msgType,
-		MyIdentity:     req.SenderID,
+		OriginatorID:   req.SenderID,
 		YourIdentity:   peer.ID,
 		Zone:           req.Zone,
 		SyncType:       req.SyncType.String(),
@@ -395,7 +395,7 @@ type apiBeatResponse struct {
 
 type apiSyncRequest struct {
 	MessageType    string              `json:"message_type"`
-	MyIdentity     string              `json:"my_identity"`
+	OriginatorID   string              `json:"originator_id"`
 	YourIdentity   string              `json:"your_identity"`
 	Zone           string              `json:"zone"`
 	SyncType       string              `json:"sync_type"`

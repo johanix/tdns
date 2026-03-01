@@ -80,7 +80,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			if msg == nil {
 				continue
 			}
-			senderID := string(msg.MyIdentity)
+			senderID := string(msg.OriginatorID)
 			zone := string(msg.Zone)
 			rfiType := msg.RfiType
 

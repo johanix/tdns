@@ -402,16 +402,17 @@ func HandleRelocate(ctx *MessageContext) error {
 }
 
 // parseIncomingMessage parses a raw JSON payload into an IncomingMessage.
-// Handles both standard format (MessageType/MyIdentity) and legacy format (type/sender_id).
+// Handles both standard format (MessageType/OriginatorID) and legacy format (type/sender_id).
 // Returns nil if parsing fails.
 func parseIncomingMessage(payload []byte) *IncomingMessage {
 	var fields struct {
-		MessageType string `json:"MessageType"`
-		Type        string `json:"type"`
-		MyIdentity  string `json:"MyIdentity"`
-		SenderID    string `json:"sender_id"`
-		Zone        string `json:"Zone"`
-		LegacyZone  string `json:"zone"`
+		MessageType  string `json:"MessageType"`
+		Type         string `json:"type"`
+		OriginatorID string `json:"OriginatorID"` // Sync/update messages
+		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
+		SenderID     string `json:"sender_id"`
+		Zone         string `json:"Zone"`
+		LegacyZone   string `json:"zone"`
 	}
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return nil
@@ -420,7 +421,10 @@ func parseIncomingMessage(payload []byte) *IncomingMessage {
 	if msgType == "" {
 		msgType = fields.Type
 	}
-	senderID := fields.MyIdentity
+	senderID := fields.OriginatorID
+	if senderID == "" {
+		senderID = fields.MyIdentity
+	}
 	if senderID == "" {
 		senderID = fields.SenderID
 	}

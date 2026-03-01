@@ -171,13 +171,22 @@ func (s RRState) String() string {
 	}
 }
 
+// RRConfirmation records a single recipient's confirmation status for a tracked RR.
+type RRConfirmation struct {
+	Status    string    `json:"status"`           // "accepted", "rejected", "removed", "pending"
+	Reason    string    `json:"reason,omitempty"` // rejection reason
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // TrackedRR wraps a dns.RR with lifecycle state for combiner confirmation tracking.
 type TrackedRR struct {
-	RR             dns.RR
-	State          RRState
-	Reason         string // Rejection reason (empty unless rejected)
-	DistributionID string // Last distribution this RR was part of
-	UpdatedAt      time.Time
+	RR                 dns.RR
+	State              RRState
+	Reason             string // Rejection reason (empty unless rejected)
+	DistributionID     string // Last distribution this RR was part of
+	UpdatedAt          time.Time
+	Confirmations      map[string]RRConfirmation // recipientID → per-recipient status
+	ExpectedRecipients []string                  // Who must confirm before state transitions to accepted
 }
 
 // TrackedRRset holds a set of tracked RRs for a single RRtype.
@@ -208,11 +217,12 @@ type RejectedItemInfo struct {
 
 // TrackedRRInfo is the JSON-serializable form for dump output.
 type TrackedRRInfo struct {
-	RR             string `json:"rr"`
-	State          string `json:"state"`
-	Reason         string `json:"reason,omitempty"`
-	DistributionID string `json:"distribution_id"`
-	UpdatedAt      string `json:"updated_at"`
+	RR             string                    `json:"rr"`
+	State          string                    `json:"state"`
+	Reason         string                    `json:"reason,omitempty"`
+	DistributionID string                    `json:"distribution_id"`
+	UpdatedAt      string                    `json:"updated_at"`
+	Confirmations  map[string]RRConfirmation `json:"confirmations,omitempty"`
 }
 
 // SynchedDataEngine is a component that updates the combiner with new information
@@ -315,6 +325,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// Generate a single shared distID for combiner + all agents
 							distID := GenerateQueueDistributionID()
 
+							// Build the expected recipients list for confirmation tracking
+							recipients := tm.GetDistributionRecipients(synchedDataUpdate.Zone, synchedDataUpdate.SkipCombiner)
+
 							if synchedDataUpdate.SkipCombiner {
 								log.Printf("SynchedDataEngine: Update applied, enqueuing for remote agents only (SkipCombiner)")
 							} else {
@@ -327,7 +340,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
 								} else {
 									// Mark all RRs in this update as pending with the distribution ID
-									zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
+									zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
 								}
 							}
 
@@ -412,7 +425,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
 							} else {
-								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
+								// Remote update: only the combiner is the expected recipient
+								var remoteRecipients []string
+								if tm.combinerID != "" {
+									remoteRecipients = []string{string(tm.combinerID)}
+								}
+								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, remoteRecipients)
 								resp.Msg = "Remote update applied, sync enqueued for combiner"
 
 								// Track mapping from our combiner distID to the originating agent's distID
@@ -486,6 +504,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										info.Reason = tr.Reason
 										info.DistributionID = tr.DistributionID
 										info.UpdatedAt = tr.UpdatedAt.Format(time.RFC3339)
+										info.Confirmations = tr.Confirmations
 										break
 									}
 								}
@@ -507,6 +526,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										Reason:         tr.Reason,
 										DistributionID: tr.DistributionID,
 										UpdatedAt:      tr.UpdatedAt.Format(time.RFC3339),
+										Confirmations:  tr.Confirmations,
 									})
 								}
 							}
@@ -528,6 +548,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									Reason:         tr.Reason,
 									DistributionID: tr.DistributionID,
 									UpdatedAt:      tr.UpdatedAt.Format(time.RFC3339),
+									Confirmations:  tr.Confirmations,
 								})
 							}
 							if len(infos) > 0 {
@@ -622,7 +643,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: fmt.Sprintf("Combiner enqueue error: %v", err)}
 					continue
 				}
-				zdr.MarkRRsPending(sdcmd.Zone, myAgentId, zu, distID)
+				resyncRecipients := tm.GetDistributionRecipients(sdcmd.Zone, false)
+				zdr.MarkRRsPending(sdcmd.Zone, myAgentId, zu, distID, resyncRecipients)
 
 				if err := tm.EnqueueForZoneAgents(sdcmd.Zone, zu, distID); err != nil {
 					log.Printf("SynchedDataEngine: resync: failed to enqueue for zone agents: %v", err)
@@ -689,11 +711,13 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 
 // MarkRRsPending marks all RRs in a ZoneUpdate as pending with the given distribution ID.
 // Called after successful enqueue for combiner delivery.
+// recipients is the list of expected confirmation sources (combiner + agents) for this distID.
+// The RR transitions to accepted only after ALL recipients have confirmed.
 //
 // For ClassINET RRs: marks as RRStatePending (addition awaiting confirmation).
 // For ClassNONE RRs: finds the matching existing tracked RR and marks it as RRStatePendingRemoval.
 // For ClassANY RRs: marks all tracked RRs for the rrtype as RRStatePendingRemoval.
-func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *ZoneUpdate, distID string) {
+func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *ZoneUpdate, distID string, recipients []string) {
 	now := time.Now()
 
 	// Handle RRsets (remote updates)
@@ -723,6 +747,12 @@ func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *Zo
 		case dns.ClassANY:
 			zdr.markAllDeletePending(tracked, distID, now)
 		}
+	}
+
+	// Set ExpectedRecipients on all TrackedRRs that now carry this distID.
+	// This tells ProcessConfirmation who must confirm before state can transition.
+	if len(recipients) > 0 {
+		zdr.setExpectedRecipients(zone, agent, distID, recipients)
 	}
 }
 
@@ -780,6 +810,36 @@ func (zdr *ZoneDataRepo) markAllDeletePending(tracked *TrackedRRset, distID stri
 	}
 }
 
+// setExpectedRecipients sets the ExpectedRecipients on all TrackedRRs matching a given distID.
+func (zdr *ZoneDataRepo) setExpectedRecipients(zone ZoneName, agent AgentId, distID string, recipients []string) {
+	if zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
+		return
+	}
+	for _, trackedRRset := range zdr.Tracking[zone][agent] {
+		for i := range trackedRRset.Tracked {
+			if trackedRRset.Tracked[i].DistributionID == distID {
+				trackedRRset.Tracked[i].ExpectedRecipients = recipients
+			}
+		}
+	}
+}
+
+// allRecipientsConfirmed returns true if every expected recipient has sent a
+// non-pending confirmation (accepted, removed, rejected). If ExpectedRecipients
+// is empty (legacy/unset), returns true immediately for backwards compatibility.
+func allRecipientsConfirmed(tr *TrackedRR) bool {
+	if len(tr.ExpectedRecipients) == 0 {
+		return true // No tracking — behave as before
+	}
+	for _, r := range tr.ExpectedRecipients {
+		c, ok := tr.Confirmations[r]
+		if !ok || c.Status == "pending" {
+			return false
+		}
+	}
+	return true
+}
+
 // ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
 // For additions: Pending → Accepted or Rejected.
 // For deletions: PendingRemoval → Removed (and the RR is actually deleted from the ZoneDataRepo).
@@ -791,11 +851,36 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		source = "unknown"
 	}
 
-	// First NOTIFY in two-phase protocol: status="PENDING" means the remote agent
-	// received the sync and is processing it. No RR matching needed — just log and return.
+	// Helper to record per-recipient confirmation on a TrackedRR.
+	setConfirmation := func(tr *TrackedRR, status, reason string) {
+		if tr.Confirmations == nil {
+			tr.Confirmations = make(map[string]RRConfirmation)
+		}
+		tr.Confirmations[source] = RRConfirmation{
+			Status:    status,
+			Reason:    reason,
+			Timestamp: now,
+		}
+	}
+
+	// First NOTIFY in two-phase protocol: status="PENDING" means the remote peer
+	// received the sync and is processing it. Record per-recipient pending status.
 	if detail.Status == "PENDING" {
-		log.Printf("SynchedDataEngine: ProcessConfirmation(%s): pending confirmation for dist %s zone %s (delivery confirmed, awaiting combiner)",
+		log.Printf("SynchedDataEngine: ProcessConfirmation(%s): pending confirmation for dist %s zone %s (delivery confirmed, awaiting final response)",
 			source, detail.DistributionID, detail.Zone)
+		zoneTracking := zdr.Tracking[detail.Zone]
+		if zoneTracking != nil {
+			for _, agentTracking := range zoneTracking {
+				for _, trackedRRset := range agentTracking {
+					for i := range trackedRRset.Tracked {
+						tr := &trackedRRset.Tracked[i]
+						if tr.DistributionID == detail.DistributionID {
+							setConfirmation(tr, "pending", "")
+						}
+					}
+				}
+			}
+		}
 		return
 	}
 
@@ -839,11 +924,17 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 				case RRStatePending:
 					// Addition confirmation
 					if appliedSet[rrStr] {
-						tr.State = RRStateAccepted
-						tr.Reason = ""
+						setConfirmation(tr, "accepted", "")
 						tr.UpdatedAt = now
 						matched++
+						// Only transition to Accepted if ALL expected recipients have confirmed.
+						if allRecipientsConfirmed(tr) {
+							tr.State = RRStateAccepted
+							tr.Reason = ""
+						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
+						setConfirmation(tr, "rejected", reason)
+						// Any rejection immediately transitions to Rejected
 						tr.State = RRStateRejected
 						tr.Reason = reason
 						tr.UpdatedAt = now
@@ -853,19 +944,20 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 				case RRStatePendingRemoval:
 					if removedSet[rrStr] {
-						// Combiner confirmed removal — transition to Removed and
-						// actually delete the RR from the active ZoneDataRepo.
-						tr.State = RRStateRemoved
-						tr.Reason = ""
+						setConfirmation(tr, "removed", "")
 						tr.UpdatedAt = now
 						matched++
-						removed++
-
-						// Delete from the active repo
-						zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): RR removed (confirmed): %s", source, rrStr)
+						// Only transition to Removed and delete from repo if ALL expected recipients confirmed.
+						if allRecipientsConfirmed(tr) {
+							tr.State = RRStateRemoved
+							tr.Reason = ""
+							removed++
+							zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
+							log.Printf("SynchedDataEngine: ProcessConfirmation(%s): RR removed (all confirmed): %s", source, rrStr)
+						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						// Combiner rejected the delete — RR is still live, revert to Accepted
+						setConfirmation(tr, "rejected", reason)
 						tr.State = RRStateAccepted
 						tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
 						tr.UpdatedAt = now
@@ -875,17 +967,16 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 					// If truncated and RR not in either list, leave as pending-removal
 
 				case RRStateAccepted:
-					// Already accepted (e.g. combiner confirmed first, then remote agent's
-					// second NOTIFY arrives with the same distID). Log informational.
+					// Already accepted — record this recipient's confirmation
 					if appliedSet[rrStr] {
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): additional confirmation for already-accepted RR: %s", source, rrStr)
+						setConfirmation(tr, "accepted", "")
 						matched++
 					}
 
 				case RRStateRemoved:
-					// Already removed. Log informational.
+					// Already removed — record this recipient's confirmation
 					if removedSet[rrStr] {
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): additional confirmation for already-removed RR: %s", source, rrStr)
+						setConfirmation(tr, "removed", "")
 						matched++
 					}
 				}

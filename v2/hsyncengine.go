@@ -331,7 +331,7 @@ func (ar *AgentRegistry) DistributeDnskeyChanges(zone ZoneName, ds *DnskeyStatus
 
 // Handler for messages received from other agents
 func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate, synchedDataCmdQ chan *SynchedDataCmd) {
-	log.Printf("MsgHandler: Received %q message from %s: %+v", AgentMsgToString[ampp.MessageType], ampp.MyIdentity, ampp)
+	log.Printf("MsgHandler: Received %q message from %s: %+v", AgentMsgToString[ampp.MessageType], ampp.OriginatorID, ampp)
 
 	// var resp = SynchedDataResponse{
 	var resp = AgentMsgResponse{
@@ -345,7 +345,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		if ampp.Response != nil {
 			select {
 			case ampp.Response <- &resp:
-				// log.Printf("MsgHandler: Response %+v sent to API handler", resp, ampp.MyIdentity)
+				// log.Printf("MsgHandler: Response %+v sent to API handler", resp, ampp.OriginatorID)
 			default:
 				log.Printf("MsgHandler: Response channel blocked, skipping response")
 			}
@@ -373,11 +373,11 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 	switch ampp.MessageType {
 	case AgentMsgNotify:
 		// if amp, ok := ampp.Msg.(*AgentMsgPost); ok {
-		//	log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
+		//	log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.OriginatorID, amp)
 
 		var zu = &ZoneUpdate{
 			Zone:    ampp.Zone,
-			AgentId: ampp.MyIdentity,
+			AgentId: ampp.OriginatorID,
 			RRsets:  map[uint16]core.RRset{},
 		}
 		for _, rrStrs := range ampp.Records {
@@ -405,7 +405,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
 			Zone:              ampp.Zone,
-			AgentId:           ampp.MyIdentity,
+			AgentId:           ampp.OriginatorID,
 			UpdateType:        "remote",
 			Update:            zu,
 			OriginatingDistID: ampp.DistributionID,
@@ -414,17 +414,17 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		select {
 		case r := <-cresp:
 			if r.Error {
-				log.Printf("MsgHandler: Error processing update from %s: %s", ampp.MyIdentity, r.ErrorMsg)
+				log.Printf("MsgHandler: Error processing update from %s: %s", ampp.OriginatorID, r.ErrorMsg)
 				resp.Error = true
 				resp.ErrorMsg = r.ErrorMsg
 			}
 		case <-time.After(3 * time.Second):
-			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 3 seconds", ampp.MyIdentity)
+			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 3 seconds", ampp.OriginatorID)
 		}
 
 	case AgentMsgRfi:
 		// Process the RFI
-		log.Printf("MsgHandler: Received RFI request from %s", ampp.MyIdentity)
+		log.Printf("MsgHandler: Received RFI request from %s", ampp.OriginatorID)
 
 		switch ampp.RfiType {
 		case "UPSTREAM":
@@ -432,18 +432,18 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			// data for xfr.outgoing, (c) send the data to the remote agent.
 			found := false
 			for _, aid := range zad.MyDownstreams {
-				if aid == ampp.MyIdentity {
+				if aid == ampp.OriginatorID {
 					found = true
 					break
 				}
 			}
 			if !found {
 				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.MyIdentity)
+				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
 				resp.ErrorMsg = resp.Msg
 				return
 			}
-			log.Printf("MsgHandler: RFI UPSTREAM request received from %q, which is a downstream agent (i.e. legitimate request)", ampp.MyIdentity)
+			log.Printf("MsgHandler: RFI UPSTREAM request received from %q, which is a downstream agent (i.e. legitimate request)", ampp.OriginatorID)
 
 			if len(ar.LocalAgent.Xfr.Outgoing.Addresses) == 0 {
 				resp.Error = true
@@ -452,25 +452,25 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				return
 			}
 
-			// log.Printf("MsgHandler: Sending RFI UPSTREAM response to %q", ampp.MyIdentity)
+			// log.Printf("MsgHandler: Sending RFI UPSTREAM response to %q", ampp.OriginatorID)
 
 			resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
 				ZoneXfrSrcs: ar.LocalAgent.Xfr.Outgoing.Addresses,
 				ZoneXfrAuth: ar.LocalAgent.Xfr.Outgoing.Auth,
 			}
-			// log.Printf("MsgHandler: RFI UPSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
+			// log.Printf("MsgHandler: RFI UPSTREAM response %+v sent to %q", resp.RfiResponse, ampp.OriginatorID)
 
 		case "DOWNSTREAM":
 			// This is the case where a remote agent has us as downstream. Need to (a) verify that this is correct, (b) verify that we have
 			// data for xfr.incoming, (c) send the data to the remote agent.
-			if zad.MyUpstream != ampp.MyIdentity {
+			if zad.MyUpstream != ampp.OriginatorID {
 				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.MyIdentity)
+				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
 				resp.ErrorMsg = resp.Msg
 				return
 			}
 
-			log.Printf("MsgHandler: RFI DOWNSTREAM request received from %q, which is our upstream agent (i.e. legitimate request)", ampp.MyIdentity)
+			log.Printf("MsgHandler: RFI DOWNSTREAM request received from %q, which is our upstream agent (i.e. legitimate request)", ampp.OriginatorID)
 
 			if len(ar.LocalAgent.Xfr.Incoming.Addresses) == 0 {
 				resp.Error = true
@@ -479,18 +479,18 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				return
 			}
 
-			// log.Printf("MsgHandler: Sending RFI DOWNSTREAM response to %q", ampp.MyIdentity)
+			// log.Printf("MsgHandler: Sending RFI DOWNSTREAM response to %q", ampp.OriginatorID)
 
 			resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
 				ZoneXfrDsts: ar.LocalAgent.Xfr.Incoming.Addresses,
 				ZoneXfrAuth: ar.LocalAgent.Xfr.Incoming.Auth,
 			}
-			// log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
+			// log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.OriginatorID)
 
 		case "SYNC":
 			// Remote agent asks us to re-send all our local data.
 			log.Printf("MsgHandler: RFI SYNC from %q for zone %q — triggering local resync",
-				ampp.MyIdentity, ampp.Zone)
+				ampp.OriginatorID, ampp.Zone)
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "resync",
 				Zone:     ZoneName(ampp.Zone),
@@ -513,7 +513,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		case "AUDIT":
 			// Remote agent wants to see all data we have for this zone.
 			log.Printf("MsgHandler: RFI AUDIT from %q for zone %q",
-				ampp.MyIdentity, ampp.Zone)
+				ampp.OriginatorID, ampp.Zone)
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "dump-zonedatarepo",
 				Zone:     ZoneName(ampp.Zone),
@@ -657,7 +657,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			} else {
 				amr, err := agent.SendApiMsg(&AgentMsgPost{
 					MessageType:  AgentMsgNotify,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					Records:      groupRRStringsByOwner(msg.RRs),
@@ -713,7 +713,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// Send the RFI to the upstream agent
 			amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 				MessageType:  AgentMsgRfi,
-				MyIdentity:   AgentId(ar.LocalAgent.Identity),
+				OriginatorID: AgentId(ar.LocalAgent.Identity),
 				YourIdentity: agent.Identity,
 				Zone:         msg.Zone,
 				RfiType:      msg.RfiType,
@@ -766,7 +766,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				// Send the RFI to the downstream agent
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					RfiType:      msg.RfiType,
@@ -803,7 +803,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					RfiType:      "SYNC",
@@ -829,7 +829,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					RfiType:      "AUDIT",

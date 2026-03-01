@@ -28,6 +28,7 @@ const (
 	OptCatalogZone
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
+	OptMPManualApproval
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -51,6 +52,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogZone:             "catalog-zone",
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
+	OptMPManualApproval:        "mp-manual-approval",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -73,6 +75,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-zone":               OptCatalogZone,
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
+	"mp-manual-approval":         OptMPManualApproval,
 }
 
 type ImrOption uint8
