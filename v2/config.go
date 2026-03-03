@@ -452,6 +452,7 @@ type MsgQs struct {
 	SynchedDataCmd    chan *SynchedDataCmd       // local commands TO the combiner
 	Confirmation      chan *ConfirmationDetail   // combiner confirmation feedback
 	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
+	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
@@ -465,6 +466,14 @@ type KeystateInventoryMsg struct {
 	SenderID  string
 	Zone      string
 	Inventory []KeyInventoryItem
+}
+
+// EditsResponseMsg carries an agent's contributions from combiner back to the agent.
+// Delivered via MsgQs.EditsResponse channel. Modeled on KeystateInventoryMsg.
+type EditsResponseMsg struct {
+	SenderID string
+	Zone     string
+	Records  map[string][]string // owner → []RR strings
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

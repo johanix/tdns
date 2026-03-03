@@ -418,6 +418,8 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeSyncMessage(msg)
 	case "keystate":
 		tm.routeKeystateMessage(msg)
+	case "edits":
+		tm.routeEditsMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
 	default:
@@ -748,6 +750,38 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 		lgTransport.Info("routed KEYSTATE inventory to agent", "sender", senderID, "zone", payload.Zone, "keys", len(items))
 	default:
 		lgTransport.Warn("KeystateInventory channel full, dropping inventory", "sender", senderID)
+	}
+}
+
+// routeEditsMessage routes an incoming EDITS message from the combiner.
+// Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
+// Modeled on routeKeystateMessage.
+func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsEditsPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse edits payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing EDITS", "sender", senderID, "zone", payload.Zone)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("EDITS received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	editsMsg := &EditsResponseMsg{
+		SenderID: senderID,
+		Zone:     payload.Zone,
+		Records:  payload.Records,
+	}
+
+	select {
+	case tm.msgQs.EditsResponse <- editsMsg:
+		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "owners", len(payload.Records))
+	default:
+		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
 	}
 }
 
@@ -1771,5 +1805,44 @@ func (tm *TransportManager) sendRfiToSigner(zone string, rfiType string) error {
 	}
 
 	lgTransport.Info("RFI sent to signer", "rfiType", rfiType, "zone", zone, "signer", tm.signerID, "status", resp.Status)
+	return nil
+}
+
+// sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
+// Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
+func (tm *TransportManager) sendRfiToCombiner(zone string, rfiType string) error {
+	if tm.agentRegistry == nil {
+		return fmt.Errorf("no agent registry")
+	}
+
+	combinerID, err := tm.getCombinerID()
+	if err != nil {
+		return fmt.Errorf("RFI %s: %w", rfiType, err)
+	}
+
+	combiner, exists := tm.agentRegistry.S.Get(combinerID)
+	if !exists {
+		return fmt.Errorf("combiner %q not found in AgentRegistry", combinerID)
+	}
+
+	peer := tm.SyncPeerFromAgent(combiner)
+
+	syncReq := &transport.SyncRequest{
+		SenderID:    tm.LocalID,
+		Zone:        zone,
+		Timestamp:   time.Now(),
+		MessageType: "rfi",
+		RfiType:     rfiType,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+	if err != nil {
+		return fmt.Errorf("RFI %s to combiner %s failed: %w", rfiType, combinerID, err)
+	}
+
+	lgTransport.Info("RFI sent to combiner", "rfiType", rfiType, "zone", zone, "combiner", combinerID, "status", resp.Status)
 	return nil
 }

@@ -318,6 +318,98 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 	}
 }
 
+// RequestAndWaitForEdits sends an RFI EDITS to the combiner and waits for the
+// contributions response. Applies the received records to the SynchedDataEngine
+// as confirmed data (the combiner already has them).
+//
+// Modeled on RequestAndWaitForKeyInventory.
+func (zd *ZoneData) RequestAndWaitForEdits() {
+	tm := Conf.Internal.TransportManager
+	if tm == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
+		return
+	}
+
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.EditsResponse == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
+		return
+	}
+
+	// Send RFI EDITS to combiner
+	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
+		return
+	}
+
+	// Wait for the contributions response (combiner sends it as a separate EDITS message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case resp := <-msgQs.EditsResponse:
+		if resp == nil || resp.Zone != zd.ZoneName {
+			zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received nil or mismatched edits from combiner", zd.ZoneName)
+			return
+		}
+
+		// Count total records for logging
+		totalRRs := 0
+		for _, rrs := range resp.Records {
+			totalRRs += len(rrs)
+		}
+
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received edits from combiner (%d owners, %d RRs)",
+			zd.ZoneName, len(resp.Records), totalRRs)
+
+		// Apply to SDE — this is Step 7 (see plan)
+		zd.applyEditsToSDE(resp.Records)
+
+	case <-timeout.C:
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: timeout waiting for combiner EDITS response (15s)", zd.ZoneName)
+	}
+}
+
+// applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
+// Records are the agent's own contributions as tracked by the combiner — they should be
+// added as confirmed data (not queued for sending to the combiner again).
+func (zd *ZoneData) applyEditsToSDE(records map[string][]string) {
+	if len(records) == 0 {
+		zd.Logger.Printf("applyEditsToSDE: zone %s: no records to apply", zd.ZoneName)
+		return
+	}
+
+	zdr := Conf.Internal.ZoneDataRepo
+	if zdr == nil {
+		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
+		return
+	}
+
+	localAgentID := AgentId(Conf.Agent.Identity)
+	if localAgentID == "" {
+		zd.Logger.Printf("applyEditsToSDE: zone %s: no local agent identity configured", zd.ZoneName)
+		return
+	}
+
+	// Parse the RR strings and add them to the SDE repo as confirmed data.
+	// The records are owner → []RR strings. We need to add each RR to the
+	// agent's repo entry in the SDE, marked as accepted (combiner has them).
+	added := 0
+	for _, rrStrings := range records {
+		for _, rrStr := range rrStrings {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
+				continue
+			}
+			zdr.AddConfirmedRR(ZoneName(zd.ZoneName), localAgentID, rr)
+			added++
+		}
+	}
+
+	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from combiner edits", zd.ZoneName, added)
+}
+
 // buildRemoteDNSKEYsFromTags returns DNSKEY RRs from the zone that match the given key tags.
 func (zd *ZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]bool) []dns.RR {
 	if len(foreignKeyTags) == 0 {

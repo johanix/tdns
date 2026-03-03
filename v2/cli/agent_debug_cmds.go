@@ -77,9 +77,9 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		PrepArgs("zonename", "identity")
 
 		rfitype = strings.ToUpper(rfitype)
-		validRfiTypes := map[string]bool{"UPSTREAM": true, "DOWNSTREAM": true, "SYNC": true, "AUDIT": true}
+		validRfiTypes := map[string]bool{"UPSTREAM": true, "DOWNSTREAM": true, "SYNC": true, "AUDIT": true, "EDITS": true}
 		if !validRfiTypes[rfitype] {
-			log.Fatalf("Error: RFI type must be one of UPSTREAM, DOWNSTREAM, SYNC, or AUDIT (is %q)", rfitype)
+			log.Fatalf("Error: RFI type must be one of UPSTREAM, DOWNSTREAM, SYNC, AUDIT, or EDITS (is %q)", rfitype)
 		}
 
 		req := tdns.AgentMgmtPost{
@@ -984,7 +984,7 @@ func init() {
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM|SYNC|AUDIT)")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM|SYNC|AUDIT|EDITS)")
 
 	// New command flags
 	DebugAgentShowSyncedDataCmd.Flags().String("zone", "", "Filter by specific zone")

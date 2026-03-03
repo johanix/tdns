@@ -193,7 +193,19 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	lgTransport().Info("registered message handlers", "count", 8)
+	// Edits handler (priority: 100)
+	err = router.Register(
+		"EditsHandler",
+		MessageType("edits"),
+		HandleEdits,
+		WithPriority(100),
+		WithDescription("Processes EDITS messages with agent contributions from combiner"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lgTransport().Info("registered message handlers", "count", 9)
 	lgTransport().Info("router initialization complete")
 
 	return nil
@@ -298,8 +310,19 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		return err
 	}
 
+	// Register RFI handler for combiner (handles RFI EDITS from agents)
+	if err := router.Register(
+		"CombinerRfiHandler",
+		MessageType("rfi"),
+		HandleRfi,
+		WithPriority(100),
+		WithDescription("Combiner: processes RFI messages from agents"),
+	); err != nil {
+		return err
+	}
+
 	// Register combiner-specific update handler (agent→combiner zone contributions)
-	handlerCount := 2
+	handlerCount := 3
 	if cfg.HandleUpdate != nil {
 		if err := router.Register(
 			"CombinerUpdateHandler",
@@ -459,6 +482,8 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("rfi")
 	case "keystate":
 		return MessageType("keystate")
+	case "edits":
+		return MessageType("edits")
 	default:
 		return MessageTypeUnknown
 	}

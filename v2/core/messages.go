@@ -19,6 +19,7 @@ const (
 	AgentMsgStatus   AgentMsg = "status"
 	AgentMsgPing     AgentMsg = "ping"
 	AgentMsgKeystate AgentMsg = "keystate"
+	AgentMsgEdits    AgentMsg = "edits"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
@@ -30,6 +31,7 @@ var AgentMsgToString = map[AgentMsg]string{
 	AgentMsgStatus:   "STATUS",
 	AgentMsgPing:     "PING",
 	AgentMsgKeystate: "KEYSTATE",
+	AgentMsgEdits:    "EDITS",
 }
 
 // AgentHelloPost represents a hello handshake message.
@@ -179,4 +181,17 @@ type AgentKeystateResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+}
+
+// AgentEditsPost represents an EDITS message carrying an agent's current contributions
+// from the combiner back to the requesting agent.
+// Modeled on AgentKeystatePost. The combiner sends this in response to an RFI EDITS request.
+type AgentEditsPost struct {
+	MessageType  AgentMsg            // AgentMsgEdits
+	MyIdentity   string              // Combiner identity
+	YourIdentity string              // Requesting agent identity
+	Zone         string              // Zone (FQDN)
+	Records      map[string][]string // Agent's current contributions (owner → []RR strings)
+	Message      string              // Optional status message
+	Time         time.Time           // Timestamp
 }

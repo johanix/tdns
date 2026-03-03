@@ -365,6 +365,66 @@ func HandleKeystate(ctx *MessageContext) error {
 	return nil
 }
 
+// HandleEdits processes EDITS messages carrying an agent's current contributions
+// from the combiner. Modeled on HandleKeystate.
+// Sent by the combiner in response to an RFI EDITS request.
+func HandleEdits(ctx *MessageContext) error {
+	lgTransport().Debug("processing edits", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+
+	// Parse the edits message
+	var edits DnsEditsPayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &edits); err != nil {
+		return fmt.Errorf("failed to parse edits: %w", err)
+	}
+
+	// Validate message type
+	msgType := edits.MessageType
+	if msgType == "" {
+		msgType = edits.Type
+	}
+	if msgType != "edits" {
+		return fmt.Errorf("invalid message type for edits handler: %s", msgType)
+	}
+
+	if edits.Zone == "" {
+		return fmt.Errorf("edits message missing zone")
+	}
+
+	// Store for processing by the agent
+	ctx.Data["message_type"] = "edits"
+	ctx.Data["incoming_message"] = &IncomingMessage{
+		Type:     "edits",
+		SenderID: edits.GetSenderID(),
+		Zone:     edits.Zone,
+		Payload:  ctx.ChunkPayload,
+	}
+
+	// Create confirmation response using standard "confirm" type
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        fmt.Sprintf("edits received for zone %s (%d owners)", edits.Zone, len(edits.Records)),
+		Timestamp:      time.Now().Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal edits confirmation: %w", err)
+	}
+
+	ctx.Data["response"] = payloadBytes
+
+	lgTransport().Info("edits received", "peer", ctx.PeerID, "zone", edits.Zone, "owners", len(edits.Records))
+	return nil
+}
+
 // HandleRelocate processes relocate messages for DDoS mitigation.
 func HandleRelocate(ctx *MessageContext) error {
 	lgTransport().Debug("processing relocate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)

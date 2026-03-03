@@ -48,6 +48,7 @@ const (
 	AgentMsgRfi    = core.AgentMsgRfi
 	AgentMsgStatus = core.AgentMsgStatus
 	AgentMsgPing   = core.AgentMsgPing
+	AgentMsgEdits  = core.AgentMsgEdits
 )
 
 var AgentMsgToString = core.AgentMsgToString

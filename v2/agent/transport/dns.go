@@ -674,6 +674,49 @@ func extractKeystateConfirmFromResponse(res *dns.Msg, peerID string, sw *SecureP
 	return nil, fmt.Errorf("no CHUNK option in response")
 }
 
+// Edits sends an EDITS message to an agent, carrying that agent's current contributions.
+// Modeled on DNSTransport.Keystate(). Sent by combiner in response to RFI EDITS.
+func (t *DNSTransport) Edits(ctx context.Context, peer *Peer, req *EditsRequest) (*EditsResponse, error) {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return nil, NewTransportError("DNS", "Edits", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	distributionID := GenerateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
+
+	// Create edits payload using typed struct from core package
+	payload := &core.AgentEditsPost{
+		MessageType:  core.AgentMsgEdits,
+		MyIdentity:   req.SenderID,
+		YourIdentity: peer.ID,
+		Zone:         req.Zone,
+		Records:      req.Records,
+		Message:      req.Message,
+		Time:         req.Timestamp,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Edits", peer.ID,
+			fmt.Errorf("failed to marshal edits payload: %w", err), false)
+	}
+
+	// Send via sendNotifyWithPayload (reuses standard NOTIFY+confirm flow)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "edits", distributionID, payloadJSON, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &EditsResponse{
+		ResponderID: peer.ID,
+		Zone:        req.Zone,
+		Accepted:    resp.Status == ConfirmSuccess,
+		Message:     resp.Message,
+		Timestamp:   time.Now(),
+	}, nil
+}
+
 // Confirm sends an acknowledgment of a sync operation via DNS.
 // Uses NOTIFY(CHUNK) with status in EDNS0 option.
 func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
@@ -1148,6 +1191,35 @@ type DnsKeystateConfirmPayload struct {
 	Status    string `json:"status"`            // "ok" or "error"
 	Message   string `json:"message,omitempty"` // Optional detail
 	Timestamp int64  `json:"timestamp"`
+}
+
+// DnsEditsPayload represents an EDITS message payload.
+// Carries an agent's current contributions from combiner back to the agent.
+// Modeled on DnsKeystatePayload.
+type DnsEditsPayload struct {
+	// Standard fields
+	MessageType  string `json:"MessageType"`  // "edits"
+	MyIdentity   string `json:"MyIdentity"`   // Sender (combiner) identity
+	YourIdentity string `json:"YourIdentity"` // Recipient (agent) identity
+
+	// EDITS-specific fields
+	Zone    string              `json:"Zone"`              // Zone (FQDN)
+	Records map[string][]string `json:"Records,omitempty"` // Agent's contributions (owner → []RR strings)
+	Message string              `json:"Message,omitempty"` // Optional status message
+
+	Timestamp int64 `json:"timestamp"` // Unix timestamp
+
+	// Legacy fields (fallback)
+	Type     string `json:"type"`      // "edits"
+	SenderID string `json:"sender_id"` // Sender identity (legacy)
+}
+
+// GetSenderID returns the sender ID from either standard or legacy format.
+func (d *DnsEditsPayload) GetSenderID() string {
+	if d.MyIdentity != "" {
+		return d.MyIdentity
+	}
+	return d.SenderID
 }
 
 // DnsPingConfirmPayload is the response to a ping; echoes the nonce.

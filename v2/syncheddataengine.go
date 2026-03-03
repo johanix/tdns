@@ -142,6 +142,44 @@ func (zdr *ZoneDataRepo) Set(zone ZoneName, agentRepo *AgentRepo) {
 	zdr.Repo.Set(zone, agentRepo)
 }
 
+// AddConfirmedRR adds a single RR to the repo and tracking as RRStateAccepted.
+// Used to hydrate the SDE with pre-confirmed data from the combiner (RFI EDITS).
+func (zdr *ZoneDataRepo) AddConfirmedRR(zone ZoneName, agentID AgentId, rr dns.RR) {
+	// Get or create AgentRepo for this zone
+	nar, ok := zdr.Get(zone)
+	if !ok {
+		nar, _ = NewAgentRepo()
+		zdr.Set(zone, nar)
+	}
+
+	// Get or create OwnerData for this agent
+	nod, ok := nar.Get(agentID)
+	if !ok {
+		nod = NewOwnerData(string(zone))
+		nar.Set(agentID, nod)
+	}
+
+	// Add RR to the RRTypeStore
+	rrtype := rr.Header().Rrtype
+	cur, ok := nod.RRtypes.Get(rrtype)
+	if !ok {
+		cur = core.RRset{
+			Name:   rr.Header().Name,
+			RRtype: rrtype,
+		}
+	}
+	cur.Add(rr)
+	nod.RRtypes.Set(rrtype, cur)
+
+	// Add tracking entry as RRStateAccepted
+	ts := zdr.getOrCreateTracking(zone, agentID, rrtype)
+	ts.Tracked = append(ts.Tracked, TrackedRR{
+		RR:        rr,
+		State:     RRStateAccepted,
+		UpdatedAt: time.Now(),
+	})
+}
+
 // RRState represents the lifecycle state of a tracked RR.
 type RRState uint8
 
@@ -270,6 +308,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	}
 
 	conf.Internal.ZoneDataRepo = zdr
+
+	// Hydrate SDE from combiner: request our current contributions for each
+	// multi-provider zone. This recovers local edits (e.g. NS records) that
+	// were lost on restart. DNSKEYs come from RFI KEYSTATE, remote agent data
+	// from RFI SYNC — this fills the remaining gap.
+	if conf.Internal.TransportManager != nil && conf.Internal.TransportManager.combinerID != "" {
+		for item := range Zones.IterBuffered() {
+			zd := item.Val
+			if !zd.Options[OptMultiProvider] {
+				continue
+			}
+			lgEngine.Info("requesting edits from combiner", "zone", item.Key)
+			zd.RequestAndWaitForEdits()
+		}
+	}
 
 	lgEngine.Info("SynchedDataEngine started")
 

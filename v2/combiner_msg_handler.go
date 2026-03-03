@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -97,6 +98,19 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				deliveredBy = senderID // Fallback: direct delivery
 			}
 			zone := string(msg.Zone)
+
+			// Handle RFI messages (e.g. RFI EDITS) — dispatch and continue
+			if msg.MessageType == AgentMsgRfi {
+				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
+				switch msg.RfiType {
+				case "EDITS":
+					go sendEditsToAgent(conf, tm, senderID, zone)
+				default:
+					lgCombiner.Warn("unknown RFI type, ignoring", "type", msg.RfiType, "sender", senderID)
+				}
+				continue
+			}
+
 			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
 			kdb := conf.Internal.KeyDB
@@ -280,6 +294,69 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 		}
 		owner := rr.Header().Name
 		result[owner] = append(result[owner], rrStr)
+	}
+	return result
+}
+
+// sendEditsToAgent looks up the agent's current contributions for the zone and sends
+// them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
+// when an RFI EDITS is received.
+// Modeled on sendKeystateInventoryToAgent in signer_msg_handler.go.
+func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone string) {
+	zd, exists := Zones.Get(dns.Fqdn(zone))
+	if !exists {
+		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
+		return
+	}
+
+	// Extract this agent's contributions (may be nil if no prior edits)
+	records := contributionsToRecords(zd.AgentContributions[agentID])
+
+	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "owners", len(records))
+
+	if tm == nil || tm.DNSTransport == nil {
+		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(agentID)
+	if !peerExists || peer == nil {
+		lgCombiner.Warn("RFI EDITS: agent not in PeerRegistry", "agent", agentID)
+		return
+	}
+
+	req := &transport.EditsRequest{
+		SenderID:  conf.MultiProvider.Identity,
+		Zone:      zone,
+		Records:   records,
+		Timestamp: time.Now(),
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.DNSTransport.Edits(sendCtx, peer, req)
+	if err != nil {
+		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
+		return
+	}
+
+	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "owners", len(records), "accepted", resp.Accepted)
+}
+
+// contributionsToRecords converts an agent's contributions map to the flat
+// map[string][]string format used by sync/update messages.
+func contributionsToRecords(contributions map[string]map[uint16]core.RRset) map[string][]string {
+	result := make(map[string][]string)
+	if contributions == nil {
+		return result
+	}
+	for owner, rrtypeMap := range contributions {
+		for _, rrset := range rrtypeMap {
+			for _, rr := range rrset.RRs {
+				result[owner] = append(result[owner], rr.String())
+			}
+		}
 	}
 	return result
 }
