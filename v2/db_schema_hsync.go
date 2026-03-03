@@ -258,6 +258,19 @@ var HsyncTables = map[string]string{
 		rejected_at     INTEGER NOT NULL,
 		reason          TEXT NOT NULL
 	)`,
+
+	// CombinerContributions is a snapshot of the current per-agent contributions.
+	// One row per RR. Used to restore AgentContributions on restart.
+	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		zone        TEXT NOT NULL,
+		sender_id   TEXT NOT NULL,
+		owner       TEXT NOT NULL,
+		rrtype      INTEGER NOT NULL,
+		rr          TEXT NOT NULL,
+		updated_at  INTEGER NOT NULL,
+		UNIQUE(zone, sender_id, owner, rrtype, rr)
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.
@@ -299,6 +312,10 @@ var HsyncIndexes = []string{
 
 	// CombinerRejectedEdits indexes
 	`CREATE INDEX IF NOT EXISTS idx_rejected_edits_zone ON CombinerRejectedEdits(zone)`,
+
+	// CombinerContributions indexes
+	`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
+	`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
 }
 
 // InitHsyncTables initializes the HSYNC tables in the KeyDB.
@@ -336,6 +353,7 @@ func (kdb *KeyDB) InitCombinerEditTables() error {
 		"CombinerPendingEdits",
 		"CombinerApprovedEdits",
 		"CombinerRejectedEdits",
+		"CombinerContributions",
 	}
 
 	for _, name := range combinerTables {
@@ -352,6 +370,8 @@ func (kdb *KeyDB) InitCombinerEditTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_pending_edits_zone ON CombinerPendingEdits(zone)`,
 		`CREATE INDEX IF NOT EXISTS idx_approved_edits_zone ON CombinerApprovedEdits(zone)`,
 		`CREATE INDEX IF NOT EXISTS idx_rejected_edits_zone ON CombinerRejectedEdits(zone)`,
+		`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
+		`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
 	}
 
 	for _, indexSQL := range combinerIndexes {

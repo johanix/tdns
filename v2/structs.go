@@ -72,9 +72,13 @@ type ZoneData struct {
 	// When merging, all agents' contributions for the same owner/rrtype are combined
 	// into a single RRset in CombinerData.
 	AgentContributions map[string]map[string]map[uint16]core.RRset
-	Ready              bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType            string // axfr | ixfr
-	Logger             *log.Logger
+	// PersistContributions is set by the combiner at init time to persist an agent's
+	// contributions to the snapshot table after every write. Non-combiner apps leave it nil.
+	// Args: zone, senderID, agent's contributions (owner → rrtype → RRset).
+	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
+	Ready                bool   // true if zd.Data has been populated (from file or upstream)
+	XfrType              string // axfr | ixfr
+	Logger               *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping

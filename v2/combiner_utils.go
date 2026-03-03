@@ -157,6 +157,13 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	// Rebuild CombinerData by merging contributions from ALL agents
 	zd.rebuildCombinerData()
 
+	// Persist this agent's contributions to the snapshot table
+	if zd.PersistContributions != nil {
+		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+			zd.Logger.Printf("AddCombinerData: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+		}
+	}
+
 	modified, err := zd.CombineWithLocalChanges()
 	if err != nil {
 		return changed, err
@@ -431,6 +438,14 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 
 	// Rebuild merged CombinerData and apply to zone
 	zd.rebuildCombinerData()
+
+	// Persist this agent's contributions to the snapshot table
+	if zd.PersistContributions != nil {
+		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+			zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+		}
+	}
+
 	modified, err := zd.CombineWithLocalChanges()
 	if err != nil {
 		return removedRecords, err
@@ -491,6 +506,14 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 
 	// Rebuild merged CombinerData and apply to zone
 	zd.rebuildCombinerData()
+
+	// Persist this agent's contributions to the snapshot table
+	if zd.PersistContributions != nil {
+		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+			zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+		}
+	}
+
 	modified, err := zd.CombineWithLocalChanges()
 	if err != nil {
 		return removedRecords, err

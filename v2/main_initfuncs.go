@@ -25,6 +25,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/johanix/tdns/v2/agent/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
 )
@@ -717,28 +718,44 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 // StartCombiner starts subsystems for tdns-combiner
 func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
-	// Rebuild in-memory CombinerData from approved edits persisted in the DB.
+	// Load persisted AgentContributions from the snapshot table and set up
+	// the PersistContributions callback on each combiner zone.
 	// This must happen before CombinerMsgHandler starts so that the combiner
 	// has correct state before processing new incoming updates.
 	if kdb := conf.Internal.KeyDB; kdb != nil {
-		approved, err := kdb.ListApprovedEdits("")
-		if err != nil {
-			lgConfig.Warn("failed to load approved edits", "err", err)
-		} else if len(approved) > 0 {
-			rebuilt := 0
-			for _, rec := range approved {
-				zd, exists := Zones.Get(dns.Fqdn(rec.Zone))
-				if !exists {
-					lgConfig.Warn("skipping approved edit for unknown zone", "editID", rec.EditID, "zone", rec.Zone)
-					continue
-				}
-				if _, err := zd.AddCombinerDataNG(rec.SenderID, rec.Records); err != nil {
-					lgConfig.Error("failed to rebuild edit", "editID", rec.EditID, "zone", rec.Zone, "err", err)
-					continue
-				}
-				rebuilt++
+		// Set PersistContributions callback on all combiner zones
+		for item := range Zones.IterBuffered() {
+			zd := item.Val
+			if zd.Options[OptMultiProvider] {
+				zd.PersistContributions = kdb.SaveContributions
 			}
-			lgConfig.Info("rebuilt CombinerData from approved edits", "rebuilt", rebuilt, "totalInDB", len(approved))
+		}
+
+		// Load snapshot and hydrate AgentContributions
+		allContribs, err := kdb.LoadAllContributions()
+		if err != nil {
+			lgConfig.Warn("failed to load contributions snapshot", "err", err)
+		} else if len(allContribs) > 0 {
+			rebuilt := 0
+			for zoneName, agentMap := range allContribs {
+				zd, exists := Zones.Get(dns.Fqdn(zoneName))
+				if !exists {
+					lgConfig.Warn("skipping contributions for unknown zone", "zone", zoneName)
+					continue
+				}
+				zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+				for senderID, ownerMap := range agentMap {
+					zd.AgentContributions[senderID] = ownerMap
+					rebuilt++
+				}
+				zd.rebuildCombinerData()
+				if modified, err := zd.CombineWithLocalChanges(); err != nil {
+					lgConfig.Error("failed to apply restored contributions", "zone", zoneName, "err", err)
+				} else if modified {
+					lgConfig.Debug("applied restored contributions to zone", "zone", zoneName)
+				}
+			}
+			lgConfig.Info("restored AgentContributions from snapshot", "agents", rebuilt, "zones", len(allContribs))
 		}
 	}
 

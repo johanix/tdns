@@ -170,8 +170,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Split results into approved and rejected record maps and persist.
 			if kdb != nil && editID > 0 {
 				approved := rrStringsToOwnerMap(resp.AppliedRecords)
-				// Removals were also successfully processed
-				for owner, rrs := range rrStringsToOwnerMap(resp.RemovedRecords) {
+				// Store removals with ClassNONE so the audit trail preserves ADD/DEL intent
+				for owner, rrs := range rrStringsToClassNONE(resp.RemovedRecords) {
 					approved[owner] = append(approved[owner], rrs...)
 				}
 				rejected := make(map[string][]string)
@@ -280,6 +280,22 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 		}
 		owner := rr.Header().Name
 		result[owner] = append(result[owner], rrStr)
+	}
+	return result
+}
+
+// rrStringsToClassNONE parses RR strings, converts them to ClassNONE (to mark
+// as deletions in the audit trail), and groups them by owner name.
+func rrStringsToClassNONE(rrStrings []string) map[string][]string {
+	result := make(map[string][]string)
+	for _, rrStr := range rrStrings {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			continue
+		}
+		owner := rr.Header().Name
+		rr.Header().Class = dns.ClassNONE
+		result[owner] = append(result[owner], rr.String())
 	}
 	return result
 }
