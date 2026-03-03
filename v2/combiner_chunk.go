@@ -253,6 +253,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	// Apply additions
+	dataChanged := false
 	if len(addOwnerRRs) > 0 {
 		addChanged, err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
 		if err != nil {
@@ -261,9 +262,13 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			return resp
 		}
 		if addChanged {
-			for _, rrs := range addOwnerRRs {
-				appliedRecords = append(appliedRecords, rrs...)
-			}
+			dataChanged = true
+		}
+		// Always report accepted records regardless of whether data changed.
+		// The agent needs to know its records are present at the combiner so it
+		// can transition them from pending to accepted in the SDE.
+		for _, rrs := range addOwnerRRs {
+			appliedRecords = append(appliedRecords, rrs...)
 		}
 	}
 
@@ -274,6 +279,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			lgCombiner.Error("error removing records", "err", err)
 			// Don't fail the whole request — report partial success
 		}
+		if len(removed) > 0 {
+			dataChanged = true
+		}
 		removedRecords = append(removedRecords, removed...)
 	}
 
@@ -283,6 +291,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			removed, err := zd.RemoveCombinerDataByRRtype(req.SenderID, owner, rrtype)
 			if err != nil {
 				lgCombiner.Error("error removing RRset", "rrtype", dns.TypeToString[rrtype], "owner", owner, "err", err)
+			}
+			if len(removed) > 0 {
+				dataChanged = true
 			}
 			removedRecords = append(removedRecords, removed...)
 		}
@@ -310,7 +321,8 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 	lgCombiner.Info("update processed", "status", resp.Status, "message", resp.Message)
 
-	if totalActions > 0 {
+	// Only bump the serial when the zone data actually changed (not for idempotent re-applies).
+	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
 		if err != nil {
 			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
