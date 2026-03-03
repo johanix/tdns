@@ -6,7 +6,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"time"
@@ -122,7 +121,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			if len(rr.RRSIGs) > 0 {
 				vstate, err = imr.Cache.ValidateRRsetWithParentZone(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
-					log.Printf("maybeQueryTLSA: failed to validate TLSA RRset: %v", err)
+					lgImr.Warn("maybeQueryTLSA: failed to validate TLSA RRset", "err", err)
 					return
 				}
 			}

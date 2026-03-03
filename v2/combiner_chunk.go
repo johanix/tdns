@@ -323,39 +323,23 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 }
 
 // isNoOpUpdate checks whether an incoming update would cause any actual change
-// to the combiner's AgentContributions. Used to short-circuit the manual approval
-// queue for zones with mp-manual-approval — no-op edits should not require operator action.
+// to the zone data. Checks against the live zone RRsets (persisted across restarts),
+// not the in-memory AgentContributions (which are lost on restart).
 func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bool {
-	if senderID == "" {
-		senderID = "local"
-	}
-
 	for owner, rrStrings := range records {
 		for _, rrStr := range rrStrings {
 			rr, err := dns.NewRR(rrStr)
 			if err != nil {
-				// Can't parse → not a no-op (will be rejected, but that's a change in outcome)
 				return false
 			}
 
 			rrtype := rr.Header().Rrtype
 			switch rr.Header().Class {
 			case dns.ClassINET:
-				// ADD: check if this RR already exists in contributions
-				if zd.AgentContributions == nil {
-					return false
-				}
-				agentData, ok := zd.AgentContributions[senderID]
-				if !ok {
-					return false
-				}
-				ownerMap, ok := agentData[owner]
-				if !ok {
-					return false
-				}
-				existing, ok := ownerMap[rrtype]
-				if !ok {
-					return false
+				// ADD: no-op if the RR already exists in the zone
+				existing, err := zd.GetRRset(owner, rrtype)
+				if err != nil || existing == nil {
+					return false // RRset doesn't exist → adding is a change
 				}
 				found := false
 				for _, existingRR := range existing.RRs {
@@ -369,49 +353,29 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 				}
 
 			case dns.ClassNONE:
-				// DEL: check if this RR is already absent from contributions
+				// DEL: no-op if the RR is already absent from the zone
 				delRR := dns.Copy(rr)
 				delRR.Header().Class = dns.ClassINET
-				if zd.AgentContributions == nil {
-					continue // Already absent → no-op for this record
-				}
-				agentData, ok := zd.AgentContributions[senderID]
-				if !ok {
-					continue
-				}
-				ownerMap, ok := agentData[owner]
-				if !ok {
-					continue
-				}
-				existing, ok := ownerMap[rrtype]
-				if !ok {
-					continue
+				existing, err := zd.GetRRset(owner, rrtype)
+				if err != nil || existing == nil {
+					continue // RRset doesn't exist → already absent
 				}
 				for _, existingRR := range existing.RRs {
 					if dns.IsDuplicate(delRR, existingRR) {
-						return false // RR exists, so removing it IS a change
+						return false // RR exists → removing it IS a change
 					}
 				}
 
 			case dns.ClassANY:
-				// Bulk DEL: check if rrtype has no contributions
-				if zd.AgentContributions == nil {
-					continue
+				// Bulk DEL: no-op if the rrtype has no records at this owner
+				existing, err := zd.GetRRset(owner, rrtype)
+				if err != nil || existing == nil || len(existing.RRs) == 0 {
+					continue // Nothing to delete → no-op
 				}
-				agentData, ok := zd.AgentContributions[senderID]
-				if !ok {
-					continue
-				}
-				ownerMap, ok := agentData[owner]
-				if !ok {
-					continue
-				}
-				if _, ok := ownerMap[rrtype]; ok {
-					return false // RRtype exists, so deleting it IS a change
-				}
+				return false // Records exist → deleting them IS a change
 
 			default:
-				return false // Unknown class → not a no-op
+				return false
 			}
 		}
 	}

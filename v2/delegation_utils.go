@@ -7,7 +7,6 @@ package tdns
 import (
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -46,12 +45,12 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 	for _, pserver = range zd.ParentServers {
 		p_nsrrs, err = AuthQuery(zd.ZoneName, pserver, dns.TypeNS)
 		if err != nil {
-			log.Printf("Error from AuthQuery(%s, %s, NS): %v", pserver, zd.ZoneName, err)
+			lgDns.Warn("error from AuthQuery for NS", "server", pserver, "zone", zd.ZoneName, "err", err)
 			continue
 		}
 
 		if len(p_nsrrs) == 0 {
-			log.Printf("Empty respone to AuthQuery(%s, %s, NS)", pserver, zd.ZoneName)
+			lgDns.Warn("empty response to AuthQuery for NS", "server", pserver, "zone", zd.ZoneName)
 			continue
 		}
 
@@ -83,17 +82,17 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 	for _, ns := range child_inb {
 		owner, err := zd.GetOwner(ns)
 		if err != nil {
-			log.Printf("Error from zd.GetOwner(%s): %v", ns, err)
+			lgDns.Warn("error from GetOwner", "name", ns, "err", err)
 			continue
 		}
 		if owner == nil {
-			log.Printf("AnalyseZoneDelegation: Zone %s: Owner data is nil for NS %s", zd.ZoneName, ns)
+			lgDns.Warn("AnalyseZoneDelegation: owner data is nil for NS", "zone", zd.ZoneName, "ns", ns)
 			continue
 		}
 		child_a_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)
 		if err != nil {
-			log.Printf("Error from AuthQuery(%s, %s, A): %v", pserver, child_inb, err)
+			lgDns.Warn("error from AuthQuery for A glue", "server", pserver, "ns", child_inb, "err", err)
 		}
 		gluediff, adds, removes := core.RRsetDiffer(ns, child_a_glue, parent_a_glue,
 			dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
@@ -107,7 +106,7 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		child_aaaa_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs
 		parent_aaaa_glue, err := AuthQuery(ns, pserver, dns.TypeAAAA)
 		if err != nil {
-			log.Printf("Error from AuthQuery(%s, %s, AAAA): %v", pserver, child_inb, err)
+			lgDns.Warn("error from AuthQuery for AAAA glue", "server", pserver, "ns", child_inb, "err", err)
 		}
 		differ, adds, removes = core.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
 			dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
@@ -195,7 +194,7 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 // Returns unsynched bool, adds, removes []dns.RR, error
 
 func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
-	log.Printf("*** Enter DDCNG(%s)", newzd.ZoneName)
+	lgDns.Debug("entering DelegationDataChangedNG", "zone", newzd.ZoneName)
 	var dss = DelegationSyncStatus{
 		Time:     time.Now(),
 		ZoneName: zd.ZoneName,
@@ -205,13 +204,13 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		if errors.Is(err, ErrZoneNotReady) {
-			log.Printf("DDCNG: Zone %s: old zone not ready (initial load). No delegation change.", zd.ZoneName)
+			lgDns.Debug("DDCNG: old zone not ready (initial load), no delegation change", "zone", zd.ZoneName)
 			return false, dss, nil
 		}
 		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
-		log.Printf("DDCNG: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		lgDns.Debug("DDCNG: old apexdata was nil, this is the initial zone load", "zone", zd.ZoneName)
 		return false, dss, nil
 	}
 
@@ -220,9 +219,8 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		return false, dss, fmt.Errorf("error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	log.Printf("*** oldapex.RRtypes[dns.TypeNS]:")
+	lgDns.Debug("DDCNG: comparing NS RRtypes", "zone", zd.ZoneName)
 	// dump.P(oldapex.RRtypes[dns.TypeNS])
-	log.Printf("*** newapex.RRtypes[dns.TypeNS]:")
 	// dump.P(newapex.RRtypes[dns.TypeNS])
 
 	var nsdiff bool
@@ -233,11 +231,11 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	dss.InSync = !nsdiff
 
 	for _, ns := range dss.NsRemoves {
-		log.Printf("DDCNG: Removed NS: %s", ns.String())
+		lgDns.Debug("DDCNG: removed NS", "ns", ns.String())
 		if nsrr, ok := ns.(*dns.NS); ok {
 			nsowner, err := zd.GetOwner(nsrr.Ns)
 			if err != nil {
-				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+				lgDns.Warn("DDCNG: nsname of NS has no RRs", "nsname", nsrr.Ns, "ns", nsrr.String())
 			} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
 				if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 					for _, rr := range a_rrset.RRs {
@@ -258,11 +256,11 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	}
 
 	for _, ns := range dss.NsAdds {
-		log.Printf("DDCNG: Added NS: %s", ns.String())
+		lgDns.Debug("DDCNG: added NS", "ns", ns.String())
 		if nsrr, ok := ns.(*dns.NS); ok {
 			nsowner, err := newzd.GetOwner(nsrr.Ns)
 			if err != nil {
-				log.Printf("DDCNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+				lgDns.Warn("DDCNG: nsname of NS has no RRs", "nsname", nsrr.Ns, "ns", nsrr.String())
 			} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
 				if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 					for _, rr := range a_rrset.RRs {
@@ -286,13 +284,13 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		if nsrr, ok := ns.(*dns.NS); ok {
 			oldowner, err := zd.GetOwner(nsrr.Ns)
 			if err != nil || oldowner == nil {
-				log.Printf("DDCNG: Error: Nameserver %s has no address records in old zone", nsrr.Ns)
+				lgDns.Warn("DDCNG: nameserver has no address records in old zone", "ns", nsrr.Ns)
 				// TODO: We should add all address records found in the new version of the zone.
 				continue
 			}
 			newowner, err := newzd.GetOwner(nsrr.Ns)
 			if err != nil || newowner == nil {
-				log.Printf("DDCNG: Error: Nameserver %s has no address records in new zone", nsrr.Ns)
+				lgDns.Warn("DDCNG: nameserver has no address records in new zone", "ns", nsrr.Ns)
 				for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
 					rr.Header().Class = dns.ClassNONE
 					dss.ARemoves = append(dss.ARemoves, rr)
@@ -339,13 +337,13 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		if errors.Is(err, ErrZoneNotReady) {
-			log.Printf("DnskeysChanged: Zone %s: old zone not ready (initial load). Reporting DNSKEYs changed.", zd.ZoneName)
+			lgDns.Debug("DnskeysChanged: old zone not ready (initial load), reporting DNSKEYs changed", "zone", zd.ZoneName)
 			return true, dss, nil
 		}
 		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
-		log.Printf("DnskeysChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		lgDns.Debug("DnskeysChanged: old apexdata was nil, this is the initial zone load", "zone", zd.ZoneName)
 		return true, dss, nil // on initial load, we always return true, dss, nil as we don't know that the DNSKEYs have changed
 	}
 
@@ -373,13 +371,13 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	oldapex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		if errors.Is(err, ErrZoneNotReady) {
-			log.Printf("DnskeysChangedNG: Zone %s: old zone not ready (initial load). Reporting DNSKEYs changed.", zd.ZoneName)
+			lgDns.Debug("DnskeysChangedNG: old zone not ready (initial load), reporting DNSKEYs changed", "zone", zd.ZoneName)
 			return true, nil
 		}
 		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
-		log.Printf("DnskeysChangedNG: Zone %s: old apexdata was nil (initial load). Reporting DNSKEYs changed.", zd.ZoneName)
+		lgDns.Debug("DnskeysChangedNG: old apexdata was nil (initial load), reporting DNSKEYs changed", "zone", zd.ZoneName)
 		return true, nil
 	}
 
@@ -399,16 +397,16 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	}
 	if oldkeys == nil && newkeys != nil {
 		// DNSKEYs added (zone became signed)
-		log.Printf("DnskeysChanged: Zone %s: DNSKEYs added (%d keys)", zd.ZoneName, len(newkeys.RRs))
+		lgDns.Info("DnskeysChanged: DNSKEYs added", "zone", zd.ZoneName, "count", len(newkeys.RRs))
 		return true, nil
 	}
 	if oldkeys != nil && newkeys == nil {
 		// DNSKEYs removed (zone became unsigned)
-		log.Printf("DnskeysChanged: Zone %s: DNSKEYs removed (%d keys)", zd.ZoneName, len(oldkeys.RRs))
+		lgDns.Info("DnskeysChanged: DNSKEYs removed", "zone", zd.ZoneName, "count", len(oldkeys.RRs))
 		return true, nil
 	}
 
-	log.Printf("DnskeysChanged: newkeys: %+v oldkeys: %+v", newkeys.RRs, oldkeys.RRs)
+	lgDns.Debug("DnskeysChanged: comparing keys", "newkeys", newkeys.RRs, "oldkeys", oldkeys.RRs)
 	differ, _, _ = core.RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ, nil
 }

@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/gookit/goutil/dump"
@@ -17,9 +16,7 @@ import (
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
-	if Globals.Debug {
-		log.Printf("PublishKeyRRs: received request to publish KEY records for %q", zd.ZoneName)
-	}
+	lgHandler.Debug("PublishKeyRRs: received request to publish KEY records", "zone", zd.ZoneName)
 	if zd.Options[OptDontPublishKey] {
 		return fmt.Errorf("zone %q does not allow KEY RR publication", zd.ZoneName)
 	}
@@ -34,7 +31,7 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 
 	for _, pkc := range sak.Keys {
 		if !strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
-			log.Printf("PublishKeyRRs: DEBUG: SIG(0) key %q is not a subdomain of zone %q", pkc.KeyRR.Header().Name, zd.ZoneName)
+			lgHandler.Debug("PublishKeyRRs: SIG(0) key is not a subdomain of zone", "key", pkc.KeyRR.Header().Name, "zone", zd.ZoneName)
 			return fmt.Errorf("PublishKeyRRs: SIG(0) key %q is not a subdomain of zone %q", pkc.KeyRR.Header().Name, zd.ZoneName)
 		}
 		rrset.RRs = append(rrset.RRs, &pkc.KeyRR)
@@ -216,7 +213,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to lookup DSYNC target: %v", zd.ZoneName, err), UpdateResult{}, err
 	}
 
-	log.Printf("BootstrapSig0KeyWithParent(%q): DSYNC target: %+v", zd.ZoneName, dsyncTarget.RR)
+	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
 	// dump.P(dsyncTarget)
 
 	// 3. Create the DNS UPDATE message
@@ -300,7 +297,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to lookup DSYNC target: %v", zd.ZoneName, err)
 	}
-	log.Printf("RolloverSig0KeyWithParent(%q): DSYNC target:", zd.ZoneName)
+	lgHandler.Info("RolloverSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName)
 
 	//	if action == "complete" || action == "add" {
 	sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
@@ -360,8 +357,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to create update message: %v", zd.ZoneName, err)
 	}
 
-	log.Printf("RolloverSig0KeyWithParent(%q): signing addition of new key keyid %d with keyid %d:",
-		zd.ZoneName, pkc.KeyRR.KeyTag(), sak.Keys[0].KeyRR.KeyTag())
+	lgHandler.Info("RolloverSig0KeyWithParent: signing addition of new key",
+		"zone", zd.ZoneName, "newKeyid", pkc.KeyRR.KeyTag(), "signingKeyid", sak.Keys[0].KeyRR.KeyTag())
 
 	m, err = SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
@@ -402,8 +399,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	newSak = &Sig0ActiveKeys{Keys: []*PrivateKeyCache{pkc}}
-	log.Printf("RolloverSig0KeyWithParent(%s): signing removal of key keyid %d with keyid %d:",
-		zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), pkc.KeyRR.KeyTag())
+	lgHandler.Info("RolloverSig0KeyWithParent: signing removal of old key",
+		"zone", zd.ZoneName, "removeKeyid", sak.Keys[0].KeyRR.KeyTag(), "signingKeyid", pkc.KeyRR.KeyTag())
 	m, err = SignMsg(*m, zd.ZoneName, newSak)
 	if err != nil {
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to sign message: %v", zd.ZoneName, err)

@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"slices"
 	"sync"
 	"time"
@@ -471,7 +470,7 @@ type KeystateInventoryMsg struct {
 func (conf *Config) ReloadConfig() (string, error) {
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
-		log.Printf("Error parsing config: %v", err)
+		lgConfig.Error("error parsing config", "err", err)
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
@@ -484,34 +483,34 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 
 	// Re-read config file to pick up template changes
 	if err := conf.reloadTemplatesFromFile(); err != nil {
-		log.Printf("ReloadZoneConfig: Warning: failed to reload templates: %v", err)
+		lgConfig.Warn("ReloadZoneConfig: failed to reload templates", "err", err)
 		// Continue with existing templates rather than failing entirely
 	}
 
 	prezones := Zones.Keys()
-	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
+	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
-		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)
+		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
 	}
 
 	for _, zname := range prezones {
 		if !slices.Contains(zonelist, zname) {
 			zd, exists := Zones.Get(zname)
 			if !exists {
-				log.Printf("ReloadZoneConfig: Zone %s not in config and also not in zone list.", zname)
+				lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
 			}
 			if zd.Options[OptAutomaticZone] {
-				log.Printf("ReloadZoneConfig: Zone %s is an automatic zone. Not removing from zone list.", zname)
+				lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
 				continue
 			}
-			log.Printf("ReloadZoneConfig: Zone %s no longer in config. Removing from zone list.", zname)
+			lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
 			Zones.Remove(zname)
 		}
 	}
 
-	log.Printf("ReloadZones: zones after reloading: %v", zonelist)
+	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
 }

@@ -261,7 +261,7 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 
 func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, cdd *ChildDelegationData) ([]dns.RR, bool, error) {
 
-	log.Printf("CsyncAnalyzeA: zone %s, new_nsrrs %v", zone, new_nsrrs)
+	lg.Debug("CsyncAnalyzeA", "zone", zone, "newNSRRs", new_nsrrs)
 	// cur_v4glue, err := scanner.LabDB.FetchChildDataFromDB(zone, dns.TypeA)
 	// cur_v4glue := pzd.Children[zone].A_glue
 	cur_v4glue := cdd.A_glue
@@ -319,7 +319,7 @@ func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, cdd *Chi
 
 func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, cdd *ChildDelegationData) ([]dns.RR, bool, error) {
 	//func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, pzd *ZoneData) (*RRset, bool, error) {
-	log.Printf("CsyncAnalyzeAAAA: zone %s, new_nsrrs %v", zone, new_nsrrs)
+	lg.Debug("CsyncAnalyzeAAAA", "zone", zone, "newNSRRs", new_nsrrs)
 	// cur_v6glue := pzd.Children[zone].AAAA_glue
 	cur_v6glue := cdd.AAAA_glue
 
@@ -374,7 +374,7 @@ func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, cdd *
 
 // Returns: new_rrs, changed=true, error
 func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([]dns.RR, bool, error) {
-	log.Printf("CsyncAnalyzeNS: zone %s", zone)
+	lg.Debug("CsyncAnalyzeNS", "zone", zone)
 
 	// cur_NSrrs := pzd.Children[zone].NS_rrs
 	cur_NSrrs := cdd.NS_rrs
@@ -422,7 +422,7 @@ func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([
 var KnownCsyncMinSOAs = map[string]uint32{}
 
 func (scanner *Scanner) ZoneCSYNCKnown(zone string, csyncrr *dns.CSYNC) bool {
-	log.Printf("ZoneCSYNCKnown: checking if CSYNC for %s is known", zone)
+	lg.Debug("ZoneCSYNCKnown: checking if CSYNC is known", "zone", zone)
 	new_minsoa := csyncrr.Serial
 	var old_minsoa uint32
 	var ok bool

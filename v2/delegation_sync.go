@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -24,27 +23,25 @@ const (
 
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, conf *Config) error {
 
-	log.Printf("DelegationSyncher: sleeping for 2 seconds to allow ImrEngine to start")
+	lgDns.Info("DelegationSyncher: sleeping for 2 seconds to allow ImrEngine to start")
 	time.Sleep(2 * time.Second)
 
 	if conf.Internal.ImrEngine == nil {
-		log.Printf("DelegationSyncher: imr is nil. Terminating.")
+		lgDns.Error("DelegationSyncher: imr is nil, terminating")
 		return fmt.Errorf("DelegationSyncher: imr is nil")
 	}
 
 	imr := conf.Internal.ImrEngine
-	log.Printf("*** DelegationSyncher: starting ***")
+	lgDns.Info("DelegationSyncher: starting")
 	var err error
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("DelegationSyncher: terminating due to context cancelled")
-			log.Println("DelegationSyncher: terminating")
+			lgDns.Info("DelegationSyncher: terminating due to context cancelled")
 			return nil
 		case ds, ok := <-delsyncq:
 			if !ok {
-				log.Println("DelegationSyncher: delsyncq closed")
-				log.Println("DelegationSyncher: terminating")
+				lgDns.Info("DelegationSyncher: delsyncq closed, terminating")
 				return nil
 			}
 			zd := ds.ZoneData
@@ -56,27 +53,27 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				// This is the initial setup request, when we first load a zone that has the delegation-sync-child option set.
 				err = zd.DelegationSyncSetup(ctx, kdb)
 				if err != nil {
-					log.Printf("DelegationSyncher: Zone %s: Error from DelegationSyncSetup(): %v. Ignoring sync request.", ds.ZoneName, err)
+					lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
 				}
 
 			case "INITIAL-KEY-UPLOAD":
 				// This case is not yet used, intended for automating the initial key upload to parent
-				log.Printf("DelegationSyncher: Zone %s request for initial key upload.", zd.ZoneName)
+				lgDns.Info("DelegationSyncher: request for initial key upload", "zone", zd.ZoneName)
 				// err := zd.UploadKeyToParent(kdb)
 				// if err != nil {
 				// 	log.Printf("DelegationSyncher: Zone %s: Error from UploadKeyToParent(): %v. Ignoring sync request.", ds.ZoneName, err)
 				// 	continue
 				// }
-				log.Printf("DelegationSyncher: Zone %s: Initial key upload complete.", ds.ZoneName)
+				lgDns.Info("DelegationSyncher: initial key upload complete", "zone", ds.ZoneName)
 				continue
 
 			case "DELEGATION-STATUS":
-				log.Printf("DelegationSyncher: Zone %s request for delegation status.", zd.ZoneName)
+				lgDns.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
 
 				syncstate, err := zd.AnalyseZoneDelegation(imr)
 				if err != nil {
-					log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+					lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
 					syncstate.ErrorMsg = err.Error()
 				}
@@ -86,31 +83,34 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				continue
 
 			case "SYNC-DELEGATION":
-				log.Printf("DelegationSyncher: Zone %s request for delegation sync -%d+%d NS adds and -%d+%d A glue and -%d+%d AAAA glue.", ds.ZoneName,
-					len(dss.NsRemoves), len(dss.NsAdds), len(dss.ARemoves), len(dss.AAdds), len(dss.AAAARemoves), len(dss.AAAAAdds))
+				lgDns.Info("DelegationSyncher: request for delegation sync",
+					"zone", ds.ZoneName,
+					"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
+					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
+					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
 					zd.Parent, err = imr.ParentZone(zd.ZoneName)
 					if err != nil {
-						log.Printf("DelegationSyncher: Zone %s: Error from ParentZone(): %v. Ignoring sync request.", ds.ZoneName, err)
+						lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
 						continue
 					}
 				}
 
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr)
 				if err != nil {
-					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
 				}
 				ds.SyncStatus.UpdateResult = ur
-				log.Printf("DelegationSyncher: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
+				lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
 
 			case "EXPLICIT-SYNC-DELEGATION":
-				log.Printf("DelegationSyncher: Zone %s request for explicit delegation sync.", ds.ZoneName)
+				lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
 
 				syncstate, err := zd.AnalyseZoneDelegation(imr)
 				if err != nil {
-					log.Printf("DelegationSyncher: Zone %s: Error from AnalyseZoneDelegation(): %v. Ignoring sync request.", ds.ZoneName, err)
+					lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
 					syncstate.ErrorMsg = err.Error()
 					if ds.Response != nil {
@@ -120,8 +120,8 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				if syncstate.InSync {
-					log.Printf("DelegationSyncher: Zone %s: delegation data in parent \"%s\" is in sync with child. No action needed.",
-						syncstate.ZoneName, syncstate.Parent)
+					lgDns.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
+						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
@@ -131,12 +131,12 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				// Not in sync, let's fix that.
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
 				if err != nil {
-					log.Printf("DelegationSyncher: Zone %s: Error from SyncZoneDelegation(): %v Ignoring sync request.", ds.ZoneName, err)
+					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
 					syncstate.ErrorMsg = err.Error()
 					syncstate.UpdateResult = ur
 				} else {
-					log.Printf("DelegationSyncher: Zone %s: SyncZoneDelegation() returned msg: %s, rcode: %s", ds.ZoneName, msg, dns.RcodeToString[int(rcode)])
+					lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
 				}
 				syncstate.Msg = msg
 				syncstate.Rcode = rcode
@@ -147,9 +147,9 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				continue
 
 			case "SYNC-DNSKEY-RRSET":
-				log.Printf("DelegationSyncher: Zone %s request for DNSKEY RRset sync.", ds.ZoneName)
+				lgDns.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
 				if zd.Options[OptMultiProvider] {
-					log.Printf("DelegationSyncher: Zone %s is a multisigner zone. Notifying multisigner controller.", ds.ZoneName)
+					lgDns.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
 					notifyq <- NotifyRequest{
 						ZoneName: zd.ZoneName,
 						ZoneData: zd,
@@ -161,7 +161,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 			default:
-				log.Printf("DelegationSyncher: Zone %s: Unknown command: '%s'. Ignoring.", ds.ZoneName, ds.Command)
+				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 			}
 		}
 	}
@@ -171,7 +171,7 @@ func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
 	algstr := viper.GetString(configKey)
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	if alg == 0 {
-		log.Printf("Unknown keygen algorithm \"%s\" in config key %s, using default algorithm %s", algstr, configKey, dns.AlgorithmToString[defaultAlg])
+		lgDns.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "configKey", configKey, "default", dns.AlgorithmToString[defaultAlg])
 		alg = defaultAlg
 	}
 	return alg, nil
@@ -179,7 +179,7 @@ func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
 
 func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	if !zd.Options[OptDelSyncChild] {
-		log.Printf("DelegationSyncSetup: Zone %s does not have child-side delegation sync enabled. Skipping.", zd.ZoneName)
+		lgDns.Debug("DelegationSyncSetup: zone does not have child-side delegation sync enabled, skipping", "zone", zd.ZoneName)
 		return nil
 	}
 
@@ -191,13 +191,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// }
 	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
 	if err != nil {
-		log.Printf("DelegationSyncSetup: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
 	err = zd.Sig0KeyPreparation(zd.ZoneName, alg, kdb)
 	if err != nil {
-		zd.Logger.Printf("DelegationSyncSetup: Zone %s: Error from Sig0KeyPreparation(): %v", zd.ZoneName, err)
+		lgDns.Error("DelegationSyncSetup: error from Sig0KeyPreparation", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
@@ -206,13 +206,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// we should keep state of whether successful key bootstrapping has been done or not in the keystore.
 	msg, ur, err := zd.BootstrapSig0KeyWithParent(ctx, alg)
 	if err != nil {
-		log.Printf("DelegationSyncSetup: Zone %s: Error from BootstrapSig0KeyWithParent(): %v.", zd.ZoneName, err)
+		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
 		for _, tes := range ur.TargetStatus {
-			log.Printf("DelegationSyncSetup: Zone %s: TargetUpdateStatus: %v", zd.ZoneName, tes)
+			lgDns.Error("DelegationSyncSetup: TargetUpdateStatus", "zone", zd.ZoneName, "status", tes)
 		}
 		return err
 	}
-	log.Printf("DelegationSyncSetup: Zone %s: SIG(0) key bootstrap: %s", zd.ZoneName, msg)
+	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
 	return nil
 }
 
@@ -225,7 +225,7 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 	// }
 	alg, err := parseKeygenAlgorithm("delegationsync.parent.update.keygen.algorithm", dns.ED25519)
 	if err != nil {
-		log.Printf("ParentSig0KeyPrep: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		lgDns.Error("ParentSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
@@ -243,7 +243,7 @@ func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 	// }
 	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
 	if err != nil {
-		log.Printf("MusicSig0KeyPrep: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		lgDns.Error("MusicSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
@@ -251,11 +251,11 @@ func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error {
-	log.Printf("Sig0KeyPreparation: Zone %s: setting up SIG(0) key pair for name %s", zd.ZoneName, name)
+	lgDns.Info("Sig0KeyPreparation: setting up SIG(0) key pair", "zone", zd.ZoneName, "name", name)
 
-	log.Printf("Sig0KeyPreparation: Checking whether zone %s allows updates and if so has a '%s KEY' RRset published.", zd.ZoneName, name)
+	lgDns.Debug("Sig0KeyPreparation: checking whether zone allows updates and has KEY RRset published", "zone", zd.ZoneName, "name", name)
 	owner, err := zd.GetOwner(name)
-	log.Printf("Sig0KeyPreparation: name: %s, owner: %v, err: %v", name, owner, err)
+	lgDns.Debug("Sig0KeyPreparation: GetOwner result", "name", name, "owner", owner, "err", err)
 	if err != nil {
 		return fmt.Errorf("Sig0KeyPreparation(%s) failed to get owner: %v", name, err)
 	}
@@ -268,34 +268,34 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
 		err := zd.VerifyPublishedKeyRRs()
 		if err != nil {
-			zd.Logger.Printf("Error from VerifyPublishedKeyRRs(%s): %v", name, err)
+			lgDns.Error("error from VerifyPublishedKeyRRs", "name", name, "err", err)
 			return err
 		}
-		zd.Logger.Printf("Sig0KeyPreparation: Zone %s: Verified published KEY RRset", name)
+		lgDns.Info("Sig0KeyPreparation: verified published KEY RRset", "name", name)
 	}
 
 	// 1. Are updates to the zone data allowed?
 	if !zd.Options[OptAllowUpdates] {
 		if keyrrexist {
-			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates, but a '%s' KEY RRset is already published in the zone.", zd.ZoneName, name)
+			lgDns.Debug("Sig0KeyPreparation: zone does not allow updates, but KEY RRset is already published", "zone", zd.ZoneName, "name", name)
 		} else {
-			log.Printf("Sig0KeyPreparation: Zone %s does not allow updates. Cannot publish a '%s KEY' RRset.", zd.ZoneName, name)
+			lgDns.Debug("Sig0KeyPreparation: zone does not allow updates, cannot publish KEY RRset", "zone", zd.ZoneName, "name", name)
 		}
 		return nil
 	}
 
-	log.Printf("Sig0KeyPreparation: Zone %s allows updates. '%s' KEY RR exist: %v, dont-publish-key: %v", zd.ZoneName, name, keyrrexist, zd.Options[OptDontPublishKey])
+	lgDns.Debug("Sig0KeyPreparation: zone allows updates", "zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist, "dontPublishKey", zd.Options[OptDontPublishKey])
 
 	// 2. Updates allowed, but there is no KEY RRset published.
 	if !keyrrexist && !zd.Options[OptDontPublishKey] {
-		log.Printf("Sig0KeyPreparation: Fetching the private SIG(0) key for %s", name)
+		lgDns.Debug("Sig0KeyPreparation: fetching the private SIG(0) key", "name", name)
 		sak, err := kdb.GetSig0Keys(name, Sig0StateActive)
 		if err != nil {
-			log.Printf("Sig0KeyPreparation: Error from kdb.GetSig0Keys(%s, %s): %v. Parent sync via UPDATE not possible.", name, Sig0StateActive, err)
+			lgDns.Error("Sig0KeyPreparation: error from GetSig0Keys, parent sync via UPDATE not possible", "name", name, "state", Sig0StateActive, "err", err)
 			return err
 		}
 		if len(sak.Keys) == 0 {
-			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for zone %s. Will generate new key to enable parent sync via UPDATE.", name)
+			lgDns.Info("Sig0KeyPreparation: no active SIG(0) key found, will generate new key", "name", name)
 
 			kp := KeystorePost{
 				Command:    "sig0-mgmt",
@@ -310,7 +310,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 			if err != nil {
 				return fmt.Errorf("Sig0KeyPreparation(%s) failed to generate keypair: %v", name, err)
 			}
-			zd.Logger.Printf("%s", resp.Msg)
+			lgDns.Info("Sig0KeyPreparation: key generated", "msg", resp.Msg)
 
 			sak, err = zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 			if err != nil {
@@ -319,13 +319,13 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		}
 
 		if len(sak.Keys) == 0 {
-			log.Printf("Sig0KeyPreparation: No active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible.", name, zd.ZoneName)
+			lgDns.Error("Sig0KeyPreparation: no active SIG(0) key found, parent sync via UPDATE not possible", "name", name, "zone", zd.ZoneName)
 			return fmt.Errorf("no active SIG(0) key found for name %s in zone %s. Parent sync via UPDATE not possible", name, zd.ZoneName)
 		}
-		log.Printf("Sig0KeyPreparation: Publishing '%s KEY' RR in zone %s", name, zd.ZoneName)
+		lgDns.Info("Sig0KeyPreparation: publishing KEY RR", "name", name, "zone", zd.ZoneName)
 		err = zd.PublishKeyRRs(sak)
 		if err != nil {
-			log.Printf("Sig0KeyPreparation: Error from PublishKeyRRs() publishing '%s KEY' RR in zone %s: %v", name, zd.ZoneName, err)
+			lgDns.Error("Sig0KeyPreparation: error from PublishKeyRRs", "name", name, "zone", zd.ZoneName, "err", err)
 			return err
 		}
 	}
@@ -351,8 +351,8 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
 			syncstate.ZoneName, zd.Parent), 0, UpdateResult{}, nil
 	} else {
-		log.Printf("Zone \"%s\" delegation data in parent \"%s\" is NOT in sync. Sync action needed.",
-			syncstate.ZoneName, zd.Parent)
+		lgDns.Info("zone delegation data in parent is NOT in sync, sync action needed",
+			"zone", syncstate.ZoneName, "parent", zd.Parent)
 	}
 
 	// var zd *tdns.ZoneData
@@ -374,7 +374,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 
 	scheme, dsynctarget, err := zd.BestSyncScheme(ctx, imr)
 	if err != nil {
-		log.Printf("DelegationSyncEngine: Zone %s: Error from BestSyncScheme(): %v. Ignoring sync request.", zd.ZoneName, err)
+		lgDns.Error("DelegationSyncEngine: error from BestSyncScheme, ignoring sync request", "zone", zd.ZoneName, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
 
@@ -410,14 +410,14 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 
 	if updateMode == UpdateModeReplace {
 		// Replace mode: remove all existing delegation data and add new complete data
-		log.Printf("SyncZoneDelegationViaUpdate: Using replace mode for zone %s", zd.ZoneName)
+		lgDns.Info("SyncZoneDelegationViaUpdate: using replace mode", "zone", zd.ZoneName)
 		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA)
 		if err != nil {
 			return "", 0, UpdateResult{}, err
 		}
 	} else {
 		// Delta mode: use adds and removes (existing behavior)
-		log.Printf("SyncZoneDelegationViaUpdate: Using delta mode for zone %s", zd.ZoneName)
+		lgDns.Info("SyncZoneDelegationViaUpdate: using delta mode", "zone", zd.ZoneName)
 		// Ensure that we don't count any changes twice.
 		syncstate.Adds = []dns.RR{}
 		syncstate.Removes = []dns.RR{}
@@ -440,42 +440,42 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	}
 
 	// 3. Fetch the SIG(0) key from the keystore
-	log.Printf("SyncZoneDelegationViaUpdate: Fetching the private key for %s", zd.ZoneName)
+	lgDns.Debug("SyncZoneDelegationViaUpdate: fetching the private key", "zone", zd.ZoneName)
 	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
-		log.Printf("SyncZoneDelegationViaUpdate: Error from kdb.GetSig0Keys(%s, %s): %v", zd.ZoneName, Sig0StateActive, err)
+		lgDns.Error("SyncZoneDelegationViaUpdate: error from GetSig0Keys", "zone", zd.ZoneName, "state", Sig0StateActive, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
 	if len(sak.Keys) == 0 {
-		log.Printf("SyncZoneDelegationViaUpdate: No active SIG(0) key found for zone %s", zd.ZoneName)
+		lgDns.Error("SyncZoneDelegationViaUpdate: no active SIG(0) key found", "zone", zd.ZoneName)
 		return "", 0, UpdateResult{}, fmt.Errorf("no active SIG(0) key found for zone %s", zd.ZoneName)
 	}
 
 	// 4. Sign the msg
-	log.Printf("SyncZoneDelegationViaUpdate: Signing the DNS UPDATE %s", zd.ZoneName)
+	lgDns.Debug("SyncZoneDelegationViaUpdate: signing the DNS UPDATE", "zone", zd.ZoneName)
 	smsg, err := SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
-		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
+		lgDns.Error("SyncZoneDelegationViaUpdate: error from SignMsg", "zone", zd.ZoneName, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
 	if smsg == nil {
-		log.Printf("SyncZoneDelegationViaUpdate: Error from SignMsgNG(%s): %v", zd.ZoneName, err)
+		lgDns.Error("SyncZoneDelegationViaUpdate: SignMsg returned nil", "zone", zd.ZoneName, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
 
 	// 5. Send the msg
-	log.Printf("SyncZoneDelegationViaUpdate: Sending the signed update to %s (addresses: %v) port %d",
-		dsynctarget.Name, dsynctarget.Addresses, dsynctarget.Port)
+	lgDns.Info("SyncZoneDelegationViaUpdate: sending the signed update",
+		"target", dsynctarget.Name, "addresses", dsynctarget.Addresses, "port", dsynctarget.Port)
 
 	rcode, ur, err := SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
-		log.Printf("Error from SendUpdate(%s): %v", zd.Parent, err)
+		lgDns.Error("error from SendUpdate", "zone", zd.Parent, "err", err)
 		return "", 0, ur, err
 	}
 	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
-	log.Print(msg)
+	lgDns.Info("SyncZoneDelegationViaUpdate: update sent", "zone", zd.Parent, "rcode", dns.RcodeToString[rcode])
 	for _, tes := range ur.TargetStatus {
-		log.Printf("SyncZoneDelegationViaUpdate: TargetUpdateStatus: %v", tes)
+		lgDns.Debug("SyncZoneDelegationViaUpdate: TargetUpdateStatus", "status", tes)
 	}
 
 	// 6. Check the response
@@ -491,7 +491,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
 		err := zd.PublishCsyncRR()
 		if err != nil {
-			log.Printf("SyncZoneDelegationViaNotify: Error from PublishCsync(): %v", err)
+			lgDns.Error("SyncZoneDelegationViaNotify: error from PublishCsyncRR", "err", err)
 			return "", dns.RcodeServerFailure, err
 		}
 
@@ -506,9 +506,9 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 			//			if len(dak.ZSKs) > 0 {
 			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // Let's force signing
 			if err != nil {
-				log.Printf("Error signing %s: %v", zd.ZoneName, err)
+				lgDns.Error("error signing CSYNC RRset", "zone", zd.ZoneName, "err", err)
 			} else {
-				log.Printf("Signed %s: %v", zd.ZoneName, err)
+				lgDns.Debug("signed CSYNC RRset", "zone", zd.ZoneName)
 			}
 			//			}
 			//			}
@@ -536,7 +536,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 	}
 
 	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request for zone %s to NotifierEngine", zd.ZoneName)
-	log.Print(msg)
+	lgDns.Info("SyncZoneDelegationViaNotify: sent notify request to NotifierEngine", "zone", zd.ZoneName)
 
 	return msg, dns.RcodeSuccess, nil
 }
