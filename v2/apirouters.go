@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -15,19 +14,22 @@ import (
 	"github.com/gorilla/mux"
 )
 
+var lgApi = Logger("api")
+
 func WalkRoutes(router *mux.Router, address string) {
-	log.Printf("Defined API endpoints for router on: %s\n", address)
+	lgApi.Info("defined API endpoints", "address", address)
 
 	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		path, _ := route.GetPathTemplate()
 		methods, _ := route.GetMethods()
 		for m := range methods {
-			log.Printf("%-6s %s\n", methods[m], path)
+			lgApi.Debug("route", "method", methods[m], "path", path)
 		}
 		return nil
 	}
 	if err := router.Walk(walker); err != nil {
-		log.Panicf("Logging err: %s\n", err.Error())
+		lgApi.Error("walk routes failed", "err", err)
+		panic(err)
 	}
 	//	return nil
 }
@@ -60,7 +62,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 			conf.Internal.DistributionCache = NewDistributionCache()
 			// Start background GC to purge old distributions every minute
 			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
-			log.Printf("Initialized distribution cache with automatic cleanup")
+			lgApi.Info("initialized distribution cache with automatic cleanup")
 		}
 	}
 
@@ -98,7 +100,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/agent/transaction", conf.APIagentTransaction(conf.Internal.DistributionCache)).Methods("POST")
 		// XXX: Should be behind a debug requirement, but for now always present
 		// if Globals.Debug {
-		log.Printf("Setting up debug endpoint for agent API")
+		lgApi.Debug("setting up debug endpoint for agent API")
 		sr.HandleFunc("/agent/debug", conf.APIagentDebug()).Methods("POST")
 		// }
 	}
@@ -129,7 +131,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	routeFuncs := getRegisteredAPIRoutes()
 	for _, routeFunc := range routeFuncs {
 		if err := routeFunc(rtr); err != nil {
-			log.Printf("Error registering API route: %v", err)
+			lgApi.Error("error registering API route", "err", err)
 			// Continue with other routes even if one fails
 		}
 	}
@@ -222,7 +224,7 @@ func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, erro
 			clientId := clientCert.Subject.CommonName
 			agent, ok := conf.Internal.AgentRegistry.S.Get(AgentId(clientId))
 			if !ok {
-				log.Printf("AgentSyncApi: Unknown remote agent identity: %s", clientId)
+				lgApi.Warn("unknown remote agent identity", "clientId", clientId)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -231,14 +233,14 @@ func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, erro
 			tlsaRR := agent.ApiDetails.TlsaRR
 			// agent.mu.Unlock()
 			if tlsaRR == nil {
-				log.Printf("AgentSyncApi: No TLSA record available for client: %s", clientId)
+				lgApi.Warn("no TLSA record available for client", "clientId", clientId)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
 
 			err := VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw)
 			if err != nil {
-				log.Printf("AgentSyncApi: Certificate verification for client id '%s' failed: %v", clientId, err)
+				lgApi.Warn("certificate verification failed", "clientId", clientId, "err", err)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -261,23 +263,20 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	certFile := conf.ApiServer.CertFile
 	keyFile := conf.ApiServer.KeyFile
 
-	if Globals.Debug {
-		log.Printf("APIdispatcher: addresses: %v, certFile: %s, keyFile: %s", addresses, certFile, keyFile)
-	}
+	lgApi.Debug("dispatcher config", "addresses", addresses, "certFile", certFile, "keyFile", keyFile)
 
 	if len(addresses) == 0 {
-		log.Println("APIdispatcher: no addresses to listen on (key 'apiserver.addresses' not set). Not starting.")
+		lgApi.Warn("no addresses to listen on (key 'apiserver.addresses' not set), not starting")
 		// return fmt.Errorf("no addresses to listen on")
 		return nil
 	}
 
 	if router == nil {
-		log.Println("APIdispatcher: API router is nil. Not starting.")
+		lgApi.Warn("API router is nil, not starting")
 		return nil
 	}
 
 	WalkRoutes(router, addresses[0])
-	log.Println("")
 
 	servers := make([]*http.Server, len(addresses))
 
@@ -289,15 +288,15 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 		}
 
 		go func(srv *http.Server, idx int) {
-			log.Printf("Starting API dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
+			lgApi.Info("starting API dispatcher", "index", idx, "address", srv.Addr)
 			if conf.ApiServer.UseTLS {
 				if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
-					log.Printf("APIdispatcher: ListenAndServeTLS error: %v", err)
+					lgApi.Error("ListenAndServeTLS failed", "err", err)
 				}
 			} else {
-				log.Printf("APIdispatcher: serving HTTP on %s", srv.Addr)
+				lgApi.Info("serving HTTP", "address", srv.Addr)
 				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					log.Printf("APIdispatcher: ListenAndServe error: %v", err)
+					lgApi.Error("ListenAndServe failed", "err", err)
 				}
 			}
 		}(servers[idx], idxCopy)
@@ -305,10 +304,10 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 
 	go func() {
 		<-done
-		log.Println("Shutting down API servers...")
+		lgApi.Info("shutting down API servers")
 		for _, srv := range servers {
 			if err := srv.Shutdown(context.Background()); err != nil {
-				log.Printf("API server Shutdown: %v", err)
+				lgApi.Error("API server shutdown failed", "err", err)
 			}
 		}
 	}()
@@ -322,27 +321,26 @@ func APIdispatcherNG(conf *Config, router *mux.Router, addrs []string, certFile 
 	addresses := addrs
 
 	if len(addresses) == 0 {
-		log.Println("APIdispatcherNG: no addresses to listen on. Not starting.")
+		lgApi.Warn("no addresses to listen on, not starting")
 		return fmt.Errorf("no addresses to listen on")
 	}
 
 	if certFile == "" || keyFile == "" {
-		log.Println("APIdispatcherNG: no certificate file or key file provided. Not starting.")
+		lgApi.Warn("no certificate file or key file provided, not starting")
 		return fmt.Errorf("no certificate file or key file provided")
 	}
 
 	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		log.Printf("APIdispatcherNG: certificate file %q does not exist. Not starting.", certFile)
+		lgApi.Error("certificate file does not exist", "certFile", certFile)
 		return fmt.Errorf("certificate file %q does not exist", certFile)
 	}
 
 	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		log.Printf("APIdispatcherNG: key file %q does not exist. Not starting.", keyFile)
+		lgApi.Error("key file does not exist", "keyFile", keyFile)
 		return fmt.Errorf("key file %q does not exist", keyFile)
 	}
 
 	WalkRoutes(router, addresses[0])
-	log.Println("")
 
 	// Load server certificate and key
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -373,19 +371,19 @@ func APIdispatcherNG(conf *Config, router *mux.Router, addrs []string, certFile 
 		}
 
 		go func(srv *http.Server, idx int) {
-			log.Printf("Starting API dispatcher #%d. Listening on '%s'\n", idx, srv.Addr)
+			lgApi.Info("starting API dispatcher", "index", idx, "address", srv.Addr)
 			if err := srv.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-				log.Printf("APIdispatcherNG: ListenAndServeTLS() error: %v", err)
+				lgApi.Error("ListenAndServeTLS failed", "err", err)
 			}
 		}(servers[idx], idxCopy)
 	}
 
 	go func() {
 		<-done
-		log.Println("Shutting down API servers...")
+		lgApi.Info("shutting down API servers")
 		for _, srv := range servers {
 			if err := srv.Shutdown(context.Background()); err != nil {
-				log.Printf("API server Shutdown: %v", err)
+				lgApi.Error("API server shutdown failed", "err", err)
 			}
 		}
 	}()

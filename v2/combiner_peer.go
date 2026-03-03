@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
@@ -22,12 +21,12 @@ import (
 // This ensures we verify combiner connectivity and get early warning of communication issues.
 func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	if conf.Agent == nil || conf.Agent.Combiner == nil {
-		log.Printf("InitializeCombinerAsPeer: No combiner configured, skipping")
+		lgCombiner.Debug("no combiner configured, skipping peer init")
 		return nil
 	}
 
 	if conf.Agent.Combiner.Address == "" {
-		log.Printf("InitializeCombinerAsPeer: Combiner address not configured, skipping")
+		lgCombiner.Debug("combiner address not configured, skipping peer init")
 		return nil
 	}
 
@@ -46,9 +45,9 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	combinerID := AgentId("combiner")
 	if conf.Agent.Combiner.Identity != "" {
 		combinerID = AgentId(conf.Agent.Combiner.Identity)
-		log.Printf("InitializeCombinerAsPeer: Using configured combiner identity: %s", combinerID)
+		lgCombiner.Info("using configured combiner identity", "identity", combinerID)
 	} else {
-		log.Printf("InitializeCombinerAsPeer: WARNING: No combiner identity configured, using default 'combiner' (agents with chunk_mode=query will fail)")
+		lgCombiner.Warn("no combiner identity configured, using default 'combiner' (agents with chunk_mode=query will fail)")
 	}
 
 	// Create an agent entry for the combiner
@@ -75,7 +74,7 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 
 	// Register in AgentRegistry with configured identity
 	ar.S.Set(combinerID, combinerAgent)
-	log.Printf("InitializeCombinerAsPeer: Registered combiner %s at %s as virtual peer for heartbeat monitoring", combinerID, conf.Agent.Combiner.Address)
+	lgCombiner.Info("registered combiner as virtual peer", "identity", combinerID, "address", conf.Agent.Combiner.Address)
 
 	// Load and register combiner's public key for encrypted communication
 	// If combiner is configured, encryption is MANDATORY
@@ -107,14 +106,13 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	payloadCrypto.AddPeerKey(string(combinerID), combinerPubKey)
 	payloadCrypto.AddPeerVerificationKey(string(combinerID), combinerPubKey)
 
-	log.Printf("InitializeCombinerAsPeer: Loaded combiner public key from %s", conf.Agent.Combiner.LongTermJosePubKey)
+	lgCombiner.Info("loaded combiner public key", "path", conf.Agent.Combiner.LongTermJosePubKey)
 
 	// Perform initial connectivity check
 	if err := performCombinerConnectivityCheck(conf); err != nil {
-		log.Printf("InitializeCombinerAsPeer: WARNING: Initial connectivity check failed: %v", err)
-		log.Printf("InitializeCombinerAsPeer: Combiner heartbeats will continue to retry")
+		lgCombiner.Warn("initial connectivity check failed, heartbeats will continue to retry", "err", err)
 	} else {
-		log.Printf("InitializeCombinerAsPeer: Initial connectivity check passed")
+		lgCombiner.Info("initial connectivity check passed")
 	}
 
 	return nil

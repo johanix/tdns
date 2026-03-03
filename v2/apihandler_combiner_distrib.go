@@ -8,7 +8,6 @@ package tdns
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -35,12 +34,12 @@ func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.Res
 		var req CombinerDistribPost
 		err := decoder.Decode(&req)
 		if err != nil {
-			log.Println("APIcombinerDistrib: error decoding request:", err)
+			lgApi.Warn("error decoding request", "handler", "combinerDistrib", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("API: received /combiner/distrib request (cmd: %s) from %s.", req.Command, r.RemoteAddr)
+		lgApi.Debug("received /combiner/distrib request", "cmd", req.Command, "from", r.RemoteAddr)
 
 		resp := CombinerDistribResponse{
 			Time: time.Now(),
@@ -53,7 +52,7 @@ func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.Res
 				sanitizedResp := SanitizeForJSON(resp)
 				err := json.NewEncoder(w).Encode(sanitizedResp)
 				if err != nil {
-					log.Printf("Error from json encoder: %v", err)
+					lgApi.Error("json encode failed", "handler", "combinerDistrib", "err", err)
 				}
 			}
 		}()

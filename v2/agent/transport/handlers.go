@@ -10,7 +10,6 @@ package transport
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
@@ -22,8 +21,7 @@ import (
 // Routes the confirmation to the transport's reliable message queue and
 // forwards per-RR detail to the SynchedDataEngine via OnConfirmationReceived.
 func HandleConfirmation(ctx *MessageContext) error {
-	log.Printf("HandleConfirmation: Processing confirmation from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing confirmation", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Parse the confirmation message
 	var confirm DnsConfirmPayload
@@ -57,14 +55,13 @@ func HandleConfirmation(ctx *MessageContext) error {
 			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated)
 	}
 
-	log.Printf("HandleConfirmation: Confirmation processed from %s (status=%s)", ctx.PeerID, confirm.Status)
+	lgTransport().Debug("confirmation processed", "peer", ctx.PeerID, "status", confirm.Status)
 	return nil
 }
 
 // HandlePing processes ping messages and sends immediate response.
 func HandlePing(ctx *MessageContext) error {
-	log.Printf("HandlePing: Processing ping from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing ping", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by RouteViaRouter)
 	incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
@@ -114,14 +111,13 @@ func HandlePing(ctx *MessageContext) error {
 	// Route to MsgQs for peer liveness tracking (response already sent synchronously)
 	ctx.Data["message_type"] = "ping"
 
-	log.Printf("HandlePing: Ping processed from %s, nonce=%s", ctx.PeerID, ping.Nonce)
+	lgTransport().Debug("ping processed", "peer", ctx.PeerID, "nonce", ping.Nonce)
 	return nil
 }
 
 // HandleHello processes hello messages for peer introduction.
 func HandleHello(ctx *MessageContext) error {
-	log.Printf("HandleHello: Processing hello from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing hello", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	helloMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
@@ -141,7 +137,7 @@ func HandleHello(ctx *MessageContext) error {
 	ctx.Data["message_type"] = "hello"
 	ctx.Data["incoming_message"] = helloMsg
 
-	log.Printf("HandleHello: Hello processed from %s", ctx.PeerID)
+	lgTransport().Debug("hello processed", "peer", ctx.PeerID)
 	return nil
 }
 
@@ -149,8 +145,7 @@ func HandleHello(ctx *MessageContext) error {
 // Works for both agent and combiner — the confirm response is always constructed,
 // and the RouteToMsgHandler middleware (agent only) picks up the message for further processing.
 func HandleBeat(ctx *MessageContext) error {
-	log.Printf("HandleBeat: Processing beat from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing beat", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	beatMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
@@ -186,25 +181,24 @@ func HandleBeat(ctx *MessageContext) error {
 	}
 	payloadBytes, err := json.Marshal(confirmPayload)
 	if err != nil {
-		log.Printf("HandleBeat: Failed to marshal beat confirm: %v", err)
+		lgTransport().Error("failed to marshal beat confirm", "err", err)
 	} else {
 		ctx.Data["response"] = payloadBytes
 	}
 
-	log.Printf("HandleBeat: Beat processed from %s", ctx.PeerID)
+	lgTransport().Debug("beat processed", "peer", ctx.PeerID)
 	return nil
 }
 
 // HandleSync processes sync messages and sends acknowledgment.
 func HandleSync(ctx *MessageContext) error {
-	log.Printf("HandleSync: Processing sync from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing sync", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Check if sender has zero shared zones (LEGACY state)
 	// LEGACY agents should not send sync messages (only beats)
 	if ctx.Peer != nil && len(ctx.Peer.GetSharedZones()) == 0 {
 		// Agent is LEGACY (zero shared zones) - reject sync
-		log.Printf("HandleSync: Rejecting sync from LEGACY agent %s (zero shared zones)", ctx.PeerID)
+		lgTransport().Warn("rejecting sync from LEGACY agent (zero shared zones)", "peer", ctx.PeerID)
 		return fmt.Errorf("LEGACY agent %s cannot send sync messages (zero shared zones)", ctx.PeerID)
 	}
 
@@ -235,22 +229,21 @@ func HandleSync(ctx *MessageContext) error {
 
 	ackPayload, err := json.Marshal(ack)
 	if err != nil {
-		log.Printf("HandleSync: Failed to marshal sync acknowledgment: %v", err)
+		lgTransport().Error("failed to marshal sync acknowledgment", "err", err)
 		// Don't return error - ack failure shouldn't prevent sync processing
 	} else {
 		// Store acknowledgment in context for response middleware
 		ctx.Data["response"] = ackPayload
-		log.Printf("HandleSync: Sync acknowledgment prepared for %s (distrib=%s)", ctx.PeerID, ctx.DistributionID)
+		lgTransport().Debug("sync acknowledgment prepared", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 	}
 
-	log.Printf("HandleSync: Sync processed from %s", ctx.PeerID)
+	lgTransport().Debug("sync processed", "peer", ctx.PeerID)
 	return nil
 }
 
 // HandleRfi processes RFI (Request For Information) messages.
 func HandleRfi(ctx *MessageContext) error {
-	log.Printf("HandleRfi: Processing RFI from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing RFI", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	rfiMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
@@ -279,13 +272,13 @@ func HandleRfi(ctx *MessageContext) error {
 
 	ackPayload, err := json.Marshal(ack)
 	if err != nil {
-		log.Printf("HandleRfi: Failed to marshal rfi acknowledgment: %v", err)
+		lgTransport().Error("failed to marshal rfi acknowledgment", "err", err)
 	} else {
 		ctx.Data["response"] = ackPayload
-		log.Printf("HandleRfi: RFI acknowledgment prepared for %s (distrib=%s)", ctx.PeerID, ctx.DistributionID)
+		lgTransport().Debug("RFI acknowledgment prepared", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 	}
 
-	log.Printf("HandleRfi: RFI processed from %s", ctx.PeerID)
+	lgTransport().Debug("RFI processed", "peer", ctx.PeerID)
 	return nil
 }
 
@@ -293,8 +286,7 @@ func HandleRfi(ctx *MessageContext) error {
 // Used for agent↔signer communication about DNSKEY propagation status.
 // Signals: propagated, rejected, removed (agent→signer), published, retired (signer→agent).
 func HandleKeystate(ctx *MessageContext) error {
-	log.Printf("HandleKeystate: Processing keystate from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing keystate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Parse the keystate message
 	var keystate DnsKeystatePayload
@@ -366,19 +358,16 @@ func HandleKeystate(ctx *MessageContext) error {
 	ctx.Data["response"] = payloadBytes
 
 	if keystate.Signal == "inventory" {
-		log.Printf("HandleKeystate: inventory received from %s for zone %s (%d keys)",
-			ctx.PeerID, keystate.Zone, len(keystate.KeyInventory))
+		lgTransport().Info("keystate inventory received", "peer", ctx.PeerID, "zone", keystate.Zone, "keys", len(keystate.KeyInventory))
 	} else {
-		log.Printf("HandleKeystate: %s processed from %s for key %d in zone %s",
-			keystate.Signal, ctx.PeerID, keystate.KeyTag, keystate.Zone)
+		lgTransport().Info("keystate processed", "signal", keystate.Signal, "peer", ctx.PeerID, "keytag", keystate.KeyTag, "zone", keystate.Zone)
 	}
 	return nil
 }
 
 // HandleRelocate processes relocate messages for DDoS mitigation.
 func HandleRelocate(ctx *MessageContext) error {
-	log.Printf("HandleRelocate: Processing relocate from %s (distrib=%s)",
-		ctx.PeerID, ctx.DistributionID)
+	lgTransport().Debug("processing relocate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// Get the pre-parsed message from context (set by agent RouteViaRouter)
 	relocateMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
@@ -397,7 +386,7 @@ func HandleRelocate(ctx *MessageContext) error {
 	ctx.Data["message_type"] = "relocate"
 	ctx.Data["incoming_message"] = relocateMsg
 
-	log.Printf("HandleRelocate: Relocate processed from %s", ctx.PeerID)
+	lgTransport().Debug("relocate processed", "peer", ctx.PeerID)
 	return nil
 }
 
@@ -450,7 +439,7 @@ func DefaultUnsupportedHandler(ctx *MessageContext) error {
 		msgType = mt
 	}
 
-	log.Printf("DefaultUnsupportedHandler: unsupported message type %q from %s", msgType, ctx.PeerID)
+	lgTransport().Warn("unsupported message type", "type", msgType, "peer", ctx.PeerID)
 
 	errorPayload := struct {
 		Type           string `json:"type"`
@@ -484,7 +473,7 @@ func encryptResponsePayload(ctx *MessageContext, payload []byte) ([]byte, uint8)
 			if encrypted, err := sw.WrapOutgoing(peerID, payload); err == nil {
 				return encrypted, core.FormatJWT
 			} else {
-				log.Printf("encryptResponsePayload: encryption failed for peer %s: %v", peerID, err)
+				lgTransport().Error("response encryption failed", "peer", peerID, "err", err)
 			}
 		}
 	}
@@ -501,7 +490,7 @@ func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
 		// Determine response code
 		rcode := dns.RcodeSuccess
 		if err != nil {
-			log.Printf("SendResponseMiddleware: Handler error: %v", err)
+			lgTransport().Error("handler error", "err", err)
 			rcode = dns.RcodeServerFailure
 		}
 
@@ -588,10 +577,9 @@ func RouteToMsgHandler(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
 			if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
 				select {
 				case incomingChan <- incomingMsg:
-					log.Printf("RouteToMsgHandler: Routed %s message from %s",
-						msgType, ctx.PeerID)
+					lgTransport().Debug("routed message to handler", "type", msgType, "peer", ctx.PeerID)
 				default:
-					log.Printf("RouteToMsgHandler: Incoming channel full, dropping %s message", msgType)
+					lgTransport().Warn("incoming channel full, dropping message", "type", msgType)
 					return fmt.Errorf("message handler channel full")
 				}
 			}

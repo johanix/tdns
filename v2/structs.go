@@ -116,6 +116,16 @@ type ZoneData struct {
 	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
 	// Used for diagnostics (CLI show-key-inventory command).
 	LastKeyInventory *KeyInventorySnapshot
+
+	// LocalDNSKEYs holds DNSKEY RRs that the signer classifies as local (not foreign).
+	// Derived from KEYSTATE inventory. Used to compute adds/removes on DNSKEY updates.
+	LocalDNSKEYs []dns.RR
+
+	// KEYSTATE health tracking — we depend on KEYSTATE for DNSKEY classification.
+	// Failure is an error condition that must be visible to the operator.
+	KeystateOK    bool      // true after successful KEYSTATE exchange
+	KeystateError string    // error message from last failed attempt (empty on success)
+	KeystateTime  time.Time // time of last KEYSTATE attempt
 }
 
 // KeyInventorySnapshot stores a complete key inventory received from the signer.

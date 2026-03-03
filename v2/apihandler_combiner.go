@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -21,11 +20,10 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 		var cp CombinerPost
 		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APIcombiner: error decoding combiner command post:", err)
+			lgApi.Warn("error decoding request", "handler", "combiner", "err", err)
 		}
 
-		log.Printf("API: received /combiner request (cmd: %s) from %s.\n",
-			cp.Command, r.RemoteAddr)
+		lgApi.Debug("received /combiner request", "cmd", cp.Command, "from", r.RemoteAddr)
 
 		resp := CombinerResponse{
 			Time: time.Now(),
@@ -35,7 +33,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "combiner", "err", err)
 			}
 		}()
 
@@ -49,7 +47,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 
 		switch cp.Command {
 		case "add":
-			err := zd.AddCombinerDataNG("", cp.Data)
+			_, err := zd.AddCombinerDataNG("", cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -86,11 +84,10 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		var cp CombinerEditPost
 		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APIcombinerEdits: error decoding post:", err)
+			lgApi.Warn("error decoding request", "handler", "combinerEdits", "err", err)
 		}
 
-		log.Printf("API: received /combiner/edits request (cmd: %s) from %s.\n",
-			cp.Command, r.RemoteAddr)
+		lgApi.Debug("received /combiner/edits request", "cmd", cp.Command, "from", r.RemoteAddr)
 
 		resp := CombinerEditResponse{
 			Time: time.Now(),
@@ -100,7 +97,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("APIcombinerEdits: error encoding response: %v", err)
+				lgApi.Error("json encode failed", "handler", "combinerEdits", "err", err)
 			}
 		}()
 
@@ -168,9 +165,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			syncResp := CombinerProcessUpdate(syncReq, protectedNamespaces)
 
-			log.Printf("APIcombinerEdits: Approved edit #%d for zone %s: status=%s applied=%d removed=%d rejected=%d",
-				cp.EditID, rec.Zone, syncResp.Status,
-				len(syncResp.AppliedRecords), len(syncResp.RemovedRecords), len(syncResp.RejectedItems))
+			lgApi.Info("approved edit", "editID", cp.EditID, "zone", rec.Zone, "status", syncResp.Status, "applied", len(syncResp.AppliedRecords), "removed", len(syncResp.RemovedRecords), "rejected", len(syncResp.RejectedItems))
 
 			// Send confirmation back to the agent that delivered the edit.
 			// For forwarded messages, DeliveredBy is our local agent (not the originator).
@@ -181,6 +176,13 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			tm := conf.Internal.TransportManager
 			if tm != nil {
 				combinerSendConfirmation(tm, confirmTarget, syncResp)
+			}
+
+			// Notify downstream servers about the zone change.
+			if syncResp.Status != "error" {
+				if zd, ok := Zones.Get(dns.Fqdn(rec.Zone)); ok && len(zd.Downstreams) > 0 {
+					go zd.NotifyDownstreams()
+				}
 			}
 
 			resp.Msg = fmt.Sprintf("Edit #%d approved and applied for zone %s (status=%s, applied=%d, rejected=%d)",
@@ -294,11 +296,10 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		var cp CombinerDebugPost
 		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APIcombinerDebug: error decoding debug post:", err)
+			lgApi.Warn("error decoding request", "handler", "combinerDebug", "err", err)
 		}
 
-		log.Printf("API: received /combiner/debug request (cmd: %s) from %s.\n",
-			cp.Command, r.RemoteAddr)
+		lgApi.Debug("received /combiner/debug request", "cmd", cp.Command, "from", r.RemoteAddr)
 
 		resp := CombinerDebugResponse{
 			Time: time.Now(),
@@ -308,7 +309,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("APIcombinerDebug: error encoding response: %v", err)
+				lgApi.Error("json encode failed", "handler", "combinerDebug", "err", err)
 			}
 		}()
 

@@ -266,6 +266,9 @@ db:
 
 log:
                         file:  /var/log/axfr.net/tdns-auth.log
+                        level: info     # default level: debug|info|warn|error
+                        # subsystems:   # per-subsystem level overrides
+                        #   dns: debug
 
 common:
                         servername:  tdns-auth

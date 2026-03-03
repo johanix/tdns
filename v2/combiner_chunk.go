@@ -17,7 +17,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"time"
@@ -26,6 +25,8 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+var lgCombiner = Logger("combiner")
 
 // CombinerSyncRequest represents a sync request to the combiner.
 // Uses the same data structure as CombinerPost.Data for transport neutrality.
@@ -136,8 +137,7 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 	for _, rrs := range records {
 		rrCount += len(rrs)
 	}
-	log.Printf("ParseAgentMsgNotify: Parsed sync from %q for zone %q (%d RRs, %d owners)",
-		msg.OriginatorID, msg.Zone, rrCount, len(records))
+	lgCombiner.Debug("parsed sync", "sender", msg.OriginatorID, "zone", msg.Zone, "rrs", rrCount, "owners", len(records))
 
 	return &CombinerSyncRequest{
 		SenderID:       msg.OriginatorID,
@@ -162,8 +162,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	for _, rrs := range req.Records {
 		totalRecords += len(rrs)
 	}
-	log.Printf("CombinerProcessUpdate: Processing sync from %q for zone %q (%d owners, %d records)",
-		req.SenderID, req.Zone, len(req.Records), totalRecords)
+	lgCombiner.Debug("processing update", "sender", req.SenderID, "zone", req.Zone, "owners", len(req.Records), "records", totalRecords)
 
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
@@ -233,7 +232,6 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			switch rr.Header().Class {
 			case dns.ClassINET:
 				addOwnerRRs[owner] = append(addOwnerRRs[owner], rrStr)
-				appliedRecords = append(appliedRecords, rrStr)
 
 			case dns.ClassNONE:
 				// Convert to ClassINET string for removal matching in AgentContributions.
@@ -256,11 +254,16 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 	// Apply additions
 	if len(addOwnerRRs) > 0 {
-		err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
+		addChanged, err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
 		if err != nil {
 			resp.Status = "error"
 			resp.Message = fmt.Sprintf("failed to apply add updates: %v", err)
 			return resp
+		}
+		if addChanged {
+			for _, rrs := range addOwnerRRs {
+				appliedRecords = append(appliedRecords, rrs...)
+			}
 		}
 	}
 
@@ -268,7 +271,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	if len(deleteOwnerRRs) > 0 {
 		removed, err := zd.RemoveCombinerDataNG(req.SenderID, deleteOwnerRRs)
 		if err != nil {
-			log.Printf("CombinerProcessUpdate: Error removing records: %v", err)
+			lgCombiner.Error("error removing records", "err", err)
 			// Don't fail the whole request — report partial success
 		}
 		removedRecords = append(removedRecords, removed...)
@@ -279,8 +282,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		for _, rrtype := range rrtypes {
 			removed, err := zd.RemoveCombinerDataByRRtype(req.SenderID, owner, rrtype)
 			if err != nil {
-				log.Printf("CombinerProcessUpdate: Error removing RRset %s for owner %s: %v",
-					dns.TypeToString[rrtype], owner, err)
+				lgCombiner.Error("error removing RRset", "rrtype", dns.TypeToString[rrtype], "owner", owner, "err", err)
 			}
 			removedRecords = append(removedRecords, removed...)
 		}
@@ -306,19 +308,115 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			len(rejectedItems), req.Zone)
 	}
 
-	log.Printf("CombinerProcessUpdate: %s - %s", resp.Status, resp.Message)
+	lgCombiner.Info("update processed", "status", resp.Status, "message", resp.Message)
 
 	if totalActions > 0 {
 		bumperResp, err := zd.BumpSerialOnly()
 		if err != nil {
-			log.Printf("CombinerProcessUpdate: BumpSerialOnly failed for zone %q: %v", req.Zone, err)
+			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
 		} else {
-			log.Printf("CombinerProcessUpdate: BumpSerial %s: %d -> %d",
-				req.Zone, bumperResp.OldSerial, bumperResp.NewSerial)
+			lgCombiner.Info("serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
 		}
 	}
 
 	return resp
+}
+
+// isNoOpUpdate checks whether an incoming update would cause any actual change
+// to the combiner's AgentContributions. Used to short-circuit the manual approval
+// queue for zones with mp-manual-approval — no-op edits should not require operator action.
+func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bool {
+	if senderID == "" {
+		senderID = "local"
+	}
+
+	for owner, rrStrings := range records {
+		for _, rrStr := range rrStrings {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				// Can't parse → not a no-op (will be rejected, but that's a change in outcome)
+				return false
+			}
+
+			rrtype := rr.Header().Rrtype
+			switch rr.Header().Class {
+			case dns.ClassINET:
+				// ADD: check if this RR already exists in contributions
+				if zd.AgentContributions == nil {
+					return false
+				}
+				agentData, ok := zd.AgentContributions[senderID]
+				if !ok {
+					return false
+				}
+				ownerMap, ok := agentData[owner]
+				if !ok {
+					return false
+				}
+				existing, ok := ownerMap[rrtype]
+				if !ok {
+					return false
+				}
+				found := false
+				for _, existingRR := range existing.RRs {
+					if dns.IsDuplicate(rr, existingRR) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+
+			case dns.ClassNONE:
+				// DEL: check if this RR is already absent from contributions
+				delRR := dns.Copy(rr)
+				delRR.Header().Class = dns.ClassINET
+				if zd.AgentContributions == nil {
+					continue // Already absent → no-op for this record
+				}
+				agentData, ok := zd.AgentContributions[senderID]
+				if !ok {
+					continue
+				}
+				ownerMap, ok := agentData[owner]
+				if !ok {
+					continue
+				}
+				existing, ok := ownerMap[rrtype]
+				if !ok {
+					continue
+				}
+				for _, existingRR := range existing.RRs {
+					if dns.IsDuplicate(delRR, existingRR) {
+						return false // RR exists, so removing it IS a change
+					}
+				}
+
+			case dns.ClassANY:
+				// Bulk DEL: check if rrtype has no contributions
+				if zd.AgentContributions == nil {
+					continue
+				}
+				agentData, ok := zd.AgentContributions[senderID]
+				if !ok {
+					continue
+				}
+				ownerMap, ok := agentData[owner]
+				if !ok {
+					continue
+				}
+				if _, ok := ownerMap[rrtype]; ok {
+					return false // RRtype exists, so deleting it IS a change
+				}
+
+			default:
+				return false // Unknown class → not a no-op
+			}
+		}
+	}
+
+	return true
 }
 
 // NewCombinerSyncHandler creates a transport.MessageHandlerFunc for combiner UPDATE processing.
@@ -327,8 +425,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 // runs asynchronously, and the detailed confirmation is sent back as a separate CONFIRM NOTIFY.
 func NewCombinerSyncHandler() transport.MessageHandlerFunc {
 	return func(ctx *transport.MessageContext) error {
-		log.Printf("CombinerHandleUpdate: Received update from %s (distrib=%s), sending pending ACK",
-			ctx.PeerID, ctx.DistributionID)
+		lgCombiner.Debug("received update, sending pending ACK", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 		// Build pending ACK for DNS response
 		ack := struct {
@@ -376,9 +473,9 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	}
 
 	if secureWrapper != nil && secureWrapper.IsEnabled() {
-		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for %s with crypto enabled", localID)
+		lgCombiner.Info("registering CHUNK handler with crypto enabled", "localID", localID)
 	} else {
-		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for %s", localID)
+		lgCombiner.Info("registering CHUNK handler", "localID", localID)
 	}
 
 	// Wire FetchChunkQuery for chunk_mode=query (combiner has no DNSTransport)
@@ -416,9 +513,9 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 	handler.FetchChunkQuery = fetchChunkPayloadViaQuery
 
 	if secureWrapper != nil && secureWrapper.IsEnabled() {
-		log.Printf("RegisterSignerChunkHandler: Registering CHUNK handler for %s with crypto enabled", localID)
+		lgCombiner.Info("registering signer CHUNK handler with crypto enabled", "localID", localID)
 	} else {
-		log.Printf("RegisterSignerChunkHandler: XX Registering CHUNK handler for %s", localID)
+		lgCombiner.Info("registering signer CHUNK handler", "localID", localID)
 	}
 	err := RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *DnsNotifyRequest) error {
 		return handler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
@@ -503,7 +600,7 @@ func fetchChunkPayloadViaQuery(ctx context.Context, serverAddr, qname string) ([
 // For in-process communication, this calls CombinerProcessUpdate directly.
 func SendToCombiner(state *CombinerState, req *CombinerSyncRequest) *CombinerSyncResponse {
 	if state == nil {
-		log.Printf("SendToCombiner: state is nil, cannot send update")
+		lgCombiner.Error("state is nil, cannot send update")
 		return &CombinerSyncResponse{
 			DistributionID: req.DistributionID,
 			Zone:           req.Zone,

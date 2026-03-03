@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 )
@@ -60,11 +59,10 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
 		rootCA, err := os.ReadFile(rootcafile)
 		if err != nil {
-			log.Fatalf("reading cert failed : %v", err)
+			lgApi.Error("reading cert failed", "err", err)
+			os.Exit(1)
 		}
-		if Globals.Debug {
-			fmt.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
-		}
+		lgApi.Debug("creating API client with root CAs", "name", name, "rootcafile", rootcafile)
 
 		rootCAPool.AppendCertsFromPEM(rootCA)
 		tlsconfig.RootCAs = rootCAPool
@@ -121,18 +119,15 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	} else if api.AuthMethod == "Authorization" {
 		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
 	} else {
-		log.Printf("Error: Client API Post: unknown auth method: %s. Aborting.\n",
-			api.AuthMethod)
+		lgApi.Error("unknown auth method", "method", api.AuthMethod)
 		return 501, []byte{}, fmt.Errorf("unknown auth method: %s", api.AuthMethod)
 	}
 
-	if api.Debug {
-		log.Printf("\nrequestHelper: about to send request using auth method '%s' and key '%s'\n",
-			api.AuthMethod, api.apiKey)
-	}
+	lgApi.Debug("sending request", "authMethod", api.AuthMethod)
 
 	if api.apiKey == "" {
-		log.Fatalf("api.requestHelper: Error: apikey not set.\n")
+		lgApi.Error("apikey not set")
+		os.Exit(1)
 	}
 
 	resp, err := api.Client.Do(req)
@@ -147,10 +142,9 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 		var prettyJSON bytes.Buffer
 		error := json.Indent(&prettyJSON, buf, "", "  ")
 		if error != nil {
-			log.Println("JSON parse error: ", error)
+			lgApi.Debug("JSON parse error", "err", error)
 		}
-		fmt.Printf("requestHelper: received %d bytes of response data:\n%s\n", len(buf),
-			prettyJSON.String())
+		lgApi.Debug("received response data", "bytes", len(buf), "data", prettyJSON.String())
 	}
 
 	return resp.StatusCode, buf, err
@@ -165,16 +159,16 @@ func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
 		var prettyJSON bytes.Buffer
 		error := json.Indent(&prettyJSON, data, "", "  ")
 		if error != nil {
-			log.Println("JSON parse error: ", error)
+			lgApi.Debug("JSON parse error", "err", error)
 		}
-		fmt.Printf("api.Post: posting to URL '%s' %d bytes of data:\n%s\n",
-			api.BaseUrl+endpoint, len(data), prettyJSON.String())
+		lgApi.Debug("posting data", "url", api.BaseUrl+endpoint, "bytes", len(data), "data", prettyJSON.String())
 	}
 
 	req, err := http.NewRequest(http.MethodPost, api.BaseUrl+endpoint,
 		bytes.NewBuffer(data))
 	if err != nil {
-		log.Fatalf("Error from http.NewRequest: Error: %v", err)
+		lgApi.Error("http.NewRequest failed", "err", err)
+		os.Exit(1)
 	}
 	return api.requestHelper(req)
 }
@@ -189,7 +183,8 @@ func (api *ApiClient) Delete(endpoint string) (int, []byte, error) {
 
 	req, err := http.NewRequest(http.MethodDelete, api.BaseUrl+endpoint, nil)
 	if err != nil {
-		log.Fatalf("Error from http.NewRequest: Error: %v", err)
+		lgApi.Error("http.NewRequest failed", "err", err)
+		os.Exit(1)
 	}
 	return api.requestHelper(req)
 }
@@ -198,12 +193,13 @@ func (api *ApiClient) Delete(endpoint string) (int, []byte, error) {
 func (api *ApiClient) Get(endpoint string) (int, []byte, error) {
 
 	if api.Debug {
-		fmt.Printf("api.Get: GET URL '%s'\n", api.BaseUrl+endpoint)
+		lgApi.Debug("GET request", "url", api.BaseUrl+endpoint)
 	}
 
 	req, err := http.NewRequest(http.MethodGet, api.BaseUrl+endpoint, nil)
 	if err != nil {
-		log.Fatalf("Error from http.NewRequest: Error: %v", err)
+		lgApi.Error("http.NewRequest failed", "err", err)
+		os.Exit(1)
 	}
 	return api.requestHelper(req)
 }
@@ -219,7 +215,8 @@ func (api *ApiClient) Put(endpoint string, data []byte) (int, []byte, error) {
 	req, err := http.NewRequest(http.MethodPut, api.BaseUrl+endpoint,
 		bytes.NewBuffer(data))
 	if err != nil {
-		log.Fatalf("Error from http.NewRequest: Error: %v", err)
+		lgApi.Error("http.NewRequest failed", "err", err)
+		os.Exit(1)
 	}
 	return api.requestHelper(req)
 }
@@ -240,9 +237,9 @@ func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {
 
 		error := json.Indent(&prettyJSON, data, "", "  ")
 		if error != nil {
-			log.Println("JSON parse error: ", error)
+			lgApi.Debug("JSON parse error", "err", error)
 		}
-		fmt.Printf("API%s: posting %d bytes of data: %s\n", method, len(data), prettyJSON.String())
+		lgApi.Debug("posting data", "method", method, "bytes", len(data), "data", prettyJSON.String())
 	}
 }
 
@@ -262,15 +259,15 @@ func (api *ApiClient) UrlReportNG(method, fullurl string, data []byte) {
 
 		error := json.Indent(&prettyJSON, data, "", "  ")
 		if error != nil {
-			log.Println("JSON parse error: ", error)
+			lgApi.Debug("JSON parse error", "err", error)
 		}
-		fmt.Printf("API%s: posting %d bytes of data: %s\n", method, len(data), prettyJSON.String())
+		lgApi.Debug("posting data", "method", method, "bytes", len(data), "data", prettyJSON.String())
 	}
 }
 
 func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
 	if api == nil {
-		log.Printf("api.RequestNG: api client is nil. Returning.")
+		lgApi.Warn("api client is nil")
 		return 501, nil, fmt.Errorf("api client is nil")
 	}
 	bytebuf := new(bytes.Buffer)
@@ -282,10 +279,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		}
 	}
 
-	if api.Debug {
-		log.Printf("api.RequestNG: %s %s data: %+v", method, endpoint, data)
-		log.Printf("api.RequestNG: %s %s %d bytes of data: %s", method, endpoint, bytebuf.Len(), bytebuf.String())
-	}
+	lgApi.Debug("RequestNG preparing request", "method", method, "endpoint", endpoint, "bytes", bytebuf.Len())
 
 	api.UrlReport(method, endpoint, bytebuf.Bytes())
 
@@ -296,7 +290,8 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	baseURL, err := url.Parse(api.BaseUrl)
 	if err != nil {
 		if dieOnError {
-			log.Fatalf("Failed to parse base URL: %v", err)
+			lgApi.Error("failed to parse base URL", "err", err)
+			os.Exit(1)
 		}
 		return 0, nil, fmt.Errorf("failed to parse base URL: %v", err)
 	}
@@ -308,9 +303,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		addressesToTry = []string{baseURL.Host}
 	}
 
-	if api.Debug {
-		log.Printf("api.RequestNG: trying addresses: %v\n", addressesToTry)
-	}
+	lgApi.Debug("RequestNG trying addresses", "addresses", addressesToTry)
 
 	var resp *http.Response
 
@@ -322,9 +315,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		urlCopy.Host = addr // addr must be in addr:port format
 		fullURL := fmt.Sprintf("%s%s", urlCopy.String(), endpoint)
 
-		if api.Debug {
-			log.Printf("api.RequestNG: trying URL: %s\n", fullURL)
-		}
+		lgApi.Debug("RequestNG trying URL", "url", fullURL)
 		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
 
 		// Create the request
@@ -392,9 +383,9 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	if api.Debug {
 		var prettyJSON bytes.Buffer
 		if err := json.Indent(&prettyJSON, buf, "", "  "); err != nil {
-			log.Printf("API %s %s: response (%d bytes, not JSON): %s", method, endpoint, len(buf), string(buf))
+			lgApi.Debug("response (not JSON)", "method", method, "endpoint", endpoint, "bytes", len(buf), "data", string(buf))
 		} else {
-			log.Printf("API %s %s: response (%d bytes):\n%s", method, endpoint, len(buf), prettyJSON.String())
+			lgApi.Debug("response", "method", method, "endpoint", endpoint, "bytes", len(buf), "data", prettyJSON.String())
 		}
 	}
 
@@ -415,7 +406,7 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint string, data interface{}, dieOnError bool) (int, []byte, error) {
 	if api == nil {
-		log.Printf("api.RequestNG: api client is nil. Returning.")
+		lgApi.Warn("api client is nil")
 		return 501, nil, fmt.Errorf("api client is nil")
 	}
 	bytebuf := new(bytes.Buffer)
@@ -453,7 +444,8 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	baseURL, err := url.Parse(api.BaseUrl)
 	if err != nil {
 		if dieOnError {
-			log.Fatalf("Failed to parse base URL: %v", err)
+			lgApi.Error("failed to parse base URL", "err", err)
+			os.Exit(1)
 		}
 		return 0, nil, fmt.Errorf("failed to parse base URL: %v", err)
 	}
@@ -465,9 +457,7 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		addressesToTry = []string{baseURL.Host}
 	}
 
-	if api.Debug {
-		log.Printf("api.RequestNG: trying addresses: %v\n", addressesToTry)
-	}
+	lgApi.Debug("RequestNG trying addresses", "addresses", addressesToTry)
 
 	var resp *http.Response
 
@@ -479,9 +469,7 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		urlCopy.Host = addr // addr must be in addr:port format
 		fullURL := fmt.Sprintf("%s%s", urlCopy.String(), endpoint)
 
-		if api.Debug {
-			log.Printf("api.RequestNG: trying URL: %s\n", fullURL)
-		}
+		lgApi.Debug("RequestNG trying URL", "url", fullURL)
 		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
 
 		// Create the request with context
@@ -554,9 +542,9 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	if api.Debug {
 		var prettyJSON bytes.Buffer
 		if err := json.Indent(&prettyJSON, buf, "", "  "); err != nil {
-			log.Printf("API %s %s: response (%d bytes, not JSON): %s", method, endpoint, len(buf), string(buf))
+			lgApi.Debug("response (not JSON)", "method", method, "endpoint", endpoint, "bytes", len(buf), "data", string(buf))
 		} else {
-			log.Printf("API %s %s: response (%d bytes):\n%s", method, endpoint, len(buf), prettyJSON.String())
+			lgApi.Debug("response", "method", method, "endpoint", endpoint, "bytes", len(buf), "data", prettyJSON.String())
 		}
 	}
 

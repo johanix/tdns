@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -278,9 +277,9 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	sharedZones := peer.GetSharedZones()
 
 	if len(sharedZones) == 0 {
-		log.Printf("DNS Beat: WARNING: No shared zones found for peer %s", peer.ID)
+		lgTransport().Warn("no shared zones found for peer", "peer", peer.ID)
 	} else {
-		log.Printf("DNS Beat: Including %d shared zone(s) for peer %s: %v", len(sharedZones), peer.ID, sharedZones)
+		lgTransport().Debug("including shared zones in beat", "count", len(sharedZones), "peer", peer.ID, "zones", sharedZones)
 	}
 
 	payload := &core.AgentBeatPost{
@@ -301,7 +300,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", distributionID, payloadJSON, false)
 	if err != nil {
 		// For beats, we might want to be more lenient with errors
-		log.Printf("DNS Beat to %s failed: %v", peer.ID, err)
+		lgTransport().Warn("beat failed", "peer", peer.ID, "err", err)
 		return &BeatResponse{
 			ResponderID: peer.ID,
 			Timestamp:   time.Now(),
@@ -862,9 +861,9 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// Try to extract application-level confirmation from the DNS response EDNS0.
 	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
 	if confirm := extractConfirmFromResponse(res, peer.ID, t.SecureWrapper); confirm != nil {
-		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q applied=%d removed=%d rejected=%d",
-			opType, distributionID, peer.ID, confirm.Status, confirm.Message,
-			len(confirm.AppliedRecords), len(confirm.RemovedRecords), len(confirm.RejectedItems))
+		lgTransport().Info("received confirmation", "op", opType, "distrib", distributionID, "peer", peer.ID,
+			"status", confirm.Status, "message", confirm.Message,
+			"applied", len(confirm.AppliedRecords), "removed", len(confirm.RemovedRecords), "rejected", len(confirm.RejectedItems))
 		status := parseConfirmStatus(confirm.Status)
 		return &operationResponse{
 			Status:         status,
@@ -879,8 +878,8 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// No EDNS0 confirmation payload — DNS-level ACK (NOERROR) is NOT sufficient.
 	// The recipient must include an explicit EDNS0 CHUNK confirmation to prove
 	// it received and processed the message.
-	log.Printf("DNS: NOTIFY %s %s to %s: DNS ACK received but no EDNS0 confirmation payload — treating as unconfirmed",
-		opType, distributionID, peer.ID)
+	lgTransport().Warn("DNS ACK received but no EDNS0 confirmation, treating as unconfirmed",
+		"op", opType, "distrib", distributionID, "peer", peer.ID)
 	return nil, NewTransportError("DNS", opType, peer.ID,
 		fmt.Errorf("no EDNS0 confirmation in response (DNS-level ACK only)"), true)
 }
@@ -952,7 +951,7 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 		Message: confirm.Message,
 	}:
 	default:
-		log.Printf("DNS: Response channel full for distribution ID: %s", confirm.DistributionID)
+		lgTransport().Warn("response channel full", "distrib", confirm.DistributionID)
 	}
 }
 

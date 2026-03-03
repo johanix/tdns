@@ -19,5 +19,6 @@ imrengine:
 
 log:
    file:                /var/log/tdns/tdns-imr.log
+   level:               info    # default level: debug|info|warn|error
 
 

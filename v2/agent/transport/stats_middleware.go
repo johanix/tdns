@@ -6,10 +6,6 @@
 
 package transport
 
-import (
-	"log"
-)
-
 // StatsMiddlewareConfig holds configuration for stats middleware.
 type StatsMiddlewareConfig struct {
 	// PeerRegistry for looking up peers and recording stats
@@ -54,10 +50,10 @@ func NewStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
 			peer.Stats.RecordMessageReceived(msgType)
 
 			lastUsed, totalSent, totalReceived := peer.Stats.GetStats()
-			log.Printf("StatsMiddleware: Peer %s - %s received (total: %d sent, %d received, last used: %s)",
-				ctx.PeerID, msgType, totalSent, totalReceived, lastUsed.Format("15:04:05"))
+			lgTransport().Debug("peer stats updated", "peer", ctx.PeerID, "type", msgType,
+				"total_sent", totalSent, "total_received", totalReceived, "last_used", lastUsed.Format("15:04:05"))
 		} else {
-			log.Printf("StatsMiddleware: Warning - no message type found for peer %s", ctx.PeerID)
+			lgTransport().Warn("no message type found for peer", "peer", ctx.PeerID)
 		}
 
 		// Continue processing

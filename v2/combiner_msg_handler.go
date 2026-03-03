@@ -12,7 +12,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -26,7 +25,7 @@ import (
 func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	protectedNamespaces []string, errorJournal *ErrorJournal) {
 	if msgQs == nil {
-		log.Printf("CombinerMsgHandler: No MsgQs configured, exiting")
+		lgCombiner.Warn("no MsgQs configured, exiting")
 		return
 	}
 
@@ -47,13 +46,12 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 		}
 	}
 
-	log.Printf("CombinerMsgHandler: Starting (peerRegistry=%v, tm=%v, localAgents=%d)",
-		peerRegistry != nil, tm != nil, len(localAgents))
+	lgCombiner.Info("message handler starting", "peerRegistry", peerRegistry != nil, "tm", tm != nil, "localAgents", len(localAgents))
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("CombinerMsgHandler: Context cancelled, stopping")
+			lgCombiner.Info("context cancelled, stopping")
 			return
 
 		case report := <-msgQs.Beat:
@@ -61,8 +59,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("CombinerMsgHandler: Beat from %s (interval=%d, distrib=%s)",
-				senderID, report.BeatInterval, report.DistributionID)
+			lgCombiner.Debug("beat received", "sender", senderID, "interval", report.BeatInterval, "distrib", report.DistributionID)
 
 			// Update PeerRegistry liveness
 			if peerRegistry != nil {
@@ -76,7 +73,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("CombinerMsgHandler: Hello from %s", senderID)
+			lgCombiner.Debug("hello received", "sender", senderID)
 
 			// Update PeerRegistry on hello
 			if peerRegistry != nil {
@@ -88,8 +85,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if report == nil {
 				continue
 			}
-			log.Printf("CombinerMsgHandler: Ping from %s (distrib=%s)",
-				string(report.Identity), report.DistributionID)
+			lgCombiner.Debug("ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
 
 		case msg := <-msgQs.Msg:
 			if msg == nil {
@@ -101,8 +97,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				deliveredBy = senderID // Fallback: direct delivery
 			}
 			zone := string(msg.Zone)
-			log.Printf("CombinerMsgHandler: Processing async update from %s (delivered by %s) zone %s (distrib=%s)",
-				senderID, deliveredBy, zone, msg.DistributionID)
+			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
 
 			kdb := conf.Internal.KeyDB
 
@@ -120,17 +115,27 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					ReceivedAt:     time.Now(),
 				}
 				if err := kdb.SavePendingEdit(rec); err != nil {
-					log.Printf("CombinerMsgHandler: Failed to persist edit for zone %s: %v", zone, err)
+					lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
 				} else {
-					log.Printf("CombinerMsgHandler: Persisted edit #%d from %s for zone %s", editID, senderID, zone)
+					lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
 				}
 			}
 
 			// Manual approval gate: if zone has mp-manual-approval, keep the
-			// edit pending for operator review.
+			// edit pending for operator review — unless it's a no-op.
 			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[OptMPManualApproval] {
-				log.Printf("CombinerMsgHandler: Zone %s has mp-manual-approval, edit #%d awaits operator action",
-					zone, editID)
+				if isNoOpUpdate(zd, senderID, msg.Records) {
+					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
+					combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
+						DistributionID: msg.DistributionID,
+						Zone:           zone,
+						Status:         "ok",
+						Message:        "no changes needed (data already current)",
+						Timestamp:      time.Now(),
+					})
+					continue
+				}
+				lgCombiner.Info("edit awaits manual approval", "zone", zone, "editID", editID)
 				// Send PENDING confirmation to the delivering agent
 				combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
 					DistributionID: msg.DistributionID,
@@ -188,15 +193,24 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					}
 				}
 				if err := kdb.ResolvePendingEdit(editID, approved, rejected, reason); err != nil {
-					log.Printf("CombinerMsgHandler: Failed to resolve edit #%d: %v", editID, err)
+					lgCombiner.Error("failed to resolve edit", "editID", editID, "err", err)
 				}
 			}
 
-			log.Printf("CombinerMsgHandler: Update processed from %s zone %s: status=%s applied=%d removed=%d rejected=%d",
-				senderID, zone, resp.Status, len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
+			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems))
 
 			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
 			combinerSendConfirmation(tm, deliveredBy, resp)
+
+			// Notify downstream servers (e.g. signer) about the zone change
+			// so they can fetch the updated zone promptly instead of waiting
+			// for the next periodic SOA refresh.
+			// Run async to avoid blocking the message handler on network I/O.
+			if resp.Status != "error" {
+				if zd, ok := Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
+					go zd.NotifyDownstreams()
+				}
+			}
 		}
 	}
 }
@@ -205,14 +219,13 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 // Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
 func combinerSendConfirmation(tm *TransportManager, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
-		log.Printf("CombinerMsgHandler: Cannot send confirmation — no DNSTransport (sender=%s, distrib=%s)",
-			senderID, resp.DistributionID)
+		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
 		return
 	}
 
 	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		log.Printf("CombinerMsgHandler: Cannot send confirmation — peer %s not in registry", senderID)
+		lgCombiner.Warn("cannot send confirmation, peer not in registry", "sender", senderID)
 		return
 	}
 
@@ -251,12 +264,9 @@ func combinerSendConfirmation(tm *TransportManager, senderID string, resp *Combi
 	})
 
 	if err != nil {
-		log.Printf("CombinerMsgHandler: Failed to send confirmation for %s to %s: %v",
-			resp.DistributionID, senderID, err)
+		lgCombiner.Error("failed to send confirmation", "distrib", resp.DistributionID, "sender", senderID, "err", err)
 	} else {
-		log.Printf("CombinerMsgHandler: Sent confirmation for %s to %s (status=%s applied=%d removed=%d rejected=%d)",
-			resp.DistributionID, senderID, resp.Status,
-			len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
+		lgCombiner.Debug("sent confirmation", "distrib", resp.DistributionID, "sender", senderID, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems))
 	}
 }
 

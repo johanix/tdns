@@ -20,7 +20,7 @@ func runTransportSignalPostpass(conf *Config) {
 	for zname, zdz := range Zones.Items() {
 		if zdz != nil && zdz.Options[OptAddTransportSignal] {
 			if err := zdz.CreateTransportSignalRRs(conf); err != nil {
-				log.Printf("Postpass CreateTransportSignalRRs(%s): %v", zname, err)
+				lgEngine.Error("postpass CreateTransportSignalRRs failed", "zone", zname, "error", err)
 			}
 		}
 	}
@@ -60,11 +60,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	}
 
 	if !viper.GetBool("service.refresh") {
-		log.Printf("RefreshEngine: NOT active. Will accept zone definitions but skip periodic refreshes.")
+		lgEngine.Info("refresh engine not active, will accept zone definitions but skip periodic refreshes")
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("RefreshEngine: terminating due to context cancelled (inactive mode)")
+				lgEngine.Info("terminating (inactive mode)", "reason", "context cancelled")
 				return
 			case <-zonerefch:
 			}
@@ -73,7 +73,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 		}
 	} else {
 		ticker = time.NewTicker(1 * time.Second)
-		log.Printf("RefreshEngine: Starting")
+		lgEngine.Info("refresh engine starting")
 	}
 
 	var upstream, zone string
@@ -89,12 +89,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("RefreshEngine: terminating due to context cancelled")
+			lgEngine.Info("refresh engine terminating", "reason", "context cancelled")
 			ticker.Stop()
 			return
 		case zr, ok := <-zonerefch:
 			if !ok {
-				log.Printf("RefreshEngine: terminating due to zonerefch closed")
+				lgEngine.Info("refresh engine terminating", "reason", "zonerefch closed")
 				ticker.Stop()
 				return
 			}
@@ -106,7 +106,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
 					if zd.Error && zd.ErrorType != RefreshError {
-						log.Printf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+						lgEngine.Warn("zone in error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 						if zr.Response != nil {
 							zr.Response <- resp
@@ -115,13 +115,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 					if zd.ZoneType == Primary && zd.Options[OptDirty] {
 						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
-						log.Printf("%s", resp.Msg)
+						lgEngine.Warn("zone has modifications, reload not possible", "zone", zone)
 						if zr.Response != nil {
 							zr.Response <- resp
 						}
 						continue
 					}
-					log.Printf("RefreshEngine: scheduling immediate refresh for known zone '%s'", zone)
+					lgEngine.Debug("scheduling immediate refresh for known zone", "zone", zone)
 					// Update configuration fields from ZoneRefresher for existing zones
 					// This ensures that config reload (reload-zones, zone reload) picks up changes to:
 					// notify addresses, upstream, zonefile, zone store, options, update policy, DNSSEC policy, etc.
@@ -155,7 +155,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// Update ZoneType only if provided (non-zero value)
 					if zr.ZoneType != 0 {
 						if zd.ZoneType != zr.ZoneType {
-							log.Printf("RefreshEngine: Zone %s zone type changed from %s to %s", zone, ZoneTypeToString[zd.ZoneType], ZoneTypeToString[zr.ZoneType])
+							lgEngine.Info("zone type changed", "zone", zone, "from", ZoneTypeToString[zd.ZoneType], "to", ZoneTypeToString[zr.ZoneType])
 						}
 						zd.ZoneType = zr.ZoneType
 					}
@@ -164,25 +164,24 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
 							zd.DnssecPolicy = &dp
 						} else {
-							log.Printf("RefreshEngine: Warning: DNSSEC policy %q not found for zone %s, keeping existing policy", zr.DnssecPolicy, zone)
+							lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", zr.DnssecPolicy, "zone", zone)
 						}
 					}
 					if zr.MultiSigner != "" {
 						if msc, exists := conf.MultiSigner[zr.MultiSigner]; exists {
 							zd.MultiSigner = &msc
 						} else {
-							log.Printf("RefreshEngine: Warning: MultiSigner %q not found for zone %s, keeping existing config", zr.MultiSigner, zone)
+							lgEngine.Warn("MultiSigner config not found, keeping existing", "multisigner", zr.MultiSigner, "zone", zone)
 						}
 					}
 					zd.mu.Unlock()
-					log.Printf("RefreshEngine: Updated configuration for zone %s: notify=%v, upstream=%s, zonefile=%s, store=%s",
-						zone, zd.Downstreams, zd.Upstream, zd.Zonefile, ZoneStoreToString[zd.ZoneStore])
+					lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
 					// Update or create refreshCounter with current config values
 					var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
 					soa, err := zd.GetSOA()
 					if err != nil {
-						log.Printf("RefreshEngine: Error from GetSOA(%s): %v", zone, err)
+						lgEngine.Error("GetSOA failed", "zone", zone, "error", err)
 						zd.SetError(RefreshError, "get soa error: %v", err)
 						zd.LatestError = time.Now()
 					} else {
@@ -210,19 +209,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					go func(zd *ZoneData, zone string, force bool, conf *Config) {
 						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
 						if err != nil {
-							log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
+							lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
 						} else {
 							// Clear any previous error state after successful refresh
 							if zd.Error {
-								log.Printf("RefreshEngine: Zone %s refresh succeeded, clearing %s error state",
-									zone, ErrorTypeToString[zd.ErrorType])
+								lgEngine.Info("zone refresh succeeded, clearing error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType])
 								zd.SetError(NoError, "")
 							}
 							// No error from refresh - zone data is valid
 							if updated {
-								log.Printf("Zone %s was updated via refresh operation", zd.ZoneName)
+								lgEngine.Info("zone updated via refresh", "zone", zd.ZoneName)
 
 								// Write zone file after successful update
 								// Two cases:
@@ -232,21 +230,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									// Auto-configured catalog member zone
 									_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
 									if err != nil {
-										log.Printf("DYNAMIC-ZONES: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+										lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
 										// Don't fail the operation, just log the warning
 									}
 
 									// Update dynamic config file (zone file path may have changed, or this is first write)
 									if err := conf.AddDynamicZoneToConfig(zd); err != nil {
-										log.Printf("DYNAMIC-ZONES: Warning: Failed to update dynamic config file for %s: %v", zd.ZoneName, err)
+										lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
 										// Don't fail the operation, just log the warning
 									}
 								} else if zd.Zonefile != "" {
 									// Regular zone with zonefile configured (typically secondary zones)
-									log.Printf("RefreshEngine: Writing updated zone %s to file %s", zd.ZoneName, zd.Zonefile)
+									lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
 									_, err := zd.WriteFile(zd.Zonefile)
 									if err != nil {
-										log.Printf("RefreshEngine: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+										lgEngine.Warn("failed to write zone file", "zone", zd.ZoneName, "error", err)
 									}
 								}
 							}
@@ -255,8 +253,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// Force typically means "config reload-zones", so we want to notify even if unchanged
 							if updated || force {
 								if len(zd.Downstreams) > 0 {
-									log.Printf("RefreshEngine: Zone %s refreshed (updated=%v, forced=%v), sending NOTIFY to %d downstreams",
-										zd.ZoneName, updated, force, len(zd.Downstreams))
+									lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Downstreams))
 									conf.Internal.NotifyQ <- NotifyRequest{
 										ZoneName: zd.ZoneName,
 										ZoneData: zd,
@@ -270,19 +267,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// Parse catalog zones after EVERY successful refresh (updated or not)
 							// This ensures membership is populated even if zone file hasn't changed
 							if zd.Options[OptCatalogZone] {
-								log.Printf("CATALOG: RefreshEngine: Zone %s is a catalog zone, parsing member zones (updated=%v)", zone, updated)
+								lgEngine.Info("parsing catalog zone member zones", "zone", zone, "updated", updated)
 								catalogUpdate, err := ParseCatalogZone(zd)
 								if err != nil {
-									log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
+									lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
 								} else {
-									log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)",
-										zone, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
+									lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
 
 									// Notify all registered callbacks
 									if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
-										log.Printf("CATALOG: RefreshEngine: ERROR notifying catalog zone callbacks: %v", err)
+										lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
 									} else {
-										log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
+										lgEngine.Debug("notified catalog zone callbacks")
 									}
 
 									// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
@@ -290,11 +286,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 										defer func() {
 											if r := recover(); r != nil {
-												log.Printf("CATALOG: RefreshEngine: PANIC in auto-configure goroutine: %v", r)
+												lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
 											}
 										}()
 										if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-											log.Printf("CATALOG: RefreshEngine: ERROR auto-configuring zones: %v", err)
+											lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
 										}
 									}(catalogUpdate, conf, ctx)
 								}
@@ -303,7 +299,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}(zd, zone, zr.Force, conf)
 
 				} else {
-					log.Printf("***** RefreshEngine: adding the new zone '%s'", zone)
+					lgEngine.Info("adding new zone", "zone", zone)
 					// XXX: We want to do this in parallel
 					// go func() {
 					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
@@ -325,12 +321,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						SyncQ:           conf.Internal.SyncQ,
 						Data:            cmap.New[OwnerData](),
 						KeyDB:           conf.Internal.KeyDB,
-					FirstZoneLoad:   true,
+						FirstZoneLoad:   true,
 					}
 
 					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
 					if err != nil {
-						log.Printf("RefreshEngine: Error from zone refresh(%s): %v", zone, err)
+						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
 						zd.LatestError = time.Now()
 						continue // cannot do much else
@@ -339,7 +335,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 					refresh, err := FindSoaRefresh(zd)
 					if err != nil {
-						log.Printf("Error from FindSoaRefresh(%s): %v", zone, err)
+						lgEngine.Error("FindSoaRefresh failed", "zone", zone, "error", err)
 					}
 
 					refreshCounters.Set(zone, &RefreshCounter{
@@ -355,19 +351,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 					// Check if this is a catalog zone and parse it (for new zones)
 					if zd.Options[OptCatalogZone] {
-						log.Printf("CATALOG: RefreshEngine: New zone %s is a catalog zone, parsing member zones", zone)
+						lgEngine.Info("new zone is a catalog zone, parsing member zones", "zone", zone)
 						catalogUpdate, err := ParseCatalogZone(zd)
 						if err != nil {
-							log.Printf("CATALOG: RefreshEngine: ERROR parsing catalog zone %s: %v", zone, err)
+							lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
 						} else {
-							log.Printf("CATALOG: RefreshEngine: Successfully parsed catalog zone %s: %d member zones found (serial: %d)",
-								zone, len(catalogUpdate.MemberZones), catalogUpdate.Serial)
+							lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
 
 							// Notify all registered callbacks
 							if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
-								log.Printf("CATALOG: RefreshEngine: ERROR notifying catalog zone callbacks: %v", err)
+								lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
 							} else {
-								log.Printf("CATALOG: RefreshEngine: Successfully notified catalog zone callbacks")
+								lgEngine.Debug("notified catalog zone callbacks")
 							}
 
 							// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
@@ -375,11 +370,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
 								defer func() {
 									if r := recover(); r != nil {
-										log.Printf("CATALOG: RefreshEngine: PANIC in auto-configure goroutine: %v", r)
+										lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
 									}
 								}()
 								if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-									log.Printf("CATALOG: RefreshEngine: ERROR auto-configuring zones: %v", err)
+									lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
 								}
 							}(catalogUpdate, conf, ctx)
 						}
@@ -391,7 +386,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if Globals.App.Type != AppTypeAgent {
 						err = zd.SetupZoneSigning(conf.Internal.ResignQ)
 						if err != nil {
-							log.Printf("Error from SetupZoneSigning(%s): %v", zone, err)
+							lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
 						}
 					}
 
@@ -399,7 +394,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// config should cause any specific changes to the zone data to be made.
 					err = zd.SetupZoneSync(conf.Internal.DelegationSyncQ)
 					if err != nil {
-						log.Printf("Error from SetupZoneSync(%s): %v", zone, err)
+						lgEngine.Error("SetupZoneSync failed", "zone", zone, "error", err)
 					}
 
 					if updated {
@@ -410,8 +405,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						if resetSoaSerial {
 							zd.CurrentSerial = uint32(time.Now().Unix())
-							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-								zone, zd.CurrentSerial)
+							lgEngine.Info("zone updated from upstream, resetting serial to unixtime", "zone", zone, "serial", zd.CurrentSerial)
 						}
 						zd.NotifyDownstreams()
 					}
@@ -433,17 +427,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				if rc.CurRefresh <= 0 {
 					upstream = rc.Upstream
 
-					log.Printf("RefreshEngine: will refresh zone %s due to refresh counter", zone)
+					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)
 					if zd.Error {
-						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not refreshing.", zone, zd.ErrorMsg)
+						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "error", zd.ErrorMsg)
 						continue
 					}
 					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, conf)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
-						log.Printf("RefreshEngine: Error from zd.Refresh(%s): %v", zone, err)
+						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
 						zd.LatestError = time.Now()
 					} else if updated {
@@ -453,8 +447,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						if resetSoaSerial {
 							zd.CurrentSerial = uint32(time.Now().Unix())
-							log.Printf("RefreshEngine: %s updated from upstream. Resetting serial to unixtime: %d",
-								zone, zd.CurrentSerial)
+							lgEngine.Info("zone updated from upstream, resetting serial to unixtime", "zone", zone, "serial", zd.CurrentSerial)
 
 						}
 					}
@@ -469,21 +462,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// Auto-configured catalog member zone
 							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
 							if err != nil {
-								log.Printf("DYNAMIC-ZONES: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+								lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
 								// Don't fail the operation, just log the warning
 							}
 
 							// Update dynamic config file (zone file path may have changed, or this is first write)
 							if err := conf.AddDynamicZoneToConfig(zd); err != nil {
-								log.Printf("DYNAMIC-ZONES: Warning: Failed to update dynamic config file for %s: %v", zd.ZoneName, err)
+								lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
 								// Don't fail the operation, just log the warning
 							}
 						} else if zd.Zonefile != "" {
 							// Regular zone with zonefile configured (typically secondary zones)
-							log.Printf("RefreshEngine: Writing updated zone %s to file %s", zd.ZoneName, zd.Zonefile)
+							lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
 							_, err := zd.WriteFile(zd.Zonefile)
 							if err != nil {
-								log.Printf("RefreshEngine: Warning: Failed to write zone file for %s: %v", zd.ZoneName, err)
+								lgEngine.Warn("failed to write zone file", "zone", zd.ZoneName, "error", err)
 							}
 						}
 					}
@@ -492,7 +485,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 		case bd, ok := <-bumpch:
 			if !ok {
-				log.Printf("RefreshEngine: terminating due to bumpch closed")
+				lgEngine.Info("refresh engine terminating", "reason", "bumpch closed")
 				ticker.Stop()
 				return
 			}
@@ -502,10 +495,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
 					if zd.Error {
-						log.Printf("RefreshEngine: Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
+						lgEngine.Warn("zone in error state, not bumping serial", "zone", zone, "error", zd.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
-						log.Print(resp.ErrorMsg)
+						lgEngine.Warn(resp.ErrorMsg)
 						// do not bump serial when in error state
 						if bd.Result != nil {
 							select {
@@ -519,13 +512,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if err != nil {
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Error bumping SOA serial for zone '%s': %v", zone, err)
-						log.Print(resp.ErrorMsg)
+						lgEngine.Error("failed to bump SOA serial", "zone", zone, "error", err)
 					}
-					log.Printf("RefreshEngine: bumping SOA serial for known zone '%s'", zone)
+					lgEngine.Debug("bumping SOA serial", "zone", zone)
 				} else {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Request to bump serial for unknown zone '%s'", zone)
-					log.Print(resp.ErrorMsg)
+					lgEngine.Warn("request to bump serial for unknown zone", "zone", zone)
 				}
 			}
 			if bd.Result != nil {

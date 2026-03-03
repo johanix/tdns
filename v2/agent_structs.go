@@ -324,22 +324,30 @@ type AgentDebugPost struct {
 	Data    ZoneUpdate
 }
 
+// KeystateInfo reports the health of the KEYSTATE exchange with the signer for a zone.
+type KeystateInfo struct {
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 type AgentMgmtResponse struct {
-	Identity      AgentId
-	Status        string
-	Time          time.Time
-	Agents        []*Agent // used for hsync-agentstatus
-	ZoneAgentData *ZoneAgentData
-	HsyncRRs      []string
-	AgentConfig   LocalAgentConf
-	RfiType       string
-	RfiResponse   map[AgentId]*RfiData
-	AgentRegistry *AgentRegistry
-	ZoneDataRepo  map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
-	Msg           string
-	Error         bool
-	ErrorMsg      string
-	Data          interface{} `json:"data,omitempty"` // Generic data field for custom responses
+	Identity       AgentId
+	Status         string
+	Time           time.Time
+	Agents         []*Agent // used for hsync-agentstatus
+	ZoneAgentData  *ZoneAgentData
+	HsyncRRs       []string
+	AgentConfig    LocalAgentConf
+	RfiType        string
+	RfiResponse    map[AgentId]*RfiData
+	AgentRegistry  *AgentRegistry
+	ZoneDataRepo   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
+	KeystateStatus map[ZoneName]KeystateInfo `json:"keystate_status,omitempty"`
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	Data           interface{} `json:"data,omitempty"` // Generic data field for custom responses
 
 	// HSYNC debug data (Phase 5)
 	HsyncPeers         []*HsyncPeerInfo         `json:"hsync_peers,omitempty"`

@@ -149,7 +149,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 
 	logfile := viper.GetString("log.file")
-	err = SetupLogging(logfile)
+	err = SetupLogging(logfile, Conf.Log)
 	if err != nil {
 		return fmt.Errorf("error setting up logging: %v", err)
 	}
@@ -738,7 +738,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 					log.Printf("StartCombiner: Skipping approved edit #%d for unknown zone %s", rec.EditID, rec.Zone)
 					continue
 				}
-				if err := zd.AddCombinerDataNG(rec.SenderID, rec.Records); err != nil {
+				if _, err := zd.AddCombinerDataNG(rec.SenderID, rec.Records); err != nil {
 					log.Printf("StartCombiner: Failed to rebuild edit #%d for zone %s: %v", rec.EditID, rec.Zone, err)
 					continue
 				}

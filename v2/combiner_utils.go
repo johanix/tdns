@@ -100,7 +100,7 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 // A local change must not delete or modify an RR contributed by a remote agent,
 // and vice versa. The per-agent storage in AgentContributions already provides
 // structural isolation; policy enforcement needs to happen at the RR level.
-func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRset) error {
+func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRset) (bool, error) {
 	if zd.CombinerData == nil {
 		var m = cmap.New[OwnerData]()
 		zd.CombinerData = &m
@@ -121,6 +121,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	// Merge this agent's contributions into existing data (accumulate, don't replace).
 	// Each sync may carry only a delta, so we must add new RRs to any existing
 	// contribution from the same agent rather than overwriting.
+	changed := false
 	for owner, rrsets := range data {
 		if zd.AgentContributions[senderID][owner] == nil {
 			zd.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
@@ -134,14 +135,23 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 			if !ok {
 				// First contribution for this agent/owner/rrtype
 				zd.AgentContributions[senderID][owner][rrtype] = rrset
+				changed = true
 			} else {
 				// Merge: add new RRs (deduplicated) into the existing contribution
 				for _, rr := range rrset.RRs {
+					prevLen := len(existing.RRs)
 					existing.Add(rr)
+					if len(existing.RRs) > prevLen {
+						changed = true
+					}
 				}
 				zd.AgentContributions[senderID][owner][rrtype] = existing
 			}
 		}
+	}
+
+	if !changed {
+		return false, nil
 	}
 
 	// Rebuild CombinerData by merging contributions from ALL agents
@@ -149,7 +159,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 
 	modified, err := zd.CombineWithLocalChanges()
 	if err != nil {
-		return err
+		return changed, err
 	}
 	if modified {
 		zd.Logger.Printf("AddCombinerData: Zone %q: Local changes applied immediately (from %s)", zd.ZoneName, senderID)
@@ -160,7 +170,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 		zd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
-	return nil
+	return true, nil
 }
 
 // rebuildCombinerData merges all per-agent contributions into CombinerData.
@@ -265,7 +275,7 @@ func (zd *ZoneData) GetCombinerData() (map[string][]core.RRset, error) {
 // AddCombinerDataNG adds or updates local RRsets for the zone from a specific agent.
 // The input map keys are owner names and values are slices of RR strings.
 // senderID identifies the contributing agent (use "" for CLI-originated data).
-func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string) error {
+func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string) (bool, error) {
 	// Convert string RRs to dns.RR objects and group them into RRsets
 	rrsetData := make(map[string][]core.RRset)
 	for owner, rrStrings := range data {
@@ -273,7 +283,7 @@ func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string)
 		for _, rrString := range rrStrings {
 			rr, err := dns.NewRR(rrString)
 			if err != nil {
-				return fmt.Errorf("error parsing RR string %q: %v", rrString, err)
+				return false, fmt.Errorf("error parsing RR string %q: %v", rrString, err)
 			}
 			rrs = append(rrs, rr)
 		}
@@ -349,16 +359,11 @@ func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
 
 // RemoveCombinerDataNG removes specific RRs from the agent's contributions.
 // Input: senderID identifies the agent, data maps owner → RR strings (ClassINET format).
-// Returns the list of RR strings that were actually removed (idempotent: if an RR
-// was already absent, it is still reported as "removed").
+// Returns the list of RR strings that were actually removed. If an RR was already
+// absent, it is not included in the returned list (true no-op detection).
 func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]string) ([]string, error) {
 	if zd.AgentContributions == nil {
-		// Nothing to remove — but report success (idempotent)
-		var removed []string
-		for _, rrStrings := range data {
-			removed = append(removed, rrStrings...)
-		}
-		return removed, nil
+		return nil, nil
 	}
 
 	if senderID == "" {
@@ -367,12 +372,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 
 	agentData, ok := zd.AgentContributions[senderID]
 	if !ok {
-		// Agent has no contributions — idempotent success
-		var removed []string
-		for _, rrStrings := range data {
-			removed = append(removed, rrStrings...)
-		}
-		return removed, nil
+		return nil, nil
 	}
 
 	var removedRecords []string
@@ -380,8 +380,6 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	for owner, rrStrings := range data {
 		ownerMap, ok := agentData[owner]
 		if !ok {
-			// Owner has no contributions — idempotent success
-			removedRecords = append(removedRecords, rrStrings...)
 			continue
 		}
 
@@ -395,8 +393,6 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 			rrtype := rr.Header().Rrtype
 			existing, ok := ownerMap[rrtype]
 			if !ok {
-				// RRtype has no contributions — idempotent success
-				removedRecords = append(removedRecords, rrStr)
 				continue
 			}
 
@@ -411,8 +407,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 				kept = append(kept, existingRR)
 			}
 
-			if found || !found {
-				// Idempotent: report as removed even if not found
+			if found {
 				removedRecords = append(removedRecords, rrStr)
 			}
 
@@ -428,6 +423,10 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 		if len(ownerMap) == 0 {
 			delete(agentData, owner)
 		}
+	}
+
+	if len(removedRecords) == 0 {
+		return nil, nil
 	}
 
 	// Rebuild merged CombinerData and apply to zone

@@ -8,12 +8,13 @@ package tdns
 
 import (
 	"context"
-	"log"
 	"strings"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
+
+var lgHandler = Logger("handler")
 
 // ServerQueryHandler handles queries for qnames ending in ".server." with ClassCHAOS.
 // NOTE: This function is now optional. .server. queries are automatically handled
@@ -28,7 +29,7 @@ func ServerQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		return ErrNotHandled
 	}
 
-	log.Printf("DnsHandler: Qname is '%s', which is not a known zone, but likely a query for the .server CH tld", qname)
+	lgHandler.Debug("query for .server CH TLD", "qname", qname)
 	DotServerQnameResponse(qname, req.ResponseWriter, req.Msg)
 	return nil
 }
@@ -45,8 +46,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	w := req.ResponseWriter
 	msgoptions := req.Options
 
-	log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO)
-	log.Printf("Zone %s %s request from %s", qname, dns.TypeToString[qtype], w.RemoteAddr())
+	lgHandler.Debug("query received", "qname", qname, "opcode", dns.OpcodeToString[r.Opcode], "opcodeNum", r.Opcode, "DO", msgoptions.DO, "qtype", dns.TypeToString[qtype], "from", w.RemoteAddr())
 
 	// Check if this is a reporter app handling error channel queries (RFC9567)
 	if Globals.App.Type == AppTypeReporter {
@@ -54,7 +54,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 			edns0.ErrorChannelReporter(qname, qtype, w, r)
 			return nil
 		}
-		log.Printf("DnsHandler: Qname is %q, which is not the correct format for error channel reports (expected to start with '_er.').", qname)
+		lgHandler.Warn("bad error channel query format, expected '_er.' prefix", "qname", qname)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
@@ -64,8 +64,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	if zd, ok := Zones.Get(qname); ok {
 		if zd.Error {
 			if zd.ErrorType != RefreshError || zd.RefreshCount == 0 {
-				log.Printf("DnsHandler: Qname is %q, which is a known zone, but it is in %s error state: %s",
-					qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+				lgHandler.Warn("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeServerFailure)
 				w.WriteMsg(m)
@@ -73,10 +72,10 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 			}
 		}
 
-		log.Printf("DnsHandler: Qname is %q, which is a known zone.", qname)
+		lgHandler.Debug("query for known zone", "qname", qname)
 		err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
 		if err != nil {
-			log.Printf("Error in QueryResponder: %v", err)
+			lgHandler.Error("QueryResponder failed", "error", err)
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeServerFailure)
 			w.WriteMsg(m)
@@ -84,8 +83,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		return nil
 	}
 
-	log.Printf("DnsHandler: Qname is %q, which is not a known zone.", qname)
-	log.Printf("DnsHandler: known zones are: %v", Zones.Keys())
+	lgHandler.Debug("qname is not a known zone", "qname", qname, "knownZones", Zones.Keys())
 
 	// Let's see if we can find the zone
 	zd, folded := FindZone(qname)
@@ -97,11 +95,11 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		return nil
 	}
 
-	log.Printf("DnsHandler: query %q refers to zone %q", qname, zd.ZoneName)
+	lgHandler.Debug("query refers to zone", "qname", qname, "zone", zd.ZoneName)
 
-	log.Printf("DnsHandler: AppMode: \"%s\"", AppTypeToString[Globals.App.Type])
+	lgHandler.Debug("app mode check", "appMode", AppTypeToString[Globals.App.Type])
 	if Globals.App.Type == AppTypeAgent {
-		log.Printf("DnsHandler: Agent mode, not handling ordinary queries for zone %q", qname)
+		lgHandler.Debug("agent mode, refusing ordinary query", "qname", qname)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
@@ -120,8 +118,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	}
 
 	if zd.Error && zd.ErrorType != RefreshError {
-		log.Printf("DnsHandler: Qname is %q, which is belongs to a known zone (%q), but it is in %s error state: %s",
-			qname, zd.ZoneName, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+		lgHandler.Warn("zone in error state", "qname", qname, "zone", zd.ZoneName, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
@@ -129,7 +126,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	}
 
 	if zd.RefreshCount == 0 {
-		log.Printf("DnsHandler: Qname is %q, which belongs to a known zone (%q), but it has not been refreshed at least once yet", qname, zd.ZoneName)
+		lgHandler.Warn("zone not yet refreshed", "qname", qname, "zone", zd.ZoneName)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
@@ -138,7 +135,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 
 	err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
 	if err != nil {
-		log.Printf("Error in QueryResponder: %v", err)
+		lgHandler.Error("QueryResponder failed", "error", err)
 	}
 	return nil
 }
@@ -157,13 +154,9 @@ func RegisterDefaultQueryHandlers(conf *Config) error {
 		if err := RegisterQueryHandler(0, DefaultQueryHandler); err != nil {
 			return err
 		}
-		if Globals.Debug {
-			log.Printf("RegisterDefaultQueryHandlers: Registered default zone-based query handler")
-		}
+		lgHandler.Debug("registered default zone-based query handler")
 	} else {
-		if Globals.Debug {
-			log.Printf("RegisterDefaultQueryHandlers: No zones configured and not agent, skipping default query handler registration")
-		}
+		lgHandler.Debug("no zones configured and not agent, skipping default query handler registration")
 	}
 
 	return nil

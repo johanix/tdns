@@ -151,6 +151,75 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 	return differ, ds, nil
 }
 
+// LocalDnskeysFromKeystate derives local DNSKEY adds/removes from the KEYSTATE
+// inventory rather than from the zone transfer's DNSKEY RRset. The KEYSTATE
+// inventory (from the signer) is the authoritative source for which keys are
+// local vs foreign. Each inventory entry's KeyRR field contains the full DNSKEY
+// RR string, so we can build dns.RR objects directly.
+//
+// Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
+// returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
+func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
+	if zd.LastKeyInventory == nil {
+		zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: no KEYSTATE inventory available", zd.ZoneName)
+		return false, nil, nil
+	}
+
+	ds := &DnskeyStatus{
+		Time:     time.Now(),
+		ZoneName: zd.ZoneName,
+	}
+
+	// Extract local keys from the KEYSTATE inventory
+	var newLocalKeys []dns.RR
+	for _, entry := range zd.LastKeyInventory.Inventory {
+		if entry.State == DnskeyStateForeign {
+			continue
+		}
+		if entry.KeyRR == "" {
+			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: skipping key %d with empty KeyRR",
+				zd.ZoneName, entry.KeyTag)
+			continue
+		}
+		rr, err := dns.NewRR(entry.KeyRR)
+		if err != nil {
+			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: failed to parse KeyRR for key %d: %v",
+				zd.ZoneName, entry.KeyTag, err)
+			continue
+		}
+		newLocalKeys = append(newLocalKeys, rr)
+	}
+
+	oldLocalKeys := zd.LocalDNSKEYs
+
+	// Handle initial case (no previous local keys)
+	if len(oldLocalKeys) == 0 && len(newLocalKeys) == 0 {
+		return false, ds, nil
+	}
+	if len(oldLocalKeys) == 0 {
+		// First KEYSTATE — all local keys are adds
+		ds.LocalAdds = newLocalKeys
+		zd.LocalDNSKEYs = newLocalKeys
+		if len(ds.LocalAdds) > 0 {
+			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: initial KEYSTATE, %d local DNSKEYs",
+				zd.ZoneName, len(ds.LocalAdds))
+			return true, ds, nil
+		}
+		return false, ds, nil
+	}
+
+	differ, adds, removes := core.RRsetDiffer(zd.ZoneName, newLocalKeys, oldLocalKeys,
+		dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
+
+	ds.LocalAdds = adds
+	ds.LocalRemoves = removes
+	zd.LocalDNSKEYs = newLocalKeys
+
+	zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",
+		zd.ZoneName, differ, len(adds), len(removes))
+	return differ, ds, nil
+}
+
 // filterLocalDNSKEYs returns only the DNSKEY RRs whose key tag is NOT in remoteKeyTags.
 func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.RR {
 	if rrset == nil || len(rrset.RRs) == 0 {
@@ -171,27 +240,35 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 // for the inventory response. Uses the inventory to populate zd.RemoteDNSKEYs
 // by matching foreign key tags against the actual DNSKEY RRset in the zone.
 //
-// On timeout or error, falls back to empty RemoteDNSKEYs (conservative — treats
-// all keys as local, which is safe: worst case we send a DNSKEY update that
-// the combiner already has).
+// Sets zd.KeystateOK/KeystateError/KeystateTime to reflect success or failure.
+// KEYSTATE failure is an error condition — the agent depends on KEYSTATE for
+// DNSKEY classification and must not guess when it's unavailable.
 func (zd *ZoneData) RequestAndWaitForKeyInventory() {
+	zd.KeystateTime = time.Now()
+
 	tm := Conf.Internal.TransportManager
 	if tm == nil {
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: no TransportManager, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.KeystateOK = false
+		zd.KeystateError = "no TransportManager available"
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 		return
 	}
 
 	msgQs := Conf.Internal.MsgQs
 	if msgQs == nil || msgQs.KeystateInventory == nil {
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: no MsgQs/KeystateInventory channel, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.KeystateOK = false
+		zd.KeystateError = "no KeystateInventory channel available"
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 		return
 	}
 
 	// Send RFI KEYSTATE to signer
 	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: RFI KEYSTATE failed: %v, falling back to empty RemoteDNSKEYs", zd.ZoneName, err)
+		zd.KeystateOK = false
+		zd.KeystateError = fmt.Sprintf("RFI KEYSTATE send failed: %v", err)
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 		return
 	}
@@ -203,7 +280,9 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 	select {
 	case inv := <-msgQs.KeystateInventory:
 		if inv == nil || inv.Zone != zd.ZoneName {
-			zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received nil or mismatched inventory, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+			zd.KeystateOK = false
+			zd.KeystateError = "received nil or mismatched inventory from signer"
+			zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 			zd.RemoteDNSKEYs = nil
 			return
 		}
@@ -227,11 +306,15 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 		// Match foreign key tags against actual DNSKEYs in the zone
 		zd.RemoteDNSKEYs = zd.buildRemoteDNSKEYsFromTags(foreignKeyTags)
 
+		zd.KeystateOK = true
+		zd.KeystateError = ""
 		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
 			zd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(zd.RemoteDNSKEYs))
 
 	case <-timeout.C:
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: timeout waiting for inventory (15s), falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.KeystateOK = false
+		zd.KeystateError = "timeout waiting for signer response (15s)"
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 	}
 }

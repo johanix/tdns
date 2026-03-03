@@ -12,18 +12,19 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
 )
+
+var lgSigner = Logger("signer")
 
 // SignerMsgHandler consumes beat, hello, ping, and RFI messages from MsgQs.
 // Updates PeerRegistry liveness on beats and logs hello/ping messages.
 // Processes RFI KEYSTATE requests by querying KeyDB and pushing inventory.
 func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	if msgQs == nil {
-		log.Printf("SignerMsgHandler: No MsgQs configured, exiting")
+		lgSigner.Warn("No MsgQs configured, exiting")
 		return
 	}
 
@@ -33,12 +34,12 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		peerRegistry = tm.PeerRegistry
 	}
 
-	log.Printf("SignerMsgHandler: Starting (peerRegistry=%v)", peerRegistry != nil)
+	lgSigner.Info("Starting", "peerRegistry", peerRegistry != nil)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("SignerMsgHandler: Context cancelled, stopping")
+			lgSigner.Info("Context cancelled, stopping")
 			return
 
 		case report := <-msgQs.Beat:
@@ -46,8 +47,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("SignerMsgHandler: Beat from %s (interval=%d, distrib=%s)",
-				senderID, report.BeatInterval, report.DistributionID)
+			lgSigner.Debug("Beat received", "sender", senderID, "interval", report.BeatInterval, "distrib", report.DistributionID)
 
 			// Update PeerRegistry liveness
 			if peerRegistry != nil {
@@ -61,7 +61,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("SignerMsgHandler: Hello from %s", senderID)
+			lgSigner.Debug("Hello received", "sender", senderID)
 
 			// Update PeerRegistry on hello
 			if peerRegistry != nil {
@@ -73,27 +73,28 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			if report == nil {
 				continue
 			}
-			log.Printf("SignerMsgHandler: Ping from %s (distrib=%s)",
-				string(report.Identity), report.DistributionID)
+			lgSigner.Debug("Ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
 
 		case msg := <-msgQs.Msg:
 			if msg == nil {
 				continue
 			}
 			senderID := string(msg.OriginatorID)
+			if senderID == "" {
+				senderID = string(msg.DeliveredBy) // Fallback to transport sender
+			}
 			zone := string(msg.Zone)
 			rfiType := msg.RfiType
 
-			log.Printf("SignerMsgHandler: RFI %s from %s for zone %s", rfiType, senderID, zone)
+			lgSigner.Debug("RFI received", "type", rfiType, "sender", senderID, "zone", zone)
 
 			switch rfiType {
 			case "KEYSTATE":
 				if err := sendKeystateInventoryToAgent(conf, tm, senderID, zone); err != nil {
-					log.Printf("SignerMsgHandler: Failed to send KEYSTATE inventory to %s for zone %s: %v",
-						senderID, zone, err)
+					lgSigner.Error("Failed to send KEYSTATE inventory", "agent", senderID, "zone", zone, "err", err)
 				}
 			default:
-				log.Printf("SignerMsgHandler: Unknown RFI type %q from %s, ignoring", rfiType, senderID)
+				lgSigner.Warn("Unknown RFI type, ignoring", "type", rfiType, "sender", senderID)
 			}
 		}
 	}
@@ -113,7 +114,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 		return fmt.Errorf("GetKeyInventory failed: %w", err)
 	}
 
-	log.Printf("sendKeystateInventoryToAgent: Zone %s has %d keys in KeyDB", zone, len(items))
+	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
 
 	// Convert KeyInventoryItem → transport.KeyInventoryEntry
 	inventory := make([]transport.KeyInventoryEntry, len(items))
@@ -161,7 +162,6 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 		return fmt.Errorf("agent %s rejected inventory: %s", agentID, resp.Message)
 	}
 
-	log.Printf("sendKeystateInventoryToAgent: Sent %d-key inventory for zone %s to %s (accepted)",
-		len(inventory), zone, agentID)
+	lgSigner.Info("KEYSTATE inventory sent", "zone", zone, "agent", agentID, "keys", len(inventory))
 	return nil
 }

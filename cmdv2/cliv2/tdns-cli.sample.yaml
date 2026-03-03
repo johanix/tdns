@@ -43,3 +43,4 @@ keys:
 
 log:
    file:                /var/log/tdns/tdns-cli.log
+   level:               info    # default level: debug|info|warn|error

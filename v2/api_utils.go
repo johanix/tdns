@@ -6,7 +6,6 @@ package tdns
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -41,14 +40,13 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			tls = "TLS "
 		}
 
-		log.Printf("APIping: received %s/ping request from %s. app.Name: %s, Globals.AppName: %s",
-			tls, r.RemoteAddr, Globals.App.Name, Globals.App.Name)
+		lgApi.Debug("received ping request", "tls", tls != "", "from", r.RemoteAddr, "app", Globals.App.Name)
 
 		decoder := json.NewDecoder(r.Body)
 		var pp PingPost
 		err := decoder.Decode(&pp)
 		if err != nil {
-			log.Println("APIping: error decoding ping post:", err)
+			lgApi.Warn("error decoding ping request", "err", err)
 		}
 		pongs += 1
 		hostname, _ := os.Hostname()
@@ -77,18 +75,18 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 }
 
 func walkRoutes(router *mux.Router, address string) {
-	log.Printf("Defined API endpoints for router on: %s\n", address)
+	lgApi.Info("defined API endpoints", "address", address)
 
 	walker := func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		path, _ := route.GetPathTemplate()
 		methods, _ := route.GetMethods()
 		for m := range methods {
-			log.Printf("%-6s %s\n", methods[m], path)
+			lgApi.Debug("route", "method", methods[m], "path", path)
 		}
 		return nil
 	}
 	if err := router.Walk(walker); err != nil {
-		log.Panicf("Logging err: %s\n", err.Error())
+		lgApi.Error("failed to walk routes", "err", err)
+		panic(fmt.Sprintf("failed to walk routes: %s", err.Error()))
 	}
-	//	return nil
 }

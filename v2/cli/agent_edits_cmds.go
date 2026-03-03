@@ -174,7 +174,17 @@ func showDetailedZoneStatus(zone string) {
 						rrTypeName = fmt.Sprintf("TYPE%d", rrtype)
 					}
 
-					fmt.Printf("  %s (%d records):\n", rrTypeName, len(rrInfos))
+					// Flag KEYSTATE failure on DNSKEY summary line
+					if rrtype == dns.TypeDNSKEY {
+						if ksInfo, ok := amr.KeystateStatus[tdns.ZoneName(zone)]; ok && !ksInfo.OK {
+							fmt.Printf("  %s (%d records, WARNING: KEYSTATE exchange FAILED: %s):\n",
+								rrTypeName, len(rrInfos), ksInfo.Error)
+						} else {
+							fmt.Printf("  %s (%d records):\n", rrTypeName, len(rrInfos))
+						}
+					} else {
+						fmt.Printf("  %s (%d records):\n", rrTypeName, len(rrInfos))
+					}
 					for _, info := range rrInfos {
 						fmt.Printf("    %s\n", info.RR)
 						line := fmt.Sprintf("      State: %s", info.State)

@@ -32,10 +32,8 @@ type Config struct {
 	Keys           KeyConf
 	Db             DbConf
 	Registrars     map[string][]string
-	Log            struct {
-		File string `validate:"required"`
-	}
-	Agent *LocalAgentConf `yaml:"agent"`
+	Log            LogConf
+	Agent          *LocalAgentConf `yaml:"agent"`
 	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
 	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
@@ -109,6 +107,12 @@ type AppDetails struct {
 	Date             string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
+}
+
+type LogConf struct {
+	File       string            `yaml:"file" validate:"required"`
+	Level      string            `yaml:"level"`      // "debug"|"info"|"warn"|"error"; default "info"
+	Subsystems map[string]string `yaml:"subsystems"` // per-subsystem level overrides
 }
 
 type ServiceConf struct {

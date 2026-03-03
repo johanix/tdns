@@ -257,6 +257,18 @@ Modes:
 
 		zone := tdns.ZoneName(tdns.Globals.Zonename)
 
+		// Refresh key inventory from signer before resync
+		fmt.Printf("Refreshing key inventory for zone %s...\n", zone)
+		keyReq := &tdns.AgentMgmtPost{Command: "refresh-keys", Zone: zone}
+		keyResp, err := SendAgentMgmtCmd(keyReq, "peer")
+		if err != nil {
+			fmt.Printf("Warning: failed to refresh key inventory: %v\n", err)
+		} else if keyResp.Error {
+			fmt.Printf("Warning: key inventory refresh failed: %s\n", keyResp.ErrorMsg)
+		} else {
+			fmt.Printf("%s\n", keyResp.Msg)
+		}
+
 		// Push: re-send local data to combiner and remote agents
 		if resyncPush || resyncFull {
 			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
