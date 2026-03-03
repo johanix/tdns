@@ -7,7 +7,6 @@ package tdns
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -19,7 +18,7 @@ func (tx *Tx) Commit() error {
 	err := tx.Tx.Commit()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
-		log.Printf("<--- Error committing KeyDB transaction (%s): %v", tx.context, err)
+		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
 	}
 	return err
 }
@@ -29,7 +28,7 @@ func (tx *Tx) Rollback() error {
 	err := tx.Tx.Rollback()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
-		log.Printf("<--- Error rolling back KeyDB transaction (%s): %v", tx.context, err)
+		lgConfig.Error("error rolling back KeyDB transaction", "context", tx.context, "err", err)
 	}
 	return err
 }
@@ -38,7 +37,7 @@ func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 	// log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
 	result, err := tx.Tx.Exec(query, args...)
 	if err != nil {
-		log.Printf("<--- Error executing KeyDB Exec (%s): %v", tx.context, err)
+		lgConfig.Error("error executing KeyDB Exec", "context", tx.context, "err", err)
 	}
 	return result, err
 }
@@ -47,7 +46,7 @@ func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	// log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
 	rows, err := tx.Tx.Query(query, args...)
 	if err != nil {
-		log.Printf("<--- Error executing KeyDB query (%s): %v", tx.context, err)
+		lgConfig.Error("error executing KeyDB query", "context", tx.context, "err", err)
 	}
 	return rows, err
 }
@@ -64,13 +63,13 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
 	if db.Ctx != "" {
-		log.Printf("<--- Error: KeyDB transaction already in progress: %s", db.Ctx)
+		lgConfig.Error("KeyDB transaction already in progress", "context", db.Ctx)
 		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
 	}
 	db.Ctx = context
 	tx, err := db.DB.Begin()
 	if err != nil {
-		log.Printf("Error beginning transaction (%s): %v", context, err)
+		lgConfig.Error("error beginning transaction", "context", context, "err", err)
 		return nil, err
 	}
 	return &Tx{Tx: tx, KeyDB: db, context: context}, nil
@@ -96,18 +95,16 @@ func (db *KeyDB) Close() error {
 // It prepares and executes each table schema; prepare errors are logged and execution errors call log.Fatalf (terminating the process).
 // If Globals.Verbose is true, progress is logged. It always returns false.
 func dbSetupTables(db *sql.DB) bool {
-	if Globals.Verbose {
-		log.Printf("Setting up missing tables\n")
-	}
+	lgConfig.Debug("setting up missing tables")
 
 	for t, s := range DefaultTables {
 		stmt, err := db.Prepare(s)
 		if err != nil {
-			log.Printf("dbSetupTables: Error from %s schema \"%s\": %v\n", t, s, err)
+			lgConfig.Error("error from schema prepare", "table", t, "schema", s, "err", err)
 		}
 		_, err = stmt.Exec()
 		if err != nil {
-			log.Fatalf("Failed to set up db schema: %s. Error: %v", s, err)
+			Fatal("failed to set up db schema", "schema", s, "err", err)
 		}
 	}
 
@@ -133,9 +130,9 @@ func dbMigrateSchema(db *sql.DB) {
 		}
 		_, err := db.Exec(m.ddl)
 		if err != nil {
-			log.Printf("dbMigrateSchema: failed to add column %s.%s: %v", m.table, m.column, err)
+			lgConfig.Error("failed to add column in schema migration", "table", m.table, "column", m.column, "err", err)
 		} else {
-			log.Printf("dbMigrateSchema: added column %s.%s", m.table, m.column)
+			lgConfig.Info("added column in schema migration", "table", m.table, "column", m.column)
 		}
 	}
 }
@@ -173,9 +170,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	if dbfile == "" {
 		return nil, fmt.Errorf("error: DB filename unspecified")
 	}
-	if Globals.Verbose {
-		log.Printf("NewKeyDB: TDNS using sqlite db in file %s\n", dbfile)
-	}
+	lgConfig.Debug("opening TDNS sqlite db", "file", dbfile)
 	if err := os.Chmod(dbfile, 0664); err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}

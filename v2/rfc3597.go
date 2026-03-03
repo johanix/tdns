@@ -6,7 +6,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 
@@ -46,11 +45,11 @@ func xxxParentZone(z, imr string) (string, error) {
 				}
 			}
 
-			log.Printf("ParentZone: ERROR: Failed to locate parent of '%s' via Answer and Authority. Now guessing.", z)
+			lgHandler.Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
 			return upone, fmt.Errorf("failed to located parent of '%s' via Answer and Authority", z)
 		}
 	}
-	log.Printf("ParentZone: had difficulties splitting zone '%s'\n", z)
+	lgHandler.Error("had difficulties splitting zone", "zone", z)
 	return z, fmt.Errorf("failed to split zone name '%s' into labels", z)
 }
 
@@ -80,7 +79,7 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 				}
 			}
 			// If we got an answer but no SOA, the response is broken
-			log.Printf("ParentZone: ERROR: Received answer for '%s' SOA query but no SOA record found. Response is broken.", upone)
+			lgHandler.Error("received answer for SOA query but no SOA record found", "zone", upone)
 			return "", fmt.Errorf("received answer for '%s' SOA query but no SOA record found", upone)
 		}
 
@@ -112,10 +111,10 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 			}
 		}
 
-		log.Printf("ParentZone: ERROR: Failed to locate parent of '%s' via Answer and Authority. Now guessing.", z)
+		lgHandler.Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
 		return upone, fmt.Errorf("failed to locate parent of '%s' via Answer and Authority", z)
 	}
-	log.Printf("ParentZone: had difficulties splitting zone '%s'\n", z)
+	lgHandler.Error("had difficulties splitting zone", "zone", z)
 	return z, fmt.Errorf("failed to split zone name '%s' into labels", z)
 }
 

@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	// "github.com/gookit/goutil/dump"
@@ -49,7 +48,7 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 	dnsupdateq := conf.Internal.DnsUpdateQ
 	updateq := conf.Internal.UpdateQ
 
-	log.Printf("*** DnsUpdateResponderEngine: starting")
+	lgHandler.Info("DnsUpdateResponderEngine starting")
 
 	//	var wg sync.WaitGroup
 	//	wg.Add(1)
@@ -58,16 +57,16 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("DnsUpdateResponderEngine: context cancelled")
+			lgHandler.Info("DnsUpdateResponderEngine: context cancelled")
 			return nil
 		case dhr, ok := <-dnsupdateq:
 			if !ok {
-				log.Println("DnsUpdateResponderEngine: dnsupdateq closed")
+				lgHandler.Info("DnsUpdateResponderEngine: dnsupdateq closed")
 				return nil
 			}
 			err := UpdateResponder(&dhr, updateq)
 			if err != nil {
-				log.Printf("Error from UpdateResponder: %v", err)
+				lgHandler.Error("error from UpdateResponder", "err", err)
 			}
 		}
 	}
@@ -82,20 +81,19 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	m.SetReply(r)
 	var opt *dns.OPT
 
-	log.Printf("UpdateResponder: Received UPDATE for zone '%s' with %d RRs in the update section and %d RRs in the additional section",
-		qname, len(r.Ns), len(r.Extra))
+	lgHandler.Info("received UPDATE", "zone", qname, "updateRRs", len(r.Ns), "additionalRRs", len(r.Extra))
 
 	if len(r.Ns) > 0 {
-		log.Printf("UpdateResponder: Update section contains %d RRs", len(r.Ns))
+		lgHandler.Debug("update section RRs", "count", len(r.Ns))
 		//		for _, rr := range r.Ns {
 		//			log.Printf("UpdateResponder: Update RR: %s", rr.String())
 		//		}
-		log.Printf("Update contains:\n%s", SprintUpdates(r.Ns))
+		lgHandler.Debug("update contents", "updates", SprintUpdates(r.Ns))
 	}
 	if len(r.Extra) > 0 {
-		log.Printf("UpdateResponder: Additional section contains %d RRs", len(r.Extra))
+		lgHandler.Debug("additional section RRs", "count", len(r.Extra))
 		for _, rr := range r.Extra {
-			log.Printf("UpdateResponder: Additional RR: %s", rr.String())
+			lgHandler.Debug("additional RR", "rr", rr.String())
 			if rr.Header().Rrtype == dns.TypeOPT {
 				opt = new(dns.OPT)
 				opt.Hdr.Name = "."
@@ -123,7 +121,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// Let's see if we can find the zone
 	zd, _ := FindZone(qname)
 	if zd == nil {
-		log.Printf("UpdateResponder: zone %s not found", qname)
+		lgHandler.Warn("zone not found", "qname", qname)
 		m.SetRcode(r, dns.RcodeRefused)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
@@ -131,7 +129,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	}
 
 	if zd.Error {
-		log.Printf("UpdateResponder: zone %s is in %s error state: %s", qname, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+		lgHandler.Error("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "errorMsg", zd.ErrorMsg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
@@ -142,7 +140,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// dump.P(zd.UpdatePolicy)
 
 	if zd.Options[OptFrozen] {
-		log.Printf("UpdateResponder: zone %s is frozen (i.e. updates not possible). Ignoring update for owner=%s", zd.ZoneName, qname)
+		lgHandler.Warn("zone is frozen, ignoring update", "zone", zd.ZoneName, "owner", qname)
 		m.SetRcode(r, dns.RcodeRefused)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneFrozen)
 		w.WriteMsg(m)
@@ -151,15 +149,14 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	// isdel := false
 
-	log.Printf("UpdateResponder: zone %s: qname %s. Setting update type.", zd.ZoneName, qname)
+	lgHandler.Debug("setting update type", "zone", zd.ZoneName, "qname", qname)
 	// 1. Is qname the apex of this zone?
 	if qname == zd.ZoneName {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the apex of this zone",
 			zd.ZoneName, qname)
 		if !zd.Options[OptAllowUpdates] {
-			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
-				zd.ZoneName, qname)
+			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
 			m.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
@@ -182,8 +179,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		default:
 			dur.Status.Type = "CHILD-UPDATE"
 			if !zd.Options[OptAllowChildUpdates] {
-				log.Printf("UpdateResponder: zone %s does not allow child updates like %s. Ignoring update.",
-					zd.ZoneName, qname)
+				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
 				m.SetRcode(r, dns.RcodeRefused)
 				w.WriteMsg(m)
 				return nil
@@ -196,8 +192,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
 		if !zd.Options[OptAllowUpdates] {
-			log.Printf("UpdateResponder: zone %s does not allow updates to auth data %s. Ignoring update.",
-				zd.ZoneName, qname)
+			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
 			m.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
@@ -240,13 +235,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	//	log.Printf("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
 	//		isdel, rcode, validated, trusted, signername)
-	log.Printf("UpdateResponder: %+v %+v %+v %+v %+v", dur.Status.Type, dur.Status.ValidationRcode, dur.Status.Validated, dur.Status.ValidatedByTrustedKey, dur.Status.SignerName)
+	lgHandler.Info("update status", "type", dur.Status.Type, "rcode", dur.Status.ValidationRcode, "validated", dur.Status.Validated, "trusted", dur.Status.ValidatedByTrustedKey, "signer", dur.Status.SignerName)
 	// send response
 	m = m.SetRcode(m, int(dur.Status.ValidationRcode))
 	w.WriteMsg(m)
 
 	if dur.Status.ValidationRcode != dns.RcodeSuccess {
-		log.Printf("Error verifying DNS UPDATE. Most likely ignoring contents.")
+		lgHandler.Error("error verifying DNS UPDATE, most likely ignoring contents")
 		// Let's not return here, this could be an unvalidated key upload.
 	}
 
@@ -262,14 +257,14 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		dur.Status.Type = "TRUSTSTORE-UPDATE"
 	}
 	if err != nil {
-		log.Printf("Error from ApproveUpdate: %v. Ignoring update.", err)
+		lgHandler.Error("error from ApproveUpdate, ignoring update", "err", err)
 		return err
 	}
 
 	// dump.P(dur.Status.Type)
 
 	if !dur.Status.Approved {
-		log.Printf("DnsEngine: ApproveUpdate rejected the update. Ignored.")
+		lgHandler.Warn("ApproveUpdate rejected the update, ignored")
 		return nil
 	}
 
@@ -280,7 +275,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	}
 
 	// dump.P(dur.Status)
-	log.Printf("UpdateResponder: cmd=%s zone=%s validated=%v trusted=%v", dur.Status.Type, zone, dur.Status.Validated, dur.Status.ValidatedByTrustedKey)
+	lgHandler.Info("update queued for zone update", "cmd", dur.Status.Type, "zone", zone, "validated", dur.Status.Validated, "trusted", dur.Status.ValidatedByTrustedKey)
 
 	// send into suitable channel for pending updates
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
@@ -320,8 +315,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	if us.ValidationRcode != dns.RcodeSuccess || !us.Validated {
 		un = "un"
 	}
-	log.Printf("Analysing %svalidated update using policy type %s with allowed RR types %v",
-		un, zd.UpdatePolicy.Child.Type, zd.UpdatePolicy.Child.RRtypes)
+	lgHandler.Info("analysing child update", "validated", un == "", "policyType", zd.UpdatePolicy.Child.Type, "allowedRRtypes", zd.UpdatePolicy.Child.RRtypes)
 
 	unvalidatedKeyUpload := false
 	for i := 0; i <= len(r.Ns)-1; i++ {
@@ -335,9 +329,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// 2. Single RR in Update section, which is a KEY
 		// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 		// 4. Name of key must be == existing delegation
-		log.Printf("ApproveChildUpdate: rrtype=%s keybootstrap=%s class=%s len(r.Ns)=%d",
-			dns.TypeToString[rrtype], zd.UpdatePolicy.Child.KeyBootstrap,
-			dns.ClassToString[rrclass], len(r.Ns))
+		lgHandler.Debug("ApproveChildUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "keyBootstrap", zd.UpdatePolicy.Child.KeyBootstrap, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
 		if !us.ValidatedByTrustedKey {
 			// If the update is not trusted (i.e. validated against a trusted key) it should be
@@ -345,20 +337,19 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 			if rrtype != dns.TypeKEY {
 				us.Approved = false
-				us.Log("ApproveChildUpdate: update of %s RRset rejected (signed by an untrusted key)",
-					dns.TypeToString[rrtype])
+				us.Log("child update rejected: signed by untrusted key", "rrtype", dns.TypeToString[rrtype])
 				return false, false, nil
 			}
 
 			if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 				us.Approved = false
-				us.Log("ApproveChildUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)")
+				us.Log("child update rejected: KEY delete signed by untrusted key")
 				return false, false, nil
 			}
 
 			if len(r.Ns) != 1 {
 				us.Approved = false
-				us.Log("ApproveChildUpdate: update of KEY RRset rejected (only a single KEY record allowed to be added by untrusted key)")
+				us.Log("child update rejected: only a single KEY record allowed from untrusted key")
 				return false, false, nil
 			}
 
@@ -367,12 +358,12 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 				for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
 					if bootstrap == "strict-manual" {
 						us.Approved = false
-						log.Printf("ApproveChildUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
+						lgHandler.Warn("keybootstrap=strict-manual prohibits unvalidated KEY upload")
 						return false, false, nil
 					}
 				}
 				// XXX: I think we should require that this KEY upload is self-signed.
-				log.Printf("ApproveChildUpdate: update approved (unvalidated KEY upload)")
+				lgHandler.Info("child update approved: unvalidated KEY upload")
 				unvalidatedKeyUpload = true
 			}
 		}
@@ -380,20 +371,19 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// Past the unvalidated key upload; from here update MUST be validated
 		if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
 			us.Approved = false
-			log.Printf("ApproveUpdate: update rejected (signature did not validate)")
+			lgHandler.Warn("update rejected: signature did not validate")
 			return false, false, nil
 		}
 
 		if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
 			us.Approved = false
-			log.Printf("ApproveUpdate: update rejected (signature validated but key not trusted)")
+			lgHandler.Warn("update rejected: signature validated but key not trusted")
 			return false, false, nil
 		}
 
 		if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
 			us.Approved = false
-			log.Printf("ApproveUpdate: update rejected (unapproved RR type: %s)",
-				dns.TypeToString[rr.Header().Rrtype])
+			lgHandler.Warn("update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 			return false, false, nil
 		}
 
@@ -401,35 +391,33 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		case "selfsub":
 			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 				us.Approved = false
-				log.Printf("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
-					rr.Header().Name, us.SignerName)
+				lgHandler.Warn("update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
 
 		case "self":
 			if rr.Header().Name != us.SignerName {
 				us.Approved = false
-				log.Printf("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
-					rr.Header().Name, us.SignerName)
+				lgHandler.Warn("update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
 		default:
 			us.Approved = false
-			log.Printf("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Child.Type)
+			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Child.Type)
 			return false, false, nil
 		}
 
 		switch rrclass {
 		case dns.ClassNONE:
-			log.Printf("ApproveUpdate: Remove RR: %s", rr.String())
+			lgHandler.Debug("remove RR", "rr", rr.String())
 		case dns.ClassANY:
-			log.Printf("ApproveUpdate: Remove RRset: %s", rr.String())
+			lgHandler.Debug("remove RRset", "rr", rr.String())
 		default:
-			log.Printf("ApproveUpdate: Add RR: %s", rr.String())
+			lgHandler.Debug("add RR", "rr", rr.String())
 		}
 	}
 	us.Approved = true
-	log.Printf("ApproveUpdate: update approved")
+	lgHandler.Info("child update approved")
 	updateZone := !unvalidatedKeyUpload
 
 	return true, updateZone, nil
@@ -440,13 +428,13 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 	if us.ValidationRcode != dns.RcodeSuccess || !us.Validated {
 		us.Approved = false
-		log.Printf("ApproveUpdate: update rejected (signature did not validate)")
+		lgHandler.Warn("auth update rejected: signature did not validate")
 		return false, false, nil
 	}
 
 	if !us.ValidatedByTrustedKey {
 		us.Approved = false
-		log.Printf("ApproveUpdate: update rejected (signature validated but key not trusted)")
+		lgHandler.Warn("auth update rejected: signature validated but key not trusted")
 		return false, false, nil
 	}
 
@@ -454,21 +442,18 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 	for rrt := range zd.UpdatePolicy.Zone.RRtypes {
 		rrtypes = append(rrtypes, dns.TypeToString[rrt])
 	}
-	log.Printf("Analysing validated update using policy type %s with allowed RR types: %s",
-		zd.UpdatePolicy.Zone.Type, strings.Join(rrtypes, ", "))
+	lgHandler.Info("analysing auth update", "policyType", zd.UpdatePolicy.Zone.Type, "allowedRRtypes", strings.Join(rrtypes, ", "))
 
 	for i := 0; i <= len(r.Ns)-1; i++ {
 		rr := r.Ns[i]
 		rrtype := rr.Header().Rrtype
 		rrclass := rr.Header().Class
 
-		log.Printf("ApproveAuthUpdate: rrtype=%s class=%s len(r.Ns)=%d",
-			dns.TypeToString[rrtype], dns.ClassToString[rrclass], len(r.Ns))
+		lgHandler.Debug("ApproveAuthUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
 		if !zd.UpdatePolicy.Zone.RRtypes[rrtype] {
 			us.Approved = false
-			log.Printf("ApproveUpdate: update rejected (unapproved RR type: %s)",
-				dns.TypeToString[rr.Header().Rrtype])
+			lgHandler.Warn("auth update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 			return false, false, nil
 		}
 
@@ -476,50 +461,48 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 		case "selfsub":
 			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 				us.Approved = false
-				log.Printf("ApproveUpdate: update rejected (owner name %s outside selfsub %s tree)",
-					rr.Header().Name, us.SignerName)
+				lgHandler.Warn("auth update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
 
 		case "self":
 			if rr.Header().Name != us.SignerName {
 				us.Approved = false
-				log.Printf("ApproveUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
-					rr.Header().Name, us.SignerName)
+				lgHandler.Warn("auth update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
 
 		case "none":
 			us.Approved = false
-			log.Printf("ApproveUpdate: update rejected (policy type \"none\" disallows all updates)")
+			lgHandler.Warn("auth update rejected: policy type none disallows all updates")
 			return false, false, nil
 
 		default:
 			us.Approved = false
-			log.Printf("ApproveUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Zone.Type)
+			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Zone.Type)
 			return false, false, nil
 		}
 
 		switch rrclass {
 		case dns.ClassNONE:
-			log.Printf("ApproveUpdate: Remove RR: %s", rr.String())
+			lgHandler.Debug("remove RR", "rr", rr.String())
 		case dns.ClassANY:
-			log.Printf("ApproveUpdate: Remove RRset: %s", rr.String())
+			lgHandler.Debug("remove RRset", "rr", rr.String())
 		default:
-			log.Printf("ApproveUpdate: Add RR: %s", rr.String())
+			lgHandler.Debug("add RR", "rr", rr.String())
 		}
 	}
 	us.Approved = true
-	us.Log("ApproveUpdate: update approved")
+	lgHandler.Info("auth update approved")
 	return true, true, nil
 }
 
-func (dur *DnsUpdateRequest) Log(fmt string, v ...any) {
-	log.Printf(fmt, v...)
+func (dur *DnsUpdateRequest) Log(msg string, args ...any) {
+	lgHandler.Info(msg, args...)
 }
 
-func (us *UpdateStatus) Log(fmt string, v ...any) {
-	log.Printf(fmt, v...)
+func (us *UpdateStatus) Log(msg string, args ...any) {
+	lgHandler.Info(msg, args...)
 }
 
 // Trust updates are either validated updates (signed by already trusted key) or unvalidated
@@ -527,19 +510,18 @@ func (us *UpdateStatus) Log(fmt string, v ...any) {
 // single KEY RR.
 // Returns approved, updatezone, error
 func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
-	log.Printf("ApproveTrustUpdate: zone=%s", zone)
+	lgHandler.Info("approving trust update", "zone", zone)
 	un := ""
 	if us.ValidationRcode != dns.RcodeSuccess || !us.Validated {
 		un = "un"
 	}
-	log.Printf("ApproveTrustUpdate: Analysing %svalidated update using policy type %s with allowed RR types %v",
-		un, zd.UpdatePolicy.Child.Type, zd.UpdatePolicy.Child.RRtypes)
+	lgHandler.Info("analysing trust update", "validated", un == "", "policyType", zd.UpdatePolicy.Child.Type, "allowedRRtypes", zd.UpdatePolicy.Child.RRtypes)
 
 	unvalidatedKeyUpload := false
 
 	if len(r.Ns) != 1 {
 		us.Approved = false
-		us.Log("ApproveTrustUpdate: update rejected (only a single KEY record allowed to be added by untrusted key)")
+		us.Log("trust update rejected: only a single KEY record allowed")
 		return false, false, nil
 	}
 
@@ -553,23 +535,20 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// 2. Single RR in Update section, which is a KEY
 	// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 	// 4. Name of key must be == existing delegation
-	log.Printf("ApproveTrustUpdate: rrtype=%s keybootstrap=%s class=%s len(r.Ns)=%d",
-		dns.TypeToString[rrtype], zd.UpdatePolicy.Child.KeyBootstrap,
-		dns.ClassToString[rrclass], len(r.Ns))
+	lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "keyBootstrap", zd.UpdatePolicy.Child.KeyBootstrap, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
 	if !us.ValidatedByTrustedKey {
 		// If the update is not trusted (i.e. validated against a trusted key) it should be
 		// rejected, except in the special case of unvalidated key uploads.
 
 		if rrtype != dns.TypeKEY {
-			log.Printf("ApproveTrustUpdate: update of %s RRset rejected (trust update must be for a KEY RR)",
-				dns.TypeToString[rrtype])
+			lgHandler.Warn("trust update rejected: must be for a KEY RR", "rrtype", dns.TypeToString[rrtype])
 			return false, false, nil
 		}
 
 		if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 			us.Approved = false
-			log.Printf("ApproveTrustUpdate: update of KEY RRset rejected (delete operation signed by untrusted key)")
+			lgHandler.Warn("trust update rejected: KEY delete signed by untrusted key")
 			return false, false, nil
 		}
 
@@ -584,12 +563,12 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 			for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
 				if bootstrap == "strict-manual" {
 					us.Approved = false
-					log.Printf("ApproveTrustUpdate: keybootstrap=strict-manual prohibits unvalidated KEY upload")
+					lgHandler.Warn("keybootstrap=strict-manual prohibits unvalidated KEY upload")
 					return false, false, nil
 				}
 			}
 			// XXX: I think we should require that this KEY upload is self-signed.
-			log.Printf("ApproveTrustUpdate: update approved (unvalidated KEY upload)")
+			lgHandler.Info("trust update approved: unvalidated KEY upload")
 			unvalidatedKeyUpload = true
 			us.Approved = true
 			return true, false, nil
@@ -599,20 +578,19 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// Past the unvalidated key upload; from here update MUST be validated
 	if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
 		us.Approved = false
-		log.Printf("ApproveTrustUpdate: update rejected (signature did not validate)")
+		lgHandler.Warn("trust update rejected: signature did not validate")
 		return false, false, nil
 	}
 
 	if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
 		us.Approved = false
-		log.Printf("ApproveTrustUpdate: update rejected (signature validated but key not trusted)")
+		lgHandler.Warn("trust update rejected: signature validated but key not trusted")
 		return false, false, nil
 	}
 
 	if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
 		us.Approved = false
-		log.Printf("ApproveTrustUpdate: update rejected (unapproved RR type: %s)",
-			dns.TypeToString[rr.Header().Rrtype])
+		lgHandler.Warn("trust update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 		return false, false, nil
 	}
 
@@ -620,35 +598,33 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	case "selfsub":
 		if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 			us.Approved = false
-			log.Printf("ApproveTrustUpdate: update rejected (owner name %s outside selfsub %s tree)",
-				rr.Header().Name, us.SignerName)
+			lgHandler.Warn("trust update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}
 
 	case "self":
 		if rr.Header().Name != us.SignerName {
 			us.Approved = false
-			log.Printf("ApproveTrustUpdate: update rejected (owner name %s different from signer name %s in violation of \"self\" policy)",
-				rr.Header().Name, us.SignerName)
+			lgHandler.Warn("trust update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}
 	default:
 		us.Approved = false
-		log.Printf("ApproveTrustUpdate: unknown policy type: \"%s\"", zd.UpdatePolicy.Child.Type)
+		lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Child.Type)
 		return false, false, nil
 	}
 
 	switch rrclass {
 	case dns.ClassNONE:
-		log.Printf("ApproveTrustUpdate: Remove RR: %s", rr.String())
+		lgHandler.Debug("remove RR", "rr", rr.String())
 	case dns.ClassANY:
-		log.Printf("ApproveTrustUpdate: Remove RRset: %s", rr.String())
+		lgHandler.Debug("remove RRset", "rr", rr.String())
 	default:
-		log.Printf("ApproveTrustUpdate: Add RR: %s", rr.String())
+		lgHandler.Debug("add RR", "rr", rr.String())
 	}
 
 	us.Approved = true
-	log.Printf("ApproveTrustUpdate: update approved")
+	lgHandler.Info("trust update approved")
 
 	return true, false, nil
 }

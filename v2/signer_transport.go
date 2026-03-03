@@ -10,7 +10,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -65,7 +64,7 @@ func initSignerCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	}
 
 	pc.SetLocalKeys(privKey, pubKey)
-	log.Printf("initSignerCrypto: Loaded signer JOSE key from %s", privKeyPath)
+	lgSigner.Info("loaded signer JOSE key", "path", privKeyPath)
 
 	// Load public keys for all configured agents
 	for i, agentConf := range mp.Agents {
@@ -76,16 +75,16 @@ func initSignerCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 		agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				log.Printf("initSignerCrypto: agent[%d] public key file not found %q: %v (agent encryption disabled)", i, agentPubKeyPath, err)
+				lgSigner.Warn("agent public key file not found, encryption disabled", "agent_index", i, "path", agentPubKeyPath, "err", err)
 			} else {
-				log.Printf("initSignerCrypto: failed to read agent[%d] public key %q: %v (agent encryption disabled)", i, agentPubKeyPath, err)
+				lgSigner.Warn("failed to read agent public key, encryption disabled", "agent_index", i, "path", agentPubKeyPath, "err", err)
 			}
 			continue
 		}
 		agentPubKeyData = StripKeyFileComments(agentPubKeyData)
 		agentPubKey, err := backend.ParsePublicKey(agentPubKeyData)
 		if err != nil {
-			log.Printf("initSignerCrypto: failed to parse agent[%d] public key: %v (agent encryption disabled)", i, err)
+			lgSigner.Warn("failed to parse agent public key, encryption disabled", "agent_index", i, "err", err)
 			continue
 		}
 		agentID := agentConf.Identity
@@ -94,7 +93,7 @@ func initSignerCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 		}
 		pc.AddPeerKey(agentID, agentPubKey)
 		pc.AddPeerVerificationKey(agentID, agentPubKey)
-		log.Printf("initSignerCrypto: Loaded agent public key from %s (peer: %s)", agentPubKeyPath, agentID)
+		lgSigner.Info("loaded agent public key", "path", agentPubKeyPath, "peer", agentID)
 	}
 
 	return pc, nil

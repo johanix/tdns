@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -14,9 +13,7 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 
 	switch report.MessageType {
 	case AgentMsgBeat:
-		if Globals.Debug {
-			log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
-		}
+		lgAgent.Debug("received BEAT", "from", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
 			agent.mu.Lock()
 			agent.ApiDetails.LatestRBeat = time.Now()
@@ -35,7 +32,7 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 		//		}
 
 	default:
-		log.Printf("HeartbeatHandler: Unknown message type: %s", AgentMsgToString[report.MessageType])
+		lgAgent.Warn("unknown message type in HeartbeatHandler", "type", AgentMsgToString[report.MessageType])
 	}
 }
 
@@ -53,17 +50,13 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
 
 		if !apiReady && !dnsReady {
-			if Globals.Debug {
-				log.Printf("HsyncEngine: Not sending heartbeat to %s (API: %s, DNS: %s - both < INTRODUCED)",
-					a.Identity, AgentStateToString[apiState], AgentStateToString[dnsState])
-			}
+			lgAgent.Debug("not sending heartbeat, both transports below INTRODUCED",
+				"agent", a.Identity, "apiState", AgentStateToString[apiState], "dnsState", AgentStateToString[dnsState])
 			continue
 		}
 
-		if Globals.Debug {
-			log.Printf("HsyncEngine: Sending heartbeat to %s (API: %s, DNS: %s)",
-				a.Identity, AgentStateToString[apiState], AgentStateToString[dnsState])
-		}
+		lgAgent.Debug("sending heartbeat",
+			"agent", a.Identity, "apiState", AgentStateToString[apiState], "dnsState", AgentStateToString[dnsState])
 
 		go func(a *Agent) {
 			agent := a
@@ -103,7 +96,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			agent.mu.Lock()
 			switch {
 			case err != nil:
-				log.Printf("HsyncEngine: Error sending heartbeat to %s: %v", agent.Identity, err)
+				lgAgent.Warn("error sending heartbeat", "agent", agent.Identity, "err", err)
 				if agent.ApiDetails.LatestError == "" {
 					agent.ApiDetails.LatestError = err.Error()
 					agent.ApiDetails.LatestErrorTime = time.Now()
@@ -119,16 +112,16 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				agent.ApiDetails.LatestError = ""
 				agent.ApiDetails.SentBeats++
 				if len(agent.DeferredTasks) > 0 {
-					log.Printf("HsyncEngine: Agent %s has %d deferred tasks, sending them now", agent.Identity, len(agent.DeferredTasks))
+					lgAgent.Info("agent has deferred tasks, executing", "agent", agent.Identity, "count", len(agent.DeferredTasks))
 					var remainingTasks []DeferredAgentTask
 					for _, task := range agent.DeferredTasks {
 						if task.Precondition() {
 							ok, err := task.Action()
 							if err != nil {
-								log.Printf("HsyncEngine: Error executing deferred task %s: %v", task.Desc, err)
+								lgAgent.Error("deferred task failed", "task", task.Desc, "err", err)
 								remainingTasks = append(remainingTasks, task)
 							} else if ok {
-								log.Printf("HsyncEngine: Deferred task %s executed successfully", task.Desc)
+								lgAgent.Info("deferred task executed successfully", "task", task.Desc)
 							} else {
 								remainingTasks = append(remainingTasks, task)
 							}

@@ -7,7 +7,6 @@ import (
 	"crypto"
 	"database/sql"
 	"fmt"
-	"log"
 
 	"time"
 
@@ -32,13 +31,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	var err error
 
-	log.Printf("Sig0KeyMgmt: request: %s", kp.SubCommand)
+	lgSigner.Debug("Sig0KeyMgmt request", "subcommand", kp.SubCommand)
 
 	switch kp.SubCommand {
 	case "list":
 		rows, err := kdb.Query(getAllSig0KeysSql)
 		if err != nil {
-			log.Printf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			lgSigner.Error("kdb.Query failed", "sql", getAllSig0KeysSql, "err", err)
 			return &resp, fmt.Errorf("error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
@@ -71,7 +70,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	// XXX: FIXME: "add" should also add the public key to the TrustStore.
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
-		log.Printf("Sig0KeyMgmt: importing private key (type=%T): [redacted]", pkc.K)
+		lgSigner.Info("importing private key", "type", fmt.Sprintf("%T", pkc.K))
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
@@ -98,15 +97,14 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
-			log.Printf("Error from PrivateKeyToPEM: %v", err)
+			lgSigner.Error("PrivateKeyToPEM failed", "err", err)
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
 		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.KeyRR.String())
-		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to add SIG(0) key", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -132,13 +130,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "generate":
-		log.Printf("Sig0KeyMgmt: request to generate new keypair for name: %s", kp.Keyname)
+		lgSigner.Info("generating new SIG(0) keypair", "name", kp.Keyname)
 		if kp.Keyname == "" {
 			kp.Keyname = kp.Zone
 		}
 		pkc, msg, err := kdb.GenerateKeypair(kp.Keyname, kp.Creator, kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
 		if err != nil {
-			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
+			lgSigner.Error("GenerateKeypair failed", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 			return &resp, err
@@ -164,9 +162,8 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	case "setstate":
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to set SIG(0) key state", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -194,23 +191,22 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		var keyid int
 		err := row.Scan(&zone, &state, &keyid, &algorithm, &privatekey, &keyrr)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to scan SIG(0) key for delete", "err", err)
 			if err == sql.ErrNoRows {
 				return &resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
 			return &resp, err
 		}
 		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
-			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
+			lgSigner.Warn("SIG(0) key not found for delete", "keyname", kp.Keyname, "keyid", kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
 			return &resp, nil
 		}
 
 		// 3. Return all good, now untrusted
 		res, err = tx.Exec(deleteSig0KeySql, kp.Keyname, kp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to delete SIG(0) key", "err", err)
 			return &resp, err
 		}
 		rows, _ := res.RowsAffected()
@@ -232,7 +228,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+state)
 
 	default:
-		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
+		lgSigner.Warn("unknown Sig0KeyMgmt subcommand", "subcommand", kp.SubCommand)
 	}
 
 	return &resp, nil
@@ -264,7 +260,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 	defer func() {
 		if localtx {
 			if err != nil {
-				log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err)
+				lgSigner.Debug("DnssecKeyMgmt rollback", "err", err)
 				tx.Rollback()
 			} else {
 				tx.Commit()
@@ -344,19 +340,18 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
-			log.Printf("Error from PrivateKeyToPEM: %v", err)
+			lgSigner.Error("PrivateKeyToPEM failed", "err", err)
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
 		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.DnskeyRR.String())
 
-		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
-			log.Printf("Error from tx.Exec(): %v", err)
+			lgSigner.Error("failed to add DNSKEY", "err", err)
 			return &resp, err
 		} else {
-			log.Printf("tx.Exec(): all ok")
+			lgSigner.Debug("DNSKEY added successfully")
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
@@ -365,7 +360,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 	case "generate":
 		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
 		if err != nil {
-			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
+			lgSigner.Error("GenerateKeypair failed", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 		}
@@ -375,9 +370,8 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 
 	case "setstate":
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error from tx.Exec(): %v", err)
+			lgSigner.Error("failed to set DNSKEY state", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -400,23 +394,22 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		var keyid, flags int
 		err := row.Scan(&zone, &state, &keyid, &flags, &algorithm, &privatekey, &keyrr)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to scan DNSKEY for delete", "err", err)
 			if err == sql.ErrNoRows {
 				return &resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
 			return &resp, err
 		}
 		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
-			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
+			lgSigner.Warn("DNSKEY not found for delete", "keyname", kp.Keyname, "keyid", kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
 			return &resp, nil
 		}
 
 		// 3. Return all good, now untrusted
 		res, err = tx.Exec(deleteDnskeySql, kp.Keyname, kp.Keyid)
-		log.Printf("tx.Exec(%s, %s, %d)", deleteDnskeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error from tx.Exec(): %v", err)
+			lgSigner.Error("failed to delete DNSKEY", "err", err)
 			//			resp.Error = true
 			//			resp.ErrorMsg = err.Error()
 			return &resp, err
@@ -427,7 +420,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 	default:
 		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)
-		log.Printf("DnssecKeyMgmt: %s", resp.Msg)
+		lgSigner.Warn("unknown DnssecKeyMgmt subcommand", "subcommand", kp.SubCommand)
 		resp.Error = true
 		resp.ErrorMsg = resp.Msg
 	}
@@ -447,7 +440,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename, state)
 	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+		lgSigner.Error("failed to query SIG(0) keys", "sql", fetchSig0PrivKeySql, "zone", zonename, "err", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -460,19 +453,18 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	for rows.Next() {
 		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
-		// log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				// This is not an error, so lets just return an empty Sig0ActiveKeys
-				log.Printf("No SIG(0) key in state %s found for zone %s", state, zonename)
+				lgSigner.Debug("no SIG(0) key found", "state", state, "zone", zonename)
 				return &sak, nil
 			}
-			log.Printf("Error from rows.Scan(): %v", err)
+			lgSigner.Error("rows.Scan failed", "err", err)
 			return nil, err
 		}
 
 		if keyfound {
-			log.Printf("Error: multiple SIG(0) keys in state %s found for zone %s", state, zonename)
+			lgSigner.Warn("multiple SIG(0) keys found", "state", state, "zone", zonename)
 			// XXX: Should we return an error here?
 			continue
 		}
@@ -480,20 +472,20 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		// Parse private key, detecting old BIND format or new PEM format
 		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			log.Printf("Error from ParsePrivateKeyFromDB(): %v", err)
+			lgSigner.Error("ParsePrivateKeyFromDB failed", "err", err)
 			return nil, err
 		}
 
 		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
 		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
+			lgSigner.Error("PrepareKeyCache failed", "err", err)
 			return nil, err
 		}
 
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
-			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
+			lgSigner.Warn("algorithm mismatch", "stored", alg, "parsed", pkc.Algorithm)
 			return nil, fmt.Errorf("error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
@@ -503,13 +495,11 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	if !keyfound {
 		// This is not an error, so lets just return an empty Sig0ActiveKeys
-		log.Printf("No SIG(0) key in state %s found for zone %s", state, zonename)
+		lgSigner.Debug("no SIG(0) key found", "state", state, "zone", zonename)
 		return &sak, nil
 	}
 
-	if Globals.Debug {
-		log.Printf("GetSig0Keys(%s, %s) returned keys %v", zonename, state, sak)
-	}
+	lgSigner.Debug("GetSig0Keys returned keys", "zone", zonename, "state", state, "keys", sak)
 
 	kdb.KeystoreSig0Cache[zonename+"+"+state] = &sak
 
@@ -533,7 +523,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename, state)
 	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchDnssecPrivKeySql, zonename, err)
+		lgSigner.Error("failed to query DNSSEC keys", "sql", fetchDnssecPrivKeySql, "zone", zonename, "err", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -547,10 +537,10 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
-				log.Printf("No active DNSSEC key found for zone %s", zonename)
+				lgSigner.Debug("no active DNSSEC key found", "zone", zonename)
 				return &dk, nil
 			}
-			log.Printf("Error from rows.Scan(): %v", err)
+			lgSigner.Error("rows.Scan failed", "err", err)
 			return nil, err
 		}
 
@@ -559,20 +549,20 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		// Parse private key, detecting old BIND format or new PEM format
 		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			log.Printf("Error from ParsePrivateKeyFromDB(): %v", err)
+			lgSigner.Error("ParsePrivateKeyFromDB failed", "err", err)
 			return nil, err
 		}
 
 		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
 		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
+			lgSigner.Error("PrepareKeyCache failed", "err", err)
 			return nil, err
 		}
 
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
-			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
+			lgSigner.Warn("algorithm mismatch", "stored", alg, "parsed", pkc.Algorithm)
 			return nil, fmt.Errorf("error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
@@ -589,25 +579,23 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	// No keys found is not an error
 	if !keysfound {
-		log.Printf("No %s DNSSEC keys found for zone %s", state, zonename)
+		lgSigner.Debug("no DNSSEC keys found", "state", state, "zone", zonename)
 		return &dk, nil
 	}
 
 	// No KSK found is a hard error
 	if len(dk.KSKs) == 0 {
-		log.Printf("No %s DNSSEC KSK found for zone %s", state, zonename)
+		lgSigner.Warn("no DNSSEC KSK found", "state", state, "zone", zonename)
 		return &dk, nil
 	}
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
 	if len(dk.ZSKs) == 0 {
-		log.Printf("No %s DNSSEC ZSK found for zone %s, reusing KSK", state, zonename)
+		lgSigner.Info("no DNSSEC ZSK found, reusing KSK as CSK", "state", state, "zone", zonename)
 		dk.ZSKs = append(dk.ZSKs, dk.KSKs[0])
 	}
 
-	if Globals.Debug {
-		log.Printf("GetDnssecKey(%s, %s) returned keys: %s", zonename, state, logmsg)
-	}
+	lgSigner.Debug("GetDnssecKeys returned keys", "zone", zonename, "state", state, "keys", logmsg)
 
 	kdb.KeystoreDnskeyCache[zonename+"+"+state] = &dk
 
@@ -685,7 +673,7 @@ func (kdb *KeyDB) SetPropagationConfirmed(zonename string, keyid uint16) error {
 
 	// Invalidate cache for published state (the key should be in published state)
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStatePublished)
-	log.Printf("SetPropagationConfirmed: key %d in zone %s marked as propagation confirmed", keyid, zonename)
+	lgSigner.Info("key marked as propagation confirmed", "keyid", keyid, "zone", zonename)
 	return nil
 }
 
@@ -723,24 +711,22 @@ const DefaultDnskeyTTL = 3600 * time.Second
 func (kdb *KeyDB) canPromoteMultiProvider(zonename string, keyid uint16) bool {
 	confirmed, confirmedAt, err := kdb.GetDnssecKeyPropagation(zonename, keyid)
 	if err != nil {
-		log.Printf("canPromoteMultiProvider: error checking propagation for key %d in %s: %v", keyid, zonename, err)
+		lgSigner.Error("error checking propagation for multi-provider promotion", "keyid", keyid, "zone", zonename, "err", err)
 		return false
 	}
 
 	if !confirmed {
-		log.Printf("canPromoteMultiProvider: key %d in %s: propagation not yet confirmed", keyid, zonename)
+		lgSigner.Debug("propagation not yet confirmed", "keyid", keyid, "zone", zonename)
 		return false
 	}
 
 	elapsed := time.Since(confirmedAt)
 	if elapsed < DefaultDnskeyTTL {
-		log.Printf("canPromoteMultiProvider: key %d in %s: propagation confirmed %s ago, need %s (DNSKEY TTL wait)",
-			keyid, zonename, elapsed.Truncate(time.Second), DefaultDnskeyTTL)
+		lgSigner.Debug("propagation confirmed but TTL not expired", "keyid", keyid, "zone", zonename, "elapsed", elapsed.Truncate(time.Second), "ttl", DefaultDnskeyTTL)
 		return false
 	}
 
-	log.Printf("canPromoteMultiProvider: key %d in %s: eligible for promotion (propagation confirmed %s ago, TTL %s expired)",
-		keyid, zonename, elapsed.Truncate(time.Second), DefaultDnskeyTTL)
+	lgSigner.Info("key eligible for multi-provider promotion", "keyid", keyid, "zone", zonename, "elapsed", elapsed.Truncate(time.Second), "ttl", DefaultDnskeyTTL)
 	return true
 }
 

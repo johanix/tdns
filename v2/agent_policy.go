@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -13,7 +12,7 @@ import (
 )
 
 func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (bool, string, error) {
-	log.Printf("SynchedDataEngine: Evaluating update for zone %q from %q", synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+	lgAgent.Debug("evaluating update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 	// 1. Evaluate the update for applicability (valid zone, etc)
 	// 2. Evaluate the update according to policy.
 
@@ -22,12 +21,12 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		for _, rrset := range synchedDataUpdate.Update.RRsets {
 			for _, rr := range rrset.RRs {
 				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
-					log.Printf("SynchedDataEngine: Invalid RR type: %s", rr.String())
+					lgAgent.Warn("invalid RR type", "rr", rr.String())
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR type: %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
 				}
 				if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
-					log.Printf("SynchedDataEngine: Invalid RR name (outside apex): %s", rr.String())
+					lgAgent.Warn("invalid RR name (outside apex)", "rr", rr.String())
 					return false, fmt.Sprintf("Update for zone %q from %q: Invalid RR name (outside apex): %s",
 						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rr.String()), nil
 				}
@@ -69,12 +68,12 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		// Must check for (at least): approved RRtype, apex of zone and zone with us in the HSYNC RRset
 		for _, rr := range rrs {
 			if !AllowedLocalRRtypes[rr.Header().Rrtype] {
-				log.Printf("SynchedDataEngine: Invalid RR type: %s", rr.String())
+				lgAgent.Warn("invalid RR type", "rr", rr.String())
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR type: %s",
 					synchedDataUpdate.Zone, rr.String()), nil
 			}
 			if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
-				log.Printf("SynchedDataEngine: Invalid RR name (outside apex): %s", rr.String())
+				lgAgent.Warn("invalid RR name (outside apex)", "rr", rr.String())
 				return false, fmt.Sprintf("Local update for zone %q from mgmt API: Invalid RR name (outside apex): %s",
 					synchedDataUpdate.Zone, rr.String()), nil
 			}
@@ -119,27 +118,27 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bool, string, error) {
 	var msg string
 	var changed bool
-	log.Printf("SynchedDataEngine: Processing update for zone %q from %q", synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+	lgAgent.Debug("processing update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 	var nar *AgentRepo
 	var err error
 	var ok bool
 	if nar, ok = zdr.Get(synchedDataUpdate.Zone); !ok {
-		log.Printf("SynchedDataEngine: Creating new agent repo for zone %q", synchedDataUpdate.Zone)
+		lgAgent.Debug("creating new agent repo", "zone", synchedDataUpdate.Zone)
 		nar, err = NewAgentRepo()
-		log.Printf("SynchedDataEngine: New agent repo created: %+v", nar)
+		lgAgent.Debug("new agent repo created")
 		if err != nil {
 			return false, "", err
 		}
-		log.Printf("SynchedDataEngine: Setting new agent repo for zone %q", synchedDataUpdate.Zone)
+		lgAgent.Debug("setting new agent repo", "zone", synchedDataUpdate.Zone)
 		zdr.Set(synchedDataUpdate.Zone, nar)
 	}
 
-	log.Printf("SynchedDataEngine: Agent repo for zone %q should now exist", synchedDataUpdate.Zone)
+	lgAgent.Debug("agent repo should now exist", "zone", synchedDataUpdate.Zone)
 	// Initialize agent data if it doesn't exist
 	var nod *OwnerData
-	log.Printf("SynchedDataEngine: Getting owner data for zone %q from %q", synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+	lgAgent.Debug("getting owner data", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 	if nod, ok = nar.Get(synchedDataUpdate.AgentId); !ok {
-		log.Printf("SynchedDataEngine: Creating new owner data for zone %q from %q", synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+		lgAgent.Debug("creating new owner data", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 		nod = NewOwnerData(string(synchedDataUpdate.Zone))
 		nar.Set(synchedDataUpdate.AgentId, nod)
 	}
@@ -147,11 +146,11 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 	isLocal := synchedDataUpdate.UpdateType == "local"
 
 	// Iterate through RRsets in the update and only replace those with data
-	log.Printf("SynchedDataEngine: Iterating through RRsets in the update")
+	lgAgent.Debug("iterating through RRsets in the update")
 	for rrtype, rrset := range synchedDataUpdate.Update.RRsets {
 		if len(rrset.RRs) > 0 {
-			log.Printf("SynchedDataEngine: Adding %s %s RRset to agent %s",
-				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
+			lgAgent.Debug("adding RRset to agent", "zone", synchedDataUpdate.Zone,
+				"rrtype", dns.TypeToString[rrtype], "agent", synchedDataUpdate.AgentId)
 			// XXX: If there are new RRs, then we just replace the existing RRset.
 			// nar.Get(update.AgentId).RRtypes.Set(rrtype, rrset)
 			cur_rrset, ok := nod.RRtypes.Get(rrtype)
@@ -162,21 +161,21 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 					if !ok {
 						msg = fmt.Sprintf("Removing %s %s RRset from agent %q: RRset does not exist",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 					} else if isLocal {
 						// Local delete: don't remove yet — mark as changed so the
 						// delete is sent to combiner/agents. The actual removal
 						// happens when the combiner confirms.
 						msg = fmt.Sprintf("Requesting removal of %s %s RRset from agent %q (pending combiner confirmation)",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 						changed = true
 					} else {
 						// Remote delete: apply immediately (remote agent mirrors
 						// originating agent's intent, doesn't own lifecycle).
 						msg = fmt.Sprintf("Removing %s %s RRset from agent %q",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 						nod.RRtypes.Delete(rrtype)
 						// Remove tracking for this entire RRtype
 						zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
@@ -187,7 +186,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 					if !ok {
 						msg = fmt.Sprintf("Removing %s RR %q from agent %q: RRset does not exist",
 							synchedDataUpdate.Zone, rr.String(), synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 					} else if isLocal {
 						// Local delete: don't remove from repo yet. Keep the RR
 						// with ClassNONE intact in the ZoneUpdate so transport
@@ -195,7 +194,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						// removal from the repo happens on combiner confirmation.
 						msg = fmt.Sprintf("Requesting removal of %s RR from agent %q (pending combiner confirmation)",
 							synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 						changed = true
 					} else {
 						// Remote delete: copy the RR before mutating class for
@@ -203,7 +202,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 						// forwarding to this agent's combiner.
 						msg = fmt.Sprintf("Removing %s RR from agent %q (remote)",
 							synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 						delRR := dns.Copy(rr)
 						delRR.Header().Class = dns.ClassINET
 						cur_rrset.Delete(delRR)
@@ -216,7 +215,7 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 					if !ok {
 						msg = fmt.Sprintf("Adding %s %s RRset to agent %q",
 							synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
-						log.Printf("SynchedDataEngine: %s", msg)
+						lgAgent.Debug(msg)
 						cur_rrset = *rrset.Clone()
 						changed = true
 					} else {
@@ -225,13 +224,13 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 							cur_rrset.Add(rr)
 							if len(cur_rrset.RRs) > prevLen {
 								msg = fmt.Sprintf("Adding RR: %s to RRset", rr.String())
-								log.Printf("SynchedDataEngine: %s", msg)
+								lgAgent.Debug(msg)
 								changed = true
 							} else if synchedDataUpdate.Force {
-								log.Printf("SynchedDataEngine: RR already present but --force set, marking changed: %s", rr.String())
+								lgAgent.Debug("RR already present but --force set, marking changed", "rr", rr.String())
 								changed = true
 							} else {
-								log.Printf("SynchedDataEngine: RR already present, skipping: %s", rr.String())
+								lgAgent.Debug("RR already present, skipping", "rr", rr.String())
 							}
 						}
 					}
@@ -240,17 +239,17 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 			}
 			rrset, ok = nod.RRtypes.Get(rrtype)
 			if !ok {
-				log.Printf("SynchedDataEngine: %s %s RRset does not exist",
-					synchedDataUpdate.Zone, dns.TypeToString[rrtype])
+				lgAgent.Debug("RRset does not exist",
+					"zone", synchedDataUpdate.Zone, "rrtype", dns.TypeToString[rrtype])
 			} else {
-				log.Printf("SynchedDataEngine: %s %s RRset after addition/deletion:\n%v",
-					synchedDataUpdate.Zone, dns.TypeToString[rrtype], rrset.RRs)
+				lgAgent.Debug("RRset after addition/deletion",
+					"zone", synchedDataUpdate.Zone, "rrtype", dns.TypeToString[rrtype], "rrs", rrset.RRs)
 			}
 		}
 	}
-	log.Printf("SynchedDataEngine: Setting owner data for zone %q from %q", synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+	lgAgent.Debug("setting owner data", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 	nar.Set(synchedDataUpdate.AgentId, nod)
-	log.Printf("SynchedDataEngine: Setting agent repo for zone %q", synchedDataUpdate.Zone)
+	lgAgent.Debug("setting agent repo", "zone", synchedDataUpdate.Zone)
 	zdr.Set(synchedDataUpdate.Zone, nar)
 	return changed, msg, nil
 }

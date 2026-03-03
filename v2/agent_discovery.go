@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto"
 	"fmt"
-	"log"
 	"net/url"
 	"time"
 
@@ -54,7 +53,7 @@ func DiscoverAgentAPI(ctx context.Context, imr *Imr, identity string, result *Ag
 		if err == nil {
 			result.APIAddresses = addresses
 		} else {
-			log.Printf("AgentDiscovery: No SVCB record found for API service at %s: %v", apiServiceName, err)
+			lgAgent.Debug("no SVCB record for API service", "service", apiServiceName, "err", err)
 			result.Partial = true
 		}
 
@@ -63,13 +62,13 @@ func DiscoverAgentAPI(ctx context.Context, imr *Imr, identity string, result *Ag
 		if err == nil {
 			result.TLSA = tlsaRR
 		} else {
-			log.Printf("AgentDiscovery: No TLSA record found for API service: %v", err)
+			lgAgent.Debug("no TLSA record for API service", "err", err)
 			result.Partial = true
 		}
 
-		log.Printf("AgentDiscovery: Found API endpoint %s at %s", apiUri, apiHost)
+		lgAgent.Info("found API endpoint", "uri", apiUri, "host", apiHost)
 	} else {
-		log.Printf("AgentDiscovery: No API URI record found: %v", err)
+		lgAgent.Debug("no API URI record found", "err", err)
 		result.Partial = true
 	}
 }
@@ -92,7 +91,7 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 		if err == nil {
 			result.DNSAddresses = addresses
 		} else {
-			log.Printf("AgentDiscovery: No SVCB record found for DNS service at %s: %v", dnsServiceName, err)
+			lgAgent.Debug("no SVCB record for DNS service", "service", dnsServiceName, "err", err)
 			result.Partial = true
 		}
 
@@ -102,24 +101,24 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 			result.JWKData = jwkData
 			result.PublicKey = publicKey
 			result.KeyAlgorithm = algorithm
-			log.Printf("AgentDiscovery: Found JWK record for %s (algorithm: %s)", identity, algorithm)
+			lgAgent.Info("found JWK record", "identity", identity, "algorithm", algorithm)
 		} else {
-			log.Printf("AgentDiscovery: No JWK record found for %s: %v", identity, err)
+			lgAgent.Debug("no JWK record found", "identity", identity, "err", err)
 
 			// Fallback to KEY record for legacy support
 			keyRR, err := imr.lookupAgentKEY(ctx, identity)
 			if err == nil {
 				result.LegacyKeyRR = keyRR
-				log.Printf("AgentDiscovery: Using legacy KEY record for %s (algorithm %d)", identity, keyRR.Algorithm)
+				lgAgent.Info("using legacy KEY record", "identity", identity, "algorithm", keyRR.Algorithm)
 			} else {
-				log.Printf("AgentDiscovery: No KEY record found for %s: %v", identity, err)
+				lgAgent.Debug("no KEY record found", "identity", identity, "err", err)
 				result.Partial = true
 			}
 		}
 
-		log.Printf("AgentDiscovery: Found DNS endpoint %s at %s:%d", dnsUri, dnsHost, dnsPort)
+		lgAgent.Info("found DNS endpoint", "uri", dnsUri, "host", dnsHost, "port", dnsPort)
 	} else {
-		log.Printf("AgentDiscovery: No DNS URI record found (optional): %v", err)
+		lgAgent.Debug("no DNS URI record found (optional)", "err", err)
 	}
 }
 
@@ -139,8 +138,7 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 		return result
 	}
 
-	log.Printf("AgentDiscovery: Discovery complete for %s (API: %s, DNS: %s)",
-		identity, result.APIUri, result.DNSUri)
+	lgAgent.Info("discovery complete", "identity", identity, "apiUri", result.APIUri, "dnsUri", result.DNSUri)
 	return result
 }
 
@@ -172,10 +170,10 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		// Non-fatal: skip API peer registration if SVCB addresses are missing,
 		// but continue to DNS and AgentRegistry update.
 		if len(result.APIAddresses) == 0 {
-			log.Printf("AgentDiscovery: Warning: No SVCB addresses for API transport of %s, skipping API peer registration", result.Identity)
+			lgAgent.Warn("no SVCB addresses for API transport, skipping API peer registration", "identity", result.Identity)
 		} else {
 			host := result.APIAddresses[0]
-			log.Printf("AgentDiscovery: Using discovered IP %s for API transport (from SVCB)", host)
+			lgAgent.Debug("using discovered IP for API transport", "host", host)
 
 			addr := &transport.Address{
 				Host:      host,
@@ -187,7 +185,7 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			peer.APIEndpoint = result.APIUri
 			peer.PreferredTransport = "API"
 
-			log.Printf("AgentDiscovery: Registered peer %s with API endpoint %s (address: %s:%d)", result.Identity, result.APIUri, host, port)
+			lgAgent.Info("registered peer with API endpoint", "identity", result.Identity, "endpoint", result.APIUri, "address", host, "port", port)
 		}
 	}
 
@@ -209,10 +207,10 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		// Non-fatal: skip DNS peer registration if SVCB addresses are missing,
 		// but continue to AgentRegistry update.
 		if len(result.DNSAddresses) == 0 {
-			log.Printf("AgentDiscovery: Warning: No SVCB addresses for DNS transport of %s, skipping DNS peer registration", result.Identity)
+			lgAgent.Warn("no SVCB addresses for DNS transport, skipping DNS peer registration", "identity", result.Identity)
 		} else {
 			host := result.DNSAddresses[0]
-			log.Printf("AgentDiscovery: Using discovered IP %s for DNS transport (from SVCB)", host)
+			lgAgent.Debug("using discovered IP for DNS transport", "host", host)
 
 			addr := &transport.Address{
 				Host:      host,
@@ -225,7 +223,7 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 			peer.SetDiscoveryAddress(addr)
 			peer.PreferredTransport = "DNS"
 
-			log.Printf("AgentDiscovery: Registered peer %s with DNS endpoint %s (address: %s:%d)", result.Identity, result.DNSUri, host, port)
+			lgAgent.Info("registered peer with DNS endpoint", "identity", result.Identity, "endpoint", result.DNSUri, "address", host, "port", port)
 		}
 	}
 
@@ -244,17 +242,17 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 				// The backend can reconstruct its own PublicKey type from the raw key
 				wrappedKey, err := payloadCrypto.Backend.PublicKeyFromStdlib(result.PublicKey)
 				if err != nil {
-					log.Printf("AgentDiscovery: Warning: Failed to wrap public key for %s: %v", result.Identity, err)
+					lgAgent.Warn("failed to wrap public key", "identity", result.Identity, "err", err)
 				} else {
 					payloadCrypto.AddPeerKey(result.Identity, wrappedKey)
 					payloadCrypto.AddPeerVerificationKey(result.Identity, wrappedKey)
-					log.Printf("AgentDiscovery: Added JWK public key to PayloadCrypto for %s (algorithm: %s)", result.Identity, result.KeyAlgorithm)
+					lgAgent.Info("added JWK public key to PayloadCrypto", "identity", result.Identity, "algorithm", result.KeyAlgorithm)
 				}
 			} else {
-				log.Printf("AgentDiscovery: Warning: Cannot add peer key - PayloadCrypto not configured")
+				lgAgent.Warn("cannot add peer key - PayloadCrypto not configured")
 			}
 		} else {
-			log.Printf("AgentDiscovery: Warning: Cannot add peer key - SecureWrapper not configured")
+			lgAgent.Warn("cannot add peer key - SecureWrapper not configured")
 		}
 	}
 
@@ -323,7 +321,7 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		}
 
 		tm.agentRegistry.S.Set(AgentId(result.Identity), agent)
-		log.Printf("AgentDiscovery: Also added agent %s to AgentRegistry", result.Identity)
+		lgAgent.Debug("also added agent to AgentRegistry", "identity", result.Identity)
 	}
 
 	return nil
@@ -331,7 +329,7 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 
 // DiscoverAndRegisterAgent performs discovery and registration in one step.
 func (tm *TransportManager) DiscoverAndRegisterAgent(ctx context.Context, identity string) error {
-	log.Printf("AgentDiscovery: Starting discovery for agent %s", identity)
+	lgAgent.Info("starting discovery for agent", "identity", identity)
 
 	// Get IMR engine via injected callback (late-binding: IMR starts asynchronously)
 	if tm.getImrEngine == nil {
@@ -348,7 +346,7 @@ func (tm *TransportManager) DiscoverAndRegisterAgent(ctx context.Context, identi
 	}
 
 	if result.Partial {
-		log.Printf("AgentDiscovery: Warning: Partial discovery for %s (some records missing)", identity)
+		lgAgent.Warn("partial discovery (some records missing)", "identity", identity)
 	}
 
 	err := tm.RegisterDiscoveredAgent(result)
@@ -356,6 +354,6 @@ func (tm *TransportManager) DiscoverAndRegisterAgent(ctx context.Context, identi
 		return fmt.Errorf("failed to register discovered agent %s: %w", identity, err)
 	}
 
-	log.Printf("AgentDiscovery: Successfully discovered and registered agent %s", identity)
+	lgAgent.Info("successfully discovered and registered agent", "identity", identity)
 	return nil
 }

@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strings"
@@ -32,13 +31,11 @@ func CaseFoldContains(slice []string, str string) bool {
 }
 
 func DnsEngine(ctx context.Context, conf *Config) error {
-	log.Printf("DnsEngine: starting with addresses: %v", conf.DnsEngine.Addresses)
-	if Globals.Debug {
-		log.Printf("DnsEngine: Debug mode enabled")
-		log.Printf("DnsEngine: DnsQueryQ channel: %v (nil=%v)", conf.Internal.DnsQueryQ, conf.Internal.DnsQueryQ == nil)
-		log.Printf("DnsEngine: DnsNotifyQ channel: %v (nil=%v)", conf.Internal.DnsNotifyQ, conf.Internal.DnsNotifyQ == nil)
-		log.Printf("DnsEngine: DnsUpdateQ channel: %v (nil=%v)", conf.Internal.DnsUpdateQ, conf.Internal.DnsUpdateQ == nil)
-	}
+	lgDns.Info("DnsEngine: starting", "addresses", conf.DnsEngine.Addresses)
+	lgDns.Debug("DnsEngine: channel status",
+		"DnsQueryQ_nil", conf.Internal.DnsQueryQ == nil,
+		"DnsNotifyQ_nil", conf.Internal.DnsNotifyQ == nil,
+		"DnsUpdateQ_nil", conf.Internal.DnsUpdateQ == nil)
 
 	// verbose := viper.GetBool("dnsengine.verbose")
 	// debug := viper.GetBool("dnsengine.debug")
@@ -50,9 +47,9 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 
 	addresses := conf.DnsEngine.Addresses
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
-		log.Printf("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory. Still configuring: %v", addresses)
+		lgDns.Warn("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory, still configuring", "addresses", addresses)
 	}
-	log.Printf("DnsEngine: UDP/TCP addresses: %v", addresses)
+	lgDns.Info("DnsEngine: UDP/TCP addresses configured", "addresses", addresses)
 	var servers []*dns.Server
 	for _, addr := range addresses {
 		for _, transport := range []string{"udp", "tcp"} {
@@ -68,19 +65,15 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			servers = append(servers, srv)
 
 			go func(s *dns.Server, addr, transport string) {
-				if Globals.Debug {
-					log.Printf("DnsEngine: [startup] Attempting to bind to %s (%s)", addr, transport)
-				}
+				lgDns.Debug("DnsEngine: attempting to bind", "addr", addr, "transport", transport)
 				// Announce we're attempting to listen. This does not mean we're listening yet.
-				log.Printf("DnsEngine: [startup] Launching %s/%s server (will log an error if bind fails)...", addr, transport)
+				lgDns.Info("DnsEngine: launching server", "addr", addr, "transport", transport)
 				if err := s.ListenAndServe(); err != nil {
 					// ListenAndServe only returns on error or shutdown.
-					log.Printf("DnsEngine: ERROR: %s/%s server failed to start or stopped unexpectedly: %v", addr, transport, err)
+					lgDns.Error("DnsEngine: server failed to start or stopped unexpectedly", "addr", addr, "transport", transport, "err", err)
 				} else {
 					// This case is basically never reached unless shutdown is very clean.
-					if Globals.Debug {
-						log.Printf("DnsEngine: [debug] %s/%s server exited normally", addr, transport)
-					}
+					lgDns.Debug("DnsEngine: server exited normally", "addr", addr, "transport", transport)
 				}
 			}(srv, addr, transport)
 		}
@@ -89,7 +82,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// Graceful shutdown on context cancellation
 	go func() {
 		<-ctx.Done()
-		log.Printf("DnsEngine: shutting down Do53 servers...")
+		lgDns.Info("DnsEngine: shutting down Do53 servers...")
 		for _, s := range servers {
 			done := make(chan struct{})
 			go func(srv *dns.Server) {
@@ -99,7 +92,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
-				log.Printf("DnsEngine: timeout shutting down %s/%s; continuing", s.Addr, s.Net)
+				lgDns.Warn("DnsEngine: timeout shutting down server, continuing", "addr", s.Addr, "net", s.Net)
 			}
 		}
 	}()
@@ -109,17 +102,17 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	certKey := true
 
 	if certFile == "" || keyFile == "" {
-		log.Println("DnsEngine: no certificate file or key file provided. Not starting DoT, DoH or DoQ service.")
+		lgDns.Info("DnsEngine: no certificate file or key file provided. Not starting DoT, DoH or DoQ service.")
 		certKey = false
 	}
 
 	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		log.Printf("DnsEngine: certificate file %q does not exist. Not starting DoT, DoH or DoQ service.", certFile)
+		lgDns.Info("DnsEngine: certificate file does not exist. Not starting DoT, DoH or DoQ service.", "file", certFile)
 		certKey = false
 	}
 
 	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		log.Printf("DnsEngine: key file %q does not exist. Not starting DoT, DoH or DoQ service.", keyFile)
+		lgDns.Info("DnsEngine: key file does not exist. Not starting DoT, DoH or DoQ service.", "file", keyFile)
 		certKey = false
 	}
 
@@ -143,7 +136,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			log.Printf("DnsEngine: failed to load certificate: %v. Not starting DoT, DoH or DoQ service.", err)
+			lgDns.Error("DnsEngine: failed to load certificate, not starting DoT/DoH/DoQ service", "err", err)
 			certKey = false
 		}
 
@@ -152,7 +145,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		for i, addr := range addresses {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
-				log.Printf("Failed to parse address %s: %v", addr, err)
+				lgDns.Error("Failed to parse address", "addr", addr, "err", err)
 				tmp[i] = addr // Keep original if parsing fails
 			} else {
 				tmp[i] = host
@@ -163,21 +156,21 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
 			err := DnsDoTEngine(ctx, conf, addresses, &cert, authDNSHandler)
 			if err != nil {
-				log.Printf("Failed to setup the DoT server: %s\n", err.Error())
+				lgDns.Error("Failed to setup the DoT server", "err", err)
 			}
 		}
 
 		if CaseFoldContains(conf.DnsEngine.Transports, "doh") {
 			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, authDNSHandler)
 			if err != nil {
-				log.Printf("Failed to setup the DoH server: %s\n", err.Error())
+				lgDns.Error("Failed to setup the DoH server", "err", err)
 			}
 		}
 
 		if CaseFoldContains(conf.DnsEngine.Transports, "doq") {
 			err := DnsDoQEngine(ctx, conf, addresses, &cert, authDNSHandler)
 			if err != nil {
-				log.Printf("Failed to setup the DoQ server: %s\n", err.Error())
+				lgDns.Error("Failed to setup the DoQ server", "err", err)
 			}
 		}
 	}
@@ -190,24 +183,16 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 	dnsqueryq := conf.Internal.DnsQueryQ // NOTE: Only used by original tdns-kdc (before repo split). New dzm/tdns-kdc uses RegisterQueryHandler.
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
-		if Globals.Debug {
-			log.Printf("DnsHandler: Received DNS message from %s", w.RemoteAddr())
-			log.Printf("DnsHandler: Message ID: %d, Opcode: %s (%d)", r.MsgHdr.Id, dns.OpcodeToString[r.Opcode], r.Opcode)
-			log.Printf("DnsHandler: Question count: %d", len(r.Question))
-			if len(r.Question) > 0 {
-				log.Printf("DnsHandler: Question: %s %s", r.Question[0].Name, dns.TypeToString[r.Question[0].Qtype])
-			}
-			log.Printf("DnsHandler: Additional count: %d", len(r.Extra))
-		}
+		lgDns.Debug("DnsHandler: received DNS message", "remoteaddr", w.RemoteAddr(),
+			"id", r.MsgHdr.Id, "opcode", dns.OpcodeToString[r.Opcode],
+			"questions", len(r.Question), "additional", len(r.Extra))
 		qname := r.Question[0].Name
 		// var dnssec_ok, ots_opt_in, ots_opt_out bool
 		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
 		if err != nil {
-			log.Printf("Error extracting EDNS0 options: %v", err)
+			lgDns.Error("Error extracting EDNS0 options", "err", err)
 		}
-		if Globals.Debug {
-			log.Printf("DnsHandler: EDNS0 DO bit: %v", msgoptions.DO)
-		}
+		lgDns.Debug("DnsHandler: EDNS0 DO bit", "do", msgoptions.DO)
 
 		switch r.Opcode {
 		case dns.OpcodeNotify:
@@ -234,26 +219,22 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					if err == nil {
 						// Handler successfully handled the NOTIFY
 						handled = true
-						if Globals.Debug {
-							log.Printf("DnsHandler: NOTIFY handled by registered handler (qname=%s, qtype=%s)", qname, dns.TypeToString[qtype])
-						}
+						lgDns.Debug("DnsHandler: NOTIFY handled by registered handler", "qname", qname, "qtype", dns.TypeToString[qtype])
 						return
 					}
 					if errors.Is(err, notifyerrors.ErrNotifyHandlerErrorResponse) {
 						// Handler sent an error response (e.g. decryption failed); do not try next handler
 						handled = true
-						log.Printf("DnsHandler: NOTIFY handler responded with error (qname=%s, qtype=%s)", qname, dns.TypeToString[qtype])
+						lgDns.Warn("DnsHandler: NOTIFY handler responded with error", "qname", qname, "qtype", dns.TypeToString[qtype])
 						return
 					}
 					if err == ErrNotHandled {
 						// Handler doesn't handle this NOTIFY, try next handler
-						if Globals.Debug {
-							log.Printf("DnsHandler: NOTIFY handler returned ErrNotHandled, trying next handler")
-						}
+						lgDns.Debug("DnsHandler: NOTIFY handler returned ErrNotHandled, trying next handler")
 						continue
 					} else {
 						// Handler attempted to handle but failed
-						log.Printf("DnsHandler: NOTIFY handler error: %v", err)
+						lgDns.Error("DnsHandler: NOTIFY handler error", "err", err)
 						// Continue to next handler or fall back to default
 						continue
 					}
@@ -263,15 +244,15 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					return // NOTIFY was handled by a registered handler
 				}
 				// All handlers returned ErrNotHandled, fall through to default handler
-				if Globals.Debug {
-					log.Printf("DnsHandler: All registered NOTIFY handlers returned ErrNotHandled, falling back to channel-based handler")
-				}
+				lgDns.Debug("DnsHandler: all registered NOTIFY handlers returned ErrNotHandled, falling back to channel-based handler")
 			}
 
 			// Backward compatibility: If DnsNotifyQ channel is provided, route NOTIFYs there
 			// (This is the old way, kept for backward compatibility)
 			if dnsnotifyq != nil {
-				log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. len(dnsnotifyq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO, len(dnsnotifyq))
+				lgDns.Debug("DnsHandler: routing NOTIFY to dnsnotifyq channel",
+					"qname", qname, "opcode", dns.OpcodeToString[r.Opcode],
+					"do", msgoptions.DO, "channellen", len(dnsnotifyq))
 				// A DNS NOTIFY may trigger time consuming outbound queries
 				dnsnotifyq <- DnsNotifyRequest{ResponseWriter: w, Msg: r, Qname: qname, Options: msgoptions}
 				// Not waiting for a result
@@ -286,7 +267,9 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			return
 
 		case dns.OpcodeUpdate:
-			log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. len(dnsupdateq): %d", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO, len(dnsupdateq))
+			lgDns.Debug("DnsHandler: received UPDATE",
+				"qname", qname, "opcode", dns.OpcodeToString[r.Opcode],
+				"do", msgoptions.DO, "channellen", len(dnsupdateq))
 
 			// Create DnsUpdateRequest for handler matching
 			dur := DnsUpdateRequest{
@@ -307,19 +290,15 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					if err == nil {
 						// Handler successfully handled the UPDATE
 						handled = true
-						if Globals.Debug {
-							log.Printf("DnsHandler: UPDATE handled by registered handler (qname=%s)", qname)
-						}
+						lgDns.Debug("DnsHandler: UPDATE handled by registered handler", "qname", qname)
 						return
 					} else if err == ErrNotHandled {
 						// Handler doesn't handle this UPDATE, try next handler
-						if Globals.Debug {
-							log.Printf("DnsHandler: UPDATE handler returned ErrNotHandled, trying next handler")
-						}
+						lgDns.Debug("DnsHandler: UPDATE handler returned ErrNotHandled, trying next handler")
 						continue
 					} else {
 						// Handler attempted to handle but encountered an error
-						log.Printf("DnsHandler: UPDATE handler error: %v", err)
+						lgDns.Error("DnsHandler: UPDATE handler error", "err", err)
 						// Continue to next handler or fall through to default
 						continue
 					}
@@ -329,9 +308,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					return // UPDATE was handled by a registered handler
 				}
 				// All handlers returned ErrNotHandled, fall through to default handler
-				if Globals.Debug {
-					log.Printf("DnsHandler: All registered UPDATE handlers returned ErrNotHandled, falling back to channel-based handler")
-				}
+				lgDns.Debug("DnsHandler: all registered UPDATE handlers returned ErrNotHandled, falling back to channel-based handler")
 			}
 
 			// Backward compatibility: If DnsUpdateQ channel is provided, route UPDATEs there
@@ -371,19 +348,15 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					if err == nil {
 						// Handler successfully handled the query
 						handled = true
-						if Globals.Debug {
-							log.Printf("DnsHandler: Query handled by registered handler (qname=%s, qtype=%s)", qname, dns.TypeToString[qtype])
-						}
+						lgDns.Debug("DnsHandler: query handled by registered handler", "qname", qname, "qtype", dns.TypeToString[qtype])
 						return
 					} else if err == ErrNotHandled {
 						// Handler doesn't handle this query, try next handler
-						if Globals.Debug {
-							log.Printf("DnsHandler: Handler returned ErrNotHandled, trying next handler")
-						}
+						lgDns.Debug("DnsHandler: handler returned ErrNotHandled, trying next handler")
 						continue
 					} else {
 						// Handler attempted to handle but failed
-						log.Printf("DnsHandler: Query handler error: %v", err)
+						lgDns.Error("DnsHandler: Query handler error", "err", err)
 						// Continue to next handler or fall back to default
 						continue
 					}
@@ -393,9 +366,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					return // Query was handled by a registered handler
 				}
 				// All handlers returned ErrNotHandled, fall through to default handler
-				if Globals.Debug {
-					log.Printf("DnsHandler: All registered handlers returned ErrNotHandled, falling back to default handler")
-				}
+				lgDns.Debug("DnsHandler: all registered handlers returned ErrNotHandled, falling back to default handler")
 			}
 
 			// Backward compatibility: If DnsQueryQ channel is provided, route queries there
@@ -403,10 +374,9 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			// The new dzm/tdns-kdc uses RegisterQueryHandler instead.
 			// (This is the old way, kept for backward compatibility with tdns/tdns/kdc_init.go)
 			if dnsqueryq != nil {
-				if Globals.Debug {
-					log.Printf("DnsHandler: Routing QUERY to dnsqueryq channel (qname=%s, qtype=%s, channel_len=%d)", qname, dns.TypeToString[qtype], len(dnsqueryq))
-				}
-				log.Printf("DnsHandler: qname: %s opcode: %s (%d) DO: %v. Routing to dnsqueryq channel", qname, dns.OpcodeToString[r.Opcode], r.Opcode, msgoptions.DO)
+				lgDns.Debug("DnsHandler: routing QUERY to dnsqueryq channel", "qname", qname, "qtype", dns.TypeToString[qtype], "channellen", len(dnsqueryq))
+				lgDns.Debug("DnsHandler: routing to dnsqueryq channel",
+					"qname", qname, "opcode", dns.OpcodeToString[r.Opcode], "do", msgoptions.DO)
 				// A DNS Query may trigger time consuming processing
 				select {
 				case dnsqueryq <- DnsQueryRequest{
@@ -416,11 +386,9 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 					Qtype:          qtype,
 					Options:        msgoptions,
 				}:
-					if Globals.Debug {
-						log.Printf("DnsHandler: Successfully sent query to dnsqueryq channel")
-					}
+					lgDns.Debug("DnsHandler: successfully sent query to dnsqueryq channel")
 				default:
-					log.Printf("DnsHandler: ERROR: dnsqueryq channel is full! Dropping query")
+					lgDns.Error("DnsHandler: ERROR: dnsqueryq channel is full! Dropping query")
 				}
 				// Not waiting for a result
 				return
@@ -430,20 +398,21 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			// Before returning REFUSED, check for .server. queries (standard DNS server identification)
 			qnameLower := strings.ToLower(qname)
 			if strings.HasSuffix(qnameLower, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
-				log.Printf("DnsHandler: Qname is '%s', which is not a known zone, but likely a query for the .server CH tld", qnameLower)
+				lgDns.Debug("DnsHandler: likely a .server CH query", "qname", qnameLower)
 				DotServerQnameResponse(qnameLower, w, r)
 				return
 			}
 
 			// No handler processed the query, return REFUSED
-			log.Printf("DnsHandler: No handler processed query for %s %s, returning REFUSED", qname, dns.TypeToString[qtype])
+			lgDns.Info("DnsHandler: no handler processed query, returning REFUSED",
+				"qname", qname, "qtype", dns.TypeToString[qtype])
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeRefused)
 			w.WriteMsg(m)
 			return
 
 		default:
-			log.Printf("Error: unable to handle msgs of type %s", dns.OpcodeToString[r.Opcode])
+			lgDns.Error("Error: unable to handle msgs of type", "type", dns.OpcodeToString[r.Opcode])
 		}
 	}
 }

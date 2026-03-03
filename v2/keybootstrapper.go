@@ -3,7 +3,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +30,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 
 	verifications := make(map[string]*VerificationInfo)
 
-	log.Printf("KeyBootstrapper: starting")
+	lgSigner.Info("KeyBootstrapper starting")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -41,7 +40,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("KeyBootstrapper: Received context done signal")
+				lgSigner.Info("KeyBootstrapper received context done signal")
 				return
 			// XXX: stopchan is being deprecated
 			//			case <-stopchan:
@@ -49,40 +48,27 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 			//				return
 			case utr = <-keybootstrapperq:
 
-				fmt.Printf("KeyBootstrapper: Received request: %v\n", utr)
-				fmt.Printf("KeyBootstrapper: Request details:\n")
-				fmt.Printf("KeyBootstrapper: Cmd: %s\n", utr.Cmd)
-				fmt.Printf("KeyBootstrapper: KeyName: %s\n", utr.KeyName)
-				fmt.Printf("KeyBootstrapper: ZoneName: %s\n", utr.ZoneName)
-				fmt.Printf("KeyBootstrapper: Keyid: %d\n", utr.Keyid)
-				fmt.Printf("KeyBootstrapper: Key: %v\n", utr.Key)
-				fmt.Printf("KeyBootstrapper: ZoneData: %v\n", utr.ZoneData)
-				if utr.ResponseChan != nil {
-					fmt.Printf("KeyBootstrapper: ResponseChan: [exists]\n")
-				} else {
-					fmt.Printf("KeyBootstrapper: ResponseChan: [missing]\n")
-				}
+				lgSigner.Debug("KeyBootstrapper received request", "cmd", utr.Cmd, "keyname", utr.KeyName, "zone", utr.ZoneName, "keyid", utr.Keyid, "has_response_chan", utr.ResponseChan != nil)
 
 				switch utr.Cmd {
 				case kbCmdPing:
-					log.Printf("KeyBootstrapper: PING received. PONG!")
+					lgSigner.Debug("KeyBootstrapper PING received, PONG!")
 				case kbCmdInfo:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
-					fmt.Printf("KeyBootstrapper: INFO received. KeyName: %s, Keyid: %d\n", utr.KeyName, utr.Keyid)
+					lgSigner.Debug("KeyBootstrapper INFO received", "keyname", utr.KeyName, "keyid", utr.Keyid)
 
 					if utr.ResponseChan != nil {
 						if info, exists := verifications[mapKey]; exists {
-							fmt.Printf("KeyBootstrapper: INFO found info for key. Sending response.\n")
-							fmt.Printf("KeyBootstrapper: INFO info: %d %d\n", info.FailedAttempts, info.AttemptsLeft)
+							lgSigner.Debug("KeyBootstrapper INFO found info for key", "failed_attempts", info.FailedAttempts, "attempts_left", info.AttemptsLeft)
 							utr.ResponseChan <- info
 						} else {
-							fmt.Printf("KeyBootstrapper: INFO no info found for key. Sending nil response.\n")
+							lgSigner.Debug("KeyBootstrapper INFO no info found for key")
 							utr.ResponseChan <- nil
 						}
 					}
 				case kbCmdBootstrap: //Start the verification process
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
-					log.Printf("KeyBootstrapper: Received verification request for domain %s", utr.ZoneName)
+					lgSigner.Info("received verification request", "zone", utr.ZoneName)
 
 					// Hämta antalet försök från konfigurationen
 					attempts := viper.GetInt("verifyengine.attempts")
@@ -103,9 +89,9 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 					go VerifyKey(utr.KeyName, utr.Key, utr.Keyid, utr.ZoneData, keybootstrapperq)
 				case kbCmdVerificationStep:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
-					log.Printf("KeyBootstrapper: Received verification result for domain %s, keyid %d", utr.KeyName, utr.Keyid)
+					lgSigner.Info("received verification result", "keyname", utr.KeyName, "keyid", utr.Keyid)
 					if info, exists := verifications[mapKey]; exists {
-						log.Printf("KeyBootstrapper: Verification info for domain %s: %v", utr.KeyName, info)
+						lgSigner.Debug("verification info", "keyname", utr.KeyName, "info", info)
 						info.AttemptsLeft--
 						retryInterval := viper.GetInt("verifyengine.retry_interval")
 						if retryInterval == 0 {
@@ -113,13 +99,13 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 						}
 						info.NextCheckTime = time.Now().Add(time.Duration(retryInterval) * time.Second)
 						if info.AttemptsLeft <= 0 {
-							log.Printf("KeyBootstrapper: Verification for %s completed. Verified: %v", utr.KeyName, utr.Verified)
+							lgSigner.Info("verification completed", "keyname", utr.KeyName, "verified", utr.Verified)
 							delete(verifications, mapKey)
 							utr.Verified = true
 							// Uppdatera motsvarande nyckel i TrustStore och sätt trusted till true
 							tx, err := kdb.Begin("VerifyTrustEngine")
 							if err != nil {
-								log.Printf("Error starting transaction: %v", err)
+								lgSigner.Error("failed to start transaction", "err", err)
 							} else {
 								tppost := TruststorePost{
 									SubCommand: "trust",
@@ -128,27 +114,27 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 								}
 								_, err := kdb.Sig0TrustMgmt(tx, tppost)
 								if err != nil {
-									log.Printf("Error updating TrustStore: %v", err)
+									lgSigner.Error("failed to update TrustStore", "err", err)
 									tx.Rollback()
 								} else {
 									err = tx.Commit()
 									if err != nil {
-										log.Printf("Error committing transaction: %v", err)
+										lgSigner.Error("failed to commit transaction", "err", err)
 									} else {
-										log.Printf("TrustStore updated for %s. Trusted: %v", utr.KeyName, utr.Verified)
+										lgSigner.Info("TrustStore updated", "keyname", utr.KeyName, "verified", utr.Verified)
 									}
 								}
 							}
-							log.Printf("Verification for %s completed. Verified: %v", utr.KeyName, utr.Verified)
+							lgSigner.Info("verification for key completed", "keyname", utr.KeyName, "verified", utr.Verified)
 						} else {
-							log.Printf("Scheduling next check for %s. Attempts left: %d", utr.KeyName, info.AttemptsLeft)
+							lgSigner.Debug("scheduling next check", "keyname", utr.KeyName, "attempts_left", info.AttemptsLeft)
 						}
 					}
 				case kbCmdRestart:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
 					if info, exists := verifications[mapKey]; exists {
 
-						log.Printf("Verification failed for  %s, restarting process", utr.KeyName)
+						lgSigner.Info("verification failed, restarting", "keyname", utr.KeyName)
 
 						attempts := viper.GetInt("verifyengine.attempts")
 						if attempts == 0 {
@@ -161,7 +147,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 
 					}
 				default:
-					log.Printf("KeyBootstrapper: Unknown command: '%s'. Ignoring.", utr.Cmd)
+					lgSigner.Warn("KeyBootstrapper unknown command, ignoring", "cmd", utr.Cmd)
 				}
 			case <-ticker.C:
 				now := time.Now()
@@ -183,12 +169,12 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 					tmp := strings.Split(k, "::")
 					keyname := tmp[0]
 					keyid, _ := strconv.ParseUint(tmp[1], 10, 16)
-					fmt.Printf("KeyBootstrapper: Updating key state for %s, keyid %d\n", keyname, keyid)
+					lgSigner.Debug("updating key state", "keyname", keyname, "keyid", keyid)
 
 					go func() {
 						err := kdb.UpdateKeyState(ctx, keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
 						if err != nil {
-							log.Printf("KeyBootstrapper:Error updating key state for %s, keyid %d: %v", keyname, keyid, err)
+							lgSigner.Error("failed to update key state", "keyname", keyname, "keyid", keyid, "err", err)
 						}
 					}()
 				}
@@ -196,7 +182,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 				// Uppdatera keystate för alla aktiva nycklar
 				sak, err := kdb.GetSig0Keys(Globals.Zonename, Sig0StateActive)
 				if err != nil {
-					log.Printf("Error getting active keys: %v", err)
+					lgSigner.Error("failed to get active SIG(0) keys", "err", err)
 					continue
 				}
 
@@ -204,7 +190,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 					go func() {
 						err := kdb.UpdateKeyState(ctx, key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
 						if err != nil {
-							log.Printf("KeyBootstrapper: Error updating key state for %s, keyid %d: %v", key.KeyRR.Header().Name, key.KeyRR.KeyTag(), err)
+							lgSigner.Error("failed to update key state", "keyname", key.KeyRR.Header().Name, "keyid", key.KeyRR.KeyTag(), "err", err)
 						}
 					}()
 				}
@@ -213,21 +199,21 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 	}()
 	wg.Wait()
 
-	log.Println("KeyBootstrapper: terminating")
+	lgSigner.Info("KeyBootstrapper terminating")
 	return nil
 }
 
 func VerifyKey(KeyName string, key string, keyid uint16, zd *ZoneData, updatetrustq chan<- KeyBootstrapperRequest) {
-	log.Printf("Verifying key for domain %s", KeyName)
+	lgSigner.Info("verifying key", "keyname", KeyName)
 
 	nameservers, err := GetNameservers(KeyName, zd)
 	if err != nil {
-		log.Printf("Error getting nameservers for %s: %v", KeyName, err)
+		lgSigner.Error("failed to get nameservers", "keyname", KeyName, "err", err)
 		updatetrustq <- KeyBootstrapperRequest{Cmd: kbCmdRestart, KeyName: KeyName, Keyid: keyid}
 		return
 	}
 
-	log.Printf("BERRA: Verifying key for domain %s. Nameservers: %v", KeyName, nameservers)
+	lgSigner.Debug("verifying key against nameservers", "keyname", KeyName, "nameservers", nameservers)
 
 	c := new(dns.Client)
 	c.Net = "tcp"
@@ -240,7 +226,7 @@ func VerifyKey(KeyName string, key string, keyid uint16, zd *ZoneData, updatetru
 	for _, ns := range nameservers {
 		r, _, err := c.Exchange(m, ns+":53")
 		if err != nil {
-			log.Printf("Error querying nameserver %s for %s: %v", ns, KeyName, err)
+			lgSigner.Error("failed to query nameserver", "ns", ns, "keyname", KeyName, "err", err)
 			allVerified = false
 			continue
 		}
@@ -250,19 +236,19 @@ func VerifyKey(KeyName string, key string, keyid uint16, zd *ZoneData, updatetru
 			if keyRR, ok := ans.(*dns.KEY); ok {
 				if keyRR.String() == key {
 					nsVerified = true
-					log.Printf("Key verified for domain %s on nameserver %s", KeyName, ns)
+					lgSigner.Debug("key verified on nameserver", "keyname", KeyName, "ns", ns)
 					break
 				}
 			}
 		}
 
 		if !nsVerified {
-			log.Printf("Key not verified for domain %s on nameserver %s", KeyName, ns)
+			lgSigner.Warn("key not verified on nameserver", "keyname", KeyName, "ns", ns)
 			allVerified = false
 		}
 	}
 
-	log.Printf("BERRA: Verification for %s completed. Verified: %v", KeyName, allVerified)
+	lgSigner.Info("key verification completed", "keyname", KeyName, "verified", allVerified)
 
 	if allVerified {
 		updatetrustq <- KeyBootstrapperRequest{Cmd: kbCmdVerificationStep, KeyName: KeyName, Keyid: keyid}
@@ -356,7 +342,7 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 
 	tx, err := kdb.Begin("UpdateKeyState")
 	if err != nil {
-		log.Printf("Error starting transaction: %v", err)
+		lgSigner.Error("failed to start transaction", "err", err)
 		return err
 	}
 
@@ -370,36 +356,36 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 
 	resp, err := kdb.Sig0KeyMgmt(tx, kpparent)
 	if err != nil {
-		log.Printf("Error updating parent state: %v", err)
+		lgSigner.Error("failed to update parent state", "err", err)
 		tx.Rollback()
 		return err
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		log.Printf("Error committing transaction: %v", err)
+		lgSigner.Error("failed to commit transaction", "err", err)
 		return err
 	}
 
-	log.Printf("KeyBootstrapper: Parent state updated: %s", resp.Msg)
+	lgSigner.Info("parent state updated", "msg", resp.Msg)
 
 	// If the key is unknown, bootstrap it with parent
 	if keystate.KeyState == edns0.KeyStateUnknown {
 
 		zd, ok := FindZone(KeyName)
 		if !ok {
-			log.Printf("Keybootstrapper: Error getting zone data for %s: %v", KeyName, err)
+			lgSigner.Error("failed to get zone data", "keyname", KeyName, "err", err)
 			return fmt.Errorf("could not get zone data for %s: %v", KeyName, err)
 		}
 
 		if zd == nil {
-			log.Printf("Keybootstrapper: Zone data not found for %s", KeyName)
+			lgSigner.Error("zone data not found", "keyname", KeyName)
 			return fmt.Errorf("zone data not found for %s", KeyName)
 		}
 
 		_, _, err = zd.BootstrapSig0KeyWithParent(ctx, algorithm)
 		if err != nil {
-			log.Printf("Keybootstrapper: Error bootstrapping key for %s: %v", KeyName, err)
+			lgSigner.Error("failed to bootstrap key", "keyname", KeyName, "err", err)
 			return fmt.Errorf("could not bootstrap key for %s: %v", KeyName, err)
 		}
 	}

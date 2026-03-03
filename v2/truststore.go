@@ -6,7 +6,6 @@ package tdns
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -112,7 +111,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		if tp.Src == "file" {
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, false, false, false, tp.Src, tp.KeyRR)
 			if err != nil {
-				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
+				lgSigner.Error("failed to add SIG(0) key to TrustStore", "err", err)
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
@@ -121,17 +120,16 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		} else if tp.Src == "keystore" {
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, true, false, true, tp.Src, tp.KeyRR)
 			if err != nil {
-				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
+				lgSigner.Error("failed to add SIG(0) key to TrustStore from keystore", "err", err)
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d imported from KeyStore to TrustStore", tp.Keyname, tp.Keyid)
 			}
 		} else if tp.Src == "child-update" {
-			// dump.P(tp)
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
 			if err != nil {
-				log.Printf("Error adding SIG(0) key to TrustStore: %v", err)
+				lgSigner.Error("failed to add SIG(0) key to TrustStore from child-update", "err", err)
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			} else {
@@ -158,7 +156,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 		err := row.Scan(&zone, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrr)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to scan TrustStore key for delete", "err", err)
 			if err == sql.ErrNoRows {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
@@ -167,17 +165,15 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			// return &resp, err
 		}
 
-		// log.Printf("DEBUG: truststore sig0 delete: key %s (should be %s) keyid %d (should be %d)", zone, tp.Keyname, keyid, tp.Keyid)
 		if keyid != tp.Keyid || zone != tp.Keyname {
-			log.Printf("truststore sig0 delete: key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
+			lgSigner.Warn("TrustStore key not found for delete", "keyname", tp.Keyname, "keyid", tp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
 			// return &resp, nil
 		}
 
 		res, err = tx.Exec(deleteSig0KeySql, tp.Keyname, tp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error deleting SIG(0) key from TrustStore: %v", err)
+			lgSigner.Error("failed to delete SIG(0) key from TrustStore", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 			// return &resp, err
@@ -196,7 +192,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		res, err = tx.Exec(childsig0keyupdatetrustsql, true,
 			tp.Keyname, tp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to trust SIG(0) key", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 		} else {
@@ -212,10 +208,8 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		// 3. Return all good, now untrusted
 		res, err = tx.Exec(childsig0keyupdatetrustsql, false,
 			tp.Keyname, tp.Keyid)
-		log.Printf("tx.Exec(%s, %v, %s, %d)", childsig0keyupdatetrustsql,
-			false, tp.Keyname, tp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to untrust SIG(0) key", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 		} else {
@@ -226,7 +220,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	default:
-		log.Printf("Sig0TrustStoreMgmt: Unknown SubCommand: %s", tp.SubCommand)
+		lgSigner.Warn("unknown Sig0TrustMgmt subcommand", "subcommand", tp.SubCommand)
 	}
 
 	return &resp, nil
@@ -287,7 +281,7 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
        VALUES (?, ?, ?, ?, ?, ?)`
 	)
 
-	log.Printf("*** Enter LoadChildSig0Keys() ***")
+	lgSigner.Info("loading child SIG(0) keys")
 	// dump.P(kdb)
 
 	rows, err := kdb.Query(loadsig0sql)
@@ -350,7 +344,7 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 			}
 
 			if keyrr, ok := rr.(*dns.KEY); ok {
-				log.Printf("* LoadChildSig0Keys: loading key %s", k)
+				lgSigner.Debug("loading child SIG(0) key from file", "key", k)
 				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
 				kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
 					Name:      k,
@@ -362,17 +356,16 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 				})
 				_, err = tx.Exec(insertchildsig0key, k, keyrr.KeyTag(), true, true, "file", keyrr.String())
 				if err != nil {
-					log.Printf("LoadSig0ChildKeys: Error from tx.Exec(%s): %v",
-						insertchildsig0key, err)
+					lgSigner.Error("failed to insert child SIG(0) key", "sql", insertchildsig0key, "err", err)
 					continue
 				}
 			} else {
-				log.Printf("LoadSig0ChildKeys: Key %s is not a KEY?", rr.String())
+				lgSigner.Warn("key is not a KEY RR", "rr", rr.String())
 			}
 		}
 		err1 := tx.Commit()
 		if err1 != nil {
-			log.Printf("LoadSig0ChildKeys: tx.Commit() error=%v", err1)
+			lgSigner.Error("failed to commit child SIG(0) key load", "err", err1)
 		}
 	}
 	return nil

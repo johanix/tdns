@@ -7,7 +7,6 @@ package tdns
 import (
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -41,9 +40,9 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	}
 
 	if oldapex == nil {
-		log.Printf("HsyncChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		lgAgent.Info("initial zone load, old apex was nil", "zone", zd.ZoneName)
 		if newhsync == nil {
-			log.Printf("HsyncChanged: Zone %s new apex has no HSYNC RRset. No action.", zd.ZoneName)
+			lgAgent.Debug("new apex has no HSYNC RRset, no action", "zone", zd.ZoneName)
 			return false, &hss, nil
 		}
 		hss.HsyncAdds = newhsync.RRs

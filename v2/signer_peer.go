@@ -11,7 +11,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
@@ -26,12 +25,12 @@ import (
 // Mirrors InitializeCombinerAsPeer for the signer role.
 func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	if conf.Agent == nil || conf.Agent.Signer == nil {
-		log.Printf("InitializeSignerAsPeer: No signer configured, skipping")
+		lgSigner.Debug("no signer configured, skipping peer registration")
 		return nil
 	}
 
 	if conf.Agent.Signer.Address == "" {
-		log.Printf("InitializeSignerAsPeer: Signer address not configured, skipping")
+		lgSigner.Debug("signer address not configured, skipping peer registration")
 		return nil
 	}
 
@@ -49,9 +48,9 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	signerID := AgentId("signer")
 	if conf.Agent.Signer.Identity != "" {
 		signerID = AgentId(conf.Agent.Signer.Identity)
-		log.Printf("InitializeSignerAsPeer: Using configured signer identity: %s", signerID)
+		lgSigner.Debug("using configured signer identity", "identity", signerID)
 	} else {
-		log.Printf("InitializeSignerAsPeer: WARNING: No signer identity configured, using default 'signer'")
+		lgSigner.Warn("no signer identity configured, using default 'signer'")
 	}
 
 	// Create an agent entry for the signer
@@ -78,7 +77,7 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 
 	// Register in AgentRegistry
 	ar.S.Set(signerID, signerAgent)
-	log.Printf("InitializeSignerAsPeer: Registered signer %s at %s as virtual peer", signerID, conf.Agent.Signer.Address)
+	lgSigner.Info("registered signer as virtual peer", "identity", signerID, "address", conf.Agent.Signer.Address)
 
 	// Load and register signer's public key for encrypted communication
 	if conf.Agent.Signer.LongTermJosePubKey == "" {
@@ -107,14 +106,13 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 	payloadCrypto.AddPeerKey(string(signerID), signerPubKey)
 	payloadCrypto.AddPeerVerificationKey(string(signerID), signerPubKey)
 
-	log.Printf("InitializeSignerAsPeer: Loaded signer public key from %s", conf.Agent.Signer.LongTermJosePubKey)
+	lgSigner.Info("loaded signer public key", "path", conf.Agent.Signer.LongTermJosePubKey)
 
 	// Perform initial connectivity check
 	if err := performSignerConnectivityCheck(conf); err != nil {
-		log.Printf("InitializeSignerAsPeer: WARNING: Initial connectivity check failed: %v", err)
-		log.Printf("InitializeSignerAsPeer: Signer pings will continue to work once signer is reachable")
+		lgSigner.Warn("initial connectivity check failed, signer pings will work once reachable", "err", err)
 	} else {
-		log.Printf("InitializeSignerAsPeer: Initial connectivity check passed")
+		lgSigner.Info("initial signer connectivity check passed")
 	}
 
 	return nil

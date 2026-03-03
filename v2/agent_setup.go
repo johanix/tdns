@@ -14,7 +14,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -42,7 +41,7 @@ func createDeferredUpdate(zoneName, description string, action func() error) Def
 }
 
 func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
-	log.Printf("SetupAgentAutoZone: Zone %q not found, creating a minimal auto zone", zonename)
+	lgAgent.Info("creating a minimal auto zone", "zone", zonename)
 
 	var zd *ZoneData
 	var err error
@@ -68,9 +67,7 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 	// Check for local notify configuration and set downstream targets
 	if len(conf.Agent.Local.Notify) > 0 {
 		zd.Downstreams = NormalizeAddresses(conf.Agent.Local.Notify)
-		if Globals.Debug {
-			log.Printf("SetupAgentAutoZone: Setting downstream notify targets for zone %s: %v", zonename, zd.Downstreams)
-		}
+		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "downstreams", zd.Downstreams)
 	}
 
 	// Agent auto zone needs to be signed
@@ -105,7 +102,7 @@ func (conf *Config) SetupApiTransport() error {
 			if !ok {
 				return fmt.Errorf("SetupApiTransport: zone data for agent identity %q not found", identity)
 			}
-			log.Printf("SetupApiTransport: publishing URI record for agent %q, api transport", identity)
+			lgAgent.Info("publishing URI record for API transport", "agent", identity)
 
 			// Publish _https._tcp URI record
 			uristr := strings.Replace(conf.Agent.Api.BaseUrl, "{TARGET}", identity, 1)
@@ -119,14 +116,14 @@ func (conf *Config) SetupApiTransport() error {
 			if err != nil {
 				host = uri.Host // No port specified
 			}
-			log.Printf("SetupApiTransport: publishing _https._tcp URI record for agent %q with target %q", identity, host)
+			lgAgent.Debug("publishing _https._tcp URI record", "agent", identity, "target", host)
 
 			// Publish _https._tcp URI record
 			err = zd.PublishUriRR("_https._tcp."+identity, identity, conf.Agent.Api.BaseUrl, conf.Agent.Api.Port)
 			if err != nil {
 				return fmt.Errorf("SetupApiTransport: failed to publish URI record: %v", err)
 			}
-			log.Printf("SetupApiTransport: successfully published URI record for agent %q", identity)
+			lgAgent.Debug("published URI record", "agent", identity)
 
 			// Publish address records for the URI target
 			for _, addr := range conf.Agent.Api.Addresses.Publish {
@@ -135,14 +132,14 @@ func (conf *Config) SetupApiTransport() error {
 					return fmt.Errorf("SetupApiTransport: failed to publish address record for %s %s: %v", host, addr, err)
 				}
 			}
-			log.Printf("SetupApiTransport: successfully published address records for agent %q", identity)
+			lgAgent.Debug("published address records", "agent", identity)
 
 			// Publish TLSA record
 			err = zd.PublishTlsaRR(host, conf.Agent.Api.Port, conf.Agent.Api.CertData)
 			if err != nil {
 				return fmt.Errorf("SetupApiTransport: failed to publish TLSA record: %v", err)
 			}
-			log.Printf("SetupApiTransport: successfully published TLSA record for agent %q", identity)
+			lgAgent.Debug("published TLSA record", "agent", identity)
 			// Publish SVCB record with addresses
 			var value []dns.SVCBKeyValue
 			var ipv4hint, ipv6hint []net.IP
@@ -173,7 +170,7 @@ func (conf *Config) SetupApiTransport() error {
 			if err != nil {
 				return fmt.Errorf("SetupApiTransport: failed to publish SVCB record: %v", err)
 			}
-			log.Printf("SetupApiTransport: successfully published SVCB record for agent %q", identity)
+			lgAgent.Debug("published SVCB record for API transport", "agent", identity)
 
 			return nil
 		},
@@ -200,7 +197,7 @@ func (conf *Config) SetupDnsTransport() error {
 			if !ok {
 				return fmt.Errorf("SetupDnsTransport: zone data for agent identity %q not found", identity)
 			}
-			log.Printf("SetupDnsTransport: publishing DNS transport records for agent %q", identity)
+			lgAgent.Info("publishing DNS transport records", "agent", identity)
 
 			uristr := strings.Replace(conf.Agent.Dns.BaseUrl, "{TARGET}", identity, 1)
 			uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.Agent.Dns.Port), 1)
@@ -209,20 +206,20 @@ func (conf *Config) SetupDnsTransport() error {
 				return fmt.Errorf("SetupDnsTransport: failed to parse base URL: %q", uristr)
 			}
 
-			log.Printf("*** SetupDnsTransport: DEBUG: uri: %q, uri.Host: %q", uri, uri.Host)
+			lgAgent.Debug("parsed DNS transport URI", "uri", uri, "host", uri.Host)
 			// Split host and port since url.Parse doesn't handle dns:// URLs properly
 			host, _, err := net.SplitHostPort(uri.Host)
 			if err != nil {
 				host = uri.Host // No port specified
 			}
-			log.Printf("*** SetupDnsTransport: publishing _dns._tcp URI record for agent %q with target %q", identity, host)
+			lgAgent.Debug("publishing _dns._tcp URI record", "agent", identity, "target", host)
 
 			// Publish _dns._tcp URI record
 			err = zd.PublishUriRR("_dns._tcp."+identity, identity, conf.Agent.Dns.BaseUrl, conf.Agent.Dns.Port)
 			if err != nil {
 				return fmt.Errorf("SetupDnsTransport: failed to publish URI record: %v", err)
 			}
-			log.Printf("SetupDnsTransport: successfully published URI record for agent %q", identity)
+			lgAgent.Debug("published DNS URI record", "agent", identity)
 
 			// Publish address records for the URI target
 			for _, addr := range conf.Agent.Dns.Addresses.Publish {
@@ -231,24 +228,24 @@ func (conf *Config) SetupDnsTransport() error {
 					return fmt.Errorf("SetupDnsTransport: failed to publish address record for %s %s: %v", host, addr, err)
 				}
 			}
-			log.Printf("SetupApiTransport: successfully published address records for agent %q", identity)
+			lgAgent.Debug("published address records", "agent", identity)
 
 			// Publish KEY record for SIG(0)
 			err = zd.AgentSig0KeyPrep(host, zd.KeyDB)
 			if err != nil {
 				return fmt.Errorf("SetupDnsTransport: failed to publish KEY record: %v", err)
 			}
-			log.Printf("SetupDnsTransport: successfully published KEY record for agent %q", identity)
+			lgAgent.Debug("published KEY record", "agent", identity)
 
 			// Publish JWK record for JOSE/HPKE keys at dns.<identity>
 			// This is separate from SIG(0) KEY records - JWK is for payload crypto
 			publishName := "dns." + identity
 			err = zd.AgentJWKKeyPrep(publishName, zd.KeyDB)
 			if err != nil {
-				log.Printf("SetupDnsTransport: warning: failed to publish JWK record: %v (continuing without JWK)", err)
+				lgAgent.Warn("failed to publish JWK record, continuing without JWK", "err", err)
 				// Don't fail setup if JWK publication fails - it's optional
 			} else {
-				log.Printf("SetupDnsTransport: successfully published JWK record at %q", publishName)
+				lgAgent.Debug("published JWK record", "name", publishName)
 			}
 
 			// Publish SVCB record with addresses
@@ -281,7 +278,7 @@ func (conf *Config) SetupDnsTransport() error {
 			if err != nil {
 				return fmt.Errorf("SetupDnsTransport: failed to publish SVCB record: %v", err)
 			}
-			log.Printf("SetupDnsTransport: successfully published SVCB record for agent %q", identity)
+			lgAgent.Debug("published SVCB record for DNS transport", "agent", identity)
 
 			return nil
 		},
@@ -297,9 +294,7 @@ func (conf *Config) SetupDnsTransport() error {
 }
 
 func (conf *Config) SetupAgent(all_zones []string) error {
-	if Globals.Debug {
-		log.Printf("SetupAgent: enter. all_zones: %v", all_zones)
-	}
+	lgAgent.Debug("SetupAgent enter", "zones", all_zones)
 
 	if len(conf.Agent.Api.Addresses.Listen) == 0 && len(conf.Agent.Dns.Addresses.Listen) == 0 {
 		dump.P(conf.Agent)
@@ -359,11 +354,8 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 
 		// Add this before setting up the HTTP client
-		log.Printf("Client certificate loaded: Subject=%s",
-			cert.Subject.CommonName)
-
-		log.Printf("Client certificate valid from %s to %s",
-			cert.NotBefore, cert.NotAfter)
+		lgAgent.Info("client certificate loaded", "subject", cert.Subject.CommonName,
+			"notBefore", cert.NotBefore, "notAfter", cert.NotAfter)
 
 		err = conf.SetupApiTransport()
 		if err != nil {
@@ -380,16 +372,14 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 	}
 
-	if Globals.Debug {
-		log.Printf("SetupAgent: exit")
-	}
+	lgAgent.Debug("SetupAgent exit")
 	return nil
 }
 
 func (zd *ZoneData) AgentSig0KeyPrep(name string, kdb *KeyDB) error {
 	alg, err := parseKeygenAlgorithm("agent.update.keygen.algorithm", dns.ED25519)
 	if err != nil {
-		log.Printf("AgentSig0KeyPrep: Zone %s: Error from parseKeygenAlgorithm(): %v", zd.ZoneName, err)
+		lgAgent.Error("parseKeygenAlgorithm failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
@@ -406,11 +396,11 @@ func (zd *ZoneData) AgentSig0KeyPrep(name string, kdb *KeyDB) error {
 //   - publishname: The name where the JWK record will be published (typically "dns.<identity>")
 //   - kdb: The key database (unused, kept for interface compatibility)
 func (zd *ZoneData) AgentJWKKeyPrep(publishname string, kdb *KeyDB) error {
-	log.Printf("AgentJWKKeyPrep: Zone %s: publishing JWK record at %s", zd.ZoneName, publishname)
+	lgAgent.Info("publishing JWK record", "zone", zd.ZoneName, "name", publishname)
 
 	// Check if JWK publication is disabled
 	if zd.Options[OptDontPublishJWK] {
-		log.Printf("AgentJWKKeyPrep: Zone %s: JWK publication disabled by dont-publish-jwk option", zd.ZoneName)
+		lgAgent.Debug("JWK publication disabled by dont-publish-jwk option", "zone", zd.ZoneName)
 		return nil
 	}
 
@@ -505,7 +495,7 @@ func (zd *ZoneData) AgentJWKKeyPrep(publishname string, kdb *KeyDB) error {
 		return fmt.Errorf("AgentJWKKeyPrep: failed to publish JWK record: %w", err)
 	}
 
-	log.Printf("AgentJWKKeyPrep: successfully published JWK record at %s", publishname)
+	lgAgent.Info("published JWK record", "name", publishname)
 	return nil
 }
 
@@ -527,10 +517,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 		return fmt.Errorf("local agent config missing either cert or key file")
 	}
 
-	if Globals.Debug {
-		log.Printf("NewAgentSyncApiClient: enter. identity: %s, baseurl: %s",
-			agent.Identity, agent.ApiDetails.BaseUri)
-	}
+	lgAgent.Debug("creating API client", "identity", agent.Identity, "baseurl", agent.ApiDetails.BaseUri)
 
 	// Create API client
 	api := AgentApi{
@@ -570,7 +557,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 				return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
 			}
 
-			log.Printf("VerifyPeerCertificate: successfully verified cert for %q against TLSA record", agent.Identity)
+			lgAgent.Debug("verified cert against TLSA record", "agent", agent.Identity)
 		}
 
 		return nil
@@ -587,9 +574,7 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 
 	// Configure API addresses if available
 	if len(agent.ApiDetails.Addrs) > 0 {
-		if Globals.Debug {
-			log.Printf("Remote agent %q has the API addresses %v", agent.Identity, agent.ApiDetails.Addrs)
-		}
+		lgAgent.Debug("remote agent API addresses", "agent", agent.Identity, "addrs", agent.ApiDetails.Addrs)
 		var addressesWithPort []string
 		port := strconv.Itoa(int(agent.ApiDetails.Port))
 
@@ -600,10 +585,8 @@ func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
 		api.ApiClient.Addresses = addressesWithPort
 	}
 
-	if Globals.Debug {
-		fmt.Printf("Setting up AGENT-TO-AGENT Sync API client: %s\n", agent.Identity)
-		fmt.Printf("* baseurl is: %s \n* authmethod is: %s \n", api.ApiClient.BaseUrl, api.ApiClient.AuthMethod)
-	}
+	lgAgent.Debug("setting up agent-to-agent sync API client",
+		"agent", agent.Identity, "baseurl", api.ApiClient.BaseUrl, "authmethod", api.ApiClient.AuthMethod)
 
 	// Assign the API client to the agent
 	agent.Api = &api

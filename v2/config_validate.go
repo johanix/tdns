@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -118,7 +117,7 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 	}
 
 	for k, data := range configsections {
-		log.Printf("%s: Validating config for %q section\n", strings.ToUpper(Globals.App.Name), k)
+		lgConfig.Info("validating config section", "app", strings.ToUpper(Globals.App.Name), "section", k)
 		if err := validate.Struct(data); err != nil {
 			// log.Printf("ValidateBySection ERROR: %q section failed validation: %v\ndata:\n%+v", k, err, data)
 			return fmt.Sprintf("%s: Config %s, section %q: missing required attributes:\n%v",
@@ -132,33 +131,31 @@ func ValidateBySection(config *Config, configsections map[string]interface{}, cf
 func ValidateCertAndKeyFiles(fl validator.FieldLevel) bool {
 	certFile := fl.Field().String()
 	keyFile := fl.Parent().FieldByName("KeyFile").String()
-	if Globals.Debug {
-		log.Printf("ValidateCertAndKeyFiles: certFile: %s, keyFile: %s", certFile, keyFile)
-	}
+	lgConfig.Debug("validating cert and key files", "certFile", certFile, "keyFile", keyFile)
 
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
-		log.Printf("ValidateCertAndKeyFiles: error reading cert file: %v", err)
+		lgConfig.Error("error reading cert file", "err", err)
 		return false
 	}
 
 	keyPEM, err := os.ReadFile(keyFile)
 	if err != nil {
-		log.Printf("ValidateCertAndKeyFiles: error reading key file: %v", err)
+		lgConfig.Error("error reading key file", "err", err)
 		return false
 	}
 
 	// Load the certificate
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		log.Printf("ValidateCertAndKeyFiles: error loading certificate: %v", err)
+		lgConfig.Error("error loading certificate", "err", err)
 		return false
 	}
 
 	// Parse the certificate
 	certParsed, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		log.Printf("ValidateCertAndKeyFiles: error parsing certificate: %v", err)
+		lgConfig.Error("error parsing certificate", "err", err)
 		return false
 	}
 
@@ -168,16 +165,16 @@ func ValidateCertAndKeyFiles(fl validator.FieldLevel) bool {
 
 	// Check if the certificate is valid
 	if _, err := certParsed.Verify(x509.VerifyOptions{Roots: certPool}); err != nil {
-		log.Printf("ValidateCertAndKeyFiles: error verifying certificate against custom cert pool (for self-signed cert): %v", err)
+		lgConfig.Warn("error verifying certificate against custom cert pool (self-signed)", "err", err)
 
 		// If cert verification against the cert pool fails, try again with the system cert pool
 		certPool, err := x509.SystemCertPool()
 		if err != nil {
-			log.Printf("ValidateCertAndKeyFiles: error loading system cert pool: %v", err)
+			lgConfig.Error("error loading system cert pool", "err", err)
 			return false
 		}
 		if _, err := certParsed.Verify(x509.VerifyOptions{Roots: certPool}); err != nil {
-			log.Printf("ValidateCertAndKeyFiles: error verifying certificate against system cert pool: %v", err)
+			lgConfig.Error("error verifying certificate against system cert pool", "err", err)
 			return false
 		}
 	}
