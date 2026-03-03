@@ -662,7 +662,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					continue
 				}
 
-				// Build ZoneUpdate from all local RRsets
+				// Build ZoneUpdate from local RRsets, excluding DNSKEY.
+				// Local DNSKEYs are managed via the KEYSTATE protocol (agent↔signer)
+				// and must not be sent to the combiner as UPDATEs.
 				zu := &ZoneUpdate{
 					Zone:    sdcmd.Zone,
 					AgentId: myAgentId,
@@ -670,6 +672,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				}
 				var totalRRs int
 				for _, rrtype := range nod.RRtypes.Keys() {
+					if rrtype == dns.TypeDNSKEY {
+						continue
+					}
 					rrset, exists := nod.RRtypes.Get(rrtype)
 					if !exists || len(rrset.RRs) == 0 {
 						continue

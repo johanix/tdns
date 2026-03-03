@@ -334,9 +334,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	return resp
 }
 
-// isNoOpUpdate checks whether an incoming update would cause any actual change
-// to the zone data. Checks against the live zone RRsets (persisted across restarts),
-// not the in-memory AgentContributions (which are lost on restart).
+// isNoOpUpdate checks whether an incoming update would cause any actual change.
+// Checks against both the live zone data (GetRRset) and CombinerData (merged agent
+// contributions). A record is considered present if it exists in either source.
 func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bool {
 	for owner, rrStrings := range records {
 		for _, rrStr := range rrStrings {
@@ -348,43 +348,33 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 			rrtype := rr.Header().Rrtype
 			switch rr.Header().Class {
 			case dns.ClassINET:
-				// ADD: no-op if the RR already exists in the zone
-				existing, err := zd.GetRRset(owner, rrtype)
-				if err != nil || existing == nil {
-					return false // RRset doesn't exist → adding is a change
-				}
-				found := false
-				for _, existingRR := range existing.RRs {
-					if dns.IsDuplicate(rr, existingRR) {
-						found = true
-						break
-					}
-				}
-				if !found {
+				if !rrExistsInZone(zd, owner, rrtype, rr) {
+					lgCombiner.Info("isNoOpUpdate: RR not found, update is NOT a no-op",
+						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 					return false
 				}
+				lgCombiner.Debug("isNoOpUpdate: RR already present (no-op)",
+					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 
 			case dns.ClassNONE:
-				// DEL: no-op if the RR is already absent from the zone
 				delRR := dns.Copy(rr)
 				delRR.Header().Class = dns.ClassINET
-				existing, err := zd.GetRRset(owner, rrtype)
-				if err != nil || existing == nil {
-					continue // RRset doesn't exist → already absent
+				if rrExistsInZone(zd, owner, rrtype, delRR) {
+					lgCombiner.Info("isNoOpUpdate: RR exists, delete is NOT a no-op",
+						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+					return false // RR exists → removing it IS a change
 				}
-				for _, existingRR := range existing.RRs {
-					if dns.IsDuplicate(delRR, existingRR) {
-						return false // RR exists → removing it IS a change
-					}
-				}
+				lgCombiner.Debug("isNoOpUpdate: RR already absent (delete is no-op)",
+					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 
 			case dns.ClassANY:
-				// Bulk DEL: no-op if the rrtype has no records at this owner
-				existing, err := zd.GetRRset(owner, rrtype)
-				if err != nil || existing == nil || len(existing.RRs) == 0 {
-					continue // Nothing to delete → no-op
+				if rrTypeExistsInZone(zd, owner, rrtype) {
+					lgCombiner.Info("isNoOpUpdate: RRtype has records, bulk delete is NOT a no-op",
+						"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
+					return false
 				}
-				return false // Records exist → deleting them IS a change
+				lgCombiner.Debug("isNoOpUpdate: RRtype empty (bulk delete is no-op)",
+					"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
 
 			default:
 				return false
@@ -392,7 +382,98 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 		}
 	}
 
+	lgCombiner.Info("isNoOpUpdate: all records already present, update is a no-op",
+		"sender", senderID, "zone", zd.ZoneName)
 	return true
+}
+
+// rrExistsInZone checks whether the given RR exists in either the live zone data
+// or CombinerData. Returns true if found in either source.
+func rrExistsInZone(zd *ZoneData, owner string, rrtype uint16, rr dns.RR) bool {
+	rrStr := rr.String()
+	rrtypeStr := dns.TypeToString[rrtype]
+
+	// Check live zone data first
+	existing, err := zd.GetRRset(owner, rrtype)
+	if err != nil {
+		lgCombiner.Info("rrExistsInZone: GetRRset error", "owner", owner, "rrtype", rrtypeStr, "err", err)
+	} else if existing == nil {
+		lgCombiner.Info("rrExistsInZone: no RRset in live zone", "owner", owner, "rrtype", rrtypeStr, "zoneStore", ZoneStoreToString[zd.ZoneStore])
+	} else {
+		for _, existingRR := range existing.RRs {
+			if dns.IsDuplicate(rr, existingRR) {
+				lgCombiner.Info("rrExistsInZone: found in live zone", "owner", owner, "rrtype", rrtypeStr, "rr", rrStr)
+				return true
+			}
+		}
+		// RRset exists but this specific RR is not in it
+		var existingStrs []string
+		for _, e := range existing.RRs {
+			existingStrs = append(existingStrs, e.String())
+		}
+		lgCombiner.Info("rrExistsInZone: RRset exists in live zone but RR not found",
+			"owner", owner, "rrtype", rrtypeStr, "lookingFor", rrStr, "existing", existingStrs)
+	}
+
+	// Check CombinerData
+	if zd.CombinerData == nil {
+		lgCombiner.Info("rrExistsInZone: CombinerData is nil", "zone", zd.ZoneName)
+	} else {
+		ownerData, ownerExists := zd.CombinerData.Get(owner)
+		if !ownerExists {
+			// Dump all CombinerData keys for diagnostics
+			var cdOwners []string
+			for item := range zd.CombinerData.IterBuffered() {
+				cdOwners = append(cdOwners, item.Key)
+			}
+			lgCombiner.Info("rrExistsInZone: owner not in CombinerData",
+				"owner", owner, "cdOwners", cdOwners)
+		} else {
+			cdRRset, rrtypeExists := ownerData.RRtypes.Get(rrtype)
+			if !rrtypeExists || len(cdRRset.RRs) == 0 {
+				var cdRRtypes []string
+				for _, rt := range ownerData.RRtypes.Keys() {
+					cdRRtypes = append(cdRRtypes, dns.TypeToString[rt])
+				}
+				lgCombiner.Info("rrExistsInZone: rrtype not in CombinerData for owner",
+					"owner", owner, "rrtype", rrtypeStr, "cdRRtypes", cdRRtypes)
+			} else {
+				for _, existingRR := range cdRRset.RRs {
+					if dns.IsDuplicate(rr, existingRR) {
+						lgCombiner.Info("rrExistsInZone: found in CombinerData (not in live zone)",
+							"owner", owner, "rrtype", rrtypeStr, "rr", rrStr)
+						return true
+					}
+				}
+				// RRset exists in CombinerData but this specific RR is not in it
+				var existingStrs []string
+				for _, e := range cdRRset.RRs {
+					existingStrs = append(existingStrs, e.String())
+				}
+				lgCombiner.Info("rrExistsInZone: RRset exists in CombinerData but RR not found",
+					"owner", owner, "rrtype", rrtypeStr, "lookingFor", rrStr, "existing", existingStrs)
+			}
+		}
+	}
+
+	return false
+}
+
+// rrTypeExistsInZone checks whether the given owner/rrtype has any records in
+// either the live zone data or CombinerData.
+func rrTypeExistsInZone(zd *ZoneData, owner string, rrtype uint16) bool {
+	existing, err := zd.GetRRset(owner, rrtype)
+	if err == nil && existing != nil && len(existing.RRs) > 0 {
+		return true
+	}
+	if zd.CombinerData != nil {
+		if ownerData, ok := zd.CombinerData.Get(owner); ok {
+			if cdRRset, ok := ownerData.RRtypes.Get(rrtype); ok && len(cdRRset.RRs) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NewCombinerSyncHandler creates a transport.MessageHandlerFunc for combiner UPDATE processing.

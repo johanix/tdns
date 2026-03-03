@@ -723,42 +723,9 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	// the PersistContributions callback on each combiner zone.
 	// This must happen before CombinerMsgHandler starts so that the combiner
 	// has correct state before processing new incoming updates.
-	if kdb := conf.Internal.KeyDB; kdb != nil {
-		// Set PersistContributions callback on all combiner zones
-		for item := range Zones.IterBuffered() {
-			zd := item.Val
-			if zd.Options[OptMultiProvider] {
-				zd.PersistContributions = kdb.SaveContributions
-			}
-		}
-
-		// Load snapshot and hydrate AgentContributions
-		allContribs, err := kdb.LoadAllContributions()
-		if err != nil {
-			lgConfig.Warn("failed to load contributions snapshot", "err", err)
-		} else if len(allContribs) > 0 {
-			rebuilt := 0
-			for zoneName, agentMap := range allContribs {
-				zd, exists := Zones.Get(dns.Fqdn(zoneName))
-				if !exists {
-					lgConfig.Warn("skipping contributions for unknown zone", "zone", zoneName)
-					continue
-				}
-				zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
-				for senderID, ownerMap := range agentMap {
-					zd.AgentContributions[senderID] = ownerMap
-					rebuilt++
-				}
-				zd.rebuildCombinerData()
-				if modified, err := zd.CombineWithLocalChanges(); err != nil {
-					lgConfig.Error("failed to apply restored contributions", "zone", zoneName, "err", err)
-				} else if modified {
-					lgConfig.Debug("applied restored contributions to zone", "zone", zoneName)
-				}
-			}
-			lgConfig.Info("restored AgentContributions from snapshot", "agents", rebuilt, "zones", len(allContribs))
-		}
-	}
+	// Note: PersistContributions callback and AgentContributions hydration are
+	// handled in FetchFromUpstream (zone_utils.go) when a combiner zone is loaded.
+	// This ensures they're set at the right time — after zones exist in Zones map.
 
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })

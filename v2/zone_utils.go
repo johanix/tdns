@@ -512,9 +512,30 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
 	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowCombine] {
-		// XXX: We are a combiner and this zone has a HSYNC RRset. Therefore we need to check whether there are
-		// any local changes to the zone that needs to be applied before we can send the zone to the downstreams.
-		// XXX: This MUST not be a request through a channel, but rather a direct call to something that does this.
+		// Ensure PersistContributions callback is set for this combiner zone.
+		// This runs on every refresh, so it also catches zones added dynamically.
+		if zd.PersistContributions == nil && zd.KeyDB != nil {
+			zd.PersistContributions = zd.KeyDB.SaveContributions
+			lg.Info("PersistContributions callback set", "zone", zd.ZoneName)
+		}
+
+		// Hydrate AgentContributions from persistent storage on first load.
+		// This must happen before CombineWithLocalChanges so the combiner
+		// has correct state from its first refresh onwards.
+		if zd.AgentContributions == nil && zd.KeyDB != nil {
+			allContribs, err := zd.KeyDB.LoadAllContributions()
+			if err != nil {
+				lg.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
+			} else if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
+				zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+				for senderID, ownerMap := range zoneContribs {
+					zd.AgentContributions[senderID] = ownerMap
+				}
+				zd.rebuildCombinerData()
+				lg.Info("hydrated AgentContributions from snapshot", "zone", zd.ZoneName, "agents", len(zoneContribs))
+			}
+		}
+
 		lg.Info("combining with local changes", "zone", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {

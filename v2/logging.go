@@ -96,7 +96,6 @@ func Logger(subsystem string) *slog.Logger {
 	h := &subsystemHandler{
 		subsystem: subsystem,
 		level:     lv,
-		inner:     slog.Default().Handler(),
 	}
 	return slog.New(h).With("subsystem", subsystem)
 }
@@ -157,7 +156,7 @@ func getOrCreateLevel(name string) *slog.LevelVar {
 type subsystemHandler struct {
 	subsystem string
 	level     *slog.LevelVar
-	inner     slog.Handler
+	preAttrs  []slog.Attr
 }
 
 func (h *subsystemHandler) Enabled(_ context.Context, level slog.Level) bool {
@@ -165,23 +164,30 @@ func (h *subsystemHandler) Enabled(_ context.Context, level slog.Level) bool {
 }
 
 func (h *subsystemHandler) Handle(ctx context.Context, r slog.Record) error {
-	return h.inner.Handle(ctx, r)
+	handler := slog.Default().Handler()
+	r2 := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	r2.AddAttrs(h.preAttrs...)
+	r.Attrs(func(a slog.Attr) bool {
+		r2.AddAttrs(a)
+		return true
+	})
+	return handler.Handle(ctx, r2)
 }
 
 func (h *subsystemHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	combined := make([]slog.Attr, len(h.preAttrs)+len(attrs))
+	copy(combined, h.preAttrs)
+	copy(combined[len(h.preAttrs):], attrs)
 	return &subsystemHandler{
 		subsystem: h.subsystem,
 		level:     h.level,
-		inner:     h.inner.WithAttrs(attrs),
+		preAttrs:  combined,
 	}
 }
 
 func (h *subsystemHandler) WithGroup(name string) slog.Handler {
-	return &subsystemHandler{
-		subsystem: h.subsystem,
-		level:     h.level,
-		inner:     h.inner.WithGroup(name),
-	}
+	// Groups are not used in our logging; return self unchanged.
+	return h
 }
 
 // --- plainHandler: custom output format ---
