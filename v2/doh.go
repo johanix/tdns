@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"time"
@@ -23,7 +22,7 @@ import (
 func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
-	log.Printf("DnsEngine: DoH addresses: %v", dohaddrs)
+	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
 	http.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
 		var dnsQuery []byte
 		var err error
@@ -55,9 +54,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		var buf bytes.Buffer
 		rw := &dohResponseWriter{&buf}
 
-		if Globals.Debug {
-			log.Printf("*** DoH received message opcode: %s qname: %s rrtype: %s", dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
-		}
+		lgDns.Debug("DoH: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
 		// Call your internal handler to process DNS query
 		ourDNSHandler(rw, msg)
@@ -78,25 +75,25 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 			srv := &http.Server{Addr: hostport, Handler: nil}
 			servers = append(servers, srv)
 			go func(s *http.Server, hp string) {
-				log.Printf("DnsEngine: setting up DoH server on %s", hp)
+				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp)
 				if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-					log.Printf("Failed to setup the DoH server on %s: %s", hp, err.Error())
+					lgDns.Error("failed to setup DoH server", "hostport", hp, "err", err)
 				} else {
-					log.Printf("DnsEngine: listening on %s/DoH", hp)
+					lgDns.Info("DnsEngine: listening on DoH", "hostport", hp)
 				}
-				log.Printf("DnsEngine: done setting up DoH server on %s", hp)
+				lgDns.Info("DnsEngine: done setting up DoH server", "hostport", hp)
 			}(srv, hostport)
 		}
 	}
 	go func() {
 		<-ctx.Done()
-		log.Printf("DnsDoHEngine: shutting down DoH servers...")
+		lgDns.Info("DnsDoHEngine: shutting down DoH servers")
 		// Use bounded shutdown context to avoid hanging forever
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, s := range servers {
 			if err := s.Shutdown(shutdownCtx); err != nil {
-				log.Printf("DnsDoHEngine: error during shutdown of %s: %v", s.Addr, err)
+				lgDns.Error("DnsDoHEngine: error during shutdown", "addr", s.Addr, "err", err)
 			}
 		}
 	}()

@@ -32,7 +32,7 @@ const (
 func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string) (uint32, error) {
 
 	if upstream == "" {
-		log.Fatalf("ZoneTransfer: upstream not set")
+		Fatal("ZoneTransfer: upstream not set")
 	}
 
 	msg := new(dns.Msg)
@@ -47,7 +47,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 		// zd.Data = make(map[string]OwnerData, 30)
 		zd.Data = cmap.New[OwnerData]()
 	}
-	log.Printf("ZoneTransferIn: Zone %s ZoneStore: %s", zd.ZoneName, ZoneStoreToString[zd.ZoneStore])
+	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
 
 	transfer := new(dns.Transfer)
 	answerChan, err := transfer.In(msg, upstream)
@@ -467,7 +467,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	if len(soa_rrset.RRs) > 0 {
 		soa = soa_rrset.RRs[0].(*dns.SOA)
 	} else {
-		log.Printf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
+		lgDns.Error("ParseZoneFromReader: SOA error", "zone", zd.ZoneName, "soa_rrset", soa_rrset)
 		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
 	}
 
@@ -591,7 +591,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		log.Printf("WriteZoneToFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
+		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)

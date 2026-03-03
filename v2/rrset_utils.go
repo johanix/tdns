@@ -6,7 +6,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -17,11 +16,7 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, rrtype)
 
-	if Globals.Debug {
-		// fmt.Printf("DEBUG: Query:\n%s\n", m.String())
-		fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", qname,
-			dns.TypeToString[rrtype], ns)
-	}
+	lg.Debug("AuthQuery: sending query", "qname", qname, "rrtype", dns.TypeToString[rrtype], "ns", ns)
 
 	res, err := dns.Exchange(m, ns)
 
@@ -42,14 +37,10 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 	var rrs []dns.RR
 
 	if len(res.Answer) > 0 {
-		if Globals.Debug {
-			fmt.Printf("Looking up %s %s RRset:\n", qname, dns.TypeToString[rrtype])
-		}
+		lg.Debug("AuthQuery: looking up RRset from answer", "qname", qname, "rrtype", dns.TypeToString[rrtype])
 		for _, rr := range res.Answer {
 			if rr.Header().Rrtype == rrtype {
-				if Globals.Debug {
-					fmt.Printf("%s\n", rr.String())
-				}
+				lg.Debug("AuthQuery: found RR", "rr", rr.String())
 
 				rrs = append(rrs, rr)
 
@@ -64,14 +55,10 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 	}
 
 	if len(res.Ns) > 0 {
-		if Globals.Debug {
-			fmt.Printf("Looking up %s %s RRset:\n", qname, dns.TypeToString[rrtype])
-		}
+		lg.Debug("AuthQuery: looking up RRset from authority", "qname", qname, "rrtype", dns.TypeToString[rrtype])
 		for _, rr := range res.Ns {
 			if rr.Header().Rrtype == rrtype && rr.Header().Name == qname {
-				if Globals.Debug {
-					fmt.Printf("%s\n", rr.String())
-				}
+				lg.Debug("AuthQuery: found RR", "rr", rr.String())
 
 				rrs = append(rrs, rr)
 
@@ -89,14 +76,10 @@ func AuthQuery(qname, ns string, rrtype uint16) ([]dns.RR, error) {
 	}
 
 	if len(res.Extra) > 0 {
-		if Globals.Debug {
-			fmt.Printf("Looking up %s %s RRset:\n", qname, dns.TypeToString[rrtype])
-		}
+		lg.Debug("AuthQuery: looking up RRset from additional", "qname", qname, "rrtype", dns.TypeToString[rrtype])
 		for _, rr := range res.Extra {
 			if rr.Header().Rrtype == rrtype && rr.Header().Name == qname {
-				if Globals.Debug {
-					fmt.Printf("%s\n", rr.String())
-				}
+				lg.Debug("AuthQuery: found RR", "rr", rr.String())
 
 				rrs = append(rrs, rr)
 
@@ -131,7 +114,7 @@ type AuthQueryResponse struct {
 }
 
 func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
-	log.Printf("*** AuthQueryEngine: Starting ***")
+	lg.Info("AuthQueryEngine: starting")
 
 	tcpclient := new(dns.Client)
 	tcpclient.Net = "tcp"
@@ -162,7 +145,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			return
 		case req, ok := <-requests:
 			if !ok {
-				log.Println("AuthQueryEngine: requests channel closed")
+				lg.Info("AuthQueryEngine: requests channel closed")
 				return
 			}
 			if shuttingDown {
@@ -180,7 +163,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 				continue
 			}
 
-			log.Printf("*** AuthQueryEngine: Received request for %s %s from %s ***", req.qname, dns.TypeToString[req.rrtype], req.ns)
+			lg.Debug("AuthQueryEngine: received request", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype], "ns", req.ns)
 			rrset := core.RRset{
 				Name: req.qname,
 			}
@@ -191,10 +174,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			m.SetEdns0(dns.DefaultMsgSize, true)
 			// No need to manually set OPT header fields; SetEdns0 initializes them.
 
-			if Globals.Debug {
-				fmt.Printf("Sending query %s %s to nameserver \"%s\"\n", req.qname,
-					dns.TypeToString[req.rrtype], req.ns)
-			}
+			lg.Debug("AuthQueryEngine: sending query", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype], "ns", req.ns)
 
 			var err error
 			var res *dns.Msg
@@ -218,21 +198,17 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			}
 
 			if len(res.Answer) > 0 {
-				if Globals.Debug {
-					fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
-				}
+				lg.Debug("AuthQueryEngine: looking up RRset from answer", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype])
 				for _, rr := range res.Answer {
 					if rr.Header().Rrtype == req.rrtype {
-						if Globals.Debug {
-							fmt.Printf("%s\n", rr.String())
-						}
+						lg.Debug("AuthQueryEngine: found RR", "rr", rr.String())
 
 						rrset.RRs = append(rrset.RRs, rr)
 
 					} else if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == req.rrtype {
 						rrset.RRSIGs = append(rrset.RRSIGs, rr)
 					} else {
-						log.Printf("AuthQueryNG: Error: answer is not an %s RR: %s", dns.TypeToString[req.rrtype], rr.String())
+						lg.Warn("AuthQueryEngine: answer is not expected RR type", "expectedRrtype", dns.TypeToString[req.rrtype], "rr", rr.String())
 					}
 				}
 				req.response <- &AuthQueryResponse{&rrset, nil}
@@ -240,14 +216,10 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			}
 
 			if len(res.Ns) > 0 {
-				if Globals.Debug {
-					fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
-				}
+				lg.Debug("AuthQueryEngine: looking up RRset from authority", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype])
 				for _, rr := range res.Ns {
 					if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
-						if Globals.Debug {
-							fmt.Printf("AuthQueryNG: Found: %s\n", rr.String())
-						}
+						lg.Debug("AuthQueryEngine: found RR", "rr", rr.String())
 
 						rrset.RRs = append(rrset.RRs, rr)
 
@@ -262,14 +234,10 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			}
 
 			if len(res.Extra) > 0 {
-				if Globals.Debug {
-					fmt.Printf("Looking up %s %s RRset:\n", req.qname, dns.TypeToString[req.rrtype])
-				}
+				lg.Debug("AuthQueryEngine: looking up RRset from additional", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype])
 				for _, rr := range res.Extra {
 					if rr.Header().Rrtype == req.rrtype && rr.Header().Name == req.qname {
-						if Globals.Debug {
-							fmt.Printf("%s\n", rr.String())
-						}
+						lg.Debug("AuthQueryEngine: found RR", "rr", rr.String())
 
 						rrset.RRs = append(rrset.RRs, rr)
 

@@ -82,7 +82,7 @@ func (imr *Imr) extractDsyncFromResponse(qname string, resp *ImrResponse, verbos
 
 func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) (DsyncResult, error) {
 	var dr DsyncResult
-		lgDns.Debug("discovering DSYNC for parent of child zone", "zone", child)
+	lgDns.Debug("discovering DSYNC for parent of child zone", "zone", child)
 
 	// Step 1: One level up
 	labels := dns.SplitDomainName(child)
@@ -90,7 +90,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	parent_guess := dns.Fqdn(strings.Join(labels[1:], "."))
 	name := prefix + "._dsync." + parent_guess
 
-		lgDns.Debug("looking up DSYNC", "name", name)
+	lgDns.Debug("looking up DSYNC", "name", name)
 	resp, err := imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 	if err != nil {
 		lgDns.Error("error during ImrQuery", "err", err)
@@ -104,7 +104,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	}
 	if len(prrs) > 0 {
 		dr = DsyncResult{Qname: name, Rdata: prrs, Parent: parent_guess}
-			lgDns.Debug("found DSYNC RRs", "count", len(prrs), "name", name, "rrs", prrs)
+		lgDns.Debug("found DSYNC RRs", "count", len(prrs), "name", name, "rrs", prrs)
 		return dr, nil
 	}
 
@@ -115,7 +115,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 			return dr, fmt.Errorf("misidentified parent for %s: %v", child, parent)
 		}
 		name = prefix + "._dsync." + parent
-			lgDns.Debug("looking up DSYNC", "name", name)
+		lgDns.Debug("looking up DSYNC", "name", name)
 		resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 		if err != nil {
 			lgDns.Error("error during ImrQuery", "err", err)
@@ -137,7 +137,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	}
 	name = "_dsync." + parent
 
-		lgDns.Debug("looking up DSYNC", "name", name)
+	lgDns.Debug("looking up DSYNC", "name", name)
 	resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 	if err != nil {
 		lgDns.Error("error during ImrQuery", "err", err)
@@ -244,7 +244,7 @@ func xxxDsyncQuery(qname, imr string, verbose bool) ([]*core.DSYNC, string, erro
 	if res.Rcode == dns.RcodeSuccess {
 		for _, rr := range res.Answer {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
-				log.Printf("%s\n", rr.String())
+				lgDns.Debug("found DSYNC RR in answer", "rr", rr.String())
 
 				if dsyncrr, ok := prr.Data.(*core.DSYNC); ok {
 					dsyncrrs = append(dsyncrrs, dsyncrr)
@@ -304,9 +304,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 		return nil, err
 	}
 
-	if Globals.Debug {
-		fmt.Printf("Zone %s: Found %d DSYNC RRs in parent zone %s\n", childzone, len(dsync_res.Rdata), dsync_res.Parent)
-	}
+	lgDns.Debug("DSYNC discovery results", "zone", childzone, "count", len(dsync_res.Rdata), "parent", dsync_res.Parent)
 
 	found := false
 	var dsync *core.DSYNC
@@ -323,19 +321,14 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 			dns.TypeToString[dtype], scheme, childzone)
 	}
 
-	if Globals.Verbose {
-		fmt.Printf("Looked up published DSYNC update target for zone %s:\n\n%s\tIN\tDSYNC\t%s\n\n",
-			childzone, dsync_res.Qname, dsync.String())
-	}
+	lgDns.Debug("looked up published DSYNC update target", "zone", childzone, "qname", dsync_res.Qname, "dsync", dsync.String())
 
 	addrs, err = net.DefaultResolver.LookupHost(ctx, dsync.Target)
 	if err != nil {
 		return nil, fmt.Errorf("lookup DSYNC target %q: %w", dsync.Target, err)
 	}
 
-	if Globals.Verbose {
-		fmt.Printf("%s has the IP addresses: %v\n", dsync.Target, addrs)
-	}
+	lgDns.Debug("resolved DSYNC target addresses", "target", dsync.Target, "addrs", addrs)
 
 	for _, a := range addrs {
 		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(a, strconv.Itoa(int(dsync.Port))))
