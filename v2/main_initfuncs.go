@@ -9,6 +9,7 @@ import (
 
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"runtime/debug"
@@ -719,13 +720,64 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 // StartCombiner starts subsystems for tdns-combiner
 func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
-	// Load persisted AgentContributions from the snapshot table and set up
-	// the PersistContributions callback on each combiner zone.
-	// This must happen before CombinerMsgHandler starts so that the combiner
-	// has correct state before processing new incoming updates.
-	// Note: PersistContributions callback and AgentContributions hydration are
-	// handled in FetchFromUpstream (zone_utils.go) when a combiner zone is loaded.
-	// This ensures they're set at the right time — after zones exist in Zones map.
+	// Pre-register combiner zones with OnFirstLoad callbacks.
+	// At this point RefreshEngine hasn't started yet, so Zones is empty
+	// and there's no race. ParseZones has already queued ZoneRefresher
+	// requests to RefreshZoneCh — we create minimal zd stubs in Zones
+	// for each zone that needs post-load setup.
+	kdb := conf.Internal.KeyDB
+	for _, zoneName := range conf.Internal.AllZones {
+		zd := &ZoneData{
+			ZoneName:      zoneName,
+			Logger:        log.Default(),
+			FirstZoneLoad: true,
+		}
+
+		if kdb != nil {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *ZoneData) {
+				if !zd.Options[OptMultiProvider] {
+					return
+				}
+
+				// Set PersistContributions callback
+				if zd.PersistContributions == nil && zd.KeyDB != nil {
+					zd.PersistContributions = zd.KeyDB.SaveContributions
+					lgConfig.Info("PersistContributions callback set", "zone", zd.ZoneName)
+				}
+
+				// Hydrate AgentContributions from persistent storage
+				if zd.AgentContributions == nil && zd.KeyDB != nil {
+					allContribs, err := zd.KeyDB.LoadAllContributions()
+					if err != nil {
+						lgConfig.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
+						return
+					}
+					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
+						zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+						for senderID, ownerMap := range zoneContribs {
+							zd.AgentContributions[senderID] = ownerMap
+						}
+						zd.rebuildCombinerData()
+						lgConfig.Info("hydrated AgentContributions from snapshot",
+							"zone", zd.ZoneName, "agents", len(zoneContribs))
+					}
+				}
+
+				// Re-apply combined data now that contributions are loaded
+				if zd.Options[OptAllowCombine] {
+					success, err := zd.CombineWithLocalChanges()
+					if err != nil {
+						lgConfig.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
+					} else if success {
+						lgConfig.Info("re-applied local changes after hydration", "zone", zd.ZoneName)
+					}
+				}
+			})
+		}
+
+		Zones.Set(zoneName, zd)
+		lgConfig.Info("pre-registered zone with OnFirstLoad callbacks", "zone", zoneName)
+	}
 
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })

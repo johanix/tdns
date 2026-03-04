@@ -36,6 +36,99 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
+// initialLoadZone handles the first load of a zone: refresh, counter setup,
+// post-init hooks, OnFirstLoad callbacks, and downstream notification.
+// Called for both newly-created zones and pre-registered zone stubs.
+func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
+	refreshCounters cmap.ConcurrentMap[string, *RefreshCounter],
+	tryPostpass func(string), resetSoaSerial bool) (bool, error) {
+
+	updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
+	if err != nil {
+		return false, err
+	}
+
+	refresh, err := FindSoaRefresh(zd)
+	if err != nil {
+		lgEngine.Error("FindSoaRefresh failed", "zone", zone, "error", err)
+	}
+	refreshCounters.Set(zone, &RefreshCounter{
+		Name:        zone,
+		SOARefresh:  refresh,
+		CurRefresh:  refresh,
+		Upstream:    NormalizeAddress(zr.Primary),
+		Downstreams: NormalizeAddresses(zr.Notify),
+	})
+
+	// Check if this is a catalog zone and parse it
+	if zd.Options[OptCatalogZone] {
+		lgEngine.Info("parsing catalog zone member zones", "zone", zone)
+		catalogUpdate, err := ParseCatalogZone(zd)
+		if err != nil {
+			lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
+		} else {
+			lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
+
+			// Notify all registered callbacks
+			if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
+				lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
+			} else {
+				lgEngine.Debug("notified catalog zone callbacks")
+			}
+
+			// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
+			go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
+				defer func() {
+					if r := recover(); r != nil {
+						lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
+					}
+				}()
+				if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
+					lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
+				}
+			}(catalogUpdate, conf, ctx)
+		}
+	}
+
+	// Defer transport signal synthesis until all zones are initialized.
+	tryPostpass(zone)
+
+	if Globals.App.Type != AppTypeAgent {
+		if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+			lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
+		}
+	}
+	if err := zd.SetupZoneSync(conf.Internal.DelegationSyncQ); err != nil {
+		lgEngine.Error("SetupZoneSync failed", "zone", zone, "error", err)
+	}
+
+	// Execute OnFirstLoad callbacks (one-shot)
+	zd.mu.Lock()
+	callbacks := zd.OnFirstLoad
+	zd.OnFirstLoad = nil
+	zd.mu.Unlock()
+	for i, cb := range callbacks {
+		lgEngine.Info("executing OnFirstLoad callback", "zone", zone, "callback", i+1, "total", len(callbacks))
+		cb(zd)
+	}
+
+	if updated {
+		zd.LatestRefresh = time.Now()
+		zd.RefreshCount++
+		if zd.Error && zd.ErrorType == RefreshError {
+			zd.SetError(NoError, "")
+		}
+		if resetSoaSerial {
+			zd.CurrentSerial = uint32(time.Now().Unix())
+			lgEngine.Info("zone updated from upstream, resetting serial to unixtime",
+				"zone", zone, "serial", zd.CurrentSerial)
+		}
+		zd.NotifyDownstreams()
+	}
+
+	return updated, nil
+}
+
 func RefreshEngine(ctx context.Context, conf *Config) {
 
 	var zonerefch = conf.Internal.RefreshZoneCh
@@ -76,13 +169,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 		lgEngine.Info("refresh engine starting")
 	}
 
-	var upstream, zone string
-	var downstreams []string
-	// var refresh uint32
-	//	var rc *RefreshCounter
-	var updated bool
-	var err error
-	// var bd BumperData
+	var zone string
 
 	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
@@ -105,203 +192,237 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
-					if zd.Error && zd.ErrorType != RefreshError {
-						lgEngine.Warn("zone in error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
-						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
-						if zr.Response != nil {
-							zr.Response <- resp
-						}
-						continue
-					}
-					if zd.ZoneType == Primary && zd.Options[OptDirty] {
-						resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
-						lgEngine.Warn("zone has modifications, reload not possible", "zone", zone)
-						if zr.Response != nil {
-							zr.Response <- resp
-						}
-						continue
-					}
-					lgEngine.Debug("scheduling immediate refresh for known zone", "zone", zone)
-					// Update configuration fields from ZoneRefresher for existing zones
-					// This ensures that config reload (reload-zones, zone reload) picks up changes to:
-					// notify addresses, upstream, zonefile, zone store, options, update policy, DNSSEC policy, etc.
-					// Only update fields that are actually set in ZoneRefresher (non-zero/non-empty values)
-					zd.mu.Lock()
-					// Update notify addresses only if provided
-					if zr.Notify != nil {
-						zd.Downstreams = NormalizeAddresses(zr.Notify)
-					}
-					// Update upstream only if provided
-					if zr.Primary != "" {
-						zd.Upstream = NormalizeAddress(zr.Primary)
-					}
-					// Update zonefile only if provided
-					if zr.Zonefile != "" {
-						zd.Zonefile = zr.Zonefile
-					}
-					// Update ZoneStore only if provided (non-zero value)
-					if zr.ZoneStore != 0 {
-						zd.ZoneStore = zr.ZoneStore
-					}
-					// Replace options only if provided (don't merge) to match config reload behavior
-					if zr.Options != nil {
-						zd.Options = zr.Options
-					}
-					// Update UpdatePolicy only if provided (check if it has meaningful content)
-					// UpdatePolicy is a struct, so we check if any fields are set
-					if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate {
-						zd.UpdatePolicy = zr.UpdatePolicy
-					}
-					// Update ZoneType only if provided (non-zero value)
-					if zr.ZoneType != 0 {
-						if zd.ZoneType != zr.ZoneType {
-							lgEngine.Info("zone type changed", "zone", zone, "from", ZoneTypeToString[zd.ZoneType], "to", ZoneTypeToString[zr.ZoneType])
-						}
-						zd.ZoneType = zr.ZoneType
-					}
-					// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation)
-					if zr.DnssecPolicy != "" {
-						if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
-							zd.DnssecPolicy = &dp
-						} else {
-							lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", zr.DnssecPolicy, "zone", zone)
-						}
-					}
-					if zr.MultiSigner != "" {
-						if msc, exists := conf.MultiSigner[zr.MultiSigner]; exists {
-							zd.MultiSigner = &msc
-						} else {
-							lgEngine.Warn("MultiSigner config not found, keeping existing", "multisigner", zr.MultiSigner, "zone", zone)
-						}
-					}
-					zd.mu.Unlock()
-					lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
+					if zd.FirstZoneLoad {
+						// PRE-REGISTERED STUB: zone was pre-registered with
+						// OnFirstLoad callbacks but not yet loaded. Merge config
+						// from ZoneRefresher, do initial load, run callbacks.
+						lgEngine.Info("loading pre-registered zone", "zone", zone)
 
-					// Update or create refreshCounter with current config values
-					var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
-					soa, err := zd.GetSOA()
-					if err != nil {
-						lgEngine.Error("GetSOA failed", "zone", zone, "error", err)
-						zd.SetError(RefreshError, "get soa error: %v", err)
-						zd.LatestError = time.Now()
-					} else {
-						refresh = soa.Refresh
-					}
-					if rc, haveParams := refreshCounters.Get(zone); haveParams {
-						// Update existing refreshCounter with new config values
-						rc.Upstream = NormalizeAddress(zr.Primary)
-						rc.Downstreams = NormalizeAddresses(zr.Notify)
-						rc.Zonefile = zr.Zonefile
-						rc.SOARefresh = refresh
-						rc.CurRefresh = refresh // immediate refresh handled by goroutine below
-					} else {
-						// Create new refreshCounter
-						refreshCounters.Set(zone, &RefreshCounter{
-							Name:        zone,
-							SOARefresh:  refresh,
-							CurRefresh:  refresh, // immediate refresh handled by goroutine below
-							Upstream:    NormalizeAddress(zr.Primary),
-							Downstreams: NormalizeAddresses(zr.Notify),
-							Zonefile:    zr.Zonefile,
-						})
-					}
-					// XXX: Should do refresh in parallel
-					go func(zd *ZoneData, zone string, force bool, conf *Config) {
-						updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
-						if err != nil {
+						dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
+						msc := conf.MultiSigner[zr.MultiSigner]
+
+						zd.mu.Lock()
+						zd.ZoneStore = zr.ZoneStore
+						zd.Upstream = NormalizeAddress(zr.Primary)
+						zd.Downstreams = NormalizeAddresses(zr.Notify)
+						zd.Zonefile = zr.Zonefile
+						zd.ZoneType = zr.ZoneType
+						zd.Options = zr.Options
+						zd.UpdatePolicy = zr.UpdatePolicy
+						zd.DnssecPolicy = &dp
+						zd.MultiSigner = &msc
+						zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
+						zd.MusicSyncQ = conf.Internal.MusicSyncQ
+						zd.SyncQ = conf.Internal.SyncQ
+						zd.KeyDB = conf.Internal.KeyDB
+						zd.Data = cmap.New[OwnerData]()
+						zd.mu.Unlock()
+
+						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
+							tryPostpass, resetSoaSerial); err != nil {
 							lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
-						} else {
-							// Clear any previous error state after successful refresh
-							if zd.Error {
-								lgEngine.Info("zone refresh succeeded, clearing error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType])
-								zd.SetError(NoError, "")
+							continue
+						}
+					} else {
+						// EXISTING ZONE: already loaded, normal refresh path.
+						if zd.Error && zd.ErrorType != RefreshError {
+							lgEngine.Warn("zone in error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
+							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
+							if zr.Response != nil {
+								zr.Response <- resp
 							}
-							// No error from refresh - zone data is valid
-							if updated {
-								lgEngine.Info("zone updated via refresh", "zone", zd.ZoneName)
-
-								// Write zone file after successful update
-								// Two cases:
-								// 1. Auto-configured zones -> write to dynamic zone directory
-								// 2. Regular zones with zonefile configured -> write to configured file
-								if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
-									// Auto-configured catalog member zone
-									_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
-									if err != nil {
-										lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
-										// Don't fail the operation, just log the warning
-									}
-
-									// Update dynamic config file (zone file path may have changed, or this is first write)
-									if err := conf.AddDynamicZoneToConfig(zd); err != nil {
-										lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
-										// Don't fail the operation, just log the warning
-									}
-								} else if zd.Zonefile != "" {
-									// Regular zone with zonefile configured (typically secondary zones)
-									lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
-									_, err := zd.WriteFile(zd.Zonefile)
-									if err != nil {
-										lgEngine.Warn("failed to write zone file", "zone", zd.ZoneName, "error", err)
-									}
-								}
+							continue
+						}
+						if zd.ZoneType == Primary && zd.Options[OptDirty] {
+							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
+							lgEngine.Warn("zone has modifications, reload not possible", "zone", zone)
+							if zr.Response != nil {
+								zr.Response <- resp
 							}
-
-							// Send NOTIFY to downstreams after successful refresh (updated OR forced)
-							// Force typically means "config reload-zones", so we want to notify even if unchanged
-							if updated || force {
-								if len(zd.Downstreams) > 0 {
-									lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Downstreams))
-									conf.Internal.NotifyQ <- NotifyRequest{
-										ZoneName: zd.ZoneName,
-										ZoneData: zd,
-										RRtype:   dns.TypeSOA,
-										Targets:  zd.Downstreams,
-										Urgent:   false,
-									}
-								}
+							continue
+						}
+						lgEngine.Debug("scheduling immediate refresh for known zone", "zone", zone)
+						// Update configuration fields from ZoneRefresher for existing zones
+						// This ensures that config reload (reload-zones, zone reload) picks up changes to:
+						// notify addresses, upstream, zonefile, zone store, options, update policy, DNSSEC policy, etc.
+						// Only update fields that are actually set in ZoneRefresher (non-zero/non-empty values)
+						zd.mu.Lock()
+						// Update notify addresses only if provided
+						if zr.Notify != nil {
+							zd.Downstreams = NormalizeAddresses(zr.Notify)
+						}
+						// Update upstream only if provided
+						if zr.Primary != "" {
+							zd.Upstream = NormalizeAddress(zr.Primary)
+						}
+						// Update zonefile only if provided
+						if zr.Zonefile != "" {
+							zd.Zonefile = zr.Zonefile
+						}
+						// Update ZoneStore only if provided (non-zero value)
+						if zr.ZoneStore != 0 {
+							zd.ZoneStore = zr.ZoneStore
+						}
+						// Replace options only if provided (don't merge) to match config reload behavior
+						if zr.Options != nil {
+							zd.Options = zr.Options
+						}
+						// Update UpdatePolicy only if provided (check if it has meaningful content)
+						// UpdatePolicy is a struct, so we check if any fields are set
+						if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate {
+							zd.UpdatePolicy = zr.UpdatePolicy
+						}
+						// Update ZoneType only if provided (non-zero value)
+						if zr.ZoneType != 0 {
+							if zd.ZoneType != zr.ZoneType {
+								lgEngine.Info("zone type changed", "zone", zone, "from", ZoneTypeToString[zd.ZoneType], "to", ZoneTypeToString[zr.ZoneType])
 							}
-
-							// Parse catalog zones after EVERY successful refresh (updated or not)
-							// This ensures membership is populated even if zone file hasn't changed
-							if zd.Options[OptCatalogZone] {
-								lgEngine.Info("parsing catalog zone member zones", "zone", zone, "updated", updated)
-								catalogUpdate, err := ParseCatalogZone(zd)
-								if err != nil {
-									lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
-								} else {
-									lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
-
-									// Notify all registered callbacks
-									if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
-										lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
-									} else {
-										lgEngine.Debug("notified catalog zone callbacks")
-									}
-
-									// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-									// Policy is now per-catalog-zone via catalog-member-auto-create option
-									go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
-										defer func() {
-											if r := recover(); r != nil {
-												lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
-											}
-										}()
-										if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-											lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
-										}
-									}(catalogUpdate, conf, ctx)
-								}
+							zd.ZoneType = zr.ZoneType
+						}
+						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation)
+						if zr.DnssecPolicy != "" {
+							if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
+								zd.DnssecPolicy = &dp
+							} else {
+								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", zr.DnssecPolicy, "zone", zone)
 							}
 						}
-					}(zd, zone, zr.Force, conf)
+						if zr.MultiSigner != "" {
+							if msc, exists := conf.MultiSigner[zr.MultiSigner]; exists {
+								zd.MultiSigner = &msc
+							} else {
+								lgEngine.Warn("MultiSigner config not found, keeping existing", "multisigner", zr.MultiSigner, "zone", zone)
+							}
+						}
+						zd.mu.Unlock()
+						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
+						// Update or create refreshCounter with current config values
+						var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
+						soa, err := zd.GetSOA()
+						if err != nil {
+							lgEngine.Error("GetSOA failed", "zone", zone, "error", err)
+							zd.SetError(RefreshError, "get soa error: %v", err)
+							zd.LatestError = time.Now()
+						} else {
+							refresh = soa.Refresh
+						}
+						if rc, haveParams := refreshCounters.Get(zone); haveParams {
+							// Update existing refreshCounter with new config values
+							rc.Upstream = NormalizeAddress(zr.Primary)
+							rc.Downstreams = NormalizeAddresses(zr.Notify)
+							rc.Zonefile = zr.Zonefile
+							rc.SOARefresh = refresh
+							rc.CurRefresh = refresh // immediate refresh handled by goroutine below
+						} else {
+							// Create new refreshCounter
+							refreshCounters.Set(zone, &RefreshCounter{
+								Name:        zone,
+								SOARefresh:  refresh,
+								CurRefresh:  refresh, // immediate refresh handled by goroutine below
+								Upstream:    NormalizeAddress(zr.Primary),
+								Downstreams: NormalizeAddresses(zr.Notify),
+								Zonefile:    zr.Zonefile,
+							})
+						}
+						// XXX: Should do refresh in parallel
+						go func(zd *ZoneData, zone string, force bool, conf *Config) {
+							updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
+							if err != nil {
+								lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
+								zd.SetError(RefreshError, "refresh error: %v", err)
+								zd.LatestError = time.Now()
+							} else {
+								// Clear any previous error state after successful refresh
+								if zd.Error {
+									lgEngine.Info("zone refresh succeeded, clearing error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType])
+									zd.SetError(NoError, "")
+								}
+								// No error from refresh - zone data is valid
+								if updated {
+									lgEngine.Info("zone updated via refresh", "zone", zd.ZoneName)
+
+									// Write zone file after successful update
+									// Two cases:
+									// 1. Auto-configured zones -> write to dynamic zone directory
+									// 2. Regular zones with zonefile configured -> write to configured file
+									if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+										// Auto-configured catalog member zone
+										_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
+										if err != nil {
+											lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
+											// Don't fail the operation, just log the warning
+										}
+
+										// Update dynamic config file (zone file path may have changed, or this is first write)
+										if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+											lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
+											// Don't fail the operation, just log the warning
+										}
+									} else if zd.Zonefile != "" {
+										// Regular zone with zonefile configured (typically secondary zones)
+										lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
+										_, err := zd.WriteFile(zd.Zonefile)
+										if err != nil {
+											lgEngine.Warn("failed to write zone file", "zone", zd.ZoneName, "error", err)
+										}
+									}
+								}
+
+								// Send NOTIFY to downstreams after successful refresh (updated OR forced)
+								// Force typically means "config reload-zones", so we want to notify even if unchanged
+								if updated || force {
+									if len(zd.Downstreams) > 0 {
+										lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Downstreams))
+										conf.Internal.NotifyQ <- NotifyRequest{
+											ZoneName: zd.ZoneName,
+											ZoneData: zd,
+											RRtype:   dns.TypeSOA,
+											Targets:  zd.Downstreams,
+											Urgent:   false,
+										}
+									}
+								}
+
+								// Parse catalog zones after EVERY successful refresh (updated or not)
+								// This ensures membership is populated even if zone file hasn't changed
+								if zd.Options[OptCatalogZone] {
+									lgEngine.Info("parsing catalog zone member zones", "zone", zone, "updated", updated)
+									catalogUpdate, err := ParseCatalogZone(zd)
+									if err != nil {
+										lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
+									} else {
+										lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
+
+										// Notify all registered callbacks
+										if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
+											lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
+										} else {
+											lgEngine.Debug("notified catalog zone callbacks")
+										}
+
+										// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
+										// Policy is now per-catalog-zone via catalog-member-auto-create option
+										go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
+											defer func() {
+												if r := recover(); r != nil {
+													lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
+												}
+											}()
+											if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
+												lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
+											}
+										}(catalogUpdate, conf, ctx)
+									}
+								}
+							}
+						}(zd, zone, zr.Force, conf)
+					}
 				} else {
+					// NEW ZONE: create zd, register in Zones, then initial load
 					lgEngine.Info("adding new zone", "zone", zone)
-					// XXX: We want to do this in parallel
-					// go func() {
 					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
@@ -317,97 +438,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DnssecPolicy:    &dp,
 						MultiSigner:     &msc,
 						DelegationSyncQ: conf.Internal.DelegationSyncQ,
-						MusicSyncQ:      conf.Internal.MusicSyncQ, // TODO: remove this
+						MusicSyncQ:      conf.Internal.MusicSyncQ,
 						SyncQ:           conf.Internal.SyncQ,
 						Data:            cmap.New[OwnerData](),
 						KeyDB:           conf.Internal.KeyDB,
 						FirstZoneLoad:   true,
 					}
 
-					updated, err = zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
-					if err != nil {
+					Zones.Set(zone, zd)
+
+					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
+						tryPostpass, resetSoaSerial); err != nil {
 						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
 						zd.LatestError = time.Now()
-						continue // cannot do much else
-						// return // terminate goroutine
-					}
-
-					refresh, err := FindSoaRefresh(zd)
-					if err != nil {
-						lgEngine.Error("FindSoaRefresh failed", "zone", zone, "error", err)
-					}
-
-					refreshCounters.Set(zone, &RefreshCounter{
-						Name:        zone,
-						SOARefresh:  refresh,
-						CurRefresh:  refresh,
-						Upstream:    upstream,
-						Downstreams: downstreams,
-					})
-
-					// Register the zone before any per-zone actions.
-					Zones.Set(zone, zd)
-
-					// Check if this is a catalog zone and parse it (for new zones)
-					if zd.Options[OptCatalogZone] {
-						lgEngine.Info("new zone is a catalog zone, parsing member zones", "zone", zone)
-						catalogUpdate, err := ParseCatalogZone(zd)
-						if err != nil {
-							lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
-						} else {
-							lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
-
-							// Notify all registered callbacks
-							if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
-								lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
-							} else {
-								lgEngine.Debug("notified catalog zone callbacks")
-							}
-
-							// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-							// Policy is now per-catalog-zone via catalog-member-auto-create option
-							go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
-								defer func() {
-									if r := recover(); r != nil {
-										lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
-									}
-								}()
-								if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-									lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
-								}
-							}(catalogUpdate, conf, ctx)
-						}
-					}
-
-					// Defer transport signal synthesis until all zones are initialized.
-					tryPostpass(zone)
-
-					if Globals.App.Type != AppTypeAgent {
-						err = zd.SetupZoneSigning(conf.Internal.ResignQ)
-						if err != nil {
-							lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
-						}
-					}
-
-					// This is a new zone being added to the server. Let's see if the zone
-					// config should cause any specific changes to the zone data to be made.
-					err = zd.SetupZoneSync(conf.Internal.DelegationSyncQ)
-					if err != nil {
-						lgEngine.Error("SetupZoneSync failed", "zone", zone, "error", err)
-					}
-
-					if updated {
-						zd.LatestRefresh = time.Now()
-						zd.RefreshCount++
-						if zd.Error && zd.ErrorType == RefreshError {
-							zd.SetError(NoError, "")
-						}
-						if resetSoaSerial {
-							zd.CurrentSerial = uint32(time.Now().Unix())
-							lgEngine.Info("zone updated from upstream, resetting serial to unixtime", "zone", zone, "serial", zd.CurrentSerial)
-						}
-						zd.NotifyDownstreams()
+						continue
 					}
 				}
 			}
@@ -425,8 +470,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				// log.Printf("RefEng: ticker for %s: curref: %d", zone, v.CurRefresh)
 				rc.CurRefresh--
 				if rc.CurRefresh <= 0 {
-					upstream = rc.Upstream
-
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)

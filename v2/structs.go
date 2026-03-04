@@ -130,6 +130,11 @@ type ZoneData struct {
 	KeystateOK    bool      // true after successful KEYSTATE exchange
 	KeystateError string    // error message from last failed attempt (empty on success)
 	KeystateTime  time.Time // time of last KEYSTATE attempt
+
+	// OnFirstLoad holds one-shot callbacks executed after the zone's first successful load.
+	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
+	// after executing them. Protected by zd.mu.
+	OnFirstLoad []func(*ZoneData)
 }
 
 // KeyInventorySnapshot stores a complete key inventory received from the signer.
