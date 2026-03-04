@@ -311,58 +311,6 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if err != nil {
 		lgSigner.Warn("failed to publish DNSKEY RRs", "zone", zd.ZoneName, "err", err)
 		// Don't fail if publishing fails, keys are still usable for signing
-	} else {
-		// Sign apex RRsets immediately after publishing DNSKEYs
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil {
-			lgSigner.Error("failed to get apex for zone to sign RRsets", "zone", zd.ZoneName, "err", err)
-		} else {
-			// Sign DNSKEY RRset
-			if dnskeys, exist := apex.RRtypes.Get(dns.TypeDNSKEY); exist {
-				_, err = zd.SignRRset(&dnskeys, zd.ZoneName, dak, true) // true = force signing
-				if err != nil {
-					lgSigner.Error("failed to sign DNSKEY RRset", "zone", zd.ZoneName, "err", err)
-				} else {
-					apex.RRtypes.Set(dns.TypeDNSKEY, dnskeys)
-					lgSigner.Info("signed DNSKEY RRset", "zone", zd.ZoneName)
-				}
-			}
-
-			// Sign SOA RRset
-			if soa, exist := apex.RRtypes.Get(dns.TypeSOA); exist {
-				_, err = zd.SignRRset(&soa, zd.ZoneName, dak, true) // true = force signing
-				if err != nil {
-					lgSigner.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
-				} else {
-					apex.RRtypes.Set(dns.TypeSOA, soa)
-					lgSigner.Info("signed SOA RRset", "zone", zd.ZoneName)
-				}
-			}
-
-			// Sign NS RRset at apex
-			if ns, exist := apex.RRtypes.Get(dns.TypeNS); exist {
-				_, err = zd.SignRRset(&ns, zd.ZoneName, dak, true) // true = force signing
-				if err != nil {
-					lgSigner.Error("failed to sign NS RRset", "zone", zd.ZoneName, "err", err)
-				} else {
-					apex.RRtypes.Set(dns.TypeNS, ns)
-					lgSigner.Info("signed NS RRset", "zone", zd.ZoneName)
-				}
-			}
-
-			// Sign A/AAAA records at apex (for NS names)
-			for _, rrt := range []uint16{dns.TypeA, dns.TypeAAAA} {
-				if addr, exist := apex.RRtypes.Get(rrt); exist {
-					_, err = zd.SignRRset(&addr, zd.ZoneName, dak, true) // true = force signing
-					if err != nil {
-						lgSigner.Error("failed to sign RRset", "rrtype", dns.TypeToString[rrt], "zone", zd.ZoneName, "err", err)
-					} else {
-						apex.RRtypes.Set(rrt, addr)
-						lgSigner.Info("signed RRset", "rrtype", dns.TypeToString[rrt], "zone", zd.ZoneName)
-					}
-				}
-			}
-		}
 	}
 
 	return dak, nil
@@ -391,12 +339,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			return 0, nil
 		}
 
-		// We are a signer. Check if multi-signer (mode 4) or single-signer (mode 2).
-		multiSigner, err := zd.isMultiSigner()
-		if err != nil {
-			lgSigner.Warn("error checking isMultiSigner, treating as single-signer", "zone", zd.ZoneName, "err", err)
-		}
-		if multiSigner {
+		// Check if multi-signer (mode 4) or single-signer (mode 2).
+		// OptMultiSigner was set during zone refresh by analyzeHsyncSigners().
+		if zd.Options[OptMultiSigner] {
 			// Mode 4: extract remote DNSKEYs from the current zone data before
 			// PublishDnskeyRRs overwrites the DNSKEY RRset with local keys only.
 			if err := zd.extractRemoteDNSKEYs(kdb); err != nil {

@@ -122,6 +122,8 @@ func dbMigrateSchema(db *sql.DB) {
 	}{
 		{"DnssecKeyStore", "propagation_confirmed", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed INTEGER DEFAULT 0"},
 		{"DnssecKeyStore", "propagation_confirmed_at", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed_at TEXT DEFAULT ''"},
+		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
+		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
 	}
 
 	for _, m := range migrations {

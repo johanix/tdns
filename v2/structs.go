@@ -48,10 +48,12 @@ const (
 	Sig0StateActive      string = "active"
 	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
+	DnskeyStateMpdist    string = "mpdist" // multi-provider distribution: awaiting confirmation from all providers
 	DnskeyStatePublished string = "published"
 	DnskeyStateStandby   string = "standby"
 	DnskeyStateActive    string = "active"
 	DnskeyStateRetired   string = "retired"
+	DnskeyStateRemoved   string = "removed"
 	DnskeyStateForeign   string = "foreign"
 )
 
@@ -532,13 +534,14 @@ type CombinerEditPost struct {
 
 // CombinerEditResponse is the response for edit management commands.
 type CombinerEditResponse struct {
-	Time     time.Time             `json:"time"`
-	Error    bool                  `json:"error"`
-	ErrorMsg string                `json:"error_msg,omitempty"`
-	Msg      string                `json:"msg,omitempty"`
-	Pending  []*PendingEditRecord  `json:"pending,omitempty"`
-	Approved []*ApprovedEditRecord `json:"approved,omitempty"`
-	Rejected []*RejectedEditRecord `json:"rejected,omitempty"`
+	Time     time.Time                      `json:"time"`
+	Error    bool                           `json:"error"`
+	ErrorMsg string                         `json:"error_msg,omitempty"`
+	Msg      string                         `json:"msg,omitempty"`
+	Pending  []*PendingEditRecord           `json:"pending,omitempty"`
+	Approved []*ApprovedEditRecord          `json:"approved,omitempty"`
+	Rejected []*RejectedEditRecord          `json:"rejected,omitempty"`
+	Current  map[string]map[string][]string `json:"current,omitempty"` // agent → rrtype → []rr
 }
 
 // CombinerDebugResponse returns both the merged CombinerData and the per-agent

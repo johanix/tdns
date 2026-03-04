@@ -197,10 +197,10 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 
 var DebugAgentShowSyncedDataCmd = &cobra.Command{
 	Use:   "show-synced-data",
-	Short: "Show synchronized data from peer agents (moved to: agent edits status show)",
+	Short: "Show synchronized data from peer agents (moved to: agent zone edits list)",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("This command has moved to: agent edits status show")
-		fmt.Println("Usage: tdns-cliv2 agent edits status show [--zone <zone>]")
+		fmt.Println("This command has moved to: agent zone edits list")
+		fmt.Println("Usage: tdns-cliv2 agent zone edits list [--zone <zone>]")
 	},
 }
 

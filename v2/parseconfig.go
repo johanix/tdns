@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -617,10 +618,51 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 		all_zones = append(all_zones, zname)
 
+		// Get existing zd or create a minimal stub.
+		// On SIGHUP reload, zones already exist — reuse them.
+		zdp, exists := Zones.Get(zname)
+		if !exists {
+			zdp = &ZoneData{
+				ZoneName:      zname,
+				Logger:        log.Default(),
+				FirstZoneLoad: true,
+			}
+			Zones.Set(zname, zdp)
+		}
+
+		if Globals.App.Type != AppTypeAgent && zdp.FirstZoneLoad {
+			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
+				"online-signing", options[OptOnlineSigning],
+				"inline-signing", options[OptInlineSigning],
+				"multi-provider", options[OptMultiProvider],
+				"apptype", AppTypeToString[Globals.App.Type])
+
+			// Signing callback: zones with explicit signing options in config
+			if options[OptOnlineSigning] || options[OptInlineSigning] {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+						lgConfig.Error("SetupZoneSigning failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
+					}
+				})
+			}
+
+			// Multi-provider post-load callback: for auth servers serving MP zones.
+			// By this point, FetchFromUpstream has examined the HSYNC RRset and
+			// may have set OptInlineSigning dynamically. Only sign if it did.
+			// Future: other MP-specific post-load setup goes here.
+			if options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if zd.Options[OptInlineSigning] {
+						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+							lgConfig.Error("SetupZoneSigning failed in MP OnFirstLoad", "zone", zd.ZoneName, "error", err)
+						}
+					}
+				})
+			}
+		}
+
 		switch Globals.App.Type {
 		case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
-			// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
-			// try a non-blocking send; if it would block, send from a goroutine.
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
@@ -637,17 +679,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				UpdatePolicy: policy,
 				DnssecPolicy: zconf.DnssecPolicy,
 			}
-			select {
-			case conf.Internal.RefreshZoneCh <- zr:
-				// enqueued immediately
-			default:
-				go func(z ZoneRefresher) {
-					select {
-					case conf.Internal.RefreshZoneCh <- z:
-					case <-ctx.Done():
-					}
-				}(zr)
-			}
+			conf.Internal.RefreshZoneCh <- zr
 		}
 	}
 

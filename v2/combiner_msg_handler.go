@@ -140,11 +140,24 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[OptMPManualApproval] {
 				if isNoOpUpdate(zd, senderID, msg.Records) {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
+					// Clean up the pending edit (move to approved as no-op)
+					if kdb != nil && editID > 0 {
+						if err := kdb.ResolvePendingEdit(editID, msg.Records, nil, ""); err != nil {
+							lgCombiner.Error("failed to resolve no-op edit", "editID", editID, "err", err)
+						}
+					}
+					// Include the original records as AppliedRecords so the
+					// agent can match them and transition from pending to accepted.
+					var allRRs []string
+					for _, rrs := range msg.Records {
+						allRRs = append(allRRs, rrs...)
+					}
 					combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
 						DistributionID: msg.DistributionID,
 						Zone:           zone,
 						Status:         "ok",
 						Message:        "no changes needed (data already current)",
+						AppliedRecords: allRRs,
 						Timestamp:      time.Now(),
 					})
 					continue
@@ -326,7 +339,7 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 	}
 
 	req := &transport.EditsRequest{
-		SenderID:  conf.MultiProvider.Identity,
+		SenderID:  conf.Combiner.Identity,
 		Zone:      zone,
 		Records:   records,
 		Timestamp: time.Now(),

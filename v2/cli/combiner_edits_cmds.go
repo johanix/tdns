@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
@@ -61,7 +63,7 @@ var combinerZoneEditsCmd = &cobra.Command{
 
 var combinerZoneEditsListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List edits for a zone (default: approved; use --pending or --rejected)",
+	Short: "List edits for a zone (default: current contributions; use --pending/--approved/--rejected)",
 	Run: func(cmd *cobra.Command, args []string) {
 		zone, _ := cmd.Flags().GetString("zone")
 		if zone == "" {
@@ -72,9 +74,10 @@ var combinerZoneEditsListCmd = &cobra.Command{
 		showApproved, _ := cmd.Flags().GetBool("approved")
 		showRejected, _ := cmd.Flags().GetBool("rejected")
 
-		// Default to --approved if no flag specified
+		// Default to current contributions if no flag specified
 		if !showPending && !showApproved && !showRejected {
-			showApproved = true
+			listCurrentContributions(zone)
+			return
 		}
 
 		if showPending {
@@ -87,6 +90,59 @@ var combinerZoneEditsListCmd = &cobra.Command{
 			listRejectedEdits(zone)
 		}
 	},
+}
+
+func listCurrentContributions(zone string) {
+	resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+		Command: "list-current",
+		Zone:    zone,
+	})
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+
+	if len(resp.Current) == 0 {
+		fmt.Printf("No current contributions for zone %s\n", dns.Fqdn(zone))
+		return
+	}
+
+	fmt.Printf("Current Contributions for Zone: %s\n", dns.Fqdn(zone))
+	fmt.Printf("═══════════════════════════════════════\n\n")
+
+	// Build table rows grouped by rrtype first, agent second.
+	// Collect all (rrtype, agent, rr) tuples then sort by rrtype.
+	type contribution struct {
+		rrtype string
+		agent  string
+		rr     string
+	}
+	var contribs []contribution
+	for agentID, rrtypeMap := range resp.Current {
+		for rrtype, rrs := range rrtypeMap {
+			for _, rr := range rrs {
+				contribs = append(contribs, contribution{rrtype: rrtype, agent: agentID, rr: rr})
+			}
+		}
+	}
+
+	// Sort by rrtype then agent
+	sort.Slice(contribs, func(i, j int) bool {
+		if contribs[i].rrtype != contribs[j].rrtype {
+			return contribs[i].rrtype < contribs[j].rrtype
+		}
+		return contribs[i].agent < contribs[j].agent
+	})
+
+	var rows []string
+	rows = append(rows, "Type | Origin | Record")
+	for _, c := range contribs {
+		rows = append(rows, fmt.Sprintf("%s | %s | %s",
+			c.rrtype, c.agent, truncateDNSKEY(c.rr)))
+	}
+
+	output := columnize.SimpleFormat(rows)
+	fmt.Println(output)
+	fmt.Println()
 }
 
 func listPendingEdits(zone string) {
@@ -307,7 +363,7 @@ func init() {
 	// Flags for list
 	combinerZoneEditsListCmd.Flags().String("zone", "", "Zone to list edits for")
 	combinerZoneEditsListCmd.Flags().Bool("pending", false, "Show pending edits")
-	combinerZoneEditsListCmd.Flags().Bool("approved", false, "Show approved edits (default)")
+	combinerZoneEditsListCmd.Flags().Bool("approved", false, "Show approved edits (transaction history)")
 	combinerZoneEditsListCmd.Flags().Bool("rejected", false, "Show rejected edits")
 
 	// Flags for approve

@@ -271,6 +271,46 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			resp.Rejected = rejected
 			resp.Msg = fmt.Sprintf("%d rejected edit(s) for zone %s", len(rejected), zone)
 
+		case "list-current":
+			zone := dns.Fqdn(cp.Zone)
+			if zone == "" || zone == "." {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			zd, exists := Zones.Get(zone)
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
+				return
+			}
+			// Build agent → rrtype → []rr from AgentContributions
+			current := make(map[string]map[string][]string)
+			if zd.AgentContributions != nil {
+				for agentID, ownerMap := range zd.AgentContributions {
+					for _, rrtypeMap := range ownerMap {
+						for rrtype, rrset := range rrtypeMap {
+							if current[agentID] == nil {
+								current[agentID] = make(map[string][]string)
+							}
+							rtStr := dns.TypeToString[rrtype]
+							for _, rr := range rrset.RRs {
+								current[agentID][rtStr] = append(current[agentID][rtStr], rr.String())
+							}
+						}
+					}
+				}
+			}
+			resp.Current = current
+			totalRRs := 0
+			for _, rrtypeMap := range current {
+				for _, rrs := range rrtypeMap {
+					totalRRs += len(rrs)
+				}
+			}
+			resp.Msg = fmt.Sprintf("%d current contribution(s) from %d agent(s) for zone %s",
+				totalRRs, len(current), zone)
+
 		case "purge":
 			pendingCount, err1 := kdb.PurgePendingEdits()
 			approvedCount, err2 := kdb.PurgeApprovedEdits()

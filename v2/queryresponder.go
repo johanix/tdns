@@ -142,10 +142,8 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		lgHandler.Warn("no KeyDB available, cannot sign", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
 		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
 	}
-	if !zd.Options[OptOnlineSigning] {
-		// No online signing — return unsigned. For inline-signed zones this means
-		// the RRset lost its RRSIG (shouldn't happen), but returning an error here
-		// would SERVFAIL the entire query which is worse than returning unsigned data.
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		// No signing configured — return unsigned.
 		return rrset, nil
 	}
 

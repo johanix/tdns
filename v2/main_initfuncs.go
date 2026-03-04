@@ -9,7 +9,6 @@ import (
 
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"runtime/debug"
@@ -219,7 +218,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
 	conf.Internal.SyncQ = make(chan SyncRequest, 10)
 	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10)
-	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
@@ -720,17 +719,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 // StartCombiner starts subsystems for tdns-combiner
 func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
-	// Pre-register combiner zones with OnFirstLoad callbacks.
-	// At this point RefreshEngine hasn't started yet, so Zones is empty
-	// and there's no race. ParseZones has already queued ZoneRefresher
-	// requests to RefreshZoneCh — we create minimal zd stubs in Zones
-	// for each zone that needs post-load setup.
+	// Attach OnFirstLoad callbacks to zone stubs created by ParseZones.
+	// Stubs already exist in Zones with FirstZoneLoad=true.
 	kdb := conf.Internal.KeyDB
 	for _, zoneName := range conf.Internal.AllZones {
-		zd := &ZoneData{
-			ZoneName:      zoneName,
-			Logger:        log.Default(),
-			FirstZoneLoad: true,
+		zd, exists := Zones.Get(zoneName)
+		if !exists {
+			lgConfig.Error("zone stub not found, skipping callback attachment", "zone", zoneName)
+			continue
 		}
 
 		if kdb != nil {
@@ -774,9 +770,6 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 				}
 			})
 		}
-
-		Zones.Set(zoneName, zd)
-		lgConfig.Info("pre-registered zone with OnFirstLoad callbacks", "zone", zoneName)
 	}
 
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })

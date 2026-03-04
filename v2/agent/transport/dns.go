@@ -277,7 +277,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	sharedZones := peer.GetSharedZones()
 
 	if len(sharedZones) == 0 {
-		lgTransport().Warn("no shared zones found for peer", "peer", peer.ID)
+		lgTransport().Debug("no shared zones found for peer", "peer", peer.ID)
 	} else {
 		lgTransport().Debug("including shared zones in beat", "count", len(sharedZones), "peer", peer.ID, "zones", sharedZones)
 	}
@@ -904,9 +904,14 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// Try to extract application-level confirmation from the DNS response EDNS0.
 	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
 	if confirm := extractConfirmFromResponse(res, peer.ID, t.SecureWrapper); confirm != nil {
-		lgTransport().Info("received confirmation", "op", opType, "distrib", distributionID, "peer", peer.ID,
-			"status", confirm.Status, "message", confirm.Message,
-			"applied", len(confirm.AppliedRecords), "removed", len(confirm.RemovedRecords), "rejected", len(confirm.RejectedItems))
+		if opType == "sync" || opType == "update" {
+			lgTransport().Info("received confirmation", "op", opType, "distrib", distributionID, "peer", peer.ID,
+				"status", confirm.Status, "message", confirm.Message,
+				"applied", len(confirm.AppliedRecords), "removed", len(confirm.RemovedRecords), "rejected", len(confirm.RejectedItems))
+		} else {
+			lgTransport().Debug("received confirmation", "op", opType, "distrib", distributionID, "peer", peer.ID,
+				"status", confirm.Status, "message", confirm.Message)
+		}
 		status := parseConfirmStatus(confirm.Status)
 		return &operationResponse{
 			Status:         status,

@@ -477,11 +477,12 @@ func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 // On agents: uses Globals.AgentId.
 // On the signer (AppTypeAuth): uses multi-provider.hsync-identity (or
 // multi-provider.agent.identity as fallback, since the HSYNC lists agents).
-// Returns (true, nil) if we should sign, (false, nil) if we should not,
-// or (true, nil) as a safe default if no identity is configured or no
-// matching HSYNC record is found.
-// Handles both HSYNC and HSYNC2 record types.
-func (zd *ZoneData) weAreASigner() (bool, error) {
+// analyzeHsyncSigners walks the HSYNC/HSYNC2 RRset once and returns:
+//   - weShouldSign: whether our identity has SIGN=YES
+//   - otherSigners: count of other identities with SIGN=YES
+//
+// Defaults: sign=true if no matching record found, otherSigners=0 if no records.
+func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, err error) {
 	ourIdentity := string(Globals.AgentId)
 
 	// On the signer, our HSYNC identity is the agent we represent, not the signer itself.
@@ -495,8 +496,10 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return true, fmt.Errorf("weAreASigner: cannot get apex for zone %s: %v", zd.ZoneName, err)
+		return true, 0, fmt.Errorf("analyzeHsyncSigners: cannot get apex for zone %s: %v", zd.ZoneName, err)
 	}
+
+	foundOurRecord := false
 
 	// Try HSYNC first, then HSYNC2
 	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
@@ -504,12 +507,17 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 		for _, rr := range hsyncRRset.RRs {
 			hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
 			if hsync.Identity == ourIdentity {
-				return hsync.Sign == core.HsyncSignYES, nil
+				foundOurRecord = true
+				weShouldSign = hsync.Sign == core.HsyncSignYES
+			} else if hsync.Sign == core.HsyncSignYES {
+				otherSigners++
 			}
 		}
-		// No matching HSYNC record for our identity
-		zd.Logger.Printf("weAreASigner: zone %s: no HSYNC record matches our identity %q", zd.ZoneName, ourIdentity)
-		return true, nil
+		if !foundOurRecord {
+			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC record matches our identity %q", zd.ZoneName, ourIdentity)
+			weShouldSign = true // default: sign if no matching record
+		}
+		return weShouldSign, otherSigners, nil
 	}
 
 	hsync2RRset, exists := apex.RRtypes.Get(core.TypeHSYNC2)
@@ -517,56 +525,27 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 		for _, rr := range hsync2RRset.RRs {
 			hsync2 := rr.(*dns.PrivateRR).Data.(*core.HSYNC2)
 			if hsync2.Identity == ourIdentity {
-				return hsync2.DoSign(), nil
+				foundOurRecord = true
+				weShouldSign = hsync2.DoSign()
+			} else if hsync2.DoSign() {
+				otherSigners++
 			}
 		}
-		// No matching HSYNC2 record for our identity
-		zd.Logger.Printf("weAreASigner: zone %s: no HSYNC2 record matches our identity %q", zd.ZoneName, ourIdentity)
-		return true, nil
+		if !foundOurRecord {
+			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC2 record matches our identity %q", zd.ZoneName, ourIdentity)
+			weShouldSign = true
+		}
+		return weShouldSign, otherSigners, nil
 	}
 
-	// No HSYNC/HSYNC2 records at all — sign by default
-	return true, nil
+	// No HSYNC/HSYNC2 records at all — sign by default, no other signers
+	return true, 0, nil
 }
 
-// isMultiSigner checks the HSYNC RRset and returns true if more than one
-// agent has Sign=SIGN (or DoSign() for HSYNC2). This distinguishes
-// multi-signer mode (mode 4) from single-signer multi-provider (mode 2).
-// Returns (false, nil) if 0 or 1 signers, (true, nil) if 2+.
-func (zd *ZoneData) isMultiSigner() (bool, error) {
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, fmt.Errorf("isMultiSigner: cannot get apex for zone %s: %v", zd.ZoneName, err)
-	}
-
-	signerCount := 0
-
-	// Try HSYNC first
-	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
-	if exists && len(hsyncRRset.RRs) > 0 {
-		for _, rr := range hsyncRRset.RRs {
-			hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
-			if hsync.Sign == core.HsyncSignYES {
-				signerCount++
-			}
-		}
-		return signerCount > 1, nil
-	}
-
-	// Try HSYNC2
-	hsync2RRset, exists := apex.RRtypes.Get(core.TypeHSYNC2)
-	if exists && len(hsync2RRset.RRs) > 0 {
-		for _, rr := range hsync2RRset.RRs {
-			hsync2 := rr.(*dns.PrivateRR).Data.(*core.HSYNC2)
-			if hsync2.DoSign() {
-				signerCount++
-			}
-		}
-		return signerCount > 1, nil
-	}
-
-	// No HSYNC/HSYNC2 records — not multi-signer
-	return false, nil
+// weAreASigner is a convenience wrapper around analyzeHsyncSigners.
+func (zd *ZoneData) weAreASigner() (bool, error) {
+	shouldSign, _, err := zd.analyzeHsyncSigners()
+	return shouldSign, err
 }
 
 func (zd *ZoneData) PrintOwnerNames() error {

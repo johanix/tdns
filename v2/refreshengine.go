@@ -93,11 +93,9 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// Defer transport signal synthesis until all zones are initialized.
 	tryPostpass(zone)
 
-	if Globals.App.Type != AppTypeAgent {
-		if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-			lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
-		}
-	}
+	// Note: SetupZoneSigning is NOT called here. For config-defined zones,
+	// it is registered as an OnFirstLoad callback in ParseZones. For dynamic
+	// zones (catalog, API), it is called explicitly after initialLoadZone.
 	if err := zd.SetupZoneSync(conf.Internal.DelegationSyncQ); err != nil {
 		lgEngine.Error("SetupZoneSync failed", "zone", zone, "error", err)
 	}
@@ -198,31 +196,54 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// from ZoneRefresher, do initial load, run callbacks.
 						lgEngine.Info("loading pre-registered zone", "zone", zone)
 
-						dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
-						msc := conf.MultiSigner[zr.MultiSigner]
+						// Only merge config from ZoneRefresher if the zd has not
+						// been configured yet (ZoneType still 0). The first
+						// ZoneRefresher from ParseZones has all fields set. On
+						// retry (CLI reload, ticker), the zd already has config
+						// from the first attempt — must not overwrite with zeros.
+						if zd.ZoneType == 0 {
+							dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
+							msc := conf.MultiSigner[zr.MultiSigner]
 
-						zd.mu.Lock()
-						zd.ZoneStore = zr.ZoneStore
-						zd.Upstream = NormalizeAddress(zr.Primary)
-						zd.Downstreams = NormalizeAddresses(zr.Notify)
-						zd.Zonefile = zr.Zonefile
-						zd.ZoneType = zr.ZoneType
-						zd.Options = zr.Options
-						zd.UpdatePolicy = zr.UpdatePolicy
-						zd.DnssecPolicy = &dp
-						zd.MultiSigner = &msc
-						zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
-						zd.MusicSyncQ = conf.Internal.MusicSyncQ
-						zd.SyncQ = conf.Internal.SyncQ
-						zd.KeyDB = conf.Internal.KeyDB
-						zd.Data = cmap.New[OwnerData]()
-						zd.mu.Unlock()
+							zd.mu.Lock()
+							zd.ZoneStore = zr.ZoneStore
+							zd.Upstream = NormalizeAddress(zr.Primary)
+							zd.Downstreams = NormalizeAddresses(zr.Notify)
+							zd.Zonefile = zr.Zonefile
+							zd.ZoneType = zr.ZoneType
+							zd.Options = zr.Options
+							zd.UpdatePolicy = zr.UpdatePolicy
+							zd.DnssecPolicy = &dp
+							zd.MultiSigner = &msc
+							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
+							zd.MusicSyncQ = conf.Internal.MusicSyncQ
+							zd.SyncQ = conf.Internal.SyncQ
+							zd.KeyDB = conf.Internal.KeyDB
+							zd.Data = cmap.New[OwnerData]()
+							zd.mu.Unlock()
+						}
 
 						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
 							tryPostpass, resetSoaSerial); err != nil {
 							lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
+
+							// Set a refresh counter so the ticker can retry.
+							if _, exists := refreshCounters.Get(zone); !exists {
+								refreshCounters.Set(zone, &RefreshCounter{
+									Name:       zone,
+									SOARefresh: 300, // 5 min fallback
+									CurRefresh: 30,  // retry sooner on initial failure
+								})
+							}
+
+							// Send response if someone is waiting (e.g. CLI reload)
+							if zr.Response != nil {
+								resp.Error = true
+								resp.ErrorMsg = fmt.Sprintf("zone %s: refresh failed: %v", zone, err)
+								zr.Response <- resp
+							}
 							continue
 						}
 					} else {
@@ -344,6 +365,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								if updated {
 									lgEngine.Info("zone updated via refresh", "zone", zd.ZoneName)
 
+									// Re-sign zone after refresh (upstream data has no RRSIGs)
+									if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+										lgEngine.Error("SetupZoneSigning failed after refresh", "zone", zd.ZoneName, "error", err)
+									}
+
 									// Write zone file after successful update
 									// Two cases:
 									// 1. Auto-configured zones -> write to dynamic zone directory
@@ -421,8 +447,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}(zd, zone, zr.Force, conf)
 					}
 				} else {
-					// NEW ZONE: create zd, register in Zones, then initial load
-					lgEngine.Info("adding new zone", "zone", zone)
+					// DYNAMIC ZONE: not from config (catalog member, API-created).
+					// Config-defined zones are always pre-registered by ParseZones.
+					lgEngine.Info("adding dynamic zone (not pre-registered)", "zone", zone)
 					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
@@ -454,6 +481,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						zd.LatestError = time.Now()
 						continue
 					}
+
+					// Dynamic zones: set up signing if needed
+					// (config zones do this via OnFirstLoad callback registered in ParseZones)
+					if Globals.App.Type != AppTypeAgent {
+						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+							lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
+						}
+					}
 				}
 			}
 			if zr.Response != nil {
@@ -473,10 +508,26 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)
-					if zd.Error {
-						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "error", zd.ErrorMsg)
+					if zd.Error && zd.ErrorType != RefreshError {
+						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 						continue
 					}
+
+					// If zone never completed initial load, retry via initialLoadZone
+					// to get the full treatment (callbacks, signing, sync setup).
+					if zd.FirstZoneLoad {
+						lgEngine.Info("retrying initial load for zone", "zone", zone)
+						zd.SetError(NoError, "") // clear error to allow load
+						if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
+							refreshCounters, tryPostpass, resetSoaSerial); err != nil {
+							lgEngine.Error("initial load retry failed", "zone", zone, "error", err)
+							zd.SetError(RefreshError, "refresh error: %v", err)
+							zd.LatestError = time.Now()
+						}
+						rc.CurRefresh = rc.SOARefresh
+						continue
+					}
+
 					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, conf)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
@@ -491,7 +542,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if resetSoaSerial {
 							zd.CurrentSerial = uint32(time.Now().Unix())
 							lgEngine.Info("zone updated from upstream, resetting serial to unixtime", "zone", zone, "serial", zd.CurrentSerial)
+						}
 
+						// Re-sign zone after refresh (upstream data has no RRSIGs)
+						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+							lgEngine.Error("SetupZoneSigning failed after refresh", "zone", zone, "error", err)
 						}
 					}
 					if updated {

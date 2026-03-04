@@ -243,11 +243,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
 	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
-	// dynamically enable/disable inline-signing.
+	// dynamically enable/disable inline-signing and detect multi-signer mode.
 	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
-		shouldSign, err := zd.weAreASigner()
+		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
 		if err != nil {
-			lg.Error("error checking HSYNC SIGN field", "zone", zd.ZoneName, "err", err)
+			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
 		}
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
@@ -255,6 +255,14 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		} else if !shouldSign && zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = false
+		}
+		isMS := shouldSign && otherSigners > 0
+		if isMS && !zd.Options[OptMultiSigner] {
+			lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
+			zd.Options[OptMultiSigner] = true
+		} else if !isMS && zd.Options[OptMultiSigner] {
+			lg.Info("no longer multi-signer", "zone", zd.ZoneName)
+			zd.Options[OptMultiSigner] = false
 		}
 	}
 
@@ -425,12 +433,12 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
 	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
-	// dynamically enable/disable inline-signing. The HSYNC is the authority
-	// for whether we should sign, not static config.
+	// dynamically enable/disable inline-signing and detect multi-signer mode.
+	// The HSYNC is the authority for whether we should sign, not static config.
 	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
-		shouldSign, err := zd.weAreASigner()
+		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
 		if err != nil {
-			lg.Error("error checking HSYNC SIGN field", "zone", zd.ZoneName, "err", err)
+			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
 		}
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
@@ -438,6 +446,14 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		} else if !shouldSign && zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = false
+		}
+		isMS := shouldSign && otherSigners > 0
+		if isMS && !zd.Options[OptMultiSigner] {
+			lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
+			zd.Options[OptMultiSigner] = true
+		} else if !isMS && zd.Options[OptMultiSigner] {
+			lg.Info("no longer multi-signer", "zone", zd.ZoneName)
+			zd.Options[OptMultiSigner] = false
 		}
 	}
 

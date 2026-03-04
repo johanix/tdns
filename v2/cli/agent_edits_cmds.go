@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
  * CLI commands for inspecting agent SDE (SynchedDataEngine) status.
- * Provides "agent edits status show [--zone {zone}]" with per-RR
+ * Provides "agent zone edits list [--zone {zone}]" with per-RR
  * tracking state and outbound queue status.
  */
 package cli
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -19,18 +20,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var agentEditsCmd = &cobra.Command{
+var agentZoneEditsCmd = &cobra.Command{
 	Use:   "edits",
 	Short: "Agent edit/sync status commands",
 }
 
-var agentEditsStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Agent SDE status inspection",
-}
-
-var agentEditsStatusShowCmd = &cobra.Command{
-	Use:   "show",
+var agentZoneEditsListCmd = &cobra.Command{
+	Use:   "list",
 	Short: "Show synchronized data and tracking state",
 	Long: `Display the agent's SynchedDataEngine state showing contributions from all peer agents.
 
@@ -38,8 +34,8 @@ Without --zone: summary view sorted by zone → source agent → RRtype → RRs
 With --zone:    detailed per-RR tracking state and outbound queue status
 
 Example:
-  tdns-cliv2 agent edits status show
-  tdns-cliv2 agent edits status show --zone example.com`,
+  tdns-cliv2 agent zone edits list
+  tdns-cliv2 agent zone edits list --zone example.com`,
 	Run: func(cmd *cobra.Command, args []string) {
 		zone, _ := cmd.Flags().GetString("zone")
 
@@ -51,8 +47,7 @@ Example:
 	},
 }
 
-// showSyncedDataSummary displays the same output as the old
-// "agent debug show-synced-data" command — a zone→agent→rrtype hierarchy.
+// showSyncedDataSummary displays a zone→agent→rrtype hierarchy.
 func showSyncedDataSummary() {
 	req := tdns.AgentMgmtPost{
 		Command: "dump-zonedatarepo",
@@ -135,8 +130,8 @@ func showSyncedDataSummary() {
 	}
 }
 
-// showDetailedZoneStatus displays per-RR tracking state and outbound
-// queue status for a single zone.
+// showDetailedZoneStatus displays per-RR tracking state in table format
+// and outbound queue status for a single zone.
 func showDetailedZoneStatus(zone string) {
 	// 1. Get per-RR tracking data
 	req := tdns.AgentMgmtPost{
@@ -161,12 +156,20 @@ func showDetailedZoneStatus(zone string) {
 	} else {
 		for _, agentRepo := range amr.ZoneDataRepo {
 			for agentID, rrTypeMap := range agentRepo {
-				fmt.Printf("Source: %s\n", agentID)
+				fmt.Printf("Source: %s\n\n", agentID)
 
 				if len(rrTypeMap) == 0 {
 					fmt.Printf("  (no RRsets)\n\n")
 					continue
 				}
+
+				// Flag KEYSTATE failure
+				if ksInfo, ok := amr.KeystateStatus[tdns.ZoneName(zone)]; ok && !ksInfo.OK {
+					fmt.Printf("  WARNING: KEYSTATE exchange FAILED: %s\n\n", ksInfo.Error)
+				}
+
+				var rows []string
+				rows = append(rows, "Type | State | RR / Details")
 
 				for rrtype, rrInfos := range rrTypeMap {
 					rrTypeName := dns.TypeToString[rrtype]
@@ -174,50 +177,57 @@ func showDetailedZoneStatus(zone string) {
 						rrTypeName = fmt.Sprintf("TYPE%d", rrtype)
 					}
 
-					// Flag KEYSTATE failure on DNSKEY summary line
-					if rrtype == dns.TypeDNSKEY {
-						if ksInfo, ok := amr.KeystateStatus[tdns.ZoneName(zone)]; ok && !ksInfo.OK {
-							fmt.Printf("  %s (%d records, WARNING: KEYSTATE exchange FAILED: %s):\n",
-								rrTypeName, len(rrInfos), ksInfo.Error)
-						} else {
-							fmt.Printf("  %s (%d records):\n", rrTypeName, len(rrInfos))
-						}
-					} else {
-						fmt.Printf("  %s (%d records):\n", rrTypeName, len(rrInfos))
-					}
 					for _, info := range rrInfos {
-						fmt.Printf("    %s\n", info.RR)
-						line := fmt.Sprintf("      State: %s", info.State)
-						if info.DistributionID != "" {
-							distID := info.DistributionID
-							if len(distID) > 16 {
-								distID = distID[:16] + "..."
-							}
-							line += fmt.Sprintf("  DistID: %s", distID)
+						state := strings.ToUpper(info.State)
+						rrDisplay := truncateDNSKEY(info.RR)
+
+						// Main row: Type | State | RR
+						rows = append(rows, fmt.Sprintf("%s | %s | %s",
+							rrTypeName, state, rrDisplay))
+
+						// Detail row: Updated timestamp
+						updatedStr := info.UpdatedAt
+						if t, err := time.Parse(time.RFC3339, info.UpdatedAt); err == nil {
+							updatedStr = t.Format("2006-01-02 15:04:05")
 						}
-						if info.UpdatedAt != "" {
-							line += fmt.Sprintf("  Updated: %s", info.UpdatedAt)
-						}
-						fmt.Println(line)
-						if info.Reason != "" {
-							fmt.Printf("      Reason: %s\n", info.Reason)
-						}
-						// Show per-recipient confirmations for non-accepted RRs
-						if info.State != "accepted" && len(info.Confirmations) > 0 {
-							fmt.Printf("      Confirmations:\n")
+						rows = append(rows, fmt.Sprintf(" | | Updated: %s", updatedStr))
+
+						// For PENDING: show which recipients are still pending
+						if info.State == "pending" && len(info.Confirmations) > 0 {
+							var pendingPeers []string
 							for recipientID, conf := range info.Confirmations {
-								if conf.Reason != "" {
-									fmt.Printf("        %-30s  %s  %s  (%s)\n",
-										recipientID, conf.Status,
-										conf.Timestamp.Format(time.RFC3339), conf.Reason)
-								} else {
-									fmt.Printf("        %-30s  %s  %s\n",
-										recipientID, conf.Status,
-										conf.Timestamp.Format(time.RFC3339))
+								if conf.Status == "pending" {
+									pendingPeers = append(pendingPeers, recipientID)
+								}
+							}
+							if len(pendingPeers) > 0 {
+								rows = append(rows, fmt.Sprintf(" | | Pending: %s",
+									strings.Join(pendingPeers, ", ")))
+							}
+						}
+
+						// For REJECTED: show who rejected and why
+						if info.State == "rejected" {
+							if info.Reason != "" {
+								rows = append(rows, fmt.Sprintf(" | | Reason: %s", info.Reason))
+							}
+							for recipientID, conf := range info.Confirmations {
+								if conf.Status == "rejected" {
+									reason := conf.Reason
+									if reason == "" {
+										reason = "no reason given"
+									}
+									rows = append(rows, fmt.Sprintf(" | | Rejected by: %s (%s)",
+										recipientID, reason))
 								}
 							}
 						}
 					}
+				}
+
+				if len(rows) > 1 {
+					output := columnize.SimpleFormat(rows)
+					fmt.Println(output)
 				}
 				fmt.Println()
 			}
@@ -315,10 +325,29 @@ func showQueueStatusForZone(zone string) {
 	}
 }
 
-func init() {
-	AgentCmd.AddCommand(agentEditsCmd)
-	agentEditsCmd.AddCommand(agentEditsStatusCmd)
-	agentEditsStatusCmd.AddCommand(agentEditsStatusShowCmd)
+// truncateDNSKEY truncates DNSKEY public key material in an RR string for display.
+// Returns the original string for non-DNSKEY records.
+func truncateDNSKEY(rrStr string) string {
+	rr, err := dns.NewRR(rrStr)
+	if err != nil {
+		return rrStr
+	}
+	dnskey, ok := rr.(*dns.DNSKEY)
+	if !ok {
+		return rrStr
+	}
+	pub := dnskey.PublicKey
+	if len(pub) > 15 {
+		pub = pub[:10] + "..." + pub[len(pub)-5:]
+	}
+	// Reconstruct a readable DNSKEY string with truncated key
+	return fmt.Sprintf("%s %d IN DNSKEY %d %d %d %s",
+		dnskey.Hdr.Name, dnskey.Hdr.Ttl, dnskey.Flags, dnskey.Protocol, dnskey.Algorithm, pub)
+}
 
-	agentEditsStatusShowCmd.Flags().String("zone", "", "Show detailed status for a specific zone")
+func init() {
+	AgentZoneCmd.AddCommand(agentZoneEditsCmd)
+	agentZoneEditsCmd.AddCommand(agentZoneEditsListCmd)
+
+	agentZoneEditsListCmd.Flags().String("zone", "", "Show detailed status for a specific zone")
 }

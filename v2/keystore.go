@@ -736,7 +736,7 @@ type KeyInventoryItem struct {
 	KeyTag    uint16
 	Algorithm uint8
 	Flags     uint16
-	State     string // "created","published","standby","active","retired","foreign"
+	State     string // "created","mpdist","published","standby","active","retired","removed","foreign"
 	KeyRR     string // Full DNSKEY RR string (public key data, no private key)
 }
 
@@ -774,4 +774,135 @@ func (kdb *KeyDB) GetKeyInventory(zonename string) ([]KeyInventoryItem, error) {
 	}
 
 	return entries, nil
+}
+
+// DnssecKeyWithTimestamps extends KeyInventoryItem with lifecycle timestamps.
+// Used by the KeyStateWorker for time-based state transitions.
+type DnssecKeyWithTimestamps struct {
+	ZoneName    string
+	KeyTag      uint16
+	Algorithm   uint8
+	Flags       uint16
+	State       string
+	KeyRR       string
+	PublishedAt *time.Time
+	RetiredAt   *time.Time
+}
+
+// GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
+// If zone is empty, returns keys across all zones.
+func (kdb *KeyDB) GetDnssecKeysByState(zone string, state string) ([]DnssecKeyWithTimestamps, error) {
+	var query string
+	var args []interface{}
+
+	if zone == "" {
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE state=?`
+		args = []interface{}{state}
+	} else {
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE zonename=? AND state=?`
+		args = []interface{}{zone, state}
+	}
+
+	rows, err := kdb.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("GetDnssecKeysByState: query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []DnssecKeyWithTimestamps
+	for rows.Next() {
+		var zonename, algorithm, st, keyrr, publishedAtStr, retiredAtStr string
+		var keyid, flags int
+		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &retiredAtStr); err != nil {
+			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
+		}
+
+		entry := DnssecKeyWithTimestamps{
+			ZoneName:  zonename,
+			KeyTag:    uint16(keyid),
+			Algorithm: dns.StringToAlgorithm[algorithm],
+			Flags:     uint16(flags),
+			State:     st,
+			KeyRR:     keyrr,
+		}
+
+		if publishedAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, publishedAtStr); err == nil {
+				entry.PublishedAt = &t
+			}
+		}
+		if retiredAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, retiredAtStr); err == nil {
+				entry.RetiredAt = &t
+			}
+		}
+
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetDnssecKeysByState: rows iteration failed: %w", err)
+	}
+
+	return entries, nil
+}
+
+// UpdateDnssecKeyState transitions a DNSSEC key to a new state and sets the
+// appropriate lifecycle timestamp. When transitioning to "published", sets
+// published_at. When transitioning to "retired", sets retired_at.
+// Invalidates the cache for both old and new states.
+func (kdb *KeyDB) UpdateDnssecKeyState(zonename string, keyid uint16, newstate string) error {
+	tx, err := kdb.Begin("UpdateDnssecKeyState")
+	if err != nil {
+		return fmt.Errorf("error beginning transaction: %v", err)
+	}
+
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	// Get the current state so we can invalidate the right cache entry
+	var oldstate string
+	err = tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&oldstate)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
+		}
+		return fmt.Errorf("error querying DnssecKeyStore: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	var res sql.Result
+	switch newstate {
+	case DnskeyStatePublished:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
+			newstate, now, zonename, keyid)
+	case DnskeyStateRetired:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+			newstate, now, zonename, keyid)
+	default:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+			newstate, zonename, keyid)
+	}
+
+	if err != nil {
+		return fmt.Errorf("error updating DnssecKeyStore: %v", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		err = fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
+		return err
+	}
+
+	// Invalidate caches for both old and new states
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+newstate)
+
+	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
+	return nil
 }

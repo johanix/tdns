@@ -425,6 +425,17 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
+	// Register beat handler (shared implementation with agent/combiner)
+	if err := router.Register(
+		"BeatHandler",
+		MessageType("beat"),
+		HandleBeat,
+		WithPriority(100),
+		WithDescription("Processes heartbeat messages from peers"),
+	); err != nil {
+		return err
+	}
+
 	// Register keystate handler (agent→signer: propagated/rejected/removed)
 	if err := router.Register(
 		"KeystateHandler",
@@ -447,7 +458,7 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
-	lgTransport().Info("signer: registered message handlers", "count", 3)
+	lgTransport().Info("signer: registered message handlers", "count", 4)
 	lgTransport().Info("signer: router initialization complete")
 
 	return nil
