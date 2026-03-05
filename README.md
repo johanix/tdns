@@ -91,3 +91,65 @@ Multi-signer is in practice just a special case of multi-provider where more tha
 is requested by the zone owner to sign the zone. this requires additional synchronization among the
 providers using the same mechanisms as for all multi-provider synchronization.
 
+# Running agent in Docker
+
+## Building the image:
+
+```
+$ docker buildx build --no-cache -t tdns - < Dockerfile
+[+] Building 137.3s (24/24) FINISHED                                                                                                                                                                                         docker:desktop-linux
+ => [internal] load build definition from Dockerfile                                                                                                                                                                                         0.0s
+ => => transferring dockerfile: 1.83kB                                                                                                                                                                                                       0.0s
+ => [internal] load metadata for docker.io/library/alpine:latest                                                                                                                                                                             1.0s
+ => [internal] load metadata for docker.io/library/golang:1.25.2-alpine                                                                                                                                                                      0.0s
+ => [internal] load .dockerignore                                                                                                                                                                                                            0.0s
+ => => transferring context: 2B                                                                                                                                                                                                              0.0s
+ => CACHED [stage-1  1/12] FROM docker.io/library/alpine:latest@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659                                                                                                      0.0s
+ => CACHED [builder 1/7] FROM docker.io/library/golang:1.25.2-alpine                                                                                                                                                                         0.0s
+ => [stage-1  2/12] RUN apk add --no-cache ca-certificates openssl                                                                                                                                                                           5.3s
+ => [builder 2/7] RUN apk add --no-cache make git gcc musl-dev                                                                                                                                                                              43.1s
+ => [stage-1  3/12] WORKDIR /etc/tdns                                                                                                                                                                                                        0.0s
+ => [builder 3/7] WORKDIR /app                                                                                                                                                                                                               0.0s
+ => [builder 4/7] RUN git clone --branch multi-signer-support-3 https://github.com/johanix/tdns.git .                                                                                                                                        6.9s
+ => [builder 5/7] RUN make all                                                                                                                                                                                                              82.5s
+ => [builder 6/7] RUN mkdir -p /usr/local/libexec /usr/local/bin     && find . -type f -name "tdns*" -executable -exec cp {} /usr/local/bin/ ;                                                                                               0.5s
+ => [builder 7/7] RUN make install                                                                                                                                                                                                           0.9s
+ => [stage-1  4/12] COPY --from=builder /usr/local/bin/tdns-* /usr/local/bin/                                                                                                                                                                0.4s
+ => [stage-1  5/12] RUN mkdir -p /etc/tdns/certs                                                                                                                                                                                             0.1s
+ => [stage-1  6/12] COPY --from=builder /app/cmdv2/agentv2/tdns-agent.sample.yaml /etc/tdns/tdns-agentv2.yaml                                                                                                                                0.0s
+ => [stage-1  7/12] COPY --from=builder /app/cmdv2/agentv2/agent-zones.yaml /etc/tdns/                                                                                                                                                       0.0s
+ => [stage-1  8/12] COPY --from=builder /app/cmdv2/cliv2/tdns-cli.sample.yaml /etc/tdns/tdns-cli.yaml                                                                                                                                        0.0s
+ => [stage-1  9/12] COPY --from=builder /app/cmdv2/authv2/tdns-auth.sample.yaml /etc/tdns/tdns-authv2.yaml                                                                                                                                   0.0s
+ => [stage-1 10/12] COPY --from=builder /app/utils/ /tmp/utils/                                                                                                                                                                              0.0s
+ => [stage-1 11/12] RUN tdns-cli db init -f /var/tmp/tdns-agent.db     && cd /tmp/utils     && for cn in localhost. agent.provider. agent.jose. ; do echo $cn | sh gen-cert.sh ; done     && cp *.key *.crt /etc/tdns/certs/     && rm -rf   0.3s
+ => [stage-1 12/12] RUN tdns-cliv2 keys generate --jose                                                                                                                                                                                      0.1s
+ => exporting to image                                                                                                                                                                                                                       0.4s
+ => => exporting layers                                                                                                                                                                                                                      0.4s
+ => => writing image sha256:58d76957faa361ebc7d2ab2d707b74101046957f045b8907ae409f3aada51720                                                                                                                                                 0.0s
+ => => naming to docker.io/library/tdns                                                                                                                                                                                                      0.0s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/ppi50nbelmoja3erifxhb5k0h
+
+What's next:
+    View a summary of image vulnerabilities and recommendations → docker scout quickview
+```
+
+## Running the image built
+
+```
+$ docker run -it tdns
+*** TDNS tdns-agentv2 version v0.8-multi-signer-support-3-ad46c23 mode of operation: "agent" (verbose: false, debug: false)
+2026/03/05 19:42:39 WARN unknown config keys ignored (possible misspellings) subsystem=config keys="[Service.refresh Service.maxrefresh server delegationsync validator common resolver keybootstrap]"
+2026/03/05 19:42:39 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=log
+2026/03/05 19:42:39 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=service
+2026/03/05 19:42:39 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=db
+2026/03/05 19:42:39 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=apiserver
+2026/03/05 19:42:39 INFO validating config section subsystem=config app=TDNS-AGENTV2 section=dnsengine
+Logging to file: /var/log/tdns/tdns-agent.log
+TDNS tdns-agentv2 version v0.8-multi-signer-support-3-ad46c23 starting.
+Zone "test.net." refers to the non-existing template "parent-primary". Ignored.
+Zone "johani.org." refers to the non-existing template "secondary". Ignored.
+PRINT AT github.com/johanix/tdns/v2.(*KeyDB).GenerateKeypair(sig0_utils.go:232)
+string("/opt/local/bin/dnssec-keygen -K /tmp -a ED25519 -T KEY -f KSK -n ZONE dns.agent.provider."), #len=89
+```
+
