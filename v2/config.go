@@ -28,6 +28,7 @@ type Config struct {
 	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
+	Kasp           KaspConf                   `yaml:"kasp" mapstructure:"kasp"`
 	Keys           KeyConf
 	Db             DbConf
 	Registrars     map[string][]string
@@ -36,6 +37,36 @@ type Config struct {
 	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
 	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
+}
+
+// KaspConf holds Key and Signing Policy parameters for the signer.
+// Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
+// YAML key: "kasp:"
+//
+// Example:
+//
+//	kasp:
+//	    propagation_delay: 1h
+//	    standby_key_count: 1
+//	    check_interval: 1m
+type KaspConf struct {
+	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
+	// through all caches before allowing state transitions.
+	// Used for published→standby and retired→removed transitions.
+	// Accepts Go duration strings: "1h", "3600s", "90m".
+	// Default: "1h".
+	PropagationDelay string `yaml:"propagation_delay" mapstructure:"propagation_delay"`
+
+	// StandbyKeyCount is the number of standby keys to maintain per zone
+	// (applied separately for KSKs and ZSKs).
+	// When the count drops below this, the KeyStateWorker generates new keys.
+	// Default: 1.
+	StandbyKeyCount int `yaml:"standby_key_count" mapstructure:"standby_key_count"`
+
+	// CheckInterval is how often the KeyStateWorker runs its checks.
+	// Accepts Go duration strings: "1m", "60s", "5m".
+	// Default: "1m".
+	CheckInterval string `yaml:"check_interval" mapstructure:"check_interval"`
 }
 
 // LocalCombinerConf holds combiner-specific config (symmetric to LocalAgentConf).
@@ -452,6 +483,7 @@ type MsgQs struct {
 	SynchedDataCmd    chan *SynchedDataCmd       // local commands TO the combiner
 	Confirmation      chan *ConfirmationDetail   // combiner confirmation feedback
 	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
+	KeystateSignal    chan *KeystateSignalMsg    // incoming KEYSTATE signals (propagated/rejected) from agent to signer
 	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
@@ -466,6 +498,17 @@ type KeystateInventoryMsg struct {
 	SenderID  string
 	Zone      string
 	Inventory []KeyInventoryItem
+}
+
+// KeystateSignalMsg carries a per-key KEYSTATE signal from agent to signer.
+// Delivered via MsgQs.KeystateSignal channel.
+// Signals: "propagated" (all remote providers confirmed), "rejected" (some provider rejected).
+type KeystateSignalMsg struct {
+	SenderID string
+	Zone     string
+	KeyTag   uint16
+	Signal   string // "propagated", "rejected", "removed"
+	Message  string
 }
 
 // EditsResponseMsg carries an agent's contributions from combiner back to the agent.

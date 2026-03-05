@@ -217,6 +217,20 @@ var keystoreDnssecGenDSCmd = &cobra.Command{
 	},
 }
 
+var keystoreDnssecRolloverCmd = &cobra.Command{
+	Use:   "rollover",
+	Short: "Perform a manual DNSSEC key rollover (standby→active, active→retired)",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+
+		err := DnssecKeyMgmt("rollover")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	// rootCmd.AddCommand(KeystoreCmd)
 	KeystoreCmd.AddCommand(keystoreSig0Cmd, keystoreDnssecCmd)
@@ -225,7 +239,7 @@ func init() {
 	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
 
 	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
-	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd, keystoreDnssecGenDSCmd)
+	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd, keystoreDnssecGenDSCmd, keystoreDnssecRolloverCmd)
 
 	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
 	keystoreSig0AddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
@@ -263,6 +277,10 @@ func init() {
 	keystoreDnssecGenDSCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to generate DS records for")
 	keystoreDnssecGenDSCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of specific KSK to generate DS for (optional, if not specified, generates for all KSKs)")
 	keystoreDnssecGenDSCmd.MarkFlagRequired("zone")
+
+	keystoreDnssecRolloverCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to perform rollover for")
+	keystoreDnssecRolloverCmd.Flags().StringVarP(&keytype, "keytype", "", "ZSK", "Key type to roll over (ZSK|KSK)")
+	keystoreDnssecRolloverCmd.MarkFlagRequired("zone")
 }
 
 func Sig0KeyMgmt(cmd string) error {
@@ -416,6 +434,10 @@ func DnssecKeyMgmt(cmd string) error {
 		data.KeyType = keytype // "KSK|ZSK|CSK"
 		data.State = NewState
 
+	case "rollover":
+		data.Zone = tdns.Globals.Zonename
+		data.KeyType = keytype
+
 	case "delete", "setstate":
 		data.Keyid = uint16(keyid)
 		data.Zone = tdns.Globals.Zonename
@@ -460,7 +482,7 @@ func DnssecKeyMgmt(cmd string) error {
 			fmt.Printf("No DNSSEC key pairs found\n")
 		}
 
-	case "add", "import", "generate", "delete", "setstate":
+	case "add", "import", "generate", "delete", "setstate", "rollover":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}

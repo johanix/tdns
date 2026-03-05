@@ -716,9 +716,27 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 	lgTransport.Debug("processing KEYSTATE", "signal", payload.Signal, "sender", senderID, "zone", payload.Zone)
 
 	if payload.Signal != "inventory" {
-		lgTransport.Debug("non-inventory KEYSTATE, routing to Msg queue", "signal", payload.Signal, "sender", senderID)
-		// Per-key signals go through the normal Msg channel (for hsyncengine)
-		tm.routeSyncMessage(msg)
+		// Per-key signals (propagated/rejected/removed) go to the dedicated KeystateSignal channel
+		// so the SignerMsgHandler can process them. Falls back to routeSyncMessage if the channel
+		// is not available (e.g. on an agent where this signal doesn't apply).
+		if tm.msgQs != nil && tm.msgQs.KeystateSignal != nil {
+			sigMsg := &KeystateSignalMsg{
+				SenderID: senderID,
+				Zone:     payload.Zone,
+				KeyTag:   payload.KeyTag,
+				Signal:   payload.Signal,
+				Message:  payload.Message,
+			}
+			select {
+			case tm.msgQs.KeystateSignal <- sigMsg:
+				lgTransport.Info("routed KEYSTATE signal", "signal", payload.Signal, "sender", senderID, "zone", payload.Zone, "keyTag", payload.KeyTag)
+			default:
+				lgTransport.Warn("KeystateSignal channel full, dropping", "signal", payload.Signal, "sender", senderID)
+			}
+		} else {
+			lgTransport.Debug("non-inventory KEYSTATE, no KeystateSignal channel, routing to Msg queue", "signal", payload.Signal, "sender", senderID)
+			tm.routeSyncMessage(msg)
+		}
 		return
 	}
 
@@ -1627,7 +1645,7 @@ type PendingDnskeyPropagation struct {
 }
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
-// Called by DistributeDnskeyChanges after enqueueing for remote agents.
+// Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
 func (tm *TransportManager) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()

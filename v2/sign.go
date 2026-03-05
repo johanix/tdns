@@ -601,9 +601,9 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 		return nil
 	}
 
-	// Get all local keys (active + published + retired + created) to identify what's ours
+	// Get all local keys to identify what's ours (all non-foreign states)
 	localKeyTags := make(map[uint16]bool)
-	for _, state := range []string{DnskeyStateActive, DnskeyStatePublished, DnskeyStateRetired, DnskeyStateCreated} {
+	for _, state := range []string{DnskeyStateCreated, DnskeyStateMpdist, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired, DnskeyStateRemoved} {
 		dak, err := kdb.GetDnssecKeys(zd.ZoneName, state)
 		if err != nil {
 			continue
@@ -647,17 +647,15 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 		}
 	}
 
-	// Persist new foreign keys to KeyDB
-	const insertForeignSql = `INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	// Persist new foreign keys to KeyDB (INSERT OR IGNORE to never overwrite existing keys)
+	const insertForeignSql = `INSERT OR IGNORE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	for kt, dnskey := range currentForeign {
-		if !existingForeign[kt] {
-			lgSigner.Info("persisting new foreign DNSKEY", "zone", zd.ZoneName, "keytag", kt, "flags", dnskey.Flags, "algorithm", dns.AlgorithmToString[dnskey.Algorithm])
-		}
-		// Always INSERT OR REPLACE to keep keyrr up to date
-		_, err := kdb.Exec(insertForeignSql, zd.ZoneName, DnskeyStateForeign, kt, dnskey.Flags,
+		res, err := kdb.Exec(insertForeignSql, zd.ZoneName, DnskeyStateForeign, kt, dnskey.Flags,
 			dns.AlgorithmToString[dnskey.Algorithm], "foreign", "", dnskey.String())
 		if err != nil {
 			lgSigner.Error("failed to persist foreign DNSKEY", "zone", zd.ZoneName, "keytag", kt, "err", err)
+		} else if n, _ := res.RowsAffected(); n > 0 {
+			lgSigner.Info("persisted new foreign DNSKEY", "zone", zd.ZoneName, "keytag", kt, "flags", dnskey.Flags, "algorithm", dns.AlgorithmToString[dnskey.Algorithm])
 		}
 	}
 

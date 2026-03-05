@@ -42,7 +42,7 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 
 	const (
 		fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='mpdist' OR state='published' OR state='standby' OR state='retired' OR state='foreign')`
 	)
 
 	rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)

@@ -75,6 +75,35 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			}
 			lgSigner.Debug("Ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
 
+		case sigMsg := <-msgQs.KeystateSignal:
+			if sigMsg == nil {
+				continue
+			}
+			lgSigner.Info("KEYSTATE signal received", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "sender", sigMsg.SenderID)
+
+			kdb := conf.Internal.KeyDB
+			if kdb == nil {
+				lgSigner.Error("KeyDB not available for KEYSTATE signal processing")
+				continue
+			}
+
+			switch sigMsg.Signal {
+			case "propagated":
+				if err := kdb.SetPropagationConfirmed(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
+					continue
+				}
+				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
+				if err := kdb.TransitionMpdistToPublished(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
+				}
+				triggerResign(conf, sigMsg.Zone)
+			case "rejected":
+				lgSigner.Warn("KEYSTATE rejection received", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "reason", sigMsg.Message)
+			default:
+				lgSigner.Debug("Unhandled KEYSTATE signal", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag)
+			}
+
 		case msg := <-msgQs.Msg:
 			if msg == nil {
 				continue

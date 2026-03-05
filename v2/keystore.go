@@ -383,6 +383,19 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 		}
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
 
+	case "rollover":
+		keytype := kp.KeyType
+		if keytype == "" {
+			keytype = "ZSK"
+		}
+		oldKeyid, newKeyid, err := kdb.RolloverKey(kp.Zone, keytype)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.Msg = fmt.Sprintf("%s rollover for zone %s: active key %d retired, standby key %d now active", keytype, kp.Zone, oldKeyid, newKeyid)
+
 	case "delete":
 		const getDnskeySql = `
 SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
@@ -656,6 +669,60 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 	return nil
 }
 
+// GenerateAndStageKey generates a new DNSSEC key and stages it for the key pipeline.
+// For multi-provider zones (isMultiProvider=true): created → mpdist (awaits remote confirmation)
+// For normal zones: created → published (sets published_at, enters time-based pipeline)
+func (kdb *KeyDB) GenerateAndStageKey(zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
+	pkc, _, err := kdb.GenerateKeypair(zone, creator, DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
+	if err != nil {
+		return 0, fmt.Errorf("GenerateAndStageKey: key generation failed: %w", err)
+	}
+
+	keyid := pkc.KeyId
+
+	var targetState string
+	if isMultiProvider {
+		targetState = DnskeyStateMpdist
+	} else {
+		targetState = DnskeyStatePublished
+	}
+
+	if err := kdb.UpdateDnssecKeyState(zone, keyid, targetState); err != nil {
+		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", targetState, err)
+	}
+
+	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", targetState, "mp", isMultiProvider)
+	return keyid, nil
+}
+
+// TransitionMpdistToPublished transitions a key from mpdist to published state.
+// Called when the signer receives a "propagated" KEYSTATE signal from the agent,
+// indicating all remote providers have confirmed the key.
+// If the key is not in mpdist state, this is a no-op (returns nil).
+func (kdb *KeyDB) TransitionMpdistToPublished(zonename string, keyid uint16) error {
+	// Check current state — only transition if in mpdist
+	var currentState string
+	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil // Key not found, no-op
+		}
+		return fmt.Errorf("TransitionMpdistToPublished: query failed: %w", err)
+	}
+
+	if currentState != DnskeyStateMpdist {
+		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+		return nil
+	}
+
+	if err := kdb.UpdateDnssecKeyState(zonename, keyid, DnskeyStatePublished); err != nil {
+		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
+	}
+
+	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
+	return nil
+}
+
 // SetPropagationConfirmed marks a DNSKEY as propagation-confirmed in the keystore.
 // Called when the agent sends KEYSTATE "propagated" to the signer.
 func (kdb *KeyDB) SetPropagationConfirmed(zonename string, keyid uint16) error {
@@ -905,4 +972,94 @@ func (kdb *KeyDB) UpdateDnssecKeyState(zonename string, keyid uint16, newstate s
 
 	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
 	return nil
+}
+
+// RolloverKey performs a manual key rollover for the specified zone and key type.
+// It swaps the oldest standby key to active and the current active key to retired.
+// Returns the old active keyid and the new active keyid.
+func (kdb *KeyDB) RolloverKey(zonename string, keytype string) (uint16, uint16, error) {
+	var expectedFlags uint16
+	switch keytype {
+	case "ZSK":
+		expectedFlags = 256
+	case "KSK", "CSK":
+		expectedFlags = 257
+	default:
+		return 0, 0, fmt.Errorf("invalid keytype %q, must be ZSK or KSK", keytype)
+	}
+
+	// Get active keys of this type
+	activeKeys, err := kdb.GetDnssecKeysByState(zonename, DnskeyStateActive)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
+	}
+
+	var activeKey *DnssecKeyWithTimestamps
+	for i, k := range activeKeys {
+		if k.Flags == expectedFlags {
+			activeKey = &activeKeys[i]
+			break
+		}
+	}
+	if activeKey == nil {
+		return 0, 0, fmt.Errorf("no active %s found for zone %s", keytype, zonename)
+	}
+
+	// Get standby keys of this type
+	standbyKeys, err := kdb.GetDnssecKeysByState(zonename, DnskeyStateStandby)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting standby keys: %w", err)
+	}
+
+	var standbyKey *DnssecKeyWithTimestamps
+	for i, k := range standbyKeys {
+		if k.Flags == expectedFlags {
+			standbyKey = &standbyKeys[i]
+			break
+		}
+	}
+	if standbyKey == nil {
+		return 0, 0, fmt.Errorf("no standby %s available for rollover in zone %s", keytype, zonename)
+	}
+
+	// Perform the rollover in a transaction: standby→active, active→retired
+	tx, err := kdb.Begin("RolloverKey")
+	if err != nil {
+		return 0, 0, fmt.Errorf("error beginning transaction: %w", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	var txErr error
+
+	defer func() {
+		if txErr != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	// standby → active
+	_, txErr = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+		DnskeyStateActive, zonename, standbyKey.KeyTag)
+	if txErr != nil {
+		return 0, 0, fmt.Errorf("standby→active transition failed: %w", txErr)
+	}
+
+	// active → retired (set retired_at)
+	_, txErr = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+		DnskeyStateRetired, now, zonename, activeKey.KeyTag)
+	if txErr != nil {
+		return 0, 0, fmt.Errorf("active→retired transition failed: %w", txErr)
+	}
+
+	// Invalidate all relevant caches
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateActive)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateStandby)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateRetired)
+
+	lgSigner.Info("key rollover completed", "zone", zonename, "keytype", keytype,
+		"old_active", activeKey.KeyTag, "new_active", standbyKey.KeyTag)
+
+	return activeKey.KeyTag, standbyKey.KeyTag, nil
 }

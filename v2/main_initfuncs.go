@@ -244,6 +244,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		Confirmation:      make(chan *ConfirmationDetail, 100),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
+		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
 		EditsResponse:     make(chan *EditsResponseMsg, 10),
 	}
 
@@ -852,6 +853,10 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	startEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
+
+	// Start key state worker for automatic DNSSEC key lifecycle transitions
+	startEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
+
 	return nil
 }
 

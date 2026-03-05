@@ -225,9 +225,14 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		lgEngine.Info("local DNSKEY changes, feeding into SynchedDataEngine", "zone", req.ZoneName, "adds", len(ds.LocalAdds), "removes", len(ds.LocalRemoves))
 
 		// Build RR list: adds use ClassINET, removes use ClassNONE
+		// Extract key tags from adds for DNSKEY propagation tracking
 		var rrs []dns.RR
+		var keyTags []uint16
 		for _, rr := range ds.LocalAdds {
 			rrs = append(rrs, dns.Copy(rr))
+			if dnskey, ok := rr.(*dns.DNSKEY); ok {
+				keyTags = append(keyTags, dnskey.KeyTag())
+			}
 		}
 		for _, rr := range ds.LocalRemoves {
 			rrCopy := dns.Copy(rr)
@@ -251,78 +256,19 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		// SynchedDataEngine stores the data and distributes to remote agents.
 		// SkipCombiner: local DNSKEYs don't need to go to the combiner — the signer
 		// adds its own keys during signing. Only remote agents need our DNSKEY changes.
+		// DnskeyKeyTags: enables propagation tracking so the agent sends KEYSTATE
+		// "propagated" back to the signer when all remote agents confirm.
 		synchedDataUpdateQ <- &SynchedDataUpdate{
-			Zone:         req.ZoneName,
-			AgentId:      ourId,
-			UpdateType:   "local",
-			Update:       zu,
-			SkipCombiner: true,
+			Zone:          req.ZoneName,
+			AgentId:       ourId,
+			UpdateType:    "local",
+			Update:        zu,
+			SkipCombiner:  true,
+			DnskeyKeyTags: keyTags,
 		}
 
 	default:
 		lgEngine.Warn("unknown command", "command", req.Command)
-	}
-}
-
-// DistributeDnskeyChanges sends local DNSKEY adds/removes to all remote agents
-// for a given zone. Uses the TransportManager's reliable message queue for delivery.
-// This is the core Phase 5 distribution function: when our signer publishes or
-// removes a DNSKEY, we tell all remote agents so they can include/remove it.
-// Phase 6 addition: registers the distribution for propagation tracking, so that
-// KEYSTATE "propagated" (or "rejected") is sent to the signer when all agents confirm.
-func (ar *AgentRegistry) DistributeDnskeyChanges(zone ZoneName, ds *DnskeyStatus) {
-	if ar.TransportManager == nil {
-		lgEngine.Warn("no TransportManager, cannot distribute DNSKEY changes", "zone", zone)
-		return
-	}
-
-	// Build the RR list: adds use ClassINET, removes use ClassNONE (DNS UPDATE semantics)
-	var rrs []dns.RR
-	var keyTags []uint16
-	for _, rr := range ds.LocalAdds {
-		rrs = append(rrs, dns.Copy(rr)) // ClassINET (default)
-		if dnskey, ok := rr.(*dns.DNSKEY); ok {
-			keyTags = append(keyTags, dnskey.KeyTag())
-		}
-	}
-	for _, rr := range ds.LocalRemoves {
-		rrCopy := dns.Copy(rr)
-		rrCopy.Header().Class = dns.ClassNONE // Signal removal
-		rrs = append(rrs, rrCopy)
-		if dnskey, ok := rr.(*dns.DNSKEY); ok {
-			keyTags = append(keyTags, dnskey.KeyTag())
-		}
-	}
-
-	if len(rrs) == 0 {
-		return
-	}
-
-	update := &ZoneUpdate{
-		Zone: zone,
-		RRs:  rrs,
-	}
-
-	// Get the list of remote agents for propagation tracking
-	agents, err := ar.TransportManager.getAllAgentsForZone(zone)
-	if err != nil {
-		lgEngine.Error("cannot get agents for DNSKEY distribution", "zone", zone, "err", err)
-		return
-	}
-	if len(agents) == 0 {
-		lgEngine.Debug("no remote agents, nothing to distribute", "zone", zone)
-		return
-	}
-
-	distID := GenerateQueueDistributionID()
-	lgEngine.Info("enqueueing DNSKEY changes", "zone", zone, "changes", len(rrs), "adds", len(ds.LocalAdds), "removes", len(ds.LocalRemoves), "agents", len(agents), "distID", distID)
-
-	// Register for propagation tracking (Phase 6) before enqueueing
-	ar.TransportManager.TrackDnskeyPropagation(zone, distID, keyTags, agents)
-
-	err = ar.TransportManager.EnqueueForZoneAgents(zone, update, distID)
-	if err != nil {
-		lgEngine.Error("error enqueueing DNSKEY changes", "zone", zone, "err", err)
 	}
 }
 

@@ -16,9 +16,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
-
-	// kdb := conf.Internal.KeyDB
+func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -31,9 +29,6 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 
 		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
 
-		// resp := KeystoreResponse{
-		// 	Time: time.Now(),
-		// }
 		var resp *KeystoreResponse
 
 		tx, err := kdb.Begin("APIkeystore")
@@ -78,6 +73,10 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 					Error:    true,
 					ErrorMsg: err.Error(),
 				}
+			}
+			// Trigger re-sign after rollover so the zone is re-signed with the new active key
+			if err == nil && kp.SubCommand == "rollover" {
+				triggerResign(conf, kp.Zone)
 			}
 
 		default:

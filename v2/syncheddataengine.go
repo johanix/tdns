@@ -18,9 +18,10 @@ type SynchedDataUpdate struct {
 	AgentId           AgentId
 	UpdateType        string // "local" or "remote"
 	Update            *ZoneUpdate
-	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
-	Force             bool   // Bypass dedup check (always send even if RR already present)
-	SkipCombiner      bool   // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
+	OriginatingDistID string   // Distribution ID from the originating agent (for remote updates)
+	Force             bool     // Bypass dedup check (always send even if RR already present)
+	SkipCombiner      bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
+	DnskeyKeyTags     []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
 	// Response chan *SynchedDataResponse
 	Response chan *AgentMsgResponse
 }
@@ -404,6 +405,18 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								} else {
 									resp.Error = true
 									resp.ErrorMsg = fmt.Sprintf("Agent enqueue error: %v", err)
+								}
+							}
+
+							// Register DNSKEY propagation tracking so that when all
+							// remote agents confirm, the agent sends KEYSTATE "propagated"
+							// back to the signer (mpdist → published transition).
+							if len(synchedDataUpdate.DnskeyKeyTags) > 0 {
+								agents, err := tm.getAllAgentsForZone(synchedDataUpdate.Zone)
+								if err != nil {
+									lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
+								} else if len(agents) > 0 {
+									tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, agents)
 								}
 							}
 
