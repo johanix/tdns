@@ -427,12 +427,32 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			targetState = DnskeyStateMpremove
 		}
 
-		if err := kdb.UpdateDnssecKeyState(kp.Zone, kp.Keyid, targetState); err != nil {
+		// Inline state update using the existing tx (calling UpdateDnssecKeyState
+		// would try to Begin a second transaction and deadlock).
+		now := time.Now().UTC().Format(time.RFC3339)
+		var updateRes sql.Result
+		switch targetState {
+		case DnskeyStatePublished:
+			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
+				targetState, now, kp.Zone, kp.Keyid)
+		case DnskeyStateRetired:
+			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+				targetState, now, kp.Zone, kp.Keyid)
+		default:
+			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+				targetState, kp.Zone, kp.Keyid)
+		}
+		if err != nil {
 			lgSigner.Error("failed to transition DNSKEY for delete", "err", err)
+			return &resp, err
+		}
+		if rows, _ := updateRes.RowsAffected(); rows == 0 {
+			err = fmt.Errorf("no rows updated for key %d in zone %s", kp.Keyid, kp.Zone)
 			return &resp, err
 		}
 		resp.Msg = fmt.Sprintf("Key %s (keyid %d) transitioned to %s", kp.Keyname, kp.Keyid, targetState)
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+state)
+		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+targetState)
 
 	default:
 		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)

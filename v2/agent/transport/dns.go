@@ -146,7 +146,7 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		ControlZone:                dns.Fqdn(cfg.ControlZone),
 		ListenAddr:                 cfg.ListenAddr,
 		Timeout:                    timeout,
-		DNSClient:                  &dns.Client{Timeout: timeout, Net: "udp"},
+		DNSClient:                  &dns.Client{Timeout: timeout, Net: "tcp"},
 		pendingConfirmations:       make(map[string]*pendingOperation),
 		ConfirmationChan:           make(chan *IncomingConfirmation, 100),
 		chunkMode:                  cfg.ChunkMode,
