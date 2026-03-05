@@ -263,14 +263,11 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 		return
 	}
 
-	msgQs := Conf.Internal.MsgQs
-	if msgQs == nil || msgQs.KeystateInventory == nil {
-		zd.KeystateOK = false
-		zd.KeystateError = "no KeystateInventory channel available"
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
-		zd.RemoteDNSKEYs = nil
-		return
-	}
+	// Use a dedicated channel for this solicited RFI response so the
+	// HsyncEngine's proactive-inventory consumer doesn't steal it.
+	rfiChan := make(chan *KeystateInventoryMsg, 1)
+	tm.keystateRfiChan.Store(&rfiChan)
+	defer tm.keystateRfiChan.Store(nil)
 
 	// Send RFI KEYSTATE to signer
 	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {
@@ -286,7 +283,7 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 	defer timeout.Stop()
 
 	select {
-	case inv := <-msgQs.KeystateInventory:
+	case inv := <-rfiChan:
 		if inv == nil || inv.Zone != zd.ZoneName {
 			zd.KeystateOK = false
 			zd.KeystateError = "received nil or mismatched inventory from signer"
