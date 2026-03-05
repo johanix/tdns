@@ -109,7 +109,35 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 
-			// stopch removed; ctx.Done() handles shutdown
+		case inventoryMsg := <-msgQs.KeystateInventory:
+			// Proactive KEYSTATE inventory push from signer.
+			// Store the inventory and check for DNSKEY changes.
+			zd, exists := Zones.Get(inventoryMsg.Zone)
+			if !exists {
+				lgEngine.Warn("proactive inventory: zone not found", "zone", inventoryMsg.Zone)
+				break
+			}
+			zd.LastKeyInventory = &KeyInventorySnapshot{
+				SenderID:  inventoryMsg.SenderID,
+				Zone:      inventoryMsg.Zone,
+				Inventory: inventoryMsg.Inventory,
+				Received:  time.Now(),
+			}
+			changed, ds, err := zd.LocalDnskeysFromKeystate()
+			if err != nil {
+				lgEngine.Error("proactive inventory: LocalDnskeysFromKeystate failed", "zone", inventoryMsg.Zone, "err", err)
+				break
+			}
+			if !changed {
+				lgEngine.Debug("proactive inventory: no DNSKEY changes", "zone", inventoryMsg.Zone)
+				break
+			}
+			lgEngine.Info("proactive inventory: DNSKEY changes detected, triggering sync", "zone", inventoryMsg.Zone, "adds", len(ds.LocalAdds), "removes", len(ds.LocalRemoves))
+			registry.SyncRequestHandler(ourId, SyncRequest{
+				ZoneName:     ZoneName(inventoryMsg.Zone),
+				Command:      "SYNC-DNSKEY-RRSET",
+				DnskeyStatus: ds,
+			}, synchedDataUpdateQ)
 		}
 	}
 }
@@ -224,8 +252,8 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 
 		lgEngine.Info("local DNSKEY changes, feeding into SynchedDataEngine", "zone", req.ZoneName, "adds", len(ds.LocalAdds), "removes", len(ds.LocalRemoves))
 
-		// Build RR list: adds use ClassINET, removes use ClassNONE
-		// Extract key tags from adds for DNSKEY propagation tracking
+		// Build RR list for local SDE storage: adds use ClassINET, removes use ClassNONE.
+		// Extract key tags from both adds and removes for DNSKEY propagation tracking.
 		var rrs []dns.RR
 		var keyTags []uint16
 		for _, rr := range ds.LocalAdds {
@@ -238,12 +266,29 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 			rrCopy := dns.Copy(rr)
 			rrCopy.Header().Class = dns.ClassNONE
 			rrs = append(rrs, rrCopy)
+			if dnskey, ok := rr.(*dns.DNSKEY); ok {
+				keyTags = append(keyTags, dnskey.KeyTag())
+			}
 		}
 
+		// Build REPLACE operation: the complete current set of local DNSKEYs.
+		// Remote agents receive "here are all our DNSKEYs — make yours match"
+		// instead of individual add/delete instructions.
+		var dnskeyRRStrings []string
+		for _, rr := range ds.CurrentLocalKeys {
+			dnskeyRRStrings = append(dnskeyRRStrings, rr.String())
+		}
+		ops := []core.RROperation{{
+			Operation: "replace",
+			RRtype:    "DNSKEY",
+			Records:   dnskeyRRStrings,
+		}}
+
 		zu := &ZoneUpdate{
-			Zone:   req.ZoneName,
-			RRs:    rrs,
-			RRsets: make(map[uint16]core.RRset),
+			Zone:       req.ZoneName,
+			RRs:        rrs,
+			RRsets:     make(map[uint16]core.RRset),
+			Operations: ops,
 		}
 		for _, rr := range rrs {
 			rrtype := rr.Header().Rrtype
@@ -323,6 +368,13 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			AgentId: ampp.OriginatorID,
 			RRsets:  map[uint16]core.RRset{},
 		}
+
+		// Prefer Operations over Records when both are present
+		if len(ampp.Operations) > 0 {
+			zu.Operations = ampp.Operations
+		}
+
+		// Parse Records into RRsets (used for legacy path and local SDE storage)
 		for _, rrStrs := range ampp.Records {
 			for _, rrstr := range rrStrs {
 				rr, err := dns.NewRR(rrstr)
@@ -344,7 +396,6 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			}
 		}
 
-		// var cresp = make(chan *SynchedDataResponse, 1)
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
 			Zone:              ampp.Zone,

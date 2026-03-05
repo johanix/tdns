@@ -675,6 +675,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
+			Operations:     payload.GetOperations(),
 			Time:           time.Unix(payload.Timestamp, 0),
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
@@ -1370,6 +1371,9 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		DistributionID: msg.DistributionID,
 		MessageType:    "update", // agent→combiner uses "update" (not "sync")
 	}
+	if msg.Update != nil && len(msg.Update.Operations) > 0 {
+		syncReq.Operations = msg.Update.Operations
+	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
@@ -1426,6 +1430,9 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		MessageType:    "sync",
+	}
+	if msg.Update != nil && len(msg.Update.Operations) > 0 {
+		syncReq.Operations = msg.Update.Operations
 	}
 
 	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)

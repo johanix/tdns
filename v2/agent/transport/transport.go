@@ -11,6 +11,8 @@ import (
 	"context"
 	"crypto"
 	"time"
+
+	"github.com/johanix/tdns/v2/core"
 )
 
 // SyncType identifies what type of data is being synchronized.
@@ -146,7 +148,8 @@ type SyncRequest struct {
 	SenderID       string              // Identity of the sender
 	Zone           string              // The zone this sync applies to (FQDN)
 	SyncType       SyncType            // What type of data is being synced
-	Records        map[string][]string // RRs grouped by owner name (owner → []RR strings)
+	Records        map[string][]string // RRs grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Timestamp      time.Time           // When this data was generated
 	Serial         uint32              // Zone serial at time of sync
 	DistributionID string              // For tracking confirmations

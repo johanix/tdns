@@ -16,6 +16,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/johanix/tdns/v2/core"
 )
 
 // APITransport implements the Transport interface using HTTPS REST API.
@@ -182,6 +184,7 @@ func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		Zone:           req.Zone,
 		SyncType:       req.SyncType.String(),
 		Records:        req.Records,
+		Operations:     req.Operations,
 		Serial:         req.Serial,
 		DistributionID: req.DistributionID,
 		RfiType:        req.RfiType,
@@ -400,6 +403,7 @@ type apiSyncRequest struct {
 	Zone           string              `json:"zone"`
 	SyncType       string              `json:"sync_type"`
 	Records        map[string][]string `json:"records"`
+	Operations     []core.RROperation  `json:"operations,omitempty"`
 	Serial         uint32              `json:"serial"`
 	DistributionID string              `json:"distribution_id"`
 	RfiType        string              `json:"rfi_type,omitempty"`

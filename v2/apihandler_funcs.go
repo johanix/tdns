@@ -74,9 +74,10 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					ErrorMsg: err.Error(),
 				}
 			}
-			// Trigger re-sign after rollover so the zone is re-signed with the new active key
-			if err == nil && kp.SubCommand == "rollover" {
+			// Trigger re-sign and inventory push after state-changing operations
+			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate") {
 				triggerResign(conf, kp.Zone)
+				pushKeystateInventoryToAllAgents(conf, kp.Zone)
 			}
 
 		default:

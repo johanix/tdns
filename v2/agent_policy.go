@@ -18,6 +18,33 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 
 	switch synchedDataUpdate.UpdateType {
 	case "remote":
+		// Validate Operations if present
+		if len(synchedDataUpdate.Update.Operations) > 0 {
+			for _, op := range synchedDataUpdate.Update.Operations {
+				rrtype, ok := dns.StringToType[op.RRtype]
+				if !ok {
+					return false, fmt.Sprintf("Update for zone %q from %q: unknown RR type in operation: %s",
+						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, op.RRtype), nil
+				}
+				if !AllowedLocalRRtypes[rrtype] {
+					return false, fmt.Sprintf("Update for zone %q from %q: disallowed RR type in operation: %s",
+						synchedDataUpdate.Zone, synchedDataUpdate.AgentId, op.RRtype), nil
+				}
+				for _, rrStr := range op.Records {
+					rr, err := dns.NewRR(rrStr)
+					if err != nil {
+						return false, fmt.Sprintf("Update for zone %q from %q: invalid RR in operation: %s",
+							synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrStr), nil
+					}
+					if !strings.EqualFold(rr.Header().Name, string(synchedDataUpdate.Zone)) {
+						return false, fmt.Sprintf("Update for zone %q from %q: RR outside apex in operation: %s",
+							synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrStr), nil
+					}
+				}
+			}
+		}
+
+		// Validate legacy Records/RRsets
 		for _, rrset := range synchedDataUpdate.Update.RRsets {
 			for _, rr := range rrset.RRs {
 				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
@@ -145,6 +172,14 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 
 	isLocal := synchedDataUpdate.UpdateType == "local"
 
+	// Process explicit Operations if present (takes precedence over RRsets for remote updates)
+	if !isLocal && len(synchedDataUpdate.Update.Operations) > 0 {
+		changed, msg = zdr.processOperations(synchedDataUpdate, nar, nod)
+		nar.Set(synchedDataUpdate.AgentId, nod)
+		zdr.Set(synchedDataUpdate.Zone, nar)
+		return changed, msg, nil
+	}
+
 	// Iterate through RRsets in the update and only replace those with data
 	lgAgent.Debug("iterating through RRsets in the update")
 	for rrtype, rrset := range synchedDataUpdate.Update.RRsets {
@@ -252,4 +287,156 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 	lgAgent.Debug("setting agent repo", "zone", synchedDataUpdate.Zone)
 	zdr.Set(synchedDataUpdate.Zone, nar)
 	return changed, msg, nil
+}
+
+// processOperations handles explicit Operations (add, delete, replace) on a remote update.
+// Returns (changed bool, msg string).
+func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate, nar *AgentRepo, nod *OwnerData) (bool, string) {
+	var changed bool
+	var msg string
+
+	for _, op := range synchedDataUpdate.Update.Operations {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			lgAgent.Warn("unknown RR type in operation, skipping", "rrtype", op.RRtype)
+			continue
+		}
+
+		switch op.Operation {
+		case "replace":
+			changed, msg = zdr.processReplaceOp(synchedDataUpdate, nod, rrtype, op)
+
+		case "add":
+			curRRset, _ := nod.RRtypes.Get(rrtype)
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					lgAgent.Warn("invalid RR in add operation, skipping", "rr", rrStr, "err", err)
+					continue
+				}
+				prevLen := len(curRRset.RRs)
+				curRRset.Add(rr)
+				if len(curRRset.RRs) > prevLen {
+					msg = fmt.Sprintf("Added RR via operation: %s", rr.String())
+					lgAgent.Debug(msg)
+					changed = true
+				}
+			}
+			nod.RRtypes.Set(rrtype, curRRset)
+
+		case "delete":
+			curRRset, exists := nod.RRtypes.Get(rrtype)
+			if !exists {
+				lgAgent.Debug("delete operation: RRset does not exist", "rrtype", op.RRtype)
+				continue
+			}
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					lgAgent.Warn("invalid RR in delete operation, skipping", "rr", rrStr, "err", err)
+					continue
+				}
+				curRRset.Delete(rr)
+				zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String())
+				msg = fmt.Sprintf("Deleted RR via operation: %s", rr.String())
+				lgAgent.Debug(msg)
+				changed = true
+			}
+			if len(curRRset.RRs) == 0 {
+				nod.RRtypes.Delete(rrtype)
+				zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+			} else {
+				nod.RRtypes.Set(rrtype, curRRset)
+			}
+
+		default:
+			lgAgent.Warn("unknown operation type, skipping", "operation", op.Operation)
+		}
+	}
+
+	return changed, msg
+}
+
+// processReplaceOp handles a "replace" operation: makes the agent's RRset for the
+// given rrtype match the provided set exactly. RRs in the old set but not in the
+// new set are implicitly removed. Empty Records means delete the entire RRset.
+func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, nod *OwnerData, rrtype uint16, op core.RROperation) (bool, string) {
+	var changed bool
+	var msg string
+
+	// Parse all new RRs
+	var newRRs []dns.RR
+	for _, rrStr := range op.Records {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			lgAgent.Warn("invalid RR in replace operation, skipping", "rr", rrStr, "err", err)
+			continue
+		}
+		newRRs = append(newRRs, rr)
+	}
+
+	oldRRset, hadOld := nod.RRtypes.Get(rrtype)
+
+	// Empty replacement set = delete entire RRset
+	if len(newRRs) == 0 {
+		if hadOld && len(oldRRset.RRs) > 0 {
+			nod.RRtypes.Delete(rrtype)
+			zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+			msg = fmt.Sprintf("Replace with empty set: removed %s %s RRset from agent %q",
+				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
+			lgAgent.Info(msg)
+			changed = true
+		}
+		return changed, msg
+	}
+
+	// Build the new RRset
+	var newRRset core.RRset
+	for _, rr := range newRRs {
+		newRRset.RRs = append(newRRset.RRs, rr)
+	}
+
+	// Check if anything actually changed by comparing old and new
+	if hadOld {
+		// Quick length check
+		if len(oldRRset.RRs) != len(newRRset.RRs) {
+			changed = true
+		} else {
+			// Check if all old RRs are in the new set and vice versa
+			for _, oldRR := range oldRRset.RRs {
+				found := false
+				for _, newRR := range newRRset.RRs {
+					if dns.IsDuplicate(oldRR, newRR) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					changed = true
+					break
+				}
+			}
+		}
+	} else {
+		// No old set — any new RRs means change
+		changed = len(newRRs) > 0
+	}
+
+	if changed {
+		// Remove old tracking
+		if hadOld {
+			zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+		}
+		// Set the new RRset
+		nod.RRtypes.Set(rrtype, newRRset)
+		msg = fmt.Sprintf("Replaced %s %s RRset for agent %q: %d RRs",
+			synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId, len(newRRs))
+		lgAgent.Info(msg)
+	} else {
+		msg = fmt.Sprintf("Replace %s %s for agent %q: no change (idempotent)",
+			synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
+		lgAgent.Debug(msg)
+	}
+
+	return changed, msg
 }

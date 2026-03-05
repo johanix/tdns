@@ -532,6 +532,119 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	return removedRecords, nil
 }
 
+// ReplaceCombinerDataByRRtype atomically replaces an agent's contributions for a
+// specific owner+rrtype with a new set of RRs. Returns the lists of actually
+// added and removed RR strings, plus whether any change occurred.
+// Used for "replace" operation semantics at the combiner level.
+func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
+	if senderID == "" {
+		senderID = "local"
+	}
+
+	if zd.AgentContributions == nil {
+		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+	}
+	if zd.AgentContributions[senderID] == nil {
+		zd.AgentContributions[senderID] = make(map[string]map[uint16]core.RRset)
+	}
+	if zd.AgentContributions[senderID][owner] == nil {
+		zd.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
+	}
+
+	oldRRset, hadOld := zd.AgentContributions[senderID][owner][rrtype]
+
+	// Empty replacement set = delete entire RRset for this agent/owner/rrtype
+	if len(newRRs) == 0 {
+		if hadOld && len(oldRRset.RRs) > 0 {
+			for _, rr := range oldRRset.RRs {
+				removed = append(removed, rr.String())
+			}
+			delete(zd.AgentContributions[senderID][owner], rrtype)
+			if len(zd.AgentContributions[senderID][owner]) == 0 {
+				delete(zd.AgentContributions[senderID], owner)
+			}
+			changed = true
+		}
+		if !changed {
+			return
+		}
+	} else {
+		// Diff old vs new
+		newSet := core.RRset{Name: owner, RRtype: rrtype, RRs: newRRs}
+
+		// Find removed: in old but not in new
+		if hadOld {
+			for _, oldRR := range oldRRset.RRs {
+				found := false
+				for _, newRR := range newRRs {
+					if dns.IsDuplicate(oldRR, newRR) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					removed = append(removed, oldRR.String())
+					changed = true
+				}
+			}
+		}
+
+		// Find added: in new but not in old
+		for _, newRR := range newRRs {
+			found := false
+			if hadOld {
+				for _, oldRR := range oldRRset.RRs {
+					if dns.IsDuplicate(oldRR, newRR) {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				applied = append(applied, newRR.String())
+				changed = true
+			}
+		}
+
+		if !changed {
+			return
+		}
+
+		zd.AgentContributions[senderID][owner][rrtype] = newSet
+	}
+
+	// Rebuild merged CombinerData and apply to zone
+	if zd.CombinerData == nil {
+		var m = cmap.New[OwnerData]()
+		zd.CombinerData = &m
+	}
+	zd.rebuildCombinerData()
+
+	if zd.PersistContributions != nil {
+		if err = zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+			zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+		}
+	}
+
+	modified, combErr := zd.CombineWithLocalChanges()
+	if combErr != nil {
+		err = combErr
+		return
+	}
+	if modified {
+		zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Local changes applied after replace (from %s)", zd.ZoneName, senderID)
+	}
+
+	// Clean up if no contributions remain for this rrtype
+	zd.cleanupRemovedRRtype(owner, rrtype)
+
+	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+		zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
+	}
+
+	return
+}
+
 // InjectSignatureTXT adds a combiner signature TXT record to the zone data.
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.

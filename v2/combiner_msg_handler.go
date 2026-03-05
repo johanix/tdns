@@ -138,7 +138,14 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Manual approval gate: if zone has mp-manual-approval, keep the
 			// edit pending for operator review — unless it's a no-op.
 			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[OptMPManualApproval] {
-				if isNoOpUpdate(zd, senderID, msg.Records) {
+				// Check for no-op: use Operations-aware check when Operations are present
+				var noOp bool
+				if len(msg.Operations) > 0 {
+					noOp = isNoOpOperations(zd, senderID, msg.Operations)
+				} else {
+					noOp = isNoOpUpdate(zd, senderID, msg.Records)
+				}
+				if noOp {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)
 					if kdb != nil && editID > 0 {
@@ -149,8 +156,16 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					// Include the original records as AppliedRecords so the
 					// agent can match them and transition from pending to accepted.
 					var allRRs []string
-					for _, rrs := range msg.Records {
-						allRRs = append(allRRs, rrs...)
+					if len(msg.Operations) > 0 {
+						for _, op := range msg.Operations {
+							if op.Operation == "replace" || op.Operation == "add" {
+								allRRs = append(allRRs, op.Records...)
+							}
+						}
+					} else {
+						for _, rrs := range msg.Records {
+							allRRs = append(allRRs, rrs...)
+						}
 					}
 					combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
 						DistributionID: msg.DistributionID,
@@ -179,6 +194,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				SenderID:       senderID,
 				Zone:           zone,
 				Records:        msg.Records,
+				Operations:     msg.Operations,
 				DistributionID: msg.DistributionID,
 				Timestamp:      msg.Time,
 			}

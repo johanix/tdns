@@ -603,7 +603,7 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 
 	// Get all local keys to identify what's ours (all non-foreign states)
 	localKeyTags := make(map[uint16]bool)
-	for _, state := range []string{DnskeyStateCreated, DnskeyStateMpdist, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired, DnskeyStateRemoved} {
+	for _, state := range []string{DnskeyStateCreated, DnskeyStateMpdist, DnskeyStateMpremove, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired, DnskeyStateRemoved} {
 		dak, err := kdb.GetDnssecKeys(zd.ZoneName, state)
 		if err != nil {
 			continue

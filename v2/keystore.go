@@ -419,16 +419,19 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			return &resp, nil
 		}
 
-		// 3. Return all good, now untrusted
-		res, err = tx.Exec(deleteDnskeySql, kp.Keyname, kp.Keyid)
-		if err != nil {
-			lgSigner.Error("failed to delete DNSKEY", "err", err)
-			//			resp.Error = true
-			//			resp.ErrorMsg = err.Error()
+		// Transition to mpremove (MP zones) or removed (non-MP) instead of deleting.
+		// Keys must stay in the DB until all remote agents confirm the removal.
+		targetState := DnskeyStateRemoved
+		zd, exists := Zones.Get(kp.Zone)
+		if exists && zd.Options[OptMultiProvider] {
+			targetState = DnskeyStateMpremove
+		}
+
+		if err := kdb.UpdateDnssecKeyState(kp.Zone, kp.Keyid, targetState); err != nil {
+			lgSigner.Error("failed to transition DNSKEY for delete", "err", err)
 			return &resp, err
 		}
-		rows, _ := res.RowsAffected()
-		resp.Msg = fmt.Sprintf("Key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
+		resp.Msg = fmt.Sprintf("Key %s (keyid %d) transitioned to %s", kp.Keyname, kp.Keyid, targetState)
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+state)
 
 	default:
@@ -720,6 +723,33 @@ func (kdb *KeyDB) TransitionMpdistToPublished(zonename string, keyid uint16) err
 	}
 
 	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
+	return nil
+}
+
+// TransitionMpremoveToRemoved transitions a key from mpremove to removed state.
+// Called when the signer receives a "propagated" KEYSTATE signal from the agent,
+// indicating all remote providers have confirmed the key removal.
+// If the key is not in mpremove state, this is a no-op (returns nil).
+func (kdb *KeyDB) TransitionMpremoveToRemoved(zonename string, keyid uint16) error {
+	var currentState string
+	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("TransitionMpremoveToRemoved: query failed: %w", err)
+	}
+
+	if currentState != DnskeyStateMpremove {
+		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+		return nil
+	}
+
+	if err := kdb.UpdateDnssecKeyState(zonename, keyid, DnskeyStateRemoved); err != nil {
+		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
+	}
+
+	lgSigner.Info("key transitioned mpremove->removed", "zone", zonename, "keyid", keyid)
 	return nil
 }
 

@@ -72,10 +72,11 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 
 // DnskeyStatus holds the result of DNSKEY change detection (local keys only).
 type DnskeyStatus struct {
-	Time         time.Time
-	ZoneName     string
-	LocalAdds    []dns.RR // Local DNSKEYs added since last check
-	LocalRemoves []dns.RR // Local DNSKEYs removed since last check
+	Time             time.Time
+	ZoneName         string
+	LocalAdds        []dns.RR // Local DNSKEYs added since last check
+	LocalRemoves     []dns.RR // Local DNSKEYs removed since last check
+	CurrentLocalKeys []dns.RR // Complete current set of local DNSKEYs (for replace operations)
 }
 
 // LocalDnskeysChanged compares old and new DNSKEY RRsets, filtering out
@@ -169,10 +170,16 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 		ZoneName: zd.ZoneName,
 	}
 
-	// Extract local keys from the KEYSTATE inventory
+	// Extract local keys from the KEYSTATE inventory.
+	// Skip states that should NOT be in the DNSKEY RRset:
+	// - foreign: belongs to another signer
+	// - created: not yet staged for distribution
+	// - mpremove: being removed, awaiting agent confirmation
+	// - removed: already removed
 	var newLocalKeys []dns.RR
 	for _, entry := range zd.LastKeyInventory.Inventory {
-		if entry.State == DnskeyStateForeign {
+		switch entry.State {
+		case DnskeyStateForeign, DnskeyStateCreated, DnskeyStateMpremove, DnskeyStateRemoved:
 			continue
 		}
 		if entry.KeyRR == "" {
@@ -198,6 +205,7 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	if len(oldLocalKeys) == 0 {
 		// First KEYSTATE — all local keys are adds
 		ds.LocalAdds = newLocalKeys
+		ds.CurrentLocalKeys = newLocalKeys
 		zd.LocalDNSKEYs = newLocalKeys
 		if len(ds.LocalAdds) > 0 {
 			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: initial KEYSTATE, %d local DNSKEYs",
@@ -212,6 +220,7 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 
 	ds.LocalAdds = adds
 	ds.LocalRemoves = removes
+	ds.CurrentLocalKeys = newLocalKeys
 	zd.LocalDNSKEYs = newLocalKeys
 
 	zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",

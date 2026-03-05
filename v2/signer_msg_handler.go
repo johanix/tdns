@@ -97,6 +97,10 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				if err := kdb.TransitionMpdistToPublished(sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
+				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
+				if err := kdb.TransitionMpremoveToRemoved(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
+				}
 				triggerResign(conf, sigMsg.Zone)
 			case "rejected":
 				lgSigner.Warn("KEYSTATE rejection received", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "reason", sigMsg.Message)
@@ -125,6 +129,29 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			default:
 				lgSigner.Warn("Unknown RFI type, ignoring", "type", rfiType, "sender", senderID)
 			}
+		}
+	}
+}
+
+// pushKeystateInventoryToAllAgents sends the current KEYSTATE inventory to all
+// configured agents. Called after key state changes (rollover, delete, setstate,
+// retired→mpremove, mpdist→published) so agents learn about the change and can
+// distribute it to remote agents.
+func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
+	if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
+		return
+	}
+	tm := conf.Internal.TransportManager
+	if tm == nil {
+		lgSigner.Warn("pushKeystateInventoryToAllAgents: no TransportManager", "zone", zone)
+		return
+	}
+	for _, agent := range conf.MultiProvider.Agents {
+		if agent.Identity == "" {
+			continue
+		}
+		if err := sendKeystateInventoryToAgent(conf, tm, agent.Identity, zone); err != nil {
+			lgSigner.Error("pushKeystateInventoryToAllAgents: failed", "zone", zone, "agent", agent.Identity, "err", err)
 		}
 	}
 }

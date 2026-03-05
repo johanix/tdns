@@ -48,7 +48,8 @@ const (
 	Sig0StateActive      string = "active"
 	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
-	DnskeyStateMpdist    string = "mpdist" // multi-provider distribution: awaiting confirmation from all providers
+	DnskeyStateMpdist    string = "mpdist"   // multi-provider distribution: awaiting confirmation from all providers
+	DnskeyStateMpremove  string = "mpremove" // multi-provider removal: awaiting confirmation from all providers
 	DnskeyStatePublished string = "published"
 	DnskeyStateStandby   string = "standby"
 	DnskeyStateActive    string = "active"

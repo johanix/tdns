@@ -82,6 +82,15 @@ type AgentBeatResponse struct {
 	ErrorMsg     string
 }
 
+// RROperation describes an explicit operation on DNS records.
+// When Operations is populated on a message, Records is ignored by the receiver.
+// Operations use explicit semantics instead of overloading the DNS Class field.
+type RROperation struct {
+	Operation string   `json:"operation"`         // "add", "delete", "replace"
+	RRtype    string   `json:"rrtype"`            // DNS RR type name (e.g. "DNSKEY", "NS", "A")
+	Records   []string `json:"records,omitempty"` // RR strings in ClassINET text format
+}
+
 // AgentMsgPost represents a generic agent message (sync, update, rfi, status).
 // Used by both API and DNS transports.
 type AgentMsgPost struct {
@@ -92,7 +101,8 @@ type AgentMsgPost struct {
 	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
 	TLSA         dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
 	Zone         string              // Zone this message refers to (only one zone per message)
-	Records      map[string][]string // Resource records grouped by owner name (owner → []RR strings)
+	Records      map[string][]string `json:"records,omitempty"`    // Resource records grouped by owner name (legacy: Class-overloaded)
+	Operations   []RROperation       `json:"operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time         time.Time           // Message timestamp
 	RfiType      string              // Type of RFI request if MessageType is RFI
 }

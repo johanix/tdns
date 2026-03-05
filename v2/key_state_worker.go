@@ -118,6 +118,8 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 
 // transitionRetiredToRemoved transitions keys that have been in "retired"
 // state long enough for all RRSIGs made with them to expire from caches.
+// For MP zones, keys transition to "mpremove" (awaiting agent confirmation)
+// instead of directly to "removed".
 func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := kdb.GetDnssecKeysByState("", DnskeyStateRetired)
 	if err != nil {
@@ -136,13 +138,26 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
-		lgSigner.Info("KeyStateWorker: transitioning retired→removed", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
-		if err := kdb.UpdateDnssecKeyState(key.ZoneName, key.KeyTag, DnskeyStateRemoved); err != nil {
-			lgSigner.Error("KeyStateWorker: retired→removed failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
+		// Check if this is a multi-provider zone
+		targetState := DnskeyStateRemoved
+		zd, exists := Zones.Get(key.ZoneName)
+		if exists && zd.Options[OptMultiProvider] {
+			targetState = DnskeyStateMpremove
+		}
+
+		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
+		if err := kdb.UpdateDnssecKeyState(key.ZoneName, key.KeyTag, targetState); err != nil {
+			lgSigner.Error("KeyStateWorker: retired→"+targetState+" failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}
 
 		triggerResign(conf, key.ZoneName)
+
+		// For MP zones, push updated inventory to all agents so they
+		// learn about the key removal and distribute it to remote agents.
+		if targetState == DnskeyStateMpremove {
+			pushKeystateInventoryToAllAgents(conf, key.ZoneName)
+		}
 	}
 }
 

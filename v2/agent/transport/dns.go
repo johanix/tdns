@@ -343,6 +343,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		YourIdentity: peer.ID,
 		Zone:         req.Zone,
 		Records:      req.Records,
+		Operations:   req.Operations,
 		Time:         req.Timestamp,
 		RfiType:      req.RfiType,
 	}
@@ -1074,8 +1075,9 @@ type DnsSyncPayload struct {
 	OriginatorID   string              `json:"OriginatorID"`
 	YourIdentity   string              `json:"YourIdentity"`
 	Zone           string              `json:"Zone"`
-	Records        map[string][]string `json:"Records"` // RRs grouped by owner name
-	Time           string              `json:"Time"`    // RFC3339 timestamp
+	Records        map[string][]string `json:"Records"`              // RRs grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation  `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
+	Time           string              `json:"Time"`                 // RFC3339 timestamp
 	RfiType        string              `json:"RfiType"`
 	Timestamp      int64               `json:"timestamp"` // Unix timestamp (legacy compat)
 	DistributionID string              `json:"distribution_id"`
@@ -1130,6 +1132,11 @@ func (d *DnsSyncPayload) GetSenderID() string {
 // GetRecords returns records grouped by owner name.
 func (d *DnsSyncPayload) GetRecords() map[string][]string {
 	return d.Records
+}
+
+// GetOperations returns explicit operations (takes precedence over Records).
+func (d *DnsSyncPayload) GetOperations() []core.RROperation {
+	return d.Operations
 }
 
 // DnsPingPayload represents a ping (liveness) message payload.

@@ -35,6 +35,7 @@ type CombinerSyncRequest struct {
 	Zone           string              // Zone being updated
 	SyncType       string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
 	Records        map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
+	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Serial         uint32              // Zone serial (optional)
 	DistributionID string              // Distribution ID for tracking
 	Timestamp      time.Time           // When the request was created
@@ -115,6 +116,7 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 		OriginatorID string              `json:"OriginatorID"`
 		Zone         string              `json:"Zone"`
 		Records      map[string][]string `json:"Records"`
+		Operations   []core.RROperation  `json:"Operations"`
 		Time         time.Time           `json:"Time"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -143,6 +145,7 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 		SenderID:       msg.OriginatorID,
 		Zone:           msg.Zone,
 		Records:        records,
+		Operations:     msg.Operations,
 		DistributionID: distributionID,
 		Timestamp:      msg.Time,
 	}, nil
@@ -177,6 +180,11 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		resp.Status = "error"
 		resp.Message = fmt.Sprintf("zone %q not found", req.Zone)
 		return resp
+	}
+
+	// Process explicit Operations if present (takes precedence over Records)
+	if len(req.Operations) > 0 {
+		return combinerProcessOperations(req, zd, zonename, protectedNamespaces)
 	}
 
 	// Separate records into adds, deletes (ClassNONE), and bulk deletes (ClassANY)
@@ -334,6 +342,159 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	return resp
 }
 
+// combinerProcessOperations handles explicit Operations (add, delete, replace)
+// at the combiner level. Each operation is applied to the agent's contributions.
+func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename string, protectedNamespaces []string) *CombinerSyncResponse {
+	resp := &CombinerSyncResponse{
+		DistributionID: req.DistributionID,
+		Zone:           req.Zone,
+		Timestamp:      time.Now(),
+	}
+
+	var appliedRecords []string
+	var removedRecords []string
+	var rejectedItems []RejectedItem
+	dataChanged := false
+
+	for _, op := range req.Operations {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			rejectedItems = append(rejectedItems, RejectedItem{
+				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
+				Reason: fmt.Sprintf("unknown RR type: %s", op.RRtype),
+			})
+			continue
+		}
+		if !AllowedLocalRRtypes[rrtype] {
+			rejectedItems = append(rejectedItems, RejectedItem{
+				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
+				Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", op.RRtype),
+			})
+			continue
+		}
+
+		// Parse and validate all RRs in this operation
+		var parsedRRs []dns.RR
+		parseOk := true
+		for _, rrStr := range op.Records {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("parse error: %v", err),
+				})
+				parseOk = false
+				continue
+			}
+			if !strings.EqualFold(rr.Header().Name, zonename) {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("owner %q is not at zone apex %q", rr.Header().Name, zonename),
+				})
+				parseOk = false
+				continue
+			}
+			if reason := checkContentPolicy(rr, protectedNamespaces); reason != "" {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: reason,
+				})
+				parseOk = false
+				continue
+			}
+			parsedRRs = append(parsedRRs, rr)
+		}
+
+		switch op.Operation {
+		case "replace":
+			if !parseOk && len(parsedRRs) == 0 && len(op.Records) > 0 {
+				// All records rejected — skip replace to avoid accidental wipe
+				continue
+			}
+			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
+			if err != nil {
+				lgCombiner.Error("replace operation failed", "err", err)
+			}
+			appliedRecords = append(appliedRecords, applied...)
+			removedRecords = append(removedRecords, removed...)
+			if changed {
+				dataChanged = true
+			}
+
+		case "add":
+			addRecords := make(map[string][]string)
+			for _, rr := range parsedRRs {
+				addRecords[zonename] = append(addRecords[zonename], rr.String())
+			}
+			if len(addRecords) > 0 {
+				addChanged, err := zd.AddCombinerDataNG(req.SenderID, addRecords)
+				if err != nil {
+					lgCombiner.Error("add operation failed", "err", err)
+				}
+				if addChanged {
+					dataChanged = true
+				}
+				for _, rrs := range addRecords {
+					appliedRecords = append(appliedRecords, rrs...)
+				}
+			}
+
+		case "delete":
+			delRecords := make(map[string][]string)
+			for _, rr := range parsedRRs {
+				delRecords[zonename] = append(delRecords[zonename], rr.String())
+			}
+			if len(delRecords) > 0 {
+				removed, err := zd.RemoveCombinerDataNG(req.SenderID, delRecords)
+				if err != nil {
+					lgCombiner.Error("delete operation failed", "err", err)
+				}
+				if len(removed) > 0 {
+					dataChanged = true
+				}
+				removedRecords = append(removedRecords, removed...)
+			}
+
+		default:
+			rejectedItems = append(rejectedItems, RejectedItem{
+				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
+				Reason: fmt.Sprintf("unknown operation: %s", op.Operation),
+			})
+		}
+	}
+
+	resp.AppliedRecords = appliedRecords
+	resp.RemovedRecords = removedRecords
+	resp.RejectedItems = rejectedItems
+
+	totalActions := len(appliedRecords) + len(removedRecords)
+	if len(rejectedItems) == 0 {
+		resp.Status = "ok"
+		resp.Message = fmt.Sprintf("applied %d added %d removed for zone %q (via operations)",
+			len(appliedRecords), len(removedRecords), req.Zone)
+	} else if totalActions > 0 {
+		resp.Status = "partial"
+		resp.Message = fmt.Sprintf("applied %d added %d removed %d rejected for zone %q (via operations)",
+			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)
+	} else {
+		resp.Status = "error"
+		resp.Message = fmt.Sprintf("all operations rejected for zone %q", req.Zone)
+	}
+
+	lgCombiner.Info("operations processed", "status", resp.Status, "message", resp.Message)
+
+	if dataChanged {
+		bumperResp, err := zd.BumpSerialOnly()
+		if err != nil {
+			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
+		} else {
+			lgCombiner.Info("serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		}
+	}
+
+	return resp
+}
+
 // isNoOpUpdate checks whether an incoming update would cause any actual change.
 // Checks against both the live zone data (GetRRset) and CombinerData (merged agent
 // contributions). A record is considered present if it exists in either source.
@@ -383,6 +544,97 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 	}
 
 	lgCombiner.Info("isNoOpUpdate: all records already present, update is a no-op",
+		"sender", senderID, "zone", zd.ZoneName)
+	return true
+}
+
+// isNoOpOperations checks whether explicit Operations would cause any actual change.
+// For replace: compares the replacement set against the agent's current contributions.
+// For add: checks if all RRs already exist. For delete: checks if all RRs are already absent.
+func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) bool {
+	zonename := zd.ZoneName
+	for _, op := range ops {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			return false // Unknown type — not a no-op
+		}
+
+		switch op.Operation {
+		case "replace":
+			// Get agent's current contributions for this rrtype
+			var existingRRs []dns.RR
+			if zd.AgentContributions != nil {
+				if agentData, ok := zd.AgentContributions[senderID]; ok {
+					if ownerMap, ok := agentData[zonename]; ok {
+						if rrset, ok := ownerMap[rrtype]; ok {
+							existingRRs = rrset.RRs
+						}
+					}
+				}
+			}
+
+			// Parse replacement RRs
+			var newRRs []dns.RR
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					return false
+				}
+				newRRs = append(newRRs, rr)
+			}
+
+			// Both empty = no-op
+			if len(existingRRs) == 0 && len(newRRs) == 0 {
+				continue
+			}
+			// Different length = change
+			if len(existingRRs) != len(newRRs) {
+				return false
+			}
+			// Check all existing RRs are in the new set
+			for _, oldRR := range existingRRs {
+				found := false
+				for _, newRR := range newRRs {
+					if dns.IsDuplicate(oldRR, newRR) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+
+		case "add":
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					return false
+				}
+				if !rrExistsInZone(zd, zonename, rrtype, rr) {
+					return false
+				}
+			}
+
+		case "delete":
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					return false
+				}
+				delRR := dns.Copy(rr)
+				delRR.Header().Class = dns.ClassINET
+				if rrExistsInZone(zd, zonename, rrtype, delRR) {
+					return false // RR still exists — deleting it IS a change
+				}
+			}
+
+		default:
+			return false
+		}
+	}
+
+	lgCombiner.Info("isNoOpOperations: all operations are no-ops",
 		"sender", senderID, "zone", zd.ZoneName)
 	return true
 }
@@ -693,7 +945,7 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 	// Determine sync type from the RRs
 	syncType := determineSyncType(update)
 
-	return &CombinerSyncRequest{
+	req := &CombinerSyncRequest{
 		SenderID:       senderID,
 		Zone:           string(update.Zone),
 		SyncType:       syncType,
@@ -701,6 +953,10 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 		DistributionID: distributionID,
 		Timestamp:      time.Now(),
 	}
+	if len(update.Operations) > 0 {
+		req.Operations = update.Operations
+	}
+	return req
 }
 
 // determineSyncType examines the update and returns an appropriate sync type string.
