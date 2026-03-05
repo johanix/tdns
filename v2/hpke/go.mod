@@ -3,7 +3,7 @@ module github.com/johanix/tdns/v2/hpke
 go 1.25.2
 
 require (
-	github.com/cloudflare/circl v1.6.2
+	github.com/cloudflare/circl v1.6.3
 	github.com/miekg/dns v1.1.70
 )
 
