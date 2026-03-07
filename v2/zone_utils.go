@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -18,6 +19,13 @@ import (
 	"github.com/spf13/viper"
 )
 
+var lg = Logger("zones")
+
+// ErrZoneNotReady is returned by GetOwner/GetRRset when the zone data
+// has not been loaded yet (zd.Ready == false). Callers that need to
+// handle initial-load gracefully can check with errors.Is.
+var ErrZoneNotReady = errors.New("zone data is not yet ready")
+
 func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
 
@@ -29,7 +37,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 
 	// if zd.FoldCase {
 	if zd.Options[OptFoldCase] {
-		zd.Logger.Printf("zd.Refresh(): folding case for zone %s", zd.ZoneName)
+		lg.Debug("folding case for zone", "zone", zd.ZoneName)
 		zd.ZoneName = strings.ToLower(zd.ZoneName)
 	}
 
@@ -51,20 +59,19 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 
 		if do_transfer || force {
 			if do_transfer {
-				zd.Logger.Printf("Refresher: %s: upstream serial has increased: %d-->%d",
-					zd.ZoneName, zd.IncomingSerial, upstream_serial)
+				lg.Info("upstream serial has increased", "zone", zd.ZoneName, "old", zd.IncomingSerial, "new", upstream_serial)
 			} else if force {
-				zd.Logger.Printf("Refresher: %s: forced retransfer regardless of whether SOA serial has increased", zd.ZoneName)
+				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
 			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs)
 			if err != nil {
-				log.Printf("Error from FetchZone(%s, %s): %v", zd.ZoneName, zd.Upstream, err)
+				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", zd.Upstream, "err", err)
 				return false, err
 			}
 			return updated, nil // zone updated, no error
 		}
 
-		zd.Logger.Printf("Refresher: %s: upstream serial is unchanged: %d", zd.ZoneName, zd.IncomingSerial)
+		lg.Debug("upstream serial is unchanged", "zone", zd.ZoneName, "serial", zd.IncomingSerial)
 
 	default:
 		return false, fmt.Errorf("error: cannot refresh zone %s of unknown type %d", zd.ZoneName, zd.ZoneType)
@@ -89,13 +96,11 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	if _, _, err := net.SplitHostPort(upstream); err != nil {
 		// If error, assume no port was specified
 		upstream = net.JoinHostPort(upstream, "53")
-		if Globals.Verbose {
-			zd.Logger.Printf("DoTransfer: zone %q: no port specified for upstream %q, using default port 53", zd.ZoneName, zd.Upstream)
-		}
+		lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", zd.Upstream)
 	}
 	r, err := dns.Exchange(m, upstream)
 	if err != nil {
-		log.Printf("Error from dns.Exchange(%s, SOA): %v", zd.ZoneName, err)
+		lg.Error("dns.Exchange failed", "zone", zd.ZoneName, "qtype", "SOA", "err", err)
 		return false, 0, err
 	}
 
@@ -104,6 +109,10 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	case dns.RcodeRefused, dns.RcodeServerFailure, dns.RcodeNameError:
 		return false, 0, nil // never mind
 	case dns.RcodeSuccess:
+		if len(r.Answer) == 0 {
+			lg.Debug("DoTransfer: NOERROR but empty answer section", "zone", zd.ZoneName, "upstream", upstream)
+			return false, 0, nil
+		}
 		if soa, ok := r.Answer[0].(*dns.SOA); ok {
 			// log.Printf("UpstreamSOA: %v", soa.String())
 			if soa.Serial <= zd.IncomingSerial {
@@ -142,7 +151,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 
 	updated, _, err := new_zd.ReadZoneFile(zd.Zonefile, force)
 	if err != nil {
-		log.Printf("Error from ReadZoneFile(%s): %v", zd.ZoneName, err)
+		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
 
@@ -164,24 +173,45 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	if zd.Options[OptDelSyncChild] {
 		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
 		if err != nil {
-			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
+			lg.Error("DelegationDataChanged failed", "zone", zd.ZoneName, "err", err)
 			return false, err
 		}
 	}
 
 	var hsyncchanged, keyschanged bool
 	var hss *HsyncStatus
+	var dskeyStatus *DnskeyStatus
 	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeCombiner:
+	case AppTypeAgent, AppTypeCombiner, AppTypeAuth:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
-			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
+			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
 		}
 		keyschanged, err = zd.DnskeysChangedNG(&new_zd)
 		if err != nil {
-			zd.Logger.Printf("Error from DnskeysChanged(%s): %v", zd.ZoneName, err)
+			lg.Error("DnskeysChanged failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
+		}
+		// For multi-provider zones, also compute local DNSKEY adds/removes
+		// (must be done before zone data swap below)
+		if keyschanged && zd.Options[OptMultiProvider] {
+			if Globals.App.Type == AppTypeAgent {
+				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
+				zd.RequestAndWaitForKeyInventory()
+				_, dskeyStatus, err = zd.LocalDnskeysFromKeystate()
+				if err != nil {
+					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
+				}
+				if dskeyStatus == nil {
+					keyschanged = false
+				}
+			} else {
+				_, dskeyStatus, err = zd.LocalDnskeysChanged(&new_zd)
+				if err != nil {
+					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
+				}
+			}
 		}
 	}
 
@@ -189,7 +219,12 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
 	zd.IncomingSerial = new_zd.IncomingSerial
-	zd.CurrentSerial = new_zd.CurrentSerial
+	if zd.FirstZoneLoad {
+		zd.CurrentSerial = new_zd.CurrentSerial
+		zd.FirstZoneLoad = false
+	} else {
+		zd.CurrentSerial++
+	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
@@ -198,13 +233,42 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.Ready = true
 	zd.mu.Unlock()
 
+	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
+	if Globals.App.Type == AppTypeCombiner {
+		zd.snapshotUpstreamData()
+	}
+
 	// Repopulate all dynamically generated RRs after zone refresh
 	// (they may have been lost if not present in the zone file)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
+	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
+	// dynamically enable/disable inline-signing and detect multi-signer mode.
+	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
+		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
+		if err != nil {
+			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
+		}
+		if shouldSign && !zd.Options[OptInlineSigning] {
+			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
+			zd.Options[OptInlineSigning] = true
+		} else if !shouldSign && zd.Options[OptInlineSigning] {
+			lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
+			zd.Options[OptInlineSigning] = false
+		}
+		isMS := shouldSign && otherSigners > 0
+		if isMS && !zd.Options[OptMultiSigner] {
+			lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
+			zd.Options[OptMultiSigner] = true
+		} else if !isMS && zd.Options[OptMultiSigner] {
+			lg.Info("no longer multi-signer", "zone", zd.ZoneName)
+			zd.Options[OptMultiSigner] = false
+		}
+	}
+
 	// If the delegation has changed, send an update to the DelegationSyncEngine
 	if zd.Options[OptDelSyncChild] && delchanged {
-		zd.Logger.Printf("FetchFromFile: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
 		zd.DelegationSyncQ <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
 			ZoneName:   zd.ZoneName,
@@ -213,32 +277,20 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		}
 	}
 
-	// If this is a multi-signer zone, check for changes to the HSYNC and DNSKEY RRsets; notify MultiSignerSyncEngine if needed
-	if zd.Options[OptMultiSigner] {
+	// If this is a multi-signer zone, check for changes to the HSYNC and DNSKEY RRsets; notify HsyncEngine
+	if zd.Options[OptMultiProvider] {
 		if keyschanged {
-			zd.Logger.Printf("FetchFromFile: Zone %s: DNSKEY RRset has changed. Sending update to MultiSignerSyncEngine", zd.ZoneName)
-			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-			if err != nil {
-				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-				// return false, err
-			}
-			newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-			if err != nil {
-				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-				// return false, err
-			}
+			lg.Info("DNSKEY RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
-				Command:    "SYNC-DNSKEY-RRSET",
-				ZoneName:   ZoneName(zd.ZoneName),
-				ZoneData:   zd,
-				OldDnskeys: oldkeys,
-				NewDnskeys: newkeys,
-				SyncStatus: nil,
+				Command:      "SYNC-DNSKEY-RRSET",
+				ZoneName:     ZoneName(zd.ZoneName),
+				ZoneData:     zd,
+				DnskeyStatus: dskeyStatus,
 			}
 		}
 
 		if hsyncchanged {
-			zd.Logger.Printf("FetchFromFile: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
+			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
 
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
@@ -252,11 +304,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	if viper.GetBool("service.debug") {
 		fname, err := zd.ZoneFileName()
 		if err != nil {
-			zd.Logger.Printf("Error from ZoneFileName(%s): %v", zd.ZoneName, err)
+			lg.Error("ZoneFileName failed", "zone", zd.ZoneName, "err", err)
 		} else {
 			_, err := new_zd.WriteFile(fname)
 			if err != nil {
-				zd.Logger.Printf("Error from WriteFile(%s): %v", zd.ZoneName, err)
+				lg.Error("WriteFile failed", "zone", zd.ZoneName, "err", err)
 			} else {
 				// zd.Logger.Printf("FetchFromFile: Zone %s: zone file written to %s", zd.ZoneName, f)
 			}
@@ -269,7 +321,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 // Return updated, err
 func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset) (bool, error) {
 
-	log.Printf("Transferring zone %s via AXFR from %s\n", zd.ZoneName, zd.Upstream)
+	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", zd.Upstream)
 
 	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
@@ -288,13 +340,12 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 
 	_, err := new_zd.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
 	if err != nil {
-		zd.Logger.Printf("Error from ZoneTransfer(%s): %v", zd.ZoneName, err)
+		lg.Error("ZoneTransfer failed", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
 
-	if new_zd.CurrentSerial == zd.CurrentSerial {
-		zd.Logger.Printf("FetchFromUpstream: zone %s: SOA serial is unchanged (%d)",
-			zd.ZoneName, zd.CurrentSerial)
+	if new_zd.IncomingSerial == zd.IncomingSerial {
+		lg.Debug("FetchFromUpstream: upstream serial is unchanged", "zone", zd.ZoneName, "serial", zd.IncomingSerial)
 		return false, nil
 	}
 
@@ -307,24 +358,48 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	if zd.Options[OptDelSyncChild] {
 		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
 		if err != nil {
-			zd.Logger.Printf("Error from DelegationDataChanged(%s): %v", zd.ZoneName, err)
+			lg.Error("DelegationDataChanged failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
 		}
 	}
 
 	var hsyncchanged, dnskeyschanged bool
 	var hss *HsyncStatus
+	var dskeyStatusUpstream *DnskeyStatus
 	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeCombiner:
+	case AppTypeAgent, AppTypeCombiner, AppTypeAuth:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
-			zd.Logger.Printf("Error from HsyncChanged(%s): %v", zd.ZoneName, err)
+			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
 		}
 		dnskeyschanged, err = zd.DnskeysChangedNG(&new_zd)
 		if err != nil {
-			zd.Logger.Printf("Error from DnskeysChangedNG(%s): %v", zd.ZoneName, err)
+			lg.Error("DnskeysChangedNG failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
+		}
+		// For multi-provider zones, compute local DNSKEY adds/removes before zone swap
+		if dnskeyschanged && zd.Options[OptMultiProvider] {
+			if Globals.App.Type == AppTypeAgent {
+				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
+				// Request inventory from signer, then derive local keys from it.
+				zd.RequestAndWaitForKeyInventory()
+				_, dskeyStatusUpstream, err = zd.LocalDnskeysFromKeystate()
+				if err != nil {
+					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
+				}
+				if dskeyStatusUpstream == nil {
+					// KEYSTATE unavailable — suppress SYNC-DNSKEY-RRSET.
+					// No DNSKEYs enter SDE until KEYSTATE succeeds.
+					dnskeyschanged = false
+				}
+			} else {
+				// Non-agent roles (combiner, signer) use the zone transfer path
+				_, dskeyStatusUpstream, err = zd.LocalDnskeysChanged(&new_zd)
+				if err != nil {
+					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
+				}
+			}
 		}
 	default:
 		// Do nothing
@@ -334,7 +409,12 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
 	zd.IncomingSerial = new_zd.IncomingSerial
-	zd.CurrentSerial = new_zd.CurrentSerial
+	if zd.FirstZoneLoad {
+		zd.CurrentSerial = new_zd.CurrentSerial
+		zd.FirstZoneLoad = false
+	} else {
+		zd.CurrentSerial++
+	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
@@ -343,13 +423,43 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.Ready = true
 	zd.mu.Unlock()
 
+	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
+	if Globals.App.Type == AppTypeCombiner {
+		zd.snapshotUpstreamData()
+	}
+
 	// Repopulate all dynamically generated RRs after zone refresh
 	// (they may have been lost if not present in the transferred zone)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
+	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
+	// dynamically enable/disable inline-signing and detect multi-signer mode.
+	// The HSYNC is the authority for whether we should sign, not static config.
+	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
+		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
+		if err != nil {
+			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
+		}
+		if shouldSign && !zd.Options[OptInlineSigning] {
+			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
+			zd.Options[OptInlineSigning] = true
+		} else if !shouldSign && zd.Options[OptInlineSigning] {
+			lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
+			zd.Options[OptInlineSigning] = false
+		}
+		isMS := shouldSign && otherSigners > 0
+		if isMS && !zd.Options[OptMultiSigner] {
+			lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
+			zd.Options[OptMultiSigner] = true
+		} else if !isMS && zd.Options[OptMultiSigner] {
+			lg.Info("no longer multi-signer", "zone", zd.ZoneName)
+			zd.Options[OptMultiSigner] = false
+		}
+	}
+
 	// Can only test for differences between old and new zone data if the zone data is ready.
 	if delchanged && zd.Options[OptDelSyncChild] {
-		zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation data has changed. Sending update to DelegationSyncEngine", zd.ZoneName)
+		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
 		zd.DelegationSyncQ <- DelegationSyncRequest{
 			Command:    "SYNC-DELEGATION",
 			ZoneName:   zd.ZoneName,
@@ -361,34 +471,44 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	if dnskeyschanged {
 		switch Globals.App.Type {
 		case AppTypeAgent:
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: DNSSEC keys have changed. Sending update to DelegationSyncEngine", zd.ZoneName)
-			oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-			if err != nil {
-				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-				// return false, err
-			}
-			newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-			if err != nil {
-				zd.Logger.Printf("Error from GetRRset(%s, %d): %v", zd.ZoneName, dns.TypeDNSKEY, err)
-				// return false, err
-			}
-			zd.MusicSyncQ <- MusicSyncRequest{
-				Command:    "SYNC-DNSKEY-RRSET",
-				ZoneName:   zd.ZoneName,
-				ZoneData:   zd,
-				OldDnskeys: oldkeys,
-				NewDnskeys: newkeys,
+			if zd.Options[OptMultiProvider] {
+				// Multi-provider: send to HsyncEngine for distribution to remote agents
+				lg.Info("local DNSKEYs changed, sending to HsyncEngine for remote agent distribution", "zone", zd.ZoneName)
+				zd.SyncQ <- SyncRequest{
+					Command:      "SYNC-DNSKEY-RRSET",
+					ZoneName:     ZoneName(zd.ZoneName),
+					ZoneData:     zd,
+					DnskeyStatus: dskeyStatusUpstream,
+				}
+			} else {
+				// Legacy path: send to DelegationSyncher
+				lg.Info("DNSSEC keys have changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
+				oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+				if err != nil {
+					lg.Error("GetRRset failed", "zone", zd.ZoneName, "rrtype", dns.TypeDNSKEY, "err", err)
+				}
+				newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+				if err != nil {
+					lg.Error("GetRRset failed", "zone", zd.ZoneName, "rrtype", dns.TypeDNSKEY, "err", err)
+				}
+				zd.MusicSyncQ <- MusicSyncRequest{
+					Command:    "SYNC-DNSKEY-RRSET",
+					ZoneName:   zd.ZoneName,
+					ZoneData:   zd,
+					OldDnskeys: oldkeys,
+					NewDnskeys: newkeys,
+				}
 			}
 		case AppTypeCombiner:
 			// A combiner doesn't need to act on DNSKEY changes. But for now we log it to verify the code path.
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: Incoming DNSKEYs have changed. No action needed.", zd.ZoneName)
+			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
 		}
 	}
 
 	if hsyncchanged {
 		switch Globals.App.Type {
 		case AppTypeAgent:
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Sending update to HsyncEngine", zd.ZoneName)
+			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
 			zd.SyncQ <- SyncRequest{
 				Command:    "HSYNC-UPDATE",
 				ZoneName:   ZoneName(zd.ZoneName),
@@ -397,42 +517,43 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			}
 		case AppTypeCombiner:
 			// A combiner needs to act on HSYNC changes, but only to verify whether itself is in the HSYNC RRset
-			zd.Logger.Printf("FetchFromUpstream: Zone %s: HSYNC RRset has changed. Verifying whether we are in the HSYNC RRset", zd.ZoneName)
+			lg.Info("HSYNC RRset has changed, verifying whether we are in the HSYNC RRset", "zone", zd.ZoneName)
 			// XXX: Kludge just for testing. Should be replaced by HSYNC RRset parsing
 			zd.Options[OptAllowCombine] = true
 			// TODO: Implement this
 		}
 	}
 
-	zd.Logger.Printf("FetchFromUpstream: Zone %q: Globals.App.Type: %q allow-combine: %v",
-		zd.ZoneName, AppTypeToString[Globals.App.Type], zd.Options[OptAllowCombine])
+	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowCombine", zd.Options[OptAllowCombine])
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
 	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowCombine] {
-		// XXX: We are a combiner and this zone has a HSYNC RRset. Therefore we need to check whether there are
-		// any local changes to the zone that needs to be applied before we can send the zone to the downstreams.
-		// XXX: This MUST not be a request through a channel, but rather a direct call to something that does this.
-		zd.Logger.Printf("FetchFromUpstream: Zone %q: Combining with local changes", zd.ZoneName)
+		lg.Info("combining with local changes", "zone", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {
-			zd.Logger.Printf("Error from CombineWithLocalChanges(%q): %v", zd.ZoneName, err)
+			lg.Error("CombineWithLocalChanges failed", "zone", zd.ZoneName, "err", err)
 			return false, err
 		}
 		if success {
-			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have been applied. Sending to downstreams.", zd.ZoneName)
+			lg.Info("local changes applied, sending to downstreams", "zone", zd.ZoneName)
 		} else {
-			zd.Logger.Printf("FetchFromUpstream: Zone %q: Local changes to the zone have not been applied. Not sending to downstreams.", zd.ZoneName)
+			lg.Debug("local changes not applied, not sending to downstreams", "zone", zd.ZoneName)
+		}
+
+		// Inject combiner signature TXT if configured
+		if zd.InjectSignatureTXT(Globals.CombinerConf) {
+			lg.Debug("signature TXT injected", "zone", zd.ZoneName)
 		}
 	}
 
 	if viper.GetBool("service.debug") {
 		fname, err := zd.ZoneFileName()
 		if err != nil {
-			zd.Logger.Printf("Error from ZoneFileName(%s): %v", zd.ZoneName, err)
+			lg.Error("ZoneFileName failed", "zone", zd.ZoneName, "err", err)
 		} else {
 			_, err := new_zd.WriteFile(fname)
 			if err != nil {
-				zd.Logger.Printf("Error from WriteFile(%s): %v", zd.ZoneName, err)
+				lg.Error("WriteFile failed", "zone", zd.ZoneName, "err", err)
 			} else {
 				// zd.Logger.Printf("FetchFromUpstream: Zone %s: zone file written to %s", zd.ZoneName, f)
 			}
@@ -442,17 +563,13 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	return true, nil
 }
 
+// ZoneFileName returns the path to use for this zone's file. Only zones with zonefile: set
+// (in config) are written to disk; autozones and secondaries without zonefile are not persisted.
 func (zd *ZoneData) ZoneFileName() (string, error) {
-	filedir := viper.GetString("dnsengine.zones.filedir")
-	if filedir == "" {
-		return "", fmt.Errorf("zoneFileName: dnsengine.zones.filedir is not set")
+	if zd.Zonefile == "" {
+		return "", fmt.Errorf("zone has no zonefile (autozone or secondary not persisted); not written to disk")
 	}
-	filetmpl := viper.GetString("dnsengine.zones.filetmpl")
-	if filetmpl == "" {
-		return "", fmt.Errorf("ZoneFileName: dnsengine.zones.filetmpl is not set")
-	}
-	fname := fmt.Sprintf("/tmp"+filetmpl, filedir, zd.ZoneName) // Must ensure that we don't allow writing everywhere
-	fname = path.Clean(fname)
+	fname := path.Clean(zd.Zonefile)
 	dirname := path.Dir(fname)
 	if _, err := os.Stat(dirname); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirname, 0755); err != nil {
@@ -501,14 +618,11 @@ func (zd *ZoneData) NameExists(qname string) bool {
 		_, ok = zd.Data.Get(qname)
 
 	default:
-		zd.Logger.Printf("NameExists: should not get here for zonestorage: %s",
-			ZoneStoreToString[zd.ZoneStore])
+		lg.Error("NameExists: unexpected zone storage type", "zoneStore", ZoneStoreToString[zd.ZoneStore])
 		return false
 	}
 
-	if zd.Debug {
-		zd.Logger.Printf("NameExists: returning %v for qname %s", ok, qname)
-	}
+	lg.Debug("NameExists result", "qname", qname, "exists", ok)
 	return ok
 }
 
@@ -516,7 +630,7 @@ func (zd *ZoneData) NameExists(qname string) bool {
 
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	if !zd.Ready {
-		return nil, fmt.Errorf("getOwner: zone %s: zone data is not yet ready", zd.ZoneName)
+		return nil, fmt.Errorf("getOwner: zone %s: %w", zd.ZoneName, ErrZoneNotReady)
 	}
 	var owner OwnerData
 	var ok bool
@@ -545,7 +659,7 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		return &owner, nil
 
 	default:
-		zd.Logger.Printf("GetOwner: zone storage not supported: %v", zd.ZoneStore)
+		lg.Error("GetOwner: zone storage not supported", "zoneStore", zd.ZoneStore)
 		return &owner, fmt.Errorf("getOwner: only supported for SliceZone and MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
@@ -606,7 +720,7 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 		names = zd.Data.Keys()
 
 	default:
-		zd.Logger.Printf("GetOwnerNames: zone storage not supported: %v", zd.ZoneStore)
+		lg.Error("GetOwnerNames: zone storage not supported", "zoneStore", zd.ZoneStore)
 		return names, fmt.Errorf("getOwnerNames: only supported for SliceZone and MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
@@ -615,8 +729,7 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 
 // XXX: Is qname the name of a zone cut for a child zone?
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
-	zd.Logger.Printf("IsChildDelegation: checking delegation of %q from %q",
-		qname, zd.ZoneName)
+	lg.Debug("IsChildDelegation: checking delegation", "qname", qname, "zone", zd.ZoneName)
 	owner, err := zd.GetOwner(qname)
 	if err != nil || owner == nil || qname == zd.ZoneName {
 		return false
@@ -639,9 +752,7 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 	if !zd.Ready && zd.ZoneType == Secondary && zd.IncomingSerial == 0 {
 		// Return synthetic SOA with serial 0 and default refresh interval
 		// Serial 0 ensures the first transfer will always proceed (any real serial > 0)
-		if zd.Verbose || zd.Debug {
-			zd.Logger.Printf("GetSOA: Zone %s is new secondary zone (not yet transferred), returning synthetic SOA with serial 0", zd.ZoneName)
-		}
+		lg.Debug("GetSOA: new secondary zone not yet transferred, returning synthetic SOA with serial 0", "zone", zd.ZoneName)
 		return &dns.SOA{
 			Hdr: dns.RR_Header{
 				Name:   zd.ZoneName,
@@ -652,10 +763,10 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 			Ns:      "invalid.",
 			Mbox:    "hostmaster." + zd.ZoneName,
 			Serial:  0,
-			Refresh: 300,    // 5 minutes default
-			Retry:   1800,   // 30 minutes
+			Refresh: 300,     // 5 minutes default
+			Retry:   1800,    // 30 minutes
 			Expire:  1209600, // 2 weeks
-			Minttl:  86400,  // 1 day
+			Minttl:  86400,   // 1 day
 		}, nil
 	}
 
@@ -688,14 +799,14 @@ func (zd *ZoneData) PrintOwners() {
 			fmt.Printf("%s\n", key)
 		}
 	default:
-		zd.Logger.Printf("Sorry, only zone storage Map and Slice for now")
+		lg.Debug("PrintOwners: unsupported zone storage type", "zoneStore", ZoneStoreToString[zd.ZoneStore])
 	}
 }
 
 func (zd *ZoneData) NotifyDownstreams() error {
 	// zd.Logger.Printf("NotifyDownstreams: Zone %s has downstreams: %v", zd.ZoneName, zd.Downstreams)
 	if zd == nil {
-		zd.Logger.Printf("Error: zonedata is nil")
+		lg.Error("NotifyDownstreams: zonedata is nil")
 		return fmt.Errorf("zonedata is nil")
 	}
 	for _, d := range zd.Downstreams {
@@ -707,13 +818,12 @@ func (zd *ZoneData) NotifyDownstreams() error {
 		r, err := dns.Exchange(m, d)
 		if err != nil {
 			// well, we tried
-			log.Printf("Error from downstream %s on Notify(%s): %v", d, zd.ZoneName, err)
+			lg.Error("downstream NOTIFY failed", "downstream", d, "zone", zd.ZoneName, "err", err)
 			continue
 		}
 		if r.Opcode != dns.OpcodeNotify {
 			// well, we tried
-			log.Printf("Error: not a NOTIFY QR from downstream %s on Notify(%s): %s",
-				d, zd.ZoneName, dns.OpcodeToString[r.Opcode])
+			lg.Error("unexpected opcode from downstream on NOTIFY", "downstream", d, "zone", zd.ZoneName, "opcode", dns.OpcodeToString[r.Opcode])
 		}
 	}
 	return nil
@@ -771,7 +881,7 @@ func FindZone(qname string) (*ZoneData, bool) {
 			return zd, true
 		}
 	}
-	log.Printf("FindZone: no zone for qname=%q found", qname)
+	lg.Debug("FindZone: no zone found", "qname", qname)
 	return nil, false
 }
 
@@ -789,31 +899,27 @@ func FindZoneNG(qname string) *ZoneData {
 	return nil
 }
 
-func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
+// BumpSerialOnly increments the SOA serial and updates the SOA RR,
+// but does not notify downstreams. Use when the caller will handle
+// notification separately or when notification is not appropriate
+// (e.g. inside a NOTIFY handler where triggering downstream NOTIFYs
+// could cause side effects).
+func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp := BumperResponse{
 		Zone: zd.ZoneName,
 	}
 
-	log.Printf("BumpSerial: bumping SOA serial for zone '%s'", zd.ZoneName)
+	lg.Debug("BumpSerialOnly: bumping SOA serial", "zone", zd.ZoneName)
 	zd.mu.Lock()
-
-	defer func() {
-		zd.mu.Unlock()
-	}()
+	defer zd.mu.Unlock()
 
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
-	if zd.Options[OptOnlineSigning] {
-		//		dak, err := zd.KeyDB.GetDnssecActiveKeys(zd.ZoneName)
-		//		if err != nil {
-		//			log.Printf("SignZone: failed to get dnssec active keys for zone %s", zd.ZoneName)
-		//			zd.mu.Unlock()
-		//			return resp, err
-		//		}
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err != nil {
-			zd.Logger.Printf("Error from GetOwner(%s): %v", zd.ZoneName, err)
+			lg.Error("GetOwner failed", "zone", zd.ZoneName, "err", err)
 			return resp, err
 		}
 		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
@@ -823,19 +929,26 @@ func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
 		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
 		if err != nil {
-			log.Printf("BumpSerial: failed to sign SOA RRset for zone %s", zd.ZoneName)
+			lg.Error("BumpSerialOnly: failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
 			return resp, err
 		}
+		apex.RRtypes.Set(dns.TypeSOA, rrset)
 	}
-	//	zd.mu.Unlock()
-
-	zd.NotifyDownstreams()
 
 	return resp, nil
 }
 
+func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
+	resp, err := zd.BumpSerialOnly()
+	if err != nil {
+		return resp, err
+	}
+	zd.NotifyDownstreams()
+	return resp, nil
+}
+
 func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegationData, error) {
-	zd.Logger.Printf("FetchChildDelegationData: fetching delegation data for %s", childname)
+	lg.Debug("FetchChildDelegationData: fetching delegation data", "child", childname)
 	if !zd.IsChildDelegation(childname) {
 		return nil, fmt.Errorf("FetchChildDelegationData: %s is not a child of %s", childname, zd.ZoneName)
 	}
@@ -891,23 +1004,33 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
 	if !wantsSync {
-		zd.Logger.Printf("SetupZoneSync: Zone %s does not require delegation sync", zd.ZoneName)
+		lg.Debug("SetupZoneSync: zone does not require delegation sync", "zone", zd.ZoneName)
 		return nil
 	}
-	zd.Logger.Printf("SetupZoneSync: Zone %s requests delegation sync", zd.ZoneName)
+	lg.Debug("SetupZoneSync: zone requests delegation sync", "zone", zd.ZoneName)
 
 	// Is this a parent zone and should we then publish a DSYNC RRset?
 	if zd.Options[OptDelSyncParent] {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
-		owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
-		dsync_rrset, exist := owner.RRtypes.Get(core.TypeDSYNC)
+		owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+		if err != nil {
+			lg.Error("SetupZoneSync: error getting _dsync owner", "zone", zd.ZoneName, "err", err)
+			return err
+		}
+
+		var dsync_rrset core.RRset
+		var exist bool
+		if owner != nil {
+			dsync_rrset, exist = owner.RRtypes.Get(core.TypeDSYNC)
+		}
+
 		if exist && len(dsync_rrset.RRs) > 0 {
 			// If there is a DSYNC RRset, we assume that it is correct and will not modify
-			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC RRset exists. Will not modify.", zd.ZoneName)
+			lg.Debug("SetupZoneSync: DSYNC RRset exists, will not modify", "zone", zd.ZoneName)
 		} else {
-			zd.Logger.Printf("SetupZoneSync: Zone %s: No DSYNC RRset in zone. Will add.", zd.ZoneName)
+			lg.Debug("SetupZoneSync: no DSYNC RRset in zone, will add", "zone", zd.ZoneName)
 			//			ur := UpdateRequest{
 			//				Cmd:          "DEFERRED-UPDATE",
 			//				ZoneName:     zd.ZoneName,
@@ -918,7 +1041,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			//			zd.KeyDB.UpdateQ <- ur
 			err := zd.PublishDsyncRRs()
 			if err != nil {
-				zd.Logger.Printf("Error from PublishDsyncRRs(%s): %v", zd.ZoneName, err)
+				lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
 				return err
 			}
 		}
@@ -927,12 +1050,12 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// we generate a SIG(0) key pair for the target and publish the public key in the zone.
 		updateTarget := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
 		if _, ok := dns.IsDomainName(updateTarget); !ok {
-			zd.Logger.Printf("SetupZoneSync(%s, parent-side): Invalid DSYNC update target: %s", zd.ZoneName, updateTarget)
+			lg.Error("SetupZoneSync: invalid DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
 		} else {
-			zd.Logger.Printf("SetupZoneSync(%s, parent-side): DSYNC update target: %s", zd.ZoneName, updateTarget)
+			lg.Debug("SetupZoneSync: DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
 			err := zd.ParentSig0KeyPrep(updateTarget, zd.KeyDB)
 			if err != nil {
-				zd.Logger.Printf("Error from ParentSig0KeyPrep(%s): %v", updateTarget, err)
+				lg.Error("ParentSig0KeyPrep failed", "target", updateTarget, "err", err)
 				return err
 			}
 		}
@@ -974,15 +1097,15 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	var dynamicRRs []*core.RRset
 
-	if !zd.Options[OptAllowUpdates] || zd.KeyDB == nil {
+	if (!zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning]) || zd.KeyDB == nil {
 		return dynamicRRs
 	}
 
-	// 1. Collect DNSKEY records (if online-signing enabled)
-	if zd.Options[OptOnlineSigning] {
+	// 1. Collect DNSKEY records (if signing enabled)
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
-			zd.Logger.Printf("CollectDynamicRRs: failed to get DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+			lg.Error("CollectDynamicRRs: failed to get DNSSEC keys", "zone", zd.ZoneName, "err", err)
 		} else if dak != nil {
 			var publishkeys []dns.RR
 			for _, ksk := range dak.KSKs {
@@ -1001,20 +1124,20 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
 			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
 			if err != nil {
-				zd.Logger.Printf("CollectDynamicRRs: failed to query DNSKEYs for zone %s: %v", zd.ZoneName, err)
+				lg.Error("CollectDynamicRRs: failed to query DNSKEYs", "zone", zd.ZoneName, "err", err)
 			} else {
 				defer rows.Close()
 				for rows.Next() {
 					var keyid, flags, algorithm string
 					var keyrr string
 					if err := rows.Scan(&keyid, &flags, &algorithm, &keyrr); err != nil {
-						zd.Logger.Printf("CollectDynamicRRs: failed to scan DNSKEY row for zone %s: %v", zd.ZoneName, err)
+						lg.Error("CollectDynamicRRs: failed to scan DNSKEY row", "zone", zd.ZoneName, "err", err)
 						continue
 					}
 					if rr, err := dns.NewRR(keyrr); err == nil {
 						publishkeys = append(publishkeys, rr)
 					} else {
-						zd.Logger.Printf("CollectDynamicRRs: failed to parse DNSKEY RR from %s for zone %s: %v", keyrr, zd.ZoneName, err)
+						lg.Error("CollectDynamicRRs: failed to parse DNSKEY RR", "keyrr", keyrr, "zone", zd.ZoneName, "err", err)
 					}
 				}
 			}
@@ -1035,9 +1158,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
 			// Not an error if no SIG(0) keys exist
-			if Globals.Debug {
-				zd.Logger.Printf("CollectDynamicRRs: no active SIG(0) keys for zone %s (or error): %v", zd.ZoneName, err)
-			}
+			lg.Debug("CollectDynamicRRs: no active SIG(0) keys for zone (or error)", "zone", zd.ZoneName, "err", err)
 		} else if sak != nil && len(sak.Keys) > 0 {
 			var keyRRs []dns.RR
 			for _, pkc := range sak.Keys {
@@ -1147,7 +1268,7 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 				}
 				zd.Data.Set(rrset.Name, *owner)
 			} else {
-				zd.Logger.Printf("RepopulateDynamicRRs: failed to get/create owner %s for zone %s: %v", rrset.Name, zd.ZoneName, err)
+				lg.Error("RepopulateDynamicRRs: failed to get/create owner", "owner", rrset.Name, "zone", zd.ZoneName, "err", err)
 				continue
 			}
 		}
@@ -1191,34 +1312,30 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 		}
 	}
 
-	zd.Logger.Printf("RepopulateDynamicRRs: repopulated %d dynamic RRsets for zone %s", len(dynamicRRs), zd.ZoneName)
+	lg.Info("RepopulateDynamicRRs: repopulated dynamic RRsets", "count", len(dynamicRRs), "zone", zd.ZoneName)
 }
 
 func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
-	if !zd.Options[OptOnlineSigning] {
+	if Globals.App.Type == AppTypeAgent {
+		return nil // agents never sign
+	}
+
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return nil // this zone should not be signed (at least not by us)
 	}
 
-	if !zd.Options[OptAllowUpdates] {
-		return nil // this zone does not allow any modifications
-	}
-
-	if Globals.App.Type == AppTypeAgent {
-		return nil // this zone does not allow any modifications
-	}
-
-	if zd.ZoneType != Primary {
-		return nil // this zone is not a primary zone, it cannot be signed
+	if zd.ZoneType != Primary && !zd.Options[OptInlineSigning] {
+		return nil // non-primary zones require inline-signing to be signed
 	}
 
 	kdb := zd.KeyDB
 	newrrsigs, err := zd.SignZone(kdb, false)
 	if err != nil {
-		zd.Logger.Printf("Error from SignZone(%s): %v", zd.ZoneName, err)
+		lg.Error("SignZone failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
-	log.Printf("SetupZoneSigning: zone %s signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
+	lg.Info("SetupZoneSigning: zone signed", "zone", zd.ZoneName, "newRRSIGs", newrrsigs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -1226,7 +1343,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	select {
 	case resignq <- zd:
 	case <-ctx.Done():
-		log.Printf("SetupZoneSigning: timeout while sending zone %s to resign queue", zd.ZoneName)
+		lg.Error("SetupZoneSigning: timeout sending zone to resign queue", "zone", zd.ZoneName)
 	}
 
 	return nil
@@ -1253,7 +1370,7 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 	}
 
 	if resp.Error {
-		log.Printf("ReloadZone: Error from RefreshEngine: %s", resp.ErrorMsg)
+		lg.Error("ReloadZone: error from RefreshEngine", "err", resp.ErrorMsg)
 		return fmt.Sprintf("zone %s: Error reloading: %s", zd.ZoneName, resp.ErrorMsg),
 			fmt.Errorf("zone %s: Error reloading: %v", zd.ZoneName, resp.ErrorMsg)
 	}
@@ -1309,7 +1426,7 @@ func (zd *ZoneData) DelegationData() (*DelegationData, error) {
 		// XXX: Note that it *is* possible to have an nsname that isn't present in the zone.
 		//      I.e. a broken config with an in-bailiwick NS w/o any address.
 		if owner == nil {
-			zd.Logger.Printf("Error: Zone %s has an in-bailiwick NS \"%s\" without any address RRs.", zd.ZoneName, nsname)
+			lg.Error("in-bailiwick NS without any address RRs", "zone", zd.ZoneName, "ns", nsname)
 			continue
 		}
 
@@ -1332,7 +1449,7 @@ func isValidIP(addr string) bool {
 	return ip != nil
 }
 
-func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, error) {
+func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string, nsNames []string) (*ZoneData, error) {
 	if zonename == "" {
 		return nil, fmt.Errorf("zonename cannot be empty")
 	}
@@ -1340,7 +1457,7 @@ func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string) (*ZoneData, er
 		return nil, fmt.Errorf("zonename must be fully qualified (end with dot)")
 	}
 
-	log.Printf("CreateAutoZone: Zone %s enter", zonename)
+	lg.Info("CreateAutoZone", "zone", zonename)
 
 	// Create a fake zone for the sidecar identity just to be able to
 	// to use to generate the TLSA.
@@ -1361,18 +1478,26 @@ $TTL 86400
 	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
 	zonedatastr = strings.ReplaceAll(zonedatastr, "{SERIAL}", currentTime)
 
-	// Add address records if addresses are provided
-	if len(addrs) > 0 {
-		log.Printf("CreateAutoZone: adding address records for: %v", addrs)
-		
+	// Explicit nameserver hostnames (no glue): use for NS RRset only
+	if len(nsNames) > 0 {
+		lg.Debug("CreateAutoZone: using configured nameservers (no glue)", "nameservers", nsNames)
+		nsLines := ""
+		for _, n := range nsNames {
+			nsLines += fmt.Sprintf("%s     IN NS  %s\n", zonename, dns.Fqdn(n))
+		}
+		zonedatastr = strings.ReplaceAll(zonedatastr, zonename+"     IN NS  invalid.\n", nsLines)
+	} else if len(addrs) > 0 {
+		// Add address records if addresses are provided (NS ns.{zone} + glue)
+		lg.Debug("CreateAutoZone: adding address records", "addrs", addrs)
+
 		// Update NS record to point to ns.{zonename} instead of invalid. when addresses are provided
 		// This ensures the NS and glue records use the same owner name (no orphaned records)
 		nsTarget := fmt.Sprintf("ns.%s", zonename)
 		zonedatastr = strings.ReplaceAll(zonedatastr, "invalid.", nsTarget)
-		
+
 		for _, addr := range addrs {
 			if !isValidIP(addr) {
-				log.Printf("CreateAutoZone: invalid IP address: %s", addr)
+				lg.Error("CreateAutoZone: invalid IP address", "addr", addr)
 				return nil, fmt.Errorf("invalid IP address: %s", addr)
 			}
 			if strings.Contains(addr, ":") {
@@ -1385,7 +1510,7 @@ $TTL 86400
 		}
 	}
 
-	log.Printf("CreateAutoZone: template zone data:\n%s\n", zonedatastr)
+	lg.Debug("CreateAutoZone: template zone data", "data", zonedatastr)
 
 	zd := &ZoneData{
 		ZoneName:  zonename,
@@ -1396,7 +1521,7 @@ $TTL 86400
 		KeyDB:     kdb,
 	}
 
-	log.Printf("CreateAutoZone: reading zone data for zone '%s'", zonename)
+	lg.Debug("CreateAutoZone: reading zone data", "zone", zonename)
 	_, _, err := zd.ReadZoneData(zonedatastr, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read zone data: %v", err)
@@ -1411,10 +1536,7 @@ $TTL 86400
 // Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
 func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
-	if Globals.Debug {
-		log.Printf("FindDnsEngineAddrs: dnsengine addresses: %v", conf.DnsEngine.Addresses)
-		// dump.P(tconf.DnsEngine)
-	}
+	lg.Debug("FindDnsEngineAddrs: dnsengine addresses", "addresses", conf.DnsEngine.Addresses)
 	for _, ns := range conf.DnsEngine.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {

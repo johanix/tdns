@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strings"
@@ -151,7 +152,8 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 						}
 
 						// Compare the computed DS with the DS record from the parent zone
-						if strings.EqualFold(computedDS.Digest, dsrr.Digest) {
+						// Use constant-time comparison to prevent timing side-channel attacks
+						if subtle.ConstantTimeCompare([]byte(strings.ToLower(computedDS.Digest)), []byte(strings.ToLower(dsrr.Digest))) == 1 {
 							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY matches DS record. Adding to TAStore.")
 
 							// Store the KSK in the DnskeyCache

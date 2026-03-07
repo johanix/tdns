@@ -13,13 +13,12 @@ import (
 	"strings"
 	"sync"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
 
 	// "github.com/gookit/goutil/dump"
-	core "github.com/johanix/tdns/v2/core"
 )
 
 const (
@@ -32,7 +31,7 @@ const (
 func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string) (uint32, error) {
 
 	if upstream == "" {
-		log.Fatalf("ZoneTransfer: upstream not set")
+		Fatal("ZoneTransfer: upstream not set")
 	}
 
 	msg := new(dns.Msg)
@@ -45,9 +44,9 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 
 	if zd.ZoneStore == MapZone || zd.ZoneStore == SliceZone {
 		// zd.Data = make(map[string]OwnerData, 30)
-		zd.Data = cmap.New[OwnerData]()
+		zd.Data = core.NewCmap[OwnerData]()
 	}
-	log.Printf("ZoneTransferIn: Zone %s ZoneStore: %s", zd.ZoneName, ZoneStoreToString[zd.ZoneStore])
+	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
 
 	transfer := new(dns.Transfer)
 	answerChan, err := transfer.In(msg, upstream)
@@ -223,13 +222,13 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 
 	total_sent := 0
 	count := 0
-	batchNum := 1 // Track batch number for debug output
-	estimatedSize := 0 // Running estimate of message size
+	batchNum := 1                // Track batch number for debug output
+	estimatedSize := 0           // Running estimate of message size
 	const maxMessageSize = 60000 // Practical limit we target (theoretical DNS max is 65536 bytes / 64K)
 	// We may overshoot maxMessageSize by up to ~1000 bytes in practice, but that's still safely below 65536
-	const safeMessageSize = 59000 // Conservative threshold to avoid "message too large" errors (leaves headroom for DNS header/overhead and compression variations)
-	const theoreticalMaxSize = 65536 // True theoretical maximum DNS message size (64K)
-	const checkSizeInterval = 50  // Check actual size every N RRs to verify estimate accuracy
+	const safeMessageSize = 59000        // Conservative threshold to avoid "message too large" errors (leaves headroom for DNS header/overhead and compression variations)
+	const theoreticalMaxSize = 65536     // True theoretical maximum DNS message size (64K)
+	const checkSizeInterval = 50         // Check actual size every N RRs to verify estimate accuracy
 	const accurateCheckThreshold = 55000 // When estimated size exceeds this, do accurate checks more frequently
 	// env := dns.Envelope{}
 	rrs := []dns.RR{soa}
@@ -290,7 +289,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrt := range owner.RRtypes.Keys() {
 				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
-				
+
 				// Estimate size of new RRs before adding
 				newRRSize := 0
 				for _, rr := range rrl.RRs {
@@ -299,10 +298,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				for _, sig := range rrl.RRSIGs {
 					newRRSize += estimateRRSize(sig)
 				}
-				
+
 				// Check if batch should be flushed before adding new RRs
 				maybeFlushBatch(bs, newRRSize, false)
-				
+
 				// Now add the RRset
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
@@ -312,7 +311,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 				estimatedSize += newRRSize
-				
+
 				// Periodic accurate check to verify estimate accuracy
 				maybeFlushBatch(bs, 0, true)
 			}
@@ -327,7 +326,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 			}
 			for _, rrt := range omap.RRtypes.Keys() {
 				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
-				
+
 				// Estimate size of new RRs before adding
 				newRRSize := 0
 				for _, rr := range rrl.RRs {
@@ -336,10 +335,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				for _, sig := range rrl.RRSIGs {
 					newRRSize += estimateRRSize(sig)
 				}
-				
+
 				// Check if batch should be flushed before adding new RRs
 				maybeFlushBatch(bs, newRRSize, false)
-				
+
 				// Now add the RRset
 				rrs = append(rrs, rrl.RRs...)
 				if Globals.Debug {
@@ -349,7 +348,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 				rrs = append(rrs, rrl.RRSIGs...)
 				count += len(rrl.RRSIGs)
 				estimatedSize += newRRSize
-				
+
 				// Periodic accurate check to verify estimate accuracy
 				maybeFlushBatch(bs, 0, true)
 			}
@@ -410,7 +409,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	switch zd.ZoneStore {
 	case MapZone, SliceZone:
-		zd.Data = cmap.New[OwnerData]()
+		zd.Data = core.NewCmap[OwnerData]()
 	default:
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
 	}
@@ -420,6 +419,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	firstSoaSeen := false
 	checkedForUnchanged := false
+	serialChanged := false // Track whether serial actually changed
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		if Globals.Debug {
@@ -439,7 +439,12 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 					zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
 					return false, soa.Serial, nil
 				}
-				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload.", zd.ZoneName)
+				// force=true: continue parsing to validate zone file, but serial didn't change
+				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload (validating zone file).", zd.ZoneName)
+				serialChanged = false
+			} else {
+				// Serial changed - this indicates an actual update
+				serialChanged = true
 			}
 		}
 	}
@@ -461,7 +466,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 	if len(soa_rrset.RRs) > 0 {
 		soa = soa_rrset.RRs[0].(*dns.SOA)
 	} else {
-		log.Printf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
+		lgDns.Error("ParseZoneFromReader: SOA error", "zone", zd.ZoneName, "soa_rrset", soa_rrset)
 		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: SOA: %v", zd.ZoneName, soa_rrset)
 	}
 
@@ -470,7 +475,10 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	zd.ComputeIndices()
 	zd.XfrType = "axfr"
-	return true, soa.Serial, nil
+	// Return true only if serial changed (indicates actual update)
+	// If force=true but serial unchanged, return false (validated but no update)
+	// This prevents unnecessary zone file writes on config reload when zone hasn't changed
+	return serialChanged, soa.Serial, nil
 }
 
 func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
@@ -582,7 +590,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		log.Printf("WriteZoneToFile: Error: failed to get zone apex %s: %v", zd.ZoneName, err)
+		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
@@ -723,7 +731,7 @@ func (zd *ZoneData) ComputeIndices() {
 		// zd.Data = nil
 		zd.Data.Clear()
 		// zd.OwnerIndex = map[string]int{}
-		zd.OwnerIndex = cmap.New[int]()
+		zd.OwnerIndex = core.NewCmap[int]()
 		for i, od := range zd.Owners {
 			// zd.OwnerIndex[od.Name] = i
 			zd.OwnerIndex.Set(od.Name, i)

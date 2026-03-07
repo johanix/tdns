@@ -8,12 +8,24 @@
 package hpke
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 
 	"github.com/cloudflare/circl/dh/x25519"
 	"github.com/cloudflare/circl/hpke"
 )
+
+// zeroKeyX25519 is a 32-byte all-zero key (identity element, provides no security)
+var zeroKeyX25519 [32]byte
+
+// rejectZeroKey checks if a key is all zeros and returns an error if so
+func rejectZeroKey(key []byte, keyType string) error {
+	if bytes.Equal(key, zeroKeyX25519[:]) {
+		return fmt.Errorf("rejected all-zero X25519 %s key", keyType)
+	}
+	return nil
+}
 
 // getHPKESuite returns the HPKE suite for X25519 + HKDF-SHA256 + AES-256-GCM
 func getHPKESuite() hpke.Suite {
@@ -28,6 +40,9 @@ func getHPKESuite() hpke.Suite {
 func Encrypt(recipientPubKey []byte, ephemeralPubKey []byte, plaintext []byte) (ciphertext []byte, ephemeralPub []byte, err error) {
 	if len(recipientPubKey) != 32 {
 		return nil, nil, fmt.Errorf("recipient public key must be 32 bytes (got %d)", len(recipientPubKey))
+	}
+	if err := rejectZeroKey(recipientPubKey, "public"); err != nil {
+		return nil, nil, err
 	}
 
 	// Get HPKE suite
@@ -100,6 +115,9 @@ func Encrypt(recipientPubKey []byte, ephemeralPubKey []byte, plaintext []byte) (
 func Decrypt(recipientPrivKey []byte, ephemeralPubKey []byte, ciphertext []byte) (plaintext []byte, err error) {
 	if len(recipientPrivKey) != 32 {
 		return nil, fmt.Errorf("recipient private key must be 32 bytes (got %d)", len(recipientPrivKey))
+	}
+	if err := rejectZeroKey(recipientPrivKey, "private"); err != nil {
+		return nil, err
 	}
 
 	// Get HPKE suite
@@ -216,6 +234,12 @@ func EncryptAuth(senderPrivKey []byte, recipientPubKey []byte, plaintext []byte)
 	if len(recipientPubKey) != 32 {
 		return nil, fmt.Errorf("recipient public key must be 32 bytes (got %d)", len(recipientPubKey))
 	}
+	if err := rejectZeroKey(recipientPubKey, "public"); err != nil {
+		return nil, err
+	}
+	if err := rejectZeroKey(senderPrivKey, "private"); err != nil {
+		return nil, err
+	}
 
 	// Get HPKE suite
 	suite := getHPKESuite()
@@ -282,6 +306,12 @@ func DecryptAuth(recipientPrivKey []byte, senderPubKey []byte, ciphertext []byte
 	}
 	if len(senderPubKey) != 32 {
 		return nil, fmt.Errorf("sender public key must be 32 bytes (got %d)", len(senderPubKey))
+	}
+	if err := rejectZeroKey(senderPubKey, "public"); err != nil {
+		return nil, err
+	}
+	if err := rejectZeroKey(recipientPrivKey, "private"); err != nil {
+		return nil, err
 	}
 
 	// Get HPKE suite

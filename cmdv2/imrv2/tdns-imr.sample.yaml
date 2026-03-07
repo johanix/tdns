@@ -1,0 +1,24 @@
+imrengine:
+   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
+   root-hints:          "/etc/tdns/root.hints"   # Optional: path to root hints file. If empty, uses compiled-in hints.
+   addresses:           [ 127.0.0.1:99, '[::1]:99']
+   transports:          [ do53, dot, doq ]
+   certfile:            /etc/hsync-test/certs/hoola.bandoola.crt
+   keyfile:             /etc/hsync-test/certs/hoola.bandoola.key
+   
+   # IMR Options (all are boolean flags, no values needed):
+   # - query-for-transport: Query for transport signals opportunistically when observed
+   # - always-query-for-transport: Always query for new auth servers
+   # - query-for-transport-tlsa: Query for TLSA records for encrypted transports
+   # - transport-signal-type: Specify "svcb" (default) or "tsync"
+   # Transport signal processing is always enabled - signals in Additional are automatically applied
+   options:
+      # - query-for-transport
+      # - always-query-for-transport
+      # - query-for-transport-tlsa
+
+log:
+   file:                /var/log/tdns/tdns-imr.log
+   level:               info    # default level: debug|info|warn|error
+
+

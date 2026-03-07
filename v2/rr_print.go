@@ -86,7 +86,10 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
 	}
 	p := strings.Fields(rr.String())
-	// rhp := strings.Fields(parts[1])
+	if len(p) < 8 {
+		fmt.Printf("PrintKeyRR: unexpected field count %d in %s %s (keyid=%d), need at least 8\n", len(p), rrtype, ktype, keyid)
+		return
+	}
 	namepad := strings.Repeat(" ", leftpad-len(p[0])-len(p[1]))
 	if len(namepad) < 1 {
 		namepad = " "
@@ -100,6 +103,16 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 		sigWidth = rightmargin - leftpad
 	}
 	keyparts := chunkString(p[7], sigWidth)
+
+	// Merge tiny trailing chunk (< sigWidth/3) back into previous chunk.
+	// This avoids e.g. a 4-char "k=" fragment for ED25519 keys.
+	if len(keyparts) > 1 {
+		last := keyparts[len(keyparts)-1]
+		if len(last) < sigWidth/3 {
+			keyparts[len(keyparts)-2] += last
+			keyparts = keyparts[:len(keyparts)-1]
+		}
+	}
 
 	fields = append(fields, "(")
 	fields = append(fields, keyparts...)
@@ -165,6 +178,29 @@ func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
 	}
 	sigParts := chunkString(p[12], sigWidth)
 	printFieldsWithWrap(spaces, sigParts, leftpad+1, rightmargin, " )")
+}
+
+func PrintJwkRR(rr dns.RR, leftpad, rightmargin int) {
+	if leftpad == 0 {
+		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
+	}
+	p := strings.Fields(rr.String())
+	if len(p) < 5 {
+		PrintGenericRR(rr, leftpad, rightmargin)
+		return
+	}
+	namepad := strings.Repeat(" ", leftpad-len(p[0])-len(p[1]))
+	if len(namepad) < 1 {
+		namepad = " "
+	}
+	// First line: name ttl IN JWK (, then fold the long quoted RDATA on continuation lines, then )
+	initial := fmt.Sprintf("%s%s%s %s %s (", p[0], namepad, p[1], p[2], p[3])
+	sigWidth := rightmargin - leftpad - 1
+	if sigWidth < 10 {
+		sigWidth = rightmargin - leftpad
+	}
+	jwkParts := chunkString(p[4], sigWidth)
+	printFieldsWithWrap(initial, jwkParts, leftpad+1, rightmargin, " )")
 }
 
 func PrintSvcbRR(rr dns.RR, leftpad, rightmargin int) {
@@ -309,6 +345,8 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 					switch rr.Header().Rrtype {
 					case core.TypeDELEG, dns.TypeSVCB:
 						PrintSvcbRR(rr, leftpad, rightmargin)
+					case core.TypeJWK:
+						PrintJwkRR(rr, leftpad, rightmargin)
 
 					default:
 						// fmt.Printf("This is a %s RR\n", dns.TypeToString[rr.Header().Rrtype])
@@ -516,6 +554,12 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 		PrintRrsigRR(rr, leftpad, rightmargin)
 	case *dns.SVCB:
 		PrintSvcbRR(rr, leftpad, rightmargin)
+	case *dns.PrivateRR:
+		if rr.Header().Rrtype == core.TypeJWK {
+			PrintJwkRR(rr, leftpad, rightmargin)
+		} else {
+			PrintGenericRR(rr, leftpad, rightmargin)
+		}
 	default:
 		PrintGenericRR(rr, leftpad, rightmargin)
 	}

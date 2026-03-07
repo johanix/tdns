@@ -8,16 +8,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/url"
 	"slices"
 	"time"
 
+	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
+
+var lgAgent = Logger("agent")
 
 func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	agent, exists := ar.S.Get(identity)
@@ -50,9 +52,50 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	return agents
 }
 
+// RecomputeSharedZonesAndSyncState updates an agent's shared zones and transitions between
+// OPERATIONAL and LEGACY states based on zone count.
+// This should be called after HSYNC changes to keep agent state synchronized with zone membership.
+func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	zoneCount := len(agent.Zones)
+	oldState := agent.State
+
+	// State transitions based on zone count
+	if zoneCount == 0 && (oldState == AgentStateOperational || oldState == AgentStateIntroduced) {
+		// Transition to LEGACY when zones go to zero
+		agent.State = AgentStateLegacy
+		agent.LastState = time.Now()
+		lgAgent.Info("agent transitioned to LEGACY (no shared zones)",
+			"agent", agent.Identity, "from", AgentStateToString[oldState])
+	} else if zoneCount > 0 && oldState == AgentStateLegacy {
+		// Transition back to OPERATIONAL when zones are re-added
+		agent.State = AgentStateOperational
+		agent.LastState = time.Now()
+		lgAgent.Info("agent transitioned LEGACY to OPERATIONAL",
+			"agent", agent.Identity, "zones", zoneCount)
+	}
+
+	// Sync zones to peer in PeerRegistry (updates cached SharedZones)
+	if ar.TransportManager != nil {
+		peer := ar.TransportManager.PeerRegistry.GetOrCreate(string(agent.Identity))
+
+		// Clear existing shared zones
+		peer.SharedZones = make(map[string]*transport.ZoneRelation)
+
+		// Re-add all zones from agent
+		for zone := range agent.Zones {
+			peer.AddSharedZone(string(zone), "", "")
+		}
+
+		lgAgent.Debug("synced zones to peer", "zones", zoneCount, "peer", agent.Identity)
+	}
+}
+
 func (conf *Config) NewAgentRegistry() *AgentRegistry {
 	if conf.Agent.Identity == "" {
-		log.Printf("NewAgentRegistry: error: identity is empty")
+		lgAgent.Error("identity is empty")
 		return nil
 	}
 
@@ -68,7 +111,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		// S:              cmap.New[*Agent](),
 		S:              core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:   make(map[ZoneName][]AgentId),
-		LocalAgent:     &conf.Agent,
+		LocalAgent:     conf.Agent,
 		LocateInterval: li,
 		helloContexts:  make(map[AgentId]context.CancelFunc),
 	}
@@ -97,12 +140,17 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 // }
 
 // LocateAgent is completely asynchronous with no return values
+//
+// DEPRECATED: This function has critical concurrency issues (see docs/locateagent-review-findings.md).
+// It will be replaced by the refactored discovery mechanism using common helpers from
+// agent_discovery_common.go. Keep this implementation for backward compatibility until
+// the migration is complete.
 func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
-	log.Printf("LocateAgent: looking up agent %s", remoteid)
+	lgAgent.Debug("looking up agent", "agent", remoteid)
 
 	// Skip if this is our own identity
 	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
-		log.Printf("LocateAgent: skipping self-identification for %s", remoteid)
+		lgAgent.Debug("skipping self-identification", "agent", remoteid)
 		return
 	}
 
@@ -119,7 +167,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 		return
 	}
 
-	log.Printf("LocateAgent: looking up agent %s for zone %s", remoteid, zonename)
+	lgAgent.Debug("looking up agent for zone", "agent", remoteid, "zone", zonename)
 
 	// Initialize agent if needed
 	agent = &Agent{
@@ -155,9 +203,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 		for {
 			// Do agent lookup
 			resolverAddress := viper.GetString("resolver.address")
-			if Globals.Debug {
-				log.Printf("LocateAgent: using debug resolver %s", resolverAddress)
-			}
+			lgAgent.Debug("using resolver", "address", resolverAddress)
 			resolvers := []string{resolverAddress}
 			timeout := 2 * time.Second
 			retries := 3
@@ -176,18 +222,18 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					qname := string("_https._tcp." + remoteid)
 					rrset, err := RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
 					if err != nil {
-						log.Printf("LocateAgent: error response to URI query for %s: %v", qname, err)
+						lgAgent.Error("URI query failed", "qname", qname, "err", err)
 						return
 					}
 
 					if rrset == nil {
-						log.Printf("LocateAgent: no URI record found for %s", qname)
+						lgAgent.Debug("no URI record found", "qname", qname)
 						return
 					}
 
 					for _, rr := range rrset.RRs {
 						if u, ok := rr.(*dns.URI); ok {
-							log.Printf("LocateAgent: URI record: %s", u.String())
+							lgAgent.Debug("URI record found", "record", u.String())
 							agent.mu.Lock()
 							agent.ApiDetails.UriRR = u
 							agent.ApiDetails.BaseUri = u.Target
@@ -206,18 +252,18 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					qname := string("_dns._tcp." + remoteid)
 					rrset, err := RecursiveDNSQueryWithServers(qname, dns.TypeURI, timeout, retries, resolvers)
 					if err != nil {
-						log.Printf("LocateAgent: error response to URI query for %s: %v", qname, err)
+						lgAgent.Error("URI query failed", "qname", qname, "err", err)
 						return
 					}
 
 					if rrset == nil {
-						log.Printf("LocateAgent: no URI record found for %s", qname)
+						lgAgent.Debug("no URI record found", "qname", qname)
 						return
 					}
 
 					for _, rr := range rrset.RRs {
 						if u, ok := rr.(*dns.URI); ok {
-							log.Printf("LocateAgent: URI record for %q:\n%s", agent.Identity, u.String())
+							lgAgent.Debug("URI record found", "agent", agent.Identity, "record", u.String())
 							agent.mu.Lock()
 							agent.DnsDetails.UriRR = u
 							agent.DnsDetails.BaseUri = u.Target
@@ -237,7 +283,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.ApiDetails.BaseUri, resolvers, timeout, retries)
 					if err != nil {
-						log.Printf("LocateAgent: error fetching SVCB for %s: %v", agent.ApiDetails.BaseUri, err)
+						lgAgent.Error("SVCB fetch failed", "baseuri", agent.ApiDetails.BaseUri, "err", err)
 						return
 					}
 
@@ -258,7 +304,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.DnsDetails.BaseUri, resolvers, timeout, retries)
 					if err != nil {
-						log.Printf("LocateAgent: error fetching SVCB for %s: %v", agent.DnsDetails.BaseUri, err)
+						lgAgent.Error("SVCB fetch failed", "baseuri", agent.DnsDetails.BaseUri, "err", err)
 						return
 					}
 
@@ -272,27 +318,29 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			}
 
 			// Only proceed with KEY if we have the target name
+			// TODO: Migrate to JWK lookup using lookupAgentJWK() from agent_discovery_common.go
+			// This is a legacy fallback mechanism - new code should use JWK records
 			agent.mu.RLock()
 			tmpnilkey := agent.DnsDetails.KeyRR == nil
 			tmphost := agent.DnsDetails.Host
 			agent.mu.RUnlock()
 			if tmpnilkey && tmphost != "" {
 				go func() {
-					// Look up KEY
+					// Look up KEY (legacy)
 					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tmphost), dns.TypeKEY, timeout, retries, resolvers)
 					if err != nil {
-						log.Printf("LocateAgent: error response to KEY query: %v", err)
+						lgAgent.Error("KEY query failed", "err", err)
 						return
 					}
 
 					if rrset == nil {
-						log.Printf("LocateAgent: no KEY record found for %s", tmphost)
+						lgAgent.Debug("no KEY record found", "host", tmphost)
 						return
 					}
 
 					for _, rr := range rrset.RRs {
 						if k, ok := rr.(*dns.KEY); ok {
-							log.Printf("LocateAgent: KEY record for %q:\n%s", agent.Identity, k.String())
+							lgAgent.Debug("KEY record found", "agent", agent.Identity, "record", k.String())
 							agent.mu.Lock()
 							agent.DnsDetails.KeyRR = k
 							agent.DnsMethod = true
@@ -314,18 +362,18 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					tlsaName := fmt.Sprintf("_%d._tcp.%s", tmpport, tmphost)
 					rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(tlsaName), dns.TypeTLSA, timeout, retries, resolvers)
 					if err != nil {
-						log.Printf("LocateAgent: error response to TLSA query: %v", err)
+						lgAgent.Error("TLSA query failed", "err", err)
 						return
 					}
 
 					if rrset == nil {
-						log.Printf("LocateAgent: no TLSA record found for %s", tlsaName)
+						lgAgent.Debug("no TLSA record found", "name", tlsaName)
 						return
 					}
 
 					for _, rr := range rrset.RRs {
 						if t, ok := rr.(*dns.TLSA); ok {
-							log.Printf("LocateAgent: TLSA record for %q:\n%s", agent.Identity, t.String())
+							lgAgent.Debug("TLSA record found", "agent", agent.Identity, "record", t.String())
 							agent.mu.Lock()
 							agent.ApiDetails.TlsaRR = t
 							agent.ApiMethod = true
@@ -342,14 +390,14 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				agent.ApiDetails.ContactInfo = "complete"
 				agent.ApiDetails.State = AgentStateKnown
 				agent.ApiMethod = true
-				log.Printf("LocateAgent: API transport details for remote agent %s are complete", remoteid)
+				lgAgent.Info("API transport details complete", "agent", remoteid)
 			}
 
 			if agent.DnsDetails.UriRR != nil && agent.DnsDetails.KeyRR != nil && len(agent.DnsDetails.Addrs) > 0 {
 				agent.DnsDetails.ContactInfo = "complete"
 				agent.DnsDetails.State = AgentStateKnown
 				agent.DnsMethod = true
-				log.Printf("LocateAgent: DNS transport details for remote agent %s are complete", remoteid)
+				lgAgent.Info("DNS transport details complete", "agent", remoteid)
 			}
 			agent.mu.Unlock()
 
@@ -365,18 +413,23 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 
 				err := agent.NewAgentSyncApiClient(ar.LocalAgent)
 				if err != nil {
-					log.Printf("LocateAgent: error creating API client for remote agent %s: %v", remoteid, err)
+					lgAgent.Error("failed to create API client", "agent", remoteid, "err", err)
 					agent.mu.Lock()
 					agent.State = AgentStateError
 					agent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
 					agent.LastState = time.Now()
 					agent.mu.Unlock()
+				} else if agent.Api != nil {
+					agent.Api.ApiClient.Debug = false // disable debug logging for API client
 				}
-				agent.Api.ApiClient.Debug = false // disable debug logging for API client
 
 				// Agent is now known, update and exit the loop
 				ar.S.Set(remoteid, agent)
-				log.Printf("LocateAgent: remote agent %s is now KNOWN, stopping retry loop", remoteid)
+				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
+
+				if ar.TransportManager != nil {
+					ar.TransportManager.OnAgentDiscoveryComplete(agent)
+				}
 
 				// If we're in known state and have a zone, try to send hello
 				if zonename != "" {
@@ -401,7 +454,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			} else {
 				// Agent is not yet known, update and sleep before retrying
 				ar.S.Set(remoteid, agent)
-				log.Printf("LocateAgent: remote agent %s is not operational, will retry in %d seconds", remoteid, ar.LocateInterval)
+				lgAgent.Debug("remote agent not operational, will retry", "agent", remoteid, "interval", ar.LocateInterval)
 				time.Sleep(time.Duration(ar.LocateInterval) * time.Second)
 				// Loop will continue
 			}
@@ -413,7 +466,7 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 	retries int) (*dns.SVCB, []string, uint16, string, error) {
 	parsedUri, err := url.Parse(baseurl)
 	if err != nil {
-		log.Printf("LocateAgent: failed to parse URI target %q: %v", baseurl, err)
+		lgAgent.Error("failed to parse URI target", "url", baseurl, "err", err)
 		return nil, nil, 0, "", err
 	}
 
@@ -424,13 +477,13 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 
 	rrset, err := RecursiveDNSQueryWithServers(dns.Fqdn(targetName), dns.TypeSVCB, timeout, retries, resolvers)
 	if err != nil {
-		log.Printf("LocateAgent: error response to SVCB query: %v", err)
+		lgAgent.Error("SVCB query failed", "err", err)
 		return nil, nil, 0, "", err
 	}
 
 	// Process SVCB response
 	if rrset == nil {
-		log.Printf("LocateAgent: response to %s SVCB contained zero RRs", targetName)
+		lgAgent.Warn("SVCB response contained zero RRs", "target", targetName)
 		return nil, nil, 0, "", fmt.Errorf("response to %s SVCB contained zero RRs", targetName)
 	}
 
@@ -444,7 +497,7 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 
 	for _, rr := range rrset.RRs {
 		if svcb, ok := rr.(*dns.SVCB); ok {
-			log.Printf("LocateAgent: SVCB record for %q:\n%s", targetName, svcb.String())
+			lgAgent.Debug("SVCB record found", "target", targetName, "record", svcb.String())
 			svcbrr = svcb
 			// Process SVCB record (addresses and port)
 			for _, kv := range svcb.Value {
@@ -467,6 +520,191 @@ func FetchSVCB(baseurl string, resolvers []string, timeout time.Duration,
 		}
 	}
 	return svcbrr, addrs, port, targetName, nil
+}
+
+// MarkAgentAsNeeded creates a placeholder agent in NEEDED state.
+// The agent will be discovered asynchronously by DiscoveryRetrierNG in HsyncEngine.
+// This is the new recommended pattern for agent discovery triggered by HSYNC updates.
+//
+// Parameters:
+//   - remoteid: The agent identity to mark as needed
+//   - zonename: Optional zone name to associate with the agent
+//   - deferredTask: Optional task to execute when agent becomes OPERATIONAL
+func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
+	// Skip self-identification
+	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
+		lgAgent.Debug("skipping self-identification", "agent", remoteid)
+		return
+	}
+
+	// Check if agent already exists
+	agent, exists := ar.S.Get(remoteid)
+	if exists {
+		// Already discovered - just associate zone
+		if zonename != "" {
+			ar.AddZoneToAgent(remoteid, zonename)
+		}
+		if deferredTask != nil {
+			agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
+			ar.S.Set(remoteid, agent)
+		}
+		lgAgent.Debug("agent already exists", "agent", remoteid,
+			"apiState", AgentStateToString[agent.ApiDetails.State],
+			"dnsState", AgentStateToString[agent.DnsDetails.State])
+		return
+	}
+
+	// Create placeholder agent in NEEDED state
+	agent = &Agent{
+		Identity:   remoteid,
+		ApiDetails: &AgentDetails{State: AgentStateNeeded},
+		DnsDetails: &AgentDetails{State: AgentStateNeeded},
+		Zones:      make(map[ZoneName]bool),
+		State:      AgentStateNeeded,
+		LastState:  time.Now(),
+	}
+
+	// Mark both transports as needing discovery (will be refined during discovery)
+	agent.ApiMethod = true
+	agent.DnsMethod = true
+
+	if zonename != "" {
+		agent.Zones[zonename] = true
+	}
+
+	if deferredTask != nil {
+		agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
+	}
+
+	ar.S.Set(remoteid, agent)
+	lgAgent.Info("marked agent as NEEDED", "agent", remoteid, "zone", zonename)
+
+	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
+	if imr := Conf.Internal.ImrEngine; imr != nil {
+		lgAgent.Debug("triggering immediate discovery", "agent", remoteid)
+		go ar.attemptDiscovery(agent, imr, true, true)
+	} else {
+		lgAgent.Debug("IMR not ready, will be discovered by DiscoveryRetrierNG", "agent", remoteid)
+	}
+}
+
+// attemptDiscovery performs a single discovery attempt for an agent.
+// Called by DiscoveryRetrierNG for agents in NEEDED state.
+// discoverAPI and discoverDNS control which transports are discovered,
+// avoiding wasteful DNS lookups for transports already past NEEDED.
+// On success, transitions agent from NEEDED → KNOWN and starts HelloRetrierNG.
+// On failure, agent remains in NEEDED state for retry next interval.
+func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, discoverDNS bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	lgAgent.Debug("attempting discovery", "agent", agent.Identity, "api", discoverAPI, "dns", discoverDNS)
+
+	result := &AgentDiscoveryResult{Identity: string(agent.Identity)}
+
+	if discoverAPI {
+		DiscoverAgentAPI(ctx, imr, string(agent.Identity), result)
+	}
+	if discoverDNS {
+		DiscoverAgentDNS(ctx, imr, string(agent.Identity), result)
+	}
+
+	// Check if we got anything useful from the transports we discovered
+	if result.APIUri == "" && result.DNSUri == "" {
+		agent.mu.Lock()
+		agent.ApiDetails.LatestError = "no contact endpoints found"
+		agent.ApiDetails.LatestErrorTime = time.Now()
+		agent.mu.Unlock()
+		lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found")
+		return
+	}
+
+	// Register discovered agent
+	if ar.TransportManager != nil {
+		err := ar.TransportManager.RegisterDiscoveredAgent(result)
+		if err != nil {
+			agent.mu.Lock()
+			agent.ApiDetails.LatestError = err.Error()
+			agent.ApiDetails.LatestErrorTime = time.Now()
+			agent.mu.Unlock()
+			lgAgent.Warn("registration failed, will retry", "agent", agent.Identity, "err", err)
+			return
+		}
+	}
+
+	// SUCCESS: Discovery complete. Contact info updated.
+	lgAgent.Info("discovery successful", "agent", agent.Identity,
+		"apiState", AgentStateToString[agent.ApiDetails.State],
+		"dnsState", AgentStateToString[agent.DnsDetails.State])
+
+	// Two-stage check:
+	// 1. Did discovery produce any useful result? (any transport at KNOWN or beyond)
+	// 2. Does any transport actually need Hello? (exactly at KNOWN state)
+	//
+	// On re-discovery, a transport may already be OPERATIONAL (preserved by
+	// RegisterDiscoveredAgent). That's fine — it means Hello already succeeded.
+	// We only start HelloRetrierNG if a transport is exactly at KNOWN.
+	agent.mu.RLock()
+	apiUseful := agent.ApiMethod && agent.ApiDetails.State >= AgentStateKnown
+	dnsUseful := agent.DnsMethod && agent.DnsDetails.State >= AgentStateKnown
+	apiNeedsHello := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
+	dnsNeedsHello := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
+	agent.mu.RUnlock()
+
+	if !apiUseful && !dnsUseful {
+		lgAgent.Debug("no transports at KNOWN or beyond, skipping HelloRetrierNG", "agent", agent.Identity)
+		return
+	}
+
+	if !apiNeedsHello && !dnsNeedsHello {
+		lgAgent.Debug("already past KNOWN state, no Hello needed", "agent", agent.Identity,
+			"apiState", AgentStateToString[agent.ApiDetails.State],
+			"dnsState", AgentStateToString[agent.DnsDetails.State])
+		return
+	}
+
+	// Cancel any existing HelloRetrierNG for this agent before starting a new one
+	ar.mu.Lock()
+	if existingCancel, exists := ar.helloContexts[agent.Identity]; exists {
+		lgAgent.Debug("cancelling existing Hello retry loop", "agent", agent.Identity)
+		existingCancel()
+	}
+	ar.mu.Unlock()
+
+	helloCtx, helloCancel := context.WithCancel(context.Background())
+	ar.mu.Lock()
+	ar.helloContexts[agent.Identity] = helloCancel
+	ar.mu.Unlock()
+	go ar.HelloRetrierNG(helloCtx, agent)
+	lgAgent.Debug("started Hello retry loop", "agent", agent.Identity)
+}
+
+// DiscoverAgentAsync marks an agent as NEEDED for discovery by DiscoveryRetrierNG.
+//
+// DEPRECATED: This function is now a thin wrapper around MarkAgentAsNeeded() for backward compatibility.
+// New code should call MarkAgentAsNeeded() directly instead.
+//
+// The old immediate discovery behavior has been replaced with a retry-based approach:
+// - Agents are marked as NEEDED
+// - DiscoveryRetrierNG continuously retries discovery until success
+// - Eliminates IMR race conditions and handles transient failures
+// - Provides infinite retry with backoff (consistent with Hello/Beat mechanisms)
+//
+// Parameters:
+//   - remoteid: The agent identity to discover
+//   - zonename: Optional zone name to associate with the agent
+//   - deferredTask: Optional task to execute when agent becomes operational
+func (ar *AgentRegistry) DiscoverAgentAsync(remoteid AgentId, zonename ZoneName, deferredTask *DeferredAgentTask) {
+	lgAgent.Debug("deprecated wrapper, marking agent as NEEDED", "agent", remoteid)
+
+	// Skip if this is our own identity
+	if ar.LocalAgent.Identity != "" && string(remoteid) == ar.LocalAgent.Identity {
+		lgAgent.Debug("skipping self-identification", "agent", remoteid)
+		return
+	}
+
+	// Delegate to new unified discovery path
+	ar.MarkAgentAsNeeded(remoteid, zonename, deferredTask)
 }
 
 // Create a new synchronous function for code that needs immediate results
@@ -502,7 +740,7 @@ func (ar *AgentRegistry) xxxIdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([
 					continue
 				}
 				// Found another agent, try to locate it
-				ar.LocateAgent(AgentId(hsync.Identity), "", nil)
+				ar.DiscoverAgentAsync(AgentId(hsync.Identity), "", nil)
 			}
 		}
 	}
@@ -569,23 +807,23 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	ar.mu.RLock()
 	defer ar.mu.RUnlock()
-	log.Printf("GetZoneAgentData: zone %s has %d remote agents", zonename, len(ar.RemoteAgents[zonename]))
+	lgAgent.Debug("getting zone agent data", "zone", zonename, "remoteAgents", len(ar.RemoteAgents[zonename]))
 
 	zd, exists := Zones.Get(string(zonename))
 	if !exists {
-		log.Printf("GetZoneAgentData: zone %q is unknown", zonename)
+		lgAgent.Warn("zone is unknown", "zone", zonename)
 		return nil, fmt.Errorf("zone %q is unknown", zonename)
 	}
 
 	apex, err := zd.GetOwner(string(zonename))
 	if err != nil {
-		log.Printf("GetZoneAgentData: error getting apex for zone %q: %v", zonename, err)
+		lgAgent.Error("error getting apex", "zone", zonename, "err", err)
 		return nil, fmt.Errorf("error getting apex for zone %q: %v", zonename, err)
 	}
 
 	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC)
 	if len(hsyncRRset.RRs) == 0 {
-		log.Printf("GetZoneAgentData: zone %q has no HSYNC RRset", zonename)
+		lgAgent.Warn("zone has no HSYNC RRset", "zone", zonename)
 		return nil, fmt.Errorf("zone %q has no HSYNC RRset", zonename)
 	}
 
@@ -632,7 +870,7 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	// 3. For any agent that no longer shares zones with us:
 	//    - Send GOODBYE message
 	//    - Remove from registry
-	log.Printf("TODO: Implement cleanup for zone %s", zonename)
+	lgAgent.Warn("TODO: cleanup not yet implemented", "zone", zonename)
 }
 
 // UpdateAgents updates the registry based on the HSYNC records in the request. It has been
@@ -642,24 +880,46 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 // "change" (i.e. the same identity, but now roles). ADD+REMOVE doesn't deal with that.
 func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate) error {
 
-	var updatedIdentities = map[AgentId]bool{}
+	var updatedIdentities = map[AgentId]bool{}  // Tracks modified agents (both add and remove)
+	var affectedIdentities = map[AgentId]bool{} // Tracks ALL agents that need zone recomputation
+
+	// First pass: Check if WE are in this zone's HSYNC RRset
+	// Only process remote agents if we're also involved in this zone
+	weAreInHSYNC := false
+	for _, rr := range req.SyncStatus.HsyncAdds {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if hsync, ok := prr.Data.(*core.HSYNC); ok {
+				if AgentId(hsync.Identity) == ourId || AgentId(hsync.Upstream) == ourId {
+					weAreInHSYNC = true
+					break
+				}
+			}
+		}
+	}
+
+	if !weAreInHSYNC {
+		lgAgent.Debug("we are not in HSYNC RRset, ignoring remote agents", "zone", zonename)
+		return nil
+	}
+
 	// Handle new HSYNC records
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				log.Printf("UpdateAgents: Zone %s: analysing HSYNC: %q", zonename, hsync.String())
+				lgAgent.Debug("analysing HSYNC", "zone", zonename, "hsync", hsync.String())
 
 				updatedIdentities[AgentId(hsync.Identity)] = true
+				affectedIdentities[AgentId(hsync.Identity)] = true
 				if AgentId(hsync.Identity) == ourId {
 					// We're the Target
 					if hsync.Upstream == "." {
 						// Special case: no upstream to sync with
-						log.Printf("UpdateAgents: Zone %s: we are target but upstream is '.', no sync needed", zonename)
+						lgAgent.Debug("we are target but upstream is '.', no sync needed", "zone", zonename)
 						continue
 					}
 
-					// Need to sync with Upstream - do this asynchronously
-					ar.LocateAgent(AgentId(hsync.Upstream), zonename,
+					// Need to sync with Upstream - mark as needed for discovery
+					ar.MarkAgentAsNeeded(AgentId(hsync.Upstream), zonename,
 						&DeferredAgentTask{
 							Precondition: func() bool {
 								if agent, exists := ar.S.Get(AgentId(hsync.Upstream)); exists {
@@ -668,7 +928,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 								return false
 							},
 							Action: func() (bool, error) {
-								log.Printf("UpdateAgents: Executing deferred action (waited for agent %q to be operational): Zone %q: sending RFI for upstream data from %q", hsync.Upstream, zonename, hsync.Upstream)
+								lgAgent.Info("executing deferred RFI for upstream data", "upstream", hsync.Upstream, "zone", zonename)
 								amp := AgentMgmtPost{
 									MessageType: AgentMsgRfi,
 									RfiType:     "UPSTREAM",
@@ -682,8 +942,8 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync.Upstream),
 						})
 				} else if AgentId(hsync.Upstream) == ourId {
-					// Need to sync with Upstream - do this asynchronously
-					ar.LocateAgent(AgentId(hsync.Identity), zonename,
+					// Need to sync with downstream agents - mark as needed for discovery
+					ar.MarkAgentAsNeeded(AgentId(hsync.Identity), zonename,
 						&DeferredAgentTask{
 							// XXX: This is not complete, as there is no check for the Precondition
 							// XXX: some sort of periodic check is needed to ensure that the agent is still
@@ -695,7 +955,7 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 								return false
 							},
 							Action: func() (bool, error) {
-								log.Printf("UpdateAgents: Executing deferred action (waited for agent %q to be operational): Zone %q: sending RFI for downstream data from %q", hsync.Identity, zonename, hsync.Identity)
+								lgAgent.Info("executing deferred RFI for downstream data", "downstream", hsync.Identity, "zone", zonename)
 								amp := AgentMgmtPost{
 									MessageType: AgentMsgRfi,
 									RfiType:     "DOWNSTREAM",
@@ -710,9 +970,9 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 						})
 
 				} else {
-					log.Printf("UpdateAgents: Zone %s: HSYNC is for a remote agent, %q, analysing", zonename, hsync.Identity)
-					// Not our target, locate agent asynchronously
-					ar.LocateAgent(AgentId(hsync.Identity), zonename, nil)
+					lgAgent.Debug("HSYNC is for a remote agent, analysing", "zone", zonename, "agent", hsync.Identity)
+					// Not our target, mark as needed for discovery
+					ar.MarkAgentAsNeeded(AgentId(hsync.Identity), zonename, nil)
 				}
 			}
 		}
@@ -722,24 +982,34 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	for _, rr := range req.SyncStatus.HsyncRemoves {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync, ok := prr.Data.(*core.HSYNC); ok {
+				affectedIdentities[AgentId(hsync.Identity)] = true
 				if updatedIdentities[AgentId(hsync.Identity)] {
 					// Don't remove an agent that's still in the HSYNC RRset; it has only changed
-					log.Printf("UpdateAgents: Zone %q: not removing agent %q, HSYNC RR changed", zonename, hsync.Identity)
+					lgAgent.Debug("not removing agent, HSYNC RR changed", "zone", zonename, "agent", hsync.Identity)
 					continue
 				}
 				if AgentId(hsync.Identity) == ourId {
 					// We're no longer involved in this zone's management
-					log.Printf("UpdateAgents: Zone %q: we (%q) are no longer part of the HSYNC RRset, cleaning up", zonename, hsync.Identity)
+					lgAgent.Info("we are no longer part of the HSYNC RRset, cleaning up", "zone", zonename, "identity", hsync.Identity)
 					ar.CleanupZoneRelationships(zonename)
 				} else {
 					// Remote agent was removed, update registry
-					log.Printf("UpdateAgents: Zone %q: agent %q is no longer part of HSYNC RRset, cleaning up", zonename, hsync.Identity)
+					lgAgent.Info("agent no longer in HSYNC RRset, cleaning up", "zone", zonename, "agent", hsync.Identity)
 					if agent, exists := ar.S.Get(AgentId(hsync.Identity)); exists {
+						agent.mu.Lock()
 						delete(agent.Zones, zonename)
+						agent.mu.Unlock()
 						ar.RemoveRemoteAgent(zonename, AgentId(hsync.Identity))
 					}
 				}
 			}
+		}
+	}
+
+	// Recompute shared zones for all affected agents and handle OPERATIONAL ↔ LEGACY transitions
+	for identity := range affectedIdentities {
+		if agent, exists := ar.S.Get(identity); exists && identity != ourId {
+			ar.RecomputeSharedZonesAndSyncState(agent)
 		}
 	}
 
@@ -768,7 +1038,7 @@ func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
 			return agent.State == AgentStateOperational
 		},
 		Action: func() (bool, error) {
-			log.Printf("CreateAgentUpstreamRFI: Sending RFI to upstream agent %q (NYI)", agent.Identity)
+			lgAgent.Info("sending RFI to upstream agent (NYI)", "agent", agent.Identity)
 			return true, nil
 		},
 	}
@@ -798,6 +1068,6 @@ func (agent *Agent) MarshalJSON() ([]byte, error) {
 		ErrorMsg:    agent.ErrorMsg,
 	}
 
-	log.Printf("Using local agent.MarshalJSON() function for agent %q: %+v", agent.Identity, aj)
+	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.Identity)
 	return json.Marshal(aj)
 }

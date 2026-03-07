@@ -1,46 +1,28 @@
 .PHONY: v1 all v2 clean install
 
+# production version of major apps
 v1:
-	$(MAKE) -C ./auth/
-	$(MAKE) -C ./cli/
-	$(MAKE) -C ./agent/
-	$(MAKE) -C ./combiner/
-	$(MAKE) -C ./imr/
-	$(MAKE) -C ./dog/
+	$(MAKE) -C ./cmd/ v1
 
+# experimental version of major apps
 v2:
-	$(MAKE) -C ./authv2/
-	$(MAKE) -C ./cliv2/
-	$(MAKE) -C ./imrv2/
-	$(MAKE) -C ./dogv2/
+	$(MAKE) -C ./cmdv2/ v2
 
+# both versions of major apps + some minor apps
 all:	v1 v2
-	$(MAKE) -C ./reporter/
-	$(MAKE) -C ./scanner/
-#	$(MAKE) -C ./msa/
-#	$(MAKE) -C ./sidecar-cli/
+	$(MAKE) -C ./cmd/ all
+#	$(MAKE) -C ./obe/msa/
+#	$(MAKE) -C ./obe/sidecar-cli/
 
 clean:
-	$(MAKE) -C ./auth/ clean
-	$(MAKE) -C ./cli/ clean
-	$(MAKE) -C ./agent/ clean
-	$(MAKE) -C ./dog/ clean
-	$(MAKE) -C ./combiner/ clean
-	$(MAKE) -C ./imr/ clean
-	$(MAKE) -C ./reporter/ clean
-	$(MAKE) -C ./scanner/ clean
+	$(MAKE) -C ./cmd/ clean
+	$(MAKE) -C ./cmdv2/ clean
 #	$(MAKE) -C ./msa/ clean
 #	$(MAKE) -C ./sidecar-cli/ clean
 
 install:
-	$(MAKE) -C ./auth/ install
-	$(MAKE) -C ./cli/ install
-	$(MAKE) -C ./agent/ install
-	$(MAKE) -C ./dog/ install
-	$(MAKE) -C ./combiner/ install
-	$(MAKE) -C ./imr/ install
-	$(MAKE) -C ./reporter/ install
-	$(MAKE) -C ./scanner/ install
+	$(MAKE) -C ./cmd/ install
+	$(MAKE) -C ./cmdv2/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install
 

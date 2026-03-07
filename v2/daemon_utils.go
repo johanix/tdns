@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,27 +18,6 @@ import (
 
 	"github.com/spf13/viper"
 )
-
-func xxxShellExec(cmdline string) (string, error) {
-	args := strings.Fields(cmdline)
-	if Globals.Verbose {
-		fmt.Printf("ShellExec cmd: '%s'\n", cmdline)
-	}
-
-	cmd := exec.Command(args[0], args[1:]...)
-	out, err := cmd.CombinedOutput()
-	if len(out) > 1 {
-		out = out[:len(out)-1] // chop of trailing newline
-	}
-	if err != nil {
-		fmt.Printf("ShellExec of cmd '%s' failed. Error: %v\nOutput: %s\n", cmd, err, string(out))
-		return fmt.Sprintf("shell exec of cmd '%s' failed. Error: %v", cmd, err), err
-	}
-	if Globals.Debug {
-		fmt.Printf("ShellExec output: '%s'\n", string(out))
-	}
-	return string(out), nil
-}
 
 func (api *ApiClient) StopDaemon() {
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
@@ -67,13 +45,14 @@ func (api *ApiClient) StopDaemon() {
 // for errors.
 // command is an optional parameter specifying the daemon binary path.
 // If empty, it falls back to viper.GetString("common.command") for backward compatibility.
-func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
+// daemonFlags are additional command-line flags to pass to the daemon (e.g., --config, --debug, -v)
+func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemonFlags []string) {
 	if maxwait == 0 {
 		maxwait = 5
 	}
 
 	if Globals.Debug {
-		fmt.Printf("StartDaemon: maxwait: %d, slurp: %t, command: %q\n", maxwait, slurp, command)
+		fmt.Printf("StartDaemon: maxwait: %d, slurp: %t, command: %q, flags: %v\n", maxwait, slurp, command, daemonFlags)
 	}
 
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
@@ -99,23 +78,28 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string) {
 			var stderr, stdout io.Reader
 			age := time.Since(fi.ModTime()).Round(time.Second)
 			fmt.Printf("Daemon binary %q found (%v old)\n", daemonbinary, age)
-			cmd := exec.Command(daemonbinary)
+
+			// Build command with flags
+			if len(daemonFlags) > 0 {
+				fmt.Printf("Passing flags to daemon: %v\n", daemonFlags)
+			}
+			cmd := exec.Command(daemonbinary, daemonFlags...)
 
 			if slurp {
 				stderr, err = cmd.StderrPipe()
 				if err != nil {
-					log.Fatalf("StartDaemon: Error from cmd.StderrPipe(): %v", err)
+					Fatal("error from cmd.StderrPipe()", "err", err)
 				}
 
 				stdout, err = cmd.StdoutPipe()
 				if err != nil {
-					log.Fatalf("StartDaemon: Error from cmd.StdoutPipe(): %v", err)
+					Fatal("error from cmd.StdoutPipe()", "err", err)
 				}
 			}
 
 			err2 := cmd.Start()
 			if err2 != nil {
-				log.Fatalf("StartDaemon: Error from cmd.Start(): %v", err2)
+				Fatal("error from cmd.Start()", "err", err2)
 			}
 
 			to_ticker := time.NewTicker(time.Duration(maxwait) * time.Second)
@@ -215,8 +199,8 @@ func (api *ApiClient) UpdateDaemon(data CommandPost, dieOnError bool) (int, Comm
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		log.Printf("Error parsing JSON for CommandResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal CommandResponse: %v\n", err)
+		lgConfig.Error("error parsing JSON for CommandResponse", "raw", string(buf))
+		Fatal("error from unmarshal CommandResponse", "err", err)
 	}
 	return status, cr, err
 }
@@ -235,8 +219,8 @@ func (api *ApiClient) SendPing(pingcount int, dieOnError bool) (PingResponse, er
 	var pr PingResponse
 	err = json.Unmarshal(buf, &pr)
 	if err != nil {
-		log.Printf("Error parsing JSON for PingResponse: %s", string(buf))
-		log.Fatalf("Error from json.Unmarshal PingResponse: %v\n", err)
+		lgConfig.Error("error parsing JSON for PingResponse", "raw", string(buf))
+		Fatal("error from json.Unmarshal PingResponse", "err", err)
 	}
 	return pr, nil
 }
@@ -307,8 +291,8 @@ func (api *ApiClient) ShowApi() {
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		log.Printf("Error parsing JSON for CommandResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal CommandResponse: %v\n", err)
+		lgConfig.Error("error parsing JSON for CommandResponse", "raw", string(buf))
+		Fatal("error from unmarshal CommandResponse", "err", err)
 	}
 
 	for _, ep := range cr.ApiEndpoints {
@@ -358,6 +342,11 @@ func CopyFile(src, dst string) (int64, error) {
 	err = os.Rename(dst+".tmp", dst)
 	if err != nil {
 		return 0, err
+	}
+
+	// Preserve the source file's permissions (especially execute bit for binaries)
+	if err := os.Chmod(dst, sourceFileStat.Mode()); err != nil {
+		return nBytes, fmt.Errorf("copied file but failed to set permissions: %w", err)
 	}
 
 	return nBytes, err

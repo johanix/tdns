@@ -64,7 +64,7 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 				// Extract ER option (domain name in DNS wire format)
 				if len(localOpt.Data) > 0 {
 					domain, _, err := dns.UnpackDomainName(localOpt.Data, 0)
-					if err == nil && domain != "" {
+					if err == nil && domain != "" && len(domain) <= 255 {
 						msgoptions.ErAgentDomain = domain
 						msgoptions.HasEROption = true
 					}

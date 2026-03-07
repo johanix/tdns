@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -17,9 +16,7 @@ import (
 // baseurl: https://{TARGET}/api/v1
 // port: 443
 func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) error {
-	if Globals.Debug {
-		log.Printf("PublishUriRR: received request to publish URI record for %q, baseurl: %q, port: %d", target, baseurl, port)
-	}
+	lgHandler.Debug("PublishUriRR: received request to publish URI record", "target", target, "baseurl", baseurl, "port", port)
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishUriRR: KeyDB.UpdateQ is nil")
 	}
@@ -57,7 +54,7 @@ func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) err
 		Ttl:    7200,
 	}
 
-	log.Printf("PublishUriRR: publishing URI RR: %s", uri.String())
+	lgHandler.Info("PublishUriRR: publishing URI RR", "rr", uri.String())
 
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{
@@ -81,6 +78,10 @@ func (zd *ZoneData) UnpublishUriRR(owner, target string) error {
 	if _, ok := dns.IsDomainName(target); !ok {
 		return fmt.Errorf("target must be a valid domain name")
 	}
+
+	// Ensure owner is FQDN
+	owner = dns.Fqdn(owner)
+
 	if !strings.HasSuffix(owner, zd.ZoneName) {
 		return fmt.Errorf("owner must be a subdomain of the zone name")
 	}

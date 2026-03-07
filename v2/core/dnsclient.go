@@ -248,8 +248,8 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string, debug bool) (*dns.M
 		return nil, 0, fmt.Errorf("HTTP request failed with status: %s", resp.Status)
 	}
 
-	// Read response
-	body, err := io.ReadAll(resp.Body)
+	// Read response (DNS messages cannot exceed 65535 bytes)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 65535))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read HTTP response: %v", err)
 	}
@@ -313,12 +313,19 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 		return nil, 0, fmt.Errorf("failed to read response length: %v", err)
 	}
 	respLen := binary.BigEndian.Uint16(lenBuf)
+	if respLen == 0 {
+		return nil, 0, fmt.Errorf("DoQ response length is zero")
+	}
 
 	// Read the response
 	respBuf := make([]byte, respLen)
-	if _, err := io.ReadFull(stream, respBuf); err != nil {
+	n, err := io.ReadFull(stream, respBuf)
+	if err != nil {
 		log.Printf("*** DoQ failed to read response: %v", err)
 		return nil, 0, fmt.Errorf("failed to read response: %v", err)
+	}
+	if n != int(respLen) {
+		return nil, 0, fmt.Errorf("DoQ response length mismatch: expected %d, got %d", respLen, n)
 	}
 
 	if debug {

@@ -13,7 +13,6 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type ZoneStore uint8
@@ -48,9 +47,14 @@ const (
 	Sig0StateActive      string = "active"
 	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
+	DnskeyStateMpdist    string = "mpdist"   // multi-provider distribution: awaiting confirmation from all providers
+	DnskeyStateMpremove  string = "mpremove" // multi-provider removal: awaiting confirmation from all providers
 	DnskeyStatePublished string = "published"
+	DnskeyStateStandby   string = "standby"
 	DnskeyStateActive    string = "active"
 	DnskeyStateRetired   string = "retired"
+	DnskeyStateRemoved   string = "removed"
+	DnskeyStateForeign   string = "foreign"
 )
 
 type ZoneData struct {
@@ -59,17 +63,28 @@ type ZoneData struct {
 	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
 	Owners     Owners
-	OwnerIndex cmap.ConcurrentMap[string, int]
+	OwnerIndex *core.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
-	Data         cmap.ConcurrentMap[string, OwnerData]
-	CombinerData *cmap.ConcurrentMap[string, OwnerData]
-	Ready        bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType      string // axfr | ixfr
-	Logger       *log.Logger
+	Data         *core.ConcurrentMap[string, OwnerData]
+	CombinerData *core.ConcurrentMap[string, OwnerData]
+	UpstreamData *core.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
+	// AgentContributions stores per-agent contributions for the combiner.
+	// Key: agentID (e.g. "agent.alpha.dnslab."), Value: map[owner]map[rrtype]core.RRset
+	// When merging, all agents' contributions for the same owner/rrtype are combined
+	// into a single RRset in CombinerData.
+	AgentContributions map[string]map[string]map[uint16]core.RRset
+	// PersistContributions is set by the combiner at init time to persist an agent's
+	// contributions to the snapshot table after every write. Non-combiner apps leave it nil.
+	// Args: zone, senderID, agent's contributions (owner → rrtype → RRset).
+	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
+	Ready                bool   // true if zd.Data has been populated (from file or upstream)
+	XfrType              string // axfr | ixfr
+	Logger               *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping
+	FirstZoneLoad      bool   // true until first zone data has been loaded
 	Verbose            bool
 	Debug              bool
 	IxfrChain          []Ixfr
@@ -98,25 +113,119 @@ type ZoneData struct {
 	SourceCatalog      string      // if auto-configured, which catalog zone created this zone
 	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
 	AddTransportSignal bool        // whether to attach TransportSignal in responses
+	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
+	// These are DNSKEYs found in the incoming zone that do not match keys in our
+	// local keystore. They are preserved across resignings and merged into the
+	// DNSKEY RRset during PublishDnskeyRRs().
+	RemoteDNSKEYs []dns.RR
+
+	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
+	// Used for diagnostics (CLI show-key-inventory command).
+	LastKeyInventory *KeyInventorySnapshot
+
+	// LocalDNSKEYs holds DNSKEY RRs that the signer classifies as local (not foreign).
+	// Derived from KEYSTATE inventory. Used to compute adds/removes on DNSKEY updates.
+	LocalDNSKEYs []dns.RR
+
+	// KEYSTATE health tracking — we depend on KEYSTATE for DNSKEY classification.
+	// Failure is an error condition that must be visible to the operator.
+	KeystateOK    bool      // true after successful KEYSTATE exchange
+	KeystateError string    // error message from last failed attempt (empty on success)
+	KeystateTime  time.Time // time of last KEYSTATE attempt
+
+	// OnFirstLoad holds one-shot callbacks executed after the zone's first successful load.
+	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
+	// after executing them. Protected by zd.mu.
+	OnFirstLoad []func(*ZoneData)
+}
+
+// Thread-safe accessors for fields accessed from multiple goroutines.
+
+func (zd *ZoneData) GetLastKeyInventory() *KeyInventorySnapshot {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.LastKeyInventory
+}
+
+func (zd *ZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.LastKeyInventory = inv
+}
+
+func (zd *ZoneData) GetKeystateOK() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.KeystateOK
+}
+
+func (zd *ZoneData) SetKeystateOK(ok bool) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.KeystateOK = ok
+}
+
+func (zd *ZoneData) GetKeystateError() string {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.KeystateError
+}
+
+func (zd *ZoneData) SetKeystateError(err string) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.KeystateError = err
+}
+
+func (zd *ZoneData) GetKeystateTime() time.Time {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.KeystateTime
+}
+
+func (zd *ZoneData) SetKeystateTime(t time.Time) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.KeystateTime = t
+}
+
+func (zd *ZoneData) GetRemoteDNSKEYs() []dns.RR {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.RemoteDNSKEYs
+}
+
+func (zd *ZoneData) SetRemoteDNSKEYs(keys []dns.RR) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.RemoteDNSKEYs = keys
+}
+
+// KeyInventorySnapshot stores a complete key inventory received from the signer.
+type KeyInventorySnapshot struct {
+	SenderID  string
+	Zone      string
+	Inventory []KeyInventoryItem
+	Received  time.Time
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
-	Name         string `validate:"required"`
-	Zonefile     string
-	Type         string `validate:"required"`
-	Store        string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary      string // upstream, for secondary zones
-	Notify       []string
-	Downstreams  []string
-	OptionsStrs  []string     `yaml:"options" mapstructure:"options"`
-	Options      []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
-	Frozen       bool         // true if zone is frozen; not a config param
-	Dirty        bool         // true if zone has been modified; not a config param
-	UpdatePolicy UpdatePolicyConf
-	DnssecPolicy string
-	Template     string
-	MultiSigner  string
+	Name          string `validate:"required"`
+	Zonefile      string
+	Type          string `validate:"required"`
+	Store         string // xfr | map | slice | reg (defaults to "map" if not specified)
+	Primary       string // upstream, for secondary zones
+	Notify        []string
+	Downstreams   []string
+	OptionsStrs   []string     `yaml:"options" mapstructure:"options"`
+	Options       []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
+	Frozen        bool         // true if zone is frozen; not a config param
+	Dirty         bool         // true if zone has been modified; not a config param
+	UpdatePolicy  UpdatePolicyConf
+	DnssecPolicy  string
+	Template      string
+	MultiSigner   string
 	Error         bool      // zone is broken and cannot be used
 	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg      string    // reason for the error (if known)
@@ -299,7 +408,7 @@ type ValidatorResponse struct {
 }
 
 type Sig0StoreT struct {
-	Map cmap.ConcurrentMap[string, Sig0Key]
+	Map *core.ConcurrentMap[string, Sig0Key]
 }
 
 type Sig0Key struct {
@@ -319,15 +428,17 @@ type Sig0Key struct {
 }
 
 type DnssecKey struct {
-	Name       string
-	State      string
-	Keyid      uint16
-	Flags      uint16
-	Algorithm  string
-	Creator    string
-	PrivateKey string //
-	Key        dns.DNSKEY
-	Keystr     string
+	Name                   string
+	State                  string
+	Keyid                  uint16
+	Flags                  uint16
+	Algorithm              string
+	Creator                string
+	PrivateKey             string //
+	Key                    dns.DNSKEY
+	Keystr                 string
+	PropagationConfirmed   bool      // True when all remote providers confirmed this key
+	PropagationConfirmedAt time.Time // When propagation was confirmed (zero if not confirmed)
 }
 
 type DelegationSyncRequest struct {
@@ -467,6 +578,44 @@ type CombinerResponse struct {
 	ErrorMsg string                   `json:"error_msg,omitempty"`
 	Msg      string                   `json:"msg,omitempty"`
 	Data     map[string][]RRsetString `json:"data,omitempty"`
+}
+
+type CombinerDebugPost struct {
+	Command string `json:"command"`
+	Zone    string `json:"zone,omitempty"`
+	AgentID string `json:"agent_id,omitempty"` // For agent-targeted commands (e.g. agent-ping)
+}
+
+// CombinerEditPost represents a CLI request for managing pending/rejected edits.
+type CombinerEditPost struct {
+	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear"
+	Zone    string   `json:"zone"`
+	EditID  int      `json:"edit_id,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
+	Tables  []string `json:"tables,omitempty"` // for "clear": which tables to clear; empty = all
+}
+
+// CombinerEditResponse is the response for edit management commands.
+type CombinerEditResponse struct {
+	Time     time.Time                      `json:"time"`
+	Error    bool                           `json:"error"`
+	ErrorMsg string                         `json:"error_msg,omitempty"`
+	Msg      string                         `json:"msg,omitempty"`
+	Pending  []*PendingEditRecord           `json:"pending,omitempty"`
+	Approved []*ApprovedEditRecord          `json:"approved,omitempty"`
+	Rejected []*RejectedEditRecord          `json:"rejected,omitempty"`
+	Current  map[string]map[string][]string `json:"current,omitempty"` // agent → rrtype → []rr
+}
+
+// CombinerDebugResponse returns both the merged CombinerData and the per-agent
+// AgentContributions breakdown.
+type CombinerDebugResponse struct {
+	Time               time.Time                                            `json:"time"`
+	Error              bool                                                 `json:"error"`
+	ErrorMsg           string                                               `json:"error_msg,omitempty"`
+	Msg                string                                               `json:"msg,omitempty"`
+	CombinerData       map[string]map[string]map[string][]string            `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
+	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
 }
 
 // type AgentPost struct {

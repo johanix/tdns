@@ -21,6 +21,7 @@ const (
 	AgentStateKnown                             // We have complete information but haven't established communication
 	AgentStateIntroduced                        // We got a nice reply to our HELLO
 	AgentStateOperational                       // We got a nice reply to our (secure) BEAT
+	AgentStateLegacy                            // Established relationship but no shared zones (previously OPERATIONAL)
 	AgentStateDegraded                          // Last successful heartbeat (in either direction) was more than 2x normal interval ago
 	AgentStateInterrupted                       // Last successful heartbeat (in either direction) was more than 10x normal interval ago
 	AgentStateError                             // We have tried to establish communication but failed
@@ -31,28 +32,26 @@ var AgentStateToString = map[AgentState]string{
 	AgentStateKnown:       "KNOWN",
 	AgentStateIntroduced:  "INTRODUCED",
 	AgentStateOperational: "OPERATIONAL",
+	AgentStateLegacy:      "LEGACY",
 	AgentStateDegraded:    "DEGRADED",
 	AgentStateInterrupted: "INTERRUPTED",
 	AgentStateError:       "ERROR",
 }
 
-type AgentMsg uint8
+// AgentMsg and related constants are defined in core package to avoid circular dependencies
+type AgentMsg = core.AgentMsg
 
 const (
-	AgentMsgHello AgentMsg = iota + 1
-	AgentMsgBeat
-	AgentMsgNotify
-	AgentMsgRfi
-	AgentMsgStatus
+	AgentMsgHello  = core.AgentMsgHello
+	AgentMsgBeat   = core.AgentMsgBeat
+	AgentMsgNotify = core.AgentMsgNotify
+	AgentMsgRfi    = core.AgentMsgRfi
+	AgentMsgStatus = core.AgentMsgStatus
+	AgentMsgPing   = core.AgentMsgPing
+	AgentMsgEdits  = core.AgentMsgEdits
 )
 
-var AgentMsgToString = map[AgentMsg]string{
-	AgentMsgHello:  "HELLO",
-	AgentMsgBeat:   "BEAT",
-	AgentMsgNotify: "NOTIFY", // local agent notifies remote agent about a change in local zone data
-	AgentMsgRfi:    "RFI",
-	AgentMsgStatus: "STATUS",
-}
+var AgentMsgToString = core.AgentMsgToString
 
 // Remote agent states: first occurence of a remote agent identity is when it appears in a
 // HSYNC record for a zone where we also appear in the HSYNC RRset (i.e. we are both part of it).
@@ -87,9 +86,11 @@ type AgentDetails struct {
 	BaseUri string
 	UriRR   *dns.URI
 	//	SvcbRR  *dns.SVCB
-	Host   string    // the host part of the BaseUri
-	KeyRR  *dns.KEY  // for DNS transport
-	TlsaRR *dns.TLSA // for HTTPS transport
+	Host         string    // the host part of the BaseUri
+	KeyRR        *dns.KEY  // for DNS transport (legacy)
+	JWKData      string    // JWK data (preferred for DNS transport)
+	KeyAlgorithm string    // Key algorithm (e.g., "ES256")
+	TlsaRR       *dns.TLSA // for HTTPS transport
 	//	LastHB      time.Time
 	Endpoint    string
 	ContactInfo string // "none", "partial", "complete"
@@ -98,11 +99,38 @@ type AgentDetails struct {
 	LatestError     string
 	LatestErrorTime time.Time
 	HelloTime       time.Time
+	LastContactTime time.Time // Last contact of any type (Hello, Beat, Ping, Sync, etc.)
 	BeatInterval    uint32
 	SentBeats       uint32
 	ReceivedBeats   uint32
 	LatestSBeat     time.Time
 	LatestRBeat     time.Time
+}
+
+// IsAnyTransportOperational returns true if at least one transport layer
+// (DNS or API) is in the OPERATIONAL state. DNS is checked first as it is
+// the primary (and currently only fully implemented) transport.
+func (a *Agent) IsAnyTransportOperational() bool {
+	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
+		return true
+	}
+	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
+		return true
+	}
+	return false
+}
+
+// EffectiveState returns the most relevant transport-layer state.
+// DNS is checked first as it is the primary transport.
+// Falls back to the top-level aggregate state if no transport is operational.
+func (a *Agent) EffectiveState() AgentState {
+	if a.DnsDetails != nil && a.DnsDetails.State == AgentStateOperational {
+		return AgentStateOperational
+	}
+	if a.ApiDetails != nil && a.ApiDetails.State == AgentStateOperational {
+		return AgentStateOperational
+	}
+	return a.State
 }
 
 // AgentTask is a task that needs to be executed once the Precondition is met.
@@ -129,15 +157,18 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S              core.ConcurrentMap[AgentId, *Agent]
-	RegularS       map[AgentId]*Agent
-	RemoteAgents   map[ZoneName][]AgentId
-	mu             sync.RWMutex    // protects remoteAgents
-	LocalAgent     *LocalAgentConf // our own identity
-	LocateInterval int             // seconds to wait between locating agents (until success)
-	helloContexts  map[AgentId]context.CancelFunc
+	S                core.ConcurrentMap[AgentId, *Agent]
+	RegularS         map[AgentId]*Agent
+	RemoteAgents     map[ZoneName][]AgentId
+	mu               sync.RWMutex    // protects remoteAgents
+	LocalAgent       *LocalAgentConf // our own identity
+	LocateInterval   int             // seconds to wait between locating agents (until success)
+	helloContexts    map[AgentId]context.CancelFunc
+	TransportManager *TransportManager // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 }
 
+// AgentBeatPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 type AgentBeatPost struct {
 	MessageType    AgentMsg
 	MyIdentity     AgentId
@@ -147,6 +178,8 @@ type AgentBeatPost struct {
 	Time           time.Time
 }
 
+// AgentBeatResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 type AgentBeatResponse struct {
 	Status       string // ok | error | ...
 	MyIdentity   AgentId
@@ -162,17 +195,22 @@ type AgentBeatReport struct {
 	Beat AgentBeatPost
 }
 
+// AgentHelloPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 type AgentHelloPost struct {
 	MessageType  AgentMsg
-	Name         string
+	Name         string `json:"name,omitempty"` // DEPRECATED: Unused field
 	MyIdentity   AgentId
 	YourIdentity AgentId
-	Addresses    []string
-	Port         uint16
-	TLSA         dns.TLSA
-	Zone         ZoneName // in the /hello we only send one zone, the one that triggered the /hello
+	Addresses    []string  `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port         uint16    `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA         dns.TLSA  `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
+	Zone         ZoneName  // in the /hello we only send one zone, the one that triggered the /hello
+	Time         time.Time // message timestamp
 }
 
+// AgentHelloResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
 type AgentHelloResponse struct {
 	Status       string // ok | error | ...
 	MyIdentity   AgentId
@@ -184,20 +222,24 @@ type AgentHelloResponse struct {
 	ErrorMsg string
 }
 
+// AgentMsgPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
-	MessageType  AgentMsg // "NOTIFY", ...
-	MyIdentity   AgentId
-	YourIdentity AgentId
-	Addresses    []string
-	Port         uint16
-	TLSA         dns.TLSA
-	Zone         ZoneName // An AgentMsgPost should always only refer to one zone.
-	// Data	     map[AgentId]map[uint16]RRset
-	RRs []string // cannot send more structured format, as dns.RR cannot be json marshalled.
-	// Zones []string
-	Time    time.Time
-	RfiType string
+	MessageType    AgentMsg // "sync", "update", "rfi", "status"
+	OriginatorID   AgentId  // Original author of the update
+	DeliveredBy    AgentId  // Transport-level sender (who delivered this message to us)
+	YourIdentity   AgentId
+	Addresses      []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
+	Port           uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
+	TLSA           dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
+	Zone           ZoneName            // An AgentMsgPost should always only refer to one zone.
+	Records        map[string][]string // Resource records grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
+	Time           time.Time
+	RfiType        string
+	DistributionID string // Originating distribution ID from the sending agent
+	Nonce          string // Nonce from the incoming sync/update message (for confirmation echo)
 }
 
 type AgentMsgPostPlus struct {
@@ -205,6 +247,8 @@ type AgentMsgPostPlus struct {
 	Response chan *AgentMsgResponse
 }
 
+// AgentMsgResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId/ZoneName instead of string for backward compatibility.
 type AgentMsgResponse struct {
 	Status string // ok | error | ...
 	Time   time.Time
@@ -217,6 +261,7 @@ type AgentMsgResponse struct {
 	ErrorMsg    string
 }
 
+// RfiData is defined in core package to avoid circular dependencies.
 type RfiData struct {
 	Status      string // ok | error | ...
 	Time        time.Time
@@ -226,6 +271,32 @@ type RfiData struct {
 	ZoneXfrSrcs []string
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
+	AuditData   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo `json:"audit_data,omitempty"`
+}
+
+// AgentPingPost is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
+// AgentPingPost is used for ping operations (connectivity testing)
+type AgentPingPost struct {
+	MessageType  AgentMsg  // AgentMsgPing
+	MyIdentity   AgentId   // sender's identity
+	YourIdentity AgentId   // recipient's identity
+	Nonce        string    // for round-trip verification
+	Time         time.Time // message timestamp
+}
+
+// AgentPingResponse is defined in core package to avoid circular dependencies.
+// We keep a wrapper type here that uses AgentId instead of string for backward compatibility.
+// AgentPingResponse is the response to a ping operation
+type AgentPingResponse struct {
+	Status       string  // "ok" | "error"
+	MyIdentity   AgentId // responder's identity
+	YourIdentity AgentId // original sender
+	Nonce        string  // echo from request
+	Time         time.Time
+	Msg          string
+	Error        bool
+	ErrorMsg     string
 }
 
 // AgentMgmt{Post,Response} are used in the mgmt API
@@ -242,6 +313,7 @@ type AgentMgmtPost struct {
 	Upstream    AgentId
 	Downstream  AgentId
 	RfiType     string
+	Data        map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
 	// Response    chan *AgentMgmtResponse
 }
 
@@ -255,23 +327,116 @@ type AgentDebugPost struct {
 	Data    ZoneUpdate
 }
 
+// KeystateInfo reports the health of the KEYSTATE exchange with the signer for a zone.
+type KeystateInfo struct {
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 type AgentMgmtResponse struct {
-	Identity      AgentId
-	Status        string
-	Time          time.Time
-	Agents        []*Agent // used for hsync-agentstatus
-	ZoneAgentData *ZoneAgentData
-	HsyncRRs      []string
-	AgentConfig   LocalAgentConf
-	RfiType       string
-	RfiResponse   map[AgentId]*RfiData
-	AgentRegistry *AgentRegistry
-	// ZoneDataRepo  *ZoneDataRepo
-	// ZoneDataRepo map[ZoneName]map[AgentId]*OwnerData
-	ZoneDataRepo map[ZoneName]map[AgentId]map[uint16][]string
-	Msg          string
-	Error        bool
-	ErrorMsg     string
+	Identity       AgentId
+	Status         string
+	Time           time.Time
+	Agents         []*Agent // used for hsync-agentstatus
+	ZoneAgentData  *ZoneAgentData
+	HsyncRRs       []string
+	AgentConfig    LocalAgentConf
+	RfiType        string
+	RfiResponse    map[AgentId]*RfiData
+	AgentRegistry  *AgentRegistry
+	ZoneDataRepo   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
+	KeystateStatus map[ZoneName]KeystateInfo `json:"keystate_status,omitempty"`
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	Data           interface{} `json:"data,omitempty"` // Generic data field for custom responses
+
+	// HSYNC debug data (Phase 5)
+	HsyncPeers         []*HsyncPeerInfo         `json:"hsync_peers,omitempty"`
+	HsyncSyncOps       []*HsyncSyncOpInfo       `json:"hsync_sync_ops,omitempty"`
+	HsyncConfirmations []*HsyncConfirmationInfo `json:"hsync_confirmations,omitempty"`
+	HsyncEvents        []*HsyncTransportEvent   `json:"hsync_events,omitempty"`
+	HsyncMetrics       *HsyncMetricsInfo        `json:"hsync_metrics,omitempty"`
+}
+
+// HsyncPeerInfo contains peer information for CLI display
+type HsyncPeerInfo struct {
+	PeerID             string    `json:"peer_id"`
+	State              string    `json:"state"`
+	StateReason        string    `json:"state_reason,omitempty"`
+	DiscoverySource    string    `json:"discovery_source,omitempty"`
+	DiscoveryTime      time.Time `json:"discovery_time,omitempty"`
+	PreferredTransport string    `json:"preferred_transport"`
+	APIHost            string    `json:"api_host,omitempty"`
+	APIPort            int       `json:"api_port,omitempty"`
+	APIAvailable       bool      `json:"api_available"`
+	DNSHost            string    `json:"dns_host,omitempty"`
+	DNSPort            int       `json:"dns_port,omitempty"`
+	DNSAvailable       bool      `json:"dns_available"`
+	LastContactAt      time.Time `json:"last_contact_at,omitempty"`
+	LastHelloAt        time.Time `json:"last_hello_at,omitempty"`
+	LastBeatAt         time.Time `json:"last_beat_at,omitempty"`
+	BeatInterval       int       `json:"beat_interval"`
+	BeatsSent          int64     `json:"beats_sent"`
+	BeatsReceived      int64     `json:"beats_received"`
+	FailedContacts     int       `json:"failed_contacts"`
+}
+
+// HsyncSyncOpInfo contains sync operation information for CLI display
+type HsyncSyncOpInfo struct {
+	DistributionID string    `json:"distribution_id"`
+	ZoneName       string    `json:"zone_name"`
+	SyncType       string    `json:"sync_type"`
+	Direction      string    `json:"direction"`
+	SenderID       string    `json:"sender_id"`
+	ReceiverID     string    `json:"receiver_id"`
+	Status         string    `json:"status"`
+	StatusMessage  string    `json:"status_message,omitempty"`
+	Transport      string    `json:"transport,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	SentAt         time.Time `json:"sent_at,omitempty"`
+	ReceivedAt     time.Time `json:"received_at,omitempty"`
+	ConfirmedAt    time.Time `json:"confirmed_at,omitempty"`
+	RetryCount     int       `json:"retry_count"`
+}
+
+// HsyncConfirmationInfo contains confirmation information for CLI display
+type HsyncConfirmationInfo struct {
+	DistributionID string    `json:"distribution_id"`
+	ConfirmerID    string    `json:"confirmer_id"`
+	Status         string    `json:"status"`
+	Message        string    `json:"message,omitempty"`
+	ConfirmedAt    time.Time `json:"confirmed_at"`
+	ReceivedAt     time.Time `json:"received_at"`
+}
+
+// HsyncTransportEvent contains transport event information for CLI display
+type HsyncTransportEvent struct {
+	EventTime    time.Time `json:"event_time"`
+	PeerID       string    `json:"peer_id,omitempty"`
+	ZoneName     string    `json:"zone_name,omitempty"`
+	EventType    string    `json:"event_type"`
+	Transport    string    `json:"transport,omitempty"`
+	Direction    string    `json:"direction,omitempty"`
+	Success      bool      `json:"success"`
+	ErrorCode    string    `json:"error_code,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+}
+
+// HsyncMetricsInfo contains aggregated metrics for CLI display
+type HsyncMetricsInfo struct {
+	SyncsSent      int64 `json:"syncs_sent"`
+	SyncsReceived  int64 `json:"syncs_received"`
+	SyncsConfirmed int64 `json:"syncs_confirmed"`
+	SyncsFailed    int64 `json:"syncs_failed"`
+	BeatsSent      int64 `json:"beats_sent"`
+	BeatsReceived  int64 `json:"beats_received"`
+	BeatsMissed    int64 `json:"beats_missed"`
+	AvgLatency     int64 `json:"avg_latency"`
+	MaxLatency     int64 `json:"max_latency"`
+	APIOperations  int64 `json:"api_operations"`
+	DNSOperations  int64 `json:"dns_operations"`
 }
 
 // The ...Plus structs are always the original struct + a response channel
@@ -281,12 +446,13 @@ type AgentMgmtPostPlus struct {
 }
 
 type AgentMsgReport struct {
-	Transport    string
-	MessageType  AgentMsg
-	Zone         ZoneName
-	Identity     AgentId
-	BeatInterval uint32
-	Msg          interface{}
-	RfiType      string
-	Response     chan *SynchedDataResponse
+	Transport      string
+	MessageType    AgentMsg
+	Zone           ZoneName
+	Identity       AgentId
+	BeatInterval   uint32
+	Msg            interface{}
+	RfiType        string
+	DistributionID string
+	Response       chan *SynchedDataResponse
 }

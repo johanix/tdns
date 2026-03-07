@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"slices"
 	"sync"
 	"time"
@@ -17,6 +16,29 @@ import (
 
 var Conf Config
 
+// confMu protects Conf and Globals during config reload operations.
+// Readers do not need to hold this — the reload window is brief and
+// reads during reload may see partial state, which is acceptable.
+// Only reload paths acquire the write lock.
+var confMu sync.RWMutex
+
+// SensitiveString wraps a string that should not appear in logs.
+// Use .Value() to get the actual string; String() returns a redacted form.
+type SensitiveString string
+
+// Value returns the actual string value.
+func (s SensitiveString) Value() string {
+	return string(s)
+}
+
+// String returns a redacted representation for safe logging.
+func (s SensitiveString) String() string {
+	if len(s) == 0 {
+		return ""
+	}
+	return "[REDACTED]"
+}
+
 type Config struct {
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
@@ -24,18 +46,116 @@ type Config struct {
 	ApiServer      ApiServerConf
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
-	Catalog        CatalogConf                `yaml:"catalog" mapstructure:"catalog"`
+	MultiProvider  *MultiProviderConf         `yaml:"multi-provider" mapstructure:"multi-provider"`
+	Catalog        *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
 	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
+	Kasp           KaspConf                   `yaml:"kasp" mapstructure:"kasp"`
 	Keys           KeyConf
 	Db             DbConf
 	Registrars     map[string][]string
-	Log            struct {
-		File string `validate:"required"`
-	}
-	Agent    LocalAgentConf
+	Log            LogConf
+	Agent          *LocalAgentConf `yaml:"agent"`
+	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
+	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
+}
+
+// KaspConf holds Key and Signing Policy parameters for the signer.
+// Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
+// YAML key: "kasp:"
+//
+// Example:
+//
+//	kasp:
+//	    propagation_delay: 1h
+//	    standby_zsk_count: 1
+//	    standby_ksk_count: 0
+//	    check_interval: 1m
+type KaspConf struct {
+	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
+	// through all caches before allowing state transitions.
+	// Used for published→standby and retired→removed transitions.
+	// Accepts Go duration strings: "1h", "3600s", "90m".
+	// Default: "1h".
+	PropagationDelay string `yaml:"propagation_delay" mapstructure:"propagation_delay"`
+
+	// StandbyZskCount is the number of standby ZSKs to maintain per zone.
+	// When the count drops below this, the KeyStateWorker generates new ZSKs.
+	// Default: 1. A value of 0 (or omitted) means use the default.
+	StandbyZskCount int `yaml:"standby_zsk_count" mapstructure:"standby_zsk_count"`
+
+	// StandbyKskCount is the number of standby KSKs to maintain per zone.
+	// When the count drops below this, the KeyStateWorker generates new KSKs.
+	// Default: 0 (no standby KSKs). Set to 1+ to enable standby KSK maintenance.
+	StandbyKskCount int `yaml:"standby_ksk_count" mapstructure:"standby_ksk_count"`
+
+	// CheckInterval is how often the KeyStateWorker runs its checks.
+	// Accepts Go duration strings: "1m", "60s", "5m".
+	// Default: "1m".
+	CheckInterval string `yaml:"check_interval" mapstructure:"check_interval"`
+}
+
+// LocalCombinerConf holds combiner-specific config (symmetric to LocalAgentConf).
+type LocalCombinerConf struct {
+	// Identity: combiner's identity (FQDN) for agent protocol communication
+	// Required when agents use chunk_mode=query (needed to construct CHUNK query qnames)
+	Identity string `yaml:"identity" validate:"required,fqdn"`
+	// LongTermJosePrivKey: path to our JOSE private key for secure CHUNK
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	// Chunk config (same key names as agent.dns for consistency)
+	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
+	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
+	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.
+	// 0 = default (60000). Useful for testing fragmentation with small values.
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
+	// Agents: list of agents this combiner communicates with.
+	// Each agent must have an identity, address:port, and JOSE public key.
+	Agents []*PeerConf `yaml:"agents"`
+	// Signature: template string for a TXT record injected into combined zones (demo feature).
+	// Supports {identity} and {zone} placeholders.
+	Signature    string `yaml:"signature"`
+	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"`
+	// ProtectedNamespaces: list of domain suffixes that belong to this provider.
+	// NS records from remote agents whose targets fall within any of these namespaces
+	// are rejected (prevents namespace intrusion). Example: ["echo.dnslab.", "ultrafastdns.com."]
+	ProtectedNamespaces []string `yaml:"protected-namespaces" mapstructure:"protected-namespaces"`
+}
+
+// FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.
+func (c *LocalCombinerConf) FindAgent(identity string) *PeerConf {
+	for _, a := range c.Agents {
+		if a.Identity == identity {
+			return a
+		}
+	}
+	return nil
+}
+
+// MultiProviderConf holds signer-side config for multi-provider DNSSEC (RFC 8901).
+// Only used by tdns-auth. When Active is true, the signer initializes a TransportManager
+// for communication with its local agent (KEYSTATE signaling, PING diagnostics).
+// YAML key: "multi-provider:"
+type MultiProviderConf struct {
+	// Active: master switch for multi-provider mode.
+	// Must be true AND zone must have options: [multi-provider] for MP behavior.
+	Active bool `yaml:"active"`
+	// Identity: signer's identity (FQDN) for transport protocol.
+	Identity string `yaml:"identity"`
+	// HsyncIdentity: identity to match in the HSYNC RRset (typically the agent FQDN).
+	// If empty, falls back to Identity.
+	HsyncIdentity string `yaml:"hsync-identity" mapstructure:"hsync-identity"`
+	// LongTermJosePrivKey: path to signer's JOSE private key for secure CHUNK.
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK) to agent.
+	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
+	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.
+	// 0 = default (60000). Useful for testing fragmentation with small values.
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
+	// Agents: the local agent peers (address, JOSE public key, optional API URL).
+	// Supports multiple agents for load distribution and fault isolation.
+	Agents []*PeerConf `yaml:"agents"`
 }
 
 type AppDetails struct {
@@ -45,6 +165,12 @@ type AppDetails struct {
 	Date             string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
+}
+
+type LogConf struct {
+	File       string            `yaml:"file" validate:"required"`
+	Level      string            `yaml:"level"`      // "debug"|"info"|"warn"|"error"; default "info"
+	Subsystems map[string]string `yaml:"subsystems"` // per-subsystem level overrides
 }
 
 type ServiceConf struct {
@@ -101,10 +227,10 @@ type ImrStubConf struct {
 // }
 
 type ApiServerConf struct {
-	Addresses []string `validate:"required"` // Must be in addr:port format
-	ApiKey    string   `validate:"required"`
-	CertFile  string   `validate:"required,file,certkey"`
-	KeyFile   string   `validate:"required,file"`
+	Addresses []string        `validate:"required"` // Must be in addr:port format
+	ApiKey    SensitiveString `validate:"required"`
+	CertFile  string          `validate:"required,file,certkey"`
+	KeyFile   string          `validate:"required,file"`
 	UseTLS    bool
 	Server    ApiServerAppConf
 	Agent     ApiServerAppConf
@@ -114,21 +240,49 @@ type ApiServerConf struct {
 
 type ApiServerAppConf struct {
 	Addresses []string
-	ApiKey    string
+	ApiKey    SensitiveString
+}
+
+// PeerConf holds address and public key path for the other party (agent or combiner).
+type PeerConf struct {
+	Address            string `yaml:"address"`
+	LongTermJosePubKey string `yaml:"long_term_jose_pub_key"`
+	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional: for API transport (e.g. https://combiner:8085/api/v1)
+	Identity           string `yaml:"identity"`               // Peer identity (FQDN); required for combiner agents, optional for agent combiner
 }
 
 type LocalAgentConf struct {
 	Identity string `validate:"required,hostname"`
-	Local    struct {
-		Notify []string // secondaries to notify for an agent autozone
+	// SupportedMechanisms: List of active transport mechanisms (default: ["api", "dns"] if both configured)
+	// Valid values: "api", "dns"
+	// Set to ["api"] to disable DNS transport, ["dns"] to disable API transport
+	SupportedMechanisms []string `yaml:"supported_mechanisms" mapstructure:"supported_mechanisms"`
+	Local               struct {
+		Notify      []string // secondaries to notify for an agent autozone
+		Nameservers []string `yaml:"nameservers,omitempty"` // authoritative NS hostnames for the agent autozone (FQDN, no glue; must be outside the autozone)
 	}
 	Remote struct {
 		LocateInterval int    // time in seconds
 		BeatInterval   uint32 // time between outgoing heartbeats to same destination
 	}
+	Syncengine struct {
+		Intervals struct {
+			HelloRetry int // seconds between Hello retries (range: 15-1800)
+		}
+	}
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
-	Xfr struct {
+	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
+	Combiner *PeerConf `yaml:"combiner"`
+	// Signer peer (agent only): address and JOSE public key path for KEYSTATE signaling (Phase 6)
+	Signer *PeerConf `yaml:"signer"`
+	// AuthorizedPeers: List of agent identities authorized to communicate (identity-only, DNS provides contact info)
+	AuthorizedPeers []string `yaml:"authorized_peers"`
+	// Peers (DEPRECATED): Old format with embedded addresses/keys - use authorized_peers instead
+	Peers map[string]*PeerConf `yaml:"peers"`
+	// Our JOSE keypair for secure CHUNK (agent: path to private key; public derived or adjacent .pub)
+	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
+	Xfr                 struct {
 		Outgoing struct {
 			Addresses []string `yaml:"addresses,omitempty"`
 			Auth      []string `yaml:"auth,omitempty"`
@@ -158,8 +312,72 @@ type LocalAgentDnsConf struct {
 		Publish []string
 		Listen  []string
 	}
-	BaseUrl string
-	Port    uint16
+	BaseUrl     string
+	Port        uint16
+	ControlZone string `yaml:"control_zone" mapstructure:"control_zone"` // Zone used for NOTIFY(CHUNK) QNAMEs in DNS mode (default: agent identity)
+	// Chunk config (same key names as combiner for consistency)
+	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query"; query = store payload, receiver fetches via CHUNK query (default: edns0)
+	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query. include = signal in NOTIFY (EDNS0); none = receiver uses combiner.agents[].address
+	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads via PrepareDistributionChunks.
+	// 0 = default (60000). Useful for testing fragmentation with small values (e.g. 500).
+	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
+	// Message retention times for CHUNK distributions (in seconds)
+	MessageRetention MessageRetentionConf `yaml:"message_retention" mapstructure:"message_retention"`
+}
+
+// MessageRetentionConf defines retention times for different message types in CHUNK distributions.
+// Times are in seconds. Beat and ping messages expire quickly to reduce clutter,
+// while other message types are kept longer for debugging purposes.
+type MessageRetentionConf struct {
+	Beat     int `yaml:"beat" mapstructure:"beat"`         // Beat message retention (default: 30s)
+	Ping     int `yaml:"ping" mapstructure:"ping"`         // Ping message retention (default: 30s)
+	Hello    int `yaml:"hello" mapstructure:"hello"`       // Hello message retention (default: 300s)
+	Sync     int `yaml:"sync" mapstructure:"sync"`         // Sync message retention (default: 300s)
+	Relocate int `yaml:"relocate" mapstructure:"relocate"` // Relocate message retention (default: 300s)
+	Default  int `yaml:"default" mapstructure:"default"`   // Default retention for other types (default: 300s)
+}
+
+// GetRetentionForMessageType returns the retention time in seconds for a given message type.
+// Returns the configured value if set, otherwise returns the appropriate default.
+func (m *MessageRetentionConf) GetRetentionForMessageType(messageType string) int {
+	// Apply defaults if values are not set (0 or negative)
+	const (
+		defaultBeatPing = 30  // 30 seconds for beat and ping
+		defaultOther    = 300 // 5 minutes for other message types
+	)
+
+	switch messageType {
+	case "beat":
+		if m.Beat > 0 {
+			return m.Beat
+		}
+		return defaultBeatPing
+	case "ping":
+		if m.Ping > 0 {
+			return m.Ping
+		}
+		return defaultBeatPing
+	case "hello":
+		if m.Hello > 0 {
+			return m.Hello
+		}
+		return defaultOther
+	case "sync":
+		if m.Sync > 0 {
+			return m.Sync
+		}
+		return defaultOther
+	case "relocate":
+		if m.Relocate > 0 {
+			return m.Relocate
+		}
+		return defaultOther
+	default:
+		if m.Default > 0 {
+			return m.Default
+		}
+		return defaultOther
+	}
 }
 
 type DbConf struct {
@@ -168,17 +386,17 @@ type DbConf struct {
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
-	GroupPrefixes GroupPrefixesConf            `yaml:"group_prefixes" mapstructure:"group_prefixes"`
-	Policy        CatalogPolicy                `yaml:"policy" mapstructure:"policy"`                 // Deprecated, kept for backward compatibility
+	GroupPrefixes GroupPrefixesConf             `yaml:"group_prefixes" mapstructure:"group_prefixes"`
+	Policy        CatalogPolicy                 `yaml:"policy" mapstructure:"policy"` // Deprecated, kept for backward compatibility
 	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
-	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"`      // Deprecated, kept for backward compatibility
-	SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
+	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"` // Deprecated, kept for backward compatibility
+	SigningGroups map[string]*SigningGroupInfo  `yaml:"signing_groups" mapstructure:"signing_groups"`
 }
 
 // CatalogPolicy defines policy for how catalog zones are processed
 type CatalogPolicy struct {
 	Zones struct {
-		Add    string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`    // "auto" or "manual"
+		Add    string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`       // "auto" or "manual"
 		Remove string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"` // "auto" or "manual"
 	} `yaml:"zones" mapstructure:"zones"`
 	// Note: conflict_resolution is hardcoded to "manual-priority", not configurable
@@ -192,7 +410,7 @@ type GroupPrefixesConf struct {
 
 // ConfigGroupConfig provides configuration for zone transfers from catalog config groups (RFC 9432 terminology)
 type ConfigGroupConfig struct {
-	Name     string   `yaml:"-" mapstructure:"-"`          // Populated from map key
+	Name     string   `yaml:"-" mapstructure:"-"` // Populated from map key
 	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
 	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
 	Store    string   `yaml:"store" mapstructure:"store"`
@@ -209,25 +427,25 @@ type SigningGroupInfo struct {
 
 // DynamicZonesConf defines configuration for dynamically created zones (catalog zones, catalog members, etc.)
 type DynamicZonesConf struct {
-	ConfigFile    string                    `yaml:"configfile" mapstructure:"configfile"`       // Absolute path to dynamic config file
-	ZoneDirectory string                    `yaml:"zonedirectory" mapstructure:"zonedirectory"` // Absolute path to zone file directory
-	CatalogZones  DynamicZoneTypeConf       `yaml:"catalog_zones" mapstructure:"catalog_zones"`  // Configuration for catalog zones
+	ConfigFile     string                   `yaml:"configfile" mapstructure:"configfile"`           // Absolute path to dynamic config file
+	ZoneDirectory  string                   `yaml:"zonedirectory" mapstructure:"zonedirectory"`     // Absolute path to zone file directory
+	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog_zones" mapstructure:"catalog_zones"`     // Configuration for catalog zones
 	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
-	Dynamic       DynamicZoneTypeConf       `yaml:"dynamic" mapstructure:"dynamic"`             // Configuration for direct API-created zones (future)
+	Dynamic        DynamicZoneTypeConf      `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones (future)
 }
 
 // DynamicZoneTypeConf defines configuration for a type of dynamic zone
 type DynamicZoneTypeConf struct {
-	Allowed bool   `yaml:"allowed" mapstructure:"allowed"` // Whether this type of zone is allowed
+	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                              // Whether this type of zone is allowed
 	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
 }
 
 // DynamicCatalogMemberConf defines configuration for catalog member zones (includes add/remove policy)
 type DynamicCatalogMemberConf struct {
-	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                                      // Whether catalog member zones are allowed
-	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"`        // "memory" or "persistent"
-	Add     string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`                     // "auto" or "manual" - Enable auto-configuration from catalog
-	Remove  string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"`               // "auto" or "manual" - Whether to remove zones when deleted from catalog
+	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                              // Whether catalog member zones are allowed
+	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+	Add     string `yaml:"add" mapstructure:"add" validate:"omitempty,oneof=auto manual"`               // "auto" or "manual" - Enable auto-configuration from catalog
+	Remove  string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"`         // "auto" or "manual" - Whether to remove zones when deleted from catalog
 }
 
 type InternalConf struct {
@@ -264,67 +482,121 @@ type InternalConf struct {
 	AuthQueryQ          chan AuthQueryRequest
 	ResignQ             chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
 	SyncQ               chan SyncRequest
-	AgentQs             *AgentQs // aggregated channels for agent communication
+	MsgQs               *MsgQs // aggregated channels for agent communication
 	SyncStatusQ         chan SyncStatus
 	AgentRegistry       *AgentRegistry
 	ZoneDataRepo        *ZoneDataRepo
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	KdcDB               interface{} // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf             interface{} // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB               interface{} // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf             interface{} // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner             *Scanner    // Scanner instance for async job tracking
+	KdcDB               interface{}        // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf             interface{}        // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB               interface{}        // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf             interface{}        // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner             *Scanner           // Scanner instance for async job tracking
+	CombinerState       *CombinerState     // Combiner business logic state (error journal, protected namespaces)
+	TransportManager    *TransportManager  // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
+	ChunkPayloadStore   ChunkPayloadStore  // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	DistributionCache   *DistributionCache // In-memory cache of distributions (agent/combiner)
 }
 
-type AgentQs struct {
+type MsgQs struct {
 	Hello chan *AgentMsgReport // incoming /hello from other agents
 	Beat  chan *AgentMsgReport // incoming /beat from other agents
+	Ping  chan *AgentMsgReport // incoming /ping from other agents
 	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
-	Msg               chan *AgentMsgPostPlus  // incoming /msg from other agents
-	Command           chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
-	DebugCommand      chan *AgentMgmtPostPlus // local commands TO the agent, usually for passing on to other agents
-	SynchedDataUpdate chan *SynchedDataUpdate // incoming combiner updates
-	SynchedDataCmd    chan *SynchedDataCmd    // local commands TO the combiner
+	Msg               chan *AgentMsgPostPlus     // incoming /msg from other agents
+	Command           chan *AgentMgmtPostPlus    // local commands TO the agent, usually for passing on to other agents
+	DebugCommand      chan *AgentMgmtPostPlus    // local commands TO the agent, usually for passing on to other agents
+	SynchedDataUpdate chan *SynchedDataUpdate    // incoming combiner updates
+	SynchedDataCmd    chan *SynchedDataCmd       // local commands TO the combiner
+	Confirmation      chan *ConfirmationDetail   // combiner confirmation feedback
+	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
+	KeystateSignal    chan *KeystateSignalMsg    // incoming KEYSTATE signals (propagated/rejected) from agent to signer
+	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
+
+	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
+	// receives a combiner confirmation for a sync that originated from another agent.
+	// The callback sends the final confirmation NOTIFY back to the originating agent.
+	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
+}
+
+// KeystateInventoryMsg carries a complete KEYSTATE inventory from signer to agent.
+// Delivered via MsgQs.KeystateInventory channel.
+type KeystateInventoryMsg struct {
+	SenderID  string
+	Zone      string
+	Inventory []KeyInventoryItem
+}
+
+// KeystateSignalMsg carries a per-key KEYSTATE signal from agent to signer.
+// Delivered via MsgQs.KeystateSignal channel.
+// Signals: "propagated" (all remote providers confirmed), "rejected" (some provider rejected).
+type KeystateSignalMsg struct {
+	SenderID string
+	Zone     string
+	KeyTag   uint16
+	Signal   string // "propagated", "rejected", "removed"
+	Message  string
+}
+
+// EditsResponseMsg carries an agent's contributions from combiner back to the agent.
+// Delivered via MsgQs.EditsResponse channel. Modeled on KeystateInventoryMsg.
+type EditsResponseMsg struct {
+	SenderID string
+	Zone     string
+	Records  map[string][]string // owner → []RR strings
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
+	confMu.Lock()
+	defer confMu.Unlock()
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
-		log.Printf("Error parsing config: %v", err)
+		lgConfig.Error("error parsing config", "err", err)
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
 }
 
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
+	confMu.Lock()
+	defer confMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// Re-read config file to pick up template changes
+	if err := conf.reloadTemplatesFromFile(); err != nil {
+		lgConfig.Warn("ReloadZoneConfig: failed to reload templates", "err", err)
+		// Continue with existing templates rather than failing entirely
+	}
+
 	prezones := Zones.Keys()
-	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
+	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
-		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)
+		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
+		return "", fmt.Errorf("ReloadZoneConfig: %w", err)
 	}
 
 	for _, zname := range prezones {
 		if !slices.Contains(zonelist, zname) {
 			zd, exists := Zones.Get(zname)
 			if !exists {
-				log.Printf("ReloadZoneConfig: Zone %s not in config and also not in zone list.", zname)
-			}
-			if zd.Options[OptAutomaticZone] {
-				log.Printf("ReloadZoneConfig: Zone %s is an automatic zone. Not removing from zone list.", zname)
+				lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
 				continue
 			}
-			log.Printf("ReloadZoneConfig: Zone %s no longer in config. Removing from zone list.", zname)
+			if zd.Options[OptAutomaticZone] {
+				lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
+				continue
+			}
+			lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
 			Zones.Remove(zname)
 		}
 	}
 
-	log.Printf("ReloadZones: zones after reloading: %v", zonelist)
+	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
 }

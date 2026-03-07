@@ -6,7 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -31,21 +31,21 @@ type NotifyResponse struct {
 // zone. This is not yet implemented, but this is where to do it.
 func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 
-	log.Printf("*** NotifierEngine: starting")
+	lgDns.Info("NotifierEngine: starting")
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("NotifierEngine: terminating due to context cancelled")
+			lgDns.Info("NotifierEngine: terminating due to context cancelled")
 			return nil
 		case nr, ok := <-notifyreqQ:
 			if !ok {
-				log.Println("NotifierEngine: terminating due to notifyreqQ closed")
+				lgDns.Info("NotifierEngine: terminating due to notifyreqQ closed")
 				return nil
 			}
 
 			zd := nr.ZoneData
 
-			log.Printf("NotifierEngine: Zone %q: will notify downstreams", zd.ZoneName)
+			lgDns.Info("NotifierEngine: will notify downstreams", "zone", zd.ZoneName)
 
 			zd.SendNotify(nr.RRtype, nr.Targets)
 
@@ -53,7 +53,7 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 				select {
 				case nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}:
 				case <-ctx.Done():
-					log.Printf("NotifierEngine: Context cancelled while sending response for zone %q NOTIFY request", zd.ZoneName)
+					lgDns.Warn("NotifierEngine: context cancelled while sending NOTIFY response", "zone", zd.ZoneName)
 					return nil
 				}
 			}
@@ -92,13 +92,15 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	//		lookupserver = childpri
 
 	default:
-		log.Printf("Error: Unsupported notify type: %q", dns.TypeToString[ntype])
+		lgDns.Error("unsupported notify type", "type", dns.TypeToString[ntype])
 	}
 
+	c := new(dns.Client)
+	c.Timeout = 5 * time.Second
+
+	successCount := 0
 	for _, dst := range targets {
-		if Globals.Verbose {
-			log.Printf("Sending NOTIFY(%q) to %q\n", dns.TypeToString[ntype], dst)
-		}
+		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
 
 		m := new(dns.Msg)
 		m.SetNotify(zd.ZoneName)
@@ -106,27 +108,25 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 		// remove SOA, add ntype
 		m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
 
-		if Globals.Debug {
-			fmt.Printf("Sending Notify:\n%s\n", m.String())
-		}
+		lgDns.Debug("sending NOTIFY message", "msg", m.String())
 
-		res, err := dns.Exchange(m, dst)
+		res, _, err := c.Exchange(m, dst)
 		if err != nil {
-			log.Printf("Error from dns.Exchange(%q, NOTIFY(%q)): %v. Trying next NOTIFY target.", dst, dns.TypeToString[ntype], err)
+			lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", err)
 			continue
 		}
 
 		if res.Rcode != dns.RcodeSuccess {
-			if Globals.Verbose {
-				fmt.Printf("... and got rcode %q back (bad)\n", dns.RcodeToString[res.Rcode])
-			}
-			log.Printf("Error: Rcode: %q", dns.RcodeToString[res.Rcode])
+			lgDns.Warn("NOTIFY: bad rcode from target", "target", dst, "rcode", dns.RcodeToString[res.Rcode])
 		} else {
-			if Globals.Verbose {
-				fmt.Printf("... and got rcode NOERROR back (good)\n")
-			}
-			return res.Rcode, nil
+			lgDns.Debug("NOTIFY: got NOERROR back", "target", dst)
+			successCount++
+			// Continue to send NOTIFYs to all targets, don't return early
 		}
 	}
-	return dns.RcodeServerFailure, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+	if successCount == 0 {
+		return dns.RcodeServerFailure, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+	}
+	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "succeeded", successCount, "total", len(targets))
+	return dns.RcodeSuccess, nil
 }

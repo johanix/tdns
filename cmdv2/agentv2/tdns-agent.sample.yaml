@@ -1,0 +1,174 @@
+# Main TDNS configuration
+include:
+  - agent-zones.yaml
+
+agent:
+   identity:		agent.provider.
+   # Active transport mechanisms: "api" and/or "dns" (default: both if configured)
+   # Use ["api"] to disable DNS transport, ["dns"] to disable API, or ["api", "dns"] for both
+   supported_mechanisms:	[ api, dns ]
+   # Secure CHUNK comms with combiner (no enrollment; configure keys and address)
+   long_term_jose_priv_key:	/etc/tdns/agent.jose.private
+   combiner:
+      address:		1.2.3.4:5678
+      long_term_jose_pub_key:	/etc/tdns/combiner.jose.pub
+      # api_base_url:	https://1.2.3.4:8085/api/v1   # optional; for tdns-cli agent combiner ping --api
+   # Authorized peer agents (identity-only list - addresses and keys discovered via DNS)
+   # authorized_peers:
+   #    - agent2.example.com
+   #    - agent3.example.com
+   # --- agent autozone and secondaries (agent.local) ---
+   local:
+      # Secondaries to send NOTIFY to when the agent autozone changes
+      notify:	[]
+      # Authoritative nameserver hostnames for the agent autozone (normalized to FQDN; no glue; must be outside the autozone)
+      # nameservers:	[ ns1.example.org., ns2.example.org ]
+   # --- discovery and heartbeat (agent.remote) ---
+   remote:
+      LocateInterval:	60    # seconds between locate/discovery runs
+      BeatInterval:	30    # seconds between heartbeats to the same destination
+   # --- zone transfer (agent.xfr): allow AXFR/IXFR to/from listed addresses, optional TSIG ---
+   xfr:
+      outgoing:
+         addresses:	[]   # allow AXFR/IXFR from these addresses
+         auth:	[]   # TSIG key names for outgoing XFR auth
+      incoming:
+         addresses:	[]   # allow AXFR/IXFR to these addresses
+         auth:	[]   # TSIG key names for incoming XFR auth
+   api:
+      addresses:
+         publish:	[ 1.2.3.4 ]
+         listen:	[ 127.0.0.1:8999 ]
+      baseurl:		https://api.{TARGET}:{PORT}/api/v1 # TARGET will be expanded to identity
+      port:		8999
+      certfile:		/etc/tdns/certs/agent.provider..crt
+      keyfile:		/etc/tdns/certs/agent.provider..key
+   dns:
+      addresses:
+         publish:	[ 1.2.3.4 ]
+         listen:	[ 127.0.0.1:8998 ]
+      baseurl:		dns://dns.{TARGET}:{PORT}/ # TARGET will be expanded to identity
+      port:		8998
+      # control_zone:	agent.provider.   # optional; zone used for NOTIFY(CHUNK) QNAMEs (default: agent identity)
+      # chunk_mode:	edns0   # default: send payload in EDNS(0) CHUNK option (code 65004)
+      # chunk_mode:	query   # store payload by qname; send NOTIFY without payload; receiver fetches via CHUNK query (then chunk_query_endpoint is required)
+      # chunk_query_endpoint:	include   # when chunk_mode=query: signal CHUNK query endpoint in NOTIFY (EDNS0 option 65005). Required when chunk_mode=query.
+      # chunk_query_endpoint:	none      # when chunk_mode=query: do not add endpoint to NOTIFY; receiver uses agent_peer.address
+   # --- sync engine (agent.syncengine): always active, manages Hello retries and peer sync ---
+   syncengine:
+      intervals:
+         helloretry:	15    # seconds between Hello retries (range: 15-1800)
+
+service:
+   name:		TDNS-AGENT
+   verbose:		true
+   debug:		true   # writes processed zone to disk
+   refresh:		true
+   maxrefresh:		1800    # seconds. Cap refresh counter to max this
+
+dnsengine:
+   addresses:		[ 127.0.0.1:5357, '[::1]:5357']
+   transports:		[ doq, dot, do53 ]
+   # Zone file path comes from zone's zonefile: when set (no filedir/filetmpl needed)
+
+apiserver:
+   addresses:     	[ 127.0.0.1:8987 ]
+   apikey:         	winter-is-coming-santa-stuck-in-chimney
+   certfile:		/etc/tdns/certs/localhost..crt
+   keyfile:		/etc/tdns/certs/localhost..key
+
+server:
+   id:			ooga booga boo
+   version:		tdns-agent {version}
+   hostname:		there-is-no-place-like-127.0.0.1
+
+validator:
+   active:		true
+   verbose:		true
+   debug:		true
+   dnskey:
+      trusted:
+         file:		/etc/tdns/trust-anchors.yaml
+   sig0:
+      trusted:
+         file:		/etc/tdns/sig0-keys.yaml
+
+resolver:
+   address:		8.8.8.8:53 
+
+delegationsync:
+   parent:
+      # in parent zones, we support these schemes, and will publish DSYNC RRs
+      # if allowed to:
+      schemes:		[ notify, update ]
+      notify:
+         types:		[ CDS, CSYNC ]
+         port:		5354				# MUST be a port the dnsengine listens on
+         target:	notifications.{ZONENAME}	# {ZONENAME} will be expanded at run-time
+         addresses:	[ 127.0.0.1, '::1' ]		# There must be no port and also no '[]' around v6 addresses here
+      update:
+         types:		[ ANY ]
+         port:		5354				# MUST be a port the dnsengine listens on
+         target:	updates.{ZONENAME}
+         addresses:	[ 127.0.0.1, '::1' ]
+         keygen:
+            mode:	internal # internal | external
+            generator:	/opt/local/bin/dnssec-keygen
+            algorithm:	ED25519
+
+   child:
+      # in child zones, we will attempt the following schemes, if the parent
+      # supports them and we're allowed to modify the child zone if needed
+      # (adding CDS, CSYNC, KEY RRs, re-signing, etc):
+      schemes:		[ notify, update ]
+      update:
+         keygen:
+            mode:	external # internal | external
+            generator:	/opt/local/bin/dnssec-keygen
+            algorithm:	ED25519
+
+keybootstrap:
+   consistent-lookup:
+      iterations:	3
+      interval:		60	# seconds between lookups
+      nameservers:	all	# one | all
+
+dnssecpolicies:
+   default:
+      algorithm:        ED25519
+      ksk:
+         lifetime:      forever
+         sigvalidity:   168h    # 24*7h = 1 week
+      zsk:
+         lifetime:      forever
+         sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
+
+   fastroll:
+      algorithm:        ED25519
+      ksk:
+         lifetime:      48h
+         sigvalidity:   5h
+      zsk:
+         lifetime:      12h
+         sigvalidity:   2h
+      csk:
+         lifetime:      none
+         sigvalidity:   168h
+
+db:
+   file:		/var/tmp/tdns-agent.db
+
+log:
+   file:		/var/log/tdns/tdns-agent.log
+   level:		info		# default level: debug|info|warn|error
+   # subsystems:				# per-subsystem level overrides
+   #    transport:	debug
+   #    engine:		debug
+   #    agent:		info
+
+common:
+   servername:		tdns-agent
+   command:		/usr/local/libexec/tdns-agent

@@ -21,7 +21,10 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 			break // no point in checking above current zone name
 		}
 		if zd.NameExists(child) {
-			childrrs, _ := zd.GetOwner(child)
+			childrrs, err := zd.GetOwner(child)
+			if err != nil || childrrs == nil {
+				continue
+			}
 			zd.Logger.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
 			if childns, ok := childrrs.RRtypes.Get(dns.TypeNS); ok {
 				childds := childrrs.RRtypes.GetOnlyRRSet(dns.TypeDS)
@@ -71,7 +74,10 @@ func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *co
 			if !zd.NameExists(nsname) {
 				continue // no match for nsname in zd.OwnerIndex (i.e nameserver is out of bailiwick)
 			}
-			nsnamerrs, _ := zd.GetOwner(nsname)
+			nsnamerrs, err := zd.GetOwner(nsname)
+			if err != nil || nsnamerrs == nil {
+				continue
+			}
 
 			if ns_A_rrs, ok := nsnamerrs.RRtypes.Get(dns.TypeA); ok {
 				// Ok, we found an A RR
@@ -135,7 +141,10 @@ func (zd *ZoneData) FindGlueSimple(nsrrs core.RRset, dnssec_ok bool) ([]dns.RR, 
 			if !zd.NameExists(nsname) {
 				continue // no match for nsname in zd.OwnerIndex (i.e nameserver is out of bailiwick)
 			}
-			nsnamerrs, _ := zd.GetOwner(nsname)
+			nsnamerrs, err := zd.GetOwner(nsname)
+			if err != nil || nsnamerrs == nil {
+				continue
+			}
 
 			if ns_A_rrs, ok := nsnamerrs.RRtypes.Get(dns.TypeA); ok {
 				// Ok, we found an A RR

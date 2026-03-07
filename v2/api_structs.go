@@ -365,11 +365,11 @@ type CatalogPost struct {
 
 // CatalogResponse represents the response from catalog operations
 type CatalogResponse struct {
-	Time           time.Time               `json:"time"`
-	Error          bool                    `json:"error"`
-	ErrorMsg       string                  `json:"error_msg,omitempty"`
-	Msg            string                  `json:"msg,omitempty"`
-	Zones          map[string]*MemberZone  `json:"zones,omitempty"`        // For zone-list command
-	Groups         []string                `json:"groups,omitempty"`      // For group-list command
-	NotifyAddresses []string              `json:"notify_addresses,omitempty"` // For notify-list command
+	Time            time.Time              `json:"time"`
+	Error           bool                   `json:"error"`
+	ErrorMsg        string                 `json:"error_msg,omitempty"`
+	Msg             string                 `json:"msg,omitempty"`
+	Zones           map[string]*MemberZone `json:"zones,omitempty"`            // For zone-list command
+	Groups          []string               `json:"groups,omitempty"`           // For group-list command
+	NotifyAddresses []string               `json:"notify_addresses,omitempty"` // For notify-list command
 }

@@ -2,7 +2,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 )
 
@@ -33,14 +32,14 @@ func (conf *Config) parseImrOptions() {
 
 		imrOpt, ok := StringToImrOption[key]
 		if !ok {
-			log.Printf("ParseConfig: IMR option %q is unknown and will be ignored", key)
+			lg.Warn("unknown IMR option, ignoring", "option", key)
 			continue
 		}
 
 		switch imrOpt {
 		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport, ImrOptQueryForTransportTLSA:
 			if optval != "" {
-				log.Printf("ParseConfig: IMR option %q does not accept a value; provided value %q will be ignored", key, optval)
+				lg.Warn("IMR option does not accept a value, ignoring provided value", "option", key, "value", optval)
 			}
 			clean[imrOpt] = "true"
 		case ImrOptUseTransportSignals:
@@ -49,7 +48,7 @@ func (conf *Config) parseImrOptions() {
 				clean[imrOpt] = "false"
 			} else {
 				if optval != "" && optval != "true" {
-					log.Printf("ParseConfig: IMR option %q has invalid value %q (use 'false' to disable); ignoring", key, optval)
+					lg.Warn("IMR option has invalid value (use 'false' to disable), ignoring", "option", key, "value", optval)
 				}
 				// Default to enabled (don't set in map, absence = enabled)
 			}
@@ -62,7 +61,7 @@ func (conf *Config) parseImrOptions() {
 			case "svcb", "tsync":
 				clean[imrOpt] = val
 			default:
-				log.Printf("ParseConfig: IMR option %q has invalid value %q (allowed: svcb|tsync); defaulting to svcb", key, optval)
+				lg.Warn("IMR option has invalid value (allowed: svcb|tsync), defaulting to svcb", "option", key, "value", optval)
 				clean[imrOpt] = "svcb"
 			}
 		default:
@@ -103,7 +102,7 @@ func (conf *Config) parseAuthOptions() {
 
 		authOpt, ok := StringToAuthOption[key]
 		if !ok {
-			log.Printf("ParseConfig: Auth option %q is unknown and will be ignored", key)
+			lg.Warn("unknown Auth option, ignoring", "option", key)
 			continue
 		}
 
@@ -117,7 +116,7 @@ func (conf *Config) parseAuthOptions() {
 			case UpdateModeReplace, UpdateModeDelta:
 				clean[authOpt] = val
 			default:
-				log.Printf("ParseConfig: Auth option %q has invalid value %q (allowed: %s|%s); defaulting to %s", key, optval, UpdateModeReplace, UpdateModeDelta, UpdateModeReplace)
+				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeReplace+"|"+UpdateModeDelta, "default", UpdateModeReplace)
 				clean[authOpt] = UpdateModeReplace
 			}
 		default:
@@ -135,7 +134,7 @@ func (conf *Config) parseAuthOptions() {
 // the function records a ConfigError on zd when provided and logs the issue.
 // The function returns a map whose keys are the enabled ZoneOption values.
 func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData) map[ZoneOption]bool {
-	log.Printf("ParseZones: zone %s incoming options: %v", zname, zconf.OptionsStrs)
+	lg.Debug("zone incoming options", "zone", zname, "options", zconf.OptionsStrs)
 	options := map[ZoneOption]bool{}
 	var cleanoptions []ZoneOption
 
@@ -157,11 +156,11 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		if option == "" {
 			continue
 		}
-		log.Printf("ParseZones: zone %s: checking option: %q", zname, option)
+		lg.Debug("checking zone option", "zone", zname, "option", option)
 		opt, exist := StringToZoneOption[option]
 		if !exist {
-			log.Printf("ParseZones: Zone %s: Unknown option: %q. Ignored.", zname, option)
-			log.Printf("ParseZones: zone %s: defined options: %v", zname, StringToZoneOption)
+			lg.Warn("unknown zone option, ignoring", "zone", zname, "option", option)
+			lg.Debug("defined zone options", "zone", zname, "options", StringToZoneOption)
 			if zd != nil {
 				zd.SetError(ConfigError, "unknown config option: %q", option)
 			}
@@ -181,9 +180,9 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 
-		case OptOnlineSigning:
+		case OptOnlineSigning, OptInlineSigning:
 			if Globals.App.Type == AppTypeAgent {
-				log.Printf("Error: Zone %s: Option \"%s\" is ignored because TDNS-AGENT does not allow online signing.", zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: agent does not allow signing", "zone", zname, "option", ZoneOptionToString[opt])
 				continue
 			}
 			if zconf.DnssecPolicy != "" {
@@ -191,43 +190,31 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				cleanoptions = append(cleanoptions, opt)
 			} else {
 				if zd != nil {
-					zd.SetError(ConfigError, "online-signing is ignored because the DNSSEC policy is not set")
+					zd.SetError(ConfigError, "%s is ignored because the DNSSEC policy is not set", ZoneOptionToString[opt])
 				}
-				log.Printf("Error: Zone %s: Option \"online-signing\" is ignored because the DNSSEC policy is not set.", zname)
+				lg.Error("option ignored: DNSSEC policy not set", "zone", zname, "option", ZoneOptionToString[opt])
 			}
 
-		case OptMultiSigner:
-			if zconf.MultiSigner == "" || zconf.MultiSigner == "none" {
-				log.Printf("Error: Zone %s: Option \"%s\" set without a corresponding multisigner config. Option ignored.", zname, ZoneOptionToString[opt])
+		case OptMultiProvider:
+			// On the signer (AppTypeAuth), require server-level multi-provider config.
+			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
+			if Globals.App.Type == AppTypeAuth && (conf.MultiProvider == nil || !conf.MultiProvider.Active) {
+				lg.Error("option requires multi-provider.active in server config", "zone", zname, "option", ZoneOptionToString[opt])
 				if zd != nil {
-					zd.SetError(ConfigError, "option %s set without a corresponding multisigner config", ZoneOptionToString[opt])
-				}
-				continue
-			}
-			if _, exist := conf.MultiSigner[zconf.MultiSigner]; !exist {
-				log.Printf("Error: Zone %s: Option \"%s\" set to non-existing multi-signer config \"%s\". Option ignored.", zname, ZoneOptionToString[opt], zconf.MultiSigner)
-				if zd != nil {
-					zd.SetError(ConfigError, "option %s set to non-existing multi-signer config \"%s\"", ZoneOptionToString[opt], zconf.MultiSigner)
-				}
-				continue
-			}
-			if conf.Internal.MusicSyncQ == nil {
-				log.Printf("Error: Zone %s: Option \"%s\" set but no multi-signer sync channel configured. This is a fatal error.", zname, ZoneOptionToString[opt])
-				if zd != nil {
-					zd.SetError(ConfigError, "no multi-signer sync channel configured")
+					zd.SetError(ConfigError, "option %s requires multi-provider.active: true in server config", ZoneOptionToString[opt])
 				}
 				continue
 			}
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
-			log.Printf("ParseZones: Zone %s: option \"%s\" accepted. Using multi-signer config \"%s\"", zname, ZoneOptionToString[opt], zconf.MultiSigner)
+			lg.Debug("zone option accepted", "zone", zname, "option", ZoneOptionToString[opt])
 
 		case OptCatalogZone:
 			// Catalog zone requires valid catalog configuration
 			// Note: options[OptCatalogZone] was already set in pre-scan above
 
 			// Check for group_prefixes (required if config_groups exist)
-			if len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
+			if conf.Catalog != nil && len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
 				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
 					"catalog:\n"+
 					"  group_prefixes:\n"+
@@ -237,7 +224,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 					"    example:\n"+
 					"      upstream: \"primary-server:port\"\n"+
 					"      store: map\n", zname)
-				log.Printf("Error: %s", errorMsg)
+				lg.Error("catalog zone missing group_prefixes config", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, errorMsg)
 				}
@@ -245,7 +232,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 
 			// Check for config_groups (or legacy meta_groups)
-			if conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil {
+			if conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil) {
 				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
 					"catalog:\n"+
 					"  group_prefixes:\n"+
@@ -258,7 +245,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 					"dynamiczones:\n"+
 					"  catalog_members:\n"+
 					"    add: auto\n", zname)
-				log.Printf("Error: %s", errorMsg)
+				lg.Error("catalog zone missing config_groups", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, errorMsg)
 				}
@@ -267,13 +254,13 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 
 			// options[opt] already set in pre-scan
 			cleanoptions = append(cleanoptions, opt)
-			log.Printf("ParseZones: Zone %s: catalog zone option enabled (type: %s)", zname, zconf.Type)
+			lg.Debug("catalog zone option enabled", "zone", zname, "type", zconf.Type)
 
 		case OptCatalogMemberAutoCreate:
 			// Only valid on catalog zones (checked via pre-scan above)
 			if !isCatalogZone {
 				errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-create option is only valid on catalog zones (must also have catalog-zone option)", zname)
-				log.Printf("Error: %s", errorMsg)
+				lg.Error("catalog-member-auto-create requires catalog-zone option", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, errorMsg)
 				}
@@ -281,13 +268,13 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
-			log.Printf("ParseZones: Zone %s: catalog member auto-create enabled", zname)
+			lg.Debug("catalog member auto-create enabled", "zone", zname)
 
 		case OptCatalogMemberAutoDelete:
 			// Only valid on catalog zones (checked via pre-scan above)
 			if !isCatalogZone {
 				errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-delete option is only valid on catalog zones (must also have catalog-zone option)", zname)
-				log.Printf("Error: %s", errorMsg)
+				lg.Error("catalog-member-auto-delete requires catalog-zone option", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, errorMsg)
 				}
@@ -295,10 +282,24 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
-			log.Printf("ParseZones: Zone %s: catalog member auto-delete enabled", zname)
+			lg.Debug("catalog member auto-delete enabled", "zone", zname)
+
+		case OptMPManualApproval:
+			// Only valid on the combiner — controls whether incoming UPDATEs
+			// from agents require manual approval before being applied.
+			if Globals.App.Type != AppTypeCombiner {
+				lg.Error("mp-manual-approval is only valid on the combiner, ignoring", "zone", zname)
+				if zd != nil {
+					zd.SetError(ConfigError, "mp-manual-approval is only valid on combiner zones")
+				}
+				continue
+			}
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+			lg.Debug("mp-manual-approval enabled", "zone", zname)
 
 		default:
-			log.Printf("Error: Zone %s: Unknown option: \"%s\". Option ignored.", zname, ZoneOptionToString[opt])
+			lg.Warn("unknown zone option in switch, ignoring", "zone", zname, "option", ZoneOptionToString[opt])
 			if zd != nil {
 				zd.SetError(ConfigError, "unknown config option: %s", ZoneOptionToString[opt])
 			}

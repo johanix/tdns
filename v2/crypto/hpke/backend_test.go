@@ -351,3 +351,437 @@ func TestRegistration(t *testing.T) {
 		t.Errorf("expected name 'hpke', got '%s'", backend.Name())
 	}
 }
+
+// TestGenerateSigningKeypair tests signing keypair generation (P-256)
+func TestGenerateSigningKeypair(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	signingKey, verifyKey, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair failed: %v", err)
+	}
+
+	if signingKey == nil {
+		t.Error("signing key is nil")
+	}
+	if verifyKey == nil {
+		t.Error("verify key is nil")
+	}
+
+	if signingKey.Backend() != "hpke" {
+		t.Errorf("signing key backend expected 'hpke', got '%s'", signingKey.Backend())
+	}
+	if verifyKey.Backend() != "hpke" {
+		t.Errorf("verify key backend expected 'hpke', got '%s'", verifyKey.Backend())
+	}
+}
+
+// TestSignVerify tests signing and verification with P-256
+func TestSignVerify(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	signingKey, verifyKey, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair failed: %v", err)
+	}
+
+	data := []byte("Data to sign with HPKE backend")
+
+	// Sign
+	signature, err := backend.Sign(signingKey, data)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	if len(signature) == 0 {
+		t.Fatal("signature is empty")
+	}
+
+	// Verify
+	valid, err := backend.Verify(verifyKey, data, signature)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+
+	if !valid {
+		t.Error("signature verification failed, expected valid")
+	}
+}
+
+// TestSignWithWrongKeyType tests that signing with encryption key fails
+func TestSignWithWrongKeyType(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	// Generate HPKE encryption key (X25519)
+	encryptKey, _, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	data := []byte("Data to sign")
+
+	// Try to sign with encryption key (should fail)
+	_, err = backend.Sign(encryptKey, data)
+	if err == nil {
+		t.Error("Sign with encryption key should fail")
+	}
+}
+
+// TestVerifyWithWrongKey tests signature verification with wrong key
+func TestVerifyWithWrongKey(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	signingKey1, _, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair (1) failed: %v", err)
+	}
+
+	_, verifyKey2, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair (2) failed: %v", err)
+	}
+
+	data := []byte("Data to sign")
+
+	// Sign with key 1
+	signature, err := backend.Sign(signingKey1, data)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Try to verify with key 2 (should fail)
+	valid, err := backend.Verify(verifyKey2, data, signature)
+	if err != nil {
+		// Verification can fail with error or return false
+		return
+	}
+
+	if valid {
+		t.Error("signature verification should fail with wrong key")
+	}
+}
+
+// TestVerifyModifiedData tests signature verification with modified data
+func TestVerifyModifiedData(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	signingKey, verifyKey, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair failed: %v", err)
+	}
+
+	originalData := []byte("Original data")
+	modifiedData := []byte("Modified data")
+
+	// Sign original data
+	signature, err := backend.Sign(signingKey, originalData)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Try to verify modified data (should fail)
+	valid, err := backend.Verify(verifyKey, modifiedData, signature)
+	if err != nil {
+		// Verification can fail with error or return false
+		return
+	}
+
+	if valid {
+		t.Error("signature verification should fail with modified data")
+	}
+}
+
+// TestEncryptMultiRecipient tests multi-recipient API (single-recipient for Phase 3)
+func TestEncryptMultiRecipient(t *testing.T) {
+	backend := NewBackend()
+
+	// Generate 3 keypairs
+	privKeys := make([]crypto.PrivateKey, 3)
+	pubKeys := make([]crypto.PublicKey, 3)
+	for i := 0; i < 3; i++ {
+		priv, pub, err := backend.GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair(%d) failed: %v", i, err)
+		}
+		privKeys[i] = priv
+		pubKeys[i] = pub
+	}
+
+	plaintext := []byte("Multi-recipient test message for HPKE")
+
+	// Test with metadata (currently not used, but API accepts it)
+	metadata := map[string]interface{}{
+		"distribution_id": "test-dist-789",
+		"timestamp":       "2025-01-26T14:00:00Z",
+	}
+
+	// Encrypt for all 3 recipients (currently only encrypts for first)
+	ciphertext, err := backend.EncryptMultiRecipient(pubKeys, plaintext, metadata)
+	if err != nil {
+		t.Fatalf("EncryptMultiRecipient failed: %v", err)
+	}
+
+	if len(ciphertext) == 0 {
+		t.Fatal("ciphertext is empty")
+	}
+
+	// PHASE 3 LIMITATION: Only first recipient can decrypt
+	decrypted, err := backend.DecryptMultiRecipient(privKeys[0], ciphertext)
+	if err != nil {
+		t.Fatalf("Recipient 0 (first): DecryptMultiRecipient failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("Recipient 0: decrypted text doesn't match original")
+	}
+
+	// Other recipients cannot decrypt (expected limitation)
+	for i := 1; i < len(privKeys); i++ {
+		_, err := backend.DecryptMultiRecipient(privKeys[i], ciphertext)
+		if err == nil {
+			t.Logf("Recipient %d: Unexpectedly succeeded (Phase 3 limitation means only first recipient should work)", i)
+		}
+	}
+}
+
+// TestEncryptMultiRecipientSingle tests single recipient via multi-recipient API
+func TestEncryptMultiRecipientSingle(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, pubKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	plaintext := []byte("Single recipient via multi-recipient API for HPKE")
+
+	// Encrypt for single recipient
+	ciphertext, err := backend.EncryptMultiRecipient([]crypto.PublicKey{pubKey}, plaintext, nil)
+	if err != nil {
+		t.Fatalf("EncryptMultiRecipient failed: %v", err)
+	}
+
+	// Decrypt
+	decrypted, err := backend.DecryptMultiRecipient(privKey, ciphertext)
+	if err != nil {
+		t.Fatalf("DecryptMultiRecipient failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("decrypted text doesn't match original")
+	}
+}
+
+// TestEncryptAndSign tests full JWS(HPKE(...)) creation
+func TestEncryptAndSign(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	// Generate signing keypair
+	signingKey, verifyKey, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair failed: %v", err)
+	}
+
+	// Generate 2 recipient keypairs
+	privKeys := make([]crypto.PrivateKey, 2)
+	pubKeys := make([]crypto.PublicKey, 2)
+	for i := 0; i < 2; i++ {
+		priv, pub, err := backend.GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair (recipient %d) failed: %v", i, err)
+		}
+		privKeys[i] = priv
+		pubKeys[i] = pub
+	}
+
+	plaintext := []byte("Authenticated and encrypted HPKE distribution")
+
+	metadata := map[string]interface{}{
+		"distribution_id": "dist-hpke-123",
+		"timestamp":       "2025-01-26T14:30:00Z",
+	}
+
+	// Encrypt and sign (currently only encrypts for first recipient)
+	jws, err := backend.EncryptAndSign(pubKeys, plaintext, signingKey, metadata)
+	if err != nil {
+		t.Fatalf("EncryptAndSign failed: %v", err)
+	}
+
+	if len(jws) == 0 {
+		t.Fatal("JWS output is empty")
+	}
+
+	// PHASE 3 LIMITATION: Only first recipient can decrypt and verify
+	decrypted, err := backend.DecryptAndVerify(privKeys[0], verifyKey, jws)
+	if err != nil {
+		t.Fatalf("Recipient 0: DecryptAndVerify failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("Recipient 0: decrypted text doesn't match")
+	}
+}
+
+// TestDecryptAndVerifyInvalidSignature tests that DecryptAndVerify fails with wrong verify key
+func TestDecryptAndVerifyInvalidSignature(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	// Generate two signing keypairs
+	signingKey1, _, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair (1) failed: %v", err)
+	}
+
+	_, verifyKey2, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair (2) failed: %v", err)
+	}
+
+	// Generate recipient keypair
+	recipientPriv, recipientPub, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair (recipient) failed: %v", err)
+	}
+
+	plaintext := []byte("Test message for HPKE")
+
+	// Encrypt and sign with key 1
+	jws, err := backend.EncryptAndSign([]crypto.PublicKey{recipientPub}, plaintext, signingKey1, nil)
+	if err != nil {
+		t.Fatalf("EncryptAndSign failed: %v", err)
+	}
+
+	// Try to decrypt and verify with key 2 (should fail)
+	_, err = backend.DecryptAndVerify(recipientPriv, verifyKey2, jws)
+	if err == nil {
+		t.Error("DecryptAndVerify should fail with wrong verify key")
+	}
+}
+
+// TestEncryptMultiRecipientNoRecipients tests error handling for empty recipients
+func TestEncryptMultiRecipientNoRecipients(t *testing.T) {
+	backend := NewBackend()
+
+	plaintext := []byte("test")
+
+	// Try to encrypt with no recipients (should fail)
+	_, err := backend.EncryptMultiRecipient([]crypto.PublicKey{}, plaintext, nil)
+	if err == nil {
+		t.Error("EncryptMultiRecipient with no recipients should fail")
+	}
+}
+
+// TestBackwardCompatibility tests that DecryptMultiRecipient can decrypt old Encrypt output
+func TestBackwardCompatibility(t *testing.T) {
+	backend := NewBackend()
+
+	privKey, pubKey, err := backend.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+
+	plaintext := []byte("Backward compatibility test for HPKE")
+
+	// Encrypt with old single-recipient Encrypt method (raw HPKE format)
+	oldCiphertext, err := backend.Encrypt(pubKey, plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt failed: %v", err)
+	}
+
+	// Decrypt with new DecryptMultiRecipient method (should handle raw HPKE format)
+	decrypted, err := backend.DecryptMultiRecipient(privKey, oldCiphertext)
+	if err != nil {
+		t.Fatalf("DecryptMultiRecipient failed on raw HPKE format: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Error("backward compatibility: decrypted text doesn't match")
+	}
+}
+
+// TestSerializeParseSigningKey tests signing key serialization
+func TestSerializeParseSigningKey(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	signingKey, _, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair failed: %v", err)
+	}
+
+	// Serialize
+	data, err := backend.SerializeSigningKey(signingKey)
+	if err != nil {
+		t.Fatalf("SerializeSigningKey failed: %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("serialized data is empty")
+	}
+
+	// Parse
+	parsedKey, err := backend.ParseSigningKey(data)
+	if err != nil {
+		t.Fatalf("ParseSigningKey failed: %v", err)
+	}
+
+	if parsedKey == nil {
+		t.Fatal("parsed key is nil")
+	}
+
+	// Use parsed key to sign and verify it works
+	testData := []byte("test signing with parsed key")
+	signature, err := backend.Sign(parsedKey, testData)
+	if err != nil {
+		t.Fatalf("Sign with parsed key failed: %v", err)
+	}
+
+	if len(signature) == 0 {
+		t.Error("signature is empty")
+	}
+}
+
+// TestSerializeParseVerifyKey tests verify key serialization
+func TestSerializeParseVerifyKey(t *testing.T) {
+	backend := NewBackend().(*Backend)
+
+	signingKey, verifyKey, err := backend.GenerateSigningKeypair()
+	if err != nil {
+		t.Fatalf("GenerateSigningKeypair failed: %v", err)
+	}
+
+	// Serialize verify key
+	data, err := backend.SerializeVerifyKey(verifyKey)
+	if err != nil {
+		t.Fatalf("SerializeVerifyKey failed: %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("serialized data is empty")
+	}
+
+	// Parse
+	parsedKey, err := backend.ParseVerifyKey(data)
+	if err != nil {
+		t.Fatalf("ParseVerifyKey failed: %v", err)
+	}
+
+	if parsedKey == nil {
+		t.Fatal("parsed key is nil")
+	}
+
+	// Use parsed key to verify a signature
+	testData := []byte("test verification with parsed key")
+	signature, err := backend.Sign(signingKey, testData)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	valid, err := backend.Verify(parsedKey, testData, signature)
+	if err != nil {
+		t.Fatalf("Verify with parsed key failed: %v", err)
+	}
+
+	if !valid {
+		t.Error("verification with parsed key failed")
+	}
+}

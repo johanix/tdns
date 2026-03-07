@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
@@ -21,7 +20,7 @@ import (
 func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	msgbuf, err := r.Pack()
 	if err != nil {
-		zd.Logger.Printf("= Error from msg.Pack(): %v", err)
+		lgDns.Error("ValidateUpdate: error from msg.Pack()", "err", err)
 		us.ValidationRcode = dns.RcodeFormatError
 		return err
 	}
@@ -40,10 +39,10 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// signed the update.
 	// log.Printf("ValidateAndTrustUpdate: There are %d RRs in the Additional section of the update", len(r.Extra))
 	for idx, rr := range r.Extra {
-		log.Printf("ValidateUpdate: RR %d in Additional is a %T", idx, rr)
+		lgDns.Debug("ValidateUpdate: examining Additional RR", "index", idx, "type", fmt.Sprintf("%T", rr))
 		var sig0key *Sig0Key
 		if _, ok := rr.(*dns.SIG); !ok {
-			log.Printf("ValidateUpdate: RR in Additional is not a SIG RR (%T), continuing", rr)
+			lgDns.Debug("ValidateUpdate: RR in Additional is not a SIG RR, continuing", "type", fmt.Sprintf("%T", rr))
 			continue
 		}
 
@@ -55,7 +54,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 		keyid := sig.RRSIG.KeyTag
 		signername := sig.RRSIG.SignerName
-		log.Printf("* Update is signed by SIG(0) key \"%s\" (keyid %d).", signername, keyid)
+		lgDns.Info("ValidateUpdate: update is signed by SIG(0) key", "signer", signername, "keyid", keyid)
 
 		// We have the name and keyid of the key that generated this signature. There are now
 		// four possible alternatives for locating the key:
@@ -69,12 +68,12 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// 1. Is the key in the TrustStore?
 		sig0key, err = zd.FindSig0TrustedKey(signername, keyid)
 		if err == nil && sig0key != nil {
-			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found in the TrustStore (validated: %v trusted: %v)",
-				signername, keyid, sig0key.Validated, sig0key.Trusted)
+			lgDns.Info("ValidateUpdate: SIG(0) key found in TrustStore",
+				"signer", signername, "keyid", keyid, "validated", sig0key.Validated, "trusted", sig0key.Trusted)
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was NOT found in the TrustStore", signername, keyid)
+			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found in TrustStore", "signer", signername, "keyid", keyid)
 		}
 
 		// 2. Is the key in the KeyStore?. I don't think this is correct. If we want to be able
@@ -88,13 +87,13 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// BERRA TODO flytta
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
-			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was found via DNS lookup", signername, keyid)
+			lgDns.Info("ValidateUpdate: SIG(0) key found via DNS lookup", "signer", signername, "keyid", keyid)
 			// ok, great that we found the key. but if this is a self-signed key upload then we still need to
 			// signal it as such. so lets check if the update is a KEY RR for the same zone
 			if len(r.Ns) == 1 {
 				if key, ok := r.Ns[0].(*dns.KEY); ok {
 					if key.KeyTag() == keyid && key.Algorithm == sig.RRSIG.Algorithm {
-						log.Printf("* The update is a self-signed KEY upload for the SIG(0) key \"%s\" (keyid %d)", signername, keyid)
+						lgDns.Info("ValidateUpdate: update is a self-signed KEY upload", "signer", signername, "keyid", keyid)
 						sig0key.Key = *key
 						sig0key.PublishedInDNS = true
 						sig0key.Source = "child-key-upload"
@@ -110,12 +109,12 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			continue // key found
 		} else {
-			log.Printf("* The SIG(0) key \"%s\" (keyid %d) was NOT found via DNS lookup", signername, keyid)
+			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found via DNS lookup", "signer", signername, "keyid", keyid)
 		}
 
 		// Last chance: Is the key in the update?
 		if len(r.Ns) != 1 {
-			log.Printf("-- Update does not consist of a single SIG(0) key, so this cannot be a self-signed KEY upload")
+			lgDns.Debug("ValidateUpdate: update does not consist of a single SIG(0) key, not a self-signed KEY upload")
 			continue
 		}
 
@@ -130,10 +129,10 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
 			us.Data = "key"
 			us.Type = "TRUSTSTORE-UPDATE"
-			log.Printf("* The update is a self-signed KEY upload for the SIG(0) key \"%s\" (keyid %d)", signername, keyid)
+			lgDns.Info("ValidateUpdate: update is a self-signed KEY upload", "signer", signername, "keyid", keyid)
 			continue
 		default:
-			log.Printf("-- Update is not a SIG(0) key, so this cannot be a self-signed KEY upload")
+			lgDns.Debug("ValidateUpdate: update is not a SIG(0) key, not a self-signed KEY upload")
 			continue
 		}
 	}
@@ -147,23 +146,23 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		err = sig.Verify(&keyrr, msgbuf)
 		if err != nil {
 			// This key failed to validate the update. Try the next key.
-			log.Printf("-- The signature by the SIG(0) key \"%s\" (keyid %d) failed to verify the update: %v", signer.Name, signer.KeyId, err)
-			log.Printf("Current time: %v, inception: %v, expiration: %v", time.Now(), sig.Inception, sig.Expiration)
+			lgDns.Warn("ValidateUpdate: signature verification failed", "signer", signer.Name, "keyid", signer.KeyId, "err", err)
+			lgDns.Debug("ValidateUpdate: timing details", "currentTime", time.Now(), "inception", sig.Inception, "expiration", sig.Expiration)
 			continue
 		}
 
 		// Ok, we have a signature that validated.
-		if cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
-			us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
-		} else {
-			log.Printf("-- The signature by the SIG(0) key \"%s\" (keyid %d) is NOT within its validity period", signer.Name, signer.KeyId)
+		if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
+			lgDns.Warn("ValidateUpdate: signature NOT within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 			us.ValidationRcode = dns.RcodeBadTime
 			// This key validated the signature, but the signature is not within its validity period.
 			// Try the next key.
 			continue
 		}
 
-		log.Printf("* Update validated by known and validated key.")
+		// Signature is valid and within its validity period
+		us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
+		lgDns.Info("ValidateUpdate: update validated by known and validated key")
 		us.ValidationRcode = dns.RcodeSuccess
 		us.Validated = true // Now at least one key has validated the update
 		signer.Validated = true
@@ -185,7 +184,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	for _, key := range us.Signers {
 		// dump.P(key)
 		if key.Sig0Key.Trusted {
-			zd.Logger.Printf("* Update is signed by trusted SIG(0) key \"%s\" (keyid %d).", key.Name, key.KeyId)
+			lgDns.Info("TrustUpdate: update signed by trusted SIG(0) key", "signer", key.Name, "keyid", key.KeyId)
 			us.SignatureType = "by-trusted"
 			us.ValidatedByTrustedKey = true
 			return nil
@@ -206,7 +205,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 }
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
-	zd.Logger.Printf("FindSig0KeyViaDNS: Looking up SIG(0) key %s (keyid %d) in DNS", signer, keyid)
+	lgDns.Debug("FindSig0KeyViaDNS: looking up SIG(0) key in DNS", "signer", signer, "keyid", keyid)
 	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
 	if err != nil {
 		return nil, err
@@ -219,7 +218,7 @@ func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, er
 		return nil, err
 	}
 
-	zd.Logger.Printf("FindSig0KeyViaDNS: Found %s KEY RRset (validated: %v)", signer, valid)
+	lgDns.Debug("FindSig0KeyViaDNS: found KEY RRset", "signer", signer, "validated", valid)
 
 	for _, rr := range rrset.RRs {
 		if keyrr, ok := rr.(*dns.KEY); ok {

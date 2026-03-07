@@ -5,20 +5,22 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
-	if !zd.Options[OptAllowUpdates] {
-		return fmt.Errorf("zone %s does not allow updates", zd.ZoneName)
+	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return fmt.Errorf("zone %s does not allow updates or signing", zd.ZoneName)
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		return err
+	}
+	if apex == nil {
+		return fmt.Errorf("PublishDnskeyRRs: zone apex %q not found", zd.ZoneName)
 	}
 
 	// Ensure that all active DNSKEYs are included in the DNSKEY RRset
@@ -43,12 +45,12 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 
 	const (
 		fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='mpdist' OR state='published' OR state='standby' OR state='retired' OR state='foreign')`
 	)
 
 	rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
 	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchZoneDnskeysSql, zd.ZoneName, err)
+		lgHandler.Error("PublishDnskeyRRs: error querying DNSKEY store", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 	defer rows.Close()
@@ -58,47 +60,50 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		var keyrr string
 		err = rows.Scan(&keyid, &flags, &algorithm, &keyrr)
 		if err != nil {
-			log.Printf("Error from rows.Scan(): %v", err)
+			lgHandler.Error("PublishDnskeyRRs: error scanning DNSKEY row", "err", err)
 			return err
 		}
 
 		rr, err := dns.NewRR(keyrr)
 		if err != nil {
-			log.Printf("Error creating dns.RR from keyrr: %v", err)
+			lgHandler.Error("PublishDnskeyRRs: error creating dns.RR from keyrr", "err", err)
 			return err
+		}
+		if _, ok := rr.(*dns.DNSKEY); !ok {
+			lgHandler.Error("PublishDnskeyRRs: parsed RR is not a DNSKEY", "rrtype", dns.TypeToString[rr.Header().Rrtype], "keyrr", keyrr)
+			continue
 		}
 		publishkeys = append(publishkeys, rr)
 	}
 
-	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (all): %v", publishkeys)
-
-	//	for _, k := range dak.KSKs {
-	//		dump.P(k.DnskeyRR.String())
-	//	}
-	//	for _, k := range dak.ZSKs {
-	//		dump.P(k.DnskeyRR.String())
-	//	}
-
-	var dnskeys core.RRset
-	var exist bool
-
-	if dnskeys, exist = apex.RRtypes.Get(dns.TypeDNSKEY); exist {
-		for _, k := range publishkeys {
-			present := false
-			for _, dnskey := range dnskeys.RRs {
-				if dns.IsDuplicate(k, dnskey) {
-					present = true
+	// Multi-signer mode 4: merge remote DNSKEYs from other providers.
+	// Per RFC 8901, each signer includes all signers' DNSKEYs in the RRset.
+	remoteDNSKEYs := zd.GetRemoteDNSKEYs()
+	if len(remoteDNSKEYs) > 0 {
+		for _, rk := range remoteDNSKEYs {
+			// Deduplicate: only add if not already present
+			dup := false
+			for _, pk := range publishkeys {
+				if dns.IsDuplicate(rk, pk) {
+					dup = true
 					break
 				}
 			}
-			if !present {
-				dnskeys.RRs = append(dnskeys.RRs, k)
+			if !dup {
+				publishkeys = append(publishkeys, rk)
 			}
 		}
-	} else {
-		dnskeys = core.RRset{
-			RRs: publishkeys,
-		}
+		zd.Logger.Printf("PublishDnskeyRRs: merged remote DNSKEYs (multi-signer mode 4), total keys: %d", len(publishkeys))
+	}
+
+	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (all): %v", publishkeys)
+
+	// Build the DNSKEY RRset: replace the zone's DNSKEY RRset entirely with
+	// publishkeys (local + keystore published/retired/foreign + remote).
+	// This ensures stale keys from incoming zones are stripped.
+	var dnskeys core.RRset
+	dnskeys = core.RRset{
+		RRs: publishkeys,
 	}
 
 	apex.RRtypes.Set(dns.TypeDNSKEY, dnskeys)

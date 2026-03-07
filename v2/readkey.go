@@ -10,7 +10,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"log"
 
 	"fmt"
 	"os"
@@ -19,6 +18,21 @@ import (
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
+
+// StripKeyFileComments removes lines that are empty or start with '#' (after trim),
+// so JWK/key files with comment headers (e.g. KDC/KRS-style) parse as valid JSON.
+// Preserves line breaks and indentation of kept lines.
+func StripKeyFileComments(data []byte) []byte {
+	lines := strings.Split(string(data), "\n")
+	var out []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			out = append(out, line)
+		}
+	}
+	return []byte(strings.Join(out, "\n"))
+}
 
 type BindPrivateKey struct {
 	Private_Key_Format string `yaml:"Private-key-format"`
@@ -270,7 +284,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		case *dns.DNSKEY:
 			pkc.K, err = rr.NewPrivateKey(privkey)
 			if err != nil {
-				log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
+				lgSigner.Error("failed to read private key from string", "err", err)
 				return nil, fmt.Errorf("error reading private key %q: %v", "**REDACTED**", err)
 			}
 			pkc.KeyType = dns.TypeDNSKEY
@@ -494,7 +508,7 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 
 	for _, f := range entries {
 		fname := f.Name()
-		fmt.Println(fname)
+		lgSigner.Debug("processing key file", "filename", fname)
 
 		if strings.HasSuffix(fname, ".key") {
 			// basename = strings.TrimSuffix(filename, ".key")
@@ -523,7 +537,7 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 			}
 
 		} else {
-			fmt.Printf("File %s is not a public key file. Ignored.\n", fname)
+			lgSigner.Debug("not a public key file, ignored", "filename", fname)
 		}
 	}
 

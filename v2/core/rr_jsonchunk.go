@@ -72,6 +72,11 @@ func (rd *JSONCHUNK) Parse(txt []string) error {
 func (rd *JSONCHUNK) Pack(buf []byte) (int, error) {
 	off := 0
 
+	// Need at least 6 bytes for sequence (2) + total (2) + data length (2)
+	if off+6 > len(buf) {
+		return off, fmt.Errorf("buffer too small for JSONCHUNK header (need 6, have %d)", len(buf))
+	}
+
 	// Pack sequence and total (uint16 each)
 	buf[off] = byte(rd.Sequence >> 8)
 	buf[off+1] = byte(rd.Sequence)

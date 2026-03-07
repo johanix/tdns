@@ -5,6 +5,7 @@ package cache
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"strings"
@@ -471,7 +472,8 @@ func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string
 		}
 		// Check that DS digest matches this DNSKEY
 		comp := dk.ToDS(ds.DigestType)
-		if comp == nil || !strings.EqualFold(comp.Digest, ds.Digest) {
+		// Use constant-time comparison to prevent timing side-channel attacks
+		if comp == nil || subtle.ConstantTimeCompare([]byte(strings.ToLower(comp.Digest)), []byte(strings.ToLower(ds.Digest))) != 1 {
 			continue
 		}
 		candidateKey = dk

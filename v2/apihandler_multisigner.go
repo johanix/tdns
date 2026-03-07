@@ -6,12 +6,10 @@ package tdns
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/miekg/dns"
-	// "github.com/miekg/dns"
 )
 
 func APImultisigner(kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
@@ -21,11 +19,12 @@ func APImultisigner(kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 		var msp MultiSignerPost
 		err := decoder.Decode(&msp)
 		if err != nil {
-			log.Println("APImultisigner: error decoding multisigner command post:", err)
+			lgApi.Warn("error decoding request", "handler", "multisigner", "from", r.RemoteAddr, "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
-		log.Printf("API: received /multisigner request (cmd: %s) from %s.\n",
-			msp.Command, r.RemoteAddr)
+		lgApi.Debug("received /multisigner request", "cmd", msp.Command, "from", r.RemoteAddr)
 
 		resp := MultiSignerResponse{
 			Time: time.Now(),
@@ -35,7 +34,7 @@ func APImultisigner(kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "multisigner", "err", err)
 			}
 		}()
 
@@ -52,6 +51,12 @@ func APImultisigner(kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
+			}
+			if rrset == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %s: %s %s RRset not found", msp.Zone, msp.Name, dns.TypeToString[msp.Type])
+				return
 			}
 			resp.RRset = *rrset
 			resp.Msg = fmt.Sprintf("Zone %s: %s %s RRset as requested", msp.Zone, msp.Name, dns.TypeToString[msp.Type])

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -14,9 +13,7 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 
 	switch report.MessageType {
 	case AgentMsgBeat:
-		if Globals.Debug {
-			log.Printf("HeartbeatHandler: Received BEAT from %s", report.Identity)
-		}
+		lgAgent.Debug("received BEAT", "from", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
 			agent.mu.Lock()
 			agent.ApiDetails.LatestRBeat = time.Now()
@@ -35,73 +32,96 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 		//		}
 
 	default:
-		log.Printf("HeartbeatHandler: Unknown message type: %s", AgentMsgToString[report.MessageType])
+		lgAgent.Warn("unknown message type in HeartbeatHandler", "type", AgentMsgToString[report.MessageType])
 	}
 }
 
 func (ar *AgentRegistry) SendHeartbeats() {
 	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
-		switch a.ApiDetails.State {
-		case AgentStateIntroduced, AgentStateOperational:
-			if Globals.Debug {
-				log.Printf("HsyncEngine: Sending heartbeat to %s", a.Identity)
-			}
-		case AgentStateDegraded, AgentStateInterrupted:
-			log.Printf("HsyncEngine: Sending heartbeat to degraded/interrupted agent %s", a.Identity)
-		default:
-			if Globals.Debug {
-				log.Printf("HsyncEngine: Not sending heartbeat to %s (state %s < INTRODUCED)", a.Identity, AgentStateToString[a.ApiDetails.State])
-			}
+		// DNS-55: Check EITHER transport state (API or DNS)
+		// Send heartbeat if ANY transport is INTRODUCED or better (including LEGACY)
+		apiState := a.ApiDetails.State
+		dnsState := a.DnsDetails.State
+
+		apiReady := apiState == AgentStateIntroduced || apiState == AgentStateOperational ||
+			apiState == AgentStateLegacy || apiState == AgentStateDegraded || apiState == AgentStateInterrupted
+		dnsReady := dnsState == AgentStateIntroduced || dnsState == AgentStateOperational ||
+			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
+
+		if !apiReady && !dnsReady {
+			lgAgent.Debug("not sending heartbeat, both transports below INTRODUCED",
+				"agent", a.Identity, "apiState", AgentStateToString[apiState], "dnsState", AgentStateToString[dnsState])
 			continue
 		}
 
+		lgAgent.Debug("sending heartbeat",
+			"agent", a.Identity, "apiState", AgentStateToString[apiState], "dnsState", AgentStateToString[dnsState])
+
 		go func(a *Agent) {
 			agent := a
-			abr, err := agent.SendApiBeat(&AgentBeatPost{
-				MessageType:    AgentMsgBeat,
-				MyIdentity:     AgentId(ar.LocalAgent.Identity),
-				YourIdentity:   agent.Identity,
-				MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
-				// Zone:        "",
-			})
+			var err error
+			var beatAck bool
+			var beatMsg string
+
+			if ar.TransportManager != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				sequence := uint64(0)
+				agent.mu.RLock()
+				if agent.ApiDetails.SentBeats > 0 {
+					sequence = uint64(agent.ApiDetails.SentBeats)
+				}
+				agent.mu.RUnlock()
+				beatResp, beatErr := ar.TransportManager.SendBeatWithFallback(ctx, agent, sequence)
+				err = beatErr
+				if beatResp != nil {
+					beatAck = beatResp.Ack
+					beatMsg = beatResp.State
+				}
+			} else {
+				abr, apiErr := agent.SendApiBeat(&AgentBeatPost{
+					MessageType:    AgentMsgBeat,
+					MyIdentity:     AgentId(ar.LocalAgent.Identity),
+					YourIdentity:   agent.Identity,
+					MyBeatInterval: ar.LocalAgent.Remote.BeatInterval,
+				})
+				err = apiErr
+				if abr != nil {
+					beatAck = !abr.Error
+					beatMsg = abr.Msg
+				}
+			}
+
 			agent.mu.Lock()
 			switch {
 			case err != nil:
-				log.Printf("HsyncEngine: Error sending heartbeat to %s: %v", agent.Identity, err)
+				lgAgent.Warn("error sending heartbeat", "agent", agent.Identity, "err", err)
 				if agent.ApiDetails.LatestError == "" {
 					agent.ApiDetails.LatestError = err.Error()
 					agent.ApiDetails.LatestErrorTime = time.Now()
 				}
 
-			//			case status != http.StatusOK:
-			//				log.Printf("HsyncEngine: Error: heartbeat to %s returned status %d", agent.Identity, status)
-			//				if agent.ApiDetails.LatestError == "" {
-			//					agent.ApiDetails.LatestError = fmt.Sprintf("status %d", status)
-			//					agent.ApiDetails.LatestErrorTime = time.Now()
-			//				}
-
-			case abr.Error:
-				agent.ApiDetails.LatestError = abr.ErrorMsg
+			case !beatAck:
+				agent.ApiDetails.LatestError = beatMsg
 				agent.ApiDetails.LatestErrorTime = time.Now()
 
 			default:
-				//				if abr.Status == "ok" {
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.LatestError = ""
 				agent.ApiDetails.SentBeats++
 				if len(agent.DeferredTasks) > 0 {
-					log.Printf("HsyncEngine: Agent %s has %d deferred tasks, sending them now", agent.Identity, len(agent.DeferredTasks))
+					lgAgent.Info("agent has deferred tasks, executing", "agent", agent.Identity, "count", len(agent.DeferredTasks))
 					var remainingTasks []DeferredAgentTask
 					for _, task := range agent.DeferredTasks {
 						if task.Precondition() {
 							ok, err := task.Action()
 							if err != nil {
-								log.Printf("HsyncEngine: Error executing deferred task %s: %v", task.Desc, err)
+								lgAgent.Error("deferred task failed", "task", task.Desc, "err", err)
 								remainingTasks = append(remainingTasks, task)
 							} else if ok {
-								log.Printf("HsyncEngine: Deferred task %s executed successfully", task.Desc)
+								lgAgent.Info("deferred task executed successfully", "task", task.Desc)
 							} else {
 								remainingTasks = append(remainingTasks, task)
 							}
@@ -111,7 +131,6 @@ func (ar *AgentRegistry) SendHeartbeats() {
 					}
 					agent.DeferredTasks = remainingTasks
 				}
-				//				}
 			}
 			agent.CheckState(ar.LocalAgent.Remote.BeatInterval)
 			ar.S.Set(agent.Identity, agent)
@@ -133,18 +152,23 @@ func (agent *Agent) CheckState(ourBeatInterval uint32) {
 	}
 
 	switch agent.ApiDetails.State {
-	case AgentStateOperational, AgentStateDegraded, AgentStateInterrupted:
-		// proceed
+	case AgentStateOperational, AgentStateLegacy, AgentStateDegraded, AgentStateInterrupted:
+		// proceed with beat health checking
 	default:
 		return
 	}
 
+	// Check beat health and set DEGRADED/INTERRUPTED when beats are failing
+	// NOTE: OPERATIONAL vs LEGACY is determined by zone count (see RecomputeSharedZonesAndSyncState)
+	// This function only handles beat health degradation, not zone-based state transitions
 	if timeSinceLastReceivedBeat > 10*remoteBeatInterval || timeSinceLastSentBeat > 10*localBeatInterval {
 		agent.ApiDetails.State = AgentStateInterrupted
 	} else if timeSinceLastReceivedBeat > 2*remoteBeatInterval || timeSinceLastSentBeat > 2*localBeatInterval {
 		agent.ApiDetails.State = AgentStateDegraded
 	} else {
-		agent.ApiDetails.State = AgentStateOperational
+		// Beats healthy - sync transport state to top-level state
+		// Top-level agent.State is managed by RecomputeSharedZonesAndSyncState() based on zone count
+		agent.ApiDetails.State = agent.State
 	}
 }
 

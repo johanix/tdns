@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"slices"
 	"time"
 
@@ -61,42 +60,42 @@ type DeferredUpdate struct {
 func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 	updateq := kdb.UpdateQ
 
-	log.Printf("ZoneUpdater: starting")
+	lg.Info("ZoneUpdater starting")
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("ZoneUpdater: context cancelled")
-			log.Println("ZoneUpdater: terminating")
+			lg.Info("ZoneUpdater: context cancelled")
+			lg.Info("ZoneUpdater: terminating")
 			return nil
 		case ur, ok := <-updateq:
 			if !ok {
-				log.Printf("ZoneUpdater: updateq closed")
-				log.Println("ZoneUpdater: terminating")
+				lg.Info("ZoneUpdater: updateq closed")
+				lg.Info("ZoneUpdater: terminating")
 				return nil
 			}
-			log.Printf("ZoneUpdater: Received update request on queue: %+v", updateq)
+			lg.Debug("ZoneUpdater received update request")
 			if ur.Cmd == "PING" {
-				log.Printf("ZoneUpdater: PING received. PONG!")
+				lg.Debug("ZoneUpdater: PING received, PONG!")
 				continue
 			}
 			zd, ok := Zones.Get(ur.ZoneName)
 			if !ok {
-				log.Printf("ZoneUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", ur.Cmd, ur.ZoneName, ur)
-				log.Printf("ZoneUpdater: Current list of known zones: %v", Zones.Keys())
+				lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
+				lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
 				continue
 			}
 
 			switch ur.Cmd {
 			case "DEFERRED-UPDATE":
-				log.Printf("ZoneUpdater: Error: Received deferred update \"%s\" (should be sent to DeferredUpdaterEngine)", ur.Description)
+				lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
 				continue
 
 			case "CHILD-UPDATE":
 				// This is the case where a DNS UPDATE contains updates to child delegation information.
 				// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
 				// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
-				log.Printf("ZoneUpdater: Request for update of child delegation data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-				log.Printf("ZoneUpdater: CHILD-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+				lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+				lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
 				if zd.Options[OptAllowChildUpdates] {
 					var updated bool
 					var err error
@@ -105,12 +104,12 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case Primary:
 						updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
 						if err != nil {
-							log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
+							lg.Error("ZoneUpdater: ApplyChildUpdateToZoneData failed", "error", err)
 						}
 					case Secondary:
 						err := kdb.ApplyChildUpdateToDB(ur)
 						if err != nil {
-							log.Printf("ZoneUpdater: Error from ApplyChildUpdateToDB: %v", err)
+							lg.Error("ZoneUpdater: ApplyChildUpdateToDB failed", "error", err)
 						}
 					}
 					if updated {
@@ -121,17 +120,17 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			case "ZONE-UPDATE":
 				// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
 				// (i.e. not child delegation information).
-				log.Printf("ZoneUpdater: Request for update of authoritative data for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-				log.Printf("ZoneUpdater: ZONE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+				lg.Debug("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
 				if zd.Options[OptAllowUpdates] {
 					dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
 					if err != nil {
-						log.Printf("Error from ZoneUpdateChangesDelegationData: %v", err)
+						lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
 					}
-					log.Printf("ZoneUpdater: dss.InSync: %t", dss.InSync)
+					lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
 
 					if zd.Options[OptDelSyncChild] && !dss.InSync {
-						log.Printf("ZoneUpdater: Zone %s has delegation sync enabled and is out of sync. Sending SYNC-DELEGATION request. len(zd.DelegationSyncQ): %d", zd.ZoneName, len(zd.DelegationSyncQ))
+						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
 						zd.DelegationSyncQ <- DelegationSyncRequest{
 							Command:    "SYNC-DELEGATION",
 							ZoneName:   zd.ZoneName,
@@ -147,30 +146,30 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case Primary:
 						updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
 						if err != nil {
-							log.Printf("ZoneUpdater: Error from ApplyUpdateToZoneData: %v", err)
+							lg.Error("ZoneUpdater: ApplyZoneUpdateToZoneData failed", "error", err)
 						}
 
 					case Secondary:
 						err := kdb.ApplyZoneUpdateToDB(ur)
 						if err != nil {
-							log.Printf("ZoneUpdater: Error from ApplyUpdateToDB: %v", err)
+							lg.Error("ZoneUpdater: ApplyZoneUpdateToDB failed", "error", err)
 						}
 					}
 					if updated && !ur.InternalUpdate {
-						log.Printf("ZoneUpdater: Zone %s was updated. Setting dirty flag.", zd.ZoneName)
+						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
 						zd.Options[OptDirty] = true
 					}
 				} else {
-					log.Printf("ZoneUpdater: Zone %s has updates disallowed", zd.ZoneName)
+					lg.Debug("ZoneUpdater: updates disallowed for zone", "zone", zd.ZoneName)
 				}
-				log.Printf("ZoneUpdater: ZONE-UPDATE done")
+				lg.Debug("ZoneUpdater: ZONE-UPDATE done")
 
 			case "TRUSTSTORE-UPDATE":
-				log.Printf("ZoneUpdater: Request for update to SIG(0) TrustStore for zone %s (%d actions).", ur.ZoneName, len(ur.Actions))
-				log.Printf("ZoneUpdater: TRUSTSTORE-UPDATE Actions:\n%s", SprintUpdates(ur.Actions))
+				lg.Debug("ZoneUpdater: TRUSTSTORE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+				lg.Debug("ZoneUpdater: TRUSTSTORE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
 				tx, err := kdb.Begin("UpdaterEngine")
 				if err != nil {
-					log.Printf("Error from kdb.Begin(): %v", err)
+					lg.Error("kdb.Begin failed", "error", err)
 				}
 				for _, rr := range ur.Actions {
 					var subcommand string
@@ -180,10 +179,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case dns.ClassNONE:
 						subcommand = "delete"
 					case dns.ClassANY:
-						log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has class ANY. Delete RRset is not supported. Ignored.")
+						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: class ANY (delete RRset) not supported, ignoring")
 						continue
 					default:
-						log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: RR has unknown class: %s. Ignored.", rr.String())
+						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: unknown class, ignoring", "rr", rr.String())
 						continue
 					}
 
@@ -200,20 +199,20 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 
 						_, err := kdb.Sig0TrustMgmt(tx, tppost)
 						if err != nil {
-							log.Printf("Error from kdb.Sig0TrustMgmt(): %v", err)
+							lg.Error("kdb.Sig0TrustMgmt failed", "error", err)
 						}
 					} else {
-						log.Printf("ZoneUpdater: Error: TRUSTSTORE-UPDATE: not a KEY rr: %s", rr.String())
+						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: not a KEY RR", "rr", rr.String())
 					}
 				}
 				err = tx.Commit()
 				if err != nil {
-					log.Printf("Error from tx.Commit(): %v", err)
+					lg.Error("tx.Commit failed", "error", err)
 				}
 			default:
-				log.Printf("Unknown command: '%s'. Ignoring.", ur.Cmd)
+				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
 			}
-			log.Printf("ZoneUpdater: Request for update of type %s is completed.", ur.Cmd)
+			lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
 		}
 	}
 }
@@ -225,29 +224,29 @@ func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 
 	var runQueueTicker = time.NewTicker(10 * time.Second)
 
-	log.Printf("DeferredUpdater: starting")
+	lg.Info("DeferredUpdater starting")
 	defer runQueueTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("DeferredUpdater: context cancelled")
-			log.Println("DeferredUpdater: terminating")
+			lg.Info("DeferredUpdater: context cancelled")
+			lg.Info("DeferredUpdater: terminating")
 			return nil
 		case du, ok := <-deferredq:
 			if !ok {
-				log.Printf("DeferredUpdater: deferredq closed")
-				log.Println("DeferredUpdater: terminating")
+				lg.Info("DeferredUpdater: deferredq closed")
+				lg.Info("DeferredUpdater: terminating")
 				return nil
 			}
-			log.Printf("DeferredUpdater: Received update request on queue: %+v", deferredq)
+			lg.Debug("DeferredUpdater received update request")
 			if du.Cmd == "PING" {
-				log.Printf("DeferredUpdater: PING received. PONG!")
+				lg.Debug("DeferredUpdater: PING received, PONG!")
 				continue
 			}
 			_, ok = Zones.Get(du.ZoneName)
 			if !ok && du.Cmd != "DEFERRED-UPDATE" {
-				log.Printf("DeferredUpdater: Cmd=%s: Zone name \"%s\" in request for update is unknown. Ignored update: %+v", du.Cmd, du.ZoneName, du)
-				log.Printf("DeferredUpdater: Current list of known zones: %v", Zones.Keys())
+				lg.Warn("DeferredUpdater: unknown zone in update request, ignoring", "cmd", du.Cmd, "zone", du.ZoneName)
+				lg.Debug("DeferredUpdater: known zones", "zones", Zones.Keys())
 				continue
 			}
 
@@ -255,13 +254,13 @@ func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 			case "DEFERRED-UPDATE":
 				// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
 				if du.PreCondition() {
-					log.Printf("DeferredUpdater: PreCondition is true for deferred update \"%s\". Executing immediately.", du.Description)
+					lg.Debug("DeferredUpdater: precondition true, executing immediately", "description", du.Description)
 					err := du.Action()
 					if err != nil {
-						log.Printf("DeferredUpdater: Error return from deferred update %q action: %v", du.Description, err)
+						lg.Error("DeferredUpdater: deferred update action failed", "description", du.Description, "error", err)
 					}
 				} else {
-					log.Printf("DeferredUpdater: PreCondition is false for deferred update \"%s\". Deferring execution.", du.Description)
+					lg.Debug("DeferredUpdater: precondition false, deferring execution", "description", du.Description)
 					du := DeferredUpdate{
 						Description:  du.Description,
 						PreCondition: du.PreCondition,
@@ -273,33 +272,33 @@ func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
 				continue
 
 			default:
-				log.Printf("Unknown command: '%s'. Ignoring.", du.Cmd)
+				lg.Error("DeferredUpdater: unknown command, ignoring", "cmd", du.Cmd)
 			}
-			log.Printf("DeferredUpdater: Request for update of type %s is completed.", du.Cmd)
+			lg.Info("DeferredUpdater: update request completed", "type", du.Cmd)
 
 		case <-runQueueTicker.C:
 			if len(deferredUpdates) == 0 {
 				continue
 			}
 
-			log.Printf("DeferredUpdater: running deferred updates queue (%d items).", len(deferredUpdates))
+			lg.Debug("DeferredUpdater: running deferred updates queue", "items", len(deferredUpdates))
 			for i := 0; i < len(deferredUpdates); {
 				du := deferredUpdates[i]
-				log.Printf("DeferredUpdater: running deferred update \"%s\"", du.Description)
+				lg.Debug("DeferredUpdater: running deferred update", "description", du.Description)
 				ok := du.PreCondition()
 				if ok {
-					log.Printf("DeferredUpdater: PreCondition is true. Executing deferred update \"%s\"", du.Description)
+					lg.Debug("DeferredUpdater: precondition true, executing", "description", du.Description)
 					err := du.Action()
 					if err != nil {
-						log.Printf("DeferredUpdater: Error from deferred update action: %v", err)
+						lg.Error("DeferredUpdater: deferred update action failed", "description", du.Description, "error", err)
 						i++
 					} else {
-						log.Printf("DeferredUpdater: Deferred update \"%s\" executed successfully.", du.Description)
+						lg.Info("DeferredUpdater: deferred update executed successfully", "description", du.Description)
 						// Remove the item from deferredUpdates queue
 						deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
 					}
 				} else {
-					log.Printf("DeferredUpdater: Deferred update \"%s\" not executed because precondition failed.", du.Description)
+					lg.Debug("DeferredUpdater: precondition failed, skipping", "description", du.Description)
 					i++
 				}
 			}
@@ -333,13 +332,13 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		if err == nil {
 			err1 := tx.Commit()
 			if err1 != nil {
-				log.Printf("ApplyChildUpdateToDB: tx.Commit() error=%v", err1)
+				lg.Error("ApplyChildUpdateToDB: tx.Commit failed", "error", err1)
 			}
 		} else {
-			log.Printf("ApplyChildUpdateToDB: Error: %v. Rollback.", err)
+			lg.Error("ApplyChildUpdateToDB: rolling back", "error", err)
 			err1 := tx.Rollback()
 			if err1 != nil {
-				log.Printf("ApplyChildUpdateToDB: tx.Rollback() error=%v", err1)
+				lg.Error("ApplyChildUpdateToDB: tx.Rollback failed", "error", err1)
 			}
 		}
 	}()
@@ -357,20 +356,20 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			log.Printf("ApplyChildUpdateToDB: Remove RR: %s %s %s", owner, rrtypestr, rrcopy.String())
+			lg.Debug("ApplyChildUpdateToDB: Remove RR", "owner", owner, "rrtype", rrtypestr, "rr", rrcopy.String())
 			_, err := tx.Exec(deldelrrsql, owner, rrtypestr, rrcopy.String())
 			if err != nil {
-				log.Printf("Error from tx.Exec(%s, %s, %s): %v", deldelrrsql, owner, rrcopy.String(), err)
+				lg.Error("ApplyChildUpdateToDB: tx.Exec failed", "sql", deldelrrsql, "owner", owner, "error", err)
 				return err
 			}
 			continue
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			log.Printf("ApplyChildUpdateToDB: Remove RRset: %s", rr.String())
+			lg.Debug("ApplyChildUpdateToDB: Remove RRset", "rr", rr.String())
 			_, err := tx.Exec(deldelrrsetsql, owner, rrtypestr)
 			if err != nil {
-				log.Printf("Error from tx.Exec(%s, %s, %s): %v", deldelrrsetsql, owner, rrtypestr, err)
+				lg.Error("ApplyChildUpdateToDB: tx.Exec failed", "sql", deldelrrsetsql, "owner", owner, "rrtype", rrtypestr, "error", err)
 				return err
 			}
 			continue
@@ -379,7 +378,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 			// Do nothing here, all adds are handled in the next section.
 
 		default:
-			log.Printf("ApplyChildUpdateToDB: Error: unknown class: %s", rr.String())
+			lg.Error("ApplyChildUpdateToDB: unknown class", "rr", rr.String())
 			continue
 		}
 
@@ -392,21 +391,21 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 		case dns.TypeKEY:
 			key := rr.(*dns.KEY)
 			keyid := key.KeyTag()
-			log.Printf("ApplyChildUpdateToDB: Add KEY with keyid=%d", keyid)
+			lg.Debug("ApplyChildUpdateToDB: Add KEY", "keyid", keyid)
 			_, err := tx.Exec(sqlcmd, owner, keyid, ur.Validated, ur.Trusted, rrcopy.String())
 			if err != nil {
-				log.Printf("Error from kdb.Exec(%s): %v", sqlcmd, err)
+				lg.Error("ApplyChildUpdateToDB: tx.Exec failed", "sql", sqlcmd, "error", err)
 				return err
 			}
 		case dns.TypeNS, dns.TypeA, dns.TypeAAAA:
-			log.Printf("ApplyChildUpdateToDB: Add %s with RR=%s", rrtypestr, rrcopy.String())
+			lg.Debug("ApplyChildUpdateToDB: Add RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			_, err := tx.Exec(sqlcmd, owner, rrtype, rrcopy.String())
 			if err != nil {
-				log.Printf("Error from kdb.Exec(%s): %v", sqlcmd, err)
+				lg.Error("ApplyChildUpdateToDB: tx.Exec failed", "sql", sqlcmd, "error", err)
 				return err
 			}
 		default:
-			log.Printf("ApplyChildUpdateToDB: Error: request to add %s RR", rrtypestr)
+			lg.Error("ApplyChildUpdateToDB: unsupported RR type for add", "rrtype", rrtypestr)
 		}
 	}
 
@@ -415,7 +414,7 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 
 func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
 
-	log.Printf("ApplyChildUpdateToZoneData: %v", ur)
+	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
 	zd.mu.Lock()
 	defer func() {
@@ -437,7 +436,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 
 		// First check whether this update is allowed by the update-policy.
 		if _, ok := zd.UpdatePolicy.Child.RRtypes[rrtype]; !ok {
-			log.Printf("ApplyChildUpdateToZoneData: Error: request to add %s RR, which is denied in policy", rrtypestr)
+			lg.Error("ApplyChildUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}
 
@@ -446,7 +445,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 
 		owner, err := zd.GetOwner(ownerName)
 		if err != nil {
-			log.Printf("Warning: ApplyChildUpdateToZoneData: owner name %s is unknown", ownerName)
+			lg.Warn("ApplyChildUpdateToZoneData: unknown owner name", "owner", ownerName)
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				// If this is a delete then it is ok that the owner doesn't exist.
 				continue
@@ -464,7 +463,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 
 		rrset, exists := owner.RRtypes.Get(rrtype)
 		if !exists {
-			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
+			lg.Warn("ApplyChildUpdateToZoneData: no RRset for owner", "owner", ownerName, "rrtype", rrtypestr)
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				// If this is a delete then it is ok that the RRset doesn't exist.
 				continue
@@ -478,7 +477,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+			lg.Debug("ApplyChildUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
@@ -487,12 +486,12 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			}
 			updated = true
 			// zd.Options["dirty"] = true
-			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+			lg.Debug("ApplyChildUpdateToZoneData: Remove RR done", "owner", ownerName, "rrtype", rrtypestr)
 			continue
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
+			lg.Debug("ApplyChildUpdateToZoneData: Remove RRset", "rr", rr.String())
 			owner.RRtypes.Delete(rrtype)
 			updated = true
 			// zd.Options["dirty"] = true
@@ -501,20 +500,20 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		case dns.ClassINET:
 			// Do nothing here, all adds are handled in the next section.
 		default:
-			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
+			lg.Error("ApplyChildUpdateToZoneData: unknown class", "rr", rr.String())
 			continue
 		}
 
 		dup := false
 		for _, oldrr := range rrset.RRs {
 			if dns.IsDuplicate(oldrr, rrcopy) {
-				log.Printf("ApplyUpdateToZoneData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+				lg.Debug("ApplyChildUpdateToZoneData: not adding duplicate", "rrtype", rrtypestr, "rr", rrcopy.String())
 				dup = true
 				break
 			}
 		}
 		if !dup {
-			log.Printf("ApplyChildUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
+			lg.Debug("ApplyChildUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
 			updated = true
@@ -529,7 +528,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		continue
 	}
 
-	log.Printf("ApplyChildUpdateToZoneData done: updated=%t", updated)
+	lg.Debug("ApplyChildUpdateToZoneData done", "updated", updated)
 
 	return updated, nil
 }
@@ -540,16 +539,16 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil && zd.Options[OptOnlineSigning] && (err != nil || dak == nil || len(dak.KSKs) == 0) {
-		log.Printf("ApplyZoneUpdateToZoneData: GetDnssecKeys failed for zone %s (online-signing enabled), attempting to ensure keys exist", zd.ZoneName)
+	if err != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
+		lg.Debug("ApplyZoneUpdateToZoneData: GetDnssecKeys failed, attempting to ensure keys exist", "zone", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
 		dak, err = zd.ensureActiveDnssecKeys(kdb)
 		if err != nil {
-			log.Printf("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+			lg.Error("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
 			return false, err
 		}
 		if dak == nil || len(dak.KSKs) == 0 {
-			log.Printf("ApplyZoneUpdateToZoneData: zone %s still has no active KSKs after ensureActiveDnssecKeys", zd.ZoneName)
+			lg.Error("ApplyZoneUpdateToZoneData: still no active KSKs after ensureActiveDnssecKeys", "zone", zd.ZoneName)
 			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
 		}
 	}
@@ -562,7 +561,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		zd.BumpSerial()
 	}()
 
-	log.Printf("ApplyZoneUpdateToZoneData: processing %d actions for zone %s", len(ur.Actions), zd.ZoneName)
+	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
@@ -576,7 +575,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		// First check whether this update is allowed by the update-policy.
 		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
 		if !ok && !ur.InternalUpdate {
-			log.Printf("ZoneUpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			lg.Error("ApplyZoneUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}
 
@@ -585,7 +584,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 		owner, err := zd.GetOwner(ownerName)
 		if err != nil {
-			log.Printf("Warning: ApplyZoneUpdateToZoneData: owner name %s is unknown", ownerName)
+			lg.Warn("ApplyZoneUpdateToZoneData: unknown owner name", "owner", ownerName)
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				continue
 			}
@@ -603,7 +602,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 		rrset, exists := owner.RRtypes.Get(rrtype)
 		if !exists {
-			log.Printf("Warning: ApplyUpdateToZoneData: owner name %s has no RRset of type %s", ownerName, rrtypestr)
+			lg.Warn("ApplyZoneUpdateToZoneData: no RRset for owner", "owner", ownerName, "rrtype", rrtypestr)
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				continue
 			}
@@ -622,14 +621,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			} else {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true)
 				if err != nil {
-					log.Printf("ApplyUpdateToZoneData: Error signing %s RRset for %s: %v", rrtypestr, ownerName, err)
+					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
 				}
 				owner.RRtypes.Set(rrtype, rrset)
 			}
 			updated = true
 			// zd.Options["dirty"] = true
-			log.Printf("ApplyUpdateToZoneData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+			lg.Debug("ApplyZoneUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
 			continue
 
 		case dns.ClassANY:
@@ -638,30 +637,30 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
 			updated = true
 			// zd.Options["dirty"] = true
-			log.Printf("ApplyUpdateToZoneData: Remove RRset: %s", rr.String())
+			lg.Debug("ApplyZoneUpdateToZoneData: Remove RRset", "rr", rr.String())
 			continue
 
 		case dns.ClassINET:
 		default:
-			log.Printf("ApplyUpdate: Error: unknown class: %s", rr.String())
+			lg.Error("ApplyZoneUpdateToZoneData: unknown class", "rr", rr.String())
 		}
 
 		dup := false
 		for _, oldrr := range rrset.RRs {
 			if dns.IsDuplicate(oldrr, rrcopy) {
-				log.Printf("ApplyUpdateToZoneData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+				lg.Debug("ApplyZoneUpdateToZoneData: not adding duplicate", "rrtype", rrtypestr, "rr", rrcopy.String())
 				dup = true
 				break
 			}
 		}
 
 		if !dup {
-			log.Printf("ApplyUpdateToZoneData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
+			lg.Debug("ApplyZoneUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
 			_, err = zd.SignRRset(&rrset, ownerName, dak, true)
 			if err != nil {
-				log.Printf("ApplyUpdateToZoneData: Error signing %s RRset for %s: %v", rrtypestr, ownerName, err)
+				lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				// Continue anyway - the record is still added, just not signed
 			}
 			updated = true
@@ -674,7 +673,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		continue
 	}
 
-	log.Printf("**** ApplyZoneUpdateToZoneData done: updated=%t", updated)
+	lg.Debug("ApplyZoneUpdateToZoneData done", "updated", updated)
 
 	return updated, nil
 }
@@ -692,7 +691,7 @@ func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
 // But it's a start.
 
 func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (DelegationSyncStatus, error) {
-	log.Printf("*** Enter ZoneUpdateChangesDelegationData(). ur:\n%+v", ur)
+	lg.Debug("ZoneUpdateChangesDelegationData: enter", "request", fmt.Sprintf("%+v", ur))
 	var dss = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
 		Time:     time.Now(),
@@ -709,7 +708,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 	}
 
 	for _, rr := range ur.Actions {
-		log.Printf("ZoneUpdateChangesDelegationData: checking action: %s", rr.String())
+		lg.Debug("ZoneUpdateChangesDelegationData: checking action", "rr", rr.String())
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
@@ -722,7 +721,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		// First check whether this update is allowed by the update-policy.
 		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
 		if !ok && !ur.InternalUpdate {
-			log.Printf("ZoneUpdateChangesDelegationData: Error: request to add %s RR, which is denied by policy", rrtypestr)
+			lg.Error("ZoneUpdateChangesDelegationData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}
 
@@ -731,7 +730,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 
 		owner, err := zd.GetOwner(ownerName)
 		if err != nil {
-			log.Printf("Warning: ApplyZoneUpdateToZoneData: owner name %s is unknown", ownerName)
+			lg.Warn("ZoneUpdateChangesDelegationData: unknown owner name", "owner", ownerName)
 			if class == dns.ClassNONE || class == dns.ClassANY {
 				continue
 			}
@@ -752,7 +751,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			log.Printf("ZoneUpdateChangesDelegationData: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
+			lg.Debug("ZoneUpdateChangesDelegationData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
 
 			// Is this a change to the NS RRset?
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
@@ -775,7 +774,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			log.Printf("ZoneUpdateChangesDelegationData: Remove RRset: %s", rr.String())
+			lg.Debug("ZoneUpdateChangesDelegationData: Remove RRset", "rr", rr.String())
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
 				dss.InSync = false
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
@@ -794,16 +793,16 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			continue
 
 		case dns.ClassINET:
-			log.Printf("ZoneUpdateChangesDelegationData: Class is INET, this is an ADD: %s", rr.String())
+			lg.Debug("ZoneUpdateChangesDelegationData: class INET, this is an ADD", "rr", rr.String())
 		default:
-			log.Printf("ZoneUpdateChangesDelegationData: Error: unknown class: %s", rr.String())
+			lg.Error("ZoneUpdateChangesDelegationData: unknown class", "rr", rr.String())
 		}
 
 		dup := false
 		if rrset, exists := owner.RRtypes.Get(rrtype); exists {
 			for _, oldrr := range rrset.RRs {
 				if dns.IsDuplicate(oldrr, rrcopy) {
-					log.Printf("ZoneUpdateChangesDelegationData: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
+					lg.Debug("ZoneUpdateChangesDelegationData: not adding duplicate", "rrtype", rrtypestr, "rr", rrcopy.String())
 					dup = true
 					break
 				}
@@ -811,7 +810,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 		}
 
 		if !dup {
-			log.Printf("ZoneUpdateChangesDelegationData: Adding %s record with RR=%s", rrtypestr, rrcopy.String())
+			lg.Debug("ZoneUpdateChangesDelegationData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			// Is this a change to the NS RRset?
 			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
 				dss.InSync = false
@@ -819,7 +818,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (Delegatio
 			}
 			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
 			for _, nsname := range bns {
-				log.Printf("ZoneUpdateChangesDelegationData: checking %s", nsname)
+				lg.Debug("ZoneUpdateChangesDelegationData: checking NS", "nsname", nsname)
 				if nsname == ownerName {
 					if rrtype == dns.TypeA {
 						dss.InSync = false
@@ -932,7 +931,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				if nsrr, ok := rr.(*dns.NS); ok {
 					nsowner, err := zd.GetOwner(nsrr.Ns)
 					if err != nil {
-						log.Printf("ZUCDDNG: Error: nsname %s of NS %s has no RRs", nsrr.Ns, nsrr.String())
+						lg.Error("ZUCDDNG: NS owner has no RRs", "nsname", nsrr.Ns, "ns", nsrr.String())
 					} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
 						if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 							for _, rr := range a_rrset.RRs {
@@ -1112,14 +1111,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			}
 
 		default:
-			log.Printf("ZUCDDNG: Error: RR type: %s should not get here: %s", rrtypestr, rr.String())
+			lg.Error("ZUCDDNG: unexpected RR type", "rrtype", rrtypestr, "rr", rr.String())
 		}
 	}
 
-	if zd.ZoneName == "child.test.net." {
-		log.Printf("ZUCDDNG: ddata:\n%+v", ddata)
-		log.Printf("ZUCDDNG: ddata.Actions:\n%s", SprintUpdates(ddata.Actions))
-	}
+	lg.Debug("ZUCDDNG delegation data", "zone", zd.ZoneName, "ddata", fmt.Sprintf("%+v", ddata))
+	lg.Debug("ZUCDDNG delegation actions", "zone", zd.ZoneName, "actions", SprintUpdates(ddata.Actions))
 
 	// Compute complete new delegation data for replace mode
 	// Start with current NS RRset
@@ -1159,7 +1156,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	// Get in-bailiwick NS names from the new NS RRset
 	new_bailiwick_ns, err := BailiwickNS(zd.ZoneName, dss.NewNS)
 	if err != nil {
-		log.Printf("ZUCDDNG: Error computing bailiwick NS: %v", err)
+		lg.Error("ZUCDDNG: failed to compute bailiwick NS", "error", err)
 		return dss, err
 	} else {
 		// Build maps of current glue for quick lookup

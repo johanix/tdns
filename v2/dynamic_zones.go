@@ -9,7 +9,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,7 +63,7 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 		return "", fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
 
-	log.Printf("DYNAMIC-ZONES: Wrote zone file for %s to %s", zd.ZoneName, zoneFilePath)
+	lg.Info("wrote zone file", "zone", zd.ZoneName, "path", zoneFilePath)
 	return zoneFilePath, nil
 }
 
@@ -89,7 +88,7 @@ func (zd *ZoneData) LoadDynamicZoneFile(zoneDirectory string) (bool, uint32, err
 	updated, serial, err := zd.ReadZoneFile(zoneFilePath, false)
 	if err != nil {
 		// File is corrupted - create zone but set error state
-		log.Printf("DYNAMIC-ZONES: ERROR: Failed to load zone file %s for zone %s: %v", zoneFilePath, zd.ZoneName, err)
+		lg.Error("failed to load zone file", "zone", zd.ZoneName, "path", zoneFilePath, "err", err)
 
 		// Ensure zone exists in Zones map (create if needed)
 		if _, exists := Zones.Get(zd.ZoneName); !exists {
@@ -105,7 +104,7 @@ func (zd *ZoneData) LoadDynamicZoneFile(zoneDirectory string) (bool, uint32, err
 	// Clear any previous error state on successful load
 	zd.SetError(NoError, "")
 
-	log.Printf("DYNAMIC-ZONES: Loaded zone file for %s from %s (serial: %d)", zd.ZoneName, zoneFilePath, serial)
+	lg.Info("loaded zone file", "zone", zd.ZoneName, "path", zoneFilePath, "serial", serial)
 	return updated, serial, nil
 }
 
@@ -151,11 +150,11 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 	// Check if config file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
-		log.Printf("DYNAMIC-ZONES: Dynamic config file %s does not exist, skipping dynamic zone loading", conf.DynamicZones.ConfigFile)
+		lg.Debug("dynamic config file does not exist, skipping", "path", conf.DynamicZones.ConfigFile)
 		return nil
 	}
 
-	log.Printf("DYNAMIC-ZONES: Loading dynamic zones from config file %s", conf.DynamicZones.ConfigFile)
+	lg.Info("loading dynamic zones from config file", "path", conf.DynamicZones.ConfigFile)
 
 	// Load dynamic config file
 	zoneConfs, err := conf.loadDynamicConfigFile()
@@ -172,7 +171,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 		// Check if zone already exists (from main config or already loaded)
 		if _, exists := Zones.Get(zoneName); exists {
-			log.Printf("DYNAMIC-ZONES: Zone %s already exists (from main config), skipping dynamic config entry", zoneName)
+			lg.Debug("zone already exists, skipping dynamic config entry", "zone", zoneName)
 			skippedCount++
 			continue
 		}
@@ -185,7 +184,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		case "secondary":
 			zoneType = Secondary
 		default:
-			log.Printf("DYNAMIC-ZONES: Invalid zone type %q for zone %s, skipping", zconf.Type, zoneName)
+			lg.Warn("invalid zone type, skipping", "zone", zoneName, "type", zconf.Type)
 			skippedCount++
 			continue
 		}
@@ -200,7 +199,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		case "xfr":
 			zoneStore = XfrZone
 		default:
-			log.Printf("DYNAMIC-ZONES: Invalid zone store %q for zone %s, defaulting to map", zconf.Store, zoneName)
+			lg.Warn("invalid zone store, defaulting to map", "zone", zoneName, "store", zconf.Store)
 			zoneStore = MapZone
 		}
 
@@ -214,12 +213,11 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 		// Log what we're loading
 		if options[OptCatalogZone] {
-			log.Printf("DYNAMIC-ZONES: Enqueuing catalog zone %s for refresh (type: %s)", zoneName, zconf.Type)
+			lg.Debug("enqueuing catalog zone for refresh", "zone", zoneName, "type", zconf.Type)
 		} else if options[OptAutomaticZone] {
-			log.Printf("DYNAMIC-ZONES: Enqueuing auto-configured zone %s for refresh (type: %s, from catalog: %s)",
-				zoneName, zconf.Type, zconf.SourceCatalog)
+			lg.Debug("enqueuing auto-configured zone for refresh", "zone", zoneName, "type", zconf.Type, "catalog", zconf.SourceCatalog)
 		} else {
-			log.Printf("DYNAMIC-ZONES: Enqueuing zone %s for refresh (type: %s)", zoneName, zconf.Type)
+			lg.Debug("enqueuing zone for refresh", "zone", zoneName, "type", zconf.Type)
 		}
 
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
@@ -238,17 +236,17 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		select {
 		case conf.Internal.RefreshZoneCh <- zr:
 			loadedCount++
-			log.Printf("DYNAMIC-ZONES: Enqueued zone %s for refresh", zoneName)
+			lg.Debug("enqueued zone for refresh", "zone", zoneName)
 		case <-ctx.Done():
-			log.Printf("DYNAMIC-ZONES: Context cancelled while enqueueing zone %s", zoneName)
+			lg.Warn("context cancelled while enqueueing zone", "zone", zoneName)
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
-			log.Printf("DYNAMIC-ZONES: Timeout enqueueing zone %s to RefreshEngine", zoneName)
+			lg.Debug("timeout enqueueing zone to RefreshEngine", "zone", zoneName)
 			skippedCount++
 		}
 	}
 
-	log.Printf("DYNAMIC-ZONES: Enqueued %d zones for refresh, %d skipped", loadedCount, skippedCount)
+	lg.Info("dynamic zone loading complete", "loaded", loadedCount, "skipped", skippedCount)
 	return nil
 }
 
@@ -336,7 +334,7 @@ func (conf *Config) loadDynamicConfigFile() ([]ZoneConf, error) {
 
 	// Check if file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
-		log.Printf("DYNAMIC-ZONES: Dynamic config file %s does not exist, starting with empty config", conf.DynamicZones.ConfigFile)
+		lg.Debug("dynamic config file does not exist, starting with empty config", "path", conf.DynamicZones.ConfigFile)
 		return []ZoneConf{}, nil
 	}
 
@@ -350,11 +348,11 @@ func (conf *Config) loadDynamicConfigFile() ([]ZoneConf, error) {
 	var configFile DynamicConfigFile
 	if err := yaml.Unmarshal(data, &configFile); err != nil {
 		// File is corrupted - log error and return empty config
-		log.Printf("DYNAMIC-ZONES: ERROR: Failed to parse dynamic config file %s: %v. Starting with empty config.", conf.DynamicZones.ConfigFile, err)
+		lg.Error("failed to parse dynamic config file, starting with empty config", "path", conf.DynamicZones.ConfigFile, "err", err)
 		return []ZoneConf{}, nil
 	}
 
-	log.Printf("DYNAMIC-ZONES: Loaded %d zones from dynamic config file %s", len(configFile.Zones), conf.DynamicZones.ConfigFile)
+	lg.Info("loaded zones from dynamic config file", "count", len(configFile.Zones), "path", conf.DynamicZones.ConfigFile)
 	return configFile.Zones, nil
 }
 
@@ -417,7 +415,7 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
 
-	log.Printf("DYNAMIC-ZONES: Wrote dynamic config file %s with %d zones", conf.DynamicZones.ConfigFile, len(zones))
+	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
 	return nil
 }
 
@@ -505,6 +503,6 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 	}
 
 	// Not included - log warning
-	log.Printf("DYNAMIC-ZONES: WARNING: dynamiczones.configfile is set to %s, but this file is not included via 'include:' statement in the main config file. Dynamic zones will not be loaded on startup.", conf.DynamicZones.ConfigFile)
+	lg.Warn("dynamic config file not included via 'include:' in main config, dynamic zones will not be loaded on startup", "path", conf.DynamicZones.ConfigFile)
 	return false
 }

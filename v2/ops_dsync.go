@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -19,7 +20,10 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	}
 
 	// Verify that there is no DSYNC RRset already present
-	owner, _ := zd.GetOwner("_dsync." + zd.ZoneName)
+	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+	if err != nil {
+		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
+	}
 	if owner != nil {
 		rrset.RRs = owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
 		if len(rrset.RRs) > 0 {
@@ -206,7 +210,11 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		}
 	}
 
-	zd.KeyDB.UpdateQ <- ur
+	select {
+	case zd.KeyDB.UpdateQ <- ur:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("PublishDsyncRRs: timeout sending update for zone %s", zd.ZoneName)
+	}
 
 	return nil
 }
@@ -230,11 +238,15 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 	}
 	anti_dsync.Header().Class = dns.ClassANY // Delete DSYNC RRset
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{anti_dsync},
 		InternalUpdate: true,
+	}:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("UnpublishDsyncRRs: timeout sending update for zone %s", zd.ZoneName)
 	}
 
 	return nil

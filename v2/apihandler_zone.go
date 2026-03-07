@@ -7,12 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/miekg/dns"
-	// "github.com/miekg/dns"
 )
 
 func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
@@ -22,11 +20,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 		var zp ZonePost
 		err := decoder.Decode(&zp)
 		if err != nil {
-			log.Println("APIzone: error decoding zone command post:", err)
+			lgApi.Warn("error decoding request", "handler", "zone", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
-		log.Printf("API: received /zone request (cmd: %s) from %s.\n",
-			zp.Command, r.RemoteAddr)
+		lgApi.Debug("received /zone request", "cmd", zp.Command, "from", r.RemoteAddr)
 
 		resp := ZoneResponse{
 			Time:    time.Now(),
@@ -37,7 +36,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "zone", "err", err)
 			}
 		}()
 
@@ -45,6 +44,11 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 		if !exist && zp.Command != "list-zones" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zp.Zone)
+			return
+		}
+		if zd == nil && zp.Command != "list-zones" {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %s: zone data is nil", zp.Zone)
 			return
 		}
 
@@ -56,6 +60,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
 
@@ -127,7 +132,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "reload":
 			// XXX: Note: if the zone allows updates and is dirty, then reloading should be denied
-			log.Printf("ZoneOps: reloading, will check for changes to delegation data\n")
+			lgApi.Info("reloading zone, will check for delegation data changes")
 			// resp.Msg, err = ReloadZone(cp.Zone, cp.Force)
 			resp.Msg, err = zd.ReloadZone(refreshq, zp.Force)
 			if err != nil {
@@ -137,7 +142,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "list-zones":
 			zones := map[string]ZoneConf{}
-			log.Printf("APIzone: listing zones. len(Zones): %d. keys: %v", len(Zones.Keys()), Zones.Keys())
+			lgApi.Debug("listing zones", "count", len(Zones.Keys()))
 			for item := range Zones.IterBuffered() {
 				zname := item.Key
 				zd := item.Val
@@ -192,11 +197,12 @@ func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefres
 		var zdp ZoneDsyncPost
 		err := decoder.Decode(&zdp)
 		if err != nil {
-			log.Println("APIzoneDsync: error decoding zone command post:", err)
+			lgApi.Warn("error decoding request", "handler", "zoneDsync", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
-		log.Printf("API: received /zone/dsync request (cmd: %s) from %s.\n",
-			zdp.Command, r.RemoteAddr)
+		lgApi.Debug("received /zone/dsync request", "cmd", zdp.Command, "from", r.RemoteAddr)
 
 		resp := ZoneDsyncResponse{
 			AppName:   app.Name,
@@ -208,7 +214,7 @@ func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefres
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "zoneDsync", "err", err)
 			}
 		}()
 

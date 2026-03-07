@@ -7,11 +7,10 @@ package tdns
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 func (tx *Tx) Commit() error {
@@ -19,7 +18,7 @@ func (tx *Tx) Commit() error {
 	err := tx.Tx.Commit()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
-		log.Printf("<--- Error committing KeyDB transaction (%s): %v", tx.context, err)
+		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
 	}
 	return err
 }
@@ -29,7 +28,7 @@ func (tx *Tx) Rollback() error {
 	err := tx.Tx.Rollback()
 	tx.KeyDB.Ctx = ""
 	if err != nil {
-		log.Printf("<--- Error rolling back KeyDB transaction (%s): %v", tx.context, err)
+		lgConfig.Error("error rolling back KeyDB transaction", "context", tx.context, "err", err)
 	}
 	return err
 }
@@ -38,7 +37,7 @@ func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
 	// log.Printf("---> Executing KeyDB Exec: %s with args: %v in context: %s", query, args, tx.context)
 	result, err := tx.Tx.Exec(query, args...)
 	if err != nil {
-		log.Printf("<--- Error executing KeyDB Exec (%s): %v", tx.context, err)
+		lgConfig.Error("error executing KeyDB Exec", "context", tx.context, "err", err)
 	}
 	return result, err
 }
@@ -47,7 +46,7 @@ func (tx *Tx) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	// log.Printf("---> Executing KeyDB query: %s with args: %v in context: %s", query, args, tx.context)
 	rows, err := tx.Tx.Query(query, args...)
 	if err != nil {
-		log.Printf("<--- Error executing KeyDB query (%s): %v", tx.context, err)
+		lgConfig.Error("error executing KeyDB query", "context", tx.context, "err", err)
 	}
 	return rows, err
 }
@@ -64,13 +63,13 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
 	if db.Ctx != "" {
-		log.Printf("<--- Error: KeyDB transaction already in progress: %s", db.Ctx)
+		lgConfig.Error("KeyDB transaction already in progress", "context", db.Ctx)
 		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
 	}
 	db.Ctx = context
 	tx, err := db.DB.Begin()
 	if err != nil {
-		log.Printf("Error beginning transaction (%s): %v", context, err)
+		lgConfig.Error("error beginning transaction", "context", context, "err", err)
 		return nil, err
 	}
 	return &Tx{Tx: tx, KeyDB: db, context: context}, nil
@@ -96,21 +95,84 @@ func (db *KeyDB) Close() error {
 // It prepares and executes each table schema; prepare errors are logged and execution errors call log.Fatalf (terminating the process).
 // If Globals.Verbose is true, progress is logged. It always returns false.
 func dbSetupTables(db *sql.DB) bool {
-	if Globals.Verbose {
-		log.Printf("Setting up missing tables\n")
-	}
+	lgConfig.Debug("setting up missing tables")
 
 	for t, s := range DefaultTables {
 		stmt, err := db.Prepare(s)
 		if err != nil {
-			log.Printf("dbSetupTables: Error from %s schema \"%s\": %v\n", t, s, err)
+			Fatal("failed to prepare db schema", "table", t, "schema", s, "err", err)
 		}
 		_, err = stmt.Exec()
 		if err != nil {
-			log.Fatalf("Failed to set up db schema: %s. Error: %v", s, err)
+			Fatal("failed to set up db schema", "schema", s, "err", err)
 		}
 	}
 
+	dbMigrateSchema(db)
+	return false
+}
+
+// dbMigrateSchema adds columns that may be missing from tables created by older schema versions.
+// Uses ALTER TABLE ADD COLUMN which is a no-op if the column already exists (SQLite ignores duplicates via error check).
+func dbMigrateSchema(db *sql.DB) {
+	migrations := []struct {
+		table  string
+		column string
+		ddl    string
+	}{
+		{"DnssecKeyStore", "propagation_confirmed", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed INTEGER DEFAULT 0"},
+		{"DnssecKeyStore", "propagation_confirmed_at", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed_at TEXT DEFAULT ''"},
+		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
+		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
+	}
+
+	for _, m := range migrations {
+		if dbColumnExists(db, m.table, m.column) {
+			continue
+		}
+		_, err := db.Exec(m.ddl)
+		if err != nil {
+			lgConfig.Error("failed to add column in schema migration", "table", m.table, "column", m.column, "err", err)
+		} else {
+			lgConfig.Info("added column in schema migration", "table", m.table, "column", m.column)
+		}
+	}
+}
+
+// validTableName checks that a table name contains only safe characters.
+func validTableName(name string) bool {
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return len(name) > 0
+}
+
+// dbColumnExists checks whether a column exists in a table using PRAGMA table_info.
+func dbColumnExists(db *sql.DB, table, column string) bool {
+	if !validTableName(table) {
+		return false
+	}
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		if name == column {
+			return true
+		}
+	}
 	return false
 }
 
@@ -123,9 +185,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	if dbfile == "" {
 		return nil, fmt.Errorf("error: DB filename unspecified")
 	}
-	if Globals.Verbose {
-		log.Printf("NewKeyDB: TDNS using sqlite db in file %s\n", dbfile)
-	}
+	lgConfig.Debug("opening TDNS sqlite db", "file", dbfile)
 	if err := os.Chmod(dbfile, 0664); err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}
@@ -136,6 +196,9 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 
 	if force {
 		for table := range DefaultTables {
+			if !validTableName(table) {
+				return nil, fmt.Errorf("NewKeyDB: invalid table name %q", table)
+			}
 			sqlcmd := "DROP TABLE " + table
 			_, err = db.Exec(sqlcmd)
 			if err != nil {
@@ -156,6 +219,6 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 
 func NewSig0StoreT() *Sig0StoreT {
 	return &Sig0StoreT{
-		Map: cmap.New[Sig0Key](),
+		Map: core.NewCmap[Sig0Key](),
 	}
 }

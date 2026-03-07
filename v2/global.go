@@ -8,8 +8,8 @@ import (
 	"net"
 	"net/url"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type GlobalStuff struct {
@@ -31,9 +31,10 @@ type GlobalStuff struct {
 	BaseUri     string
 	Port        uint16
 	Address     string
-	App         AppDetails
-	ServerSVCB  *dns.SVCB // ALPN for DoH/DoQ
-	TsigKeys    map[string]*TsigDetails
+	App          AppDetails
+	ServerSVCB   *dns.SVCB // ALPN for DoH/DoQ
+	TsigKeys     map[string]*TsigDetails
+	CombinerConf *LocalCombinerConf // Set during init for combiner apps
 }
 
 var Globals = GlobalStuff{
@@ -43,7 +44,7 @@ var Globals = GlobalStuff{
 	ApiClients: map[string]*ApiClient{},
 }
 
-var Zones = cmap.New[*ZoneData]()
+var Zones = core.NewCmap[*ZoneData]()
 
 func (gs *GlobalStuff) Validate() error {
 	// Port is uint16, so it's always <= 65535, no need to check

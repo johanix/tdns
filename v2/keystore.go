@@ -7,8 +7,7 @@ import (
 	"crypto"
 	"database/sql"
 	"fmt"
-	"log"
-
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -32,13 +31,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	var err error
 
-	log.Printf("Sig0KeyMgmt: request: %s", kp.SubCommand)
+	lgSigner.Debug("Sig0KeyMgmt request", "subcommand", kp.SubCommand)
 
 	switch kp.SubCommand {
 	case "list":
 		rows, err := kdb.Query(getAllSig0KeysSql)
 		if err != nil {
-			log.Printf("Error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			lgSigner.Error("kdb.Query failed", "sql", getAllSig0KeysSql, "err", err)
 			return &resp, fmt.Errorf("error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
@@ -71,7 +70,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	// XXX: FIXME: "add" should also add the public key to the TrustStore.
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
-		log.Printf("Sig0KeyMgmt: importing private key (type=%T): [redacted]", pkc.K)
+		lgSigner.Info("importing private key", "type", fmt.Sprintf("%T", pkc.K))
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
@@ -98,15 +97,14 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
-			log.Printf("Error from PrivateKeyToPEM: %v", err)
+			lgSigner.Error("PrivateKeyToPEM failed", "err", err)
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
 		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.KeyRR.String())
-		// log.Printf("tx.Exec(%s, %s, %d, %s, %s)", addSig0KeySql, kp.Keyname, kp.Keyid, "***", kp.KeyRR)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to add SIG(0) key", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -132,13 +130,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "generate":
-		log.Printf("Sig0KeyMgmt: request to generate new keypair for name: %s", kp.Keyname)
+		lgSigner.Info("generating new SIG(0) keypair", "name", kp.Keyname)
 		if kp.Keyname == "" {
 			kp.Keyname = kp.Zone
 		}
 		pkc, msg, err := kdb.GenerateKeypair(kp.Keyname, kp.Creator, kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
 		if err != nil {
-			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
+			lgSigner.Error("GenerateKeypair failed", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 			return &resp, err
@@ -164,9 +162,8 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	case "setstate":
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to set SIG(0) key state", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -194,23 +191,22 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		var keyid int
 		err := row.Scan(&zone, &state, &keyid, &algorithm, &privatekey, &keyrr)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to scan SIG(0) key for delete", "err", err)
 			if err == sql.ErrNoRows {
 				return &resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
 			return &resp, err
 		}
 		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
-			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
+			lgSigner.Warn("SIG(0) key not found for delete", "keyname", kp.Keyname, "keyid", kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
 			return &resp, nil
 		}
 
 		// 3. Return all good, now untrusted
 		res, err = tx.Exec(deleteSig0KeySql, kp.Keyname, kp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %d)", deleteSig0KeySql, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to delete SIG(0) key", "err", err)
 			return &resp, err
 		}
 		rows, _ := res.RowsAffected()
@@ -232,7 +228,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+state)
 
 	default:
-		log.Printf("Sig0KeyMgmt: Unknown SubCommand: %s", kp.SubCommand)
+		lgSigner.Warn("unknown Sig0KeyMgmt subcommand", "subcommand", kp.SubCommand)
 	}
 
 	return &resp, nil
@@ -246,9 +242,9 @@ func (kdb *KeyDB) DnssecKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, err
 INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		setStateDnskeySql = "UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?"
 		deleteDnskeySql   = `DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
-		getAllDnskeysSql  = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore`
+		getAllDnskeysSql  = `SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, propagation_confirmed, propagation_confirmed_at FROM DnssecKeyStore`
 		getDnskeySql      = `
-SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, propagation_confirmed, propagation_confirmed_at FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	)
 
 	var localtx = false
@@ -264,7 +260,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	defer func() {
 		if localtx {
 			if err != nil {
-				log.Printf("DnssecKeyMgmt: tx.Rollback() ok, err1=%v", err)
+				lgSigner.Debug("DnssecKeyMgmt rollback", "err", err)
 				tx.Rollback()
 			} else {
 				tx.Commit()
@@ -285,10 +281,12 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 		var keyname, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid, flags int
+		var propConfirmed int
+		var propConfirmedAt string
 
 		tmp2 := map[string]DnssecKey{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr)
+			err := rows.Scan(&keyname, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr, &propConfirmed, &propConfirmedAt)
 			if err != nil {
 				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
@@ -296,15 +294,20 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				privatekey = "ULTRA SECRET KEY"
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
-			tmp2[mapkey] = DnssecKey{
-				Name:       keyname,
-				State:      state,
-				Flags:      uint16(flags),
-				Algorithm:  algorithm,
-				Creator:    creator,
-				PrivateKey: "-***-",
-				Keystr:     keyrrstr,
+			dk := DnssecKey{
+				Name:                 keyname,
+				State:                state,
+				Flags:                uint16(flags),
+				Algorithm:            algorithm,
+				Creator:              creator,
+				PrivateKey:           "-***-",
+				Keystr:               keyrrstr,
+				PropagationConfirmed: propConfirmed != 0,
 			}
+			if propConfirmedAt != "" {
+				dk.PropagationConfirmedAt, _ = time.Parse(time.RFC3339, propConfirmedAt)
+			}
+			tmp2[mapkey] = dk
 		}
 		resp.Dnskeys = tmp2
 		resp.Msg = "Here are all the DNSSEC keys that we know"
@@ -337,19 +340,18 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
-			log.Printf("Error from PrivateKeyToPEM: %v", err)
+			lgSigner.Error("PrivateKeyToPEM failed", "err", err)
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
 		res, err = tx.Exec(addDnskeySql, pkc.DnskeyRR.Header().Name, kp.State, pkc.DnskeyRR.KeyTag(), pkc.DnskeyRR.Flags,
 			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.DnskeyRR.String())
 
-		// log.Printf("tx.Exec(%s, %s, %s, %d, %d, %s, %s, %s)", addDnskeySql, kp.Keyname, kp.State, kp.Keyid, kp.Flags, dns.AlgorithmToString[kp.Algorithm], "***", kp.DnskeyRR)
 		if err != nil {
-			log.Printf("Error from tx.Exec(): %v", err)
+			lgSigner.Error("failed to add DNSKEY", "err", err)
 			return &resp, err
 		} else {
-			log.Printf("tx.Exec(): all ok")
+			lgSigner.Debug("DNSKEY added successfully")
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
@@ -358,7 +360,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	case "generate":
 		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
 		if err != nil {
-			log.Printf("Error from kdb.GenerateKeypair(): %v", err)
+			lgSigner.Error("GenerateKeypair failed", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
 		}
@@ -368,9 +370,8 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	case "setstate":
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
-		// log.Printf("tx.Exec(%s, %s, %s, %d)", setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
-			log.Printf("Error from tx.Exec(): %v", err)
+			lgSigner.Error("failed to set DNSKEY state", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
@@ -381,6 +382,19 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			}
 		}
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
+
+	case "rollover":
+		keytype := kp.KeyType
+		if keytype == "" {
+			keytype = "ZSK"
+		}
+		oldKeyid, newKeyid, err := kdb.RolloverKey(kp.Zone, keytype, tx)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.Msg = fmt.Sprintf("%s rollover for zone %s: active key %d retired, standby key %d now active", keytype, kp.Zone, oldKeyid, newKeyid)
 
 	case "delete":
 		const getDnskeySql = `
@@ -393,34 +407,109 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		var keyid, flags int
 		err := row.Scan(&zone, &state, &keyid, &flags, &algorithm, &privatekey, &keyrr)
 		if err != nil {
-			log.Printf("Error: %v", err)
+			lgSigner.Error("failed to scan DNSKEY for delete", "err", err)
 			if err == sql.ErrNoRows {
 				return &resp, fmt.Errorf("key %s (keyid %d) not found", kp.Keyname, kp.Keyid)
 			}
 			return &resp, err
 		}
 		if uint16(keyid) != kp.Keyid || zone != kp.Zone {
-			log.Printf("keystore sig0 delete: key %s %d not found", kp.Keyname, kp.Keyid)
+			lgSigner.Warn("DNSKEY not found for delete", "keyname", kp.Keyname, "keyid", kp.Keyid)
 			resp.Msg = fmt.Sprintf("key %s %d not found", kp.Keyname, kp.Keyid)
 			return &resp, nil
 		}
 
-		// 3. Return all good, now untrusted
-		res, err = tx.Exec(deleteDnskeySql, kp.Keyname, kp.Keyid)
-		log.Printf("tx.Exec(%s, %s, %d)", deleteDnskeySql, kp.Keyname, kp.Keyid)
+		// Transition to mpremove (MP zones) or removed (non-MP) instead of deleting.
+		// Keys must stay in the DB until all remote agents confirm the removal.
+		targetState := DnskeyStateRemoved
+		zd, exists := Zones.Get(kp.Zone)
+		if exists && zd.Options[OptMultiProvider] {
+			targetState = DnskeyStateMpremove
+		}
+
+		// Inline state update using the existing tx (calling UpdateDnssecKeyState
+		// would try to Begin a second transaction and deadlock).
+		now := time.Now().UTC().Format(time.RFC3339)
+		var updateRes sql.Result
+		switch targetState {
+		case DnskeyStatePublished:
+			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
+				targetState, now, kp.Zone, kp.Keyid)
+		case DnskeyStateRetired:
+			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+				targetState, now, kp.Zone, kp.Keyid)
+		default:
+			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+				targetState, kp.Zone, kp.Keyid)
+		}
 		if err != nil {
-			log.Printf("Error from tx.Exec(): %v", err)
-			//			resp.Error = true
-			//			resp.ErrorMsg = err.Error()
+			lgSigner.Error("failed to transition DNSKEY for delete", "err", err)
 			return &resp, err
 		}
-		rows, _ := res.RowsAffected()
-		resp.Msg = fmt.Sprintf("Key %s (keyid %d) deleted (%d rows)", kp.Keyname, kp.Keyid, rows)
+		if rows, _ := updateRes.RowsAffected(); rows == 0 {
+			err = fmt.Errorf("no rows updated for key %d in zone %s", kp.Keyid, kp.Zone)
+			return &resp, err
+		}
+		resp.Msg = fmt.Sprintf("Key %s (keyid %d) transitioned to %s", kp.Keyname, kp.Keyid, targetState)
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+state)
+		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+targetState)
+
+	case "clear":
+		if kp.Zone == "" {
+			resp.Error = true
+			resp.ErrorMsg = "zone is required for clear"
+			return &resp, fmt.Errorf("zone is required for clear")
+		}
+		result, err := tx.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=?`, kp.Zone)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		count, _ := result.RowsAffected()
+		// Invalidate all caches for this zone (mutex protects iteration during concurrent access)
+		kdb.mu.Lock()
+		for key := range kdb.KeystoreDnskeyCache {
+			if strings.HasPrefix(key, kp.Zone+"+") {
+				delete(kdb.KeystoreDnskeyCache, key)
+			}
+		}
+		kdb.mu.Unlock()
+		lgSigner.Info("all DNSSEC keys cleared", "zone", kp.Zone, "count", count)
+
+		// Immediately generate 1 active ZSK + 1 active KSK so the zone can be signed.
+		// Standby keys will be generated by KeyStateWorker on its next tick.
+		zd, zoneExists := Zones.Get(kp.Zone)
+		if !zoneExists || zd.DnssecPolicy == nil {
+			resp.Msg = fmt.Sprintf("Deleted all %d DNSSEC keys for zone %s. Zone not found or has no DNSSEC policy; no new keys generated.", count, kp.Zone)
+			return &resp, nil
+		}
+
+		alg := zd.DnssecPolicy.Algorithm
+		var generated []string
+
+		// Generate 1 active ZSK
+		zskPkc, _, err := kdb.GenerateKeypair(kp.Zone, "clear-regen", DnskeyStateActive, dns.TypeDNSKEY, alg, "ZSK", tx)
+		if err != nil {
+			lgSigner.Error("clear: failed to generate active ZSK", "zone", kp.Zone, "err", err)
+		} else {
+			generated = append(generated, fmt.Sprintf("ZSK %d (active)", zskPkc.KeyId))
+		}
+
+		// Generate 1 active KSK
+		kskPkc, _, err := kdb.GenerateKeypair(kp.Zone, "clear-regen", DnskeyStateActive, dns.TypeDNSKEY, alg, "KSK", tx)
+		if err != nil {
+			lgSigner.Error("clear: failed to generate active KSK", "zone", kp.Zone, "err", err)
+		} else {
+			generated = append(generated, fmt.Sprintf("KSK %d (active)", kskPkc.KeyId))
+		}
+
+		resp.Msg = fmt.Sprintf("Deleted %d keys for zone %s. Generated: %s. Standby keys will follow via KeyStateWorker.",
+			count, kp.Zone, strings.Join(generated, ", "))
 
 	default:
 		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)
-		log.Printf("DnssecKeyMgmt: %s", resp.Msg)
+		lgSigner.Warn("unknown DnssecKeyMgmt subcommand", "subcommand", kp.SubCommand)
 		resp.Error = true
 		resp.ErrorMsg = resp.Msg
 	}
@@ -440,7 +529,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename, state)
 	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchSig0PrivKeySql, zonename, err)
+		lgSigner.Error("failed to query SIG(0) keys", "sql", fetchSig0PrivKeySql, "zone", zonename, "err", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -453,19 +542,18 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	for rows.Next() {
 		err := rows.Scan(&keyid, &algorithm, &privatekey, &keyrrstr)
-		// log.Printf("rows.Scan() returned err=%v, keyid=%d, algorithm=%s, privatekey=%s, keyrrstr=%s", err, keyid, algorithm, privatekey, keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				// This is not an error, so lets just return an empty Sig0ActiveKeys
-				log.Printf("No SIG(0) key in state %s found for zone %s", state, zonename)
+				lgSigner.Debug("no SIG(0) key found", "state", state, "zone", zonename)
 				return &sak, nil
 			}
-			log.Printf("Error from rows.Scan(): %v", err)
+			lgSigner.Error("rows.Scan failed", "err", err)
 			return nil, err
 		}
 
 		if keyfound {
-			log.Printf("Error: multiple SIG(0) keys in state %s found for zone %s", state, zonename)
+			lgSigner.Warn("multiple SIG(0) keys found", "state", state, "zone", zonename)
 			// XXX: Should we return an error here?
 			continue
 		}
@@ -473,20 +561,20 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		// Parse private key, detecting old BIND format or new PEM format
 		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			log.Printf("Error from ParsePrivateKeyFromDB(): %v", err)
+			lgSigner.Error("ParsePrivateKeyFromDB failed", "err", err)
 			return nil, err
 		}
 
 		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
 		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
+			lgSigner.Error("PrepareKeyCache failed", "err", err)
 			return nil, err
 		}
 
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
-			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
+			lgSigner.Warn("algorithm mismatch", "stored", alg, "parsed", pkc.Algorithm)
 			return nil, fmt.Errorf("error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
@@ -496,13 +584,11 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	if !keyfound {
 		// This is not an error, so lets just return an empty Sig0ActiveKeys
-		log.Printf("No SIG(0) key in state %s found for zone %s", state, zonename)
+		lgSigner.Debug("no SIG(0) key found", "state", state, "zone", zonename)
 		return &sak, nil
 	}
 
-	if Globals.Debug {
-		log.Printf("GetSig0Keys(%s, %s) returned keys %v", zonename, state, sak)
-	}
+	lgSigner.Debug("GetSig0Keys returned keys", "zone", zonename, "state", state, "keys", sak)
 
 	kdb.KeystoreSig0Cache[zonename+"+"+state] = &sak
 
@@ -526,7 +612,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename, state)
 	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchDnssecPrivKeySql, zonename, err)
+		lgSigner.Error("failed to query DNSSEC keys", "sql", fetchDnssecPrivKeySql, "zone", zonename, "err", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -540,10 +626,10 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		err := rows.Scan(&keyid, &flags, &algorithm, &privatekey, &keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
-				log.Printf("No active DNSSEC key found for zone %s", zonename)
+				lgSigner.Debug("no active DNSSEC key found", "zone", zonename)
 				return &dk, nil
 			}
-			log.Printf("Error from rows.Scan(): %v", err)
+			lgSigner.Error("rows.Scan failed", "err", err)
 			return nil, err
 		}
 
@@ -552,20 +638,20 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 		// Parse private key, detecting old BIND format or new PEM format
 		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			log.Printf("Error from ParsePrivateKeyFromDB(): %v", err)
+			lgSigner.Error("ParsePrivateKeyFromDB failed", "err", err)
 			return nil, err
 		}
 
 		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
 		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
 		if err != nil {
-			log.Printf("Error from tdns.PrepareKeyCache(): %v", err)
+			lgSigner.Error("PrepareKeyCache failed", "err", err)
 			return nil, err
 		}
 
 		// Ensure the parsed algorithm matches
 		if pkc.Algorithm != alg {
-			log.Printf("Warning: algorithm mismatch: stored=%d, parsed=%d", alg, pkc.Algorithm)
+			lgSigner.Warn("algorithm mismatch", "stored", alg, "parsed", pkc.Algorithm)
 			return nil, fmt.Errorf("error: algorithm mismatch for key %s: stored=%d, parsed=%d", keyrrstr, alg, pkc.Algorithm)
 		}
 
@@ -582,25 +668,23 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 	// No keys found is not an error
 	if !keysfound {
-		log.Printf("No %s DNSSEC keys found for zone %s", state, zonename)
+		lgSigner.Debug("no DNSSEC keys found", "state", state, "zone", zonename)
 		return &dk, nil
 	}
 
 	// No KSK found is a hard error
 	if len(dk.KSKs) == 0 {
-		log.Printf("No %s DNSSEC KSK found for zone %s", state, zonename)
+		lgSigner.Warn("no DNSSEC KSK found", "state", state, "zone", zonename)
 		return &dk, nil
 	}
 
 	// When using a CSK it will have the flags = 257, but also be used as a ZSK.
 	if len(dk.ZSKs) == 0 {
-		log.Printf("No %s DNSSEC ZSK found for zone %s, reusing KSK", state, zonename)
+		lgSigner.Info("no DNSSEC ZSK found, reusing KSK as CSK", "state", state, "zone", zonename)
 		dk.ZSKs = append(dk.ZSKs, dk.KSKs[0])
 	}
 
-	if Globals.Debug {
-		log.Printf("GetDnssecKey(%s, %s) returned keys: %s", zonename, state, logmsg)
-	}
+	lgSigner.Debug("GetDnssecKeys returned keys", "zone", zonename, "state", state, "keys", logmsg)
 
 	kdb.KeystoreDnskeyCache[zonename+"+"+state] = &dk
 
@@ -659,4 +743,442 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
 
 	return nil
+}
+
+// GenerateAndStageKey generates a new DNSSEC key and stages it for the key pipeline.
+// For multi-provider zones (isMultiProvider=true): created → mpdist (awaits remote confirmation)
+// For normal zones: created → published (sets published_at, enters time-based pipeline)
+func (kdb *KeyDB) GenerateAndStageKey(zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
+	pkc, _, err := kdb.GenerateKeypair(zone, creator, DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
+	if err != nil {
+		return 0, fmt.Errorf("GenerateAndStageKey: key generation failed: %w", err)
+	}
+
+	keyid := pkc.KeyId
+
+	var targetState string
+	if isMultiProvider {
+		targetState = DnskeyStateMpdist
+	} else {
+		targetState = DnskeyStatePublished
+	}
+
+	if err := kdb.UpdateDnssecKeyState(zone, keyid, targetState); err != nil {
+		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", targetState, err)
+	}
+
+	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", targetState, "mp", isMultiProvider)
+	return keyid, nil
+}
+
+// TransitionMpdistToPublished transitions a key from mpdist to published state.
+// Called when the signer receives a "propagated" KEYSTATE signal from the agent,
+// indicating all remote providers have confirmed the key.
+// If the key is not in mpdist state, this is a no-op (returns nil).
+func (kdb *KeyDB) TransitionMpdistToPublished(zonename string, keyid uint16) error {
+	// Check current state — only transition if in mpdist
+	var currentState string
+	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil // Key not found, no-op
+		}
+		return fmt.Errorf("TransitionMpdistToPublished: query failed: %w", err)
+	}
+
+	if currentState != DnskeyStateMpdist {
+		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+		return nil
+	}
+
+	if err := kdb.UpdateDnssecKeyState(zonename, keyid, DnskeyStatePublished); err != nil {
+		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
+	}
+
+	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
+	return nil
+}
+
+// TransitionMpremoveToRemoved transitions a key from mpremove to removed state.
+// Called when the signer receives a "propagated" KEYSTATE signal from the agent,
+// indicating all remote providers have confirmed the key removal.
+// If the key is not in mpremove state, this is a no-op (returns nil).
+func (kdb *KeyDB) TransitionMpremoveToRemoved(zonename string, keyid uint16) error {
+	var currentState string
+	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("TransitionMpremoveToRemoved: query failed: %w", err)
+	}
+
+	if currentState != DnskeyStateMpremove {
+		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+		return nil
+	}
+
+	if err := kdb.UpdateDnssecKeyState(zonename, keyid, DnskeyStateRemoved); err != nil {
+		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
+	}
+
+	lgSigner.Info("key transitioned mpremove->removed", "zone", zonename, "keyid", keyid)
+	return nil
+}
+
+// SetPropagationConfirmed marks a DNSKEY as propagation-confirmed in the keystore.
+// Called when the agent sends KEYSTATE "propagated" to the signer.
+func (kdb *KeyDB) SetPropagationConfirmed(zonename string, keyid uint16) error {
+	const updateSql = `UPDATE DnssecKeyStore SET propagation_confirmed=1, propagation_confirmed_at=? WHERE zonename=? AND keyid=?`
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := kdb.Exec(updateSql, now, zonename, keyid)
+	if err != nil {
+		return fmt.Errorf("SetPropagationConfirmed: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("SetPropagationConfirmed: key %d not found in zone %s", keyid, zonename)
+	}
+
+	// Invalidate cache for published state (the key should be in published state)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStatePublished)
+	lgSigner.Info("key marked as propagation confirmed", "keyid", keyid, "zone", zonename)
+	return nil
+}
+
+// GetDnssecKeyPropagation returns the propagation state for a specific key.
+// Returns (confirmed bool, confirmedAt time.Time, err error).
+func (kdb *KeyDB) GetDnssecKeyPropagation(zonename string, keyid uint16) (bool, time.Time, error) {
+	const querySql = `SELECT propagation_confirmed, propagation_confirmed_at FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+
+	var confirmed int
+	var confirmedAtStr string
+	err := kdb.QueryRow(querySql, zonename, keyid).Scan(&confirmed, &confirmedAtStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, time.Time{}, fmt.Errorf("key %d not found in zone %s", keyid, zonename)
+		}
+		return false, time.Time{}, err
+	}
+
+	var confirmedAt time.Time
+	if confirmedAtStr != "" {
+		confirmedAt, _ = time.Parse(time.RFC3339, confirmedAtStr)
+	}
+	return confirmed != 0, confirmedAt, nil
+}
+
+// DefaultDnskeyTTL is the assumed DNSKEY RRset TTL for multi-provider gating.
+// Used when the actual TTL is not readily available. 3600 seconds (1 hour) is
+// a common DNSKEY RRset TTL.
+const DefaultDnskeyTTL = 3600 * time.Second
+
+// canPromoteMultiProvider checks whether a key in a multi-provider zone is eligible
+// for promotion from published to active. Both conditions must be met:
+// 1. propagation_confirmed is true (all remote providers confirmed the key)
+// 2. Enough time has passed since confirmation for old cached DNSKEY RRsets to expire
+func (kdb *KeyDB) canPromoteMultiProvider(zonename string, keyid uint16) bool {
+	confirmed, confirmedAt, err := kdb.GetDnssecKeyPropagation(zonename, keyid)
+	if err != nil {
+		lgSigner.Error("error checking propagation for multi-provider promotion", "keyid", keyid, "zone", zonename, "err", err)
+		return false
+	}
+
+	if !confirmed {
+		lgSigner.Debug("propagation not yet confirmed", "keyid", keyid, "zone", zonename)
+		return false
+	}
+
+	elapsed := time.Since(confirmedAt)
+	if elapsed < DefaultDnskeyTTL {
+		lgSigner.Debug("propagation confirmed but TTL not expired", "keyid", keyid, "zone", zonename, "elapsed", elapsed.Truncate(time.Second), "ttl", DefaultDnskeyTTL)
+		return false
+	}
+
+	lgSigner.Info("key eligible for multi-provider promotion", "keyid", keyid, "zone", zonename, "elapsed", elapsed.Truncate(time.Second), "ttl", DefaultDnskeyTTL)
+	return true
+}
+
+// KeyInventoryItem is a lightweight DNSKEY entry for inventory responses.
+// Does not include private key material — only the metadata needed for key classification.
+type KeyInventoryItem struct {
+	KeyTag    uint16
+	Algorithm uint8
+	Flags     uint16
+	State     string // "created","mpdist","published","standby","active","retired","removed","foreign"
+	KeyRR     string // Full DNSKEY RR string (public key data, no private key)
+}
+
+// GetKeyInventory returns the complete DNSKEY inventory for a zone — all keys
+// across all states. Used by the signer to respond to RFI KEYSTATE requests.
+// Returns lightweight entries (keytag, algorithm, flags, state, keyrr) without private keys.
+func (kdb *KeyDB) GetKeyInventory(zonename string) ([]KeyInventoryItem, error) {
+	const inventorySql = `SELECT keyid, flags, algorithm, state, COALESCE(keyrr, '') FROM DnssecKeyStore WHERE zonename=?`
+
+	rows, err := kdb.Query(inventorySql, zonename)
+	if err != nil {
+		return nil, fmt.Errorf("GetKeyInventory: query failed for zone %s: %w", zonename, err)
+	}
+	defer rows.Close()
+
+	var entries []KeyInventoryItem
+	for rows.Next() {
+		var keyid, flags int
+		var algorithm string
+		var state, keyrr string
+		if err := rows.Scan(&keyid, &flags, &algorithm, &state, &keyrr); err != nil {
+			return nil, fmt.Errorf("GetKeyInventory: scan failed: %w", err)
+		}
+		alg, ok := dns.StringToAlgorithm[algorithm]
+		if !ok {
+			lgSigner.Warn("GetKeyInventory: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
+			continue
+		}
+		entries = append(entries, KeyInventoryItem{
+			KeyTag:    uint16(keyid),
+			Algorithm: alg,
+			Flags:     uint16(flags),
+			State:     state,
+			KeyRR:     keyrr,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetKeyInventory: rows iteration failed: %w", err)
+	}
+
+	return entries, nil
+}
+
+// DnssecKeyWithTimestamps extends KeyInventoryItem with lifecycle timestamps.
+// Used by the KeyStateWorker for time-based state transitions.
+type DnssecKeyWithTimestamps struct {
+	ZoneName    string
+	KeyTag      uint16
+	Algorithm   uint8
+	Flags       uint16
+	State       string
+	KeyRR       string
+	PublishedAt *time.Time
+	RetiredAt   *time.Time
+}
+
+// GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
+// If zone is empty, returns keys across all zones.
+func (kdb *KeyDB) GetDnssecKeysByState(zone string, state string) ([]DnssecKeyWithTimestamps, error) {
+	var query string
+	var args []interface{}
+
+	if zone == "" {
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE state=?`
+		args = []interface{}{state}
+	} else {
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE zonename=? AND state=?`
+		args = []interface{}{zone, state}
+	}
+
+	rows, err := kdb.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("GetDnssecKeysByState: query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []DnssecKeyWithTimestamps
+	for rows.Next() {
+		var zonename, algorithm, st, keyrr, publishedAtStr, retiredAtStr string
+		var keyid, flags int
+		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &retiredAtStr); err != nil {
+			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
+		}
+
+		alg, ok := dns.StringToAlgorithm[algorithm]
+		if !ok {
+			lgSigner.Warn("GetDnssecKeysByState: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
+			continue
+		}
+		entry := DnssecKeyWithTimestamps{
+			ZoneName:  zonename,
+			KeyTag:    uint16(keyid),
+			Algorithm: alg,
+			Flags:     uint16(flags),
+			State:     st,
+			KeyRR:     keyrr,
+		}
+
+		if publishedAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, publishedAtStr); err == nil {
+				entry.PublishedAt = &t
+			}
+		}
+		if retiredAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, retiredAtStr); err == nil {
+				entry.RetiredAt = &t
+			}
+		}
+
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetDnssecKeysByState: rows iteration failed: %w", err)
+	}
+
+	return entries, nil
+}
+
+// UpdateDnssecKeyState transitions a DNSSEC key to a new state and sets the
+// appropriate lifecycle timestamp. When transitioning to "published", sets
+// published_at. When transitioning to "retired", sets retired_at.
+// Invalidates the cache for both old and new states.
+func (kdb *KeyDB) UpdateDnssecKeyState(zonename string, keyid uint16, newstate string) error {
+	tx, err := kdb.Begin("UpdateDnssecKeyState")
+	if err != nil {
+		return fmt.Errorf("error beginning transaction: %v", err)
+	}
+
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	// Get the current state so we can invalidate the right cache entry
+	var oldstate string
+	err = tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&oldstate)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
+		}
+		return fmt.Errorf("error querying DnssecKeyStore: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	var res sql.Result
+	switch newstate {
+	case DnskeyStatePublished:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
+			newstate, now, zonename, keyid)
+	case DnskeyStateRetired:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+			newstate, now, zonename, keyid)
+	default:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+			newstate, zonename, keyid)
+	}
+
+	if err != nil {
+		return fmt.Errorf("error updating DnssecKeyStore: %v", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		err = fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
+		return err
+	}
+
+	// Invalidate caches for both old and new states
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+newstate)
+
+	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
+	return nil
+}
+
+// RolloverKey performs a manual key rollover for the specified zone and key type.
+// It swaps the oldest standby key to active and the current active key to retired.
+// Returns the old active keyid and the new active keyid.
+// If tx is non-nil, uses the existing transaction; otherwise begins its own.
+func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, uint16, error) {
+	var expectedFlags uint16
+	switch keytype {
+	case "ZSK":
+		expectedFlags = 256
+	case "KSK", "CSK":
+		expectedFlags = 257
+	default:
+		return 0, 0, fmt.Errorf("invalid keytype %q, must be ZSK or KSK", keytype)
+	}
+
+	// Get active keys of this type
+	activeKeys, err := kdb.GetDnssecKeysByState(zonename, DnskeyStateActive)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
+	}
+
+	var activeKey *DnssecKeyWithTimestamps
+	for i, k := range activeKeys {
+		if k.Flags == expectedFlags {
+			activeKey = &activeKeys[i]
+			break
+		}
+	}
+	if activeKey == nil {
+		return 0, 0, fmt.Errorf("no active %s found for zone %s", keytype, zonename)
+	}
+
+	// Get standby keys of this type
+	standbyKeys, err := kdb.GetDnssecKeysByState(zonename, DnskeyStateStandby)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting standby keys: %w", err)
+	}
+
+	var standbyKey *DnssecKeyWithTimestamps
+	for i, k := range standbyKeys {
+		if k.Flags == expectedFlags {
+			standbyKey = &standbyKeys[i]
+			break
+		}
+	}
+	if standbyKey == nil {
+		return 0, 0, fmt.Errorf("no standby %s available for rollover in zone %s", keytype, zonename)
+	}
+
+	// Use existing transaction or begin a new one
+	localtx := false
+	if tx == nil {
+		tx, err = kdb.Begin("RolloverKey")
+		if err != nil {
+			return 0, 0, fmt.Errorf("error beginning transaction: %w", err)
+		}
+		localtx = true
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	var txErr error
+
+	defer func() {
+		if localtx {
+			if txErr != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
+		}
+	}()
+
+	// standby → active
+	_, txErr = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+		DnskeyStateActive, zonename, standbyKey.KeyTag)
+	if txErr != nil {
+		return 0, 0, fmt.Errorf("standby→active transition failed: %w", txErr)
+	}
+
+	// active → retired (set retired_at)
+	_, txErr = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
+		DnskeyStateRetired, now, zonename, activeKey.KeyTag)
+	if txErr != nil {
+		return 0, 0, fmt.Errorf("active→retired transition failed: %w", txErr)
+	}
+
+	// Invalidate all relevant caches
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateActive)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateStandby)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateRetired)
+
+	lgSigner.Info("key rollover completed", "zone", zonename, "keytype", keytype,
+		"old_active", activeKey.KeyTag, "new_active", standbyKey.KeyTag)
+
+	return activeKey.KeyTag, standbyKey.KeyTag, nil
 }

@@ -69,6 +69,9 @@ func AddEROption(opt *dns.OPT, agentDomain string) error {
 	if err != nil {
 		return fmt.Errorf("failed to pack domain name: %w", err)
 	}
+	if off <= 0 || off > len(domainBytes) {
+		return fmt.Errorf("PackDomainName returned invalid offset %d (buffer size %d)", off, len(domainBytes))
+	}
 
 	optionData := domainBytes[:off]
 

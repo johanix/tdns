@@ -7,10 +7,10 @@ package tdns
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"time"
@@ -23,13 +23,16 @@ import (
 func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
-	log.Printf("DnsEngine: DoH addresses: %v", dohaddrs)
+	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
+	// The closure captures ourDNSHandler (a function parameter) and conf (a pointer).
+	// Both are set once at startup before any HTTP requests are served, so there is
+	// no data race despite the closure being invoked concurrently by the HTTP server.
 	http.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
 		var dnsQuery []byte
 		var err error
 		msg := new(dns.Msg)
 		if r.Method == http.MethodPost {
-			dnsQuery, err = io.ReadAll(r.Body)
+			dnsQuery, err = io.ReadAll(io.LimitReader(r.Body, 65535))
 			if err != nil {
 				http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 				return
@@ -51,20 +54,26 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 			return
 		}
 
+		if len(msg.Question) == 0 {
+			lgDns.Warn("DoH: received message with no question section", "remote", r.RemoteAddr)
+			http.Error(w, "DNS message has no question section", http.StatusBadRequest)
+			return
+		}
+
 		// Create a response writer abstraction for DoH
 		var buf bytes.Buffer
 		rw := &dohResponseWriter{&buf}
 
-		if Globals.Debug {
-			log.Printf("*** DoH received message opcode: %s qname: %s rrtype: %s", dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
-		}
+		lgDns.Debug("DoH: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
 		// Call your internal handler to process DNS query
 		ourDNSHandler(rw, msg)
 
 		// raw, _ := resp.Pack()
 		w.Header().Set("Content-Type", "application/dns-message")
-		w.Write(buf.Bytes())
+		if _, err := w.Write(buf.Bytes()); err != nil {
+			lgDns.Warn("DoH: error writing response", "err", err)
+		}
 	})
 
 	ports := viper.GetStringSlice("dnsengine.ports.doh")
@@ -75,28 +84,34 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 	for _, addr := range dohaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
-			srv := &http.Server{Addr: hostport, Handler: nil}
+			srv := &http.Server{
+				Addr:    hostport,
+				Handler: nil,
+				TLSConfig: &tls.Config{
+					MinVersion: tls.VersionTLS13,
+				},
+			}
 			servers = append(servers, srv)
 			go func(s *http.Server, hp string) {
-				log.Printf("DnsEngine: setting up DoH server on %s", hp)
+				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp)
 				if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
-					log.Printf("Failed to setup the DoH server on %s: %s", hp, err.Error())
+					lgDns.Error("failed to setup DoH server", "hostport", hp, "err", err)
 				} else {
-					log.Printf("DnsEngine: listening on %s/DoH", hp)
+					lgDns.Info("DnsEngine: listening on DoH", "hostport", hp)
 				}
-				log.Printf("DnsEngine: done setting up DoH server on %s", hp)
+				lgDns.Info("DnsEngine: done setting up DoH server", "hostport", hp)
 			}(srv, hostport)
 		}
 	}
 	go func() {
 		<-ctx.Done()
-		log.Printf("DnsDoHEngine: shutting down DoH servers...")
+		lgDns.Info("DnsDoHEngine: shutting down DoH servers")
 		// Use bounded shutdown context to avoid hanging forever
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, s := range servers {
 			if err := s.Shutdown(shutdownCtx); err != nil {
-				log.Printf("DnsDoHEngine: error during shutdown of %s: %v", s.Addr, err)
+				lgDns.Error("DnsDoHEngine: error during shutdown", "addr", s.Addr, "err", err)
 			}
 		}
 	}()

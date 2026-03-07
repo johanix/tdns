@@ -16,7 +16,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 // This is still global, but also present in the RRsetCacheT struct
@@ -26,7 +25,7 @@ var DnskeyCache = NewDnskeyCache()
 // The returned cache has Map set to a fresh concurrent map for storing CachedDnskeyRRset entries.
 func NewDnskeyCache() *DnskeyCacheT {
 	return &DnskeyCacheT{
-		Map: cmap.New[CachedDnskeyRRset](),
+		Map: core.NewCmap[CachedDnskeyRRset](),
 	}
 }
 
@@ -107,6 +106,8 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 	return &crrset
 }
 
+const rrsetCacheMaxEntries = 50000
+
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
 	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
 	if rrcache.Debug {
@@ -116,6 +117,11 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	if crrset == nil {
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
 		return
+	}
+
+	// Evict oldest entry if cache exceeds max size (and this is a new key)
+	if !rrcache.RRsets.Has(lookupKey) && rrcache.RRsets.Count() >= rrsetCacheMaxEntries {
+		rrcache.evictOldestRRset()
 	}
 
 	// Compute min TTL and set Expiration accordingly when RRset present
@@ -144,6 +150,26 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	}
 
 	rrcache.RRsets.Set(lookupKey, *crrset)
+}
+
+// evictOldestRRset removes the entry with the earliest expiration time from the RRsets cache.
+func (rrcache *RRsetCacheT) evictOldestRRset() {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+	for item := range rrcache.RRsets.IterBuffered() {
+		if first || item.Val.Expiration.Before(oldestTime) {
+			oldestKey = item.Key
+			oldestTime = item.Val.Expiration
+			first = false
+		}
+	}
+	if !first {
+		rrcache.RRsets.Remove(oldestKey)
+		if rrcache.Debug {
+			log.Printf("RRsetCache: evicted oldest entry %s (expired %v) to stay within %d limit", oldestKey, oldestTime, rrsetCacheMaxEntries)
+		}
+	}
 }
 
 // FlushDomain removes cached RRsets at or below the provided domain.

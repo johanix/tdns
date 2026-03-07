@@ -8,24 +8,38 @@
 *.so
 *.dylib
 
-auth/tdns-auth
-authv2/tdns-authv2
-agent/tdns-agent
-combiner/tdns-combiner
-reporter/tdns-reporter
-scanner/tdns-scanner
-imr/tdns-imr
-imrv2/tdns-imrv2
-cli/tdns-cli
-cliv2/tdns-cliv2
-dog/dog
-dogv2/dogv2
+cmd/*/version.go
+cmdv2/*/version.go
+
+cmd/auth/tdns-auth
+cmd/agent/tdns-agent
+cmd/combiner/tdns-combiner
+cmd/reporter/tdns-reporter
+cmd/scanner/tdns-scanner
+cmd/imr/tdns-imr
+cmd/cli/tdns-cli
+cmd/dog/dog
+
+cmdv2/authv2/tdns-authv2
+cmdv2/cliv2/tdns-cliv2
+cmdv2/dogv2/dogv2
+cmdv2/imrv2/tdns-imrv2
+cmdv2/agentv2/tdns-agentv2
+cmdv2/combinerv2/tdns-combinerv2
+
 # old stuff; going away:
 sidecar/music-sidecar
 sidecar-cli/sidecar-cli
 msa/tdns-msa
 
 */version.go
+
+docs/*.aux
+docs/*.log
+docs/*.nav
+docs/*.snm
+docs/*.toc
+docs/*.vrb
 
 *~
 */*~

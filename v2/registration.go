@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/gorilla/mux"
@@ -64,20 +63,16 @@ func RegisterQueryHandler(qtype uint16, handler QueryHandlerFunc) error {
 	globalQueryHandlersMutex.Unlock()
 
 	// Also register in conf if available (and map is initialized)
+	Conf.Internal.QueryHandlersMutex.Lock()
 	if Conf.Internal.QueryHandlers != nil {
-		Conf.Internal.QueryHandlersMutex.Lock()
 		if Conf.Internal.QueryHandlers[qtype] == nil {
 			Conf.Internal.QueryHandlers[qtype] = make([]QueryHandlerFunc, 0)
 		}
 		Conf.Internal.QueryHandlers[qtype] = append(Conf.Internal.QueryHandlers[qtype], handler)
-		Conf.Internal.QueryHandlersMutex.Unlock()
-	} else {
-		// Conf not initialized yet, will be copied from global storage during MainInit
 	}
+	Conf.Internal.QueryHandlersMutex.Unlock()
 
-	if Globals.Debug {
-		log.Printf("RegisterQueryHandler: Registered handler for qtype %d", qtype)
-	}
+	lg.Debug("RegisterQueryHandler: registered handler", "qtype", qtype)
 
 	return nil
 }
@@ -147,26 +142,24 @@ func RegisterNotifyHandler(qtype uint16, handler NotifyHandlerFunc) error {
 		return fmt.Errorf("handler cannot be nil")
 	}
 
-	// Register in global storage (for early registration before conf is available)
-	globalNotifyHandlersMutex.Lock()
-	globalNotifyHandlers[qtype] = append(globalNotifyHandlers[qtype], handler)
-	globalNotifyHandlersMutex.Unlock()
-
-	// Also register in conf if available (and map is initialized)
+	// Register in conf if available; otherwise in global storage (copied to conf during MainInit).
+	// Only one location to avoid getNotifyHandlers returning duplicates.
+	Conf.Internal.NotifyHandlersMutex.Lock()
 	if Conf.Internal.NotifyHandlers != nil {
-		Conf.Internal.NotifyHandlersMutex.Lock()
 		if Conf.Internal.NotifyHandlers[qtype] == nil {
 			Conf.Internal.NotifyHandlers[qtype] = make([]NotifyHandlerFunc, 0)
 		}
 		Conf.Internal.NotifyHandlers[qtype] = append(Conf.Internal.NotifyHandlers[qtype], handler)
 		Conf.Internal.NotifyHandlersMutex.Unlock()
 	} else {
-		// Conf not initialized yet, will be copied from global storage during MainInit
+		Conf.Internal.NotifyHandlersMutex.Unlock()
+		// Conf not initialized yet — register in global storage, will be copied to conf during MainInit
+		globalNotifyHandlersMutex.Lock()
+		globalNotifyHandlers[qtype] = append(globalNotifyHandlers[qtype], handler)
+		globalNotifyHandlersMutex.Unlock()
 	}
 
-	if Globals.Debug {
-		log.Printf("RegisterNotifyHandler: Registered handler for qtype %d", qtype)
-	}
+	lg.Debug("RegisterNotifyHandler: registered handler", "qtype", qtype)
 
 	return nil
 }
@@ -276,20 +269,16 @@ func RegisterUpdateHandler(matcher UpdateMatcherFunc, handler UpdateHandlerFunc)
 	globalUpdateHandlersMutex.Unlock()
 
 	// Also register in conf if available (and slice is initialized)
+	Conf.Internal.UpdateHandlersMutex.Lock()
 	if Conf.Internal.UpdateHandlers != nil {
-		Conf.Internal.UpdateHandlersMutex.Lock()
 		Conf.Internal.UpdateHandlers = append(Conf.Internal.UpdateHandlers, UpdateHandlerRegistration{
 			Matcher: matcher,
 			Handler: handler,
 		})
-		Conf.Internal.UpdateHandlersMutex.Unlock()
-	} else {
-		// Conf not initialized yet, will be copied from global storage during MainInit
 	}
+	Conf.Internal.UpdateHandlersMutex.Unlock()
 
-	if Globals.Debug {
-		log.Printf("RegisterUpdateHandler: Registered UPDATE handler")
-	}
+	lg.Debug("RegisterUpdateHandler: registered UPDATE handler")
 
 	return nil
 }
@@ -355,9 +344,7 @@ func RegisterEngine(name string, engine EngineFunc) error {
 	globalEngines = append(globalEngines, EngineRegistration{Name: name, Engine: engine})
 	globalEnginesMutex.Unlock()
 
-	if Globals.Debug {
-		log.Printf("RegisterEngine: Registered engine '%s'", name)
-	}
+	lg.Debug("RegisterEngine: registered engine", "name", name)
 
 	return nil
 }
@@ -394,9 +381,7 @@ func RegisterAPIRoute(routeFunc APIRouteFunc) error {
 	globalAPIRoutes = append(globalAPIRoutes, APIRouteRegistration{RouteFunc: routeFunc})
 	globalAPIRoutesMutex.Unlock()
 
-	if Globals.Debug {
-		log.Printf("RegisterAPIRoute: Registered API route function")
-	}
+	lg.Debug("RegisterAPIRoute: registered API route function")
 
 	return nil
 }
@@ -434,12 +419,12 @@ func StartRegisteredEngines(ctx context.Context) {
 	for _, e := range engines {
 		names = append(names, e.Name)
 	}
-	log.Printf("Starting registered engines: %d engines to start: %v", len(engines), names)
+	lg.Info("starting registered engines", "count", len(engines), "names", names)
 	// engines := getRegisteredEngines()
 	for _, reg := range engines {
 		name := reg.Name
 		engine := reg.Engine
-		log.Printf("StartRegisteredEngines: starting %s", name)
+		lg.Info("StartRegisteredEngines: starting engine", "name", name)
 		startEngine(&Globals.App, name, func() error {
 			return engine(ctx)
 		})

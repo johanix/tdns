@@ -4,6 +4,9 @@
 package tdns
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/miekg/dns"
 )
 
@@ -22,11 +25,15 @@ func (zd *ZoneData) PublishCsyncRR() error {
 		Ttl:    120,
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{&csync},
 		InternalUpdate: true,
+	}:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("PublishCsyncRR: timeout sending update for zone %s", zd.ZoneName)
 	}
 
 	return nil
@@ -46,11 +53,15 @@ func (zd *ZoneData) UnpublishCsyncRR() error {
 		Ttl:    0,
 	}
 
-	zd.KeyDB.UpdateQ <- UpdateRequest{
+	select {
+	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        []dns.RR{&anti_csync},
 		InternalUpdate: true,
+	}:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("UnpublishCsyncRR: timeout sending update for zone %s", zd.ZoneName)
 	}
 
 	return nil

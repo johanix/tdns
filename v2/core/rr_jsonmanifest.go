@@ -71,11 +71,14 @@ func (rd *JSONMANIFEST) Pack(buf []byte) (int, error) {
 
 	// Pack as length-prefixed JSON
 	off := 0
+	if off+2 > len(buf) {
+		return off, errors.New("buffer too small for JSONMANIFEST length prefix")
+	}
 	buf[off] = byte(len(jsonBytes) >> 8)
 	buf[off+1] = byte(len(jsonBytes))
 	off += 2
 
-	if len(buf) < off+len(jsonBytes) {
+	if len(jsonBytes) > len(buf)-off {
 		return off, errors.New("buffer too small for JSONMANIFEST")
 	}
 
@@ -93,8 +96,8 @@ func (rd *JSONMANIFEST) Unpack(buf []byte) (int, error) {
 	jsonLen := int(buf[0])<<8 | int(buf[1])
 	off := 2
 
-	if len(buf) < off+jsonLen {
-		return off, errors.New("buffer too short for JSONMANIFEST data")
+	if jsonLen > len(buf)-off {
+		return off, fmt.Errorf("json manifest data exceeds message bounds (need %d, have %d)", jsonLen, len(buf)-off)
 	}
 
 	if err := json.Unmarshal(buf[off:off+jsonLen], rd); err != nil {

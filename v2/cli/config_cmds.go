@@ -131,8 +131,9 @@ var configStatusCmd = &cobra.Command{
 			} else {
 				fmt.Printf("ApiServer: not listening on any addresses\n")
 			}
-			if resp.ApiServer.ApiKey != "" {
-				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(resp.ApiServer.ApiKey), resp.ApiServer.ApiKey[:3], resp.ApiServer.ApiKey[len(resp.ApiServer.ApiKey)-3:])
+			if resp.ApiServer.ApiKey.Value() != "" {
+				ak := resp.ApiServer.ApiKey.Value()
+				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(ak), ak[:3], ak[len(ak)-3:])
 			} else {
 				fmt.Printf("ApiServer: api key is not set\n")
 			}

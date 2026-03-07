@@ -29,7 +29,14 @@ func ReportOptionToEDNS0Local(reportOption *ReportOption) (*dns.EDNS0_LOCAL, err
 		return nil, fmt.Errorf("field too long: zone=%d sender=%d details=%d (max 255)", zoneLen, senderLen, detailsLen)
 	}
 
-	data := make([]byte, 6+zoneLen+senderLen+detailsLen)
+	// Validate total option size doesn't exceed EDNS0 maximum (65535 bytes)
+	const maxEDNS0OptionSize = 65535
+	totalSize := 6 + zoneLen + senderLen + detailsLen
+	if totalSize > maxEDNS0OptionSize {
+		return nil, fmt.Errorf("total Report option size %d exceeds EDNS0 maximum %d", totalSize, maxEDNS0OptionSize)
+	}
+
+	data := make([]byte, totalSize)
 	data[0] = byte(reportOption.EDECode >> 8)
 	data[1] = byte(reportOption.EDECode & 0xFF)
 	data[2] = reportOption.Severity

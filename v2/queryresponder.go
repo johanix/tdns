@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 
@@ -24,31 +23,24 @@ import (
 func QueryHandler(ctx context.Context, conf *Config, handlerFunc func(context.Context, *DnsQueryRequest) error) error {
 	dnsqueryq := conf.Internal.DnsQueryQ
 
-	log.Printf("*** DnsQueryHandler: starting")
-	if Globals.Debug {
-		log.Printf("DnsQueryHandler: Channel capacity: %d", cap(dnsqueryq))
-		log.Printf("DnsQueryHandler: Waiting for queries on dnsqueryq channel")
-	}
+	lgHandler.Info("DnsQueryHandler starting")
+	lgHandler.Debug("DnsQueryHandler channel info", "capacity", cap(dnsqueryq))
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("DnsQueryHandler: context cancelled")
+			lgHandler.Info("DnsQueryHandler: context cancelled")
 			return nil
 		case dqr, ok := <-dnsqueryq:
 			if !ok {
-				log.Println("DnsQueryHandler: dnsqueryq closed")
+				lgHandler.Info("DnsQueryHandler: dnsqueryq closed")
 				return nil
 			}
-			if Globals.Debug {
-				log.Printf("DnsQueryHandler: Received query from channel (qname=%s, qtype=%s, from=%s)", dqr.Qname, dns.TypeToString[dqr.Qtype], dqr.ResponseWriter.RemoteAddr())
-			}
+			lgHandler.Debug("received query from channel", "qname", dqr.Qname, "qtype", dns.TypeToString[dqr.Qtype], "from", dqr.ResponseWriter.RemoteAddr())
 			if err := handlerFunc(ctx, &dqr); err != nil {
-				log.Printf("Error in query handler: %v", err)
+				lgHandler.Error("error in query handler", "err", err)
 			} else {
-				if Globals.Debug {
-					log.Printf("DnsQueryHandler: Query handler completed successfully")
-				}
+				lgHandler.Debug("query handler completed successfully")
 			}
 		}
 	}
@@ -108,14 +100,14 @@ func (zd *ZoneData) signApexRRsets(apex *OwnerData, msgoptions *edns0.MsgOptions
 
 	soaRRset, err := signFunc(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
 	if err != nil {
-		log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
+		lgHandler.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
 		errs = append(errs, err)
 	} else {
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 	}
 	nsRRset, err := signFunc(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), zd.ZoneName)
 	if err != nil {
-		log.Printf("QueryResponder: failed to sign NS RRset for zone %s: %v", zd.ZoneName, err)
+		lgHandler.Error("failed to sign NS RRset", "zone", zd.ZoneName, "err", err)
 		errs = append(errs, err)
 	} else {
 		apex.RRtypes.Set(dns.TypeNS, nsRRset)
@@ -139,19 +131,19 @@ func (zd *ZoneData) signApexRRsets(apex *OwnerData, msgoptions *edns0.MsgOptions
 // Returns the signed RRset and any error encountered.
 func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys) (core.RRset, error) {
 	if !msgoptions.DO {
-		log.Printf("QueryResponder: DNSSEC not requested (DO=0), skipping signing for %s %s", name, dns.TypeToString[rrset.RRtype])
+		lgHandler.Debug("DNSSEC not requested, skipping signing", "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
+		return rrset, nil
+	}
+	// If the RRset is already signed (e.g. by inline-signing), return as-is.
+	if len(rrset.RRSIGs) > 0 {
 		return rrset, nil
 	}
 	if kdb == nil {
-		log.Printf("QueryResponder: no KeyDB available for zone %s, cannot sign %s %s", zd.ZoneName, name, dns.TypeToString[rrset.RRtype])
+		lgHandler.Warn("no KeyDB available, cannot sign", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
 		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
 	}
-	if !zd.Options[OptOnlineSigning] {
-		log.Printf("QueryResponder: online signing not enabled for zone %s, skipping signing for %s %s", zd.ZoneName, name, dns.TypeToString[rrset.RRtype])
-		return rrset, fmt.Errorf("online signing not enabled for zone %s", zd.ZoneName)
-	}
-	if len(rrset.RRSIGs) > 0 {
-		log.Printf("QueryResponder: RRset %s %s already has %d RRSIGs, skipping signing", name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs))
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		// No signing configured — return unsigned.
 		return rrset, nil
 	}
 
@@ -161,31 +153,31 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	if zoneDak == nil {
 		zoneDak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
-			log.Printf("QueryResponder: failed to get dnssec keys for zone %s: %v", zd.ZoneName, err)
+			lgHandler.Error("failed to get DNSSEC keys", "zone", zd.ZoneName, "err", err)
 			return rrset, err
 		}
 	}
 
 	if zoneDak == nil || len(zoneDak.ZSKs) == 0 {
 		// No active keys found - try to ensure they exist (promote published or generate new)
-		log.Printf("QueryResponder: no active ZSKs for zone %s, attempting to ensure keys exist", zd.ZoneName)
+		lgHandler.Warn("no active ZSKs, attempting to ensure keys exist", "zone", zd.ZoneName)
 		zoneDak, err = zd.ensureActiveDnssecKeys(kdb)
 		if err != nil {
-			log.Printf("QueryResponder: failed to ensure active DNSSEC keys for zone %s: %v", zd.ZoneName, err)
+			lgHandler.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 			return rrset, err
 		}
 		if zoneDak == nil || len(zoneDak.ZSKs) == 0 {
-			log.Printf("QueryResponder: still no ZSKs available for zone %s after ensureActiveDnssecKeys", zd.ZoneName)
+			lgHandler.Error("still no ZSKs available after ensureActiveDnssecKeys", "zone", zd.ZoneName)
 			return rrset, fmt.Errorf("no ZSKs available for zone %s", zd.ZoneName)
 		}
 	}
-	log.Printf("QueryResponder: signing %s %s using zone %s ZSKs (have %d ZSKs)", name, dns.TypeToString[rrset.RRtype], zd.ZoneName, len(zoneDak.ZSKs))
+	lgHandler.Debug("signing RRset", "name", name, "rrtype", dns.TypeToString[rrset.RRtype], "zone", zd.ZoneName, "zskCount", len(zoneDak.ZSKs))
 	_, err = zd.SignRRset(&rrset, name, zoneDak, false)
 	if err != nil {
-		log.Printf("QueryResponder: error signing %s: %v", name, err)
+		lgHandler.Error("error signing RRset", "name", name, "err", err)
 		return rrset, err
 	}
-	log.Printf("QueryResponder: successfully signed %s %s, now has %d RRSIGs", name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs))
+	lgHandler.Debug("successfully signed RRset", "name", name, "rrtype", dns.TypeToString[rrset.RRtype], "rrsigCount", len(rrset.RRSIGs))
 	return rrset, nil
 }
 
@@ -193,10 +185,10 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys, imr *Imr,
 	signFunc func(core.RRset, string) (core.RRset, error)) error {
-	zd.Logger.Printf("QueryResponder: DS query for %s. Trying to find parent zone.", qname)
+	lgHandler.Debug("QueryResponder: DS query, trying to find parent zone", "qname", qname)
 	parent, err := imr.ParentZone(zd.ZoneName)
 	if err != nil {
-		log.Printf("QueryResponder: failed to find parent zone for %s to handle DS query", qname)
+		lgHandler.Error("failed to find parent zone for DS query", "qname", qname)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return nil
@@ -216,11 +208,11 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	zd = pzd
 	apex, err = zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		log.Printf("QueryResponder: failed to get apex data for parent zone %s", zd.ZoneName)
+		lgHandler.Error("failed to get apex data for parent zone", "zone", zd.ZoneName)
 	}
 	// Use parent zone's own keys; let signRRsetForZone fetch them via kdb.
 	if err := zd.signApexRRsets(apex, msgoptions, kdb, nil); err != nil { // force fetch parent zone's DNSSEC keys
-		log.Printf("QueryResponder: failed to sign parent apex RRsets for DS query: %v", err)
+		lgHandler.Error("failed to sign parent apex RRsets for DS query", "err", err)
 		if msgoptions.DO {
 			m.MsgHdr.Rcode = dns.RcodeServerFailure
 			w.WriteMsg(m)
@@ -230,7 +222,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	m.MsgHdr.Rcode = dns.RcodeSuccess
 	dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
 	if err != nil {
-		log.Printf("QueryResponder: failed to get DS record for %s", qname)
+		lgHandler.Error("failed to get DS record", "qname", qname)
 	}
 	m.Answer = append(m.Answer, dsRRset.RRs...)
 	if msgoptions.DO {
@@ -245,7 +237,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDelegationData, apex *OwnerData,
 	msgoptions *edns0.MsgOptions,
 	signFunc func(core.RRset, string) (core.RRset, error)) {
-	log.Printf("---> Sending referral for %s", cdd.ChildName)
+	lgHandler.Debug("sending referral", "child", cdd.ChildName)
 	m.MsgHdr.Authoritative = false
 	m.Ns = append(m.Ns, cdd.NS_rrset.RRs...)
 	m.Extra = append(m.Extra, cdd.A_glue...)
@@ -325,12 +317,12 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool) {
 	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 	soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-	zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs), zd.ZoneName, soaRRset)
+	lgHandler.Debug("SOA RRset details", "zone", zd.ZoneName, "count", len(soaRRset.RRs), "rrset", soaRRset)
 	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 	m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])
 	if msgoptions.DO {
-		log.Printf("ApexResponder: dnssec_ok is true, adding RRSIGs")
+		lgHandler.Debug("DNSSEC requested, adding RRSIGs to SOA response")
 		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 		// Note: NS and glue RRSIGs are already added by addNSAndGlue
 	}
@@ -354,7 +346,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 
 	if len(v.RRs) > 1 {
 		// XXX: NSD will not even load a zone with multiple CNAMEs. Better to check during load...
-		log.Printf("QueryResponder: Zone %s: Illegal content: multiple CNAME RRs: %v", zd.ZoneName, v)
+		lgHandler.Warn("illegal content: multiple CNAME RRs", "zone", zd.ZoneName, "rrset", v)
 	}
 
 	// Add the first CNAME to the answer
@@ -362,7 +354,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	if msgoptions.DO {
 		rrset, err := zd.signRRsetForZone(v, qname, msgoptions, kdb, nil)
 		if err != nil {
-			log.Printf("QueryResponder: failed to sign initial CNAME RRset for qname %s: %v", qname, err)
+			lgHandler.Error("failed to sign initial CNAME RRset", "qname", qname, "err", err)
 			// Still add the CNAME even if signing failed
 			// m.Answer = append(m.Answer, v.RRs...)
 			// DNSSEC requested but failed to sign, return NXDOMAIN
@@ -400,10 +392,10 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 			break
 		}
 		tgt := currentCNAME.RRs[0].(*dns.CNAME).Target
-		log.Printf("QueryResponder: CNAME chain depth %d: %s -> %s", depth+1, currentName, tgt)
+		lgHandler.Debug("following CNAME chain", "depth", depth+1, "from", currentName, "to", tgt)
 
 		if visited[tgt] {
-			log.Printf("QueryResponder: CNAME chain loop detected: %s -> %s", currentName, tgt)
+			lgHandler.Warn("CNAME chain loop detected", "from", currentName, "to", tgt)
 			break
 		}
 		visited[tgt] = true
@@ -412,14 +404,14 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 		tgtZone, _ := FindZone(tgt)
 		if tgtZone == nil {
 			// Target is outside our authority - return CNAME only
-			log.Printf("QueryResponder: CNAME target %s is outside our authority", tgt)
+			lgHandler.Debug("CNAME target outside our authority", "target", tgt)
 			break
 		}
 
 		// Get owner data from the target zone
 		tgtOwner, err := tgtZone.GetOwner(tgt)
 		if err != nil || tgtOwner == nil {
-			log.Printf("QueryResponder: failed to get owner for CNAME target %s in zone %s", tgt, tgtZone.ZoneName)
+			lgHandler.Error("failed to get owner for CNAME target", "target", tgt, "zone", tgtZone.ZoneName)
 			break
 		}
 
@@ -430,7 +422,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 			if msgoptions.DO {
 				tgtRRset, err := tgtZone.signRRsetForZone(tgtrrset, tgt, msgoptions, kdb, nil)
 				if err != nil {
-					log.Printf("QueryResponder: failed to sign final answer RRset for CNAME target %s: %v", tgt, err)
+					lgHandler.Error("failed to sign final answer RRset for CNAME target", "target", tgt, "err", err)
 					m.MsgHdr.Rcode = dns.RcodeServerFailure
 					w.WriteMsg(m)
 					return false, fmt.Errorf("failed to sign final answer RRset for CNAME target %s: %v", tgt, err)
@@ -450,7 +442,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 				if msgoptions.DO {
 					rrset, err := tgtZone.signRRsetForZone(nextCNAME, tgt, msgoptions, kdb, nil)
 					if err != nil {
-						log.Printf("QueryResponder: failed to sign intermediate CNAME RRset for %s: %v", tgt, err)
+						lgHandler.Error("failed to sign intermediate CNAME RRset", "target", tgt, "err", err)
 						m.MsgHdr.Rcode = dns.RcodeServerFailure
 						w.WriteMsg(m)
 						return false, fmt.Errorf("failed to sign intermediate CNAME RRset for %s: %v", tgt, err)
@@ -472,7 +464,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	}
 
 	if depth >= maxDepth {
-		log.Printf("QueryResponder: CNAME chain exceeded max depth (%d) for %s", maxDepth, qname)
+		lgHandler.Warn("CNAME chain exceeded max depth", "maxDepth", maxDepth, "qname", qname)
 	}
 
 	// Add NS and glue records from the zone where we found the final answer (or last CNAME)
@@ -503,7 +495,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	select {
 	case <-ctx.Done():
-		log.Printf("QueryResponder: context cancelled")
+		lgHandler.Info("QueryResponder: context cancelled")
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
@@ -520,12 +512,12 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if kdb != nil {
 		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
-			log.Printf("QueryResponder: failed to get dnssec key for zone %s: %v", zd.ZoneName, err)
+			lgHandler.Error("failed to get DNSSEC key", "zone", zd.ZoneName, "err", err)
 		}
 	} else {
 		// No KeyDB available (e.g., KDC catalog zone) - DNSSEC not supported
 		if msgoptions.DO {
-			log.Printf("QueryResponder: DNSSEC requested (DO=1) but no KeyDB available for zone %s, responding without DNSSEC", zd.ZoneName)
+			lgHandler.Debug("DNSSEC requested but no KeyDB available, responding without DNSSEC", "zone", zd.ZoneName)
 		}
 	}
 
@@ -541,7 +533,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		log.Printf("QueryResponder: failed to get apex data for zone %s: %v", zd.ZoneName, err)
+		lgHandler.Error("failed to get apex data", "zone", zd.ZoneName, "err", err)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return fmt.Errorf("failed to get apex data for zone %s: %v", zd.ZoneName, err)
@@ -550,13 +542,13 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// Sign apex RRsets if DNSSEC is requested and KeyDB is available
 	if msgoptions.DO && kdb != nil {
 		if err := zd.signApexRRsets(apex, msgoptions, kdb, dak); err != nil {
-			log.Printf("QueryResponder: failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
+			lgHandler.Error("failed to sign apex RRsets", "zone", zd.ZoneName, "err", err)
 			m.MsgHdr.Rcode = dns.RcodeServerFailure
 			w.WriteMsg(m)
 			return fmt.Errorf("failed to sign apex RRsets for zone %s: %v", zd.ZoneName, err)
 		}
 	} else if msgoptions.DO && kdb == nil {
-		log.Printf("QueryResponder: DNSSEC requested (DO=1) but no KeyDB available for zone %s, responding without DNSSEC", zd.ZoneName)
+		lgHandler.Debug("DNSSEC requested but no KeyDB available, responding without DNSSEC", "zone", zd.ZoneName)
 	}
 
 	// Reject explicit queries for NXNAME type (RFC 9824)
@@ -578,10 +570,10 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	// log.Printf("---> Checking for existence of qname %s", qname)
 	if !zd.NameExists(qname) {
-		log.Printf("---> No exact match for %s in zone %s", qname, zd.ZoneName)
+		lgHandler.Debug("no exact match for qname", "qname", qname, "zone", zd.ZoneName)
 
 		// 1. Check for child delegation
-		log.Printf("---> Checking for child delegation for %s", qname)
+		lgHandler.Debug("checking for child delegation", "qname", qname)
 		cdd := zd.FindDelegation(qname, msgoptions.DO)
 
 		// If there is delegation data and an NS RRset is present, return a referral
@@ -598,14 +590,14 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			zd.sendNXDOMAIN(m, w, qname, apex, msgoptions, MaybeSignRRset)
 			return nil
 		}
-		log.Printf("---> Wildcard match for %s (matches %s) in zone %s", qname, wildqname, zd.ZoneName)
+		lgHandler.Debug("wildcard match", "qname", qname, "wildcard", wildqname, "zone", zd.ZoneName)
 		origqname = qname
 		qname = wildqname
 	}
 
 	owner, err := zd.GetOwner(qname)
 	if err != nil {
-		log.Printf("QueryResponder: failed to get owner for qname %s", qname)
+		lgHandler.Error("failed to get owner for qname", "qname", qname)
 	}
 
 	// 0. Check for *any* existence of qname in zone
@@ -613,7 +605,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if owner.RRtypes.Count() == 0 {
 		soaRRset, err := MaybeSignRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA), zd.ZoneName)
 		if err != nil {
-			log.Printf("QueryResponder: failed to sign SOA RRset for zone %s: %v", zd.ZoneName, err)
+			lgHandler.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
 			if msgoptions.DO {
 				m.MsgHdr.Rcode = dns.RcodeServerFailure
 				w.WriteMsg(m)
@@ -628,10 +620,10 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	if len(qname) > len(zd.ZoneName) {
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
-		log.Printf("---> Checking for qname + CNAME %s in zone %s", qname, zd.ZoneName)
+		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
 		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, msgoptions, kdb, apex, &transportSignalInAnswer)
 		if err != nil {
-			log.Printf("QueryResponder: error handling CNAME chain: %v", err)
+			lgHandler.Error("error handling CNAME chain", "err", err)
 			// Error response already sent by handleCNAMEChain
 			return nil
 		}
@@ -652,7 +644,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 
 	// 2. Check for exact match qname+qtype
-	log.Printf("---> Checking for exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
+	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
 		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(rrset.RRs) > 0 {
@@ -680,11 +672,11 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			// Add transport signal RRs that aren't already present in the Answer section
 			zd.addTransportSignal(m, msgoptions, transportSignalInAnswer)
 			if msgoptions.DO {
-				log.Printf("Should we sign qname %s %s (origqname: %s)?", qname, dns.TypeToString[qtype], origqname)
+				lgHandler.Debug("considering signing", "qname", qname, "qtype", dns.TypeToString[qtype], "origqname", origqname)
 				if qname == origqname {
 					signed, err := MaybeSignRRset(rrset, qname)
 					if err != nil {
-						log.Printf("QueryResponder: failed to sign RRset for qname %s: %v", qname, err)
+						lgHandler.Error("failed to sign RRset", "qname", qname, "err", err)
 					}
 					owner.RRtypes.Set(qtype, signed)
 					rrset = signed
@@ -699,7 +691,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 				// Note: NS and glue RRSIGs are already added by addNSAndGlue
 			}
 		} else {
-			log.Printf("---> No exact match qname+qtype %s %s in zone %s", qname, dns.TypeToString[qtype], zd.ZoneName)
+			lgHandler.Debug("no exact match for qname+qtype", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 			// ensure correct serial
 			soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 			soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
@@ -716,7 +708,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		return nil
 	}
 
-	log.Printf("---> Checking for SOA query for zone %s", zd.ZoneName)
+	lgHandler.Debug("checking for SOA query", "zone", zd.ZoneName)
 	if qtype == dns.TypeSOA && qname == zd.ZoneName {
 		zd.handleSOAQuery(m, w, apex, msgoptions, &transportSignalInAnswer)
 		w.WriteMsg(m)
@@ -726,7 +718,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// AXFR and IXFR are handled by the zone transfer code
 	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
 		if qname == zd.ZoneName {
-			log.Printf("We have the %s %s, so let's try to serve it", ZoneStoreToString[zd.ZoneStore], qname)
+			lgHandler.Debug("serving zone transfer", "store", ZoneStoreToString[zd.ZoneStore], "qname", qname)
 			zd.ZoneTransferOut(w, r)
 			return nil
 		} else {
@@ -784,7 +776,7 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 	// Sign the NSEC record
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zoneName)
 	if err != nil {
-		log.Printf("addReferralNSEC: failed to sign NSEC RRset for referral at zone cut %s: %v", cdd.ChildName, err)
+		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut", "child", cdd.ChildName, "err", err)
 	} else {
 		m.Ns = append(m.Ns, nsecRR)
 		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
@@ -802,7 +794,7 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
 			soaMinTTL = soa.Minttl
-			log.Printf("Negative TTL for zone %s: %d", zd.ZoneName, soaMinTTL)
+			lgHandler.Debug("negative TTL from SOA", "zone", zd.ZoneName, "minTTL", soaMinTTL)
 		}
 	}
 
@@ -850,7 +842,7 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 	if err != nil {
-		log.Printf("addCDEResponse: failed to sign NSEC RRset for zone %s: %v", zd.ZoneName, err)
+		lgHandler.Error("failed to sign NSEC RRset for CDE response", "zone", zd.ZoneName, "err", err)
 	}
 	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
 }

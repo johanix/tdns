@@ -63,8 +63,9 @@ UNIQUE (zonename, keyid)
 
 	// The DnssecKeyStore should contain both the private and public DNSSEC keys for
 	// each zone that we're managing signing for.
-	// State is the normal series of key states for DNSSEC keys (created, published, active, retired, removed), but with
-	// one added pissible state: "foreign". Foreign keys are keys that we've received from another signer and are only
+	// State is the normal series of key states for DNSSEC keys:
+	//   created, mpdist, published, standby, active, retired, removed
+	// with one added state: "foreign". Foreign keys are keys that we've received from another signer and are only
 	// kept in the DNSKEY RRset but never used for signing and never rolled. Foreign keys obviously do not have the private key here.
 	"DnssecKeyStore": `CREATE TABLE IF NOT EXISTS 'DnssecKeyStore' (
 id		  INTEGER PRIMARY KEY,
@@ -77,6 +78,10 @@ creator	  	  TEXT,
 privatekey	  TEXT,
 keyrr		  TEXT,
 comment		  TEXT,
+propagation_confirmed     INTEGER DEFAULT 0,
+propagation_confirmed_at  TEXT DEFAULT '',
+published_at              TEXT DEFAULT '',
+retired_at                TEXT DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
 }

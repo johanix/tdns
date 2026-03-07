@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/spf13/viper"
@@ -28,11 +27,11 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	defer ticker.Stop()
 
 	if !viper.GetBool("service.resign") {
-		log.Printf("ResignerEngine is NOT active. Zones will only be updated on receipt on Notifies.")
+		lgSigner.Info("ResignerEngine is NOT active, zones updated only on Notifies")
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("ResignerEngine: terminating due to context cancelled (inactive mode)")
+				lgSigner.Info("ResignerEngine terminating (inactive mode)")
 				return
 			case _, ok := <-zoneresignch:
 				if !ok {
@@ -43,7 +42,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 			}
 		}
 	} else {
-		log.Printf("*** ResignerEngine: Starting with interval %d seconds ***", interval)
+		lgSigner.Info("ResignerEngine starting", "interval_sec", interval)
 	}
 
 	ZonesToKeepSigned := make(map[string]*ZoneData)
@@ -53,7 +52,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("ResignerEngine: terminating due to context cancelled")
+			lgSigner.Info("ResignerEngine terminating")
 			return
 		case zd, ok := <-zoneresignch:
 			if !ok {
@@ -61,25 +60,31 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 			}
 
 			if zd == nil {
-				log.Printf("ResignerEngine: Zone <nil> does not exist, cannot resign")
+				lgSigner.Warn("ResignerEngine: nil zone data received, cannot resign")
 				continue
 			}
 
 			if _, exist := ZonesToKeepSigned[zd.ZoneName]; exist {
 				continue
 			}
-			log.Printf("ResignerEngine: Adding zone %s to ZonesToKeepSigned", zd.ZoneName)
+			lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
-			// log.Printf("RefEng: ticker. refCounters: %v", refreshCounters)
 			for _, zd := range ZonesToKeepSigned {
-				log.Printf("ResignerEngine: Re-signing zone %s", zd.ZoneName)
+				// Skip multi-provider zones where our HSYNC says NOSIGN
+				if zd.Options[OptMultiProvider] {
+					shouldSign, _ := zd.weAreASigner()
+					if !shouldSign {
+						continue
+					}
+				}
+				lgSigner.Debug("re-signing zone", "zone", zd.ZoneName)
 				newrrsigs, err := zd.SignZone(zd.KeyDB, false)
 				if err != nil {
-					log.Printf("ResignerEngine: Error re-signing zone %s: %s", zd.ZoneName, err)
+					lgSigner.Error("failed to re-sign zone", "zone", zd.ZoneName, "err", err)
 				}
-				log.Printf("ResignerEngine: zone %s re-signed. %d new RRSIGs", zd.ZoneName, newrrsigs)
+				lgSigner.Info("zone re-signed", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
 			}
 		}
 	}
