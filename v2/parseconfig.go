@@ -672,6 +672,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 					}
 				})
 			}
+
+			// Delegation sync callback: set up DSYNC publication (parent) or
+			// delegation sync monitoring (child) after zone is loaded.
+			if options[OptDelSyncParent] || options[OptDelSyncChild] {
+				delegationSyncQ := conf.Internal.DelegationSyncQ
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+						lgConfig.Error("SetupZoneSync failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
+					}
+				})
+			}
 		}
 
 		switch Globals.App.Type {

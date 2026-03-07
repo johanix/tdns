@@ -653,6 +653,8 @@ type KeyBootstrapperRequest struct {
 	Key          string
 	Verified     bool
 	Keyid        uint16
+	Algorithm    uint8
+	Imr          *Imr
 	ResponseChan chan *VerificationInfo
 }
 

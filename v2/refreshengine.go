@@ -93,12 +93,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// Defer transport signal synthesis until all zones are initialized.
 	tryPostpass(zone)
 
-	// Note: SetupZoneSigning is NOT called here. For config-defined zones,
-	// it is registered as an OnFirstLoad callback in ParseZones. For dynamic
-	// zones (catalog, API), it is called explicitly after initialLoadZone.
-	if err := zd.SetupZoneSync(conf.Internal.DelegationSyncQ); err != nil {
-		lgEngine.Error("SetupZoneSync failed", "zone", zone, "error", err)
-	}
+	// Note: SetupZoneSigning and SetupZoneSync are NOT called here.
+	// For config-defined zones, they are registered as OnFirstLoad callbacks
+	// in ParseZones. For dynamic zones (catalog, API), they are called
+	// explicitly after initialLoadZone.
 
 	// Execute OnFirstLoad callbacks (one-shot)
 	zd.mu.Lock()

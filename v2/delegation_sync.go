@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -526,8 +525,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 	// msg := fmt.Sprintf("SendNotify(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
 	// log.Printf(msg)
 
-	dump.P(dsynctarget)
-	// New:
+	lgDns.Debug("DSYNC target for NOTIFY", "zone", zd.ZoneName, "target", dsynctarget)
 	notifyq <- NotifyRequest{
 		ZoneName: zd.ZoneName,
 		ZoneData: zd,

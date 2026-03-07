@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"context"
@@ -11,12 +12,55 @@ import (
 	"github.com/spf13/viper"
 )
 
+// keyStateResponseWriter wraps a dns.ResponseWriter to intercept WriteMsg
+// and attach a KeyState EDNS(0) response option and SIG(0) signature before sending.
+type keyStateResponseWriter struct {
+	dns.ResponseWriter
+	keyStateResponse *edns0.KeyStateOption
+	sig0Signer       string          // DSYNC target name (UPDATE Receiver identity)
+	sig0Keys         *Sig0ActiveKeys // active SIG(0) keys for signing
+}
+
+func (w *keyStateResponseWriter) WriteMsg(m *dns.Msg) error {
+	if w.keyStateResponse != nil {
+		edns0.AttachKeyStateToResponse(m, w.keyStateResponse)
+	}
+	// Sign the response with the UPDATE Receiver's SIG(0) key per
+	// draft-berra-dnsop-keystate-02: responses containing a KeyState
+	// option MUST be signed by the UPDATE Receiver.
+	if w.sig0Signer != "" && w.sig0Keys != nil && len(w.sig0Keys.Keys) > 0 {
+		signed, err := SignMsg(*m, w.sig0Signer, w.sig0Keys)
+		if err != nil {
+			lgSigner.Error("failed to SIG(0)-sign KeyState response", "signer", w.sig0Signer, "err", err)
+			// Send unsigned — better than failing entirely
+		} else {
+			m = signed
+		}
+	}
+	return w.ResponseWriter.WriteMsg(m)
+}
+
+// Ensure keyStateResponseWriter satisfies dns.ResponseWriter.
+func (w *keyStateResponseWriter) LocalAddr() net.Addr  { return w.ResponseWriter.LocalAddr() }
+func (w *keyStateResponseWriter) RemoteAddr() net.Addr { return w.ResponseWriter.RemoteAddr() }
+func (w *keyStateResponseWriter) Write(b []byte) (int, error) {
+	return w.ResponseWriter.Write(b)
+}
+func (w *keyStateResponseWriter) Close() error { return w.ResponseWriter.Close() }
+func (w *keyStateResponseWriter) TsigStatus() error {
+	return w.ResponseWriter.TsigStatus()
+}
+func (w *keyStateResponseWriter) TsigTimersOnly(b bool) {
+	w.ResponseWriter.TsigTimersOnly(b)
+}
+func (w *keyStateResponseWriter) Hijack() { w.ResponseWriter.Hijack() }
+
 func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*edns0.KeyStateOption, error) {
 	lgSigner.Debug("processing KeyState request", "zone", zonename, "keyid", ks.KeyID, "state", ks.KeyState)
 
 	switch ks.KeyState {
 	case edns0.KeyStateRequestAutoBootstrap:
-		// Kontrollera om automatisk bootstrap är tillåten enligt policy
+		// Check if automatic bootstrap is allowed by policy
 		if viper.GetBool("keystate.require_manual_bootstrap") {
 			return &edns0.KeyStateOption{
 				KeyID:     ks.KeyID,
@@ -33,7 +77,7 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 			}, nil
 		}
 
-		// Starta auto-bootstrap process i bakgrunden
+		// Start auto-bootstrap process in the background
 		go func() {
 			maxAttempts := viper.GetInt("keystate.max_bootstrap_attempts")
 			retryInterval := time.Duration(viper.GetInt("keystate.bootstrap_retry_interval")) * time.Second
@@ -45,15 +89,7 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 			for attempt := 1; attempt <= maxAttempts; attempt++ {
 				lgSigner.Info("auto-bootstrap attempt", "attempt", attempt, "max", maxAttempts, "zone", zonename, "keyid", ks.KeyID)
 
-				/*err := kdb.startAutoBootstrap(ctx, zonename, ks.KeyID)
-				if err == nil {
-					log.Printf("Auto-bootstrap successful for zone %s, keyID %d",
-						zonename, ks.KeyID)
-					return
-				}
-
-				log.Printf("Auto-bootstrap attempt failed: %v", err)
-				*/
+				// TODO: Implement startAutoBootstrap
 				if attempt < maxAttempts {
 					select {
 					case <-ctx.Done():
@@ -74,47 +110,18 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 		}, nil
 
 	case edns0.KeyStateInquiryKey:
-
-		// Hämta aktuell nyckelstatus
-		//status, err := kdb.getKeyStatus(zonename, ks.KeyID)
-		// Hämta nyckelstatus från truststore
+		// Get current key status from truststore
 		status, err := kdb.GetKeyStatus(zonename, ks.KeyID)
 		if err != nil {
 			lgSigner.Error("failed to get key status from truststore", "err", err)
 			return &edns0.KeyStateOption{
 				KeyID:     ks.KeyID,
 				KeyState:  edns0.KeyStateUnknown,
-				ExtraText: fmt.Sprintf("Kunde inte hämta nyckelstatus: %v", err),
+				ExtraText: fmt.Sprintf("Failed to get key status: %v", err),
 			}, nil
 		}
 
 		return status, nil
-
-	case edns0.KeyStateInquiryPolicy:
-		// Returnera aktuell policy-konfiguration
-		if viper.GetBool("keystate.require_manual_bootstrap") {
-			return &edns0.KeyStateOption{
-				KeyID:     ks.KeyID,
-				KeyState:  edns0.KeyStatePolicyManualRequired,
-				ExtraText: "Manual bootstrap required by policy",
-			}, nil
-		}
-
-		if !viper.GetBool("keystate.allow_auto_bootstrap") {
-			return &edns0.KeyStateOption{
-				KeyID:     ks.KeyID,
-				KeyState:  edns0.KeyStatePolicyManualRequired,
-				ExtraText: "Automatic bootstrap not allowed",
-			}, nil
-		}
-
-		return &edns0.KeyStateOption{
-			KeyID:    ks.KeyID,
-			KeyState: edns0.KeyStatePolicyAutoBootstrap,
-			ExtraText: fmt.Sprintf("Auto bootstrap allowed (max attempts: %d, timeout: %ds)",
-				viper.GetInt("keystate.max_bootstrap_attempts"),
-				viper.GetInt("keystate.bootstrap_timeout")),
-		}, nil
 
 	default:
 		return &edns0.KeyStateOption{
@@ -125,7 +132,7 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 	}
 }
 
-func (kdb *KeyDB) HandleKeyStateOption(opt *dns.OPT, zonename string) (*dns.EDNS0_LOCAL, error) {
+func (kdb *KeyDB) HandleKeyStateOption(opt *dns.OPT, zonename string) (*edns0.KeyStateOption, error) {
 	for _, o := range opt.Option {
 		if local, ok := o.(*dns.EDNS0_LOCAL); ok {
 			if local.Code == edns0.EDNS0_KEYSTATE_OPTION_CODE {
@@ -134,17 +141,13 @@ func (kdb *KeyDB) HandleKeyStateOption(opt *dns.OPT, zonename string) (*dns.EDNS
 					return nil, err
 				}
 
-				// Hantera olika key states
+				// Process the key state request
 				response, err := kdb.ProcessKeyState(keystate, zonename)
 				if err != nil {
 					return nil, err
 				}
 
-				return edns0.CreateKeyStateOption(
-					keystate.KeyID,
-					response.KeyState,
-					response.ExtraText,
-				), nil
+				return response, nil
 			}
 		}
 	}
@@ -162,7 +165,7 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 	})
 	if err != nil {
 		lgSigner.Error("failed to get truststore data", "err", err)
-		return nil, fmt.Errorf("kunde inte hämta truststore data: %v", err)
+		return nil, fmt.Errorf("failed to get truststore data: %v", err)
 	}
 
 	if key, exists := tr.ChildSig0keys[mapKey]; exists {
@@ -170,7 +173,6 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 		if key.Trusted {
 			state = edns0.KeyStateTrusted
 		} else if key.Validated {
-
 			responseChan := make(chan *VerificationInfo)
 			lgSigner.Debug("sending INFO request with response channel")
 			kdb.KeyBootstrapperQ <- KeyBootstrapperRequest{
@@ -188,21 +190,17 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 				lgSigner.Warn("timeout waiting for key bootstrapper response", "zone", zonename, "keyid", keyID)
 			}
 			if verInfo != nil {
-
 				lgSigner.Debug("received verification info", "info", verInfo)
-
 				if verInfo.FailedAttempts > 0 {
 					state = edns0.KeyStateValidationFail
 				} else {
 					state = edns0.KeyStateBootstrapAutoOngoing
 				}
-
 			} else {
 				state = edns0.KeyStateValidationFail
 			}
 
 			lgSigner.Debug("response received")
-
 		} else {
 			state = edns0.KeyStateInvalid
 		}
@@ -210,13 +208,13 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 		return &edns0.KeyStateOption{
 			KeyID:     keyID,
 			KeyState:  state,
-			ExtraText: fmt.Sprintf("Key is %d", state),
+			ExtraText: fmt.Sprintf("Key state: %s", edns0.KeyStateToString(state)),
 		}, nil
 	}
 	lgSigner.Debug("key not found in truststore", "state", edns0.KeyStateUnknown)
 	return &edns0.KeyStateOption{
 		KeyID:     keyID,
 		KeyState:  edns0.KeyStateUnknown,
-		ExtraText: "Nyckel hittades inte i truststore",
+		ExtraText: "Key not found in truststore",
 	}, nil
 }

@@ -82,17 +82,18 @@ func TestExtractFlagsAndEDNS0Options(t *testing.T) {
 func TestCreateKeyStateOption(t *testing.T) {
 	keyID := uint16(12345)
 	keyState := uint8(KeyStateTrusted)
+	keyData := uint8(0)
 	extraText := "test extra text"
 
-	opt := CreateKeyStateOption(keyID, keyState, extraText)
+	opt := CreateKeyStateOption(keyID, keyState, keyData, extraText)
 	if opt == nil {
 		t.Fatal("CreateKeyStateOption() returned nil")
 	}
 	if opt.Code != EDNS0_KEYSTATE_OPTION_CODE {
 		t.Errorf("CreateKeyStateOption() returned wrong code: got %d, want %d", opt.Code, EDNS0_KEYSTATE_OPTION_CODE)
 	}
-	if len(opt.Data) < 3 {
-		t.Fatalf("CreateKeyStateOption() returned data too short: got %d bytes, want at least 3", len(opt.Data))
+	if len(opt.Data) < 4 {
+		t.Fatalf("CreateKeyStateOption() returned data too short: got %d bytes, want at least 4", len(opt.Data))
 	}
 
 	// Verify keyID encoding (big-endian)
@@ -106,9 +107,14 @@ func TestCreateKeyStateOption(t *testing.T) {
 		t.Errorf("CreateKeyStateOption() encoded wrong keyState: got %d, want %d", opt.Data[2], keyState)
 	}
 
+	// Verify keyData
+	if opt.Data[3] != byte(keyData) {
+		t.Errorf("CreateKeyStateOption() encoded wrong keyData: got %d, want %d", opt.Data[3], keyData)
+	}
+
 	// Verify extraText
-	if string(opt.Data[3:]) != extraText {
-		t.Errorf("CreateKeyStateOption() encoded wrong extraText: got %s, want %s", string(opt.Data[3:]), extraText)
+	if string(opt.Data[4:]) != extraText {
+		t.Errorf("CreateKeyStateOption() encoded wrong extraText: got %s, want %s", string(opt.Data[4:]), extraText)
 	}
 }
 
@@ -117,9 +123,10 @@ func TestParseKeyStateOption(t *testing.T) {
 	t.Run("ValidOption", func(t *testing.T) {
 		keyID := uint16(12345)
 		keyState := uint8(KeyStateTrusted)
+		keyData := uint8(42)
 		extraText := "test extra text"
 
-		opt := CreateKeyStateOption(keyID, keyState, extraText)
+		opt := CreateKeyStateOption(keyID, keyState, keyData, extraText)
 		parsed, err := ParseKeyStateOption(opt)
 		if err != nil {
 			t.Fatalf("ParseKeyStateOption() failed: %v", err)
@@ -133,6 +140,9 @@ func TestParseKeyStateOption(t *testing.T) {
 		if parsed.KeyState != keyState {
 			t.Errorf("ParseKeyStateOption() returned wrong KeyState: got %d, want %d", parsed.KeyState, keyState)
 		}
+		if parsed.KeyData != keyData {
+			t.Errorf("ParseKeyStateOption() returned wrong KeyData: got %d, want %d", parsed.KeyData, keyData)
+		}
 		if parsed.ExtraText != extraText {
 			t.Errorf("ParseKeyStateOption() returned wrong ExtraText: got %s, want %s", parsed.ExtraText, extraText)
 		}
@@ -141,7 +151,7 @@ func TestParseKeyStateOption(t *testing.T) {
 	t.Run("InvalidLength", func(t *testing.T) {
 		opt := &dns.EDNS0_LOCAL{
 			Code: EDNS0_KEYSTATE_OPTION_CODE,
-			Data: []byte{1, 2}, // Too short
+			Data: []byte{1, 2, 3}, // Too short (need 4 minimum)
 		}
 		parsed, err := ParseKeyStateOption(opt)
 		if err == nil {
@@ -156,15 +166,16 @@ func TestParseKeyStateOption(t *testing.T) {
 		testCases := []struct {
 			keyID     uint16
 			keyState  uint8
+			keyData   uint8
 			extraText string
 		}{
-			{12345, uint8(KeyStateTrusted), "test"},
-			{0, uint8(KeyStateUnknown), ""},
-			{65535, uint8(KeyStateInvalid), "long extra text with spaces"},
+			{12345, uint8(KeyStateTrusted), 0, "test"},
+			{0, uint8(KeyStateUnknown), 1, ""},
+			{65535, uint8(KeyStateInvalid), 255, "long extra text with spaces"},
 		}
 
 		for _, tc := range testCases {
-			opt := CreateKeyStateOption(tc.keyID, tc.keyState, tc.extraText)
+			opt := CreateKeyStateOption(tc.keyID, tc.keyState, tc.keyData, tc.extraText)
 			parsed, err := ParseKeyStateOption(opt)
 			if err != nil {
 				t.Fatalf("ParseKeyStateOption() failed for keyID=%d: %v", tc.keyID, err)
@@ -174,6 +185,9 @@ func TestParseKeyStateOption(t *testing.T) {
 			}
 			if parsed.KeyState != tc.keyState {
 				t.Errorf("RoundTrip keyState mismatch: got %d, want %d", parsed.KeyState, tc.keyState)
+			}
+			if parsed.KeyData != tc.keyData {
+				t.Errorf("RoundTrip keyData mismatch: got %d, want %d", parsed.KeyData, tc.keyData)
 			}
 			if parsed.ExtraText != tc.extraText {
 				t.Errorf("RoundTrip extraText mismatch: got %q, want %q", parsed.ExtraText, tc.extraText)
@@ -190,7 +204,7 @@ func TestExtractKeyStateOption(t *testing.T) {
 		msg.SetEdns0(4096, false)
 		optRR := msg.IsEdns0()
 
-		keyStateOpt := CreateKeyStateOption(12345, uint8(KeyStateTrusted), "test")
+		keyStateOpt := CreateKeyStateOption(12345, uint8(KeyStateTrusted), 0, "test")
 		optRR.Option = append(optRR.Option, keyStateOpt)
 
 		extracted, found := ExtractKeyStateOption(optRR)

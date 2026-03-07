@@ -8,4 +8,5 @@ package tdns
 const (
 	SvcbTransportKey uint16 = 65280
 	SvcbTLSAKey      uint16 = 65281
+	SvcbBootstrapKey uint16 = 65282 // "bootstrap" SvcParamKey per draft-ietf-dnsop-delegation-mgmt-via-ddns-01
 )
