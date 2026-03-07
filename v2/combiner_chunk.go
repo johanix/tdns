@@ -45,6 +45,7 @@ type CombinerSyncRequest struct {
 type CombinerSyncResponse struct {
 	DistributionID string         // Echoed from request
 	Zone           string         // Zone that was updated
+	Nonce          string         // Echoed nonce from the incoming sync/update message
 	Status         string         // "ok", "partial", "error"
 	Message        string         // Human-readable message
 	AppliedRecords []string       // RRs that were successfully applied (additions)
@@ -227,6 +228,15 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 				continue
 			}
 
+			// M71: Validate TTL range
+			if rr.Header().Ttl > 604800 { // 7 days max
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("TTL %d exceeds maximum (604800)", rr.Header().Ttl),
+				})
+				continue
+			}
+
 			// Checkpoint 5: Content-based policy checks
 			if reason := checkContentPolicy(rr, protectedNamespaces); reason != "" {
 				rejectedItems = append(rejectedItems, RejectedItem{
@@ -390,6 +400,15 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("owner %q is not at zone apex %q", rr.Header().Name, zonename),
+				})
+				parseOk = false
+				continue
+			}
+			// M71: Validate TTL range
+			if rr.Header().Ttl > 604800 {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("TTL %d exceeds maximum (604800)", rr.Header().Ttl),
 				})
 				parseOk = false
 				continue

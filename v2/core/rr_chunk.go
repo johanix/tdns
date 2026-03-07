@@ -96,9 +96,9 @@ func (rd CHUNK) String() string {
 	if rd.Sequence == 0 {
 		// Manifest chunk: data should be JSON
 		dataBytes := rd.Data
-		
-		// Check if data is already JSON (starts with '{' or '[')
-		if len(dataBytes) > 0 && (dataBytes[0] == '{' || dataBytes[0] == '[') {
+		if len(dataBytes) == 0 {
+			dataStr = ""
+		} else if dataBytes[0] == '{' || dataBytes[0] == '[' {
 			// Already JSON - use as-is
 			if ManifestJSONFormat {
 				dataStr = string(dataBytes)
@@ -106,11 +106,9 @@ func (rd CHUNK) String() string {
 				// Re-encode JSON as base64 if config says so
 				dataStr = base64.StdEncoding.EncodeToString(dataBytes)
 			}
-		} else if len(dataBytes) > 0 {
-			// Data doesn't start with '{' or '[' - this is unexpected for manifest chunks
+		} else {
+			// Data doesn't start with '{' or '[' - unexpected for manifest chunks
 			// Try to decode as base64 (might have been encoded somewhere)
-			// Doesn't look like JSON - try to decode as base64
-			// The Data field appears to contain base64-encoded JSON
 			dataStrTrimmed := strings.TrimSpace(string(dataBytes))
 			decoded, err := base64.StdEncoding.DecodeString(dataStrTrimmed)
 			if err == nil && len(decoded) > 0 && (decoded[0] == '{' || decoded[0] == '[') {
@@ -202,7 +200,13 @@ func (rd *CHUNK) Parse(txt []string) error {
 	// Parse Data (JSON for manifest, base64 for data chunk)
 	dataStr := txt[4]
 	if rd.Sequence == 0 {
-		// Manifest: data is JSON
+		// Manifest: data is JSON — validate it looks well-formed
+		if len(dataStr) == 0 {
+			return errors.New("CHUNK manifest data is empty")
+		}
+		if dataStr[0] != '{' && dataStr[0] != '[' {
+			return fmt.Errorf("CHUNK manifest data is not valid JSON (starts with %q)", string(dataStr[0]))
+		}
 		rd.Data = []byte(dataStr)
 		rd.DataLength = uint16(len(rd.Data))
 	} else {

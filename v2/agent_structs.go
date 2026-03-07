@@ -239,6 +239,7 @@ type AgentMsgPost struct {
 	Time           time.Time
 	RfiType        string
 	DistributionID string // Originating distribution ID from the sending agent
+	Nonce          string // Nonce from the incoming sync/update message (for confirmation echo)
 }
 
 type AgentMsgPostPlus struct {

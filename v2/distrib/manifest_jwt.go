@@ -32,13 +32,29 @@ import (
 	"github.com/johanix/tdns/v2/crypto"
 )
 
+// DefaultJWTExpiration is the default JWT expiration duration (24 hours)
+const DefaultJWTExpiration = 24 * time.Hour
+
+// MaxJWTExpiration is the maximum allowed JWT expiration duration (7 days)
+const MaxJWTExpiration = 7 * 24 * time.Hour
+
+// AllowedJWTAlgorithms is the set of algorithms accepted for JWT verification.
+// HMAC-based algorithms ("HS256", "HS384", "HS512") and "none" are rejected.
+var AllowedJWTAlgorithms = map[string]bool{
+	"EdDSA": true,
+	"ES256": true,
+	"ES384": true,
+	"ES512": true,
+}
+
 // JWTManifestClaims represents the flattened JWT claims for a distribution manifest.
 // All metadata fields are top-level claims rather than nested in a "metadata" object.
 type JWTManifestClaims struct {
 	// Standard JWT claims
-	Issuer   string `json:"iss,omitempty"` // Sender ID
-	Subject  string `json:"sub,omitempty"` // "distribution"
-	IssuedAt int64  `json:"iat,omitempty"` // Unix timestamp
+	Issuer    string `json:"iss,omitempty"` // Sender ID
+	Subject   string `json:"sub,omitempty"` // "distribution"
+	IssuedAt  int64  `json:"iat,omitempty"` // Unix timestamp
+	ExpiresAt int64  `json:"exp,omitempty"` // Expiration (Unix timestamp)
 
 	// Distribution identification
 	DistributionID string `json:"distribution_id"`
@@ -99,8 +115,12 @@ func CreateJWTManifest(claims *JWTManifestClaims, signingKey crypto.PrivateKey, 
 	if claims.Subject == "" {
 		claims.Subject = "distribution"
 	}
+	now := time.Now()
 	if claims.IssuedAt == 0 {
-		claims.IssuedAt = time.Now().Unix()
+		claims.IssuedAt = now.Unix()
+	}
+	if claims.ExpiresAt == 0 {
+		claims.ExpiresAt = now.Add(DefaultJWTExpiration).Unix()
 	}
 
 	// Marshal claims to JSON
@@ -162,6 +182,21 @@ func ExtractJWTManifestData(chunk *core.CHUNK, verificationKey crypto.PublicKey,
 		return nil, fmt.Errorf("invalid JWS format: expected 3 parts, got %d", len(parts))
 	}
 
+	// Decode and validate JWT header for allowed algorithm (M39)
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode JWT header: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return nil, fmt.Errorf("failed to parse JWT header: %w", err)
+	}
+	if !AllowedJWTAlgorithms[header.Alg] {
+		return nil, fmt.Errorf("JWT algorithm %q is not in the allowed list", header.Alg)
+	}
+
 	// Decode the payload (claims)
 	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -181,6 +216,13 @@ func ExtractJWTManifestData(chunk *core.CHUNK, verificationKey crypto.PublicKey,
 	var claims JWTManifestClaims
 	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
 		return nil, fmt.Errorf("failed to parse JWT claims: %w", err)
+	}
+
+	// Validate expiration claim (H22)
+	if claims.ExpiresAt > 0 {
+		if time.Now().Unix() > claims.ExpiresAt {
+			return nil, fmt.Errorf("JWT has expired (exp=%d, now=%d)", claims.ExpiresAt, time.Now().Unix())
+		}
 	}
 
 	// Decode inline payload if present

@@ -39,8 +39,13 @@ func TimestampToUnix(t time.Time) uint64 {
 	return uint64(t.Unix())
 }
 
-// UnixToTimestamp converts a Unix timestamp (uint64) to time.Time
+// UnixToTimestamp converts a Unix timestamp (uint64) to time.Time.
+// Values exceeding max int64 are clamped to prevent overflow.
 func UnixToTimestamp(ts uint64) time.Time {
+	const maxInt64 = uint64(1<<63 - 1)
+	if ts > maxInt64 {
+		ts = maxInt64
+	}
 	return time.Unix(int64(ts), 0)
 }
 

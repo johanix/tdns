@@ -11,6 +11,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -21,6 +22,13 @@ import (
 	"github.com/johanix/tdns/v2/distrib"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
+)
+
+const (
+	// unsolicitedWarnThreshold is the number of unsolicited messages from unauthorized
+	// senders before escalating log level from Debug to Warn. This helps detect sustained
+	// DoS attempts without flooding the log with individual Debug entries.
+	unsolicitedWarnThreshold uint64 = 100
 )
 
 // ChunkNotifyHandler handles incoming NOTIFY(CHUNK) messages for agent communication.
@@ -63,7 +71,7 @@ type ChunkNotifyHandler struct {
 	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue
 	// and to forward per-RR detail to the SynchedDataEngine.
 	OnConfirmationReceived func(distributionID string, senderID string, status ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool)
+		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool, nonce string)
 
 	// FetchChunkQuery performs a CHUNK query to the given server for the given qname.
 	// Used when Transport is nil (combiner/signer mode) for chunk_mode=query fallback.
@@ -118,6 +126,10 @@ func (h *ChunkNotifyHandler) extractDistributionIDAndSender(qname string) (distr
 	}
 	if len(labels) > 1 {
 		senderID = dns.Fqdn(strings.Join(labels[1:], "."))
+	}
+	// M16: Reject empty senderID — every CHUNK NOTIFY must identify its sender
+	if senderID == "" || senderID == "." {
+		return "", "", fmt.Errorf("missing sender identity in QNAME %s", qname)
 	}
 	return distributionID, senderID, nil
 }
@@ -233,6 +245,9 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
+// M11: The payload is bounded by DNS message size (max 65535 bytes for TCP, ~4096 for UDP)
+// or by the CHUNK query reassembly limit. No additional size limit is needed here because
+// the input is always sourced from DNS wire data, never from unbounded HTTP or file input.
 func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
 	var fields struct {
 		MessageType  string `json:"MessageType"`  // Standard format (string: "sync", "update", "beat", etc.)
@@ -241,10 +256,21 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
 		SenderID     string `json:"sender_id"`    // Legacy
 		Zone         string `json:"Zone"`
-		LegacyZone   string `json:"zone"` // Legacy
+		LegacyZone   string `json:"zone"`  // Legacy
+		Nonce        string `json:"nonce"` // Nonce for replay protection
 	}
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return nil, fmt.Errorf("failed to parse message: %w", err)
+	}
+
+	// M21: Reject messages that set both standard and legacy fields to different values.
+	// This prevents ambiguity where an attacker could set conflicting field values
+	// to bypass routing or authorization logic.
+	if fields.MessageType != "" && fields.Type != "" && fields.MessageType != fields.Type {
+		return nil, fmt.Errorf("conflicting message type fields: MessageType=%q vs type=%q", fields.MessageType, fields.Type)
+	}
+	if fields.Zone != "" && fields.LegacyZone != "" && fields.Zone != fields.LegacyZone {
+		return nil, fmt.Errorf("conflicting zone fields: Zone=%q vs zone=%q", fields.Zone, fields.LegacyZone)
 	}
 
 	// Determine message type: prefer MessageType, fall back to legacy "type"
@@ -276,6 +302,7 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 		DistributionID: distributionID,
 		SenderID:       senderID,
 		Zone:           zone,
+		Nonce:          fields.Nonce,
 		Payload:        payload,
 		ReceivedAt:     time.Now(),
 		SourceAddr:     sourceAddr,
@@ -321,15 +348,18 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 		return h.sendResponse(w, req, dns.RcodeServerFailure)
 	}
 
-	// Encrypt response when SecureWrapper is configured
+	// Encrypt response when SecureWrapper is configured.
+	// H6: If encryption is enabled but fails, return SERVFAIL rather than sending plaintext.
+	// Sending an unencrypted response when encryption is expected would leak information.
 	var payloadFormat uint8 = core.FormatJSON
 	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && senderID != "" {
-		if encrypted, err := h.SecureWrapper.WrapOutgoing(senderID, payloadBytes); err == nil {
-			payloadBytes = encrypted
-			payloadFormat = core.FormatJWT
-		} else {
-			lgTransport().Error("confirm response encryption failed", "peer", senderID, "err", err)
+		encrypted, encErr := h.SecureWrapper.WrapOutgoing(senderID, payloadBytes)
+		if encErr != nil {
+			lgTransport().Error("confirm response encryption failed, refusing to send plaintext", "peer", senderID, "err", encErr)
+			return h.sendResponse(w, req, dns.RcodeServerFailure)
 		}
+		payloadBytes = encrypted
+		payloadFormat = core.FormatJWT
 	}
 
 	resp := new(dns.Msg)
@@ -392,6 +422,27 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
 
+	// H8: Pre-crypto authorization check. Reject unknown senders BEFORE doing any expensive
+	// crypto or query operations. This prevents DoS attacks where an attacker sends messages
+	// with forged sender identities to force expensive decryption attempts.
+	// Note: zone is not yet known at this point (it's inside the encrypted payload), so we
+	// pass "" — the callback should check if the sender is known at all.
+	if h.IsPeerAuthorized != nil {
+		authorized, reason := h.IsPeerAuthorized(senderHint, "")
+		if !authorized {
+			count := atomic.AddUint64(&h.unsolicitedCount, 1)
+			// M18: Escalate log level when unsolicited count exceeds threshold
+			if count%unsolicitedWarnThreshold == 0 {
+				lgTransport().Warn("sustained unsolicited messages from unauthorized senders",
+					"total_count", count, "latest_peer", senderHint, "source", sourceAddr, "reason", reason)
+			} else {
+				lgTransport().Debug("rejected message from unauthorized sender",
+					"peer", senderHint, "source", sourceAddr, "reason", reason)
+			}
+			return h.sendResponse(w, msg, dns.RcodeRefused)
+		}
+	}
+
 	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
 	payload, _, err := h.extractChunkPayload(msg)
 	if err != nil {
@@ -403,45 +454,28 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		}
 	}
 
-	// Decrypt the payload if it is encrypted
-	// SECURITY: Use strict decryption - ONLY try the authorized peer's key to prevent DoS
+	// Decrypt the payload if it is encrypted.
+	// SECURITY: Use strict decryption — ONLY try the claimed sender's key.
+	// H7: No combiner key fallback. If decryption fails with the sender's key, reject.
 	if h.SecureWrapper != nil {
 		lgTransport().Debug("attempting to decrypt payload", "source", sourceAddr, "key_for", senderHint)
 
-		// Use strict decryption: ONLY the senderHint's key (prevents DoS via QNAME forgery)
 		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
 		if err != nil {
-			// Check if error is due to missing verification key (peer not yet discovered)
-			if strings.Contains(err.Error(), "no verification key for") {
+			// H5: Use sentinel error instead of string matching
+			if errors.Is(err, ErrNoVerificationKey) {
 				lgTransport().Info("missing verification key, triggering discovery", "peer", senderHint, "source", sourceAddr)
-				// Trigger discovery asynchronously so we have the key for next retry
 				if h.OnPeerDiscoveryNeeded != nil {
 					go h.OnPeerDiscoveryNeeded(senderHint)
 				}
-				// Drop this message - sender will retry and we'll have the key by then
+				// Drop this message — sender will retry and we'll have the key by then
 				return nil
 			}
 
-			lgTransport().Warn("decryption failed with sender key", "peer", senderHint, "err", err)
-
-			// Try decryption with combiner's key as fallback (for combiner-to-agent messages)
-			if senderHint != "combiner" {
-				decrypted, err = h.SecureWrapper.UnwrapIncomingFromPeer(payload, "combiner")
-				if err != nil {
-					// Check if combiner key is also missing
-					if strings.Contains(err.Error(), "no verification key for") {
-						lgTransport().Info("missing verification key for combiner", "source", sourceAddr)
-						// Don't trigger discovery for combiner via this path
-						return nil
-					}
-					lgTransport().Warn("decryption failed with combiner key", "err", err)
-					// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
-					lgTransport().Warn("SECURITY: decryption failed for NOTIFY, possible forgery", "source", sourceAddr, "claimed_peer", senderHint)
-					return h.sendResponse(w, msg, dns.RcodeRefused)
-				}
-			} else {
-				return h.sendResponse(w, msg, dns.RcodeRefused)
-			}
+			// Decryption failed with the claimed sender's key — possible forgery
+			lgTransport().Warn("SECURITY: decryption failed for NOTIFY, possible forgery",
+				"source", sourceAddr, "claimed_peer", senderHint, "err", err)
+			return h.sendResponse(w, msg, dns.RcodeRefused)
 		}
 		payload = decrypted
 		lgTransport().Debug("successfully decrypted payload", "source", sourceAddr, "key_for", senderHint)
@@ -496,10 +530,30 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		var beatPayload struct {
 			Zones []string `json:"Zones"`
 		}
+		// M11: payload is DNS-sourced (bounded by wire size), safe to unmarshal without size limit
 		if err := json.Unmarshal(payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
 			// Use first shared zone for authorization
 			msgCtx.Data["zone"] = beatPayload.Zones[0]
 			lgTransport().Debug("extracted zone from beat for authorization", "zone", beatPayload.Zones[0])
+		}
+	}
+
+	// M20: Zone-peer authorization check. Now that we have the zone from the (decrypted) payload,
+	// verify that this peer is authorized for this specific zone. The pre-crypto check (H8 above)
+	// only verified the peer is known at all (zone=""); this check validates the zone-peer binding.
+	if h.IsPeerAuthorized != nil {
+		zone := ""
+		if zoneVal, ok := msgCtx.Data["zone"]; ok {
+			if zoneStr, ok := zoneVal.(string); ok {
+				zone = zoneStr
+			}
+		}
+		if zone != "" {
+			authorized, reason := h.IsPeerAuthorized(senderHint, zone)
+			if !authorized {
+				lgTransport().Warn("peer not authorized for zone", "peer", senderHint, "zone", zone, "reason", reason)
+				return h.sendResponse(w, msg, dns.RcodeRefused)
+			}
 		}
 	}
 

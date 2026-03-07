@@ -509,12 +509,13 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 		case "refresh-keys":
 			zd.RequestAndWaitForKeyInventory()
-			if !zd.KeystateOK {
+			if !zd.GetKeystateOK() {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.KeystateError)
+				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
 			} else {
+				inv := zd.GetLastKeyInventory()
 				nForeign := 0
-				for _, entry := range zd.LastKeyInventory.Inventory {
+				for _, entry := range inv.Inventory {
 					if entry.State == DnskeyStateForeign {
 						nForeign++
 					}
@@ -533,8 +534,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 					}
 				}
 				resp.Msg = fmt.Sprintf("Key inventory refreshed for zone %s: %d keys (%d local, %d foreign)",
-					amp.Zone, len(zd.LastKeyInventory.Inventory),
-					len(zd.LastKeyInventory.Inventory)-nForeign, nForeign)
+					amp.Zone, len(inv.Inventory),
+					len(inv.Inventory)-nForeign, nForeign)
 				if changed {
 					resp.Msg += fmt.Sprintf(", SDE updated (%d adds, %d removes)",
 						len(dskeyStatus.LocalAdds), len(dskeyStatus.LocalRemoves))
@@ -709,9 +710,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				for zone := range response.ZDR {
 					if zd, exists := Zones.Get(string(zone)); exists {
 						ksStatus[zone] = KeystateInfo{
-							OK:        zd.KeystateOK,
-							Error:     zd.KeystateError,
-							Timestamp: zd.KeystateTime.Format(time.RFC3339),
+							OK:        zd.GetKeystateOK(),
+							Error:     zd.GetKeystateError(),
+							Timestamp: zd.GetKeystateTime().Format(time.RFC3339),
 						}
 					}
 				}
@@ -733,14 +734,15 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = fmt.Sprintf("zone %q not found", amp.Zone)
 				return
 			}
-			if zd.LastKeyInventory == nil {
+			inv := zd.GetLastKeyInventory()
+			if inv == nil {
 				resp.Msg = fmt.Sprintf("No key inventory received yet for zone %s", amp.Zone)
 			} else {
-				resp.Data = zd.LastKeyInventory
+				resp.Data = inv
 				resp.Msg = fmt.Sprintf("Key inventory for zone %s: %d keys (received %s from %s)",
-					amp.Zone, len(zd.LastKeyInventory.Inventory),
-					zd.LastKeyInventory.Received.Format("15:04:05"),
-					zd.LastKeyInventory.SenderID)
+					amp.Zone, len(inv.Inventory),
+					inv.Received.Format("15:04:05"),
+					inv.SenderID)
 			}
 
 		case "resync":

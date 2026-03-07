@@ -429,7 +429,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						authorized, reason := conf.Internal.TransportManager.IsPeerAuthorized(toFqdn, "")
 						if !authorized {
 							resp.Error = true
-							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", req.To, reason)
+							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized", req.To)
 							lgApi.Warn("rejected discovery for unauthorized agent", "agent", toFqdn, "reason", reason)
 							return
 						}
@@ -442,7 +442,8 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						discErr := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
 						if discErr != nil {
 							resp.Error = true
-							resp.ErrorMsg = fmt.Sprintf("unknown peer identity %q and discovery failed: %v (use \"distrib peers\" to list known peers)", req.To, discErr)
+							resp.ErrorMsg = fmt.Sprintf("peer %q not found and discovery failed", req.To)
+							lgApi.Warn("peer discovery failed", "peer", toFqdn, "err", discErr)
 							return
 						}
 
@@ -501,7 +502,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			authorized, reason := conf.Internal.TransportManager.IsPeerAuthorized(agentFqdn, "")
 			if !authorized {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", agentId, reason)
+				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized", agentId)
 				lgApi.Warn("rejected discovery for unauthorized agent", "agent", agentFqdn, "reason", reason)
 				return
 			}
@@ -514,7 +515,8 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
 			if err != nil {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("discovery failed: %v", err)
+				resp.ErrorMsg = "discovery failed"
+				lgApi.Warn("agent discovery failed", "agent", agentFqdn, "err", err)
 				return
 			}
 

@@ -19,6 +19,9 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if err != nil {
 		return err
 	}
+	if apex == nil {
+		return fmt.Errorf("PublishDnskeyRRs: zone apex %q not found", zd.ZoneName)
+	}
 
 	// Ensure that all active DNSKEYs are included in the DNSKEY RRset
 	// XXX: Note that here we do not judge whether some other DNSKEY shouldn't
@@ -66,13 +69,18 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 			lgHandler.Error("PublishDnskeyRRs: error creating dns.RR from keyrr", "err", err)
 			return err
 		}
+		if _, ok := rr.(*dns.DNSKEY); !ok {
+			lgHandler.Error("PublishDnskeyRRs: parsed RR is not a DNSKEY", "rrtype", dns.TypeToString[rr.Header().Rrtype], "keyrr", keyrr)
+			continue
+		}
 		publishkeys = append(publishkeys, rr)
 	}
 
 	// Multi-signer mode 4: merge remote DNSKEYs from other providers.
 	// Per RFC 8901, each signer includes all signers' DNSKEYs in the RRset.
-	if len(zd.RemoteDNSKEYs) > 0 {
-		for _, rk := range zd.RemoteDNSKEYs {
+	remoteDNSKEYs := zd.GetRemoteDNSKEYs()
+	if len(remoteDNSKEYs) > 0 {
+		for _, rk := range remoteDNSKEYs {
 			// Deduplicate: only add if not already present
 			dup := false
 			for _, pk := range publishkeys {

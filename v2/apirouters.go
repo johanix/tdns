@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/gorilla/mux"
 )
+
+// apiKeyAuthMiddleware returns a middleware that validates the API key using
+// constant-time comparison to prevent timing side-channel attacks.
+func apiKeyAuthMiddleware(expectedKey string) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			providedKey := r.Header.Get("X-API-Key")
+			if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
 var lgApi = Logger("api")
 
@@ -37,12 +53,13 @@ func WalkRoutes(router *mux.Router, address string) {
 // The simple API router is sufficient for tdns-imr, tdns-scanner and tdns-reporter.
 func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, error) {
 	rtr := mux.NewRouter().StrictSlash(true)
-	apikey := conf.ApiServer.ApiKey
+	apikey := conf.ApiServer.ApiKey.Value()
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
-	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	sr := rtr.PathPrefix("/api/v1").Subrouter()
+	sr.Use(apiKeyAuthMiddleware(apikey))
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
@@ -67,12 +84,13 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	}
 
 	rtr := mux.NewRouter().StrictSlash(true)
-	apikey := conf.ApiServer.ApiKey
+	apikey := conf.ApiServer.ApiKey.Value()
 	if apikey == "" {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
-	sr := rtr.PathPrefix("/api/v1").Headers("X-API-Key", apikey).Subrouter()
+	sr := rtr.PathPrefix("/api/v1").Subrouter()
+	sr.Use(apiKeyAuthMiddleware(apikey))
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")

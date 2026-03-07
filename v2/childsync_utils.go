@@ -19,6 +19,9 @@ import (
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
 // command line rather than the one in the keystore. Not to be used by TDNS-SERVER.
 func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) (UpdateResult, error) {
+	if Globals.Zonename == "" {
+		return UpdateResult{}, fmt.Errorf("xxxChildSendDdnsSync: Globals.Zonename is not set")
+	}
 	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
 	if err != nil {
 		return UpdateResult{}, fmt.Errorf("error from CreateChildUpdate(%s): %v", pzone, err)

@@ -33,6 +33,11 @@ func SetupLogging(logfile string, logConf LogConf) error {
 	if logfile == "" {
 		return fmt.Errorf("log file not specified (key log.file)")
 	}
+	// H27: Validate log file path
+	logfile = filepath.Clean(logfile)
+	if strings.Contains(logfile, "..") {
+		return fmt.Errorf("log file path must not contain directory traversal: %s", logfile)
+	}
 
 	lj := &lumberjack.Logger{
 		Filename:   logfile,

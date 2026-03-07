@@ -10,12 +10,11 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 // type TAStore map[string]map[uint16]TrustAnchor
 type DnskeyCacheT struct {
-	Map cmap.ConcurrentMap[string, CachedDnskeyRRset]
+	Map *core.ConcurrentMap[string, CachedDnskeyRRset]
 }
 
 type CachedDnskeyRRset struct {

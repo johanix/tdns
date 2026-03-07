@@ -294,6 +294,9 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	// we need a third loop to check for changes in the glue records themselves.
 
 	for _, ns := range oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs {
+		if ns == nil {
+			continue
+		}
 		if nsrr, ok := ns.(*dns.NS); ok {
 			oldowner, err := zd.GetOwner(nsrr.Ns)
 			if err != nil || oldowner == nil {

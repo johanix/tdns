@@ -15,6 +15,9 @@ func ParseTsigKeys(keyconf *KeyConf) (int, map[string]string) {
 		Globals.TsigKeys = make(map[string]*TsigDetails, numtsigs)
 		tsigSecrets = make(map[string]string, numtsigs)
 		for _, val := range keyconf.Tsig {
+			if val.Name == "" || val.Algorithm == "" || val.Secret == "" {
+				continue // Skip incomplete TSIG key entries
+			}
 			Globals.TsigKeys[val.Name] = &TsigDetails{
 				Name:      val.Name,
 				Algorithm: val.Algorithm,

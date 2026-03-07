@@ -4,7 +4,9 @@
 package tdns
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"time"
@@ -12,11 +14,26 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	"golang.org/x/exp/rand"
 )
 
+// sig0TTL is the TTL used for SIG(0) records in signed messages.
+const sig0TTL uint32 = 300
+
+// cryptoRandIntn returns a random int in [0, n) using crypto/rand.
+func cryptoRandIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	max := big.NewInt(int64(n))
+	val, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return 0 // fallback to 0 on error
+	}
+	return int(val.Int64())
+}
+
 func sigLifetime(t time.Time, lifetime uint32) (uint32, uint32) {
-	sigJitter := time.Duration(time.Duration(rand.Intn(61)) * time.Second)
+	sigJitter := time.Duration(time.Duration(cryptoRandIntn(61)) * time.Second)
 	sigValidity := time.Duration(lifetime) * time.Second
 	if lifetime == 0 {
 		sigValidity = time.Duration(5 * time.Minute)
@@ -38,7 +55,7 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 			Name:   key.KeyRR.Header().Name,
 			Rrtype: dns.TypeSIG,
 			Class:  dns.ClassINET,
-			Ttl:    300,
+			Ttl:    sig0TTL,
 		}
 		sigrr.RRSIG.KeyTag = key.KeyRR.DNSKEY.KeyTag()
 		sigrr.RRSIG.Algorithm = key.KeyRR.DNSKEY.Algorithm
@@ -347,15 +364,15 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if err := zd.extractRemoteDNSKEYs(kdb); err != nil {
 				lgSigner.Warn("error extracting remote DNSKEYs, proceeding without", "zone", zd.ZoneName, "err", err)
 			}
-			lgSigner.Info("multi-signer mode (mode 4)", "zone", zd.ZoneName, "remote_dnskeys", len(zd.RemoteDNSKEYs))
+			lgSigner.Info("multi-signer mode (mode 4)", "zone", zd.ZoneName, "remote_dnskeys", len(zd.GetRemoteDNSKEYs()))
 		} else {
 			// Mode 2: single-signer, we sign — strip and replace (same as mode 1)
-			zd.RemoteDNSKEYs = nil
+			zd.SetRemoteDNSKEYs(nil)
 			lgSigner.Info("single-signer multi-provider mode (mode 2), strip and replace", "zone", zd.ZoneName)
 		}
 	} else {
 		// Mode 1: normal signing — no remote DNSKEYs
-		zd.RemoteDNSKEYs = nil
+		zd.SetRemoteDNSKEYs(nil)
 	}
 
 	// Ensure active DNSSEC keys exist (will generate if needed)
@@ -411,6 +428,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		if owner == nil {
+			continue
+		}
 		if _, exist := owner.RRtypes.Get(dns.TypeNS); exist {
 			delegations = append(delegations, name)
 		}
@@ -424,6 +444,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		owner, err := zd.GetOwner(name)
 		if err != nil {
 			return 0, err
+		}
+		if owner == nil {
+			continue
 		}
 
 		for _, rrt := range owner.RRtypes.Keys() {
@@ -510,6 +533,9 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		if err != nil {
 			return err
 		}
+		if owner == nil {
+			continue
+		}
 
 		nextidx = idx + 1
 		if nextidx == len(names) {
@@ -571,6 +597,9 @@ func (zd *ZoneData) ShowNsecChain() ([]string, error) {
 		if err != nil {
 			return nsecrrs, err
 		}
+		if owner == nil {
+			continue
+		}
 		if name != zd.ZoneName {
 			rrs := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC).RRs
 			if len(rrs) == 1 {
@@ -597,7 +626,7 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 	dnskeyRRset, exists := apex.RRtypes.Get(dns.TypeDNSKEY)
 	if !exists || len(dnskeyRRset.RRs) == 0 {
 		lgSigner.Debug("no DNSKEY RRset in zone (normal for fresh zones)", "zone", zd.ZoneName)
-		zd.RemoteDNSKEYs = nil
+		zd.SetRemoteDNSKEYs(nil)
 		return nil
 	}
 
@@ -675,6 +704,6 @@ func (zd *ZoneData) extractRemoteDNSKEYs(kdb *KeyDB) error {
 		lgSigner.Info("foreign DNSKEY summary", "zone", zd.ZoneName, "in_zone", len(currentForeign), "in_db", len(existingForeign), "persisted", len(currentForeign))
 	}
 
-	zd.RemoteDNSKEYs = remote
+	zd.SetRemoteDNSKEYs(remote)
 	return nil
 }

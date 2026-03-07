@@ -78,6 +78,10 @@ func (zd *ZoneData) UnpublishUriRR(owner, target string) error {
 	if _, ok := dns.IsDomainName(target); !ok {
 		return fmt.Errorf("target must be a valid domain name")
 	}
+
+	// Ensure owner is FQDN
+	owner = dns.Fqdn(owner)
+
 	if !strings.HasSuffix(owner, zd.ZoneName) {
 		return fmt.Errorf("owner must be a subdomain of the zone name")
 	}

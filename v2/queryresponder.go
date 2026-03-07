@@ -185,7 +185,7 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys, imr *Imr,
 	signFunc func(core.RRset, string) (core.RRset, error)) error {
-	zd.Logger.Printf("QueryResponder: DS query for %s. Trying to find parent zone.", qname)
+	lgHandler.Debug("QueryResponder: DS query, trying to find parent zone", "qname", qname)
 	parent, err := imr.ParentZone(zd.ZoneName)
 	if err != nil {
 		lgHandler.Error("failed to find parent zone for DS query", "qname", qname)
@@ -317,7 +317,7 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool) {
 	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 	soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-	zd.Logger.Printf("There are %d SOA RRs in %s RRset: %v", len(soaRRset.RRs), zd.ZoneName, soaRRset)
+	lgHandler.Debug("SOA RRset details", "zone", zd.ZoneName, "count", len(soaRRset.RRs), "rrset", soaRRset)
 	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 	m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0])

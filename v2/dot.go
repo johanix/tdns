@@ -35,6 +35,13 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 
 	// Wrap the DNS handler to add logging
 	loggingHandler := func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) == 0 {
+			lgDns.Warn("DoT: received message with no question section", "remote", w.RemoteAddr())
+			resp := new(dns.Msg)
+			resp.SetRcode(r, dns.RcodeFormatError)
+			w.WriteMsg(resp)
+			return
+		}
 		lgDns.Debug("DoT: received message", "opcode", dns.OpcodeToString[r.Opcode], "qname", r.Question[0].Name, "rrtype", dns.TypeToString[r.Question[0].Qtype])
 		ourDNSHandler(w, r)
 	}
@@ -71,7 +78,9 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 		for _, s := range servers {
 			done := make(chan struct{})
 			go func(srv *dns.Server) {
-				_ = srv.Shutdown()
+				if err := srv.Shutdown(); err != nil {
+					lgDns.Warn("DnsDoTEngine: error shutting down DoT server", "addr", srv.Addr, "err", err)
+				}
 				close(done)
 			}(s)
 			select {

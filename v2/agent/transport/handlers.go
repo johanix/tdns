@@ -23,7 +23,8 @@ import (
 func HandleConfirmation(ctx *MessageContext) error {
 	lgTransport().Debug("processing confirmation", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Parse the confirmation message
+	// Parse the confirmation message.
+	// Size bounded: ctx.ChunkPayload originates from a DNS message (max ~65535 bytes over TCP).
 	var confirm DnsConfirmPayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &confirm); err != nil {
 		return fmt.Errorf("failed to parse confirmation: %w", err)
@@ -31,7 +32,8 @@ func HandleConfirmation(ctx *MessageContext) error {
 
 	status := parseConfirmStatus(confirm.Status)
 
-	// Forward to transport's reliable message queue (marks distribution as confirmed)
+	// Forward to transport's reliable message queue (marks distribution as confirmed).
+	// Two-value type assertion: ok is false if "transport" key is missing or wrong type.
 	if transport, ok := ctx.Data["transport"].(*DNSTransport); ok && transport != nil {
 		transport.HandleIncomingConfirmation(&IncomingConfirmation{
 			DistributionID: confirm.DistributionID,
@@ -44,15 +46,16 @@ func HandleConfirmation(ctx *MessageContext) error {
 			RemovedRecords: confirm.RemovedRecords,
 			RejectedItems:  confirm.RejectedItems,
 			Truncated:      confirm.Truncated,
+			Nonce:          confirm.Nonce,
 		})
 	}
 
 	// Forward confirmation detail to SynchedDataEngine
 	type confirmCallback = func(distributionID string, senderID string, status ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool)
+		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool, nonce string)
 	if cb, ok := ctx.Data["on_confirmation_received"].(confirmCallback); ok && cb != nil && confirm.DistributionID != "" {
 		cb(confirm.DistributionID, confirm.SenderID, status,
-			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated)
+			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated, confirm.Nonce)
 	}
 
 	lgTransport().Debug("confirmation processed", "peer", ctx.PeerID, "status", confirm.Status)
@@ -86,7 +89,8 @@ func HandlePing(ctx *MessageContext) error {
 		return fmt.Errorf("ping has empty nonce")
 	}
 
-	// Get local identity from context (set by RouteViaRouter)
+	// Get local identity from context (set by RouteViaRouter).
+	// Two-value form: localID defaults to "" if key missing or wrong type.
 	localID, _ := ctx.Data["local_id"].(string)
 
 	// Create confirmation response matching DnsPingConfirmPayload format
@@ -197,8 +201,26 @@ func HandleSync(ctx *MessageContext) error {
 	// Check if sender has zero shared zones (LEGACY state)
 	// LEGACY agents should not send sync messages (only beats)
 	if ctx.Peer != nil && len(ctx.Peer.GetSharedZones()) == 0 {
-		// Agent is LEGACY (zero shared zones) - reject sync
+		// Agent is LEGACY (zero shared zones) - reject sync with informative error payload
 		lgTransport().Warn("rejecting sync from LEGACY agent (zero shared zones)", "peer", ctx.PeerID)
+		errorPayload := struct {
+			Type           string `json:"type"`
+			DistributionID string `json:"distribution_id"`
+			Status         string `json:"status"`
+			Message        string `json:"message"`
+			Timestamp      int64  `json:"timestamp"`
+		}{
+			Type:           "error",
+			DistributionID: ctx.DistributionID,
+			Status:         "rejected",
+			Message:        fmt.Sprintf("LEGACY agent %s cannot send sync messages (zero shared zones); re-introduce via HELLO with updated HSYNC zones", ctx.PeerID),
+			Timestamp:      time.Now().Unix(),
+		}
+		payloadBytes, err := json.Marshal(errorPayload)
+		if err == nil {
+			ctx.Data["response"] = payloadBytes
+			ctx.Data["response_rcode"] = dns.RcodeRefused
+		}
 		return fmt.Errorf("LEGACY agent %s cannot send sync messages (zero shared zones)", ctx.PeerID)
 	}
 
@@ -288,7 +310,8 @@ func HandleRfi(ctx *MessageContext) error {
 func HandleKeystate(ctx *MessageContext) error {
 	lgTransport().Debug("processing keystate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Parse the keystate message
+	// Parse the keystate message.
+	// Size bounded: ctx.ChunkPayload originates from a DNS message (max ~65535 bytes over TCP).
 	var keystate DnsKeystatePayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &keystate); err != nil {
 		return fmt.Errorf("failed to parse keystate: %w", err)
@@ -371,7 +394,8 @@ func HandleKeystate(ctx *MessageContext) error {
 func HandleEdits(ctx *MessageContext) error {
 	lgTransport().Debug("processing edits", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Parse the edits message
+	// Parse the edits message.
+	// Size bounded: ctx.ChunkPayload originates from a DNS message (max ~65535 bytes over TCP).
 	var edits DnsEditsPayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &edits); err != nil {
 		return fmt.Errorf("failed to parse edits: %w", err)
@@ -639,7 +663,8 @@ func RouteToMsgHandler(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
 				case incomingChan <- incomingMsg:
 					lgTransport().Debug("routed message to handler", "type", msgType, "peer", ctx.PeerID)
 				default:
-					lgTransport().Warn("incoming channel full, dropping message", "type", msgType)
+					lgTransport().Warn("message dropped: channel full",
+						"type", msgType, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 					return fmt.Errorf("message handler channel full")
 				}
 			}

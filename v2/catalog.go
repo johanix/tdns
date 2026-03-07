@@ -165,6 +165,10 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 		var configGroup string
 
 		// Get configured group prefixes
+		if Conf.Catalog == nil {
+			lg.Error("ParseCatalogZone: Conf.Catalog is nil, cannot categorize groups")
+			return nil, fmt.Errorf("Conf.Catalog is nil, cannot parse catalog zone")
+		}
 		configPrefix := Conf.Catalog.GroupPrefixes.Config
 		signingPrefix := Conf.Catalog.GroupPrefixes.Signing
 
@@ -250,7 +254,12 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	catalogZd, catalogExists := Zones.Get(update.CatalogZone)
 	if !catalogExists {
 		lg.Warn("CATALOG: catalog zone not found in Zones map", "zone", update.CatalogZone)
-		return fmt.Errorf("catalog zone %s not found", update.CatalogZone)
+		return fmt.Errorf("AutoConfigureZonesFromCatalog: catalog zone %s not found in Zones map", update.CatalogZone)
+	}
+
+	if conf.Catalog == nil {
+		lg.Warn("CATALOG: conf.Catalog is nil, cannot auto-configure zones")
+		return fmt.Errorf("AutoConfigureZonesFromCatalog: conf.Catalog is nil for catalog zone %s", update.CatalogZone)
 	}
 
 	// Check if auto-create is enabled for this catalog zone
@@ -260,6 +269,13 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	// VALIDATION: Check all member zones for configuration errors (applies regardless of policy)
 	errorCount := 0
 	for zoneName, member := range update.MemberZones {
+		// Validate zone name is a valid FQDN
+		if !dns.IsFqdn(zoneName) {
+			errorMsg := fmt.Sprintf("Member zone %q in catalog %s is not a valid FQDN", zoneName, update.CatalogZone)
+			lg.Error("CATALOG: validation error", "msg", errorMsg)
+			errorCount++
+			continue
+		}
 		// VALIDATION (a): Check if zone references a group that doesn't exist in config
 		// This validation applies regardless of auto-config policy
 		if member.MetaGroup != "" {
@@ -441,7 +457,6 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	return nil
 }
 
-// getMetaGroupNames returns a list of meta group names for logging
 // getConfigGroupNames returns a list of config group names from a map
 func getConfigGroupNames(configGroups map[string]*ConfigGroupConfig) []string {
 	if configGroups == nil {
@@ -452,11 +467,6 @@ func getConfigGroupNames(configGroups map[string]*ConfigGroupConfig) []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-// getMetaGroupNames is deprecated, use getConfigGroupNames
-func getMetaGroupNames(metaGroups map[string]*MetaGroupConfig) []string {
-	return getConfigGroupNames(metaGroups)
 }
 
 // parseZoneStore converts a zone store string to ZoneStore type
@@ -681,6 +691,22 @@ func (cm *CatalogMembership) GetMemberZones() map[string]*MemberZone {
 	result := make(map[string]*MemberZone)
 
 	// Get configured group prefixes
+	if Conf.Catalog == nil {
+		lg.Warn("GetMemberZones: Conf.Catalog is nil, returning members without group categorization")
+		for zoneName, member := range cm.MemberZones {
+			discoveredAt := member.DiscoveredAt
+			if discoveredAt.IsZero() {
+				discoveredAt = time.Now()
+			}
+			result[zoneName] = &MemberZone{
+				ZoneName:      zoneName,
+				Hash:          member.Hash,
+				ServiceGroups: member.Groups,
+				DiscoveredAt:  discoveredAt,
+			}
+		}
+		return result
+	}
 	configPrefix := Conf.Catalog.GroupPrefixes.Config
 	signingPrefix := Conf.Catalog.GroupPrefixes.Signing
 

@@ -13,6 +13,7 @@ package tdns
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -103,7 +104,7 @@ var HsyncTables = map[string]string{
 	// Each row represents a sync operation (NS, DNSKEY, CDS, CSYNC, GLUE).
 	"SyncOperations": `CREATE TABLE IF NOT EXISTS 'SyncOperations' (
 		id                INTEGER PRIMARY KEY AUTOINCREMENT,
-		correlation_id    TEXT NOT NULL UNIQUE,
+		distribution_id   TEXT NOT NULL UNIQUE,
 
 		-- Operation details
 		zone_name         TEXT NOT NULL,
@@ -140,10 +141,10 @@ var HsyncTables = map[string]string{
 	)`,
 
 	// SyncConfirmations stores detailed confirmations for sync operations.
-	// Linked to SyncOperations via correlation_id.
+	// Linked to SyncOperations via distribution_id.
 	"SyncConfirmations": `CREATE TABLE IF NOT EXISTS 'SyncConfirmations' (
 		id                INTEGER PRIMARY KEY AUTOINCREMENT,
-		correlation_id    TEXT NOT NULL,
+		distribution_id   TEXT NOT NULL,
 
 		-- Confirmation source
 		confirmer_id      TEXT NOT NULL,              -- Peer that sent the confirmation
@@ -163,7 +164,7 @@ var HsyncTables = map[string]string{
 		confirmed_at      INTEGER NOT NULL,
 		received_at       INTEGER NOT NULL,
 
-		FOREIGN KEY(correlation_id) REFERENCES SyncOperations(correlation_id) ON DELETE CASCADE
+		FOREIGN KEY(distribution_id) REFERENCES SyncOperations(distribution_id) ON DELETE CASCADE
 	)`,
 
 	// OperationalMetrics stores time-series metrics for monitoring.
@@ -291,7 +292,7 @@ var HsyncIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_sync_ops_receiver ON SyncOperations(receiver_id)`,
 
 	// SyncConfirmations indexes
-	`CREATE INDEX IF NOT EXISTS idx_sync_confirm_correlation ON SyncConfirmations(correlation_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_sync_confirm_distribution ON SyncConfirmations(distribution_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_sync_confirm_status ON SyncConfirmations(status)`,
 
 	// OperationalMetrics indexes
@@ -318,11 +319,37 @@ var HsyncIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
 }
 
+// migrateHsyncSchema applies schema migrations for existing databases.
+// Currently handles the correlation_id → distribution_id rename (M41).
+func (kdb *KeyDB) migrateHsyncSchema() {
+	migrations := []struct {
+		table  string
+		oldCol string
+		newCol string
+	}{
+		{"SyncOperations", "correlation_id", "distribution_id"},
+		{"SyncConfirmations", "correlation_id", "distribution_id"},
+	}
+	for _, m := range migrations {
+		if dbColumnExists(kdb.DB, m.table, m.oldCol) && !dbColumnExists(kdb.DB, m.table, m.newCol) {
+			_, err := kdb.DB.Exec(fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", m.table, m.oldCol, m.newCol))
+			if err != nil {
+				log.Printf("schema migration failed: %s.%s → %s: %v", m.table, m.oldCol, m.newCol, err)
+			} else {
+				log.Printf("schema migration applied: %s.%s → %s", m.table, m.oldCol, m.newCol)
+			}
+		}
+	}
+}
+
 // InitHsyncTables initializes the HSYNC tables in the KeyDB.
 // Call this during application startup after KeyDB is created.
 func (kdb *KeyDB) InitHsyncTables() error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
+
+	// Migrate existing tables before creating new ones
+	kdb.migrateHsyncSchema()
 
 	// Create tables
 	for name, schema := range HsyncTables {

@@ -114,6 +114,11 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		return fmt.Errorf("catalog zone name is required")
 	}
 
+	// Validate zone name before using in RR construction
+	if err := validateDNSName(catalogZoneName); err != nil {
+		return fmt.Errorf("invalid catalog zone name: %v", err)
+	}
+
 	// Ensure zone name is FQDN
 	catalogZoneName = dns.Fqdn(catalogZoneName)
 
@@ -240,6 +245,14 @@ func handleCatalogDelete(catalogZoneName string, resp *CatalogResponse) error {
 func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, resp *CatalogResponse) error {
 	if catalogZoneName == "" || zoneName == "" {
 		return fmt.Errorf("catalog zone name and member zone name are required")
+	}
+
+	// Validate zone names before using in RR construction
+	if err := validateDNSName(catalogZoneName); err != nil {
+		return fmt.Errorf("invalid catalog zone name: %v", err)
+	}
+	if err := validateDNSName(zoneName); err != nil {
+		return fmt.Errorf("invalid member zone name: %v", err)
 	}
 
 	catalogZoneName = dns.Fqdn(catalogZoneName)
@@ -717,6 +730,23 @@ func handleCatalogNotifyList(catalogZoneName string, resp *CatalogResponse) erro
 	copy(resp.NotifyAddresses, zd.Downstreams)
 	zd.mu.Unlock()
 
+	return nil
+}
+
+// validateDNSName validates that a string is a safe DNS name for use in RR construction.
+// It prevents format string injection and ensures the name only contains valid DNS characters.
+func validateDNSName(name string) error {
+	if name == "" {
+		return fmt.Errorf("name cannot be empty")
+	}
+	// Reject format specifiers that could be exploited in fmt.Sprintf
+	if strings.ContainsAny(name, "%\n\r\t \"\\") {
+		return fmt.Errorf("name contains invalid characters")
+	}
+	// Validate as a DNS name using IsDomainName
+	if _, ok := dns.IsDomainName(name); !ok {
+		return fmt.Errorf("name is not a valid DNS domain name")
+	}
 	return nil
 }
 

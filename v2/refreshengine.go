@@ -12,7 +12,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 
-	cmap "github.com/orcaman/concurrent-map/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
@@ -40,7 +40,7 @@ type RefreshCounter struct {
 // post-init hooks, OnFirstLoad callbacks, and downstream notification.
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
-	refreshCounters cmap.ConcurrentMap[string, *RefreshCounter],
+	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string), resetSoaSerial bool) (bool, error) {
 
 	updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
@@ -133,7 +133,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	var bumpch = conf.Internal.BumpZoneCh
 
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
-	var refreshCounters = cmap.New[*RefreshCounter]()
+	var refreshCounters = core.NewCmap[*RefreshCounter]()
 	var ticker *time.Ticker
 
 	// Build expected zone set from config for a robust post-initialization barrier
@@ -219,7 +219,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.MusicSyncQ = conf.Internal.MusicSyncQ
 							zd.SyncQ = conf.Internal.SyncQ
 							zd.KeyDB = conf.Internal.KeyDB
-							zd.Data = cmap.New[OwnerData]()
+							zd.Data = core.NewCmap[OwnerData]()
 							zd.mu.Unlock()
 						}
 
@@ -467,7 +467,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DelegationSyncQ: conf.Internal.DelegationSyncQ,
 						MusicSyncQ:      conf.Internal.MusicSyncQ,
 						SyncQ:           conf.Internal.SyncQ,
-						Data:            cmap.New[OwnerData](),
+						Data:            core.NewCmap[OwnerData](),
 						KeyDB:           conf.Internal.KeyDB,
 						FirstZoneLoad:   true,
 					}

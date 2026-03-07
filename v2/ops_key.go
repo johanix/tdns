@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gookit/goutil/dump"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -48,7 +47,7 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 }
 
 func (zd *ZoneData) UnpublishKeyRRs() error {
-	anti_key_rr, err := dns.NewRR(fmt.Sprintf("%q 0 ANY KEY 0 0 0 tomtarpaloftet", zd.ZoneName))
+	anti_key_rr, err := dns.NewRR(fmt.Sprintf("%s 0 ANY KEY 0 0 0 AA==", zd.ZoneName))
 	if err != nil {
 		return err
 	}
@@ -205,6 +204,9 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 		}
 	}
 
+	if len(sak.Keys) == 0 {
+		return "BootstrapSig0KeyWithParent: no active SIG(0) keys available", UpdateResult{}, fmt.Errorf("no active SIG(0) keys for zone %q", zd.ZoneName)
+	}
 	pkc := sak.Keys[0]
 
 	// 2. Get the parent DSYNC RRset
@@ -271,7 +273,6 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 		zd.Logger.Printf("%s", resp.Msg)
 	}
 
-	dump.P(ur)
 	return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), ur, nil
 }
 
@@ -303,6 +304,9 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
+	}
+	if len(sak.Keys) == 0 {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): no active SIG(0) keys found", zd.ZoneName)
 	}
 
 	tx, err := zd.KeyDB.Begin("RolloverSig0KeyWithParent")

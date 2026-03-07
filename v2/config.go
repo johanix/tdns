@@ -16,6 +16,29 @@ import (
 
 var Conf Config
 
+// confMu protects Conf and Globals during config reload operations.
+// Readers do not need to hold this — the reload window is brief and
+// reads during reload may see partial state, which is acceptable.
+// Only reload paths acquire the write lock.
+var confMu sync.RWMutex
+
+// SensitiveString wraps a string that should not appear in logs.
+// Use .Value() to get the actual string; String() returns a redacted form.
+type SensitiveString string
+
+// Value returns the actual string value.
+func (s SensitiveString) Value() string {
+	return string(s)
+}
+
+// String returns a redacted representation for safe logging.
+func (s SensitiveString) String() string {
+	if len(s) == 0 {
+		return ""
+	}
+	return "[REDACTED]"
+}
+
 type Config struct {
 	Service        ServiceConf
 	DnsEngine      DnsEngineConf
@@ -24,7 +47,7 @@ type Config struct {
 	DnssecPolicies map[string]DnssecPolicyConf
 	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
 	MultiProvider  *MultiProviderConf         `yaml:"multi-provider" mapstructure:"multi-provider"`
-	Catalog        CatalogConf                `yaml:"catalog" mapstructure:"catalog"`
+	Catalog        *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
 	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
@@ -204,10 +227,10 @@ type ImrStubConf struct {
 // }
 
 type ApiServerConf struct {
-	Addresses []string `validate:"required"` // Must be in addr:port format
-	ApiKey    string   `validate:"required"`
-	CertFile  string   `validate:"required,file,certkey"`
-	KeyFile   string   `validate:"required,file"`
+	Addresses []string        `validate:"required"` // Must be in addr:port format
+	ApiKey    SensitiveString `validate:"required"`
+	CertFile  string          `validate:"required,file,certkey"`
+	KeyFile   string          `validate:"required,file"`
 	UseTLS    bool
 	Server    ApiServerAppConf
 	Agent     ApiServerAppConf
@@ -217,7 +240,7 @@ type ApiServerConf struct {
 
 type ApiServerAppConf struct {
 	Addresses []string
-	ApiKey    string
+	ApiKey    SensitiveString
 }
 
 // PeerConf holds address and public key path for the other party (agent or combiner).
@@ -525,6 +548,8 @@ type EditsResponseMsg struct {
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
+	confMu.Lock()
+	defer confMu.Unlock()
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -534,6 +559,8 @@ func (conf *Config) ReloadConfig() (string, error) {
 }
 
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
+	confMu.Lock()
+	defer confMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}

@@ -114,6 +114,18 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 			continue
 		}
 
+		// Reject far-future timestamps (clock skew or data corruption)
+		if key.PublishedAt.After(now.Add(5 * time.Minute)) {
+			lgSigner.Warn("KeyStateWorker: published_at timestamp is in the future, skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "published_at", key.PublishedAt)
+			continue
+		}
+
+		// Reject unreasonably old timestamps (>10 years suggests data corruption)
+		if now.Sub(*key.PublishedAt) > 10*365*24*time.Hour {
+			lgSigner.Warn("KeyStateWorker: published_at timestamp is unreasonably old (>10 years), skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "published_at", key.PublishedAt)
+			continue
+		}
+
 		elapsed := now.Sub(*key.PublishedAt)
 		if elapsed < propagationDelay {
 			continue
@@ -143,6 +155,18 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 	for _, key := range keys {
 		if key.RetiredAt == nil {
 			lgSigner.Warn("KeyStateWorker: retired key has no retired_at timestamp, skipping", "zone", key.ZoneName, "keyid", key.KeyTag)
+			continue
+		}
+
+		// Reject far-future timestamps (clock skew or data corruption)
+		if key.RetiredAt.After(now.Add(5 * time.Minute)) {
+			lgSigner.Warn("KeyStateWorker: retired_at timestamp is in the future, skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "retired_at", key.RetiredAt)
+			continue
+		}
+
+		// Reject unreasonably old timestamps (>10 years suggests data corruption)
+		if now.Sub(*key.RetiredAt) > 10*365*24*time.Hour {
+			lgSigner.Warn("KeyStateWorker: retired_at timestamp is unreasonably old (>10 years), skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "retired_at", key.RetiredAt)
 			continue
 		}
 

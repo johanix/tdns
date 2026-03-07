@@ -467,12 +467,14 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			return &resp, err
 		}
 		count, _ := result.RowsAffected()
-		// Invalidate all caches for this zone
+		// Invalidate all caches for this zone (mutex protects iteration during concurrent access)
+		kdb.mu.Lock()
 		for key := range kdb.KeystoreDnskeyCache {
 			if strings.HasPrefix(key, kp.Zone+"+") {
 				delete(kdb.KeystoreDnskeyCache, key)
 			}
 		}
+		kdb.mu.Unlock()
 		lgSigner.Info("all DNSSEC keys cleared", "zone", kp.Zone, "count", count)
 
 		// Immediately generate 1 active ZSK + 1 active KSK so the zone can be signed.
@@ -928,7 +930,11 @@ func (kdb *KeyDB) GetKeyInventory(zonename string) ([]KeyInventoryItem, error) {
 		if err := rows.Scan(&keyid, &flags, &algorithm, &state, &keyrr); err != nil {
 			return nil, fmt.Errorf("GetKeyInventory: scan failed: %w", err)
 		}
-		alg := dns.StringToAlgorithm[algorithm]
+		alg, ok := dns.StringToAlgorithm[algorithm]
+		if !ok {
+			lgSigner.Warn("GetKeyInventory: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
+			continue
+		}
 		entries = append(entries, KeyInventoryItem{
 			KeyTag:    uint16(keyid),
 			Algorithm: alg,
@@ -985,10 +991,15 @@ func (kdb *KeyDB) GetDnssecKeysByState(zone string, state string) ([]DnssecKeyWi
 			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
 		}
 
+		alg, ok := dns.StringToAlgorithm[algorithm]
+		if !ok {
+			lgSigner.Warn("GetDnssecKeysByState: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
+			continue
+		}
 		entry := DnssecKeyWithTimestamps{
 			ZoneName:  zonename,
 			KeyTag:    uint16(keyid),
-			Algorithm: dns.StringToAlgorithm[algorithm],
+			Algorithm: alg,
 			Flags:     uint16(flags),
 			State:     st,
 			KeyRR:     keyrr,

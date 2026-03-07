@@ -28,7 +28,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 	keybootstrapperq := kdb.KeyBootstrapperQ
 	var utr KeyBootstrapperRequest
 
-	verifications := make(map[string]*VerificationInfo)
+	var verifications sync.Map
 
 	lgSigner.Info("KeyBootstrapper starting")
 	var wg sync.WaitGroup
@@ -58,7 +58,8 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 					lgSigner.Debug("KeyBootstrapper INFO received", "keyname", utr.KeyName, "keyid", utr.Keyid)
 
 					if utr.ResponseChan != nil {
-						if info, exists := verifications[mapKey]; exists {
+						if val, exists := verifications.Load(mapKey); exists {
+							info := val.(*VerificationInfo)
 							lgSigner.Debug("KeyBootstrapper INFO found info for key", "failed_attempts", info.FailedAttempts, "attempts_left", info.AttemptsLeft)
 							utr.ResponseChan <- info
 						} else {
@@ -76,7 +77,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 						attempts = 3 // Standardvärde om det inte är definierat
 					}
 
-					verifications[mapKey] = &VerificationInfo{
+					verifications.Store(mapKey, &VerificationInfo{
 						Key:            utr.Key,
 						ZoneName:       utr.ZoneName,
 						AttemptsLeft:   attempts,
@@ -85,12 +86,13 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 						KeyName:        utr.KeyName,
 						Keyid:          utr.Keyid,
 						FailedAttempts: 0,
-					}
+					})
 					go VerifyKey(utr.KeyName, utr.Key, utr.Keyid, utr.ZoneData, keybootstrapperq)
 				case kbCmdVerificationStep:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
 					lgSigner.Info("received verification result", "keyname", utr.KeyName, "keyid", utr.Keyid)
-					if info, exists := verifications[mapKey]; exists {
+					if val, exists := verifications.Load(mapKey); exists {
+						info := val.(*VerificationInfo)
 						lgSigner.Debug("verification info", "keyname", utr.KeyName, "info", info)
 						info.AttemptsLeft--
 						retryInterval := viper.GetInt("verifyengine.retry_interval")
@@ -118,7 +120,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 									if err != nil {
 										lgSigner.Error("failed to commit transaction, will retry", "err", err)
 									} else {
-										delete(verifications, mapKey)
+										verifications.Delete(mapKey)
 										utr.Verified = true
 										lgSigner.Info("TrustStore updated, verification complete", "keyname", utr.KeyName)
 									}
@@ -131,7 +133,8 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 					}
 				case kbCmdRestart:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
-					if info, exists := verifications[mapKey]; exists {
+					if val, exists := verifications.Load(mapKey); exists {
+						info := val.(*VerificationInfo)
 
 						lgSigner.Info("verification failed, restarting", "keyname", utr.KeyName)
 
@@ -150,11 +153,13 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 				}
 			case <-ticker.C:
 				now := time.Now()
-				for _, info := range verifications {
+				verifications.Range(func(_, value any) bool {
+					info := value.(*VerificationInfo)
 					if now.After(info.NextCheckTime) {
 						go VerifyKey(info.KeyName, info.Key, info.Keyid, info.ZoneData, keybootstrapperq)
 					}
-				}
+					return true
+				})
 
 				kp := KeystorePost{
 					Command:    "sig0-mgmt",

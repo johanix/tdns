@@ -8,8 +8,8 @@ import (
 	"net"
 	"net/url"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type GlobalStuff struct {
@@ -44,7 +44,7 @@ var Globals = GlobalStuff{
 	ApiClients: map[string]*ApiClient{},
 }
 
-var Zones = cmap.New[*ZoneData]()
+var Zones = core.NewCmap[*ZoneData]()
 
 func (gs *GlobalStuff) Validate() error {
 	// Port is uint16, so it's always <= 65535, no need to check

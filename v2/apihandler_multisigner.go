@@ -51,6 +51,12 @@ func APImultisigner(kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				return
+			}
+			if rrset == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %s: %s %s RRset not found", msp.Zone, msp.Name, dns.TypeToString[msp.Type])
+				return
 			}
 			resp.RRset = *rrset
 			resp.Msg = fmt.Sprintf("Zone %s: %s %s RRset as requested", msp.Zone, msp.Name, dns.TypeToString[msp.Type])

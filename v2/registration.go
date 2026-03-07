@@ -63,16 +63,14 @@ func RegisterQueryHandler(qtype uint16, handler QueryHandlerFunc) error {
 	globalQueryHandlersMutex.Unlock()
 
 	// Also register in conf if available (and map is initialized)
+	Conf.Internal.QueryHandlersMutex.Lock()
 	if Conf.Internal.QueryHandlers != nil {
-		Conf.Internal.QueryHandlersMutex.Lock()
 		if Conf.Internal.QueryHandlers[qtype] == nil {
 			Conf.Internal.QueryHandlers[qtype] = make([]QueryHandlerFunc, 0)
 		}
 		Conf.Internal.QueryHandlers[qtype] = append(Conf.Internal.QueryHandlers[qtype], handler)
-		Conf.Internal.QueryHandlersMutex.Unlock()
-	} else {
-		// Conf not initialized yet, will be copied from global storage during MainInit
 	}
+	Conf.Internal.QueryHandlersMutex.Unlock()
 
 	lg.Debug("RegisterQueryHandler: registered handler", "qtype", qtype)
 
@@ -146,14 +144,15 @@ func RegisterNotifyHandler(qtype uint16, handler NotifyHandlerFunc) error {
 
 	// Register in conf if available; otherwise in global storage (copied to conf during MainInit).
 	// Only one location to avoid getNotifyHandlers returning duplicates.
+	Conf.Internal.NotifyHandlersMutex.Lock()
 	if Conf.Internal.NotifyHandlers != nil {
-		Conf.Internal.NotifyHandlersMutex.Lock()
 		if Conf.Internal.NotifyHandlers[qtype] == nil {
 			Conf.Internal.NotifyHandlers[qtype] = make([]NotifyHandlerFunc, 0)
 		}
 		Conf.Internal.NotifyHandlers[qtype] = append(Conf.Internal.NotifyHandlers[qtype], handler)
 		Conf.Internal.NotifyHandlersMutex.Unlock()
 	} else {
+		Conf.Internal.NotifyHandlersMutex.Unlock()
 		// Conf not initialized yet — register in global storage, will be copied to conf during MainInit
 		globalNotifyHandlersMutex.Lock()
 		globalNotifyHandlers[qtype] = append(globalNotifyHandlers[qtype], handler)
@@ -270,16 +269,14 @@ func RegisterUpdateHandler(matcher UpdateMatcherFunc, handler UpdateHandlerFunc)
 	globalUpdateHandlersMutex.Unlock()
 
 	// Also register in conf if available (and slice is initialized)
+	Conf.Internal.UpdateHandlersMutex.Lock()
 	if Conf.Internal.UpdateHandlers != nil {
-		Conf.Internal.UpdateHandlersMutex.Lock()
 		Conf.Internal.UpdateHandlers = append(Conf.Internal.UpdateHandlers, UpdateHandlerRegistration{
 			Matcher: matcher,
 			Handler: handler,
 		})
-		Conf.Internal.UpdateHandlersMutex.Unlock()
-	} else {
-		// Conf not initialized yet, will be copied from global storage during MainInit
 	}
+	Conf.Internal.UpdateHandlersMutex.Unlock()
 
 	lg.Debug("RegisterUpdateHandler: registered UPDATE handler")
 

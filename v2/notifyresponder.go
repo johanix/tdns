@@ -75,6 +75,9 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 	return nil
 }
 
+// TODO: Add per-source rate limiting for NOTIFY messages. An attacker could flood
+// the server with NOTIFY messages to trigger excessive zone refreshes and scanner
+// scans. Consider a token bucket or sliding window rate limiter keyed by source IP.
 func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest, imr *Imr) error {
 
 	qname := dnr.Qname

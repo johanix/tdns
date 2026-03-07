@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/johanix/tdns/v2/crypto"
@@ -555,5 +556,7 @@ func (b *Backend) PublicKeyFromStdlib(stdlibKey interface{}) (crypto.PublicKey, 
 
 // Auto-register backend on package import
 func init() {
-	crypto.RegisterBackend(NewBackend())
+	if err := crypto.RegisterBackend(NewBackend()); err != nil {
+		log.Fatalf("failed to register HPKE crypto backend: %v", err)
+	}
 }

@@ -10,7 +10,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 // Named presets for allowed RRtypes. Hardcoded for safety.
@@ -102,8 +101,7 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 // structural isolation; policy enforcement needs to happen at the RR level.
 func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRset) (bool, error) {
 	if zd.CombinerData == nil {
-		var m = cmap.New[OwnerData]()
-		zd.CombinerData = &m
+		zd.CombinerData = core.NewCmap[OwnerData]()
 	}
 	if zd.AgentContributions == nil {
 		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
@@ -161,6 +159,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	if zd.PersistContributions != nil {
 		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("AddCombinerData: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+			return changed, fmt.Errorf("persist contributions: %w", err)
 		}
 	}
 
@@ -185,8 +184,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 // with deduplication based on the string representation of each RR.
 func (zd *ZoneData) rebuildCombinerData() {
 	if zd.CombinerData == nil {
-		var m = cmap.New[OwnerData]()
-		zd.CombinerData = &m
+		zd.CombinerData = core.NewCmap[OwnerData]()
 	}
 
 	// Collect all RRs per owner per rrtype from all agents
@@ -211,8 +209,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 
 	// Build deduplicated CombinerData from merged contributions
 	// Clear existing CombinerData
-	var m = cmap.New[OwnerData]()
-	zd.CombinerData = &m
+	zd.CombinerData = core.NewCmap[OwnerData]()
 
 	for owner, rrtypeRRs := range merged {
 		ownerData := OwnerData{
@@ -443,6 +440,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	if zd.PersistContributions != nil {
 		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+			return removedRecords, fmt.Errorf("persist contributions: %w", err)
 		}
 	}
 
@@ -511,6 +509,7 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	if zd.PersistContributions != nil {
 		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
+			return removedRecords, fmt.Errorf("persist contributions: %w", err)
 		}
 	}
 
@@ -615,8 +614,7 @@ func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype u
 
 	// Rebuild merged CombinerData and apply to zone
 	if zd.CombinerData == nil {
-		var m = cmap.New[OwnerData]()
-		zd.CombinerData = &m
+		zd.CombinerData = core.NewCmap[OwnerData]()
 	}
 	zd.rebuildCombinerData()
 
@@ -704,8 +702,7 @@ func (zd *ZoneData) InjectSignatureTXT(conf *LocalCombinerConf) bool {
 // from zd.Data into zd.UpstreamData. Called after zone load/refresh, before
 // CombineWithLocalChanges applies agent contributions.
 func (zd *ZoneData) snapshotUpstreamData() {
-	m := cmap.New[OwnerData]()
-	zd.UpstreamData = &m
+	zd.UpstreamData = core.NewCmap[OwnerData]()
 
 	// Only snapshot the apex owner (agent contributions only apply at apex)
 	if apexOd, ok := zd.Data.Get(zd.ZoneName); ok {

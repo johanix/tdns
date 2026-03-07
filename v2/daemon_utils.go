@@ -19,27 +19,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-func xxxShellExec(cmdline string) (string, error) {
-	args := strings.Fields(cmdline)
-	if Globals.Verbose {
-		fmt.Printf("ShellExec cmd: '%s'\n", cmdline)
-	}
-
-	cmd := exec.Command(args[0], args[1:]...)
-	out, err := cmd.CombinedOutput()
-	if len(out) > 1 {
-		out = out[:len(out)-1] // chop of trailing newline
-	}
-	if err != nil {
-		fmt.Printf("ShellExec of cmd '%s' failed. Error: %v\nOutput: %s\n", cmd, err, string(out))
-		return fmt.Sprintf("shell exec of cmd '%s' failed. Error: %v", cmd, err), err
-	}
-	if Globals.Debug {
-		fmt.Printf("ShellExec output: '%s'\n", string(out))
-	}
-	return string(out), nil
-}
-
 func (api *ApiClient) StopDaemon() {
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
 	if err != nil {

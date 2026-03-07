@@ -217,7 +217,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		}
 
 		algstr := dns.AlgorithmToString[alg]
-		keydir := "/tmp"
+		keydir := os.TempDir()
 
 		keytypearg := "-T KEY"
 		if rrtype == dns.TypeDNSKEY {

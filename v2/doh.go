@@ -7,6 +7,7 @@ package tdns
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -23,6 +24,9 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
+	// The closure captures ourDNSHandler (a function parameter) and conf (a pointer).
+	// Both are set once at startup before any HTTP requests are served, so there is
+	// no data race despite the closure being invoked concurrently by the HTTP server.
 	http.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
 		var dnsQuery []byte
 		var err error
@@ -67,7 +71,9 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 
 		// raw, _ := resp.Pack()
 		w.Header().Set("Content-Type", "application/dns-message")
-		w.Write(buf.Bytes())
+		if _, err := w.Write(buf.Bytes()); err != nil {
+			lgDns.Warn("DoH: error writing response", "err", err)
+		}
 	})
 
 	ports := viper.GetStringSlice("dnsengine.ports.doh")
@@ -78,7 +84,13 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 	for _, addr := range dohaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
-			srv := &http.Server{Addr: hostport, Handler: nil}
+			srv := &http.Server{
+				Addr:    hostport,
+				Handler: nil,
+				TLSConfig: &tls.Config{
+					MinVersion: tls.VersionTLS13,
+				},
+			}
 			servers = append(servers, srv)
 			go func(s *http.Server, hp string) {
 				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp)

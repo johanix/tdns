@@ -17,12 +17,17 @@ package transport
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/miekg/dns"
 )
+
+// ErrNoVerificationKey is returned when a peer's verification key is not available.
+// Use errors.Is(err, ErrNoVerificationKey) instead of string matching on error messages.
+var ErrNoVerificationKey = errors.New("no verification key")
 
 // PayloadCrypto handles encryption and signing of DNS transport payloads.
 // It wraps a crypto.Backend to provide a simple interface for the DNS transport.
@@ -204,7 +209,7 @@ func (pc *PayloadCrypto) VerifyPayload(peerID string, signedPayload []byte, orig
 
 	verifyKey, exists := pc.PeerVerificationKeys[dns.Fqdn(peerID)]
 	if !exists {
-		return false, fmt.Errorf("no verification key for peer %s", peerID)
+		return false, fmt.Errorf("%w: peer %s", ErrNoVerificationKey, peerID)
 	}
 
 	jws, err := base64.StdEncoding.DecodeString(string(signedPayload))
@@ -276,7 +281,7 @@ func (pc *PayloadCrypto) DecryptAndVerifyPayload(peerID string, encodedPayload [
 
 	verifyKey, exists := pc.PeerVerificationKeys[dns.Fqdn(peerID)]
 	if !exists {
-		return nil, fmt.Errorf("no verification key for peer %s", peerID)
+		return nil, fmt.Errorf("%w: peer %s", ErrNoVerificationKey, peerID)
 	}
 
 	// Decode base64 to get JWS
@@ -432,48 +437,6 @@ func (w *SecurePayloadWrapper) GetCrypto() *PayloadCrypto {
 	return w.crypto
 }
 
-// UnwrapIncomingTryAllPeers decrypts an incoming payload by trying each known peer's verification key.
-// senderHint is optional: if non-empty and we have that peer's key, try it first (e.g. from QNAME: "6981284f.agent.alpha.dnslab." → "agent.alpha.dnslab.").
-// Use when the sender might be unknown; returns decrypted payload and the peer ID that worked.
-// If payload is not encrypted, returns (payload, "", nil). If decryption fails for all peers, returns (nil, "", err).
-// Individual peer failures are not logged (only final "decryption failed for all" is surfaced).
-//
-// DEPRECATED: This function is unsafe for DoS mitigation. An attacker can forge the QNAME to be an authorized
-// peer's identity, forcing expensive crypto operations with all peer keys. Use UnwrapIncomingFromPeer() instead
-// when you've already performed authorization checks.
-func (w *SecurePayloadWrapper) UnwrapIncomingTryAllPeers(payload []byte, senderHint string) (decrypted []byte, peerID string, err error) {
-	if w.crypto == nil || !w.crypto.Enabled {
-		return payload, "", nil
-	}
-	if !IsPayloadEncrypted(payload) {
-		return payload, "", nil
-	}
-	allIDs := w.crypto.PeerVerificationKeyIDs()
-	// Try senderHint first if we have that peer's key (QNAME tells us sender, e.g. agent.alpha.dnslab.)
-	tryOrder := make([]string, 0, len(allIDs))
-	if senderHint != "" {
-		for _, id := range allIDs {
-			if id == senderHint {
-				tryOrder = append(tryOrder, senderHint)
-				break
-			}
-		}
-	}
-	for _, id := range allIDs {
-		if id != senderHint {
-			tryOrder = append(tryOrder, id)
-		}
-	}
-	for _, id := range tryOrder {
-		dec, err := w.crypto.DecryptAndVerifyPayload(id, payload)
-		if err != nil {
-			continue
-		}
-		return dec, id, nil
-	}
-	return nil, "", fmt.Errorf("decryption failed for all known peers")
-}
-
 // UnwrapIncomingFromPeer decrypts an incoming payload using ONLY the specified peer's verification key.
 // This is the secure version that prevents DoS attacks via QNAME forgery.
 //
@@ -504,7 +467,7 @@ func (w *SecurePayloadWrapper) UnwrapIncomingFromPeer(payload []byte, requiredPe
 	// Verify we have the peer's key
 	_, exists := w.crypto.PeerVerificationKeys[dns.Fqdn(requiredPeerID)]
 	if !exists {
-		return nil, fmt.Errorf("no verification key for required peer %s", requiredPeerID)
+		return nil, fmt.Errorf("%w: peer %s", ErrNoVerificationKey, requiredPeerID)
 	}
 
 	// Attempt decryption with ONLY the required peer's key

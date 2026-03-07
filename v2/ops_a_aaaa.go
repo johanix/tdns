@@ -43,6 +43,10 @@ func (zd *ZoneData) PublishAddrRR(name, addr string) error {
 		return err
 	}
 
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("PublishAddrRR: KeyDB.UpdateQ is nil")
+	}
+
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
@@ -61,6 +65,10 @@ func (zd *ZoneData) UnpublishAddrRR(name, addr string) error {
 	rr, err := createAddrRR(name, addr, 0, dns.ClassANY)
 	if err != nil {
 		return err
+	}
+
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("UnpublishAddrRR: KeyDB.UpdateQ is nil")
 	}
 
 	select {

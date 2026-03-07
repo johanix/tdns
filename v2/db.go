@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"os"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 func (tx *Tx) Commit() error {
@@ -139,8 +139,21 @@ func dbMigrateSchema(db *sql.DB) {
 	}
 }
 
+// validTableName checks that a table name contains only safe characters.
+func validTableName(name string) bool {
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return len(name) > 0
+}
+
 // dbColumnExists checks whether a column exists in a table using PRAGMA table_info.
 func dbColumnExists(db *sql.DB, table, column string) bool {
+	if !validTableName(table) {
+		return false
+	}
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false
@@ -183,6 +196,9 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 
 	if force {
 		for table := range DefaultTables {
+			if !validTableName(table) {
+				return nil, fmt.Errorf("NewKeyDB: invalid table name %q", table)
+			}
 			sqlcmd := "DROP TABLE " + table
 			_, err = db.Exec(sqlcmd)
 			if err != nil {
@@ -203,6 +219,6 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 
 func NewSig0StoreT() *Sig0StoreT {
 	return &Sig0StoreT{
-		Map: cmap.New[Sig0Key](),
+		Map: core.NewCmap[Sig0Key](),
 	}
 }

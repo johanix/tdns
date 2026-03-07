@@ -102,6 +102,7 @@ type IncomingConfirmation struct {
 	RemovedRecords []string
 	RejectedItems  []RejectedItemDTO
 	Truncated      bool
+	Nonce          string // Echoed nonce from the original sync request
 }
 
 // DNSTransportConfig holds configuration for creating a DNSTransport.
@@ -346,6 +347,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		Operations:   req.Operations,
 		Time:         req.Timestamp,
 		RfiType:      req.RfiType,
+		Nonce:        req.Nonce,
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -560,6 +562,10 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 			if err != nil {
 				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
 			}
+			// Validate format byte before processing
+			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+				return nil, fmt.Errorf("unknown CHUNK format in ping confirm: %d", chunkOpt.Format)
+			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == core.FormatJWT && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
@@ -654,6 +660,10 @@ func extractKeystateConfirmFromResponse(res *dns.Msg, peerID string, sw *SecureP
 			if err != nil {
 				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
 			}
+			// Validate format byte before processing
+			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+				return nil, fmt.Errorf("unknown CHUNK format in keystate confirm: %d", chunkOpt.Format)
+			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == core.FormatJWT && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
@@ -735,6 +745,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		SenderID:       req.SenderID,
 		Zone:           req.Zone,
 		DistributionID: req.DistributionID,
+		Nonce:          req.Nonce,
 		Status:         req.Status.String(),
 		Message:        req.Message,
 		AppliedCount:   len(req.AppliedRecords),
@@ -854,6 +865,9 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		}
 	}
 
+	// Clean up stale pending entries before registering new one
+	t.cleanupStalePending()
+
 	// Register pending operation
 	responseChan := make(chan *operationResponse, 1)
 	pending := &pendingOperation{
@@ -952,6 +966,11 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 			if parseErr != nil {
 				continue
 			}
+			// Validate format byte before processing
+			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+				lgTransport().Warn("unknown CHUNK format in confirm response, skipping", "format", chunkOpt.Format)
+				continue
+			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == core.FormatJWT && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
@@ -992,6 +1011,26 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 	default:
 		lgTransport().Warn("response channel full", "distrib", confirm.DistributionID)
 	}
+}
+
+// pendingConfirmationTimeout is the maximum age of a pending confirmation entry
+// before it is cleaned up. Entries older than this are orphaned (the sender
+// goroutine has already timed out or been cancelled).
+const pendingConfirmationTimeout = 60 * time.Second
+
+// cleanupStalePending removes pending confirmation entries older than
+// pendingConfirmationTimeout. Called opportunistically before registering
+// new pending operations to prevent unbounded map growth.
+func (t *DNSTransport) cleanupStalePending() {
+	now := time.Now()
+	t.pendingMu.Lock()
+	for id, op := range t.pendingConfirmations {
+		if now.Sub(op.SentAt) > pendingConfirmationTimeout {
+			lgTransport().Debug("cleaning up stale pending confirmation", "distrib", id, "peer", op.PeerID, "age", now.Sub(op.SentAt))
+			delete(t.pendingConfirmations, id)
+		}
+	}
+	t.pendingMu.Unlock()
 }
 
 // DNS payload types for JSON serialization
@@ -1065,6 +1104,7 @@ type DnsSyncPayload struct {
 	OriginatorID   string              `json:"OriginatorID"`
 	YourIdentity   string              `json:"YourIdentity"`
 	Zone           string              `json:"Zone"`
+	Nonce          string              `json:"nonce,omitempty"`      // Nonce for replay protection (echoed in confirmation)
 	Records        map[string][]string `json:"Records"`              // RRs grouped by owner name (legacy: Class-overloaded)
 	Operations     []core.RROperation  `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time           string              `json:"Time"`                 // RFC3339 timestamp
@@ -1102,6 +1142,7 @@ type DnsConfirmPayload struct {
 	SenderID       string            `json:"sender_id"`
 	Zone           string            `json:"zone"`
 	DistributionID string            `json:"distribution_id"`
+	Nonce          string            `json:"nonce,omitempty"` // Echoed nonce from the original sync request
 	Status         string            `json:"status"`
 	Message        string            `json:"message,omitempty"`
 	AppliedCount   int               `json:"applied_count,omitempty"`

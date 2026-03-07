@@ -118,7 +118,7 @@ func NewSignatureMiddleware(cfg *CryptoMiddlewareConfig) MiddlewareFunc {
 				Severity:  "warning",
 				Timestamp: ctx.StartTime.Format("2006-01-02T15:04:05Z07:00"),
 			})
-			return fmt.Errorf("no verification key for peer %s", ctx.PeerID)
+			return fmt.Errorf("%w: peer %s", ErrNoVerificationKey, ctx.PeerID)
 		}
 
 		// At this point, we have an encrypted payload and the peer's verification key.

@@ -39,7 +39,7 @@ var dbInitCmd = &cobra.Command{
 			if _, err := os.Stat(parentDir); os.IsNotExist(err) {
 				log.Fatalf("Error: Parent directory '%s' does not exist", parentDir)
 			}
-			file, err := os.OpenFile(tdnsDbFile, os.O_CREATE|os.O_RDWR, 0644)
+			file, err := os.OpenFile(tdnsDbFile, os.O_CREATE|os.O_RDWR, 0600)
 			if err != nil {
 				log.Fatalf("Error creating TDNS DB file '%s': %v", tdnsDbFile, err)
 			}

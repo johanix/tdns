@@ -82,6 +82,13 @@ func (imr *Imr) extractDsyncFromResponse(qname string, resp *ImrResponse, verbos
 
 func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) (DsyncResult, error) {
 	var dr DsyncResult
+
+	// Normalize child to FQDN
+	child = dns.Fqdn(child)
+	if child == "." || child == "" {
+		return dr, fmt.Errorf("DsyncDiscovery: invalid child zone name %q", child)
+	}
+
 	lgDns.Debug("discovering DSYNC for parent of child zone", "zone", child)
 
 	// Step 1: One level up

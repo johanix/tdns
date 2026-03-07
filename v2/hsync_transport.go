@@ -26,9 +26,12 @@ import (
 var lgTransport = Logger("transport")
 
 // generatePingNonce returns a random nonce for ping requests.
+// Panics if the system CSPRNG fails, as this indicates a critical system problem.
 func generatePingNonce() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("failed to generate random bytes for ping nonce: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -274,7 +277,9 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 
 		// Wire confirmation callback for reliable message queue and per-RR tracking
 		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool) {
+			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
+			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
+
 			if tm.reliableQueue != nil && status == transport.ConfirmSuccess {
 				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 			}
@@ -690,6 +695,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			Time:           time.Unix(payload.Timestamp, 0),
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
+			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
 		},
 	}
 
@@ -916,6 +922,7 @@ func (tm *TransportManager) sendImmediateConfirmation(payload *transport.DnsSync
 		SenderID:       tm.LocalID,
 		Zone:           payload.Zone,
 		DistributionID: payload.DistributionID,
+		Nonce:          payload.Nonce,
 		Status:         transport.ConfirmPending,
 		Message:        "Sync received, forwarding to combiner",
 		Timestamp:      time.Now(),
@@ -1392,6 +1399,7 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
+		Nonce:          msg.Nonce,
 		MessageType:    "update", // agent→combiner uses "update" (not "sync")
 	}
 	if msg.Update != nil && len(msg.Update.Operations) > 0 {
@@ -1452,6 +1460,7 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
+		Nonce:          msg.Nonce,
 		MessageType:    "sync",
 	}
 	if msg.Update != nil && len(msg.Update.Operations) > 0 {

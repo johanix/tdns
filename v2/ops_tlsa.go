@@ -62,7 +62,10 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 func parseCertificate(certPEM string) (string, error) {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
-		return "", fmt.Errorf("failed to parse certificate PEM")
+		return "", fmt.Errorf("failed to decode PEM data")
+	}
+	if block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("unexpected PEM block type: %s (expected CERTIFICATE)", block.Type)
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
@@ -76,12 +79,16 @@ func parseCertificate(certPEM string) (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
-func (zd *ZoneData) UnpublishTlsaRR() error {
-	anti_tlsa_rr, err := dns.NewRR(fmt.Sprintf("_443._tcp.%s 0 IN TLSA 3 1 1 %s", zd.ZoneName, "example_certificate_data"))
+func (zd *ZoneData) UnpublishTlsaRR(port uint16) error {
+	anti_tlsa_rr, err := dns.NewRR(fmt.Sprintf("_%d._tcp.%s 0 IN TLSA 3 1 1 %s", port, zd.ZoneName, "example_certificate_data"))
 	if err != nil {
 		return err
 	}
 	anti_tlsa_rr.Header().Class = dns.ClassANY // XXX: dns.NewRR fails to parse a CLASS ANY TLSA RRset, so we set the class manually.
+
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("UnpublishTlsaRR: KeyDB.UpdateQ is nil")
+	}
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gookit/goutil/dump"
@@ -338,6 +339,15 @@ cmdloop:
 		case "server":
 			server = tdns.TtyQuestion("Server", "localhost", false)
 			port = tdns.TtyQuestion("Port", "53", false)
+			if server == "" {
+				fmt.Println("Error: server cannot be empty")
+				continue
+			}
+			portNum, err := strconv.Atoi(port)
+			if err != nil || portNum < 1 || portNum > 65535 {
+				fmt.Printf("Error: invalid port %q (must be 1-65535)\n", port)
+				continue
+			}
 			server = net.JoinHostPort(server, port)
 
 		case "send":

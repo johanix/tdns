@@ -36,6 +36,8 @@ type chunkArrayEntry struct {
 	expires time.Time
 }
 
+const chunkStoreMaxEntries = 10000
+
 // MemChunkPayloadStore is an in-memory store with TTL.
 type MemChunkPayloadStore struct {
 	mu          sync.RWMutex
@@ -76,10 +78,34 @@ func (s *MemChunkPayloadStore) Get(qname string) ([]byte, uint8, bool) {
 func (s *MemChunkPayloadStore) Set(qname string, payload []byte, format uint8) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Evict oldest entry if at capacity (and this is a new key)
+	if _, exists := s.entries[qname]; !exists && len(s.entries) >= chunkStoreMaxEntries {
+		s.evictOldestEntry()
+	}
+
 	s.entries[qname] = &chunkPayloadEntry{
 		payload: append([]byte(nil), payload...),
 		format:  format,
 		expires: time.Now().Add(s.ttl),
+	}
+}
+
+// evictOldestEntry removes the entry with the earliest expiration time.
+// Must be called with mu held.
+func (s *MemChunkPayloadStore) evictOldestEntry() {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+	for k, e := range s.entries {
+		if first || e.expires.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = e.expires
+			first = false
+		}
+	}
+	if !first {
+		delete(s.entries, oldestKey)
 	}
 }
 
@@ -88,6 +114,11 @@ func (s *MemChunkPayloadStore) Set(qname string, payload []byte, format uint8) {
 func (s *MemChunkPayloadStore) SetChunks(qname string, chunks []*core.CHUNK) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Evict oldest chunk array if at capacity (and this is a new key)
+	if _, exists := s.chunkArrays[qname]; !exists && len(s.chunkArrays) >= chunkStoreMaxEntries {
+		s.evictOldestChunkArray()
+	}
 
 	// Deep copy all chunks
 	copied := make([]*core.CHUNK, len(chunks))
@@ -132,4 +163,22 @@ func (s *MemChunkPayloadStore) GetChunk(qname string, sequence uint16) (*core.CH
 		cp.HMAC = append([]byte(nil), c.HMAC...)
 	}
 	return &cp, true
+}
+
+// evictOldestChunkArray removes the chunk array with the earliest expiration time.
+// Must be called with mu held.
+func (s *MemChunkPayloadStore) evictOldestChunkArray() {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+	for k, e := range s.chunkArrays {
+		if first || e.expires.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = e.expires
+			first = false
+		}
+	}
+	if !first {
+		delete(s.chunkArrays, oldestKey)
+	}
 }

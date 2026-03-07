@@ -189,6 +189,9 @@ func (opt *ChunkOption) Pack() []byte {
 	return buf
 }
 
+// MaxHMACLen is the maximum allowed HMAC length (64 bytes = SHA-512)
+const MaxHMACLen = 64
+
 // ParseChunkOption parses a CHUNK EDNS(0) option from wire format
 func ParseChunkOption(opt *dns.EDNS0_LOCAL) (*ChunkOption, error) {
 	if opt.Code != EDNS0_CHUNK_OPTION_CODE {
@@ -212,6 +215,11 @@ func ParseChunkOption(opt *dns.EDNS0_LOCAL) (*ChunkOption, error) {
 	}
 	hmacLen := binary.BigEndian.Uint16(data[off:])
 	off += 2
+
+	// Cap HMAC length to prevent excessive allocation
+	if hmacLen > MaxHMACLen {
+		return nil, fmt.Errorf("CHUNK option HMAC length %d exceeds maximum %d", hmacLen, MaxHMACLen)
+	}
 
 	// Unpack HMAC (only if HMACLen > 0)
 	var hmac []byte

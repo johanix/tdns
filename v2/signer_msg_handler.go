@@ -81,6 +81,11 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			}
 			lgSigner.Info("KEYSTATE signal received", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "sender", sigMsg.SenderID)
 
+			if sigMsg.SenderID == "" {
+				lgSigner.Warn("KEYSTATE signal with empty sender, ignoring", "zone", sigMsg.Zone, "signal", sigMsg.Signal)
+				continue
+			}
+
 			kdb := conf.Internal.KeyDB
 			if kdb == nil {
 				lgSigner.Error("KeyDB not available for KEYSTATE signal processing")

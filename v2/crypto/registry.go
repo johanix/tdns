@@ -17,18 +17,19 @@ var (
 	mu       sync.RWMutex
 )
 
-// RegisterBackend registers a crypto backend
-// This is typically called from init() functions in backend packages
-func RegisterBackend(backend Backend) {
+// RegisterBackend registers a crypto backend.
+// Returns an error if a backend with the same name is already registered.
+func RegisterBackend(backend Backend) error {
 	mu.Lock()
 	defer mu.Unlock()
 
 	name := backend.Name()
 	if _, exists := backends[name]; exists {
-		panic(fmt.Sprintf("crypto backend %q already registered", name))
+		return fmt.Errorf("crypto backend %q already registered", name)
 	}
 
 	backends[name] = backend
+	return nil
 }
 
 // GetBackend retrieves a backend by name

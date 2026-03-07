@@ -18,10 +18,10 @@ import (
 // This is a generic structure used by KDC (key distributions), agents (sync operations),
 // and any other component that uses CHUNK-based data distribution.
 type ManifestData struct {
-	ChunkCount uint16                 `json:"chunk_count"`           // Number of data chunks (0 = inline payload)
-	ChunkSize  uint16                 `json:"chunk_size,omitempty"`  // Expected chunk size in bytes
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`    // Application-specific metadata
-	Payload    []byte                 `json:"payload,omitempty"`     // Optional inline payload (for small data)
+	ChunkCount uint16                 `json:"chunk_count"`          // Number of data chunks (0 = inline payload)
+	ChunkSize  uint16                 `json:"chunk_size,omitempty"` // Expected chunk size in bytes
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`   // Application-specific metadata
+	Payload    []byte                 `json:"payload,omitempty"`    // Optional inline payload (for small data)
 }
 
 // CreateCHUNKManifest creates a CHUNK manifest record from manifest data.
@@ -41,9 +41,9 @@ func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*CHUNK, erro
 		return nil, fmt.Errorf("failed to marshal manifest JSON: %v", err)
 	}
 
-	// Verify the JSON starts with '{' (should be a JSON object)
-	if len(manifestJSON) == 0 || manifestJSON[0] != '{' {
-		return nil, fmt.Errorf("manifest JSON must be a JSON object (starts with '{'), got: %q", string(manifestJSON[:min(50, len(manifestJSON))]))
+	// Validate that the marshaled output is well-formed JSON
+	if !json.Valid(manifestJSON) {
+		return nil, fmt.Errorf("manifest JSON is not valid JSON")
 	}
 
 	chunk := &CHUNK{
@@ -70,9 +70,9 @@ func CreateCHUNKManifest(manifestData *ManifestData, format uint8) (*CHUNK, erro
 //
 // Returns:
 //   - The parsed ManifestData structure, or an error if:
-//     - Chunk is not a manifest (Sequence != 0)
-//     - Format is not FormatJSON (use distrib.ExtractJWTManifestData for FormatJWT)
-//     - JSON parsing fails
+//   - Chunk is not a manifest (Sequence != 0)
+//   - Format is not FormatJSON (use distrib.ExtractJWTManifestData for FormatJWT)
+//   - JSON parsing fails
 func ExtractManifestData(chunk *CHUNK) (*ManifestData, error) {
 	if chunk.Sequence != 0 {
 		return nil, fmt.Errorf("ExtractManifestData can only be called for manifest chunks (Sequence=0), got Sequence=%d", chunk.Sequence)
@@ -160,10 +160,10 @@ func CalculateCHUNKHMAC(chunk *CHUNK, hmacKey []byte) error {
 // Returns:
 //   - true if HMAC verification succeeds
 //   - false with error if:
-//     - Chunk is not a manifest (Sequence != 0)
-//     - HMAC key is wrong size
-//     - HMAC is not set in the chunk
-//     - HMAC verification fails (false, nil)
+//   - Chunk is not a manifest (Sequence != 0)
+//   - HMAC key is wrong size
+//   - HMAC is not set in the chunk
+//   - HMAC verification fails (false, nil)
 func VerifyCHUNKHMAC(chunk *CHUNK, hmacKey []byte) (bool, error) {
 	if chunk.Sequence != 0 {
 		return false, fmt.Errorf("HMAC can only be verified for manifest chunks (Sequence=0), got Sequence=%d", chunk.Sequence)

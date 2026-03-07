@@ -86,7 +86,10 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 		leftpad = len(fmt.Sprintf("%s %d", rr.Header().Name, rr.Header().Ttl))
 	}
 	p := strings.Fields(rr.String())
-	// rhp := strings.Fields(parts[1])
+	if len(p) < 8 {
+		fmt.Printf("PrintKeyRR: unexpected field count %d in %s %s (keyid=%d), need at least 8\n", len(p), rrtype, ktype, keyid)
+		return
+	}
 	namepad := strings.Repeat(" ", leftpad-len(p[0])-len(p[1]))
 	if len(namepad) < 1 {
 		namepad = " "

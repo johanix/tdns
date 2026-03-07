@@ -65,7 +65,9 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 		<-ctx.Done()
 		lgDns.Info("DnsDoQEngine: shutting down DoQ listeners")
 		for _, l := range listeners {
-			_ = l.Close()
+			if err := l.Close(); err != nil {
+				lgDns.Warn("DnsDoQEngine: error closing DoQ listener", "err", err)
+			}
 		}
 	}()
 	return nil
@@ -104,10 +106,19 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 			return
 		}
 		lgDns.Error("DoQ: failed to read message length", "err", err)
-		stream.Close()
+		if err := stream.Close(); err != nil {
+			lgDns.Warn("DoQ: error closing stream", "err", err)
+		}
 		return
 	}
 	msgLen := binary.BigEndian.Uint16(lenBuf)
+	if msgLen == 0 {
+		lgDns.Warn("DoQ: received zero-length DNS message", "remote", conn.RemoteAddr())
+		if err := stream.Close(); err != nil {
+			lgDns.Warn("DoQ: error closing stream", "err", err)
+		}
+		return
+	}
 
 	// Read the DNS message
 	msgBuf := make([]byte, msgLen)
@@ -117,14 +128,18 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 			return
 		}
 		lgDns.Error("DoQ: failed to read DNS message", "err", err)
-		stream.Close()
+		if err := stream.Close(); err != nil {
+			lgDns.Warn("DoQ: error closing stream", "err", err)
+		}
 		return
 	}
 
 	msg := new(dns.Msg)
 	if err := msg.Unpack(msgBuf); err != nil {
 		lgDns.Error("DoQ: failed to unpack DNS message", "err", err)
-		stream.Close()
+		if err := stream.Close(); err != nil {
+			lgDns.Warn("DoQ: error closing stream", "err", err)
+		}
 		return
 	}
 
@@ -215,7 +230,9 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	}
 
 	// Just signal that we're done writing
-	w.stream.Close()
+	if err := w.stream.Close(); err != nil {
+		lgDns.Warn("DoQ: error closing stream after write", "err", err)
+	}
 
 	lgDns.Debug("DoQ: finished writing response on stream", "stream", w.stream.StreamID())
 	return nil

@@ -214,7 +214,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// Note: options[OptCatalogZone] was already set in pre-scan above
 
 			// Check for group_prefixes (required if config_groups exist)
-			if len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
+			if conf.Catalog != nil && len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
 				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
 					"catalog:\n"+
 					"  group_prefixes:\n"+
@@ -232,7 +232,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 
 			// Check for config_groups (or legacy meta_groups)
-			if conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil {
+			if conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil) {
 				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
 					"catalog:\n"+
 					"  group_prefixes:\n"+

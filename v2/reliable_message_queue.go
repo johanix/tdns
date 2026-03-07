@@ -18,6 +18,8 @@ package tdns
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -69,6 +71,7 @@ type OutgoingMessage struct {
 	Priority       MessagePriority // Delivery priority
 	CreatedAt      time.Time       // When enqueued
 	ExpiresAt      time.Time       // When to give up
+	Nonce          string          // Unique nonce for replay protection (generated at Enqueue time)
 }
 
 // PendingMessage wraps an OutgoingMessage with delivery state tracking.
@@ -226,6 +229,17 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 	if msg.RecipientID == "" {
 		return fmt.Errorf("message must have a RecipientID")
 	}
+
+	// H19: Ensure per-message TTL fields are populated
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now()
+	}
+	if msg.ExpiresAt.IsZero() {
+		msg.ExpiresAt = msg.CreatedAt.Add(q.expirationTimeout)
+	}
+
+	// A4: Generate unique nonce for replay protection and confirmation correlation
+	msg.Nonce = generateNonce()
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -534,4 +548,12 @@ func withDefaultInt(val, def int) int {
 		return def
 	}
 	return val
+}
+
+// generateNonce returns a cryptographically random nonce (16 bytes, hex-encoded).
+// Used for replay protection in sync/confirm messages.
+func generateNonce() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

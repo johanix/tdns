@@ -94,6 +94,10 @@ func (tm *TransportManager) isAuthorizedPeer(senderID string) bool {
 //
 // This mirrors the logic in EvaluateHello() from hsync_hello.go:160-211.
 func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, string) {
+	if zone == "" {
+		return false, "empty zone name"
+	}
+
 	// Check if we have this zone
 	zd, exists := Zones.Get(zone)
 	if !exists {

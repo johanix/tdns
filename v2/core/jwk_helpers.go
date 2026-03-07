@@ -9,6 +9,7 @@ package core
 
 import (
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/base64"
@@ -184,9 +185,13 @@ func DecodeJWKToPublicKey(jwkData string) (crypto.PublicKey, string, error) {
 				return nil, "", fmt.Errorf("X25519 public key must be 32 bytes, got %d", len(xBytes))
 			}
 
-			// Note: Go's crypto library doesn't have a standard X25519 public key type
-			// Return the raw bytes for now; caller can use crypto/ecdh or golang.org/x/crypto/curve25519
-			publicKey = xBytes // This is a workaround; proper type would be better
+			// Convert raw bytes to a proper *ecdh.PublicKey via crypto/ecdh (Go 1.20+).
+			// Callers should type-assert the result as *ecdh.PublicKey.
+			ecdhKey, err := ecdh.X25519().NewPublicKey(xBytes)
+			if err != nil {
+				return nil, "", fmt.Errorf("invalid X25519 public key: %w", err)
+			}
+			publicKey = ecdhKey
 			algorithm = "X25519"
 
 		default:

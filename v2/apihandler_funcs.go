@@ -511,7 +511,15 @@ func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *K
 			lgApi.Debug("processing scan request", "tuples", len(sp.ScanTuples))
 
 			// Generate job ID
-			jobID := GenerateJobID()
+			jobID, err := GenerateJobID()
+			if err != nil {
+				lgApi.Error("failed to generate job ID", "error", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("failed to generate job ID: %v", err)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
 
 			// Send request to scanner queue (non-blocking)
 			select {
@@ -722,7 +730,9 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		job, exists := conf.Internal.Scanner.Jobs[jobID]
 
 		if !exists {
-			http.Error(w, fmt.Sprintf("Job ID not found: %s", jobID), http.StatusNotFound)
+			conf.Internal.Scanner.JobsMutex.RUnlock()
+			lgApi.Warn("scan job not found", "jobID", jobID)
+			http.Error(w, "Scan job not found", http.StatusNotFound)
 			return
 		}
 
@@ -764,7 +774,8 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			// Delete specific job
 			_, exists := conf.Internal.Scanner.Jobs[jobID]
 			if !exists {
-				http.Error(w, fmt.Sprintf("Job ID not found: %s", jobID), http.StatusNotFound)
+				lgApi.Warn("scan job not found for deletion", "jobID", jobID)
+				http.Error(w, "Scan job not found", http.StatusNotFound)
 				return
 			}
 			delete(conf.Internal.Scanner.Jobs, jobID)

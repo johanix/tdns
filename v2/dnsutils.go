@@ -13,13 +13,12 @@ import (
 	"strings"
 	"sync"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
 
 	// "github.com/gookit/goutil/dump"
-	core "github.com/johanix/tdns/v2/core"
 )
 
 const (
@@ -45,7 +44,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 
 	if zd.ZoneStore == MapZone || zd.ZoneStore == SliceZone {
 		// zd.Data = make(map[string]OwnerData, 30)
-		zd.Data = cmap.New[OwnerData]()
+		zd.Data = core.NewCmap[OwnerData]()
 	}
 	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
 
@@ -410,7 +409,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	switch zd.ZoneStore {
 	case MapZone, SliceZone:
-		zd.Data = cmap.New[OwnerData]()
+		zd.Data = core.NewCmap[OwnerData]()
 	default:
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
 	}
@@ -732,7 +731,7 @@ func (zd *ZoneData) ComputeIndices() {
 		// zd.Data = nil
 		zd.Data.Clear()
 		// zd.OwnerIndex = map[string]int{}
-		zd.OwnerIndex = cmap.New[int]()
+		zd.OwnerIndex = core.NewCmap[int]()
 		for i, od := range zd.Owners {
 			// zd.OwnerIndex[od.Name] = i
 			zd.OwnerIndex.Set(od.Name, i)

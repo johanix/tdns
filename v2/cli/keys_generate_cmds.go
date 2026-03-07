@@ -121,12 +121,31 @@ func runRootKeysGenerate(cmd *cobra.Command, args []string) {
 %s
 `, generatedAt, keyID, joseOutfile, string(prettyJSONBytes))
 
-	if err := os.WriteFile(joseOutfile, []byte(keyContent), 0600); err != nil {
+	// Use O_EXCL to atomically prevent overwriting existing files (TOCTOU safe)
+	keyContentBytes := []byte(keyContent)
+	f, err := os.OpenFile(joseOutfile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		log.Fatalf("Error creating JOSE key file (may already exist): %v", err)
+	}
+	if _, err := f.Write(keyContentBytes); err != nil {
+		f.Close()
 		log.Fatalf("Error writing JOSE key file: %v", err)
+	}
+	f.Close()
+
+	// Zero sensitive key material in memory after write (M66)
+	for i := range privKeyBytes {
+		privKeyBytes[i] = 0
+	}
+	for i := range prettyJSONBytes {
+		prettyJSONBytes[i] = 0
+	}
+	for i := range keyContentBytes {
+		keyContentBytes[i] = 0
 	}
 
 	absPriv, _ := filepath.Abs(joseOutfile)
-	fmt.Printf("✓ JOSE keypair generated\n")
+	fmt.Printf("JOSE keypair generated\n")
 	fmt.Printf("  KeyID:  %s\n", keyID)
 	fmt.Printf("  Priv:   %s\n", absPriv)
 

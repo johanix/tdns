@@ -277,18 +277,20 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
-	if conf.Catalog.ConfigGroups != nil {
-		for name, configGroup := range conf.Catalog.ConfigGroups {
-			if configGroup != nil {
-				configGroup.Name = name
+	if conf.Catalog != nil {
+		if conf.Catalog.ConfigGroups != nil {
+			for name, configGroup := range conf.Catalog.ConfigGroups {
+				if configGroup != nil {
+					configGroup.Name = name
+				}
 			}
 		}
-	}
-	// Also populate MetaGroups (deprecated) if present
-	if conf.Catalog.MetaGroups != nil {
-		for name, metaGroup := range conf.Catalog.MetaGroups {
-			if metaGroup != nil {
-				metaGroup.Name = name
+		// Also populate MetaGroups (deprecated) if present
+		if conf.Catalog.MetaGroups != nil {
+			for name, metaGroup := range conf.Catalog.MetaGroups {
+				if metaGroup != nil {
+					metaGroup.Name = name
+				}
 			}
 		}
 	}
@@ -386,6 +388,10 @@ func (conf *Config) InitializeKeyDB() error {
 	if strings.Contains(dbFile, "..") {
 		return errors.New("invalid database file path: must not contain directory traversal")
 	}
+	// M42: Check for symlinks in database path
+	if info, err := os.Lstat(dbFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("database file path %q is a symlink (not allowed)", dbFile)
+	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
 
@@ -434,6 +440,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		zd := ZoneData{
 			ZoneName: zname,
 			Zonefile: zconf.Zonefile,
+		}
+
+		// M46: Validate zone name length (DNS max is 255 octets)
+		if len(zname) > 255 {
+			lgConfig.Error("zone name too long, ignoring", "zone", zname)
+			zd.SetError(ConfigError, "zone name too long: %q", zname)
+			continue
 		}
 
 		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
@@ -705,8 +718,15 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		zconf.Primary = tmpl.Primary
 	}
 	if len(tmpl.Zonefile) > 0 {
-		// XXX: We should do some sanity checking of the filename here.
-		zconf.Zonefile = filepath.Clean(fmt.Sprintf(tmpl.Zonefile, zconf.Name))
+		// H26: Validate zone name doesn't contain format specifiers
+		if strings.ContainsAny(zconf.Name, "%") {
+			return zconf, fmt.Errorf("zone name %q contains format specifiers", zconf.Name)
+		}
+		expanded := filepath.Clean(fmt.Sprintf(tmpl.Zonefile, zconf.Name))
+		if strings.Contains(expanded, "..") {
+			return zconf, fmt.Errorf("expanded zonefile path %q contains directory traversal", expanded)
+		}
+		zconf.Zonefile = expanded
 	}
 	if len(tmpl.Notify) > 0 {
 		zconf.Notify = tmpl.Notify
@@ -988,6 +1008,9 @@ func (conf *Config) setDynamicZonesDefaults() {
 // migrateCatalogPolicyToDynamicZones handles backward compatibility by migrating
 // catalog.policy.zones.add/remove to dynamiczones.catalog_members.add/remove
 func (conf *Config) migrateCatalogPolicyToDynamicZones() {
+	if conf.Catalog == nil {
+		return
+	}
 	// If catalog.policy.zones.add is set but dynamiczones.catalog_members.add is not,
 	// migrate the value
 	if conf.Catalog.Policy.Zones.Add != "" && conf.DynamicZones.CatalogMembers.Add == "" {
@@ -1006,6 +1029,9 @@ func (conf *Config) migrateCatalogPolicyToDynamicZones() {
 // migrateMetaGroupsToConfigGroups handles backward compatibility by migrating
 // catalog.meta_groups to catalog.config_groups
 func (conf *Config) migrateMetaGroupsToConfigGroups() {
+	if conf.Catalog == nil {
+		return
+	}
 	// If meta_groups is set but config_groups is empty, migrate
 	if len(conf.Catalog.MetaGroups) > 0 && len(conf.Catalog.ConfigGroups) == 0 {
 		conf.Catalog.ConfigGroups = conf.Catalog.MetaGroups
@@ -1039,6 +1065,9 @@ func (conf *Config) validateDynamicZonesConfig(includedFiles []string) {
 
 // validateGroupPrefixes validates catalog.group_prefixes configuration
 func (conf *Config) validateGroupPrefixes() error {
+	if conf.Catalog == nil {
+		return nil
+	}
 	// Check if config_groups or signing_groups are defined
 	hasConfigGroups := len(conf.Catalog.ConfigGroups) > 0
 	hasSigningGroups := len(conf.Catalog.SigningGroups) > 0

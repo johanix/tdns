@@ -333,7 +333,7 @@ func packDelegData(pairs []DELEGKeyValue, msg []byte, off int) (int, error) {
 			return len(msg), errors.New("overflow packing DELEG")
 		}
 		off, err = packUint16(uint16(len(packed)), msg, off)
-		if err != nil || off+len(packed) > len(msg) {
+		if err != nil || len(packed) > len(msg)-off {
 			return len(msg), errors.New("overflow packing DELEG")
 		}
 		copy(msg[off:off+len(packed)], packed)
@@ -353,7 +353,7 @@ func unpackDelegData(msg []byte, off int) ([]DELEGKeyValue, int, error) {
 			return nil, len(msg), errors.New("overflow unpacking DELEG")
 		}
 		length, off, err = unpackUint16(msg, off)
-		if err != nil || off+int(length) > len(msg) {
+		if err != nil || int(length) > len(msg)-off {
 			return nil, len(msg), errors.New("overflow unpacking DELEG")
 		}
 		e := makeDELEGKeyValue(DELEGKey(code))

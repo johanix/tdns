@@ -105,6 +105,7 @@ type AgentMsgPost struct {
 	Operations   []RROperation       `json:"operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time         time.Time           // Message timestamp
 	RfiType      string              // Type of RFI request if MessageType is RFI
+	Nonce        string              `json:"nonce,omitempty"` // Unique nonce for replay protection and confirmation correlation
 }
 
 // AgentMsgResponse represents the response to an AgentMsgPost.

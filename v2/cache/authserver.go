@@ -5,6 +5,7 @@ package cache
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,7 @@ type AuthServer struct {
 //   - Other fields: nil or zero values
 func NewAuthServer(name string) *AuthServer {
 	if name == "" {
+		log.Printf("NewAuthServer: called with empty name, returning nil")
 		return nil
 	}
 	return &AuthServer{

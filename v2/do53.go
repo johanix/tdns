@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -86,7 +87,9 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		for _, s := range servers {
 			done := make(chan struct{})
 			go func(srv *dns.Server) {
-				_ = srv.Shutdown()
+				if err := srv.Shutdown(); err != nil {
+					lgDns.Warn("DnsEngine: error shutting down Do53 server", "addr", srv.Addr, "net", srv.Net, "err", err)
+				}
 				close(done)
 			}(s)
 			select {
@@ -140,6 +143,23 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			certKey = false
 		}
 
+		// Check certificate expiry at startup
+		if certKey && len(cert.Certificate) > 0 {
+			x509Cert, parseErr := x509.ParseCertificate(cert.Certificate[0])
+			if parseErr != nil {
+				lgDns.Warn("DnsEngine: failed to parse certificate for expiry check", "err", parseErr)
+			} else {
+				now := time.Now()
+				if now.After(x509Cert.NotAfter) {
+					lgDns.Error("DnsEngine: TLS certificate has EXPIRED", "expiry", x509Cert.NotAfter, "file", certFile)
+				} else if x509Cert.NotAfter.Sub(now) < 30*24*time.Hour {
+					lgDns.Warn("DnsEngine: TLS certificate expires within 30 days", "expiry", x509Cert.NotAfter, "remaining", x509Cert.NotAfter.Sub(now).Round(time.Hour), "file", certFile)
+				} else {
+					lgDns.Info("DnsEngine: TLS certificate expiry check passed", "expiry", x509Cert.NotAfter, "file", certFile)
+				}
+			}
+		}
+
 		// Strip port numbers from addresses before proceeding to modern transports
 		tmp := make([]string, len(addresses))
 		for i, addr := range addresses {
@@ -186,6 +206,15 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 		lgDns.Debug("DnsHandler: received DNS message", "remoteaddr", w.RemoteAddr(),
 			"id", r.MsgHdr.Id, "opcode", dns.OpcodeToString[r.Opcode],
 			"questions", len(r.Question), "additional", len(r.Extra))
+
+		if len(r.Question) == 0 {
+			lgDns.Warn("DnsHandler: received message with no question section", "remoteaddr", w.RemoteAddr())
+			resp := new(dns.Msg)
+			resp.SetRcode(r, dns.RcodeFormatError)
+			w.WriteMsg(resp)
+			return
+		}
+
 		qname := r.Question[0].Name
 		// var dnssec_ok, ots_opt_in, ots_opt_out bool
 		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)

@@ -11,10 +11,36 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Resource limits to prevent abuse via oversized updates
+const (
+	MaxOperationsPerUpdate = 1000 // Maximum operations in a single update
+	MaxRecordsPerOwner     = 500  // Maximum records per owner per RRtype in a single operation
+)
+
 func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (bool, string, error) {
 	lgAgent.Debug("evaluating update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 	// 1. Evaluate the update for applicability (valid zone, etc)
 	// 2. Evaluate the update according to policy.
+
+	// Check resource limits early (M38)
+	if len(synchedDataUpdate.Update.Operations) > MaxOperationsPerUpdate {
+		return false, fmt.Sprintf("Update for zone %q from %q: too many operations (%d, max %d)",
+			synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
+			len(synchedDataUpdate.Update.Operations), MaxOperationsPerUpdate), nil
+	}
+	for _, op := range synchedDataUpdate.Update.Operations {
+		if len(op.Records) > MaxRecordsPerOwner {
+			return false, fmt.Sprintf("Update for zone %q from %q: too many records in %s operation for %s (%d, max %d)",
+				synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
+				op.Operation, op.RRtype,
+				len(op.Records), MaxRecordsPerOwner), nil
+		}
+	}
+	if len(synchedDataUpdate.Update.RRs) > MaxRecordsPerOwner {
+		return false, fmt.Sprintf("Update for zone %q from %q: too many RRs (%d, max %d)",
+			synchedDataUpdate.Zone, synchedDataUpdate.AgentId,
+			len(synchedDataUpdate.Update.RRs), MaxRecordsPerOwner), nil
+	}
 
 	switch synchedDataUpdate.UpdateType {
 	case "remote":
@@ -74,11 +100,13 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 		if hasNS {
 			zd, exists := Zones.Get(string(synchedDataUpdate.Zone))
 			if !exists {
-				return false, fmt.Sprintf("Local update for zone %q: zone not found", synchedDataUpdate.Zone), nil
+				// System error: zone should exist if we got this far
+				return false, "", fmt.Errorf("local update for zone %q: zone not found (system error)", synchedDataUpdate.Zone)
 			}
 			apex, err := zd.GetOwner(zd.ZoneName)
 			if err != nil {
-				return false, fmt.Sprintf("Local update for zone %q: cannot get apex: %v", synchedDataUpdate.Zone, err), nil
+				// System error: database/lookup failure, not a policy decision
+				return false, "", fmt.Errorf("local update for zone %q: cannot get apex: %w", synchedDataUpdate.Zone, err)
 			}
 			hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
 			if !exists || len(hsyncRRset.RRs) == 0 {

@@ -82,14 +82,13 @@ func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) *Scanner 
 	return s
 }
 
-// GenerateJobID generates a unique job ID
-func GenerateJobID() string {
+// GenerateJobID generates a unique job ID using crypto/rand.
+func GenerateJobID() (string, error) {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		// Fall back to time-based ID if crypto/rand fails
-		return fmt.Sprintf("%x", time.Now().UnixNano())
+		return "", fmt.Errorf("GenerateJobID: crypto/rand failed: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 func (scanner *Scanner) AddLogger(rrtype string) error {
@@ -146,7 +145,12 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 				// Create or update job status
 				jobID := sr.JobID
 				if jobID == "" {
-					jobID = GenerateJobID()
+					var err error
+					jobID, err = GenerateJobID()
+					if err != nil {
+						lg.Error("ScannerEngine: failed to generate job ID", "error", err)
+						continue
+					}
 				}
 
 				job := &ScanJobStatus{

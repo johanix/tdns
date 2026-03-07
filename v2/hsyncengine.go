@@ -117,12 +117,12 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				lgEngine.Warn("proactive inventory: zone not found", "zone", inventoryMsg.Zone)
 				break
 			}
-			zd.LastKeyInventory = &KeyInventorySnapshot{
+			zd.SetLastKeyInventory(&KeyInventorySnapshot{
 				SenderID:  inventoryMsg.SenderID,
 				Zone:      inventoryMsg.Zone,
 				Inventory: inventoryMsg.Inventory,
 				Received:  time.Now(),
-			}
+			})
 			changed, ds, err := zd.LocalDnskeysFromKeystate()
 			if err != nil {
 				lgEngine.Error("proactive inventory: LocalDnskeysFromKeystate failed", "zone", inventoryMsg.Zone, "err", err)

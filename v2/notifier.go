@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -94,6 +95,9 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 		lgDns.Error("unsupported notify type", "type", dns.TypeToString[ntype])
 	}
 
+	c := new(dns.Client)
+	c.Timeout = 5 * time.Second
+
 	successCount := 0
 	for _, dst := range targets {
 		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
@@ -106,7 +110,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 
 		lgDns.Debug("sending NOTIFY message", "msg", m.String())
 
-		res, err := dns.Exchange(m, dst)
+		res, _, err := c.Exchange(m, dst)
 		if err != nil {
 			lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", err)
 			continue

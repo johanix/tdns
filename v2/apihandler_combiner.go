@@ -22,6 +22,8 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 		err := decoder.Decode(&cp)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combiner", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
 		lgApi.Debug("received /combiner request", "cmd", cp.Command, "from", r.RemoteAddr)
@@ -86,6 +88,8 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		err := decoder.Decode(&cp)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combinerEdits", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
 		lgApi.Debug("received /combiner/edits request", "cmd", cp.Command, "from", r.RemoteAddr)
@@ -398,6 +402,8 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		err := decoder.Decode(&cp)
 		if err != nil {
 			lgApi.Warn("error decoding request", "handler", "combinerDebug", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
 		lgApi.Debug("received /combiner/debug request", "cmd", cp.Command, "from", r.RemoteAddr)

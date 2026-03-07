@@ -20,9 +20,8 @@ func (s *RRTypeStore) Get(key uint16) (core.RRset, bool) {
 	return s.data.Get(key)
 }
 
+// GetOnlyRRSet returns the RRset for key, or zero-value RRset if not found.
 func (s *RRTypeStore) GetOnlyRRSet(key uint16) core.RRset {
-	// dump.P(s)
-	// dump.P(key)
 	rrset, _ := s.data.Get(key)
 	return rrset
 }

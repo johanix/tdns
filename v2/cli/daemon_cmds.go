@@ -166,7 +166,7 @@ var DaemonRestartCmd = &cobra.Command{
 				fmt.Printf("Update binary: destination unspecified (key: apiservers[].command or common.command)\n")
 				os.Exit(1)
 			}
-			srcbin := "/tmp/" + filepath.Base(dstbin)
+			srcbin := filepath.Join(os.TempDir(), filepath.Base(dstbin))
 			dstat, err := os.Stat(dstbin)
 			if err != nil {
 				fmt.Printf("Error from stat(dst: %q): %v\n", dstbin, err)

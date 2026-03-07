@@ -13,7 +13,6 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
-	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
 type ZoneStore uint8
@@ -64,12 +63,12 @@ type ZoneData struct {
 	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
 	Owners     Owners
-	OwnerIndex cmap.ConcurrentMap[string, int]
+	OwnerIndex *core.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
-	Data         cmap.ConcurrentMap[string, OwnerData]
-	CombinerData *cmap.ConcurrentMap[string, OwnerData]
-	UpstreamData *cmap.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
+	Data         *core.ConcurrentMap[string, OwnerData]
+	CombinerData *core.ConcurrentMap[string, OwnerData]
+	UpstreamData *core.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
 	// AgentContributions stores per-agent contributions for the combiner.
 	// Key: agentID (e.g. "agent.alpha.dnslab."), Value: map[owner]map[rrtype]core.RRset
 	// When merging, all agents' contributions for the same owner/rrtype are combined
@@ -138,6 +137,68 @@ type ZoneData struct {
 	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
 	// after executing them. Protected by zd.mu.
 	OnFirstLoad []func(*ZoneData)
+}
+
+// Thread-safe accessors for fields accessed from multiple goroutines.
+
+func (zd *ZoneData) GetLastKeyInventory() *KeyInventorySnapshot {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.LastKeyInventory
+}
+
+func (zd *ZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.LastKeyInventory = inv
+}
+
+func (zd *ZoneData) GetKeystateOK() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.KeystateOK
+}
+
+func (zd *ZoneData) SetKeystateOK(ok bool) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.KeystateOK = ok
+}
+
+func (zd *ZoneData) GetKeystateError() string {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.KeystateError
+}
+
+func (zd *ZoneData) SetKeystateError(err string) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.KeystateError = err
+}
+
+func (zd *ZoneData) GetKeystateTime() time.Time {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.KeystateTime
+}
+
+func (zd *ZoneData) SetKeystateTime(t time.Time) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.KeystateTime = t
+}
+
+func (zd *ZoneData) GetRemoteDNSKEYs() []dns.RR {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.RemoteDNSKEYs
+}
+
+func (zd *ZoneData) SetRemoteDNSKEYs(keys []dns.RR) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.RemoteDNSKEYs = keys
 }
 
 // KeyInventorySnapshot stores a complete key inventory received from the signer.
@@ -347,7 +408,7 @@ type ValidatorResponse struct {
 }
 
 type Sig0StoreT struct {
-	Map cmap.ConcurrentMap[string, Sig0Key]
+	Map *core.ConcurrentMap[string, Sig0Key]
 }
 
 type Sig0Key struct {

@@ -53,33 +53,33 @@ type PeerRecord struct {
 
 // SyncOperationRecord represents a row in the SyncOperations table.
 type SyncOperationRecord struct {
-	ID            int64
+	ID             int64
 	DistributionID string
-	ZoneName      string
-	SyncType      string
-	Direction     string
-	SenderID      string
-	ReceiverID    string
-	Records       []string
-	Serial        uint32
-	Transport     string
-	Encrypted     bool
-	Status        string
-	StatusMessage string
-	CreatedAt     time.Time
-	SentAt        time.Time
-	ReceivedAt    time.Time
-	ConfirmedAt   time.Time
-	ExpiresAt     time.Time
-	RetryCount    int
-	LastError     string
-	LastErrorAt   time.Time
+	ZoneName       string
+	SyncType       string
+	Direction      string
+	SenderID       string
+	ReceiverID     string
+	Records        []string
+	Serial         uint32
+	Transport      string
+	Encrypted      bool
+	Status         string
+	StatusMessage  string
+	CreatedAt      time.Time
+	SentAt         time.Time
+	ReceivedAt     time.Time
+	ConfirmedAt    time.Time
+	ExpiresAt      time.Time
+	RetryCount     int
+	LastError      string
+	LastErrorAt    time.Time
 }
 
 // SyncConfirmationRecord represents a row in the SyncConfirmations table.
 type SyncConfirmationRecord struct {
 	ID                 int64
-	DistributionID      string
+	DistributionID     string
 	ConfirmerID        string
 	Status             string
 	Message            string
@@ -510,9 +510,7 @@ func PeerRecordFromAgent(agent *Agent) *PeerRecord {
 	}
 
 	// Determine preferred transport
-	if agent.ApiMethod && agent.DnsMethod {
-		record.PreferredTransport = "api"
-	} else if agent.ApiMethod {
+	if agent.ApiMethod {
 		record.PreferredTransport = "api"
 	} else if agent.DnsMethod {
 		record.PreferredTransport = "dns"
@@ -655,19 +653,19 @@ func PeerRecordToInfo(peer *PeerRecord) *HsyncPeerInfo {
 func SyncOpRecordToInfo(op *SyncOperationRecord) *HsyncSyncOpInfo {
 	return &HsyncSyncOpInfo{
 		DistributionID: op.DistributionID,
-		ZoneName:      op.ZoneName,
-		SyncType:      op.SyncType,
-		Direction:     op.Direction,
-		SenderID:      op.SenderID,
-		ReceiverID:    op.ReceiverID,
-		Status:        op.Status,
-		StatusMessage: op.StatusMessage,
-		Transport:     op.Transport,
-		CreatedAt:     op.CreatedAt,
-		SentAt:        op.SentAt,
-		ReceivedAt:    op.ReceivedAt,
-		ConfirmedAt:   op.ConfirmedAt,
-		RetryCount:    op.RetryCount,
+		ZoneName:       op.ZoneName,
+		SyncType:       op.SyncType,
+		Direction:      op.Direction,
+		SenderID:       op.SenderID,
+		ReceiverID:     op.ReceiverID,
+		Status:         op.Status,
+		StatusMessage:  op.StatusMessage,
+		Transport:      op.Transport,
+		CreatedAt:      op.CreatedAt,
+		SentAt:         op.SentAt,
+		ReceivedAt:     op.ReceivedAt,
+		ConfirmedAt:    op.ConfirmedAt,
+		RetryCount:     op.RetryCount,
 	}
 }
 
@@ -675,11 +673,11 @@ func SyncOpRecordToInfo(op *SyncOperationRecord) *HsyncSyncOpInfo {
 func ConfirmRecordToInfo(conf *SyncConfirmationRecord) *HsyncConfirmationInfo {
 	return &HsyncConfirmationInfo{
 		DistributionID: conf.DistributionID,
-		ConfirmerID:   conf.ConfirmerID,
-		Status:        conf.Status,
-		Message:       conf.Message,
-		ConfirmedAt:   conf.ConfirmedAt,
-		ReceivedAt:    conf.ReceivedAt,
+		ConfirmerID:    conf.ConfirmerID,
+		Status:         conf.Status,
+		Message:        conf.Message,
+		ConfirmedAt:    conf.ConfirmedAt,
+		ReceivedAt:     conf.ReceivedAt,
 	}
 }
 
@@ -687,6 +685,13 @@ func ConfirmRecordToInfo(conf *SyncConfirmationRecord) *HsyncConfirmationInfo {
 func (kdb *KeyDB) ListSyncOperations(zoneName string, limit int) ([]*SyncOperationRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
+
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
 
 	query := `
 		SELECT id, distribution_id, zone_name, sync_type, direction,
@@ -731,7 +736,9 @@ func (kdb *KeyDB) ListSyncOperations(zoneName string, limit int) ([]*SyncOperati
 		}
 
 		if recordsJSON != "" {
-			json.Unmarshal([]byte(recordsJSON), &op.Records)
+			if err := json.Unmarshal([]byte(recordsJSON), &op.Records); err != nil {
+				lgConfig.Warn("failed to unmarshal records JSON", "id", op.ID, "err", err)
+			}
 		}
 
 		op.Encrypted = encrypted == 1
@@ -752,6 +759,13 @@ func (kdb *KeyDB) ListSyncOperations(zoneName string, limit int) ([]*SyncOperati
 func (kdb *KeyDB) ListSyncConfirmations(distributionID string, limit int) ([]*SyncConfirmationRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
+
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
 
 	query := `
 		SELECT id, distribution_id, confirmer_id, status, message,
@@ -791,7 +805,9 @@ func (kdb *KeyDB) ListSyncConfirmations(distributionID string, limit int) ([]*Sy
 		}
 
 		if itemsJSON != "" {
-			json.Unmarshal([]byte(itemsJSON), &conf.ItemsProcessed)
+			if err := json.Unmarshal([]byte(itemsJSON), &conf.ItemsProcessed); err != nil {
+				lgConfig.Warn("failed to unmarshal items JSON", "id", conf.ID, "err", err)
+			}
 		}
 
 		conf.ConfirmedAt = unixToTime(confirmedAt)
@@ -807,6 +823,13 @@ func (kdb *KeyDB) ListSyncConfirmations(distributionID string, limit int) ([]*Sy
 func (kdb *KeyDB) ListTransportEvents(peerID string, limit int) ([]*HsyncTransportEvent, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
+
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
 
 	query := `
 		SELECT event_time, peer_id, zone_name, event_type, transport, direction,

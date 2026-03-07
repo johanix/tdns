@@ -70,14 +70,26 @@ func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey, use s
 	// Access the internal generator through reflection or use the registered one
 	// Actually, we need to use the TypeToRR function to get a properly initialized RR
 	tempRR := dns.TypeToRR[core.TypeJWK]()
-	jwkRR = tempRR.(*dns.PrivateRR)
+	var ok bool
+	jwkRR, ok = tempRR.(*dns.PrivateRR)
+	if !ok {
+		return fmt.Errorf("PublishJWKRR: TypeToRR returned unexpected type %T (expected *dns.PrivateRR)", tempRR)
+	}
 	jwkRR.Hdr = dns.RR_Header{
 		Name:   dns.Fqdn(owner),
 		Rrtype: core.TypeJWK,
 		Class:  dns.ClassINET,
 		Ttl:    3600,
 	}
-	jwkRR.Data.(*core.JWK).JWKData = jwkData
+	jwkInner, ok := jwkRR.Data.(*core.JWK)
+	if !ok {
+		return fmt.Errorf("PublishJWKRR: PrivateRR.Data has unexpected type %T (expected *core.JWK)", jwkRR.Data)
+	}
+	jwkInner.JWKData = jwkData
+
+	if zd.KeyDB.UpdateQ == nil {
+		return fmt.Errorf("PublishJWKRR: KeyDB.UpdateQ is nil")
+	}
 
 	// Send update request to zone
 	updateRequest := UpdateRequest{

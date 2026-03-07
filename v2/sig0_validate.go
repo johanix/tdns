@@ -152,9 +152,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		}
 
 		// Ok, we have a signature that validated.
-		if cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
-			us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
-		} else {
+		if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
 			lgDns.Warn("ValidateUpdate: signature NOT within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 			us.ValidationRcode = dns.RcodeBadTime
 			// This key validated the signature, but the signature is not within its validity period.
@@ -162,6 +160,8 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			continue
 		}
 
+		// Signature is valid and within its validity period
+		us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
 		lgDns.Info("ValidateUpdate: update validated by known and validated key")
 		us.ValidationRcode = dns.RcodeSuccess
 		us.Validated = true // Now at least one key has validated the update

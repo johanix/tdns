@@ -55,17 +55,17 @@ func (ej *ErrorJournal) Record(entry ErrorJournalEntry) {
 	ej.mu.Lock()
 	defer ej.mu.Unlock()
 
-	// Append
-	ej.entries = append(ej.entries, entry)
+	// Evict by age first
+	ej.evictOldLocked()
 
-	// Evict by count: if over maxCount, drop oldest
-	if len(ej.entries) > ej.maxCount {
-		excess := len(ej.entries) - ej.maxCount
+	// Evict by count: make room before appending
+	if len(ej.entries) >= ej.maxCount {
+		excess := len(ej.entries) - ej.maxCount + 1
 		ej.entries = ej.entries[excess:]
 	}
 
-	// Evict by age
-	ej.evictOldLocked()
+	// Append
+	ej.entries = append(ej.entries, entry)
 }
 
 // ListSince returns all errors within the given duration from now.

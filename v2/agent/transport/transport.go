@@ -153,6 +153,7 @@ type SyncRequest struct {
 	Timestamp      time.Time           // When this data was generated
 	Serial         uint32              // Zone serial at time of sync
 	DistributionID string              // For tracking confirmations
+	Nonce          string              // Unique nonce for replay protection
 	Signature      []byte              // Optional signature over the request
 	MessageType    string              // "sync" (agent→agent), "update" (agent→combiner), "rfi" (RFI)
 	RfiType        string              // For RFI messages: "SYNC", "AUDIT", "UPSTREAM", "DOWNSTREAM"
@@ -265,6 +266,7 @@ type ConfirmRequest struct {
 	SenderID       string            // Identity of the sender (who is confirming)
 	Zone           string            // The zone the sync was for
 	DistributionID string            // The correlation ID from the sync
+	Nonce          string            // Echoed nonce from the original sync request
 	Status         ConfirmStatus     // Result of processing
 	Message        string            // Optional details
 	AppliedRecords []string          // RRs accepted (additions)

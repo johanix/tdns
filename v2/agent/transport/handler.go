@@ -20,6 +20,7 @@ type IncomingMessage struct {
 	SenderID        string    // Sender identity (from payload OriginatorID — original author)
 	TransportSender string    // Transport-level sender (from QNAME — who actually sent the DNS NOTIFY)
 	Zone            string    // Zone (for zone-scoped operations)
+	Nonce           string    // Nonce from the sync/update message (echoed in confirmation)
 	Payload         []byte    // Raw payload (JSON)
 	ReceivedAt      time.Time // When the message was received
 	SourceAddr      string    // Source address of the sender

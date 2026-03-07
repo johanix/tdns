@@ -99,6 +99,11 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 			zone := string(msg.Zone)
 
+			if zone == "" || senderID == "" {
+				lgCombiner.Warn("rejecting message with empty zone or sender", "zone", zone, "sender", senderID)
+				continue
+			}
+
 			// Handle RFI messages (e.g. RFI EDITS) — dispatch and continue
 			if msg.MessageType == AgentMsgRfi {
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
@@ -170,6 +175,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
 						DistributionID: msg.DistributionID,
 						Zone:           zone,
+						Nonce:          msg.Nonce,
 						Status:         "ok",
 						Message:        "no changes needed (data already current)",
 						AppliedRecords: allRRs,
@@ -182,6 +188,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
 					DistributionID: msg.DistributionID,
 					Zone:           zone,
+					Nonce:          msg.Nonce,
 					Status:         "pending",
 					Message:        "update queued for manual approval",
 					Timestamp:      time.Now(),
@@ -206,6 +213,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				nsGuard = nil
 			}
 			resp := CombinerProcessUpdate(syncReq, nsGuard)
+			resp.Nonce = msg.Nonce // Echo nonce for confirmation
 			if resp.Status == "error" {
 				recordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
 			}
@@ -297,6 +305,7 @@ func combinerSendConfirmation(tm *TransportManager, senderID string, resp *Combi
 		SenderID:       tm.LocalID,
 		Zone:           resp.Zone,
 		DistributionID: resp.DistributionID,
+		Nonce:          resp.Nonce,
 		Status:         status,
 		Message:        resp.Message,
 		AppliedRecords: resp.AppliedRecords,
