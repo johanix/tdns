@@ -91,7 +91,7 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 		if err == nil {
 			result.DNSAddresses = addresses
 		} else {
-			lgAgent.Debug("no SVCB record for DNS service", "service", dnsServiceName, "err", err)
+			lgAgent.Warn("SVCB lookup failed for DNS service", "service", dnsServiceName, "err", err)
 			result.Partial = true
 		}
 
@@ -103,7 +103,7 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 			result.KeyAlgorithm = algorithm
 			lgAgent.Info("found JWK record", "identity", identity, "algorithm", algorithm)
 		} else {
-			lgAgent.Debug("no JWK record found", "identity", identity, "err", err)
+			lgAgent.Warn("JWK lookup failed", "identity", identity, "err", err)
 
 			// Fallback to KEY record for legacy support
 			keyRR, err := imr.lookupAgentKEY(ctx, identity)
@@ -111,7 +111,7 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 				result.LegacyKeyRR = keyRR
 				lgAgent.Info("using legacy KEY record", "identity", identity, "algorithm", keyRR.Algorithm)
 			} else {
-				lgAgent.Debug("no KEY record found", "identity", identity, "err", err)
+				lgAgent.Warn("KEY lookup failed (legacy fallback)", "identity", identity, "err", err)
 				result.Partial = true
 			}
 		}
@@ -254,6 +254,18 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 		} else {
 			lgAgent.Warn("cannot add peer key - SecureWrapper not configured")
 		}
+	}
+
+	// Verify that a verification key was actually registered.
+	// If no JWK or KEY was found, the peer is unusable for encrypted communication.
+	hasVerificationKey := false
+	if tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
+		if pc := tm.DNSTransport.SecureWrapper.GetCrypto(); pc != nil {
+			_, hasVerificationKey = pc.GetPeerVerificationKey(result.Identity)
+		}
+	}
+	if !hasVerificationKey {
+		return fmt.Errorf("discovery for %s found endpoint but no verification key (JWK/KEY lookup failed)", result.Identity)
 	}
 
 	// Also add to AgentRegistry if available (for backward compatibility)

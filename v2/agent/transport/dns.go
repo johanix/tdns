@@ -753,18 +753,8 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
 	}
 
-	// Size guard: EDNS0 payload must fit in UDP. If too large, drop per-RR detail
-	// and set Truncated so the receiver knows full detail was not included.
-	if len(payloadJSON) > 3500 {
-		payload.AppliedRecords = nil
-		payload.RemovedRecords = nil
-		payload.Truncated = true
-		payloadJSON, err = json.Marshal(payload)
-	}
-	if err != nil {
-		return NewTransportError("DNS", "Confirm", peer.ID,
-			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
-	}
+	// No size guard needed: we use TCP and CHUNK fragmentation handles
+	// arbitrary payload sizes. Never silently drop per-RR detail.
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payloadJSON

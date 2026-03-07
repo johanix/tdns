@@ -674,11 +674,28 @@ func (zd *ZoneData) InjectSignatureTXT(conf *LocalCombinerConf) bool {
 			RRtypes: NewRRTypeStore(),
 		}
 	}
-	ownerData.RRtypes.Set(dns.TypeTXT, core.RRset{
-		Name:   ownerName,
-		RRtype: dns.TypeTXT,
-		RRs:    []dns.RR{rr},
-	})
+	existing, hasExisting := ownerData.RRtypes.Get(dns.TypeTXT)
+	if hasExisting {
+		// Check if this exact RR is already present (avoid duplicates on repeated calls)
+		rrStr := rr.String()
+		alreadyPresent := false
+		for _, existingRR := range existing.RRs {
+			if existingRR.String() == rrStr {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			existing.RRs = append(existing.RRs, rr)
+		}
+	} else {
+		existing = core.RRset{
+			Name:   ownerName,
+			RRtype: dns.TypeTXT,
+			RRs:    []dns.RR{rr},
+		}
+	}
+	ownerData.RRtypes.Set(dns.TypeTXT, existing)
 	zd.Data.Set(ownerName, ownerData)
 	return true
 }

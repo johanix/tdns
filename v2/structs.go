@@ -527,10 +527,11 @@ type CombinerDebugPost struct {
 
 // CombinerEditPost represents a CLI request for managing pending/rejected edits.
 type CombinerEditPost struct {
-	Command string `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "purge"
-	Zone    string `json:"zone"`
-	EditID  int    `json:"edit_id,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear"
+	Zone    string   `json:"zone"`
+	EditID  int      `json:"edit_id,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
+	Tables  []string `json:"tables,omitempty"` // for "clear": which tables to clear; empty = all
 }
 
 // CombinerEditResponse is the response for edit management commands.

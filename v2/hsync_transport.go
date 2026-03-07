@@ -323,7 +323,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			defer cancel()
 			err := tm.DiscoverAndRegisterAgent(ctx, peerID)
 			if err != nil {
-				lgTransport.Error("discovery failed for peer", "peer", peerID, "err", err)
+				lgTransport.Warn("discovery incomplete for peer", "peer", peerID, "err", err)
 			} else {
 				lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
 			}

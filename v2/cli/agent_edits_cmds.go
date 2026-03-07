@@ -148,7 +148,7 @@ func showDetailedZoneStatus(zone string) {
 		log.Fatalf("Error: %s", amr.ErrorMsg)
 	}
 
-	fmt.Printf("SDE Status for Zone: %s\n", zone)
+	fmt.Printf("SDE Status for Zone: %s at %s\n", zone, time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Printf("════════════════════════════════════════\n\n")
 
 	if len(amr.ZoneDataRepo) == 0 {
@@ -184,6 +184,15 @@ func showDetailedZoneStatus(zone string) {
 						// Main row: Type | State | RR
 						rows = append(rows, fmt.Sprintf("%s | %s | %s",
 							rrTypeName, state, rrDisplay))
+
+						// Detail row: KeyId for DNSKEY records
+						if rrtype == dns.TypeDNSKEY {
+							if rr, err := dns.NewRR(info.RR); err == nil {
+								if dnskey, ok := rr.(*dns.DNSKEY); ok {
+									rows = append(rows, fmt.Sprintf(" | | KeyId: %d", dnskey.KeyTag()))
+								}
+							}
+						}
 
 						// Detail row: Updated timestamp
 						updatedStr := info.UpdatedAt

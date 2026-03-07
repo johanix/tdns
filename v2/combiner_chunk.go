@@ -165,7 +165,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	for _, rrs := range req.Records {
 		totalRecords += len(rrs)
 	}
-	lgCombiner.Debug("processing update", "sender", req.SenderID, "zone", req.Zone, "owners", len(req.Records), "records", totalRecords)
+	lgCombiner.Debug("processing legacy update", "sender", req.SenderID, "zone", req.Zone, "owners", len(req.Records), "records", totalRecords)
 
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
@@ -284,7 +284,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	if len(deleteOwnerRRs) > 0 {
 		removed, err := zd.RemoveCombinerDataNG(req.SenderID, deleteOwnerRRs)
 		if err != nil {
-			lgCombiner.Error("error removing records", "err", err)
+			lgCombiner.Error("legacy: error removing records", "err", err)
 			// Don't fail the whole request — report partial success
 		}
 		if len(removed) > 0 {
@@ -298,7 +298,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		for _, rrtype := range rrtypes {
 			removed, err := zd.RemoveCombinerDataByRRtype(req.SenderID, owner, rrtype)
 			if err != nil {
-				lgCombiner.Error("error removing RRset", "rrtype", dns.TypeToString[rrtype], "owner", owner, "err", err)
+				lgCombiner.Error("legacy: error removing RRset", "rrtype", dns.TypeToString[rrtype], "owner", owner, "err", err)
 			}
 			if len(removed) > 0 {
 				dataChanged = true
@@ -315,27 +315,27 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	totalActions := len(appliedRecords) + len(removedRecords)
 	if len(rejectedItems) == 0 {
 		resp.Status = "ok"
-		resp.Message = fmt.Sprintf("applied %d added %d removed for zone %q",
+		resp.Message = fmt.Sprintf("legacy: applied %d added %d removed for zone %q",
 			len(appliedRecords), len(removedRecords), req.Zone)
 	} else if totalActions > 0 {
 		resp.Status = "partial"
-		resp.Message = fmt.Sprintf("applied %d added %d removed %d rejected for zone %q",
+		resp.Message = fmt.Sprintf("legacy: applied %d added %d removed %d rejected for zone %q",
 			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)
 	} else {
 		resp.Status = "error"
-		resp.Message = fmt.Sprintf("all %d records were rejected for zone %q",
+		resp.Message = fmt.Sprintf("legacy: all %d records were rejected for zone %q",
 			len(rejectedItems), req.Zone)
 	}
 
-	lgCombiner.Info("update processed", "status", resp.Status, "message", resp.Message)
+	lgCombiner.Info("legacy update processed", "status", resp.Status, "message", resp.Message)
 
 	// Only bump the serial when the zone data actually changed (not for idempotent re-applies).
 	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
 		if err != nil {
-			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
+			lgCombiner.Error("legacy: BumpSerialOnly failed", "zone", req.Zone, "err", err)
 		} else {
-			lgCombiner.Info("serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+			lgCombiner.Info("legacy: serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
 		}
 	}
 
@@ -413,9 +413,21 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			}
 			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
-				lgCombiner.Error("replace operation failed", "err", err)
+				lgCombiner.Error("REPLACE operation failed", "err", err)
 			}
-			appliedRecords = append(appliedRecords, applied...)
+			// Always report records as applied regardless of whether data changed.
+			// The agent needs to know its records are present at the combiner so it
+			// can transition them from pending to accepted in the SDE.
+			if len(applied) > 0 {
+				appliedRecords = append(appliedRecords, applied...)
+			} else if len(parsedRRs) > 0 {
+				// No-op replace: report what's actually stored at the combiner.
+				if stored, ok := zd.AgentContributions[req.SenderID][zonename][rrtype]; ok {
+					for _, rr := range stored.RRs {
+						appliedRecords = append(appliedRecords, rr.String())
+					}
+				}
+			}
 			removedRecords = append(removedRecords, removed...)
 			if changed {
 				dataChanged = true
@@ -429,7 +441,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			if len(addRecords) > 0 {
 				addChanged, err := zd.AddCombinerDataNG(req.SenderID, addRecords)
 				if err != nil {
-					lgCombiner.Error("add operation failed", "err", err)
+					lgCombiner.Error("ADD operation failed", "err", err)
 				}
 				if addChanged {
 					dataChanged = true
@@ -447,7 +459,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			if len(delRecords) > 0 {
 				removed, err := zd.RemoveCombinerDataNG(req.SenderID, delRecords)
 				if err != nil {
-					lgCombiner.Error("delete operation failed", "err", err)
+					lgCombiner.Error("DELETE operation failed", "err", err)
 				}
 				if len(removed) > 0 {
 					dataChanged = true
@@ -481,7 +493,16 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 		resp.Message = fmt.Sprintf("all operations rejected for zone %q", req.Zone)
 	}
 
-	lgCombiner.Info("operations processed", "status", resp.Status, "message", resp.Message)
+	// Build summary of operation types for log
+	opTypes := make(map[string]int)
+	for _, op := range req.Operations {
+		opTypes[strings.ToUpper(op.Operation)]++
+	}
+	var opSummary []string
+	for opType, count := range opTypes {
+		opSummary = append(opSummary, fmt.Sprintf("%s:%d", opType, count))
+	}
+	lgCombiner.Info("operations processed", "ops", strings.Join(opSummary, ","), "status", resp.Status, "message", resp.Message)
 
 	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
@@ -510,31 +531,31 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 			switch rr.Header().Class {
 			case dns.ClassINET:
 				if !rrExistsInZone(zd, owner, rrtype, rr) {
-					lgCombiner.Info("isNoOpUpdate: RR not found, update is NOT a no-op",
+					lgCombiner.Info("legacy isNoOpUpdate: RR not found, update is NOT a no-op",
 						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 					return false
 				}
-				lgCombiner.Debug("isNoOpUpdate: RR already present (no-op)",
+				lgCombiner.Debug("legacy isNoOpUpdate: RR already present (no-op)",
 					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 
 			case dns.ClassNONE:
 				delRR := dns.Copy(rr)
 				delRR.Header().Class = dns.ClassINET
 				if rrExistsInZone(zd, owner, rrtype, delRR) {
-					lgCombiner.Info("isNoOpUpdate: RR exists, delete is NOT a no-op",
+					lgCombiner.Info("legacy isNoOpUpdate: RR exists, delete is NOT a no-op",
 						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 					return false // RR exists → removing it IS a change
 				}
-				lgCombiner.Debug("isNoOpUpdate: RR already absent (delete is no-op)",
+				lgCombiner.Debug("legacy isNoOpUpdate: RR already absent (delete is no-op)",
 					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
 
 			case dns.ClassANY:
 				if rrTypeExistsInZone(zd, owner, rrtype) {
-					lgCombiner.Info("isNoOpUpdate: RRtype has records, bulk delete is NOT a no-op",
+					lgCombiner.Info("legacy isNoOpUpdate: RRtype has records, bulk delete is NOT a no-op",
 						"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
 					return false
 				}
-				lgCombiner.Debug("isNoOpUpdate: RRtype empty (bulk delete is no-op)",
+				lgCombiner.Debug("legacy isNoOpUpdate: RRtype empty (bulk delete is no-op)",
 					"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
 
 			default:

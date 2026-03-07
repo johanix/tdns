@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
  * CLI commands for managing combiner edit approval workflow.
- * Provides "combiner zone edits {list|approve|reject|purge}".
+ * Provides "combiner zone edits {list|approve|reject|clear}".
  */
 package cli
 
@@ -301,12 +301,35 @@ var combinerZoneEditsRejectCmd = &cobra.Command{
 	},
 }
 
-var combinerZoneEditsPurgeCmd = &cobra.Command{
-	Use:   "purge",
-	Short: "Purge all pending, approved, and rejected edits",
+var combinerZoneEditsClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Clear edit tables (default: all; use --pending/--approved/--rejected/--current to select)",
 	Run: func(cmd *cobra.Command, args []string) {
+		zone, _ := cmd.Flags().GetString("zone")
+		showPending, _ := cmd.Flags().GetBool("pending")
+		showApproved, _ := cmd.Flags().GetBool("approved")
+		showRejected, _ := cmd.Flags().GetBool("rejected")
+		showCurrent, _ := cmd.Flags().GetBool("current")
+
+		var tables []string
+		if showPending {
+			tables = append(tables, "pending")
+		}
+		if showApproved {
+			tables = append(tables, "approved")
+		}
+		if showRejected {
+			tables = append(tables, "rejected")
+		}
+		if showCurrent {
+			tables = append(tables, "current")
+		}
+		// Empty tables list means "all"
+
 		resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
-			Command: "purge",
+			Command: "clear",
+			Zone:    zone,
+			Tables:  tables,
 		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
@@ -350,21 +373,83 @@ func SendCombinerEditCmd(req tdns.CombinerEditPost) (*tdns.CombinerEditResponse,
 	return &resp, nil
 }
 
+var combinerZoneReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Request re-loading a zone on the combiner",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		api, err := getApiClient("combiner", true)
+		if err != nil {
+			log.Fatalf("Error getting API client for combiner: %v", err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
+			Command: "reload",
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			Force:   force,
+		})
+		if err != nil {
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+			log.Fatalf("Error: %v", err)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
+var combinerZoneBumpCmd = &cobra.Command{
+	Use:   "bump",
+	Short: "Bump SOA serial for a zone on the combiner",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		api, err := getApiClient("combiner", true)
+		if err != nil {
+			log.Fatalf("Error getting API client for combiner: %v", err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
+			Command: "bump",
+			Zone:    tdns.Globals.Zonename,
+		})
+		if err != nil {
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+			log.Fatalf("Error: %v", err)
+		}
+
+		if cr.Msg != "" {
+			fmt.Printf("%s\n", cr.Msg)
+		}
+	},
+}
+
 func init() {
 	CombinerCmd.AddCommand(combinerZoneCmd)
 	combinerZoneCmd.AddCommand(combinerZoneListCmd)
+	combinerZoneCmd.AddCommand(combinerZoneBumpCmd)
+	combinerZoneCmd.AddCommand(combinerZoneReloadCmd)
 	combinerZoneCmd.AddCommand(combinerZoneEditsCmd)
+
+	combinerZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "Force operation")
 
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsListCmd)
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsApproveCmd)
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsRejectCmd)
-	combinerZoneEditsCmd.AddCommand(combinerZoneEditsPurgeCmd)
+	combinerZoneEditsCmd.AddCommand(combinerZoneEditsClearCmd)
 
 	// Flags for list
 	combinerZoneEditsListCmd.Flags().String("zone", "", "Zone to list edits for")
 	combinerZoneEditsListCmd.Flags().Bool("pending", false, "Show pending edits")
 	combinerZoneEditsListCmd.Flags().Bool("approved", false, "Show approved edits (transaction history)")
 	combinerZoneEditsListCmd.Flags().Bool("rejected", false, "Show rejected edits")
+
+	// Flags for clear
+	combinerZoneEditsClearCmd.Flags().String("zone", "", "Scope to zone (default: all zones)")
+	combinerZoneEditsClearCmd.Flags().Bool("pending", false, "Clear pending edits")
+	combinerZoneEditsClearCmd.Flags().Bool("approved", false, "Clear approved edits")
+	combinerZoneEditsClearCmd.Flags().Bool("rejected", false, "Clear rejected edits")
+	combinerZoneEditsClearCmd.Flags().Bool("current", false, "Clear current contributions")
 
 	// Flags for approve
 	combinerZoneEditsApproveCmd.Flags().String("zone", "", "Zone the edit belongs to")

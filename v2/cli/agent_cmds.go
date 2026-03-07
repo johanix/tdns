@@ -269,23 +269,7 @@ Modes:
 			fmt.Printf("%s\n", keyResp.Msg)
 		}
 
-		// Push: re-send local data to combiner and remote agents
-		if resyncPush || resyncFull {
-			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
-			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
-			amr, err := SendAgentMgmtCmd(req, "peer")
-			if err != nil {
-				fmt.Printf("Error sending resync push: %v\n", err)
-				os.Exit(1)
-			}
-			if amr.Error {
-				fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
-				os.Exit(1)
-			}
-			fmt.Printf("Resync push: %s\n", amr.Msg)
-		}
-
-		// Pull: send RFI SYNC to all remote agents
+		// Pull first: fetch remote data so we have the complete picture
 		if resyncPull || resyncFull {
 			fmt.Printf("Resync pull: requesting peers to re-send data for zone %s...\n", zone)
 			req := &tdns.AgentMgmtPost{
@@ -311,6 +295,22 @@ Modes:
 					fmt.Printf("  %s: %s\n", agentId, rfiData.Msg)
 				}
 			}
+		}
+
+		// Push second: re-send local data to combiner and remote agents
+		if resyncPush || resyncFull {
+			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
+			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
+			amr, err := SendAgentMgmtCmd(req, "peer")
+			if err != nil {
+				fmt.Printf("Error sending resync push: %v\n", err)
+				os.Exit(1)
+			}
+			if amr.Error {
+				fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
+				os.Exit(1)
+			}
+			fmt.Printf("Resync push: %s\n", amr.Msg)
 		}
 	},
 }

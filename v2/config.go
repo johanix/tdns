@@ -47,7 +47,8 @@ type Config struct {
 //
 //	kasp:
 //	    propagation_delay: 1h
-//	    standby_key_count: 1
+//	    standby_zsk_count: 1
+//	    standby_ksk_count: 0
 //	    check_interval: 1m
 type KaspConf struct {
 	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
@@ -57,11 +58,15 @@ type KaspConf struct {
 	// Default: "1h".
 	PropagationDelay string `yaml:"propagation_delay" mapstructure:"propagation_delay"`
 
-	// StandbyKeyCount is the number of standby keys to maintain per zone
-	// (applied separately for KSKs and ZSKs).
-	// When the count drops below this, the KeyStateWorker generates new keys.
-	// Default: 1.
-	StandbyKeyCount int `yaml:"standby_key_count" mapstructure:"standby_key_count"`
+	// StandbyZskCount is the number of standby ZSKs to maintain per zone.
+	// When the count drops below this, the KeyStateWorker generates new ZSKs.
+	// Default: 1. A value of 0 (or omitted) means use the default.
+	StandbyZskCount int `yaml:"standby_zsk_count" mapstructure:"standby_zsk_count"`
+
+	// StandbyKskCount is the number of standby KSKs to maintain per zone.
+	// When the count drops below this, the KeyStateWorker generates new KSKs.
+	// Default: 0 (no standby KSKs). Set to 1+ to enable standby KSK maintenance.
+	StandbyKskCount int `yaml:"standby_ksk_count" mapstructure:"standby_ksk_count"`
 
 	// CheckInterval is how often the KeyStateWorker runs its checks.
 	// Accepts Go duration strings: "1m", "60s", "5m".

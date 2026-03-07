@@ -423,9 +423,22 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 	}
 
 	if changed {
-		// Remove old tracking
+		// Remove tracking only for RRs that are being removed by this REPLACE.
+		// Surviving RRs keep their tracking state (e.g. ACCEPTED) so they are
+		// not regressed to PENDING when MarkRRsPending runs afterwards.
 		if hadOld {
-			zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+			for _, oldRR := range oldRRset.RRs {
+				found := false
+				for _, newRR := range newRRs {
+					if dns.IsDuplicate(oldRR, newRR) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, oldRR.String())
+				}
+			}
 		}
 		// Set the new RRset
 		nod.RRtypes.Set(rrtype, newRRset)

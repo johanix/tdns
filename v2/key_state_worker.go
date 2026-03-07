@@ -16,7 +16,8 @@ import (
 const (
 	defaultPropagationDelay = 1 * time.Hour
 	defaultCheckInterval    = 1 * time.Minute
-	defaultStandbyKeyCount  = 1
+	defaultStandbyZskCount  = 1
+	defaultStandbyKskCount  = 0
 )
 
 // KeyStateWorker runs periodic checks on DNSSEC key states and performs
@@ -42,9 +43,13 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 		}
 	}
 
-	standbyKeyCount := defaultStandbyKeyCount
-	if kasp.StandbyKeyCount > 0 {
-		standbyKeyCount = kasp.StandbyKeyCount
+	standbyZskCount := defaultStandbyZskCount
+	if kasp.StandbyZskCount > 0 {
+		standbyZskCount = kasp.StandbyZskCount
+	}
+	standbyKskCount := defaultStandbyKskCount
+	if kasp.StandbyKskCount > 0 {
+		standbyKskCount = kasp.StandbyKskCount
 	}
 
 	kdb := conf.Internal.KeyDB
@@ -56,7 +61,7 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
-	lgSigner.Info("KeyStateWorker started", "propagation_delay", propagationDelay, "standby_key_count", standbyKeyCount, "check_interval", checkInterval)
+	lgSigner.Info("KeyStateWorker started", "propagation_delay", propagationDelay, "standby_zsk_count", standbyZskCount, "standby_ksk_count", standbyKskCount, "check_interval", checkInterval)
 
 	for {
 		select {
@@ -64,7 +69,7 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 			lgSigner.Info("KeyStateWorker stopping")
 			return nil
 		case <-ticker.C:
-			checkAndTransitionKeys(conf, kdb, propagationDelay, standbyKeyCount)
+			checkAndTransitionKeys(conf, kdb, propagationDelay, standbyZskCount, standbyKskCount)
 		}
 	}
 }
@@ -73,7 +78,7 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 // 1. published → standby (time-based)
 // 2. retired → removed (time-based)
 // 3. maintain standby key count (generate new keys as needed)
-func checkAndTransitionKeys(conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyKeyCount int) {
+func checkAndTransitionKeys(conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
 
 	// (1) Check published → standby transitions
@@ -83,7 +88,7 @@ func checkAndTransitionKeys(conf *Config, kdb *KeyDB, propagationDelay time.Dura
 	transitionRetiredToRemoved(conf, kdb, now, propagationDelay)
 
 	// (3) Maintain standby key count per zone
-	maintainStandbyKeys(conf, kdb, standbyKeyCount)
+	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
 }
 
 // transitionPublishedToStandby transitions keys that have been in "published"
@@ -165,7 +170,7 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 // standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
 // required and no keys are in the pipeline (published or mpdist), new keys
 // are generated via GenerateAndStageKey.
-func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyKeyCount int) {
+func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCount int) {
 	for zoneName, zd := range Zones.Items() {
 		// Only process zones that do signing
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -188,10 +193,12 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyKeyCount int) {
 		alg := zd.DnssecPolicy.Algorithm
 
 		// Maintain ZSK standby count
-		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, isMP, standbyKeyCount)
+		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)
 
-		// Maintain KSK standby count
-		maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, isMP, standbyKeyCount)
+		// Maintain KSK standby count (0 means don't maintain)
+		if standbyKskCount > 0 {
+			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, isMP, standbyKskCount)
+		}
 	}
 }
 

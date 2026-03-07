@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -311,17 +312,77 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("%d current contribution(s) from %d agent(s) for zone %s",
 				totalRRs, len(current), zone)
 
-		case "purge":
-			pendingCount, err1 := kdb.PurgePendingEdits()
-			approvedCount, err2 := kdb.PurgeApprovedEdits()
-			rejectedCount, err3 := kdb.PurgeRejectedEdits()
-			if err1 != nil || err2 != nil || err3 != nil {
+		case "clear":
+			// Determine which tables to clear. Empty Tables list means all.
+			tables := make(map[string]bool)
+			for _, t := range cp.Tables {
+				tables[t] = true
+			}
+			clearAll := len(tables) == 0
+
+			zone := cp.Zone
+			var parts []string
+			var errs []error
+
+			if clearAll || tables["pending"] {
+				n, err := kdb.ClearPendingEdits(zone)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("pending: %w", err))
+				} else {
+					parts = append(parts, fmt.Sprintf("%d pending", n))
+				}
+			}
+			if clearAll || tables["approved"] {
+				n, err := kdb.ClearApprovedEdits(zone)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("approved: %w", err))
+				} else {
+					parts = append(parts, fmt.Sprintf("%d approved", n))
+				}
+			}
+			if clearAll || tables["rejected"] {
+				n, err := kdb.ClearRejectedEdits(zone)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("rejected: %w", err))
+				} else {
+					parts = append(parts, fmt.Sprintf("%d rejected", n))
+				}
+			}
+			if clearAll || tables["current"] {
+				n, err := kdb.ClearContributions(zone)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("contributions: %w", err))
+				} else {
+					parts = append(parts, fmt.Sprintf("%d contributions", n))
+				}
+				// Also clear in-memory AgentContributions and rebuild CombinerData
+				if zone != "" {
+					if zd, ok := Zones.Get(zone); ok {
+						zd.mu.Lock()
+						zd.AgentContributions = nil
+						zd.mu.Unlock()
+						zd.rebuildCombinerData()
+					}
+				} else {
+					for _, zd := range Zones.Items() {
+						zd.mu.Lock()
+						zd.AgentContributions = nil
+						zd.mu.Unlock()
+						zd.rebuildCombinerData()
+					}
+				}
+			}
+
+			if len(errs) > 0 {
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("purge errors: pending=%v, approved=%v, rejected=%v", err1, err2, err3)
+				resp.ErrorMsg = fmt.Sprintf("clear errors: %v", errs)
 				return
 			}
-			resp.Msg = fmt.Sprintf("Purged %d pending, %d approved, %d rejected edits",
-				pendingCount, approvedCount, rejectedCount)
+			scope := "all zones"
+			if zone != "" {
+				scope = zone
+			}
+			resp.Msg = fmt.Sprintf("Cleared %s (%s)", strings.Join(parts, ", "), scope)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown combiner edits command: %s", cp.Command)

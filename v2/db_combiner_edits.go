@@ -423,36 +423,76 @@ func (kdb *KeyDB) ListApprovedEdits(zone string) ([]*ApprovedEditRecord, error) 
 	return result, rows.Err()
 }
 
-// PurgePendingEdits deletes all rows from CombinerPendingEdits.
-func (kdb *KeyDB) PurgePendingEdits() (int64, error) {
+// ClearPendingEdits deletes rows from CombinerPendingEdits.
+// If zone is empty, all rows are deleted; otherwise only rows for that zone.
+func (kdb *KeyDB) ClearPendingEdits(zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
-	result, err := kdb.DB.Exec(`DELETE FROM CombinerPendingEdits`)
+	var result sql.Result
+	var err error
+	if zone == "" {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerPendingEdits`)
+	} else {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerPendingEdits WHERE zone=?`, zone)
+	}
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
-// PurgeApprovedEdits deletes all rows from CombinerApprovedEdits.
-func (kdb *KeyDB) PurgeApprovedEdits() (int64, error) {
+// ClearApprovedEdits deletes rows from CombinerApprovedEdits.
+// If zone is empty, all rows are deleted; otherwise only rows for that zone.
+func (kdb *KeyDB) ClearApprovedEdits(zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
-	result, err := kdb.DB.Exec(`DELETE FROM CombinerApprovedEdits`)
+	var result sql.Result
+	var err error
+	if zone == "" {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerApprovedEdits`)
+	} else {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerApprovedEdits WHERE zone=?`, zone)
+	}
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
-// PurgeRejectedEdits deletes all rows from CombinerRejectedEdits.
-func (kdb *KeyDB) PurgeRejectedEdits() (int64, error) {
+// ClearRejectedEdits deletes rows from CombinerRejectedEdits.
+// If zone is empty, all rows are deleted; otherwise only rows for that zone.
+func (kdb *KeyDB) ClearRejectedEdits(zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
-	result, err := kdb.DB.Exec(`DELETE FROM CombinerRejectedEdits`)
+	var result sql.Result
+	var err error
+	if zone == "" {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerRejectedEdits`)
+	} else {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerRejectedEdits WHERE zone=?`, zone)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// ClearContributions deletes rows from CombinerContributions.
+// If zone is empty, all rows are deleted; otherwise only rows for that zone.
+func (kdb *KeyDB) ClearContributions(zone string) (int64, error) {
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	var result sql.Result
+	var err error
+	if zone == "" {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerContributions`)
+	} else {
+		result, err = kdb.DB.Exec(`DELETE FROM CombinerContributions WHERE zone=?`, zone)
+	}
 	if err != nil {
 		return 0, err
 	}

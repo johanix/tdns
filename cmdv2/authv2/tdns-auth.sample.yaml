@@ -127,6 +127,18 @@ dnssecpolicies:
                               lifetime:     none
                               sigvalidity:  168h
 
+# Key and Signing Policy (KASP)
+# Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
+# The KeyStateWorker runs periodically to:
+#   - Transition published keys to standby after propagation_delay
+#   - Transition retired keys to removed after propagation_delay
+#   - Generate new standby keys when count drops below configured thresholds
+kasp:
+                        propagation_delay:  1h     # Wait time before published→standby and retired→removed transitions
+                        check_interval:     1m     # How often the KeyStateWorker runs its checks
+                        standby_zsk_count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
+                        standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby)
+
 # Multi-provider DNSSEC configuration (RFC 8901)
 # Signer-side config for tdns-auth. When active, the signer initializes
 # a TransportManager for communication with its local agent (KEYSTATE
